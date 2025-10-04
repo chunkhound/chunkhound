@@ -115,9 +115,12 @@ class DirectoryIndexingService:
         # Convert patterns to service layer format
         processed_patterns = [f"**/{pattern}" for pattern in include_patterns]
 
-        # Process directory using indexing coordinator
+        # Process directory using indexing coordinator with config threshold
         result = await self.indexing_coordinator.process_directory(
-            target_path, patterns=processed_patterns, exclude_patterns=exclude_patterns
+            target_path,
+            patterns=processed_patterns,
+            exclude_patterns=exclude_patterns,
+            config_file_size_threshold_kb=self.config.indexing.config_file_size_threshold_kb,
         )
 
         if result["status"] not in ["complete", "success", "no_files"]:

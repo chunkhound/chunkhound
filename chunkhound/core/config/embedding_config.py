@@ -76,9 +76,12 @@ class EmbeddingConfig(BaseSettings):
     batch_size: int = Field(default=100, description="Internal batch size")
     timeout: int = Field(default=30, description="Internal timeout")
     max_retries: int = Field(default=3, description="Internal max retries")
-    max_concurrent_batches: int = Field(default=3, description="Internal concurrency")
+    max_concurrent_batches: int | None = Field(
+        default=None,
+        description="Internal concurrency (auto-detected from provider if not set)",
+    )
     optimization_batch_frequency: int = Field(
-        default=1000, description="Internal optimization frequency"
+        default=1000, description="Internal optimization frequency (runs every N batches during indexing)"
     )
 
     @field_validator("model")

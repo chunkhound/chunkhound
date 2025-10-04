@@ -127,6 +127,7 @@ class ProviderRegistry:
             base_directory=base_directory,
             embedding_provider=embedding_provider,
             language_parsers=self._language_parsers,
+            config=self._config,
         )
 
     def create_search_service(self) -> SearchService:
@@ -159,7 +160,7 @@ class ProviderRegistry:
             max_concurrent = self._config.embedding.max_concurrent_batches
         else:
             embedding_batch_size = 1000
-            max_concurrent = 8
+            max_concurrent = None
 
         db_batch_size = 5000
         if self._config and self._config.indexing:

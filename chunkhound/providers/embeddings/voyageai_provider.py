@@ -101,6 +101,14 @@ VOYAGE_MODEL_CONFIG = {
 class VoyageAIEmbeddingProvider:
     """VoyageAI embedding provider using voyage-3.5 by default."""
 
+    # Recommended concurrent batches for VoyageAI API
+    # Aggressive value (40) leverages VoyageAI's high rate limits:
+    # - 2000 RPM (requests per minute) for paid accounts
+    # - 1M+ TPM (tokens per minute) for voyage-3.5-lite
+    # With ~50ms per request and large batch sizes, 40 concurrent
+    # batches saturate the API without hitting rate limits
+    RECOMMENDED_CONCURRENCY = 40
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -364,6 +372,14 @@ class VoyageAIEmbeddingProvider:
     def get_max_documents_per_batch(self) -> int:
         """Get maximum documents per batch for VoyageAI provider."""
         return self._model_config["max_texts_per_batch"]
+
+    def get_recommended_concurrency(self) -> int:
+        """Get recommended number of concurrent batches for VoyageAI.
+
+        Returns:
+            Aggressive concurrency for VoyageAI's high rate limits
+        """
+        return self.RECOMMENDED_CONCURRENCY
 
     def get_chars_to_tokens_ratio(self) -> float:
         """Get character-to-token ratio for VoyageAI.

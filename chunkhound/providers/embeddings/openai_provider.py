@@ -26,6 +26,14 @@ except ImportError:
 class OpenAIEmbeddingProvider:
     """OpenAI embedding provider using text-embedding-3-small by default."""
 
+    # Recommended concurrent batches for OpenAI API
+    # Conservative value (8) accounts for tier-based rate limits:
+    # - Free tier: 3 RPM, 150,000 TPM
+    # - Tier 1: 500 RPM, 200,000 TPM
+    # - Tier 2+: 5,000+ RPM
+    # Lower concurrency prevents rate limit errors across all tiers
+    RECOMMENDED_CONCURRENCY = 8
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -709,6 +717,14 @@ class OpenAIEmbeddingProvider:
     def get_max_documents_per_batch(self) -> int:
         """Get maximum documents per batch for OpenAI provider."""
         return self._batch_size
+
+    def get_recommended_concurrency(self) -> int:
+        """Get recommended number of concurrent batches for OpenAI.
+
+        Returns:
+            Conservative concurrency for tier-based rate limits
+        """
+        return self.RECOMMENDED_CONCURRENCY
 
     def supports_reranking(self) -> bool:
         """Check if reranking is supported."""

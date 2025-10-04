@@ -1,4 +1,4 @@
-"""Tests for JSON file filtering based on size and exclude patterns."""
+"""Tests for config file filtering (JSON/YAML/TOML) based on size and exclude patterns."""
 
 import json
 import pytest
@@ -16,15 +16,22 @@ def real_components(tmp_path):
     db = DuckDBProvider(":memory:", base_directory=tmp_path)
     db.connect()
 
-    # Create parsers for JSON and other languages
+    # Create parsers for config languages and Python
     json_parser = create_parser_for_language(Language.JSON)
+    yaml_parser = create_parser_for_language(Language.YAML)
+    toml_parser = create_parser_for_language(Language.TOML)
     python_parser = create_parser_for_language(Language.PYTHON)
 
     coordinator = IndexingCoordinator(
         db,
         tmp_path,
         None,
-        {Language.JSON: json_parser, Language.PYTHON: python_parser}
+        {
+            Language.JSON: json_parser,
+            Language.YAML: yaml_parser,
+            Language.TOML: toml_parser,
+            Language.PYTHON: python_parser,
+        }
     )
 
     return {"db": db, "coordinator": coordinator}
@@ -63,7 +70,7 @@ async def test_json_size_threshold_filtering(tmp_path, real_components):
     # Process large JSON file
     large_result = await coordinator.process_file(large_json_path)
     assert large_result["status"] == "skipped", f"Large JSON should be skipped: {large_result}"
-    assert large_result["reason"] == "large_json_file", f"Should skip for size reason: {large_result}"
+    assert large_result["reason"] == "large_config_file", f"Should skip for size reason: {large_result}"
     assert large_result.get("chunks", 0) == 0, "Large JSON should not produce chunks"
     
     # Verify in database by checking if file exists
@@ -98,6 +105,102 @@ async def test_json_exactly_at_threshold(tmp_path, real_components):
     result = await coordinator.process_file(edge_json_path)
     assert result["status"] in ["complete", "success"], "20KB file should be processed"
     assert result.get("chunks", 0) > 0, "20KB file should produce chunks"
+
+
+@pytest.mark.asyncio
+async def test_yaml_size_threshold_filtering(tmp_path, real_components):
+    """Test that YAML files > 20KB are skipped, <= 20KB are processed."""
+    db = real_components["db"]
+    coordinator = real_components["coordinator"]
+
+    # Create small YAML file (< 20KB)
+    small_yaml_path = tmp_path / "config.yaml"
+    small_config = """
+name: test-project
+version: 1.0.0
+description: Test configuration file
+dependencies:
+  package-1: 1.0.0
+  package-2: 2.0.0
+  package-3: 3.0.0
+"""
+    small_yaml_path.write_text(small_config)
+
+    # Create large YAML file (> 20KB)
+    large_yaml_path = tmp_path / "data.yaml"
+    # Create ~25KB of YAML data
+    large_data = "data: " + "A" * 25000 + "\n"
+    large_data += "items:\n"
+    for i in range(100):
+        large_data += f"  - id: {i}\n    value: item-{i}\n"
+    large_yaml_path.write_text(large_data)
+
+    # Process small YAML file
+    small_result = await coordinator.process_file(small_yaml_path)
+    assert small_result["status"] in ["complete", "success"], f"Small YAML should be processed: {small_result}"
+    assert small_result.get("chunks", 0) > 0, "Small YAML should produce chunks"
+
+    # Process large YAML file
+    large_result = await coordinator.process_file(large_yaml_path)
+    assert large_result["status"] == "skipped", f"Large YAML should be skipped: {large_result}"
+    assert large_result["reason"] == "large_config_file", f"Should skip for size reason: {large_result}"
+    assert large_result.get("chunks", 0) == 0, "Large YAML should not produce chunks"
+
+    # Verify in database
+    small_file = db.get_file_by_path(str(small_yaml_path))
+    large_file = db.get_file_by_path(str(large_yaml_path))
+
+    assert small_file is not None, "Small YAML should be indexed"
+    assert large_file is None, "Large YAML should not be indexed"
+
+
+@pytest.mark.asyncio
+async def test_toml_size_threshold_filtering(tmp_path, real_components):
+    """Test that TOML files > 20KB are skipped, <= 20KB are processed."""
+    db = real_components["db"]
+    coordinator = real_components["coordinator"]
+
+    # Create small TOML file (< 20KB)
+    small_toml_path = tmp_path / "config.toml"
+    small_config = """
+[package]
+name = "test-project"
+version = "1.0.0"
+description = "Test configuration file"
+
+[dependencies]
+package-1 = "1.0.0"
+package-2 = "2.0.0"
+package-3 = "3.0.0"
+"""
+    small_toml_path.write_text(small_config)
+
+    # Create large TOML file (> 20KB)
+    large_toml_path = tmp_path / "data.toml"
+    # Create ~25KB of TOML data
+    large_data = 'data = "' + "A" * 25000 + '"\n'
+    large_data += "\n[[items]]\n"
+    for i in range(100):
+        large_data += f'id = {i}\nvalue = "item-{i}"\n\n[[items]]\n'
+    large_toml_path.write_text(large_data)
+
+    # Process small TOML file
+    small_result = await coordinator.process_file(small_toml_path)
+    assert small_result["status"] in ["complete", "success"], f"Small TOML should be processed: {small_result}"
+    assert small_result.get("chunks", 0) > 0, "Small TOML should produce chunks"
+
+    # Process large TOML file
+    large_result = await coordinator.process_file(large_toml_path)
+    assert large_result["status"] == "skipped", f"Large TOML should be skipped: {large_result}"
+    assert large_result["reason"] == "large_config_file", f"Should skip for size reason: {large_result}"
+    assert large_result.get("chunks", 0) == 0, "Large TOML should not produce chunks"
+
+    # Verify in database
+    small_file = db.get_file_by_path(str(small_toml_path))
+    large_file = db.get_file_by_path(str(large_toml_path))
+
+    assert small_file is not None, "Small TOML should be indexed"
+    assert large_file is None, "Large TOML should not be indexed"
 
 
 @pytest.mark.asyncio

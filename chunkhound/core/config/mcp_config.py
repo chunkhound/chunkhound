@@ -93,6 +93,12 @@ class MCPConfig(BaseModel):
             help="Host for HTTP transport",
         )
 
+        parser.add_argument(
+            "--show-setup",
+            action="store_true",
+            help="Display MCP setup instructions and exit",
+        )
+
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
         """Load MCP config from environment variables."""

@@ -235,6 +235,15 @@ class EmbeddingProvider(Protocol):
         """
         ...
 
+    def get_recommended_concurrency(self) -> int:
+        """Get recommended number of concurrent batches for this provider.
+
+        Returns:
+            Optimal concurrent batch count based on provider's rate limits.
+            Examples: VoyageAI=40 (2000 RPM), OpenAI=8 (tier-based), Ollama=16 (local GPU)
+        """
+        ...
+
 
 class LocalEmbeddingProvider(EmbeddingProvider, Protocol):
     """Extended protocol for local embedding providers."""

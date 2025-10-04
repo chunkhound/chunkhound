@@ -283,6 +283,18 @@ class Language(Enum):
             Language.TSX,
         }
 
+    @property
+    def is_structured_config_language(self) -> bool:
+        """Return True if this is a structured config/data language.
+
+        These languages are used for both:
+        - Small config files (< 20KB typically): package.json, tsconfig.json
+        - Large data files (> 100KB typically): package-lock.json, API dumps
+
+        Size-based filtering helps distinguish between the two use cases.
+        """
+        return self in {Language.JSON, Language.YAML, Language.TOML}
+
     @classmethod
     def get_all_extensions(cls) -> set[str]:
         """Get all supported file extensions."""

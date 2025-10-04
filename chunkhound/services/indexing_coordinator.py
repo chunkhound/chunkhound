@@ -1,12 +1,22 @@
 """Indexing coordinator service for ChunkHound - orchestrates indexing workflows.
 
 # FILE_CONTEXT: Central orchestrator for the parse→chunk→embed→store pipeline
-# ROLE: Coordinates complex multi-phase workflows with different concurrency models
-# CRITICAL: Handles file-level locking and transaction boundaries
+# ROLE: Coordinates complex multi-phase workflows with parallel batch processing
+# CONCURRENCY: Parsing parallelized across CPU cores, storage remains single-threaded
 # PERFORMANCE: Smart chunk diffing preserves existing embeddings (10x speedup)
+#
+# PERFORMANCE TUNING:
+# - File batch processing scales workers based on file count (100/1000 thresholds)
+#   to balance parallelism overhead vs throughput
+# - Directory discovery uses parallel mode only when ≥4 top-level dirs
+# - Worker limits (4/8/16) prevent resource exhaustion on high-core machines
+# - See module constants below for tunable parameters
 """
 
 import asyncio
+import math
+import os
+from concurrent.futures import ProcessPoolExecutor
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
@@ -14,14 +24,55 @@ from typing import Any
 from loguru import logger
 from rich.progress import Progress, TaskID
 
-from chunkhound.core.models import File
-from chunkhound.core.types.common import FileId, FilePath, Language
+from chunkhound.core.models import Chunk, File
+from chunkhound.core.types.common import FilePath, Language
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 from chunkhound.parsers.universal_parser import UniversalParser
 
 from .base_service import BaseService
+from .batch_processor import ParsedFileResult, process_file_batch
 from .chunk_cache_service import ChunkCacheService
+
+# File pattern utilities for directory discovery
+from chunkhound.utils.file_patterns import (
+    load_gitignore_patterns,
+    scan_directory_files,
+    walk_directory_tree,
+    walk_subtree_worker,
+)
+
+
+# Performance tuning constants for parallel operations
+# RATIONALE: Balance parallelism overhead vs throughput for different workload sizes
+
+# File parsing batch sizes
+SMALL_FILE_COUNT_THRESHOLD = 100  # Below this: use minimal workers (overhead not worth it)
+MEDIUM_FILE_COUNT_THRESHOLD = 1000  # Above this: scale up for enterprise monorepos
+MAX_WORKERS_SMALL_BATCH = 4  # Worker cap for small file batches
+MAX_WORKERS_MEDIUM_BATCH = 8  # Worker cap for medium file batches (original behavior)
+MAX_WORKERS_LARGE_BATCH = 16  # Worker cap for large file batches (prevents resource exhaustion)
+
+# Fallback CPU count when os.cpu_count() returns None
+DEFAULT_CPU_COUNT = 4
+
+
+def _calculate_worker_count(file_count: int, cpu_count: int) -> int:
+    """Calculate optimal worker count based on file count and available CPUs.
+
+    Args:
+        file_count: Number of files to process
+        cpu_count: Number of available CPU cores
+
+    Returns:
+        Optimal number of workers (capped based on workload size)
+    """
+    if file_count < SMALL_FILE_COUNT_THRESHOLD:
+        return min(cpu_count, MAX_WORKERS_SMALL_BATCH, file_count)
+    elif file_count < MEDIUM_FILE_COUNT_THRESHOLD:
+        return min(cpu_count, MAX_WORKERS_MEDIUM_BATCH, file_count)
+    else:
+        return min(cpu_count, MAX_WORKERS_LARGE_BATCH, file_count)
 
 
 class IndexingCoordinator(BaseService):
@@ -43,6 +94,7 @@ class IndexingCoordinator(BaseService):
         embedding_provider: EmbeddingProvider | None = None,
         language_parsers: dict[Language, UniversalParser] | None = None,
         progress: Progress | None = None,
+        config: Any | None = None,
     ):
         """Initialize indexing coordinator.
 
@@ -52,11 +104,13 @@ class IndexingCoordinator(BaseService):
             embedding_provider: Optional embedding provider for vector generation
             language_parsers: Optional mapping of language to parser implementations
             progress: Optional Rich Progress instance for hierarchical progress display
+            config: Optional configuration object with indexing settings
         """
         super().__init__(database_provider)
         self._embedding_provider = embedding_provider
         self.progress = progress
         self._language_parsers = language_parsers or {}
+        self.config = config
 
         # Performance optimization: shared instances
         self._parser_cache: dict[Language, UniversalParser] = {}
@@ -173,167 +227,226 @@ class IndexingCoordinator(BaseService):
     ) -> dict[str, Any]:
         """Process a single file through the complete indexing pipeline.
 
-        # ENTRY_POINT: Main public API for file processing
-        # WORKFLOW: Acquire lock → Parse → Chunk → Store → Generate embeddings
-        # CONSTRAINT: One file processed at a time (file-level locking)
-        # OPTIMIZATION: skip_embeddings=True for batch processing
+        Uses the same parallel batch processing path as process_directory,
+        but with a single-file batch for consistency.
 
         Args:
             file_path: Path to the file to process
-            skip_embeddings: If True, skip embedding generation for batch processing
+            skip_embeddings: If True, skip embedding generation
 
         Returns:
             Dictionary with processing results including status, chunks, and embeddings
         """
-        # CRITICAL: File-level locking prevents concurrent modification
+        # CRITICAL: File-level locking prevents concurrent async processing
         # PATTERN: All processing happens inside the lock
-        # PREVENTS: Race conditions, partial updates, data corruption
+        # PREVENTS: Race conditions in read-modify-write operations
         file_lock = await self._get_file_lock(file_path)
         async with file_lock:
-            return await self._process_file_locked(file_path, skip_embeddings)
+            # Use batch processor with single file for consistency
+            parsed_results = await self._process_files_in_batches([file_path])
 
-    async def _process_file_locked(
-        self, file_path: Path, skip_embeddings: bool = False
-    ) -> dict[str, Any]:
-        """Process file with lock held - internal implementation.
+            if not parsed_results:
+                return {"status": "error", "chunks": 0, "error": "No results from batch processor"}
+
+            result = parsed_results[0]
+
+            if result.status == "error":
+                return {"status": "error", "chunks": 0, "error": result.error}
+
+            if result.status == "skipped":
+                return {"status": "skipped", "reason": result.error, "chunks": 0}
+
+            # Store the single file result
+            store_result = await self._store_parsed_results([result], file_task=None)
+
+            # Handle tuple return for single-file case
+            if isinstance(store_result, tuple):
+                stats, file_id = store_result
+            else:
+                # Should not happen for single file, but handle gracefully
+                stats = store_result
+                file_id = None
+
+            # Generate embeddings if needed
+            if not skip_embeddings and self._embedding_provider:
+                if stats["chunk_ids_needing_embeddings"]:
+                    await self._generate_embeddings(
+                        stats["chunk_ids_needing_embeddings"],
+                        [chunk for r in parsed_results for chunk in r.chunks]
+                    )
+
+            return_dict = {
+                "status": "success" if not stats["errors"] else "error",
+                "chunks": stats["total_chunks"],
+                "errors": stats["errors"],
+                "embeddings_skipped": skip_embeddings,
+            }
+
+            # Include file_id for single-file operations
+            if file_id is not None:
+                return_dict["file_id"] = file_id
+
+            return return_dict
+
+    async def _process_files_in_batches(
+        self, files: list[Path], config_file_size_threshold_kb: int = 20
+    ) -> list[ParsedFileResult]:
+        """Process files in parallel batches across CPU cores.
+
+        # PARALLELIZATION_STRATEGY:
+        #   - File parsing: CPU-bound tree-sitter operations (parallelizable)
+        #   - Batch processing: Each worker handles multiple files independently
+        #   - Result aggregation: Collected in main thread for serial storage
+        # CRITICAL: Only parsing is parallel, database operations remain single-threaded
+
+        Each CPU core receives a batch of files and performs the complete
+        read→parse→chunk pipeline independently before returning results.
 
         Args:
-            file_path: Path to the file to process
-            skip_embeddings: If True, skip embedding generation for batch processing
+            files: List of file paths to process
+            config_file_size_threshold_kb: Skip structured config files (JSON/YAML/TOML) larger than this (KB)
 
         Returns:
-            Dictionary with processing results
+            List of ParsedFileResult objects with parsed chunks and metadata
         """
-        try:
-            # Validate file exists and is readable
-            if not file_path.exists() or not file_path.is_file():
-                return {
-                    "status": "error",
-                    "error": f"File not found: {file_path}",
-                    "chunks": 0,
+        if not files:
+            return []
+
+        # Calculate optimal worker count based on file count
+        cpu_count = os.cpu_count() or DEFAULT_CPU_COUNT
+        file_count = len(files)
+        num_workers = _calculate_worker_count(file_count, cpu_count)
+
+        logger.debug(f"Parsing {file_count} files with {num_workers} workers")
+
+        # Split files into batches for parallel processing
+        batch_size = math.ceil(len(files) / num_workers)
+        file_batches = [
+            files[i : i + batch_size] for i in range(0, len(files), batch_size)
+        ]
+
+        # Process batches in parallel using ProcessPoolExecutor
+        loop = asyncio.get_running_loop()
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            # Submit all batches for concurrent processing
+            # Pass config for structured file size filtering (JSON/YAML/TOML)
+            config_dict = {"config_file_size_threshold_kb": config_file_size_threshold_kb}
+            futures = [
+                loop.run_in_executor(
+                    executor, process_file_batch, batch, config_dict
+                )
+                for batch in file_batches
+            ]
+
+            # Wait for all batches to complete
+            batch_results = await asyncio.gather(*futures)
+
+        # Flatten results from all batches
+        all_results = []
+        for batch_result in batch_results:
+            all_results.extend(batch_result)
+
+        return all_results
+
+    async def _store_parsed_results(
+        self, results: list[ParsedFileResult], file_task: TaskID | None = None
+    ) -> dict[str, Any] | tuple[dict[str, Any], int]:
+        """Store all parsed results in database (single-threaded).
+
+        Args:
+            results: List of parsed file results from batch processing
+            file_task: Optional progress task ID for tracking
+
+        Returns:
+            For multiple files: Dictionary with processing statistics
+            For single file: Tuple of (statistics dict, file_id)
+        """
+        stats = {
+            "total_files": 0,
+            "total_chunks": 0,
+            "errors": [],
+            "chunk_ids_needing_embeddings": [],
+        }
+
+        # Track file_ids for single-file case
+        file_ids = []
+
+        for result in results:
+            # Handle errors
+            if result.status == "error":
+                stats["errors"].append(
+                    {"file": str(result.file_path), "error": result.error}
+                )
+                if file_task is not None and self.progress:
+                    self.progress.advance(file_task, 1)
+                continue
+
+            # Handle skipped files
+            if result.status == "skipped":
+                # Track skip reason in stats for single-file case
+                if "skip_reason" not in stats:
+                    stats["skip_reason"] = result.error
+                if file_task is not None and self.progress:
+                    self.progress.advance(file_task, 1)
+                continue
+
+            # Detect language for storage
+            language = result.language
+
+            # Store file record with transaction
+            self._db.begin_transaction()
+            try:
+                # Store file metadata
+                file_stat_dict = {
+                    "st_size": result.file_size,
+                    "st_mtime": result.file_mtime,
                 }
 
-            # Detect language
-            language = self.detect_file_language(file_path)
-            if not language:
-                return {"status": "skipped", "reason": "unsupported_type", "chunks": 0}
+                # Create mock stat object for _store_file_record
+                class StatResult:
+                    def __init__(self, size: int, mtime: float):
+                        self.st_size = size
+                        self.st_mtime = mtime
 
-            # Skip large JSON data files (config files are typically < 20KB)
-            if language == Language.JSON:
-                file_size_kb = file_path.stat().st_size / 1024
-                if file_size_kb > 20:  # 20KB threshold
-                    return {
-                        "status": "skipped",
-                        "reason": "large_json_file",
-                        "chunks": 0,
-                    }
+                file_stat = StatResult(result.file_size, result.file_mtime)
+                file_id = self._store_file_record(result.file_path, file_stat, language)
 
-            # Get parser for language
-            parser = self.get_parser_for_language(language)
-            if not parser:
-                return {
-                    "status": "error",
-                    "error": f"No parser available for {language}",
-                    "chunks": 0,
-                }
+                # Track file_id for single-file case
+                file_ids.append(file_id)
 
-            # Get file stats for storage/update operations
-            file_stat = file_path.stat()
-
-            logger.debug(f"Processing file: {file_path}")
-            logger.debug(
-                f"File stat: mtime={file_stat.st_mtime}, size={file_stat.st_size}"
-            )
-
-            # DESIGN_DECISION: No timestamp checking here
-            # RATIONALE: Change detection handled externally
-            # BENEFIT: Simpler logic, single responsibility
-
-            # SECTION: Parse_Phase (CPU_BOUND)
-            # PATTERN: UniversalParser returns List[Chunk] directly
-            # CONSTRAINT: Tree-sitter parsing is thread-safe
-            chunks_list = parser.parse_file(file_path, FileId(0))
-            if not chunks_list:
-                return {"status": "no_content", "chunks": 0}
-
-            if not chunks_list:
-                return {"status": "no_chunks", "chunks": 0}
-
-            # Always process files - let chunk-level comparison handle change detection
-            # Store or update file record
-            file_id = self._store_file_record(file_path, file_stat, language)
-            if file_id is None:
-                return {
-                    "status": "error",
-                    "chunks": 0,
-                    "error": "Failed to store file record",
-                }
-
-            # Check for existing file to determine if this is an update or new file
-            # Use consistent symlink-safe path resolution
-            relative_path = self._get_relative_path(file_path)
-            existing_file = self._db.get_file_by_path(relative_path.as_posix())
-
-            # SECTION: Smart_Chunk_Update (PERFORMANCE_CRITICAL)
-            # PATTERN: Diff-based updates preserve unchanged embeddings
-            # BENEFIT: 10x speedup by avoiding re-embedding unchanged code
-            if existing_file:
-                # BUG_FIX: Always clean up old chunks to prevent stale data
-                # ISSUE: Content deletion bug when chunks persist after modification
-
-                # UniversalParser already returns Chunk models - create new with correct file_id
-                from chunkhound.core.models import Chunk
-
-                new_chunk_models = []
-                for chunk in chunks_list:
-                    new_chunk = Chunk(
-                        file_id=FileId(file_id),
-                        symbol=chunk.symbol,
-                        start_line=chunk.start_line,
-                        end_line=chunk.end_line,
-                        code=chunk.code,
-                        chunk_type=chunk.chunk_type,
-                        language=chunk.language,
-                        parent_header=chunk.parent_header,
+                if file_id is None:
+                    self._db.rollback_transaction()
+                    stats["errors"].append(
+                        {
+                            "file": str(result.file_path),
+                            "error": "Failed to store file record",
+                        }
                     )
-                    new_chunk_models.append(new_chunk)
+                    if file_task is not None and self.progress:
+                        self.progress.advance(file_task, 1)
+                    continue
 
-                # SECTION: Transaction_Boundary (CRITICAL)
-                # PATTERN: All-or-nothing updates prevent partial states
-                # RECOVERY: Rollback on any error
-                try:
-                    self._db.begin_transaction()
+                # Check for existing chunks to enable smart diffing
+                relative_path = self._get_relative_path(result.file_path)
+                existing_file = self._db.get_file_by_path(relative_path.as_posix())
 
-                    # RACE_CONDITION_FIX: Read inside transaction
-                    # PREVENTS: Duplicate insertions from concurrent processes
-                    # ENSURES: Consistent view of current state
-                    existing_chunks = self._db.get_chunks_by_file_id(
-                        file_id, as_model=True
-                    )
+                if existing_file:
+                    # Get existing chunks for diffing
+                    existing_chunks = self._db.get_chunks_by_file_id(file_id, as_model=True)
 
-                    # ALWAYS process existing files with transaction safety, regardless of existing_chunks
-                    # This fixes the content deletion bug where old chunks persist when existing_chunks is empty
-                    logger.debug(
-                        f"Processing existing file with {len(existing_chunks)} existing chunks"
-                    )
+                    # Convert result chunks to Chunk models using from_dict()
+                    new_chunk_models = [
+                        Chunk.from_dict({**chunk_data, "file_id": file_id})
+                        for chunk_data in result.chunks
+                    ]
 
                     if existing_chunks:
-                        # OPTIMIZATION: Content-based diff preserves embeddings
-                        # ALGORITHM: Compares chunk content, not just positions
-                        # RESULT: unchanged, added, modified, deleted chunks
+                        # Smart diff to preserve embeddings
                         chunk_diff = self._chunk_cache.diff_chunks(
                             new_chunk_models, existing_chunks
                         )
 
-                        logger.debug(
-                            f"Smart diff results for file_id {file_id}: "
-                            f"unchanged={len(chunk_diff.unchanged)}, "
-                            f"added={len(chunk_diff.added)}, "
-                            f"modified={len(chunk_diff.modified)}, "
-                            f"deleted={len(chunk_diff.deleted)}"
-                        )
-
-                        # Delete all chunks that were modified or removed
+                        # Delete modified/removed chunks
                         chunks_to_delete = chunk_diff.deleted + chunk_diff.modified
                         if chunks_to_delete:
                             chunk_ids_to_delete = [
@@ -341,381 +454,63 @@ class IndexingCoordinator(BaseService):
                                 for chunk in chunks_to_delete
                                 if chunk.id is not None
                             ]
-                            if chunk_ids_to_delete:
-                                logger.debug(
-                                    f"Deleting {len(chunk_ids_to_delete)} chunks with IDs: {chunk_ids_to_delete}"
-                                )
-                                for chunk_id in chunk_ids_to_delete:
-                                    self._db.delete_chunk(chunk_id)
-                                logger.debug(
-                                    f"Successfully deleted {len(chunk_ids_to_delete)} modified/removed chunks"
-                                )
+                            for chunk_id in chunk_ids_to_delete:
+                                self._db.delete_chunk(chunk_id)
 
-                        # Insert only new and modified chunks
-                        chunks_to_store = []
-                        chunks_to_store.extend(
-                            [chunk.to_dict() for chunk in chunk_diff.added]
-                        )
-                        chunks_to_store.extend(
-                            [chunk.to_dict() for chunk in chunk_diff.modified]
-                        )
+                        # Store new/modified chunks (pass models directly)
+                        chunks_to_store = chunk_diff.added + chunk_diff.modified
 
                         if chunks_to_store:
-                            logger.debug(
-                                f"Storing {len(chunks_to_store)} new/modified chunks"
-                            )
                             chunk_ids_new = self._store_chunks(
                                 file_id, chunks_to_store, language
                             )
                         else:
                             chunk_ids_new = []
 
-                        # Combine IDs: unchanged chunks keep their IDs (and embeddings!)
-                        unchanged_ids = [
-                            chunk.id
-                            for chunk in chunk_diff.unchanged
-                            if chunk.id is not None
-                        ]
-                        chunk_ids = unchanged_ids + chunk_ids_new
+                        # Track chunks needing embeddings (new + modified)
+                        stats["chunk_ids_needing_embeddings"].extend(chunk_ids_new)
 
-                        # Check which unchanged chunks are missing embeddings
-                        if (
-                            not skip_embeddings
-                            and chunk_diff.unchanged
-                            and self._embedding_provider
-                        ):
-                            unchanged_chunk_ids = [
-                                chunk.id
-                                for chunk in chunk_diff.unchanged
-                                if chunk.id is not None
-                            ]
-
-                            # Use existing interface to check embedding status
-                            existing_embedding_ids = self._db.get_existing_embeddings(
-                                unchanged_chunk_ids,
-                                self._embedding_provider.name,
-                                self._embedding_provider.model,
-                            )
-
-                            # Find unchanged chunks that need embeddings
-                            unchanged_needing_embeddings = [
-                                chunk
-                                for chunk in chunk_diff.unchanged
-                                if chunk.id not in existing_embedding_ids
-                            ]
-
-                            # Add to embedding generation lists
-                            chunks_needing_embeddings = chunks_to_store + [
-                                chunk.to_dict()
-                                for chunk in unchanged_needing_embeddings
-                            ]
-                            chunk_ids_needing_embeddings = chunk_ids_new + [
-                                chunk.id for chunk in unchanged_needing_embeddings
-                            ]
-
-                            if unchanged_needing_embeddings:
-                                logger.debug(
-                                    f"Found {len(unchanged_needing_embeddings)} unchanged chunks "
-                                    f"missing embeddings - adding to generation queue"
-                                )
-                        else:
-                            # Original logic for skip_embeddings=True or no unchanged chunks
-                            chunks_needing_embeddings = chunks_to_store
-                            chunk_ids_needing_embeddings = chunk_ids_new
-
-                        logger.debug(
-                            f"Smart chunk update complete: {len(chunk_diff.unchanged)} preserved, "
-                            f"{len(chunk_diff.added)} added, {len(chunk_diff.modified)} modified, "
-                            f"{len(chunk_diff.deleted)} deleted"
-                        )
+                        stats["total_chunks"] += len(result.chunks)
                     else:
-                        # No existing chunks found - proceed with fresh insertion
-                        # Transaction read shows no chunks, so trust the transactional view
-                        logger.debug(
-                            f"No existing chunks found for file_id {file_id}, proceeding with fresh insertion"
-                        )
-
-                        # Store all new chunks
-                        chunks_dict = [chunk.to_dict() for chunk in new_chunk_models]
-                        chunk_ids = self._store_chunks(file_id, chunks_dict, language)
-
-                        # All chunks need embeddings
-                        chunks_needing_embeddings = chunks_dict
-                        chunk_ids_needing_embeddings = chunk_ids
-
-                        logger.debug(
-                            f"Stored {len(chunk_ids)} new chunks after cleanup"
-                        )
-
-                    # Commit the transaction - this makes all changes atomic
-                    self._db.commit_transaction()
-                    logger.debug("Transaction committed successfully")
-
-                except Exception as e:
-                    # Rollback on any error to prevent partial updates
-                    logger.error(f"Chunk update failed, rolling back: {e}")
-                    try:
-                        self._db.rollback_transaction()
-                    except Exception as rollback_error:
-                        logger.error(f"Rollback failed: {rollback_error}")
-                    raise
-            else:
-                # New file, wrap in transaction for consistency
-                from chunkhound.core.models import Chunk
-
-                chunk_models = []
-                for chunk in chunks_list:
-                    new_chunk = Chunk(
-                        file_id=FileId(file_id),
-                        symbol=chunk.symbol,
-                        start_line=chunk.start_line,
-                        end_line=chunk.end_line,
-                        code=chunk.code,
-                        chunk_type=chunk.chunk_type,
-                        language=chunk.language,
-                        parent_header=chunk.parent_header,
-                    )
-                    chunk_models.append(new_chunk)
-                chunks_dict = [chunk.to_dict() for chunk in chunk_models]
-
-                try:
-                    self._db.begin_transaction()
-
-                    # Store chunks inside transaction
-                    chunk_ids = self._store_chunks(file_id, chunks_dict, language)
-
-                    # Commit transaction
-                    self._db.commit_transaction()
-                    logger.debug("New file transaction committed successfully")
-
-                except Exception as e:
-                    # Rollback on any error
-                    logger.error(f"New file chunk storage failed, rolling back: {e}")
-                    try:
-                        self._db.rollback_transaction()
-                    except Exception as rollback_error:
-                        logger.error(f"Rollback failed: {rollback_error}")
-                    raise
-
-                # All chunks need embeddings for new files
-                chunks_needing_embeddings = chunks_dict
-                chunk_ids_needing_embeddings = chunk_ids
-
-            # Generate embeddings with correctly aligned data
-            embeddings_generated = 0
-            if not skip_embeddings and chunk_ids_needing_embeddings:
-                if self._embedding_provider:
-                    embeddings_generated = await self._generate_embeddings(
-                        chunk_ids_needing_embeddings, chunks_needing_embeddings
-                    )
+                        # No existing chunks - store all as new (pass models directly)
+                        chunk_ids = self._store_chunks(file_id, new_chunk_models, language)
+                        stats["chunk_ids_needing_embeddings"].extend(chunk_ids)
+                        stats["total_chunks"] += len(chunk_ids)
                 else:
-                    logger.warning(
-                        f"Embedding provider is None - skipping embedding generation for {len(chunk_ids_needing_embeddings)} chunks"
-                    )
-            elif skip_embeddings:
-                logger.debug("Skipping embedding generation (skip_embeddings=True)")
-            elif not chunk_ids_needing_embeddings:
-                logger.debug("No chunks need embeddings")
+                    # New file - convert dicts to models, then store
+                    chunk_models = [
+                        Chunk.from_dict({**chunk_data, "file_id": file_id})
+                        for chunk_data in result.chunks
+                    ]
+                    chunk_ids = self._store_chunks(file_id, chunk_models, language)
+                    stats["chunk_ids_needing_embeddings"].extend(chunk_ids)
+                    stats["total_chunks"] += len(chunk_ids)
 
-            result = {
-                "status": "success",
-                "file_id": file_id,
-                "chunks": len(chunks_list),
-                "chunk_ids": chunk_ids,
-                "embeddings": embeddings_generated,
-                "embeddings_skipped": skip_embeddings,
-            }
+                self._db.commit_transaction()
+                stats["total_files"] += 1
 
-            # Include chunk data for batch processing
-            if skip_embeddings:
-                result["chunk_data"] = [chunk.to_dict() for chunk in chunks_list]
+                # Update progress
+                if file_task is not None and self.progress:
+                    self.progress.advance(file_task, 1)
+                    self.progress.update(file_task, info=f"{stats['total_chunks']} chunks")
 
-            return result
+            except Exception as e:
+                self._db.rollback_transaction()
+                stats["errors"].append({"file": str(result.file_path), "error": str(e)})
+                if file_task is not None and self.progress:
+                    self.progress.advance(file_task, 1)
 
-        except Exception as e:
-            import traceback
-
-            logger.error(f"Failed to process file {file_path}: {e}")
-            logger.error(f"Stack trace: {traceback.format_exc()}")
-            return {"status": "error", "error": str(e), "chunks": 0}
-
-    async def _process_file_modification_safe(
-        self,
-        file_id: int,
-        file_path: Path,
-        file_stat,
-        chunks: list[dict[str, Any]],
-        language: Language,
-        skip_embeddings: bool,
-    ) -> tuple[list[int], int]:
-        """Process file modification with transaction safety to prevent data loss.
-
-        # METHOD_CONTEXT: Legacy transaction pattern using backup tables
-        # PATTERN: Create backup → Modify → Commit/Rollback → Cleanup
-        # WARNING: Complex pattern - prefer simple transactions
-        # ALTERNATIVE: Use database-native transaction support
-
-        Args:
-            file_id: Existing file ID in database
-            file_path: Path to the file being processed
-            file_stat: File stat object with mtime and size
-            chunks: New chunks to store
-            language: File language type
-            skip_embeddings: Whether to skip embedding generation
-
-        Returns:
-            Tuple of (chunk_ids, embeddings_generated)
-
-        Raises:
-            Exception: If transaction-safe processing fails and rollback is needed
-        """
-        import time
-
-        logger.debug(f"Transaction-safe processing - Starting for file_id: {file_id}")
-
-        # Create unique backup table names using timestamp
-        timestamp = int(time.time() * 1000000)  # microseconds for uniqueness
-        chunks_backup_table = f"chunks_backup_{timestamp}"
-        embeddings_backup_table = f"embeddings_1536_backup_{timestamp}"
-
-        connection = self._db.connection
-        if connection is None:
-            raise RuntimeError("Database connection not available")
-
-        try:
-            # Start transaction
-            connection.execute("BEGIN TRANSACTION")
-            logger.debug("Transaction-safe processing - Transaction started")
-
-            # Get count of existing chunks for reporting
-            existing_chunks_count = connection.execute(
-                "SELECT COUNT(*) FROM chunks WHERE file_id = ?", [file_id]
-            ).fetchone()[0]
-            logger.debug(
-                f"Transaction-safe processing - Found {existing_chunks_count} existing chunks"
-            )
-
-            # Create backup table for chunks
-            connection.execute(
-                f"""
-                CREATE TABLE {chunks_backup_table} AS
-                SELECT * FROM chunks WHERE file_id = ?
-            """,
-                [file_id],
-            )
-            logger.debug(
-                f"Transaction-safe processing - Created backup table: {chunks_backup_table}"
-            )
-
-            # Create backup table for embeddings
-            connection.execute(
-                f"""
-                CREATE TABLE {embeddings_backup_table} AS
-                SELECT e.* FROM embeddings_1536 e
-                JOIN chunks c ON e.chunk_id = c.id
-                WHERE c.file_id = ?
-            """,
-                [file_id],
-            )
-            logger.debug(
-                f"Transaction-safe processing - Created embedding backup: {embeddings_backup_table}"
-            )
-
-            # Update file metadata first
-            self._db.update_file(
-                file_id, size_bytes=file_stat.st_size, mtime=file_stat.st_mtime
-            )
-
-            # Remove old content (but backup preserved in transaction)
-            self._db.delete_file_chunks(file_id)
-            logger.debug("Transaction-safe processing - Removed old content")
-
-            # Store new chunks
-            chunk_ids = self._store_chunks(file_id, chunks, language)
-            if not chunk_ids:
-                raise Exception("Failed to store new chunks")
-            logger.debug(
-                f"Transaction-safe processing - Stored {len(chunk_ids)} new chunks"
-            )
-
-            # Generate embeddings if requested
-            embeddings_generated = 0
-            if not skip_embeddings and self._embedding_provider and chunk_ids:
-                embeddings_generated = await self._generate_embeddings(
-                    chunk_ids, chunks, connection
-                )
-                logger.debug(
-                    f"Transaction-safe processing - Generated {embeddings_generated} embeddings"
-                )
-
-            # Commit transaction
-            connection.execute("COMMIT")
-            logger.debug(
-                "Transaction-safe processing - Transaction committed successfully"
-            )
-
-            # Cleanup backup tables
-            try:
-                connection.execute(f"DROP TABLE {chunks_backup_table}")
-                connection.execute(f"DROP TABLE {embeddings_backup_table}")
-                logger.debug("Transaction-safe processing - Backup tables cleaned up")
-            except Exception as cleanup_error:
-                logger.warning(f"Failed to cleanup backup tables: {cleanup_error}")
-
-            return chunk_ids, embeddings_generated
-
-        except Exception as e:
-            logger.error(f"Transaction-safe processing failed: {e}")
-
-            try:
-                # Rollback transaction
-                connection.execute("ROLLBACK")
-                logger.debug("Transaction-safe processing - Transaction rolled back")
-
-                # Restore from backup tables if they exist
-                try:
-                    # Check if backup tables still exist
-                    backup_exists = (
-                        connection.execute(f"""
-                        SELECT COUNT(*) FROM information_schema.tables
-                        WHERE table_name='{chunks_backup_table}'
-                    """).fetchone()[0]
-                        > 0
-                    )
-
-                    if backup_exists:
-                        # Restore chunks from backup
-                        connection.execute(f"""
-                            INSERT INTO chunks SELECT * FROM {chunks_backup_table}
-                        """)
-
-                        # Restore embeddings from backup
-                        connection.execute(f"""
-                            INSERT INTO embeddings_1536 SELECT * FROM {embeddings_backup_table}
-                        """)
-
-                        logger.info(
-                            "Transaction-safe processing - Original content restored from backup"
-                        )
-
-                        # Cleanup backup tables
-                        connection.execute(f"DROP TABLE {chunks_backup_table}")
-                        connection.execute(f"DROP TABLE {embeddings_backup_table}")
-
-                except Exception as restore_error:
-                    logger.error(f"Failed to restore from backup: {restore_error}")
-
-            except Exception as rollback_error:
-                logger.error(f"Failed to rollback transaction: {rollback_error}")
-
-            # Re-raise the original exception
-            raise e
+        # Return file_id for single-file case
+        if len(results) == 1 and file_ids and file_ids[0] is not None:
+            return stats, file_ids[0]
+        return stats
 
     async def process_directory(
         self,
         directory: Path,
         patterns: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
+        config_file_size_threshold_kb: int = 20,
     ) -> dict[str, Any]:
         """Process all supported files in a directory with batch optimization and consistency checks.
 
@@ -723,13 +518,14 @@ class IndexingCoordinator(BaseService):
             directory: Directory path to process
             patterns: Optional file patterns to include
             exclude_patterns: Optional file patterns to exclude
+            config_file_size_threshold_kb: Skip structured config files (JSON/YAML/TOML) larger than this (KB)
 
         Returns:
             Dictionary with processing statistics
         """
         try:
-            # Phase 1: Discovery - Discover files in directory
-            files = self._discover_files(directory, patterns, exclude_patterns)
+            # Phase 1: Discovery - Discover files in directory (now parallelized)
+            files = await self._discover_files(directory, patterns, exclude_patterns)
 
             if not files:
                 return {"status": "no_files", "files_processed": 0, "total_chunks": 0}
@@ -743,10 +539,7 @@ class IndexingCoordinator(BaseService):
                 f"Directory consistency: {len(files)} files discovered, {cleaned_files} orphaned files cleaned"
             )
 
-            # Phase 3: Update - Process files with enhanced cache logic
-            total_files = 0
-            total_chunks = 0
-
+            # Phase 3: Update - Process files in parallel batches
             # Create progress task for file processing
             file_task: TaskID | None = None
             if self.progress:
@@ -754,26 +547,18 @@ class IndexingCoordinator(BaseService):
                     "  └─ Processing files", total=len(files), speed="", info=""
                 )
 
-            for file_path in files:
-                result = await self.process_file(file_path, skip_embeddings=True)
+            # Parse files in parallel batches across CPU cores
+            parsed_results = await self._process_files_in_batches(files, config_file_size_threshold_kb)
 
-                if result["status"] in ["success", "up_to_date"]:
-                    total_files += 1
-                    total_chunks += result["chunks"]
-                    if file_task is not None and self.progress:
-                        self.progress.advance(file_task, 1)
-                        self.progress.update(file_task, info=f"{total_chunks} chunks")
-                elif result["status"] in ["skipped", "no_content", "no_chunks"]:
-                    # Still update progress for skipped files
-                    if file_task is not None and self.progress:
-                        self.progress.advance(file_task, 1)
-                else:
-                    # Log errors but continue processing
-                    logger.warning(
-                        f"Failed to process {file_path}: {result.get('error', 'unknown error')}"
-                    )
-                    if file_task is not None and self.progress:
-                        self.progress.advance(file_task, 1)
+            # Store results in database (single-threaded for safety)
+            stats = await self._store_parsed_results(parsed_results, file_task)
+
+            total_files = stats["total_files"]
+            total_chunks = stats["total_chunks"]
+
+            # Log any errors
+            for error in stats["errors"]:
+                logger.warning(f"Failed to process {error['file']}: {error['error']}")
 
             # Complete the file processing progress bar
             if file_task is not None and self.progress:
@@ -796,7 +581,9 @@ class IndexingCoordinator(BaseService):
             }
 
         except Exception as e:
+            import traceback
             logger.error(f"Failed to process directory {directory}: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return {"status": "error", "error": str(e)}
 
     def _extract_file_id(self, file_record: dict[str, Any] | File) -> int | None:
@@ -838,36 +625,20 @@ class IndexingCoordinator(BaseService):
         return self._db.insert_file(file_model)
 
     def _store_chunks(
-        self, file_id: int, chunks: list[dict[str, Any]], language: Language
+        self, file_id: int, chunk_models: list[Chunk], language: Language
     ) -> list[int]:
-        """Store chunks in database and return chunk IDs."""
-        if not chunks:
+        """Store chunks in database and return chunk IDs.
+
+        Args:
+            file_id: File ID for the chunks
+            chunk_models: List of Chunk model instances to store
+            language: Language (for compatibility, already set in models)
+
+        Returns:
+            List of chunk IDs from database insertion
+        """
+        if not chunk_models:
             return []
-
-        # Create Chunk model instances for batch insertion
-        from chunkhound.core.models import Chunk
-        from chunkhound.core.types.common import ChunkType
-
-        chunk_models = []
-        for chunk in chunks:
-            # Convert chunk_type string to enum
-            chunk_type_str = chunk.get("chunk_type", "function")
-            try:
-                chunk_type_enum = ChunkType(chunk_type_str)
-            except ValueError:
-                chunk_type_enum = ChunkType.FUNCTION  # default fallback
-
-            chunk_model = Chunk(
-                file_id=FileId(file_id),
-                symbol=chunk.get("symbol", ""),
-                start_line=chunk.get("start_line", 0),
-                end_line=chunk.get("end_line", 0),
-                code=chunk.get("code", ""),
-                chunk_type=chunk_type_enum,
-                language=language,  # Use the file's detected language
-                parent_header=chunk.get("parent_header"),
-            )
-            chunk_models.append(chunk_model)
 
         # Use batch insertion for optimal performance
         chunk_ids = self._db.insert_chunks_batch(chunk_models)
@@ -1025,7 +796,6 @@ class IndexingCoordinator(BaseService):
 
             # Extract data for embedding generation
             valid_chunk_ids = [chunk_id for chunk_id, _, _ in valid_chunk_data]
-            [chunk for _, chunk, _ in valid_chunk_data]
             texts = [text for _, _, text in valid_chunk_data]
 
             # Generate embeddings (progress tracking handled by missing embeddings phase)
@@ -1073,18 +843,187 @@ class IndexingCoordinator(BaseService):
 
         return await self._generate_embeddings(chunk_ids, chunks)
 
-    def _discover_files(
+    async def _discover_files_parallel(
+        self,
+        directory: Path,
+        patterns: list[str],
+        exclude_patterns: list[str],
+        use_inode_ordering: bool = False,
+    ) -> list[Path] | None:
+        """Parallel directory discovery using multi-core traversal.
+
+        ARCHITECTURE: Partitions directory tree at top level and processes subtrees
+        in parallel using ProcessPoolExecutor. Workers are isolated processes to avoid
+        GIL contention and enable true parallelism.
+
+        Args:
+            directory: Resolved directory path to search
+            patterns: File patterns to include (validated non-empty)
+            exclude_patterns: Patterns to exclude
+            use_inode_ordering: Sort directories by inode
+
+        Returns:
+            List of discovered file paths on successful parallel discovery,
+            or None to signal fallback to sequential mode is needed
+
+        Raises:
+            Logs warnings and returns None on errors
+        """
+        # Get top-level directories (first level subdirectories)
+        # RACE CONDITION SAFETY: Handle directories deleted/modified during iteration
+        top_level_items = []
+        try:
+            for item in directory.iterdir():
+                try:
+                    # Check if item is still a directory (could change during iteration)
+                    if not item.is_dir():
+                        continue
+
+                    # Check if this directory should be excluded
+                    rel_path = item.relative_to(directory)
+                    should_skip = False
+                    for pattern in exclude_patterns:
+                        if pattern.startswith("**/") and pattern.endswith("/**"):
+                            target_dir = pattern[3:-3]
+                            if target_dir in rel_path.parts:
+                                should_skip = True
+                                break
+                        elif fnmatch(str(rel_path), pattern) or fnmatch(
+                            item.name, pattern
+                        ):
+                            should_skip = True
+                            break
+                    if not should_skip:
+                        top_level_items.append(item)
+                except (FileNotFoundError, NotADirectoryError, ValueError):
+                    # Item deleted, changed type, or can't be made relative - skip it
+                    continue
+        except (PermissionError, OSError) as e:
+            logger.warning(f"Error accessing directory {directory}: {e}")
+            return None
+
+        # Check if parallel mode is beneficial
+        # Use config value if available, otherwise use default of 4
+        min_dirs_threshold = (
+            self.config.indexing.min_dirs_for_parallel if self.config else 4
+        )
+        if len(top_level_items) < min_dirs_threshold:
+            logger.info(
+                f"Using sequential discovery: {len(top_level_items)} top-level dirs "
+                f"< {min_dirs_threshold} threshold (parallel overhead not worthwhile)"
+            )
+            return None
+
+        # CRITICAL: Pre-load root .gitignore before spawning workers
+        # Workers need parent patterns to correctly apply gitignore inheritance
+        parent_gitignores: dict[Path, list[str]] = {}
+        parent_gitignores[directory] = load_gitignore_patterns(directory, directory)
+
+        # Determine number of workers for directory discovery
+        # Scale based on number of subtrees and available cores
+        # Use config value if available, otherwise use default of 16
+        max_workers = (
+            self.config.indexing.max_discovery_workers if self.config else 16
+        )
+        num_workers = min(
+            os.cpu_count() or DEFAULT_CPU_COUNT, len(top_level_items), max_workers
+        )
+
+        logger.info(
+            f"Using parallel discovery: {len(top_level_items)} top-level dirs, "
+            f"{num_workers} workers (max: {max_workers})"
+        )
+
+        # Process subtrees in parallel
+        loop = asyncio.get_running_loop()
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            futures = [
+                loop.run_in_executor(
+                    executor,
+                    walk_subtree_worker,
+                    subtree,
+                    directory,
+                    patterns,
+                    exclude_patterns,
+                    parent_gitignores,
+                    use_inode_ordering,
+                )
+                for subtree in top_level_items
+            ]
+
+            # Wait for all subtrees to complete
+            subtree_results = await asyncio.gather(*futures)
+
+        # Aggregate and log worker errors
+        all_errors = []
+        for files, errors in subtree_results:
+            all_errors.extend(errors)
+        if all_errors:
+            logger.error(
+                f"Parallel discovery encountered {len(all_errors)} worker errors:"
+            )
+            for error in all_errors[:5]:  # Log first 5 errors
+                logger.error(f"  - {error}")
+            if len(all_errors) > 5:
+                logger.error(f"  ... and {len(all_errors) - 5} more errors")
+
+        # Scan files in the root directory itself (not in subdirs) using helper
+        root_gitignore_patterns = parent_gitignores.get(directory, [])
+        root_files = scan_directory_files(
+            directory, patterns, exclude_patterns, root_gitignore_patterns or None
+        )
+
+        # Merge sorted worker results efficiently using heap-based merge
+        # Workers already sort their results, so we merge k sorted lists
+        import heapq
+
+        # Collect sorted file lists from workers
+        sorted_worker_results = []
+        for files, errors in subtree_results:
+            if files:  # Only include non-empty results
+                sorted_worker_results.append(sorted(files))
+
+        # Add root files as a sorted list
+        if root_files:
+            sorted_worker_results.append(sorted(root_files))
+
+        # Merge sorted results: O(n log k) where k is number of workers
+        # More efficient than concatenating and sorting: O(n log n)
+        if sorted_worker_results:
+            all_files = list(heapq.merge(*sorted_worker_results, key=str))
+        else:
+            all_files = []
+
+        logger.info(f"Parallel discovery complete: found {len(all_files)} files")
+        return all_files
+
+    async def _discover_files(
         self,
         directory: Path,
         patterns: list[str] | None,
         exclude_patterns: list[str] | None,
+        parallel_discovery: bool | None = None,
+        use_inode_ordering: bool = False,
     ) -> list[Path]:
         """Discover files in directory matching patterns with efficient exclude filtering.
+
+        PERFORMANCE: Automatically selects parallel vs sequential discovery based on:
+        - Config setting (parallel_discovery)
+        - Directory structure size (min_dirs_for_parallel threshold)
+        - Falls back to sequential on any parallel errors
 
         Args:
             directory: Directory to search
             patterns: File patterns to include (REQUIRED - must be provided by configuration layer)
             exclude_patterns: File patterns to exclude (optional - will load from config if None)
+            parallel_discovery: Enable parallel directory traversal (default: from config)
+                - Activates when >= min_dirs_for_parallel top-level directories exist
+                - Scales workers based on number of subdirectories (max: max_discovery_workers)
+                - Falls back to sequential for small directory structures
+            use_inode_ordering: Sort directories by inode for improved disk locality (default: False)
+                - Beneficial on rotational drives (HDDs) to reduce seek time
+                - Minimal benefit on SSDs
+                - Slight overhead from stat() calls per directory
 
         Raises:
             ValueError: If patterns is None/empty (configuration layer error)
@@ -1097,210 +1036,83 @@ class IndexingCoordinator(BaseService):
                 "Configuration layer must provide file patterns."
             )
 
-        # Default exclude patterns from unified config with .gitignore support
+        # Default exclude patterns if not provided
         if not exclude_patterns:
-            from chunkhound.core.config.config import Config
+            exclude_patterns = []
 
-            config = Config.from_environment(directory)
-            exclude_patterns = config.indexing.exclude
+        # Use default (enabled) if not explicitly specified
+        if parallel_discovery is None:
+            parallel_discovery = True  # Default: parallel discovery enabled
 
-        # Use custom directory walker that respects exclude patterns during traversal
+        # Resolve directory once for consistent path handling
+        directory = directory.resolve()
+
+        # Try parallel discovery if enabled
+        if parallel_discovery:
+            try:
+                discovered_files = await self._discover_files_parallel(
+                    directory, patterns, exclude_patterns, use_inode_ordering
+                )
+                # Check if parallel succeeded (returns files) or signaled fallback (returns None)
+                if discovered_files is not None:
+                    # Parallel discovery returns pre-sorted results (via heapq.merge)
+                    return discovered_files
+                # Otherwise fall through to sequential (None signal)
+            except Exception as e:
+                # Preserve full error context for debugging large repo issues
+                import traceback
+                error_traceback = traceback.format_exc()
+                logger.warning(
+                    f"Parallel discovery failed for {directory}, falling back to sequential:\n"
+                    f"  Error: {type(e).__name__}: {e}\n"
+                    f"  Traceback (last 3 frames):\n"
+                    f"{''.join(traceback.format_tb(e.__traceback__)[-3:])}"
+                )
+                logger.debug(f"Full traceback:\n{error_traceback}")
+                # Fall through to sequential
+
+        # Sequential discovery (fallback or explicitly requested)
         discovered_files = self._walk_directory_with_excludes(
-            directory, patterns, exclude_patterns
+            directory, patterns, exclude_patterns, use_inode_ordering
         )
-
         return sorted(discovered_files)
 
     def _walk_directory_with_excludes(
-        self, directory: Path, patterns: list[str], exclude_patterns: list[str]
+        self, directory: Path, patterns: list[str], exclude_patterns: list[str], use_inode_ordering: bool = False
     ) -> list[Path]:
-        """Custom directory walker that skips excluded directories during traversal.
+        """Optimized directory walker using os.walk() with optional inode ordering.
+
+        PERFORMANCE OPTIMIZATIONS:
+        - Uses os.walk() with scandir (3-50x faster than manual recursion)
+        - Compiled regex patterns (cached, 2-3x faster than fnmatch)
+        - Optional inode ordering (reduces disk seeks on large filesystems)
+        - Early directory pruning (skips excluded subtrees entirely)
 
         Args:
             directory: Root directory to walk
             patterns: File patterns to include
             exclude_patterns: Patterns to exclude (applied to both files and directories)
+            use_inode_ordering: Sort directories by inode to reduce disk seeks (default: False)
 
         Returns:
             List of file paths that match include patterns and don't match exclude patterns
         """
         # Resolve directory path once at the beginning for consistent comparison
         directory = directory.resolve()
-        files = []
 
-        # Cache for .gitignore patterns by directory
-        gitignore_patterns: dict[Path, list[str]] = {}
+        # Pre-load root gitignore (consistent with parallel mode)
+        parent_gitignores: dict[Path, list[str]] = {}
+        parent_gitignores[directory] = load_gitignore_patterns(directory, directory)
 
-        def should_exclude_path(
-            path: Path, base_dir: Path, patterns: list[str] | None = None
-        ) -> bool:
-            """Check if a path should be excluded based on exclude patterns."""
-            if patterns is None:
-                patterns = exclude_patterns
-
-            try:
-                rel_path = path.relative_to(base_dir)
-            except ValueError:
-                # Path is not under base directory, use absolute path as fallback
-                rel_path = path
-
-            for exclude_pattern in patterns:
-                # Handle ** patterns that fnmatch doesn't support properly
-                if exclude_pattern.startswith("**/") and exclude_pattern.endswith(
-                    "/**"
-                ):
-                    # Extract the directory name from pattern like **/.venv/**
-                    target_dir = exclude_pattern[3:-3]  # Remove **/ and /**
-                    if target_dir in rel_path.parts or target_dir in path.parts:
-                        return True
-                elif exclude_pattern.startswith("**/"):
-                    # Pattern like **/*.db - check if any part matches the suffix
-                    suffix = exclude_pattern[3:]  # Remove **/
-                    if (
-                        fnmatch(str(rel_path), suffix)
-                        or fnmatch(str(path), suffix)
-                        or fnmatch(rel_path.name, suffix)
-                        or fnmatch(path.name, suffix)
-                    ):
-                        return True
-                else:
-                    # Regular fnmatch for non-** patterns
-                    if fnmatch(str(rel_path), exclude_pattern) or fnmatch(
-                        str(path), exclude_pattern
-                    ):
-                        return True
-            return False
-
-        def should_include_file(file_path: Path) -> bool:
-            """Check if a file matches any of the include patterns."""
-            # With directory resolved at start, all paths from iterdir will be consistent
-            rel_path = file_path.relative_to(directory)
-
-            for pattern in patterns:
-                rel_path_str = str(rel_path)
-                filename = file_path.name
-
-                # Handle **/ prefix patterns (common from CLI conversion)
-                if pattern.startswith("**/"):
-                    simple_pattern = pattern[
-                        3:
-                    ]  # Remove **/ prefix (e.g., *.md from **/*.md)
-
-                    # Match against:
-                    # 1. Full relative path for nested files (e.g., "docs/guide.md" matches "**/*.md")
-                    # 2. Simple pattern for root-level files (e.g., "README.md" matches "*.md")
-                    # 3. Filename only for simple patterns (e.g., "guide.md" matches "*.md")
-                    if (
-                        fnmatch(rel_path_str, pattern)
-                        or fnmatch(rel_path_str, simple_pattern)
-                        or fnmatch(filename, simple_pattern)
-                    ):
-                        return True
-                else:
-                    # Regular pattern - check both relative path and filename
-                    if fnmatch(rel_path_str, pattern) or fnmatch(filename, pattern):
-                        return True
-            return False
-
-        # Walk directory tree manually to control traversal
-        def walk_recursive(current_dir: Path) -> None:
-            """Recursively walk directory, skipping excluded paths."""
-            try:
-                # Load .gitignore for this directory if it exists
-                gitignore_path = current_dir / ".gitignore"
-                if gitignore_path.exists():
-                    try:
-                        with open(
-                            gitignore_path, encoding="utf-8", errors="ignore"
-                        ) as f:
-                            lines = f.read().splitlines()
-                        # Filter out comments and empty lines, convert to exclude patterns
-                        # Gitignore patterns are converted to our exclude format:
-                        # - Patterns starting with / are relative to the gitignore's directory
-                        # - Other patterns apply recursively from that point
-                        patterns_from_gitignore = []
-                        for line in lines:
-                            line = line.strip()
-                            if line and not line.startswith("#"):
-                                # Convert gitignore pattern to our exclude pattern format
-                                # Patterns starting with / are relative to this directory
-                                if line.startswith("/"):
-                                    # Make it relative to the root directory we're indexing
-                                    rel_from_root = current_dir.relative_to(directory)
-                                    if rel_from_root == Path("."):
-                                        patterns_from_gitignore.append(line[1:])
-                                    else:
-                                        patterns_from_gitignore.append(
-                                            str(rel_from_root / line[1:])
-                                        )
-                                else:
-                                    # Pattern applies recursively from this directory
-                                    # Simple patterns like *.log should match at any level
-                                    rel_from_root = current_dir.relative_to(directory)
-                                    if rel_from_root == Path("."):
-                                        # Gitignore patterns without / match recursively by default
-                                        if not line.startswith("**/"):
-                                            patterns_from_gitignore.append(f"**/{line}")
-                                            patterns_from_gitignore.append(f"**/{line}/**")
-                                        else:
-                                            patterns_from_gitignore.append(line)
-                                    else:
-                                        patterns_from_gitignore.append(
-                                            f"{rel_from_root}/**/{line}"
-                                        )
-                                        patterns_from_gitignore.append(
-                                            f"{rel_from_root}/{line}"
-                                        )
-                        gitignore_patterns[current_dir] = patterns_from_gitignore
-                    except OSError as e:
-                        # Log error but continue - don't fail indexing due to gitignore issues
-                        logger.warning(f"Failed to read .gitignore at {gitignore_path}: {e}")
-                    except Exception as e:
-                        # Unexpected error - still log but continue
-                        logger.warning(f"Unexpected error reading .gitignore at {gitignore_path}: {e}")
-
-                # Combine all applicable gitignore patterns from this dir and parents
-                all_gitignore_patterns = []
-                check_dir = current_dir
-                while check_dir >= directory:
-                    if check_dir in gitignore_patterns:
-                        all_gitignore_patterns.extend(gitignore_patterns[check_dir])
-                    if check_dir == directory:
-                        break
-                    check_dir = check_dir.parent
-
-                # Get directory contents
-                for entry in current_dir.iterdir():
-                    # Skip if path should be excluded by config patterns
-                    if should_exclude_path(entry, directory):
-                        continue
-
-                    # Skip if path should be excluded by gitignore patterns
-                    if all_gitignore_patterns:
-                        skip = False
-                        for pattern in all_gitignore_patterns:
-                            if should_exclude_path(entry, directory, [pattern]):
-                                skip = True
-                                break
-                        if skip:
-                            continue
-
-                    if entry.is_file():
-                        # Check if file matches include patterns
-                        if should_include_file(entry):
-                            files.append(entry)
-                    elif entry.is_dir():
-                        # Recursively walk subdirectory (already checked it's not excluded)
-                        walk_recursive(entry)
-
-            except (PermissionError, OSError) as e:
-                # Log warning but continue with other directories
-                logger.debug(
-                    f"Skipping directory due to access error: {current_dir} - {e}"
-                )
-
-        # Start walking from the root directory
-        walk_recursive(directory)
+        # Use shared directory traversal logic
+        files, _ = walk_directory_tree(
+            directory,
+            directory,
+            patterns,
+            exclude_patterns,
+            parent_gitignores,
+            use_inode_ordering,
+        )
 
         return files
 

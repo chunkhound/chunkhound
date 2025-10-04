@@ -34,7 +34,7 @@ class EmbeddingService(BaseService):
         embedding_provider: EmbeddingProvider | None = None,
         embedding_batch_size: int = 1000,
         db_batch_size: int = 5000,
-        max_concurrent_batches: int = 8,
+        max_concurrent_batches: int | None = None,
         optimization_batch_frequency: int = 1000,
         progress: Progress | None = None,
     ):
@@ -45,7 +45,7 @@ class EmbeddingService(BaseService):
             embedding_provider: Embedding provider for vector generation
             embedding_batch_size: Number of texts per embedding API request
             db_batch_size: Number of records per database transaction
-            max_concurrent_batches: Maximum number of concurrent embedding batches
+            max_concurrent_batches: Maximum concurrent batches (None = auto-detect from provider)
             optimization_batch_frequency: Optimize DB every N batches (provider-aware)
             progress: Optional Rich Progress instance for hierarchical progress display
         """
@@ -53,7 +53,32 @@ class EmbeddingService(BaseService):
         self._embedding_provider = embedding_provider
         self._embedding_batch_size = embedding_batch_size
         self._db_batch_size = db_batch_size
-        self._max_concurrent_batches = max_concurrent_batches
+
+        # Auto-detect optimal concurrency from provider if not explicitly set
+        if max_concurrent_batches is None:
+            if embedding_provider and hasattr(embedding_provider, 'get_recommended_concurrency'):
+                self._max_concurrent_batches = embedding_provider.get_recommended_concurrency()
+                logger.info(
+                    f"Auto-detected concurrency: {self._max_concurrent_batches} "
+                    f"concurrent batches for {embedding_provider.name}"
+                )
+            else:
+                self._max_concurrent_batches = 8  # Safe default
+                if embedding_provider:
+                    logger.warning(
+                        f"Provider {embedding_provider.name} does not implement "
+                        f"get_recommended_concurrency(), using default: {self._max_concurrent_batches}"
+                    )
+                else:
+                    logger.debug(f"No embedding provider, using default concurrency: {self._max_concurrent_batches}")
+        else:
+            self._max_concurrent_batches = max_concurrent_batches
+            if embedding_provider:
+                logger.info(
+                    f"Using explicit concurrency: {self._max_concurrent_batches} "
+                    f"concurrent batches (overrides provider recommendation)"
+                )
+
         self._optimization_batch_frequency = optimization_batch_frequency
         self.progress = progress
 
@@ -188,9 +213,13 @@ class EmbeddingService(BaseService):
                     "message": "All chunks have embeddings",
                 }
 
-            # Generate embeddings in streaming fashion (loads chunk content in batches)
-            generated_count = await self._generate_embeddings_streaming(
-                chunk_ids_without_embeddings
+            # Load chunk content and generate embeddings
+            chunks_data = self._get_chunks_by_ids(chunk_ids_without_embeddings)
+            chunk_id_list = [chunk["id"] for chunk in chunks_data]
+            chunk_texts = [chunk["code"] for chunk in chunks_data]
+
+            generated_count = await self.generate_embeddings_for_chunks(
+                chunk_id_list, chunk_texts, show_progress=True
             )
 
             return {
@@ -300,7 +329,7 @@ class EmbeddingService(BaseService):
 
             # Query each table and aggregate results
             all_results = []
-            all_chunks: set[str] = set()
+            all_chunks: set[tuple[str, str, Any]] = set()
 
             for table_name in embedding_tables:
                 query = f"""
@@ -377,7 +406,7 @@ class EmbeddingService(BaseService):
             table_name = f"embeddings_{dims}"
 
             existing_chunk_ids = self._db.get_existing_embeddings(
-                chunk_ids=chunk_ids, provider=provider_name, model=model_name
+                chunk_ids=[int(cid) for cid in chunk_ids], provider=provider_name, model=model_name
             )
         except Exception as e:
             logger.error(f"Failed to get existing embeddings: {e}")
@@ -668,6 +697,21 @@ class EmbeddingService(BaseService):
         if not chunk_data:
             return []
 
+        # Maximum chunks per batch - critical tuning for DB write performance
+        #
+        # Performance tradeoff:
+        # - Larger batches = fewer serialized DB writes (DB is single-threaded bottleneck)
+        # - Smaller batches = more concurrent embedding requests (parallelizable)
+        #
+        # Value of 300 chosen empirically:
+        # - With 40 concurrent batches: 12,000 chunks in flight (good saturation)
+        # - With 8 concurrent batches: 2,400 chunks in flight (still acceptable)
+        # - DB writes complete in ~50-100ms, avoiding idle time between batch completions
+        # - Not so large that a single slow batch blocks progress significantly
+        #
+        # Can be tuned per-provider if profiling shows different optimal values
+        MAX_CHUNKS_PER_BATCH = 300
+
         if not self._embedding_provider:
             # No provider - use simple batching
             batch_size = 20  # Conservative default
@@ -685,7 +729,7 @@ class EmbeddingService(BaseService):
 
         # Provider-agnostic token-aware batching
         batches = []
-        current_batch: list[tuple[str, str]] = []
+        current_batch: list[tuple[ChunkId, str]] = []
         current_tokens = 0
 
         for chunk_id, text in chunk_data:
@@ -698,10 +742,12 @@ class EmbeddingService(BaseService):
                 # Fallback for no provider (conservative default)
                 text_tokens = max(1, int(len(text) / 3.5))
 
-            # Check if adding this chunk would exceed token OR document limit
-            if (current_tokens + text_tokens > safe_limit and current_batch) or len(
-                current_batch
-            ) >= max_documents:
+            # Check if adding this chunk would exceed token, document, or chunk limit
+            if (
+                (current_tokens + text_tokens > safe_limit and current_batch)
+                or len(current_batch) >= max_documents
+                or len(current_batch) >= MAX_CHUNKS_PER_BATCH
+            ):
                 # Start new batch
                 batches.append(current_batch)
                 current_batch = [(chunk_id, text)]
@@ -714,9 +760,19 @@ class EmbeddingService(BaseService):
         if current_batch:
             batches.append(current_batch)
 
+        # Calculate effective concurrency
+        effective_concurrency = min(len(batches), self._max_concurrent_batches)
+
+        logger.info(
+            f"Created {len(batches)} batches for {len(chunk_data)} chunks "
+            f"(concurrency limit: {self._max_concurrent_batches}, "
+            f"effective concurrency: {effective_concurrency}, "
+            f"max_chunks_per_batch: {MAX_CHUNKS_PER_BATCH})"
+        )
+
         logger.debug(
-            f"Created {len(batches)} batches from {len(chunk_data)} chunks "
-            f"(max_tokens={max_tokens}, max_documents={max_documents}, safe_limit={safe_limit})"
+            f"Batch constraints: max_tokens={max_tokens}, max_documents={max_documents}, "
+            f"safe_limit={safe_limit}, max_chunks={MAX_CHUNKS_PER_BATCH}"
         )
         return batches
 
@@ -745,11 +801,11 @@ class EmbeddingService(BaseService):
 
         # Extract chunk IDs with consistent field handling
         # Use "chunk_id" field as it's the actual field name in the database
-        all_chunk_ids = [
-            chunk.get("chunk_id")
-            for chunk in all_chunks
-            if chunk.get("chunk_id") is not None
-        ]
+        all_chunk_ids: list[int] = []
+        for chunk in all_chunks:
+            chunk_id = chunk.get("chunk_id")
+            if chunk_id is not None:
+                all_chunk_ids.append(int(chunk_id))
 
         if not all_chunk_ids:
             return []
@@ -759,78 +815,10 @@ class EmbeddingService(BaseService):
             chunk_ids=all_chunk_ids, provider=provider, model=model
         )
 
-        # Return only chunks that don't have embeddings
+        # Return only chunks that don't have embeddings (convert back to ChunkId)
         return [
-            chunk_id for chunk_id in all_chunk_ids if chunk_id not in existing_chunk_ids
+            ChunkId(chunk_id) for chunk_id in all_chunk_ids if chunk_id not in existing_chunk_ids
         ]
-
-    async def _generate_embeddings_streaming(self, chunk_ids: list[ChunkId]) -> int:
-        """Generate embeddings for chunks by streaming data in batches."""
-        if not chunk_ids or not self._embedding_provider:
-            return 0
-
-        total_generated = 0
-
-        # Load all chunks and create token-aware batches
-        chunks_data = self._get_chunks_by_ids(chunk_ids)
-        chunk_data = [(chunk["id"], chunk["code"]) for chunk in chunks_data]
-
-        # Use existing token-aware batching instead of fixed size
-        batches = self._create_token_aware_batches(chunk_data)
-
-        # Track batch count for periodic optimization
-        batch_count = 0
-        should_optimize = (
-            hasattr(self._db, "optimize_tables")
-            and self._optimization_batch_frequency > 0
-        )
-
-        # Show progress bar immediately
-        # Create progress task for missing embeddings
-        missing_task: TaskID | None = None
-        if self.progress:
-            missing_task = self.progress.add_task(
-                "    └─ Processing missing embeddings",
-                total=len(chunk_ids),
-                speed="",
-                info="",
-            )
-
-        for batch in batches:
-            # Extract IDs and texts from token-aware batch
-            chunk_id_list = [chunk_id for chunk_id, _ in batch]
-            chunk_texts = [text for _, text in batch]
-
-            # Generate embeddings for this batch (without inner progress bar)
-            generated_count = await self.generate_embeddings_for_chunks(
-                chunk_id_list, chunk_texts, show_progress=False
-            )
-            total_generated += generated_count
-
-            # Increment batch counter
-            if generated_count > 0:
-                batch_count += 1
-
-                # Periodic optimization (provider-aware)
-                if (
-                    should_optimize
-                    and batch_count > 0
-                    and batch_count % self._optimization_batch_frequency == 0
-                ):
-                    logger.debug(
-                        f"Running periodic DB optimization after {batch_count} batches"
-                    )
-                    try:
-                        self._db.optimize_tables()
-                        logger.debug("Periodic optimization completed")
-                    except Exception as e:
-                        logger.warning(f"Periodic optimization failed: {e}")
-
-            # Update progress
-            if missing_task and self.progress:
-                self.progress.advance(missing_task, len(batch))
-
-        return total_generated
 
     def _get_chunks_without_embeddings(
         self, provider: str, model: str

@@ -10,7 +10,7 @@ Purpose: Transform codebases into searchable knowledge bases for AI assistants
 - Embedding batching: MANDATORY (100x performance difference)
 - Vector index optimization: DROP_BEFORE_BULK_INSERT (20x speedup for >50 embeddings)
 - MCP server: NO_STDOUT_LOGS (breaks JSON-RPC protocol)
-- File processing: SEQUENTIAL_ONLY (prevents database contention)
+- File parsing: PARALLEL_BATCHES (CPU-bound parsing across cores, storage remains single-threaded)
 
 ## ARCHITECTURE_RATIONALE
 - SerialDatabaseProvider: NOT_OPTIONAL (wraps all DB access in single thread)
@@ -21,7 +21,7 @@ Purpose: Transform codebases into searchable knowledge bases for AI assistants
 
 ## MODIFICATION_RULES
 - NEVER: Remove SerialDatabaseProvider wrapper
-- NEVER: Add concurrent file processing
+- NEVER: Add concurrent database operations (parsing is parallelized, storage is single-threaded)
 - NEVER: Use print() in MCP server
 - NEVER: Make single-row DB inserts in loops
 - NEVER: Use forward references (quotes) in type annotations unless needed
@@ -37,7 +37,7 @@ Purpose: Transform codebases into searchable knowledge bases for AI assistants
 | Embeddings (1000 texts) | 100s | 1s | API rate limits |
 | DB inserts (5000 chunks) | 250s | 1s | Index overhead |
 | File update (1000 chunks) | 60s | 5s | Drop/recreate indexes |
-| Tree parsing | - | - | CPU-bound, parallelizable |
+| File parsing | Sequential | Parallel (CPU cores) | ProcessPoolExecutor |
 | DB operations | - | - | Single-threaded only |
 
 ## KEY_COMMANDS

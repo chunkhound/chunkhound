@@ -346,7 +346,7 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.C: LanguageConfig(ts_c, CMapping, C_AVAILABLE, "c"),
     Language.CPP: LanguageConfig(ts_cpp, CppMapping, CPP_AVAILABLE, "cpp"),
     Language.CSHARP: LanguageConfig(
-        ts_csharp, CSharpMapping, CSHARP_AVAILABLE, "c_sharp"
+        ts_csharp, CSharpMapping, CSHARP_AVAILABLE, "csharp"
     ),
     Language.GO: LanguageConfig(ts_go, GoMapping, GO_AVAILABLE, "go"),
     Language.HASKELL: LanguageConfig(
@@ -371,7 +371,7 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
         ts_markdown, MarkdownMapping, MARKDOWN_AVAILABLE, "markdown"
     ),
     Language.MAKEFILE: LanguageConfig(
-        ts_make, MakefileMapping, MAKEFILE_AVAILABLE, "make"
+        ts_make, MakefileMapping, MAKEFILE_AVAILABLE, "makefile"
     ),
     Language.JSX: LanguageConfig(
         ts_typescript, JSXMapping, JSX_AVAILABLE, "jsx"
