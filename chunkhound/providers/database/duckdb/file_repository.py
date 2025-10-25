@@ -56,7 +56,8 @@ class DuckDBFileRepository:
                 file_id = self._extract_file_id(existing)
                 if file_id is not None:
                     self.update_file(
-                        file_id, size_bytes=file.size_bytes, mtime=file.mtime
+                        file_id, size_bytes=file.size_bytes, mtime=file.mtime,
+                        content_hash=file.content_hash
                     )
                     return file_id
 
@@ -205,7 +206,8 @@ class DuckDBFileRepository:
             return None
 
     def update_file(
-        self, file_id: int, size_bytes: int | None = None, mtime: float | None = None
+        self, file_id: int, size_bytes: int | None = None, mtime: float | None = None,
+        content_hash: str | None = None
     ) -> None:
         """Update file record with new values.
 
@@ -213,12 +215,13 @@ class DuckDBFileRepository:
             file_id: ID of the file to update
             size_bytes: New file size in bytes
             mtime: New modification timestamp
+            content_hash: Content hash for change detection
         """
         if self.connection is None:
             raise RuntimeError("No database connection")
 
         # Skip if no updates provided
-        if size_bytes is None and mtime is None:
+        if size_bytes is None and mtime is None and content_hash is None:
             return
 
         try:
@@ -236,6 +239,11 @@ class DuckDBFileRepository:
                 set_clauses.append("modified_time = to_timestamp(?)")
                 values.append(mtime)
 
+            # Add content hash update if provided
+            if content_hash is not None:
+                set_clauses.append("content_hash = ?")
+                values.append(content_hash)
+
             if set_clauses:
                 set_clauses.append("updated_at = CURRENT_TIMESTAMP")
                 values.append(file_id)
@@ -243,7 +251,7 @@ class DuckDBFileRepository:
                 query = f"UPDATE files SET {', '.join(set_clauses)} WHERE id = ?"
                 if self._provider:
                     self._provider._execute_in_db_thread_sync(
-                        "update_file", file_id, size_bytes, mtime
+                        "update_file", file_id, size_bytes, mtime, content_hash
                     )
                 else:
                     # Fallback for tests

@@ -31,6 +31,7 @@ class File:
         mtime: Last modification time as Unix timestamp
         language: Programming language of the file
         size_bytes: File size in bytes
+        content_hash: Fast checksum for change detection (None if not computed)
         created_at: When the file was first indexed
         updated_at: When the file record was last updated
     """
@@ -40,6 +41,7 @@ class File:
     language: Language
     size_bytes: int
     id: FileId | None = None
+    content_hash: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -181,12 +183,15 @@ class File:
             if isinstance(updated_at, str):
                 updated_at = datetime.fromisoformat(updated_at)
 
+            content_hash = data.get("content_hash")
+
             return cls(
                 id=file_id,
                 path=FilePath(path),
                 mtime=Timestamp(float(mtime)),
                 language=language,
                 size_bytes=int(size_bytes),
+                content_hash=content_hash,
                 created_at=created_at,
                 updated_at=updated_at,
             )
@@ -212,6 +217,9 @@ class File:
 
         if self.id is not None:
             result["id"] = self.id
+
+        if self.content_hash is not None:
+            result["content_hash"] = self.content_hash
 
         if self.created_at is not None:
             result["created_at"] = self.created_at.isoformat()
@@ -269,6 +277,7 @@ class File:
             mtime=self.mtime,
             language=self.language,
             size_bytes=self.size_bytes,
+            content_hash=self.content_hash,
             created_at=self.created_at,
             updated_at=self.updated_at,
         )
@@ -288,6 +297,7 @@ class File:
             mtime=new_mtime,
             language=self.language,
             size_bytes=self.size_bytes,
+            content_hash=self.content_hash,
             created_at=self.created_at,
             updated_at=datetime.utcnow(),
         )

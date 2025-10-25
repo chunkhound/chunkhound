@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Per-file timeout controls: `indexing.per_file_timeout_seconds`, `indexing.per_file_timeout_min_size_kb`, CLI flags and env overrides.
-- Change-detection and optional checksum verification for unchanged files (`indexing.verify_checksum_when_mtime_equal`, `indexing.checksum_sample_kb`).
+- Change-detection with mandatory checksum verification for unchanged files (now always-on when size+mtime match).
 - DuckDB schema: `files.content_hash` column (idempotent migration via `ALTER TABLE IF NOT EXISTS`).
+- LanceDB schema: `files.content_hash` column for checksum support.
 - Progress improvements: split "Parsing files" vs "Handling files" with live cumulative info.
 - Post-run prompt to add timed-out files to `indexing.exclude` in `.chunkhound.json` when interactive.
 - Env override for DB executor timeout: `CHUNKHOUND_DB_EXECUTE_TIMEOUT`.
@@ -23,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed embedded API key from `.chunkhound.json`. Use environment variables instead (e.g., `CHUNKHOUND_EMBEDDING__API_KEY`).
 
 ### Changed
+- **BREAKING**: Checksum algorithm switched from SHA-256 to xxHash3-64 for faster file change detection. All files will be reindexed on first run after upgrade to compute new checksums.
+- **BREAKING**: Checksum verification now mandatory for all providers when size+mtime match. Removed `indexing.verify_checksum_when_mtime_equal` config option and `--verify-checksum` CLI flag.
+- **BREAKING**: LanceDB provider now requires `content_hash` column in files schema.
 - Default per-file timeout is now enabled by default: `indexing.per_file_timeout_seconds=3.0` (previously `0`, disabled). Set to `0` to disable.
 - When timeouts are enabled and no explicit concurrency is set, parser workers auto‑scale to `cpu_count` (capped at 32). Override via `indexing.max_concurrent`, `--max-concurrent`, or `CHUNKHOUND_INDEXING__MAX_CONCURRENT`.
 - PHP language support with comprehensive tree-sitter parsing for classes, interfaces, traits, functions, methods, namespaces, and PHPDoc comments

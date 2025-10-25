@@ -43,8 +43,6 @@ class _Cfg:
         cleanup = False
         force_reindex = False
         per_file_timeout_seconds = 0.0
-        verify_checksum_when_mtime_equal = True
-        checksum_sample_kb = 64
         min_dirs_for_parallel = 4
         max_discovery_workers = 4
         parallel_discovery = False
@@ -76,7 +74,13 @@ def test_checksum_verify_populate_and_skip(tmp_path: Path, monkeypatch: pytest.M
     async def _fake_parse(files, config_file_size_threshold_kb=20, parse_task=None, on_batch=None):
         # Simulate one ParsedFileResult success for each file
         results = []
-        for f in files:
+        for item in files:
+            # Handle both Path and (Path, hash) tuple formats
+            if isinstance(item, tuple):
+                f, precomputed_hash = item
+            else:
+                f = item
+                precomputed_hash = None
             st = f.stat()
             results.append(
                 ParsedFileResult(
@@ -85,6 +89,7 @@ def test_checksum_verify_populate_and_skip(tmp_path: Path, monkeypatch: pytest.M
                     language=Language.TEXT,
                     file_size=st.st_size,
                     file_mtime=st.st_mtime,
+                    content_hash=precomputed_hash,
                     status="success",
                 )
             )

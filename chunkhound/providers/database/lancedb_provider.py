@@ -32,6 +32,7 @@ def get_files_schema() -> pa.Schema:
             ("path", pa.string()),
             ("size", pa.int64()),
             ("modified_time", pa.float64()),
+            ("content_hash", pa.string()),
             ("indexed_time", pa.float64()),
             ("language", pa.string()),
             ("encoding", pa.string()),
@@ -293,6 +294,7 @@ class LanceDBProvider(SerialDatabaseProvider):
             "path": normalized_path,
             "size": file.size_bytes,
             "modified_time": file.mtime,
+            "content_hash": getattr(file, "content_hash", None) or "",
             "indexed_time": time.time(),
             "language": str(
                 file.language.value
@@ -397,9 +399,18 @@ class LanceDBProvider(SerialDatabaseProvider):
             logger.error(f"Error getting file by ID: {e}")
             return None
 
-    def update_file(self, file_id: int, **kwargs) -> None:
+    def update_file(
+        self,
+        file_id: int,
+        size_bytes: int | None = None,
+        mtime: float | None = None,
+        content_hash: str | None = None,
+        **kwargs,
+    ) -> None:
         """Update file record with new values."""
-        return self._execute_in_db_thread_sync("update_file", file_id, **kwargs)
+        return self._execute_in_db_thread_sync(
+            "update_file", file_id, size_bytes, mtime, content_hash
+        )
 
     def _executor_update_file(
         self,
@@ -408,6 +419,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         file_id: int,
         size_bytes: int | None = None,
         mtime: float | None = None,
+        content_hash: str | None = None,
         **kwargs,
     ) -> None:
         """Executor method for update_file - runs in DB thread."""
@@ -426,6 +438,8 @@ class LanceDBProvider(SerialDatabaseProvider):
                 updated_file["size"] = size_bytes
             if mtime is not None:
                 updated_file["modified_time"] = mtime
+            if content_hash is not None:
+                updated_file["content_hash"] = content_hash
             updated_file["indexed_time"] = time.time()
 
             # LanceDB doesn't support in-place updates, so we use merge_insert

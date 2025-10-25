@@ -76,22 +76,6 @@ class IndexingConfig(BaseModel):
         ),
     )
 
-    # Content verification (optional)
-    verify_checksum_when_mtime_equal: bool = Field(
-        default=False,
-        description=(
-            "When size and mtime are equal, verify content via checksum. "
-            "If DB has no checksum for a file, the file will be reprocessed once to populate it."
-        ),
-    )
-    checksum_sample_kb: int = Field(
-        default=64,
-        description=(
-            "Sample size (KB) from file start and end used to compute a fast checksum. "
-            "Set to 0 for full-file checksum (slower)."
-        ),
-    )
-
     # Parallel discovery settings
     parallel_discovery: bool = Field(
         default=True,
@@ -296,22 +280,6 @@ class IndexingConfig(BaseModel):
             ),
         )
         parser.add_argument(
-            "--verify-checksum",
-            action="store_true",
-            help=(
-                "Verify unchanged files by checksum when size and mtime are equal. "
-                "May reprocess once to populate checksums."
-            ),
-        )
-        parser.add_argument(
-            "--checksum-sample-kb",
-            type=int,
-            default=None,
-            help=(
-                "Sample size in KB for checksum (0 = full file). Default: 64"
-            ),
-        )
-        parser.add_argument(
             "--config-file-size-threshold-kb",
             type=int,
             default=None,
@@ -362,13 +330,6 @@ class IndexingConfig(BaseModel):
                 config["config_file_size_threshold_kb"] = int(cfg_sz)
             except ValueError:
                 pass
-        if verify := os.getenv("CHUNKHOUND_INDEXING__VERIFY_CHECKSUM_WHEN_MTIME_EQUAL"):
-            config["verify_checksum_when_mtime_equal"] = verify.lower() in ("true", "1", "yes")
-        if sample := os.getenv("CHUNKHOUND_INDEXING__CHECKSUM_SAMPLE_KB"):
-            try:
-                config["checksum_sample_kb"] = int(sample)
-            except ValueError:
-                pass
 
         # Cleanup orphaned records toggle
         if cleanup := os.getenv("CHUNKHOUND_INDEXING__CLEANUP"):
@@ -417,13 +378,6 @@ class IndexingConfig(BaseModel):
         if hasattr(args, "mtime_epsilon_seconds") and args.mtime_epsilon_seconds is not None:
             try:
                 overrides["mtime_epsilon_seconds"] = float(args.mtime_epsilon_seconds)
-            except (TypeError, ValueError):
-                pass
-        if hasattr(args, "verify_checksum") and args.verify_checksum:
-            overrides["verify_checksum_when_mtime_equal"] = True
-        if hasattr(args, "checksum_sample_kb") and args.checksum_sample_kb is not None:
-            try:
-                overrides["checksum_sample_kb"] = int(args.checksum_sample_kb)
             except (TypeError, ValueError):
                 pass
         # Structured config file size threshold override via CLI

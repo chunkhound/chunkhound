@@ -974,6 +974,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     file_id,
                     file.size_bytes if hasattr(file, "size_bytes") else None,
                     file.mtime if hasattr(file, "mtime") else None,
+                    getattr(file, "content_hash", None),
                 )
                 return file_id
 
@@ -983,8 +984,8 @@ class DuckDBProvider(SerialDatabaseProvider):
             # No existing file, insert new one
             result = conn.execute(
                 """
-                INSERT INTO files (path, name, extension, size, modified_time, language)
-                VALUES (?, ?, ?, ?, to_timestamp(?), ?)
+                INSERT INTO files (path, name, extension, size, modified_time, content_hash, language)
+                VALUES (?, ?, ?, ?, to_timestamp(?), ?, ?)
                 RETURNING id
             """,
                 [
@@ -995,6 +996,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     else Path(file.path).suffix,
                     file.size_bytes if hasattr(file, "size_bytes") else None,
                     file.mtime if hasattr(file, "mtime") else None,
+                    getattr(file, "content_hash", None),
                     file.language.value if file.language else None,
                 ],
             )
