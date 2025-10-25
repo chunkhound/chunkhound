@@ -166,15 +166,22 @@ class DuckDBConnectionManager:
 
         # Try a quick validation by attempting to open the database
         # If it crashes or fails, clean up the WAL using existing logic
+        test_conn = None
         try:
             test_conn = duckdb.connect(str(self.db_path))
             # Simple query to trigger WAL replay
             test_conn.execute("SELECT 1").fetchone()
-            test_conn.close()
             logger.debug("WAL file validation passed")
         except Exception as e:
             logger.warning(f"WAL validation failed ({e}), cleaning up WAL file")
             self._handle_wal_corruption()
+        finally:
+            # Ensure temporary validation connection is always closed
+            if test_conn is not None:
+                try:
+                    test_conn.close()
+                except Exception:
+                    pass
 
     def _handle_wal_corruption(self) -> None:
         """Handle WAL corruption using advanced recovery with VSS extension."""

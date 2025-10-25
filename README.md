@@ -75,6 +75,51 @@ chunkhound index
 
 **For configuration, IDE setup, and advanced usage, see the [documentation](https://chunkhound.github.io).**
 
+## Codex CLI Synthesis (Advanced)
+
+ChunkHound can use the Codex CLI as the synthesis LLM for deep research. This lets you reuse your local Codex agent configuration while ChunkHound handles retrieval and context assembly.
+
+- Prerequisites: Codex CLI installed and authenticated. Authentication is discovered from your `CODEX_HOME` (defaults to `~/.codex`).
+- ChunkHound never prints Codex output directly to MCP stdout; results are returned via tool responses.
+
+Run MCP stdio with Codex for synthesis:
+
+```bash
+uv run chunkhound mcp . --stdio \
+  --llm-synthesis-provider codex-cli \
+  --llm-synthesis-model codex
+```
+
+Use Codex for the research CLI:
+
+```bash
+chunkhound research "How does indexing deduplicate chunks?" \
+  --llm-synthesis-provider codex-cli \
+  --llm-synthesis-model codex
+```
+
+Implementation notes:
+- The provider shells out to `codex exec` and captures output. It never writes to stdout from within the MCP server process.
+- Each Codex run uses a sandboxed `CODEX_HOME`. ChunkHound copies only auth/session files, writes a fresh no-history/no-MCP `config.toml`, and points Codex at that sandbox so nothing from your primary agent config leaks in. The symbolic model name `codex` resolves to the Codex CLI default (`gpt-5-codex`) unless overridden.
+- Pass an explicit Codex CLI model via `--llm-synthesis-model` (for example `gpt-5-codex-pro`) to switch variants; all overlay modes honor the requested model.
+- Control the Codex reasoning effort with `--llm-codex-reasoning-effort` (`minimal` | `low` | `medium` | `high`) or `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT=high` to change the Responses API “thinking” depth used during synthesis. Use `--llm-codex-reasoning-effort-utility` / `--llm-codex-reasoning-effort-synthesis` (or the `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_UTILITY` / `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_SYNTHESIS` env vars) for stage-specific overrides.
+- Prompts are sent via stdin (privacy-first) rather than argv by default. Set `CHUNKHOUND_CODEX_STDIN_FIRST=0` to prefer argv for short prompts.
+- Environment variables:
+  - `CHUNKHOUND_CODEX_CONFIG_OVERRIDE` — `env` (default) uses `CODEX_CONFIG`; `flag` adds `--config <path>`
+  - `CHUNKHOUND_CODEX_CONFIG_ENV` — env key for config path (default: `CODEX_CONFIG`)
+  - `CHUNKHOUND_CODEX_CONFIG_FLAG` — config flag name when using `flag` override (default: `--config`)
+  - `CHUNKHOUND_CODEX_DEFAULT_MODEL` — fallback Codex CLI model when config/model is `codex` (default: `gpt-5-codex`)
+  - `CHUNKHOUND_CODEX_REASONING_EFFORT` — reasoning effort written to temp config (`minimal`, `low`, `medium`, `high`; default: `low`)
+  - `CHUNKHOUND_CODEX_AUTH_ENV` — comma-list of auth envs to forward (default: `OPENAI_API_KEY,CODEX_API_KEY,ANTHROPIC_API_KEY,BEARER_TOKEN`)
+  - `CHUNKHOUND_CODEX_PASSTHROUGH_ENV` — comma-list of additional envs to forward
+  - `CHUNKHOUND_CODEX_BIN` — path to the `codex` binary (default: `codex` on PATH)
+  - `CHUNKHOUND_CODEX_ARG_LIMIT` — max characters to pass via argv before falling back to stdin (default: 200000)
+  - `CHUNKHOUND_CODEX_COPY_ALL` — copy entire `CODEX_HOME` in overlay mode (default: minimal selective copy)
+  - `CHUNKHOUND_CODEX_MAX_COPY_BYTES` — per-file copy cap in overlay mode (default: 1,000,000 bytes)
+  - `CHUNKHOUND_CODEX_LOG_MAX_ERR` — max characters of stderr included in error messages (default: 800; secrets are redacted)
+
+If Codex is unavailable or unauthenticated, ChunkHound’s other providers (OpenAI, Ollama, Claude Code CLI, Bedrock) remain available.
+
 ## Real-Time Indexing
 
 **Automatic File Watching**: MCP servers monitor your codebase and update the index automatically as you edit files. No manual re-indexing required.

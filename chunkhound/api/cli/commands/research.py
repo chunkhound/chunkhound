@@ -12,7 +12,6 @@ from chunkhound.database_factory import create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
 from chunkhound.mcp_server.tools import deep_research_impl
-from chunkhound.registry import configure_registry
 
 from ..utils.rich_output import RichOutputFormatter
 from ..utils.tree_progress import TreeProgressDisplay
@@ -40,12 +39,8 @@ async def research_command(args: argparse.Namespace, config: Config) -> None:
         formatter.info("Run 'chunkhound index' to create the database first")
         sys.exit(1)
 
-    # Configure registry with the Config object
-    try:
-        configure_registry(config)
-    except Exception as e:
-        formatter.error(f"Failed to configure registry: {e}")
-        sys.exit(1)
+    # Registry is configured in database_factory.create_services().
+    # Avoid double configuration here to prevent opening the DB twice and causing a self-lock.
 
     # Initialize embedding manager (exactly like MCP server)
     embedding_manager = EmbeddingManager()

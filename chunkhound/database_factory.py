@@ -60,8 +60,17 @@ def create_services(
     Returns:
         DatabaseServices bundle with all components
     """
-    configure_registry(config)
+    # Avoid double-configuring the registry (which can open the DB twice and lock it).
     registry = get_registry()
+    try:
+        existing_cfg = registry.get_config()
+    except Exception:
+        existing_cfg = None
+
+    if existing_cfg is None:
+        configure_registry(config)
+    # else: assume already configured by caller (e.g., CLI), do not reconfigure again
+    # to prevent creating a second database provider connection in the same process.
 
     # If embedding_manager is provided, register its provider with the global registry
     # to ensure services use the same provider instance

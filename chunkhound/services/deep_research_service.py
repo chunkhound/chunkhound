@@ -348,6 +348,34 @@ class DeepResearchService:
 
         aggregated = self._aggregate_all_findings(root)
 
+        # Early return: no context found (avoid scary synthesis error when empty)
+        if not aggregated.get("chunks") and not aggregated.get("files"):
+            logger.info(
+                "No chunks or files aggregated; skipping synthesis and returning guidance"
+            )
+            await self._emit_event(
+                "synthesis_skip",
+                "No code context found; skipping synthesis",
+                depth=0,
+            )
+            friendly = (
+                f"No relevant code context found for: '{query}'.\n\n"
+                "Try a more code-specific question. Helpful patterns:\n"
+                "- Name files or modules (e.g., 'services/deep_research_service.py')\n"
+                "- Mention classes/functions (e.g., 'DeepResearchService._single_pass_synthesis')\n"
+                "- Include keywords that appear in code (constants, config keys)\n"
+            )
+            return {
+                "answer": friendly,
+                "metadata": {
+                    "depth_reached": 0,
+                    "nodes_explored": aggregated.get("stats", {}).get("total_nodes", 1),
+                    "chunks_analyzed": 0,
+                    "files_analyzed": 0,
+                    "skipped_synthesis": True,
+                },
+            }
+
         # Manage token budget for single-pass synthesis
         prioritized_chunks, budgeted_files, budget_info = (
             await self._manage_token_budget_for_synthesis(
@@ -362,6 +390,33 @@ class DeepResearchService:
             chunks=len(prioritized_chunks),
             files=len(budgeted_files),
         )
+
+        # Guard again after budgeting: if nothing to synthesize, return friendly message
+        if not budgeted_files:
+            logger.info(
+                "No files within budget for synthesis; returning guidance instead"
+            )
+            await self._emit_event(
+                "synthesis_skip",
+                "No files within budget; skipping synthesis",
+            )
+            friendly = (
+                f"Not enough code context available to synthesize an answer for: '{query}'.\n\n"
+                "Suggestions:\n"
+                "- Narrow the scope (name a file/class/function)\n"
+                "- Ask about a specific subsystem or path\n"
+                "- Use 'chunkhound search' to see what matches, then refine the question\n"
+            )
+            return {
+                "answer": friendly,
+                "metadata": {
+                    "depth_reached": 0,
+                    "nodes_explored": aggregated.get("stats", {}).get("total_nodes", 1),
+                    "chunks_analyzed": len(prioritized_chunks),
+                    "files_analyzed": 0,
+                    "skipped_synthesis": True,
+                },
+            }
 
         # Single-pass synthesis with all data
         answer = await self._single_pass_synthesis(
