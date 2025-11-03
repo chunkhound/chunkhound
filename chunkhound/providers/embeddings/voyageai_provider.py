@@ -232,12 +232,15 @@ class VoyageAIEmbeddingProvider:
         # Retry loop for transient network errors
         for attempt in range(self._retry_attempts):
             try:
-                result = await asyncio.to_thread(
-                    self._client.embed,
-                    texts=validated_texts,
-                    model=self._model,
-                    input_type="document",
-                    truncation=True,
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._client.embed,
+                        texts=validated_texts,
+                        model=self._model,
+                        input_type="document",
+                        truncation=True,
+                    ),
+                    timeout=self._timeout
                 )
 
                 self._requests_made += 1
@@ -246,6 +249,24 @@ class VoyageAIEmbeddingProvider:
 
                 return [embedding for embedding in result.embeddings]
 
+            except asyncio.TimeoutError:
+                # Handle timeout errors with retry logic
+                if attempt < self._retry_attempts - 1:
+                    delay = self._retry_delay * (2 ** attempt)
+                    logger.warning(
+                        f"VoyageAI embedding timed out after {self._timeout}s "
+                        f"(attempt {attempt + 1}/{self._retry_attempts}). "
+                        f"Retrying in {delay:.1f}s..."
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    logger.error(
+                        f"VoyageAI embedding timed out after {self._retry_attempts} attempts"
+                    )
+                    raise RuntimeError(
+                        f"Embedding generation timed out after {self._timeout}s"
+                    ) from None
             except Exception as e:
                 # Classify error type for retry decision
                 error_type = type(e).__name__
@@ -455,12 +476,15 @@ class VoyageAIEmbeddingProvider:
                     f"VoyageAI reranking {len(documents)} documents with model {self._rerank_model}"
                 )
 
-                result = await asyncio.to_thread(
-                    self._client.rerank,
-                    query=query,
-                    documents=documents,
-                    model=self._rerank_model,
-                    top_k=top_k,
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._client.rerank,
+                        query=query,
+                        documents=documents,
+                        model=self._rerank_model,
+                        top_k=top_k,
+                    ),
+                    timeout=self._timeout
                 )
 
                 self._requests_made += 1
@@ -486,6 +510,24 @@ class VoyageAIEmbeddingProvider:
                 )
                 return rerank_results
 
+            except asyncio.TimeoutError:
+                # Handle timeout errors with retry logic
+                if attempt < self._retry_attempts - 1:
+                    delay = self._retry_delay * (2 ** attempt)
+                    logger.warning(
+                        f"VoyageAI reranking timed out after {self._timeout}s "
+                        f"(attempt {attempt + 1}/{self._retry_attempts}). "
+                        f"Retrying in {delay:.1f}s..."
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    logger.error(
+                        f"VoyageAI reranking timed out after {self._retry_attempts} attempts"
+                    )
+                    raise RuntimeError(
+                        f"Reranking timed out after {self._timeout}s"
+                    ) from None
             except AttributeError as e:
                 # Response format error - don't retry
                 logger.error(f"VoyageAI rerank response format error: {e}")
