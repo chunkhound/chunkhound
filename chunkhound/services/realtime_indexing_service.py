@@ -26,6 +26,16 @@ from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices
 
 
+# Debounce configuration constants
+# Empirically chosen to balance responsiveness vs CPU/API thrashing:
+# - Max 10 iterations × 0.5s delay = 5 seconds worst-case latency
+# - Prevents infinite loops when files are continuously modified
+# - After timeout, gracefully degrades by processing anyway
+# - Rationale: 5s latency acceptable for rapidly-changing files
+#   vs alternative of dropped updates or repeated parsing
+MAX_DEBOUNCE_ITERATIONS = 10
+
+
 def normalize_file_path(path: Path | str) -> str:
     """Single source of truth for path normalization across ChunkHound."""
     return str(Path(path).resolve())
@@ -506,19 +516,67 @@ class RealtimeIndexingService:
                 self._debug(f"queued {file_path} priority={priority}")
 
     async def _debounced_add_file(self, file_path: Path, priority: str) -> None:
-        """Process file after debounce delay."""
-        await asyncio.sleep(self._debounce_delay)
+        """Process file after debounce delay with retry on updates.
 
+        Uses bounded retry loop to handle rapid file updates. If the file is modified
+        during the debounce period, the task reschedules itself rather than dropping
+        the file. Safety limit prevents infinite loops.
+
+        Algorithm:
+        1. Sleep for debounce_delay (0.5s)
+        2. Check if file was updated during sleep
+        3. If updated: loop again (max MAX_DEBOUNCE_ITERATIONS times)
+        4. If stable: process file
+        5. On timeout: process anyway (graceful degradation)
+
+        Performance Trade-offs:
+        - Prevents CPU/API thrashing from editor autosave/compilation
+        - Accepts up to 5s latency for rapidly-changing files
+        - Alternative (no debouncing) would cause repeated parsing/embedding
+
+        Args:
+            file_path: Path to file requiring processing
+            priority: Processing priority ("initial", "change", "embed")
+        """
         file_str = str(file_path)
-        if file_str in self._pending_debounce:
-            last_update = self._pending_debounce[file_str]
+        iteration = 0
 
-            # Check if no recent updates during delay
-            if time.time() - last_update >= self._debounce_delay:
+        while iteration < MAX_DEBOUNCE_ITERATIONS:
+            await asyncio.sleep(self._debounce_delay)
+            iteration += 1
+
+            if file_str not in self._pending_debounce:
+                # File was processed by another task or removed
+                return
+
+            last_update = self._pending_debounce[file_str]
+            time_since_update = time.time() - last_update
+
+            if time_since_update >= self._debounce_delay:
+                # File is stable, process it
                 del self._pending_debounce[file_str]
                 await self.file_queue.put((priority, file_path))
                 logger.debug(f"Processing debounced file: {file_path}")
                 self._debug(f"processing debounced file: {file_path}")
+                return
+
+            # File was updated during sleep, loop again
+            if iteration > 1:
+                logger.debug(
+                    f"File {file_path} updated during debounce "
+                    f"(iteration {iteration}/{MAX_DEBOUNCE_ITERATIONS})"
+                )
+
+        # Max iterations reached - file is being continuously updated
+        logger.warning(
+            f"Debounce timeout for {file_path} after {MAX_DEBOUNCE_ITERATIONS} iterations. "
+            f"File appears to be continuously updated. Processing anyway."
+        )
+        # Clean up and process anyway (graceful degradation)
+        if file_str in self._pending_debounce:
+            del self._pending_debounce[file_str]
+        await self.file_queue.put((priority, file_path))
+        self._debug(f"processing debounced file (timeout): {file_path}")
 
     async def _consume_events(self) -> None:
         """Simple event consumer - pure asyncio queue."""
