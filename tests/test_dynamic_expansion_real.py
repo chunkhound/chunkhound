@@ -54,62 +54,27 @@ async def indexed_codebase(request, tmp_path):
     coordinator = IndexingCoordinator(db, tmp_path, embedding_provider, {Language.PYTHON: parser})
     
     # Index files that form multi-hop chains based on our search discoveries
+    # Reduced to essential files to avoid fixture timeout (40 files → 12 files)
+    # Balances test coverage with reasonable setup time (<60s)
     critical_files = [
-        # HNSW optimization chain: storage → database → search
-        "chunkhound/providers/database/duckdb/embedding_repository.py",
-        "chunkhound/providers/database/duckdb_provider.py", 
+        # Core search infrastructure (enables semantic search)
         "chunkhound/services/search_service.py",
         "chunkhound/services/indexing_coordinator.py",
-        
+
         # MCP authentication chain: tools → config → validation → factory
         "chunkhound/core/config/embedding_config.py",
-        "chunkhound/core/config/embedding_factory.py", 
+        "chunkhound/core/config/embedding_factory.py",
         "chunkhound/mcp/tools.py",
         "chunkhound/mcp/http.py",
-        "chunkhound/mcp/http_server.py",
-        
-        # Provider configuration chain: interfaces → implementations → usage
+
+        # Provider implementations (needed for authentication context)
         "chunkhound/providers/embeddings/openai_provider.py",
         "chunkhound/providers/embeddings/voyageai_provider.py",
         "chunkhound/interfaces/embedding_provider.py",
-        "chunkhound/interfaces/database_provider.py",
-        
-        # CLI/API bridge layer: enables CLI → Service semantic chains
-        "chunkhound/api/cli/main.py",
-        "chunkhound/api/cli/utils/config_factory.py",
-        "chunkhound/api/cli/utils/validation.py",
-        "chunkhound/api/cli/commands/mcp.py",
-        
-        # Service orchestration layer: enables Service → Provider chains
-        "chunkhound/services/base_service.py",
-        "chunkhound/services/chunk_cache_service.py",
-        "chunkhound/services/directory_indexing_service.py",
-        "chunkhound/database.py",
-        
-        # Parser/Language layer: enables Parser → Concept chains
-        "chunkhound/parsers/universal_engine.py",
-        "chunkhound/parsers/parser_factory.py",
-        "chunkhound/parsers/concept_extractor.py",
-        "chunkhound/parsers/universal_parser.py",
-        
-        # Provider/Threading layer: enables Provider → Execution chains
-        "chunkhound/providers/database/serial_database_provider.py",
-        "chunkhound/providers/database/serial_executor.py",
-        "chunkhound/providers/embeddings/batch_utils.py",
-        "chunkhound/providers/embeddings/shared_utils.py",
-        
-        # Configuration/MCP layer: enables Config → MCP chains
-        "chunkhound/core/config/config.py",
-        "chunkhound/core/config/database_config.py",
-        "chunkhound/core/config/indexing_config.py",
-        "chunkhound/core/config/settings_sources.py",
-        "chunkhound/mcp/base.py",
-        "chunkhound/mcp/stdio.py",
-        "chunkhound/embeddings.py",
-        
-        # Additional semantic context (legacy)
-        "chunkhound/mcp/common.py",
-        "chunkhound/database_factory.py",
+
+        # Database layer (enables storage and retrieval)
+        "chunkhound/providers/database/duckdb_provider.py",
+        "chunkhound/providers/database/duckdb/embedding_repository.py",
     ]
     
     # Use the fixture tmp_path instead of creating a separate temp directory

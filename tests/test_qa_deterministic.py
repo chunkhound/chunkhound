@@ -141,8 +141,29 @@ class NewlyAddedClass:
         return "new_method_qa_test"
 """
         new_file.write_text(new_content)
-        await asyncio.sleep(3.5)  # Wait for debounce + processing
-        
+
+        # Wait for file to be processed and indexed (with timeout)
+        max_wait = 10.0
+        poll_interval = 0.3
+        start_time = time.time()
+        file_indexed = False
+
+        while (time.time() - start_time) < max_wait:
+            # Check if file exists in database
+            try:
+                file_record = services.provider.get_file_by_path(str(new_file.resolve()))
+                if file_record is not None:
+                    file_indexed = True
+                    elapsed = time.time() - start_time
+                    print(f"  File indexed in {elapsed:.2f}s")
+                    break
+            except Exception:
+                pass  # Database might not be ready yet
+
+            await asyncio.sleep(poll_interval)
+
+        assert file_indexed, f"File not indexed after {max_wait}s - check realtime indexing"
+
         # Search for new content
         new_regex = await execute_tool("search_regex", services, None, {
             "pattern": "newly_added_content_unique_string",
@@ -174,8 +195,31 @@ def added_during_edit():
     return "added_content_edit_qa"
 """
         existing_file.write_text(modified_content)
-        await asyncio.sleep(3.5)
-        
+
+        # Wait for file modification to be processed
+        max_wait = 10.0
+        poll_interval = 0.3
+        start_time = time.time()
+        modification_indexed = False
+
+        while (time.time() - start_time) < max_wait:
+            try:
+                # Search for the new content to verify it's indexed
+                test_results = await execute_tool("search_regex", services, None, {
+                    "pattern": "added_content_edit_qa",
+                    "page_size": 1,
+                    "offset": 0
+                })
+                if len(test_results.get('results', [])) > 0:
+                    modification_indexed = True
+                    break
+            except Exception:
+                pass
+
+            await asyncio.sleep(poll_interval)
+
+        assert modification_indexed, f"File modification not indexed after {max_wait}s"
+
         added_regex = await execute_tool("search_regex", services, None, {
             "pattern": "added_content_edit_qa",
             "page_size": 10,
@@ -196,8 +240,31 @@ def added_during_edit():
 # Note: ExistingClass was DELETED
 """
         existing_file.write_text(deleted_and_modified_content)
-        await asyncio.sleep(3.5)
-        
+
+        # Wait for file modification to be processed
+        max_wait = 10.0
+        poll_interval = 0.3
+        start_time = time.time()
+        modification_indexed = False
+
+        while (time.time() - start_time) < max_wait:
+            try:
+                # Search for the modified content to verify it's indexed
+                test_results = await execute_tool("search_regex", services, None, {
+                    "pattern": "MODIFIED_existing_content",
+                    "page_size": 1,
+                    "offset": 0
+                })
+                if len(test_results.get('results', [])) > 0:
+                    modification_indexed = True
+                    break
+            except Exception:
+                pass
+
+            await asyncio.sleep(poll_interval)
+
+        assert modification_indexed, f"File modification not indexed after {max_wait}s"
+
         # Check modification worked
         modified_regex = await execute_tool("search_regex", services, None, {
             "pattern": "MODIFIED_existing_content",
@@ -218,8 +285,27 @@ def added_during_edit():
         # QA Item 4: Delete file and verify search results
         delete_target = new_file  # Delete the new file we created
         delete_target.unlink()
-        await asyncio.sleep(3.5)
-        
+
+        # Wait for file deletion to be processed
+        max_wait = 10.0
+        poll_interval = 0.3
+        start_time = time.time()
+        deletion_processed = False
+
+        while (time.time() - start_time) < max_wait:
+            try:
+                # Check if file has been removed from database
+                file_record = services.provider.get_file_by_path(str(delete_target.resolve()))
+                if file_record is None:
+                    deletion_processed = True
+                    break
+            except Exception:
+                pass
+
+            await asyncio.sleep(poll_interval)
+
+        assert deletion_processed, f"File deletion not processed after {max_wait}s"
+
         # Search for deleted file content
         deleted_file_regex = await execute_tool("search_regex", services, None, {
             "pattern": "newly_added_content_unique_string",
