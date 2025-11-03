@@ -18,6 +18,7 @@ import math
 import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
@@ -31,11 +32,6 @@ from chunkhound.core.types.common import FilePath, Language
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 from chunkhound.parsers.universal_parser import UniversalParser
-from chunkhound.utils.hashing import compute_file_hash
-
-from .base_service import BaseService
-from .batch_processor import ParsedFileResult, process_file_batch
-from .chunk_cache_service import ChunkCacheService
 
 # File pattern utilities for directory discovery
 from chunkhound.utils.file_patterns import (
@@ -44,6 +40,48 @@ from chunkhound.utils.file_patterns import (
     walk_directory_tree,
     walk_subtree_worker,
 )
+from chunkhound.utils.hashing import compute_file_hash
+
+from .base_service import BaseService
+from .batch_processor import ParsedFileResult, process_file_batch
+from .chunk_cache_service import ChunkCacheService
+
+
+@dataclass
+class IndexingResult:
+    """Type-safe result from file processing operations.
+
+    Replaces dict-based stats communication to eliminate hidden contracts and
+    enable type checking. Maintains 1:1 correspondence between chunk IDs and
+    chunk objects to prevent ID/data misalignment during embedding generation.
+
+    Attributes:
+        total_chunks: Number of chunks created/updated
+        chunk_ids_needing_embeddings: IDs of chunks requiring embedding generation
+        chunks_for_embedding: Chunk objects corresponding to IDs (same order)
+        errors: List of error dictionaries with 'file' and 'error' keys
+        total_files: Number of files successfully processed
+        skip_reason: Reason for skipping (e.g., "timeout"), if applicable
+
+    Invariants (enforced for data integrity):
+        1. len(chunk_ids_needing_embeddings) == len(chunks_for_embedding)
+           - Every chunk ID has exactly one corresponding Chunk object
+        2. chunk_ids_needing_embeddings[i] corresponds to chunks_for_embedding[i]
+           - Position i in both lists refers to the same logical chunk
+        3. chunks_for_embedding contains only Chunk objects (never dicts)
+           - Type safety enforced by _generate_embeddings() validation
+        4. chunk_ids_needing_embeddings contains database-assigned IDs
+           - IDs are returned from insert_chunks_batch() after storage
+
+    These invariants prevent the bug where embeddings could be generated for
+    wrong chunks due to ID/data misalignment during concurrent operations.
+    """
+    total_chunks: int = 0
+    chunk_ids_needing_embeddings: list[int] = field(default_factory=list)
+    chunks_for_embedding: list[Chunk] = field(default_factory=list)
+    errors: list[dict[str, str]] = field(default_factory=list)
+    total_files: int = 0
+    skip_reason: str | None = None
 
 
 # CRITICAL FIX: Force spawn multiprocessing start method to prevent fork + asyncio issues
@@ -214,6 +252,30 @@ class IndexingCoordinator(BaseService):
         language = detect_language(file_path)
         return language if language != Language.UNKNOWN else None
 
+    def _store_and_track_chunks(
+        self, result: IndexingResult, chunks: list[Chunk]
+    ) -> None:
+        """Store chunks in database and track for embedding generation.
+
+        Unified storage logic that maintains 1:1 correspondence between chunk IDs
+        and chunk objects. Eliminates code duplication across three storage paths
+        (new file, existing file with changes, existing file no prior chunks).
+
+        Args:
+            result: IndexingResult accumulator
+            chunks: Chunk objects to store and track for embedding generation
+        """
+        if not chunks:
+            return
+
+        # Store chunks in database and get assigned IDs
+        ids = self._db.insert_chunks_batch(chunks)
+
+        # Track for embedding generation (maintain ID-data alignment)
+        result.chunk_ids_needing_embeddings.extend(ids)
+        result.chunks_for_embedding.extend(chunks)
+        result.total_chunks += len(ids)
+
     def _determine_db_batch_size(self, pending_inserts: list[Chunk]) -> int:
         """Compute an insert batch size using env/config or dynamic memory heuristics.
 
@@ -369,10 +431,10 @@ class IndexingCoordinator(BaseService):
 
             # Handle tuple return for single-file case
             if isinstance(store_result, tuple):
-                stats, file_id = store_result
+                indexing_result, file_id = store_result
             else:
                 # Should not happen for single file, but handle gracefully
-                stats = store_result
+                indexing_result = store_result
                 file_id = None
 
             # Generate embeddings if needed
@@ -382,18 +444,20 @@ class IndexingCoordinator(BaseService):
             embeddings_generated = 0
             embedding_error = None
             if not skip_embeddings and self._embedding_provider:
-                if stats["chunk_ids_needing_embeddings"]:
+                if indexing_result.chunk_ids_needing_embeddings:
                     # Generate embeddings
                     # NOTE: Transaction management is handled internally by the database provider
                     # to avoid transaction context issues during concurrent operations
                     try:
+                        # FIX: Use only chunks that were actually stored, not all parsed chunks
+                        # This ensures chunk IDs match the corresponding chunk data
                         embeddings_generated = await self._generate_embeddings(
-                            stats["chunk_ids_needing_embeddings"],
-                            [chunk for r in parsed_results for chunk in r.chunks],
+                            indexing_result.chunk_ids_needing_embeddings,
+                            indexing_result.chunks_for_embedding,
                         )
 
                         # Verify embeddings were actually generated
-                        expected_embeddings = len(stats["chunk_ids_needing_embeddings"])
+                        expected_embeddings = len(indexing_result.chunk_ids_needing_embeddings)
                         if embeddings_generated < expected_embeddings:
                             embedding_error = (
                                 f"Only generated {embeddings_generated}/{expected_embeddings} embeddings. "
@@ -409,9 +473,9 @@ class IndexingCoordinator(BaseService):
                         # File chunks are already committed and searchable via regex
 
             return_dict = {
-                "status": "success" if not stats["errors"] else "error",
-                "chunks": stats["total_chunks"],
-                "errors": stats["errors"],
+                "status": "success" if not indexing_result.errors else "error",
+                "chunks": indexing_result.total_chunks,
+                "errors": indexing_result.errors,
                 "embeddings_skipped": skip_embeddings,
                 "embeddings_generated": embeddings_generated,
                 "embedding_error": embedding_error,
@@ -577,7 +641,7 @@ class IndexingCoordinator(BaseService):
         results: list[ParsedFileResult],
         file_task: TaskID | None = None,
         cumulative_counters: dict[str, int] | None = None,
-    ) -> dict[str, Any] | tuple[dict[str, Any], int]:
+    ) -> IndexingResult | tuple[IndexingResult, int]:
         """Store all parsed results in database (single-threaded).
 
         Args:
@@ -585,15 +649,10 @@ class IndexingCoordinator(BaseService):
             file_task: Optional progress task ID for tracking
 
         Returns:
-            For multiple files: Dictionary with processing statistics
-            For single file: Tuple of (statistics dict, file_id)
+            For multiple files: IndexingResult with processing statistics
+            For single file: Tuple of (IndexingResult, file_id)
         """
-        stats = {
-            "total_files": 0,
-            "total_chunks": 0,
-            "errors": [],
-            "chunk_ids_needing_embeddings": [],
-        }
+        indexing_result = IndexingResult()
 
         # Track file_ids for single-file case
         file_ids = []
@@ -602,7 +661,7 @@ class IndexingCoordinator(BaseService):
         for result in results:
                 # Handle errors
                 if result.status == "error":
-                    stats["errors"].append(
+                    indexing_result.errors.append(
                         {"file": str(result.file_path), "error": result.error}
                     )
                     if file_task is not None and self.progress:
@@ -618,9 +677,9 @@ class IndexingCoordinator(BaseService):
 
                 # Handle skipped files
                 if result.status == "skipped":
-                    # Track skip reason in stats for single-file case
-                    if "skip_reason" not in stats:
-                        stats["skip_reason"] = result.error
+                    # Track skip reason in indexing_result for single-file case
+                    if indexing_result.skip_reason is None:
+                        indexing_result.skip_reason = result.error
                     if file_task is not None and self.progress:
                         self.progress.advance(file_task, 1)
                         if cumulative_counters is not None:
@@ -704,16 +763,13 @@ class IndexingCoordinator(BaseService):
 
                             # Store new/modified chunks (pass models directly)
                             chunks_to_store = chunk_diff.added + chunk_diff.modified
-                            ids = self._db.insert_chunks_batch(chunks_to_store) if chunks_to_store else []
+                            self._store_and_track_chunks(indexing_result, chunks_to_store)
                         else:
                             # No existing chunks - store all as new
-                            ids = self._db.insert_chunks_batch(new_chunk_models)
+                            self._store_and_track_chunks(indexing_result, new_chunk_models)
                     else:
-                        # New file - store all
-                        ids = self._db.insert_chunks_batch(new_chunk_models)
-
-                    stats["chunk_ids_needing_embeddings"].extend(ids)
-                    stats["total_chunks"] += len(ids)
+                        # New file - store all chunks
+                        self._store_and_track_chunks(indexing_result, new_chunk_models)
 
                     # Commit per-file
                     try:
@@ -724,7 +780,7 @@ class IndexingCoordinator(BaseService):
                         except Exception:
                             pass
 
-                    stats["total_files"] += 1
+                    indexing_result.total_files += 1
 
                     # Update progress
                     if file_task is not None and self.progress:
@@ -732,7 +788,7 @@ class IndexingCoordinator(BaseService):
                         if cumulative_counters is not None:
                             cumulative_counters['stored'] = cumulative_counters.get('stored', 0) + 1
                             base = int(cumulative_counters.get('chunks', 0))
-                            display_chunks = base + stats["total_chunks"]
+                            display_chunks = base + indexing_result.total_chunks
                             stored = cumulative_counters.get('stored', 0)
                             skipped = cumulative_counters.get('skipped', 0)
                             errs = cumulative_counters.get('errors', 0)
@@ -740,20 +796,20 @@ class IndexingCoordinator(BaseService):
 
                 except Exception as e:
                     self._db.rollback_transaction()
-                    stats["errors"].append({"file": str(result.file_path), "error": str(e)})
+                    indexing_result.errors.append({"file": str(result.file_path), "error": str(e)})
                     if file_task is not None and self.progress:
                         self.progress.advance(file_task, 1)
                     continue
 
         # Update external cumulative counters
         if cumulative_counters is not None:
-            cumulative_counters['chunks'] = cumulative_counters.get('chunks', 0) + stats["total_chunks"]
-            cumulative_counters['files'] = cumulative_counters.get('files', 0) + stats["total_files"]
+            cumulative_counters['chunks'] = cumulative_counters.get('chunks', 0) + indexing_result.total_chunks
+            cumulative_counters['files'] = cumulative_counters.get('files', 0) + indexing_result.total_files
 
         # Return file_id for single-file case
         if len(results) == 1 and file_ids and file_ids[0] is not None:
-            return stats, file_ids[0]
-        return stats
+            return indexing_result, file_ids[0]
+        return indexing_result
 
     async def process_directory(
         self,
@@ -930,9 +986,9 @@ class IndexingCoordinator(BaseService):
                 )
                 if isinstance(stats_part, tuple):
                     stats_part = stats_part[0]
-                agg_total_files += stats_part.get("total_files", 0)
-                agg_total_chunks += stats_part.get("total_chunks", 0)
-                agg_errors.extend(stats_part.get("errors", []))
+                agg_total_files += stats_part.total_files
+                agg_total_chunks += stats_part.total_chunks
+                agg_errors.extend(stats_part.errors)
 
             # Parse files (streaming progress as batches complete and store concurrently)
             # Pass files_to_process directly - preserves hash for each file
@@ -1202,11 +1258,37 @@ class IndexingCoordinator(BaseService):
             return {"status": "error", "error": str(e), "generated": 0}
 
     async def _generate_embeddings(
-        self, chunk_ids: list[int], chunks: list[dict[str, Any]], connection=None
+        self, chunk_ids: list[int], chunks: list[Chunk], connection=None
     ) -> int:
-        """Generate embeddings for chunks."""
+        """Generate embeddings for chunks.
+
+        Maintains 1:1 correspondence between chunk IDs and chunk objects to ensure
+        embeddings are generated for the correct chunks.
+
+        Args:
+            chunk_ids: List of chunk IDs in database
+            chunks: List of Chunk objects (same order as chunk_ids)
+            connection: Optional database connection
+
+        Returns:
+            Number of embeddings successfully generated
+
+        Raises:
+            ValueError: If chunk_ids and chunks lengths don't match
+            TypeError: If chunks contains non-Chunk objects
+        """
         if not self._embedding_provider:
             return 0
+
+        # TYPE VALIDATION: Ensure all chunks are Chunk objects
+        if chunks and not all(isinstance(c, Chunk) for c in chunks):
+            non_chunk_types = {type(c).__name__ for c in chunks if not isinstance(c, Chunk)}
+            error_msg = (
+                f"Type error in embedding generation: Expected list[Chunk], "
+                f"but got objects of types: {non_chunk_types}"
+            )
+            logger.error(f"[IndexCoord] {error_msg}")
+            raise TypeError(error_msg)
 
         # VALIDATION: Ensure chunk IDs and chunks are aligned
         if len(chunk_ids) != len(chunks):
@@ -1225,7 +1307,9 @@ class IndexingCoordinator(BaseService):
             for chunk_id, chunk in zip(chunk_ids, chunks):
                 from chunkhound.utils.normalization import normalize_content
 
-                text = normalize_content(chunk.get("code", ""))
+                # Chunk object - access code attribute directly
+                text = normalize_content(chunk.code)
+
                 if text:  # Only include chunks with actual content
                     valid_chunk_data.append((chunk_id, chunk, text))
                 else:
