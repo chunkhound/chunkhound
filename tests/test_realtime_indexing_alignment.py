@@ -152,11 +152,20 @@ def function_three():
                     test_file.write_text("def modified_final(): pass")
 
                     # Wait for debouncing to complete and file to be processed
-                    await asyncio.sleep(0.5)
+                    # Use polling with timeout instead of arbitrary sleep to handle
+                    # Windows CI timing variability (file system events + async delays)
+                    max_retries = 20  # 2 seconds total (20 * 0.1s)
+                    file_record = None
+                    for attempt in range(max_retries):
+                        await asyncio.sleep(0.1)
+                        file_record = db_services.provider.get_file_by_path(str(test_file), as_model=True)
+                        if file_record is not None:
+                            break
 
-                    # Verify final state was processed
-                    file_record = db_services.provider.get_file_by_path(str(test_file), as_model=True)
-                    assert file_record is not None, "File not found in database"
+                    assert file_record is not None, (
+                        f"File not found in database after {max_retries * 0.1}s. "
+                        f"Processing may not have completed or file was not indexed."
+                    )
                     chunks = db_services.provider.get_chunks_by_file_id(file_record.id, as_model=True)
                     assert len(chunks) == 1, "Expected 1 chunk after updates"
 
