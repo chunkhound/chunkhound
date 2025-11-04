@@ -421,6 +421,9 @@ class IndexingCoordinator(BaseService):
             result = parsed_results[0]
 
             if result.status == "error":
+                logger.warning(
+                    f"Parse error for {file_path}: {result.error}"
+                )
                 return {"status": "error", "chunks": 0, "error": result.error}
 
             if result.status == "skipped":
@@ -485,6 +488,10 @@ class IndexingCoordinator(BaseService):
             if file_id is not None:
                 return_dict["file_id"] = file_id
 
+            if return_dict.get("status") == "error":
+                logger.warning(
+                    f"Store error for {file_path}: {return_dict.get('errors')}"
+                )
             return return_dict
 
     async def _process_files_in_batches(
@@ -550,6 +557,64 @@ class IndexingCoordinator(BaseService):
                 num_workers = max(1, min(num_workers, max_concurrent))
 
         logger.debug(f"Parsing {file_count} files with {num_workers} workers (timeout={timeout_s_probe}s, max_concurrent={max_concurrent or 'auto'})")
+
+        # Fast path for single-file processing: avoid creating a ProcessPoolExecutor
+        # This eliminates sporadic BrokenProcessPool errors seen in CI on tiny files
+        # and removes overhead when there is nothing to parallelize.
+        if file_count == 1:
+            # Build the same config dict as the parallel branch uses
+            try:
+                timeout_s = 0.0
+                if self.config and getattr(self.config, "indexing", None):
+                    timeout_s = float(
+                        getattr(self.config.indexing, "per_file_timeout_seconds", 0.0)
+                        or 0.0
+                    )
+            except Exception:
+                timeout_s = 0.0
+
+            try:
+                min_timeout_kb = 128
+                if self.config and getattr(self.config, "indexing", None):
+                    min_timeout_kb = int(
+                        getattr(
+                            self.config.indexing, "per_file_timeout_min_size_kb", 128
+                        )
+                    )
+            except Exception:
+                min_timeout_kb = 128
+
+            config_dict = {
+                "config_file_size_threshold_kb": config_file_size_threshold_kb,
+                "per_file_timeout_seconds": timeout_s,
+                "per_file_timeout_min_size_kb": min_timeout_kb,
+                # Cap concurrent timeout children to avoid resource exhaustion
+                "max_concurrent_timeouts": min(max(1, num_workers) * 2, 32),
+            }
+
+            # Normalize to the batch-processor input format
+            norm: list[tuple[Path, str | None]] = []
+            for item in files:
+                if isinstance(item, tuple):
+                    norm.append(item)
+                else:
+                    norm.append((item, None))
+
+            # Execute synchronously in-process for the single file
+            results = process_file_batch(norm, config_dict)
+
+            # Stream directly to storage to keep behavior consistent with the
+            # parallel path where batches are stored as they complete.
+            if on_batch is not None and results:
+                try:
+                    if asyncio.iscoroutinefunction(on_batch):
+                        await on_batch(results)
+                    else:
+                        on_batch(results)
+                except Exception as e:
+                    logger.warning(f"on_batch handler failed: {e}")
+
+            return results
 
         # Heuristic: increase batch granularity when per-file timeouts are enabled to avoid long silent stalls
         # (long stalls happen when large batches contain many files that each hit the timeout)
@@ -781,6 +846,7 @@ class IndexingCoordinator(BaseService):
                             pass
 
                     indexing_result.total_files += 1
+
 
                     # Update progress
                     if file_task is not None and self.progress:

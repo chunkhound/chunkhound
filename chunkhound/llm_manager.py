@@ -5,6 +5,7 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.interfaces.llm_provider import LLMProvider
+from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider
 from chunkhound.providers.llm.openai_llm_provider import OpenAILLMProvider
 
@@ -18,9 +19,10 @@ class LLMManager:
     """
 
     # Registry of available providers
-    _providers: dict[str, type[LLMProvider]] = {
+    _providers: dict[str, type[LLMProvider] | Any] = {
         "openai": OpenAILLMProvider,
         "claude-code-cli": ClaudeCodeCLIProvider,
+        "codex-cli": CodexCLIProvider,
     }
 
     def __init__(
@@ -74,6 +76,10 @@ class LLMManager:
                 "max_retries": config.get("max_retries", 3),
             }
 
+            if provider_name == "codex-cli":
+                effort = config.get("reasoning_effort")
+                if effort:
+                    provider_kwargs["reasoning_effort"] = effort
             provider = provider_class(**provider_kwargs)
             return provider
         except Exception as e:

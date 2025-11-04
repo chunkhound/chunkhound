@@ -161,6 +161,7 @@ filterwarnings = [
     # Allow other warnings to be displayed
 ]
 markers = [
+    "asyncio: marks tests as asyncio-based; local event_loop fixture handles loop",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",

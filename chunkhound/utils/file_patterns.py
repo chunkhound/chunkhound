@@ -12,7 +12,7 @@
 
 import os
 import re
-from fnmatch import translate
+from fnmatch import translate, fnmatch
 from pathlib import Path
 from typing import Pattern
 
@@ -63,12 +63,26 @@ def should_exclude_path(
     path_name = path.name
 
     for exclude_pattern in patterns:
-        # Handle **/ prefix and /** suffix patterns
+        # Handle **/ prefix and /** suffix patterns (directory subtree excludes)
         if exclude_pattern.startswith("**/") and exclude_pattern.endswith("/**"):
-            # Pattern like **/.venv/** - match directory name anywhere in path
-            target_dir = exclude_pattern[3:-3]
-            if target_dir in rel_path.parts or target_dir in path.parts:
-                return True
+            # Example: **/.venv/**, **/.venv*/**, **/node_modules/**
+            target = exclude_pattern[3:-3]
+
+            # If the target segment contains wildcard characters, evaluate it
+            # against each path component using fnmatch so patterns like
+            # "**/.venv*/**" correctly match ".venv-docling" directories.
+            if "*" in target or "?" in target or ("[" in target and "]" in target):
+                # Check both relative and absolute component views for robustness
+                for part in rel_path.parts:
+                    if fnmatch(part, target):
+                        return True
+                for part in path.parts:
+                    if fnmatch(part, target):
+                        return True
+            else:
+                # Fast path for exact directory segment matches
+                if target in rel_path.parts or target in path.parts:
+                    return True
         elif exclude_pattern.startswith("**/"):
             # Treat "**/..." like include logic: try full and simple variants
             compiled_full = compile_pattern(exclude_pattern, cache)

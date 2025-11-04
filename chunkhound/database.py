@@ -139,10 +139,10 @@ class Database:
                     config, embedding_manager
                 )
 
-                # Register the new provider
-                registry.register_provider(
-                    "database", lambda: self._provider, singleton=True
-                )
+                # Register the new provider instance (not a factory)
+                # Using a lambda here caused the registry to store a function, breaking
+                # consumers that expect a provider object with methods like connect().
+                registry.register_provider("database", self._provider, singleton=True)
 
                 # Create services via registry (includes language parser setup)
                 self._indexing_coordinator = create_indexing_coordinator()

@@ -30,6 +30,9 @@ class LLMConfig(BaseSettings):
         CHUNKHOUND_LLM_SYNTHESIS_MODEL=gpt-5
         CHUNKHOUND_LLM_BASE_URL=https://api.openai.com/v1
         CHUNKHOUND_LLM_PROVIDER=openai
+        CHUNKHOUND_LLM_CODEX_REASONING_EFFORT=medium
+        CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_UTILITY=low
+        CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_SYNTHESIS=high
     """
 
     model_config = SettingsConfigDict(
@@ -41,9 +44,30 @@ class LLMConfig(BaseSettings):
     )
 
     # Provider Selection
-    provider: Literal["openai", "ollama", "claude-code-cli"] = Field(
-        default="openai", description="LLM provider (openai, ollama, claude-code-cli)"
+    provider: Literal[
+        "openai",
+        "ollama",
+        "claude-code-cli",
+        "codex-cli",
+    ] = Field(
+        default="openai",
+        description="Default LLM provider for both roles (utility, synthesis)",
     )
+
+    # Optional per-role overrides (utility vs synthesis)
+    utility_provider: Literal[
+        "openai",
+        "ollama",
+        "claude-code-cli",
+        "codex-cli",
+    ] | None = Field(default=None, description="Override provider for utility ops")
+
+    synthesis_provider: Literal[
+        "openai",
+        "ollama",
+        "claude-code-cli",
+        "codex-cli",
+    ] | None = Field(default=None, description="Override provider for synthesis ops")
 
     # Model Configuration (dual-model architecture)
     utility_model: str = Field(
@@ -54,6 +78,19 @@ class LLMConfig(BaseSettings):
     synthesis_model: str = Field(
         default="",  # Will be set by get_default_models() if empty
         description="Model for final synthesis (large context analysis)",
+    )
+
+    codex_reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = Field(
+        default=None,
+        description="Default Codex CLI reasoning effort (Responses API thinking level)",
+    )
+    codex_reasoning_effort_utility: Literal["minimal", "low", "medium", "high"] | None = Field(
+        default=None,
+        description="Codex CLI reasoning effort override for utility-stage operations",
+    )
+    codex_reasoning_effort_synthesis: Literal["minimal", "low", "medium", "high"] | None = Field(
+        default=None,
+        description="Codex CLI reasoning effort override for synthesis-stage operations",
     )
 
     api_key: SecretStr | None = Field(
@@ -87,6 +124,20 @@ class LLMConfig(BaseSettings):
 
         return v
 
+    @field_validator(
+        "codex_reasoning_effort",
+        "codex_reasoning_effort_utility",
+        "codex_reasoning_effort_synthesis",
+        mode="before",
+    )
+    def normalize_codex_effort(cls, v: str | None) -> str | None:  # noqa: N805
+        if v is None:
+            return v
+        if isinstance(v, str):
+            return v.strip().lower()
+        return v
+
+
     def get_provider_configs(self) -> tuple[dict[str, Any], dict[str, Any]]:
         """
         Get provider-specific configuration dictionaries for utility and synthesis models.
@@ -97,8 +148,11 @@ class LLMConfig(BaseSettings):
         # Get default models if not specified
         utility_default, synthesis_default = self.get_default_models()
 
+        # Resolve providers per-role
+        resolved_utility_provider = self.utility_provider or self.provider
+        resolved_synthesis_provider = self.synthesis_provider or self.provider
+
         base_config = {
-            "provider": self.provider,
             "timeout": self.timeout,
             "max_retries": self.max_retries,
         }
@@ -113,11 +167,29 @@ class LLMConfig(BaseSettings):
 
         # Build utility config
         utility_config = base_config.copy()
+        utility_config["provider"] = resolved_utility_provider
         utility_config["model"] = self.utility_model or utility_default
 
         # Build synthesis config
         synthesis_config = base_config.copy()
+        synthesis_config["provider"] = resolved_synthesis_provider
         synthesis_config["model"] = self.synthesis_model or synthesis_default
+
+        def _codex_effort_for(role: str) -> str | None:
+            default_effort = self.codex_reasoning_effort
+            if role == "utility":
+                return self.codex_reasoning_effort_utility or default_effort
+            if role == "synthesis":
+                return self.codex_reasoning_effort_synthesis or default_effort
+            return default_effort
+
+        utility_effort = _codex_effort_for("utility")
+        if resolved_utility_provider == "codex-cli" and utility_effort:
+            utility_config["reasoning_effort"] = utility_effort
+
+        synthesis_effort = _codex_effort_for("synthesis")
+        if resolved_synthesis_provider == "codex-cli" and synthesis_effort:
+            synthesis_config["reasoning_effort"] = synthesis_effort
 
         return utility_config, synthesis_config
 
@@ -138,6 +210,9 @@ class LLMConfig(BaseSettings):
             # Claude Code CLI: Haiku 4.5 for both utility and synthesis
             # (Haiku 4.5 is synthesis-capable and cost-effective, unlike 3.5)
             return ("claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001")
+        elif self.provider == "codex-cli":
+            # Codex CLI: nominal label; require explicit model if desired
+            return ("codex", "codex")
         else:
             return ("gpt-5-nano", "gpt-5")
 
@@ -148,7 +223,13 @@ class LLMConfig(BaseSettings):
         Returns:
             True if provider is properly configured
         """
-        if self.provider in ("ollama", "claude-code-cli"):
+        resolved_utility_provider = self.utility_provider or self.provider
+        resolved_synthesis_provider = self.synthesis_provider or self.provider
+        no_key_required = {"ollama", "claude-code-cli", "codex-cli"}
+        if (
+            resolved_utility_provider in no_key_required
+            and resolved_synthesis_provider in no_key_required
+        ):
             # Ollama and Claude Code CLI don't require API key
             # Claude Code CLI uses subscription-based authentication
             return True
@@ -166,7 +247,7 @@ class LLMConfig(BaseSettings):
         missing = []
 
         if (
-            self.provider not in ("ollama", "claude-code-cli")
+            self.provider not in ("ollama", "claude-code-cli", "codex-cli")
             and not self.api_key
         ):
             missing.append("api_key (set CHUNKHOUND_LLM_API_KEY)")
@@ -198,8 +279,38 @@ class LLMConfig(BaseSettings):
 
         parser.add_argument(
             "--llm-provider",
-            choices=["openai", "ollama", "claude-code-cli"],
-            help="LLM provider (default: openai)",
+            choices=["openai", "ollama", "claude-code-cli", "codex-cli"],
+            help="Default LLM provider for both roles",
+        )
+
+        parser.add_argument(
+            "--llm-utility-provider",
+            choices=["openai", "ollama", "claude-code-cli", "codex-cli"],
+            help="Override LLM provider for utility operations",
+        )
+
+        parser.add_argument(
+            "--llm-synthesis-provider",
+            choices=["openai", "ollama", "claude-code-cli", "codex-cli"],
+            help="Override LLM provider for synthesis operations",
+        )
+
+        parser.add_argument(
+            "--llm-codex-reasoning-effort",
+            choices=["minimal", "low", "medium", "high"],
+            help="Codex CLI reasoning effort (thinking depth) when using codex-cli provider",
+        )
+
+        parser.add_argument(
+            "--llm-codex-reasoning-effort-utility",
+            choices=["minimal", "low", "medium", "high"],
+            help="Utility-stage Codex reasoning effort override",
+        )
+
+        parser.add_argument(
+            "--llm-codex-reasoning-effort-synthesis",
+            choices=["minimal", "low", "medium", "high"],
+            help="Synthesis-stage Codex reasoning effort override",
         )
 
     @classmethod
@@ -213,10 +324,20 @@ class LLMConfig(BaseSettings):
             config["base_url"] = base_url
         if provider := os.getenv("CHUNKHOUND_LLM_PROVIDER"):
             config["provider"] = provider
+        if u_provider := os.getenv("CHUNKHOUND_LLM_UTILITY_PROVIDER"):
+            config["utility_provider"] = u_provider
+        if s_provider := os.getenv("CHUNKHOUND_LLM_SYNTHESIS_PROVIDER"):
+            config["synthesis_provider"] = s_provider
         if utility_model := os.getenv("CHUNKHOUND_LLM_UTILITY_MODEL"):
             config["utility_model"] = utility_model
         if synthesis_model := os.getenv("CHUNKHOUND_LLM_SYNTHESIS_MODEL"):
             config["synthesis_model"] = synthesis_model
+        if codex_effort := os.getenv("CHUNKHOUND_LLM_CODEX_REASONING_EFFORT"):
+            config["codex_reasoning_effort"] = codex_effort.strip().lower()
+        if codex_effort_util := os.getenv("CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_UTILITY"):
+            config["codex_reasoning_effort_utility"] = codex_effort_util.strip().lower()
+        if codex_effort_syn := os.getenv("CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_SYNTHESIS"):
+            config["codex_reasoning_effort_synthesis"] = codex_effort_syn.strip().lower()
 
         return config
 
@@ -235,7 +356,17 @@ class LLMConfig(BaseSettings):
             overrides["base_url"] = args.llm_base_url
         if hasattr(args, "llm_provider") and args.llm_provider:
             overrides["provider"] = args.llm_provider
-
+        if hasattr(args, "llm_utility_provider") and args.llm_utility_provider:
+            overrides["utility_provider"] = args.llm_utility_provider
+        if hasattr(args, "llm_synthesis_provider") and args.llm_synthesis_provider:
+            overrides["synthesis_provider"] = args.llm_synthesis_provider
+        if hasattr(args, "llm_codex_reasoning_effort") and args.llm_codex_reasoning_effort:
+            overrides["codex_reasoning_effort"] = args.llm_codex_reasoning_effort
+        if hasattr(args, "llm_codex_reasoning_effort_utility") and args.llm_codex_reasoning_effort_utility:
+            overrides["codex_reasoning_effort_utility"] = args.llm_codex_reasoning_effort_utility
+        if hasattr(args, "llm_codex_reasoning_effort_synthesis") and args.llm_codex_reasoning_effort_synthesis:
+            overrides["codex_reasoning_effort_synthesis"] = args.llm_codex_reasoning_effort_synthesis
+        
         return overrides
 
     def __repr__(self) -> str:

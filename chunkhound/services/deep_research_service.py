@@ -401,6 +401,34 @@ class DeepResearchService:
 
         aggregated = self._aggregate_all_findings(root)
 
+        # Early return: no context found (avoid scary synthesis error when empty)
+        if not aggregated.get("chunks") and not aggregated.get("files"):
+            logger.info(
+                "No chunks or files aggregated; skipping synthesis and returning guidance"
+            )
+            await self._emit_event(
+                "synthesis_skip",
+                "No code context found; skipping synthesis",
+                depth=0,
+            )
+            friendly = (
+                f"No relevant code context found for: '{query}'.\n\n"
+                "Try a more code-specific question. Helpful patterns:\n"
+                "- Name files or modules (e.g., 'services/deep_research_service.py')\n"
+                "- Mention classes/functions (e.g., 'DeepResearchService._single_pass_synthesis')\n"
+                "- Include keywords that appear in code (constants, config keys)\n"
+            )
+            return {
+                "answer": friendly,
+                "metadata": {
+                    "depth_reached": 0,
+                    "nodes_explored": aggregated.get("stats", {}).get("total_nodes", 1),
+                    "chunks_analyzed": 0,
+                    "files_analyzed": 0,
+                    "skipped_synthesis": True,
+                },
+            }
+
         # Manage token budget for single-pass synthesis
         (
             prioritized_chunks,

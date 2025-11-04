@@ -175,8 +175,12 @@ class SerialDatabaseProvider(ABC):
             )
 
             # Get registry and register self as database provider
+            # NOTE: ProviderRegistry.register_provider expects an instance, not a factory.
+            # Using a lambda here caused the registry to hold a function object, leading
+            # to AttributeError when services attempted to call provider.connect().
+            # Register the instance directly to maintain correct type semantics.
             registry = get_registry()
-            registry.register_provider("database", lambda: self, singleton=True)
+            registry.register_provider("database", self, singleton=True)
 
             # Initialize service layer components from registry
             if (
