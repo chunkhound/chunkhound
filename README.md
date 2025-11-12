@@ -44,8 +44,9 @@ Transform your codebase into a searchable knowledge base for AI assistants using
 
 - Python 3.10+
 - [uv package manager](https://docs.astral.sh/uv/)
-- API key for semantic search (optional - regex search works without any keys)
-  - [OpenAI](https://platform.openai.com/api-keys) | [VoyageAI](https://dash.voyageai.com/) | [Local with Ollama](https://ollama.ai/)
+- API keys (optional - regex search works without any keys)
+  - **Embeddings**: [OpenAI](https://platform.openai.com/api-keys) | [VoyageAI](https://dash.voyageai.com/) | [Local with Ollama](https://ollama.ai/)
+  - **LLM (for deep research)**: [Anthropic](https://console.anthropic.com/) | [OpenAI](https://platform.openai.com/api-keys) | [Local with Ollama](https://ollama.ai/)
 
 ## Installation
 

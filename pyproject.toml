@@ -75,6 +75,7 @@ dependencies = [
     "numpy>=1.24.0",
     "pathspec>=0.12.1",
     "pygit2>=1.12.0",
+    "anthropic>=0.72.1",
 ]
 
 [project.optional-dependencies]
