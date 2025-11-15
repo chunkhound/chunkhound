@@ -8,8 +8,8 @@ TOP_LEVEL_LEXICAL_CONFIG = """
         (variable_declarator
             name: (identifier) @name
             value: [(object) (array)] @init
-        ) @definition
-    )
+        )
+    ) @definition
 )
 """
 
@@ -21,8 +21,8 @@ TOP_LEVEL_VAR_CONFIG = """
         (variable_declarator
             name: (identifier) @name
             value: [(object) (array)] @init
-        ) @definition
-    )
+        )
+    ) @definition
 )
 """
 

@@ -112,7 +112,11 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         - Add export statements and top-level declarations/assignments, so TS config
           modules that export object literals are chunked.
         """
-        if concept == UniversalConcept.DEFINITION:
+        if concept == UniversalConcept.IMPORT:
+            return """
+            (import_statement) @definition
+            """
+        elif concept == UniversalConcept.DEFINITION:
             return ("\n".join([
                 """
                 ; Standard definitions
@@ -122,6 +126,31 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
 
                 (class_declaration
                     name: (type_identifier) @name
+                ) @definition
+
+                ; TypeScript-specific constructs
+                (interface_declaration
+                    name: (type_identifier) @name
+                ) @definition
+
+                (enum_declaration
+                    name: (identifier) @name
+                ) @definition
+
+                (type_alias_declaration
+                    name: (type_identifier) @name
+                ) @definition
+
+                ; Namespace declarations (namespace keyword)
+                (internal_module
+                    name: (identifier) @name
+                ) @definition
+
+                ; Module declarations (declare module 'name')
+                (ambient_declaration
+                    (module
+                        name: (_) @name
+                    )
                 ) @definition
 
                 ; Top-level export (default or named)
@@ -157,8 +186,39 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             """
         return None
 
-    # extract_name / extract_metadata / extract_content are inherited
-    # from JSFamilyExtraction (de-duplicated across JS/TS/JSX)
+    # extract_name / extract_content are inherited from JSFamilyExtraction
+    # extract_metadata is overridden below to handle TypeScript-specific constructs
+
+    def extract_metadata(
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
+    ) -> dict[str, Any]:
+        """Extract TypeScript-specific metadata from captures."""
+        # Get base metadata from JSFamilyExtraction
+        metadata = super().extract_metadata(concept, captures, content)
+
+        if concept == UniversalConcept.DEFINITION and "definition" in captures:
+            def_node = captures["definition"]
+            source = content.decode("utf-8", errors="replace")
+
+            # Set proper kind based on node type for ChunkType mapping
+            node_type = def_node.type
+
+            if node_type == "class_declaration":
+                metadata["kind"] = "class"
+            elif node_type == "interface_declaration":
+                metadata["kind"] = "interface"
+                # Extract type parameters if present
+                type_params = self.extract_type_parameters(def_node, source)
+                if type_params:
+                    metadata["type_parameters"] = type_params
+            elif node_type == "enum_declaration":
+                metadata["kind"] = "enum"
+            elif node_type == "type_alias_declaration":
+                metadata["kind"] = "type_alias"
+            elif node_type in ("internal_module", "ambient_declaration"):
+                metadata["kind"] = "namespace"
+
+        return metadata
 
     def get_interface_query(self) -> str:
         """Get tree-sitter query pattern for TypeScript interface definitions.

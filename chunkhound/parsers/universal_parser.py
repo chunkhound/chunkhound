@@ -1456,6 +1456,10 @@ class UniversalParser:
                 return ChunkType.INTERFACE
             elif kind == "trait" or "trait" in node_type:
                 return ChunkType.TRAIT
+            elif kind == "type_alias" or "type_alias" in node_type:
+                return ChunkType.TYPE_ALIAS
+            elif kind == "namespace" or "namespace" in node_type:
+                return ChunkType.NAMESPACE
             else:
                 return ChunkType.FUNCTION  # Default for definitions
 
