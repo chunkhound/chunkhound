@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from chunkhound.core.types.common import Language
+from chunkhound.interfaces.language_parser import LanguageParser
 
 # Import all language mappings
 from chunkhound.parsers.mappings import (
@@ -24,6 +25,7 @@ from chunkhound.parsers.mappings import (
     CMapping,
     CppMapping,
     CSharpMapping,
+    DartMapping,
     GoMapping,
     GroovyMapping,
     HaskellMapping,
@@ -50,7 +52,6 @@ from chunkhound.parsers.mappings import (
     YamlMapping,
     ZigMapping,
 )
-from chunkhound.interfaces.language_parser import LanguageParser
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import SetupError, TreeSitterEngine
 from chunkhound.parsers.universal_parser import CASTConfig, UniversalParser
@@ -322,6 +323,26 @@ except ImportError:
     ts_zig = None
     ZIG_AVAILABLE = False
 
+try:
+    from tree_sitter_language_pack import get_language
+
+    _dart_lang = get_language("dart")
+    if _dart_lang:
+        # Create a module-like wrapper for compatibility with LanguageConfig
+        class _DartLanguageWrapper:
+            def language(self):
+                return _dart_lang
+
+        ts_dart = _DartLanguageWrapper()
+        DART_AVAILABLE = True
+    else:
+        ts_dart = None
+        DART_AVAILABLE = False
+except ImportError:
+    ts_dart = None
+    DART_AVAILABLE = False
+
+
 # Additional language extensions (these might use the same parser as base language)
 JSX_AVAILABLE = JAVASCRIPT_AVAILABLE  # JSX uses JavaScript parser
 TSX_AVAILABLE = TYPESCRIPT_AVAILABLE  # TSX uses TypeScript parser
@@ -461,6 +482,7 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.MATLAB: LanguageConfig(
         ts_matlab, MatlabMapping, MATLAB_AVAILABLE, "matlab"
     ),
+    Language.DART: LanguageConfig(ts_dart, DartMapping, DART_AVAILABLE, "dart"),
     Language.OBJC: LanguageConfig(ts_objc, ObjCMapping, OBJC_AVAILABLE, "objc"),
     Language.PHP: LanguageConfig(ts_php, PHPMapping, PHP_AVAILABLE, "php"),
     Language.SWIFT: LanguageConfig(ts_swift, SwiftMapping, SWIFT_AVAILABLE, "swift"),
@@ -543,6 +565,7 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     ".fish": Language.BASH,
     # Note: .m is ambiguous, content detection used in File.from_path()
     ".m": Language.MATLAB,
+    ".dart": Language.DART,
     ".mm": Language.OBJC,
     # PHP
     ".php": Language.PHP,

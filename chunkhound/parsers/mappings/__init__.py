@@ -9,15 +9,16 @@ from .bash import BashMapping
 from .c import CMapping
 from .cpp import CppMapping
 from .csharp import CSharpMapping
+from .dart import DartMapping
 from .go import GoMapping
 from .groovy import GroovyMapping
 from .haskell import HaskellMapping
+from .hcl import HclMapping
 from .java import JavaMapping
 from .javascript import JavaScriptMapping
 from .json import JsonMapping
 from .jsx import JSXMapping
 from .kotlin import KotlinMapping
-from .hcl import HclMapping
 from .makefile import MakefileMapping
 from .markdown import MarkdownMapping
 from .matlab import MatlabMapping
@@ -42,6 +43,7 @@ __all__ = [
     "CMapping",
     "CppMapping",
     "CSharpMapping",
+    "DartMapping",
     "GoMapping",
     "GroovyMapping",
     "HaskellMapping",
