@@ -76,10 +76,12 @@ class LLMManager:
                 "max_retries": config.get("max_retries", 3),
             }
 
-            if provider_name == "codex-cli":
+            # Pass reasoning_effort to OpenAI and Codex providers
+            if provider_name in ("openai", "codex-cli"):
                 effort = config.get("reasoning_effort")
                 if effort:
                     provider_kwargs["reasoning_effort"] = effort
+
             provider = provider_class(**provider_kwargs)
             return provider
         except Exception as e:

@@ -183,12 +183,13 @@ class LLMConfig(BaseSettings):
                 return self.codex_reasoning_effort_synthesis or default_effort
             return default_effort
 
+        # Add reasoning_effort for providers that support it (OpenAI and Codex)
         utility_effort = _codex_effort_for("utility")
-        if resolved_utility_provider == "codex-cli" and utility_effort:
+        if resolved_utility_provider in ("codex-cli", "openai") and utility_effort:
             utility_config["reasoning_effort"] = utility_effort
 
         synthesis_effort = _codex_effort_for("synthesis")
-        if resolved_synthesis_provider == "codex-cli" and synthesis_effort:
+        if resolved_synthesis_provider in ("codex-cli", "openai") and synthesis_effort:
             synthesis_config["reasoning_effort"] = synthesis_effort
 
         return utility_config, synthesis_config
