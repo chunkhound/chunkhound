@@ -73,6 +73,9 @@ class MCPServerBase(ABC):
             "scan_completed_at": None,
         }
 
+        # Background task tracking for proper cleanup
+        self._background_tasks: set[asyncio.Task] = set()
+
         # Set MCP mode to suppress stderr output that interferes with JSON-RPC
         os.environ["CHUNKHOUND_MCP_MODE"] = "1"
 
@@ -93,6 +96,19 @@ class MCPServerBase(ABC):
             except Exception:
                 # Silently fail if we can't write to debug file
                 pass
+
+    def _track_task(self, task: asyncio.Task) -> asyncio.Task:
+        """Track a background task and auto-remove when done.
+
+        Args:
+            task: The asyncio task to track
+
+        Returns:
+            The same task for chaining
+        """
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
 
     async def initialize(self) -> None:
         """Initialize services and database connection.
@@ -140,7 +156,9 @@ class MCPServerBase(ABC):
             # Initialize LLM manager with dual providers (optional - continue if it fails)
             try:
                 if self.config.llm:
-                    utility_config, synthesis_config = self.config.llm.get_provider_configs()
+                    utility_config, synthesis_config = (
+                        self.config.llm.get_provider_configs()
+                    )
                     self.llm_manager = LLMManager(utility_config, synthesis_config)
                     self.debug_log(
                         f"LLM providers registered: {self.config.llm.provider} "
@@ -174,7 +192,9 @@ class MCPServerBase(ABC):
             self.debug_log("Service initialization complete")
 
             # Defer DB connect + realtime start to background so initialize is fast
-            asyncio.create_task(self._deferred_connect_and_start(target_path))
+            self._track_task(
+                asyncio.create_task(self._deferred_connect_and_start(target_path))
+            )
 
     async def _deferred_connect_and_start(self, target_path: Path) -> None:
         """Connect DB and start realtime monitoring in background."""
@@ -186,18 +206,26 @@ class MCPServerBase(ABC):
             if not self.services.provider.is_connected:
                 self.services.provider.connect()
 
+            # Cancellation checkpoint
+            await asyncio.sleep(0)
+
             # Start real-time indexing service
             self.debug_log("Starting real-time indexing service (deferred)")
             self.realtime_indexing = RealtimeIndexingService(
                 self.services, self.config, debug_sink=self.debug_log
             )
-            monitoring_task = asyncio.create_task(
-                self.realtime_indexing.start(target_path)
+            monitoring_task = self._track_task(
+                asyncio.create_task(self.realtime_indexing.start(target_path))
             )
             # Schedule background scan AFTER monitoring is confirmed ready
-            asyncio.create_task(
-                self._coordinated_initial_scan(target_path, monitoring_task)
+            self._track_task(
+                asyncio.create_task(
+                    self._coordinated_initial_scan(target_path, monitoring_task)
+                )
             )
+        except asyncio.CancelledError:
+            self.debug_log("Deferred connect/start cancelled")
+            raise  # Re-raise to allow proper task cancellation
         except Exception as e:
             self.debug_log(f"Deferred connect/start failed: {e}")
 
@@ -220,6 +248,9 @@ class MCPServerBase(ABC):
             self._scan_progress["scan_started_at"] = datetime.now().isoformat()
             await self._background_initial_scan(target_path)
 
+        except asyncio.CancelledError:
+            self.debug_log("Coordinated initial scan cancelled")
+            raise  # Re-raise to allow proper task cancellation
         except asyncio.TimeoutError:
             self.debug_log(
                 "Monitoring setup timeout - proceeding with initial scan anyway"
@@ -254,6 +285,9 @@ class MCPServerBase(ABC):
                 progress_callback=progress_callback,
             )
 
+            # Cancellation checkpoint before long-running operation
+            await asyncio.sleep(0)
+
             # Perform scan with lower priority
             stats = await indexing_service.process_directory(
                 target_path, no_embeddings=False
@@ -274,6 +308,11 @@ class MCPServerBase(ABC):
                 f"Background scan completed: {stats.files_processed} files, {stats.chunks_created} chunks"
             )
 
+        except asyncio.CancelledError:
+            self.debug_log("Background initial scan cancelled")
+            self._scan_progress["is_scanning"] = False
+            self._scan_progress["scan_error"] = "Cancelled during shutdown"
+            raise  # Re-raise to allow proper task cancellation
         except Exception as e:
             self.debug_log(f"Background initial scan failed: {e}")
             self._scan_progress["is_scanning"] = False
@@ -284,7 +323,30 @@ class MCPServerBase(ABC):
 
         This method is idempotent - safe to call multiple times.
         """
-        # Stop real-time indexing first
+        # Cancel all background tasks first to prevent hanging
+        if self._background_tasks:
+            self.debug_log(f"Cancelling {len(self._background_tasks)} background tasks")
+            for task in self._background_tasks:
+                if not task.done():
+                    task.cancel()
+
+            # Wait for cancellation with timeout (10s for large operations)
+            if self._background_tasks:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*self._background_tasks, return_exceptions=True),
+                        timeout=10.0,
+                    )
+                    self.debug_log("All background tasks cancelled successfully")
+                except asyncio.TimeoutError:
+                    self.debug_log(
+                        f"Warning: {len(self._background_tasks)} background tasks "
+                        f"did not cancel within 10s timeout"
+                    )
+                finally:
+                    self._background_tasks.clear()
+
+        # Stop real-time indexing (should already be cancelled via background tasks)
         if self.realtime_indexing:
             self.debug_log("Stopping real-time indexing service")
             await self.realtime_indexing.stop()
