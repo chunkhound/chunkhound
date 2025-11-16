@@ -10,9 +10,10 @@ ARCHITECTURE: Global state required for stdio communication model
 from __future__ import annotations
 
 import asyncio
-import sys
-import os
 import logging
+import os
+import signal
+import sys
 import warnings
 
 # CRITICAL: Suppress SWIG warnings that break JSON-RPC protocol in CI
@@ -23,9 +24,7 @@ warnings.filterwarnings(
 )
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
-
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 # Try to import the official MCP SDK; if unavailable, we'll fall back to a
 # minimal stdio JSON-RPC loop sufficient for tests that only exercise the
@@ -105,7 +104,9 @@ class StdioMCPServer(MCPServerBase):
                         CodexCLIProvider,
                     )
 
-                    async def _stub_run_exec(self, text, cwd=None, max_tokens=1024, timeout=None, model=None):  # type: ignore[override]
+                    async def _stub_run_exec(
+                        self, text, cwd=None, max_tokens=1024, timeout=None, model=None
+                    ):  # type: ignore[override]
                         mark = os.getenv("CH_TEST_CODEX_MARK_FILE")
                         if mark:
                             try:
@@ -126,12 +127,23 @@ class StdioMCPServer(MCPServerBase):
                 # And if asked, force deep_research to call synthesis directly
                 if os.getenv("CH_TEST_FORCE_SYNTHESIS") == "1":
                     try:
-                        from chunkhound.mcp_server import tools as tools_mod  # noqa: WPS433
+                        from chunkhound.mcp_server import (
+                            tools as tools_mod,  # noqa: WPS433
+                        )
 
-                        async def _stub_deep_research_impl(*, services, embedding_manager, llm_manager, query, progress=None):
+                        async def _stub_deep_research_impl(
+                            *,
+                            services,
+                            embedding_manager,
+                            llm_manager,
+                            query,
+                            progress=None,
+                        ):
                             if llm_manager is None:
                                 try:
-                                    from chunkhound.llm_manager import LLMManager  # noqa: WPS433
+                                    from chunkhound.llm_manager import (
+                                        LLMManager,  # noqa: WPS433
+                                    )
 
                                     llm_manager = LLMManager(
                                         {"provider": "codex-cli", "model": "codex"},
@@ -145,7 +157,9 @@ class StdioMCPServer(MCPServerBase):
 
                         tools_mod.deep_research_impl = _stub_deep_research_impl  # type: ignore[assignment]
                         if "code_research" in tools_mod.TOOL_REGISTRY:
-                            tools_mod.TOOL_REGISTRY["code_research"].implementation = _stub_deep_research_impl  # type: ignore[index]
+                            tools_mod.TOOL_REGISTRY[
+                                "code_research"
+                            ].implementation = _stub_deep_research_impl  # type: ignore[index]
                     except Exception:
                         pass
         except Exception:
@@ -158,6 +172,7 @@ class StdioMCPServer(MCPServerBase):
             self.server = None  # type: ignore
         else:
             from mcp.server import Server  # noqa: WPS433
+
             self.server: Server = Server("ChunkHound Code Search")
 
         # Event to signal initialization completion
@@ -248,6 +263,18 @@ class StdioMCPServer(MCPServerBase):
 
     async def run(self) -> None:
         """Run the stdio server with proper lifecycle management."""
+        # Setup signal handling for graceful shutdown
+        loop = asyncio.get_running_loop()
+        shutdown_event = asyncio.Event()
+
+        def signal_handler(sig):
+            self.debug_log(f"Received signal {sig}, initiating graceful shutdown")
+            shutdown_event.set()
+
+        # Register signal handlers
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, lambda s=sig: signal_handler(s))
+
         try:
             if _MCP_AVAILABLE:
                 # Set initialization options with capabilities
@@ -267,26 +294,47 @@ class StdioMCPServer(MCPServerBase):
                 async with self.server_lifespan():
                     # Run the stdio server
                     import mcp.server.stdio  # noqa: WPS433
+
                     async with mcp.server.stdio.stdio_server() as (
                         read_stream,
                         write_stream,
                     ):
                         self.debug_log("Stdio server started, awaiting requests")
-                        await self.server.run(
-                            read_stream,
-                            write_stream,
-                            init_options,
+
+                        # Run server and wait for shutdown signal
+                        server_task = asyncio.create_task(
+                            self.server.run(read_stream, write_stream, init_options)
                         )
+                        shutdown_task = asyncio.create_task(shutdown_event.wait())
+
+                        # Wait for either server completion or shutdown signal
+                        done, pending = await asyncio.wait(
+                            {server_task, shutdown_task},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+
+                        # Cancel remaining tasks
+                        for task in pending:
+                            task.cancel()
+                            try:
+                                await task
+                            except asyncio.CancelledError:
+                                pass
             else:
                 # Minimal fallback stdio: immediately emit a valid initialize response
                 # so tests can proceed without the official MCP SDK.
-                import json, os as _os
+                import json
+                import os as _os
+
                 resp = {
                     "jsonrpc": "2.0",
                     "id": 1,
                     "result": {
                         "protocolVersion": "2024-11-05",
-                        "serverInfo": {"name": "ChunkHound Code Search", "version": __version__},
+                        "serverInfo": {
+                            "name": "ChunkHound Code Search",
+                            "version": __version__,
+                        },
                         "capabilities": {},
                     },
                 }
@@ -303,6 +351,7 @@ class StdioMCPServer(MCPServerBase):
             self.debug_log(f"Server error: {e}")
             if self.debug_mode:
                 import traceback
+
                 traceback.print_exc(file=sys.stderr)
 
 
