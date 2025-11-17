@@ -49,6 +49,7 @@ def create_services(
     db_path: Path | str,
     config: dict[str, Any] | Any,
     embedding_manager: EmbeddingManager | None = None,
+    registry: Any | None = None,
 ) -> DatabaseServices:
     """Create clean service bundle for modern internal architecture.
 
@@ -56,21 +57,21 @@ def create_services(
         db_path: Path to database file
         config: Registry configuration (dict or Config object)
         embedding_manager: Optional embedding manager
+        registry: Optional registry instance. If None, creates a new isolated registry.
+                 This allows multiple instances to coexist in the same process.
 
     Returns:
         DatabaseServices bundle with all components
     """
-    # Avoid double-configuring the registry (which can open the DB twice and lock it).
-    registry = get_registry()
-    try:
-        existing_cfg = registry.get_config()
-    except Exception:
-        existing_cfg = None
+    # Import here to avoid circular dependency
+    from chunkhound.registry import create_registry, configure_registry
 
-    # Always (re)configure the registry with an effective per-call config so that
-    # tests using distinct temporary directories get an IndexingCoordinator whose
-    # base_directory matches the current tmp_path. This avoids cross-test leakage
-    # from the global registry's previous target_dir.
+    # Create a new isolated registry instance if not provided
+    # This allows multiple MCP servers to run in the same process without conflicts
+    if registry is None:
+        registry = create_registry()
+
+    # Configure the registry with the provided config
     effective_config: dict[str, Any] | Any = config
     try:
         if isinstance(config, dict):
@@ -86,11 +87,10 @@ def create_services(
     except Exception:
         effective_config = config
 
-    configure_registry(effective_config)
-    # else: assume already configured by caller (e.g., CLI), do not reconfigure again
-    # to prevent creating a second database provider connection in the same process.
+    # Configure the registry (isolated instance, not global)
+    configure_registry(effective_config, registry=registry)
 
-    # If embedding_manager is provided, register its provider with the global registry
+    # If embedding_manager is provided, register its provider with the registry
     # to ensure services use the same provider instance
     if embedding_manager:
         try:

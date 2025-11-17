@@ -81,6 +81,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         base_directory: Path,
         embedding_manager: EmbeddingManager | None = None,
         config: "DatabaseConfig | None" = None,
+        registry: Any | None = None,
     ):
         """Initialize LanceDB provider.
 
@@ -89,14 +90,15 @@ class LanceDBProvider(SerialDatabaseProvider):
             base_directory: Base directory for path normalization
             embedding_manager: Optional embedding manager for vector generation
             config: Database configuration for provider-specific settings
+            registry: Optional registry instance for service creation (if None, uses global)
         """
         # Ensure we always use absolute paths to avoid LanceDB internal path resolution issues
         absolute_db_path = (
             Path(db_path).parent / f"{Path(db_path).stem}.lancedb"
         ).absolute()
 
-        # Initialize base class
-        super().__init__(absolute_db_path, base_directory, embedding_manager, config)
+        # Initialize base class with registry parameter
+        super().__init__(absolute_db_path, base_directory, embedding_manager, config, registry)
 
         self.index_type = config.lancedb_index_type if config else None
         self.connection: Any | None = (
