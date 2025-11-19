@@ -1,5 +1,10 @@
 """Shared tree-sitter query fragments for JS-family mappings (JS/TS/JSX)."""
 
+# Import statement pattern
+IMPORT_STATEMENT = """
+(import_statement) @definition
+"""
+
 # Top-level const/let with object/array initializer
 TOP_LEVEL_LEXICAL_CONFIG = """
 ; Top-level const/let with object/array initializer
@@ -77,4 +82,21 @@ COMMONJS_EXPORTS_SHORTHAND = """
     )
 )
 """
+
+
+def class_declaration_query(name_type: str = "identifier") -> str:
+    """Generate class declaration query with appropriate name node type.
+
+    Args:
+        name_type: The node type for class names. Use "identifier" for JavaScript
+                   grammar, "type_identifier" for TypeScript/TSX grammars.
+
+    Returns:
+        A tree-sitter query string for class declarations.
+    """
+    return f'''
+        (class_declaration
+            name: ({name_type}) @name
+        ) @definition
+    '''
 

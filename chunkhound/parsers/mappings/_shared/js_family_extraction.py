@@ -58,6 +58,9 @@ class JSFamilyExtraction:
 
         if concept == UniversalConcept.DEFINITION and "definition" in captures:
             node = captures["definition"]
+            # Set node_type for chunk type determination in universal_parser
+            meta["node_type"] = getattr(node, "type", "")
+
             init = captures.get("init")
             target = init or node
             try:
@@ -76,6 +79,13 @@ class JSFamilyExtraction:
                             break
                         if child.type == "array":
                             meta["chunk_type_hint"] = "array"
+                            break
+                        # Check for class/function inside export_statement
+                        if child.type == "class_declaration":
+                            meta["kind"] = "class"
+                            break
+                        if child.type in ("function_declaration", "function_expression"):
+                            meta["kind"] = "function"
                             break
             except Exception:
                 # Best-effort only; do not set hint on failure

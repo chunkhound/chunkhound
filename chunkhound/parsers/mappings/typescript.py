@@ -3,6 +3,9 @@
 This module provides TypeScript-specific tree-sitter queries and extraction logic
 for the unified parser system. It handles TypeScript's unique features including
 type annotations, generics, interfaces, enums, namespaces, and decorators.
+
+TypeScript extends JavaScript since TypeScript is a superset of JavaScript.
+This means TypeScript inherits all JavaScript patterns and adds TS-specific ones.
 """
 
 from pathlib import Path
@@ -11,16 +14,7 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from chunkhound.core.types.common import ChunkType, Language
-from chunkhound.parsers.mappings.base import BaseMapping
-from chunkhound.parsers.mappings._shared.js_family_extraction import (
-    JSFamilyExtraction,
-)
-from chunkhound.parsers.mappings._shared.js_query_patterns import (
-    TOP_LEVEL_LEXICAL_CONFIG,
-    COMMONJS_MODULE_EXPORTS,
-    COMMONJS_NESTED_EXPORTS,
-    COMMONJS_EXPORTS_SHORTHAND,
-)
+from chunkhound.parsers.mappings.javascript import JavaScriptMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 if TYPE_CHECKING:
@@ -35,7 +29,7 @@ except ImportError:
     # TSNode is already defined in TYPE_CHECKING block
 
 
-class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
+class TypeScriptMapping(JavaScriptMapping):
     """TypeScript language mapping for tree-sitter parsing.
 
     This mapping handles TypeScript-specific AST patterns including:
@@ -50,8 +44,14 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
     """
 
     def __init__(self) -> None:
-        """Initialize TypeScript mapping."""
-        super().__init__(Language.TYPESCRIPT)
+        """Initialize TypeScript mapping.
+
+        Note: We call the grandparent's __init__ directly with Language.TYPESCRIPT
+        since JavaScriptMapping.__init__ always uses Language.JAVASCRIPT.
+        """
+        # Call BaseMapping.__init__ directly to set the correct language
+        from chunkhound.parsers.mappings.base import BaseMapping
+        BaseMapping.__init__(self, Language.TYPESCRIPT)
 
     def get_function_query(self) -> str:
         """Get tree-sitter query pattern for TypeScript function definitions.
@@ -108,27 +108,38 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
     def get_query_for_concept(self, concept: "UniversalConcept") -> str | None:  # type: ignore[override]
         """Provide a richer DEFINITION query including top-level config patterns.
 
-        - Keep standard function/class definitions (duplicated here for completeness)
-        - Add export statements and top-level declarations/assignments, so TS config
-          modules that export object literals are chunked.
+        TypeScript extends JavaScript's patterns and adds TS-specific constructs.
+        The key difference is that TypeScript grammar uses type_identifier for
+        class names, while JavaScript grammar uses identifier.
         """
         if concept == UniversalConcept.IMPORT:
+            # TypeScript imports - same as JavaScript
             return """
             (import_statement) @definition
             """
         elif concept == UniversalConcept.DEFINITION:
-            return ("\n".join([
-                """
-                ; Standard definitions
-                (function_declaration
-                    name: (identifier) @name
-                ) @definition
+            # Get base JS patterns
+            base_query = super().get_query_for_concept(concept)
 
-                (class_declaration
-                    name: (type_identifier) @name
-                ) @definition
+            if base_query is None:
+                return None
 
-                ; TypeScript-specific constructs
+            # CRITICAL: Replace identifier with type_identifier ONLY for class names
+            # TypeScript grammar uses type_identifier for class names,
+            # while JavaScript grammar uses identifier
+            # Other constructs (functions, variables) still use identifier in TS grammar
+            base_query = base_query.replace(
+                "(class_declaration\n                            name: (identifier)",
+                "(class_declaration\n                            name: (type_identifier)"
+            )
+            # Also handle exported class declarations
+            base_query = base_query.replace(
+                "(class_declaration\n                                name: (identifier)",
+                "(class_declaration\n                                name: (type_identifier)"
+            )
+
+            # Add TypeScript-specific patterns
+            ts_specific = """
                 (interface_declaration
                     name: (type_identifier) @name
                 ) @definition
@@ -141,52 +152,50 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
                     name: (type_identifier) @name
                 ) @definition
 
-                ; Namespace declarations (namespace keyword)
                 (internal_module
                     name: (identifier) @name
                 ) @definition
 
-                ; Module declarations (declare module 'name')
                 (ambient_declaration
-                    (module
-                        name: (_) @name
-                    )
+                    (module name: (_) @name)
                 ) @definition
 
-                ; Top-level export (default or named)
-                (export_statement) @definition
-                """,
-                TOP_LEVEL_LEXICAL_CONFIG,
-                # Top-level function/arrow declarators
-                """
-                (program
-                    (lexical_declaration
-                        (variable_declarator
-                            name: (identifier) @name
-                            value: (function_expression)
-                        ) @definition
-                    )
-                )
-                (program
-                    (lexical_declaration
-                        (variable_declarator
-                            name: (identifier) @name
-                            value: (arrow_function)
-                        ) @definition
-                    )
-                )
-                """,
-                COMMONJS_MODULE_EXPORTS,
-                COMMONJS_NESTED_EXPORTS,
-                COMMONJS_EXPORTS_SHORTHAND,
-            ]))
-        elif concept == UniversalConcept.COMMENT:
-            return """
-            (comment) @definition
-            """
-        return None
+                ; Abstract class declaration
+                (abstract_class_declaration
+                    name: (type_identifier) @name
+                ) @definition
 
-    # extract_name / extract_content are inherited from JSFamilyExtraction
+                ; Top-level const with 'as const' assertion
+                (program
+                    (lexical_declaration
+                        (variable_declarator
+                            name: (identifier) @name
+                            value: (as_expression
+                                (object)
+                            )
+                        )
+                    ) @definition
+                )
+
+                ; Top-level const with 'satisfies' operator
+                (program
+                    (lexical_declaration
+                        (variable_declarator
+                            name: (identifier) @name
+                            value: (satisfies_expression
+                                (object)
+                            )
+                        )
+                    ) @definition
+                )
+            """
+
+            return base_query + ts_specific
+
+        # Inherit IMPORT and COMMENT from JavaScript
+        return super().get_query_for_concept(concept)
+
+    # extract_name / extract_content are inherited from JavaScriptMapping (via JSFamilyExtraction)
     # extract_metadata is overridden below to handle TypeScript-specific constructs
 
     def extract_metadata(
@@ -203,7 +212,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             # Set proper kind based on node type for ChunkType mapping
             node_type = def_node.type
 
-            if node_type == "class_declaration":
+            if node_type in ("class_declaration", "abstract_class_declaration"):
                 metadata["kind"] = "class"
             elif node_type == "interface_declaration":
                 metadata["kind"] = "interface"
@@ -299,46 +308,6 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         return """
             (comment) @tsdoc
         """
-
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
-        """Extract function name from a TypeScript function definition node.
-
-        Args:
-            node: Tree-sitter function definition node
-            source: Source code string
-
-        Returns:
-            Function name or fallback name if extraction fails
-        """
-        if not TREE_SITTER_AVAILABLE or node is None:
-            return self.get_fallback_name(node, "function")
-
-        try:
-            # Handle different function types
-            if node.type == "function_declaration":
-                name_node = self.find_child_by_type(node, "identifier")
-                if name_node:
-                    return self.get_node_text(name_node, source)
-            elif node.type == "variable_declarator":
-                # Arrow function assigned to variable
-                name_node = self.find_child_by_type(node, "identifier")
-                if name_node:
-                    return self.get_node_text(name_node, source)
-            elif node.type == "method_definition":
-                # Find the method name (can be identifier, string, computed_property_name)
-                for i in range(node.child_count):
-                    child = node.child(i)
-                    if child and child.type in [
-                        "identifier",
-                        "string",
-                        "computed_property_name",
-                    ]:
-                        return self.get_node_text(child, source)
-
-            return self.get_fallback_name(node, "function")
-        except Exception as e:
-            logger.error(f"Failed to extract TypeScript function name: {e}")
-            return self.get_fallback_name(node, "function")
 
     def extract_class_name(self, node: "TSNode | None", source: str) -> str:
         """Extract class name from a TypeScript class definition node.

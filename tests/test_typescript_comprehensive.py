@@ -60,7 +60,7 @@ def test_services(temp_db_dir):
 
 
 @pytest.fixture
-def ts_test_file(tmp_path):
+def ts_test_file(temp_db_dir):
     """Create a comprehensive TypeScript test fixture file."""
     fixture_content = '''// Comprehensive TypeScript test file
 import { useState, useEffect } from 'react';
@@ -99,7 +99,7 @@ const MAX_RETRIES = 3;  // Simple number variable
 const config = { timeout: 5000, retries: MAX_RETRIES };  // Object variable
 '''
 
-    test_file = tmp_path / "test_ts_parsing.ts"
+    test_file = temp_db_dir / "test_ts_parsing.ts"
     test_file.write_text(fixture_content)
     return test_file
 
@@ -763,7 +763,7 @@ function Component() {
         chunks = parser.parse_content(test_content, "test.ts", FileId(1))
 
         # Should find import chunks
-        import_chunks = [c for c in chunks if "import" in c.content.lower()]
+        import_chunks = [c for c in chunks if "import" in c.code.lower()]
         assert len(import_chunks) > 0, "Should extract import statements"
 
     def test_interface_parsed_from_test_content(self):
