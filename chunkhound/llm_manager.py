@@ -8,6 +8,7 @@ from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider
 from chunkhound.providers.llm.openai_llm_provider import OpenAILLMProvider
+from chunkhound.providers.llm.gemini_llm_provider import GeminiLLMProvider
 
 
 class LLMManager:
@@ -23,6 +24,7 @@ class LLMManager:
         "openai": OpenAILLMProvider,
         "claude-code-cli": ClaudeCodeCLIProvider,
         "codex-cli": CodexCLIProvider,
+        "gemini": GeminiLLMProvider,
     }
 
     def __init__(

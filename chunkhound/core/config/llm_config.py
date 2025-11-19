@@ -49,6 +49,7 @@ class LLMConfig(BaseSettings):
         "ollama",
         "claude-code-cli",
         "codex-cli",
+        "gemini",
     ] = Field(
         default="openai",
         description="Default LLM provider for both roles (utility, synthesis)",
@@ -60,6 +61,7 @@ class LLMConfig(BaseSettings):
         "ollama",
         "claude-code-cli",
         "codex-cli",
+        "gemini",
     ] | None = Field(default=None, description="Override provider for utility ops")
 
     synthesis_provider: Literal[
@@ -67,6 +69,7 @@ class LLMConfig(BaseSettings):
         "ollama",
         "claude-code-cli",
         "codex-cli",
+        "gemini",
     ] | None = Field(default=None, description="Override provider for synthesis ops")
 
     # Model Configuration (dual-model architecture)
@@ -214,6 +217,10 @@ class LLMConfig(BaseSettings):
         elif self.provider == "codex-cli":
             # Codex CLI: nominal label; require explicit model if desired
             return ("codex", "codex")
+        elif self.provider == "gemini":
+            # Gemini: Use Gemini 3 Pro for both (advanced reasoning)
+            # Alternative models: gemini-2.5-pro (balanced), gemini-2.5-flash (fast)
+            return ("gemini-3-pro-preview", "gemini-3-pro-preview")
         else:
             return ("gpt-5-nano", "gpt-5")
 
@@ -280,19 +287,19 @@ class LLMConfig(BaseSettings):
 
         parser.add_argument(
             "--llm-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli"],
+            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "gemini"],
             help="Default LLM provider for both roles",
         )
 
         parser.add_argument(
             "--llm-utility-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli"],
+            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "gemini"],
             help="Override LLM provider for utility operations",
         )
 
         parser.add_argument(
             "--llm-synthesis-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli"],
+            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "gemini"],
             help="Override LLM provider for synthesis operations",
         )
 
