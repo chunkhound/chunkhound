@@ -90,9 +90,116 @@ chunkhound/
 - DuckDB (primary) / LanceDB (alternative)
 - Tree-sitter (27 language parsers: Python, JavaScript, TypeScript, JSX, TSX, Java, Kotlin, Groovy, C, C++, C#, Go, Rust, Haskell, Swift, Bash, MATLAB, Makefile, Objective-C, PHP, Vue, Zig, JSON, YAML, TOML, HCL, Markdown)
 - Custom parsers (2 formats: TEXT, PDF)
-- OpenAI/Ollama embeddings
+- OpenAI/Ollama/VoyageAI embeddings
+- Anthropic/OpenAI/Ollama LLMs for deep research
 - MCP protocol (stdio and HTTP)
 - Pydantic (configuration validation)
+
+## LLM_PROVIDERS
+
+ChunkHound supports multiple LLM providers for deep research code analysis with dual-model architecture (utility + synthesis).
+
+### Supported Providers
+
+**1. Anthropic (Native Provider)** - RECOMMENDED for quality
+- Models: Claude 4.5 generation (Sonnet 4.5, Haiku 4.5, Opus 4.1)
+- Extended Thinking: Shows Claude's reasoning process before final response
+- Tool Use: Function calling with JSON schema validation
+- Structured Output: Tool-based (more reliable than prompt engineering)
+- Streaming: Required for outputs > 21,333 tokens
+- Default: Haiku 4.5 (utility), Sonnet 4.5 (synthesis)
+
+**2. OpenAI**
+- Models: GPT-5 series, GPT-4 series
+- Structured Output: Native JSON schema validation
+- Default: GPT-5-Nano (utility), GPT-5 (synthesis)
+
+**3. Ollama** (Local)
+- Models: Any Ollama-compatible model
+- Use case: Local development, privacy-sensitive workloads
+
+**4. Claude Code CLI**
+- Integration with Claude Code editor
+- Uses Claude Haiku 4.5 for both roles
+
+**5. Codex CLI**
+- Configurable reasoning effort (minimal/low/medium/high)
+
+### Anthropic Extended Thinking
+
+**What it is**: Claude shows its reasoning process in separate thinking blocks before generating the final response.
+
+**When to use**:
+- Complex code analysis requiring step-by-step reasoning
+- Mathematical or logical problems
+- Multi-step transformations
+- Architectural decisions
+
+**Configuration**:
+```bash
+export CHUNKHOUND_LLM_PROVIDER="anthropic"
+export CHUNKHOUND_LLM_API_KEY="sk-ant-api03-..."
+export CHUNKHOUND_LLM_ANTHROPIC_THINKING_ENABLED="true"
+export CHUNKHOUND_LLM_ANTHROPIC_THINKING_BUDGET_TOKENS="10000"  # Min: 1024
+```
+
+**Supported Models**:
+- claude-sonnet-4-5-20250929: Smartest model for complex agents and coding
+- claude-haiku-4-5-20251001: Fastest model with near-frontier intelligence
+- claude-opus-4-1-20250805: Exceptional model for specialized reasoning
+
+**Important**: `max_tokens` must be greater than `thinking.budget_tokens`. The provider automatically adjusts if needed.
+
+**Token Billing**: Billed for FULL thinking tokens (not just the summary shown in response).
+
+### Configuration Examples
+
+**Anthropic with Extended Thinking**:
+```bash
+export CHUNKHOUND_LLM_PROVIDER="anthropic"
+export CHUNKHOUND_LLM_API_KEY="$ANTHROPIC_API_KEY"
+export CHUNKHOUND_LLM_ANTHROPIC_THINKING_ENABLED="true"
+export CHUNKHOUND_LLM_ANTHROPIC_THINKING_BUDGET_TOKENS="10000"
+export CHUNKHOUND_LLM_UTILITY_MODEL="claude-haiku-4-5-20251001"
+export CHUNKHOUND_LLM_SYNTHESIS_MODEL="claude-sonnet-4-5-20250929"
+```
+
+**OpenAI**:
+```bash
+export CHUNKHOUND_LLM_PROVIDER="openai"
+export CHUNKHOUND_LLM_API_KEY="$OPENAI_API_KEY"
+export CHUNKHOUND_LLM_UTILITY_MODEL="gpt-5-nano"
+export CHUNKHOUND_LLM_SYNTHESIS_MODEL="gpt-5"
+```
+
+**Ollama (Local)**:
+```bash
+export CHUNKHOUND_LLM_PROVIDER="ollama"
+export CHUNKHOUND_LLM_BASE_URL="http://localhost:11434/v1"
+export CHUNKHOUND_LLM_UTILITY_MODEL="llama3.2"
+export CHUNKHOUND_LLM_SYNTHESIS_MODEL="llama3.2"
+```
+
+### Provider-Specific Features
+
+| Feature | Anthropic | OpenAI | Ollama |
+|---------|-----------|--------|--------|
+| Extended Thinking | ✅ (native) | ❌ | ❌ |
+| Structured Output | ✅ (tool-based) | ✅ (native) | ⚠️ (limited) |
+| Tool Use | ✅ | ✅ | ⚠️ (limited) |
+| Streaming | ✅ | ✅ | ✅ |
+| Custom Endpoint | ✅ | ✅ | ✅ |
+
+### Testing LLM Providers
+
+```bash
+# Manual integration test (all features)
+source ~/.env.private
+uv run python tests/manual/test_anthropic_thinking.py
+
+# Unit tests
+uv run pytest tests/test_anthropic_provider.py -v
+```
 
 ## RERANKING_SUPPORT
 

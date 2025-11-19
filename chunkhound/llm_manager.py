@@ -5,6 +5,7 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.interfaces.llm_provider import LLMProvider
+from chunkhound.providers.llm.anthropic_llm_provider import AnthropicLLMProvider
 from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider
 from chunkhound.providers.llm.openai_llm_provider import OpenAILLMProvider
@@ -21,6 +22,7 @@ class LLMManager:
     # Registry of available providers
     _providers: dict[str, type[LLMProvider] | Any] = {
         "openai": OpenAILLMProvider,
+        "anthropic": AnthropicLLMProvider,
         "claude-code-cli": ClaudeCodeCLIProvider,
         "codex-cli": CodexCLIProvider,
     }
@@ -76,10 +78,18 @@ class LLMManager:
                 "max_retries": config.get("max_retries", 3),
             }
 
+            # Provider-specific configuration
             if provider_name == "codex-cli":
                 effort = config.get("reasoning_effort")
                 if effort:
                     provider_kwargs["reasoning_effort"] = effort
+            elif provider_name == "anthropic":
+                # Add Anthropic thinking configuration
+                thinking_enabled = config.get("thinking_enabled", False)
+                thinking_budget = config.get("thinking_budget_tokens", 10000)
+                provider_kwargs["thinking_enabled"] = thinking_enabled
+                provider_kwargs["thinking_budget_tokens"] = thinking_budget
+
             provider = provider_class(**provider_kwargs)
             return provider
         except Exception as e:

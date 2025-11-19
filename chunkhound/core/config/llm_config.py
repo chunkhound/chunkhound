@@ -49,6 +49,7 @@ class LLMConfig(BaseSettings):
         "ollama",
         "claude-code-cli",
         "codex-cli",
+        "anthropic",
     ] = Field(
         default="openai",
         description="Default LLM provider for both roles (utility, synthesis)",
@@ -60,6 +61,7 @@ class LLMConfig(BaseSettings):
         "ollama",
         "claude-code-cli",
         "codex-cli",
+        "anthropic",
     ] | None = Field(default=None, description="Override provider for utility ops")
 
     synthesis_provider: Literal[
@@ -67,6 +69,7 @@ class LLMConfig(BaseSettings):
         "ollama",
         "claude-code-cli",
         "codex-cli",
+        "anthropic",
     ] | None = Field(default=None, description="Override provider for synthesis ops")
 
     # Model Configuration (dual-model architecture)
@@ -91,6 +94,18 @@ class LLMConfig(BaseSettings):
     codex_reasoning_effort_synthesis: Literal["minimal", "low", "medium", "high"] | None = Field(
         default=None,
         description="Codex CLI reasoning effort override for synthesis-stage operations",
+    )
+
+    # Anthropic Extended Thinking Configuration
+    anthropic_thinking_enabled: bool = Field(
+        default=False,
+        description="Enable Anthropic extended thinking (shows Claude's reasoning process)",
+    )
+
+    anthropic_thinking_budget_tokens: int = Field(
+        default=10000,
+        ge=1024,
+        description="Token budget for Anthropic thinking (min 1024, recommend 10000)",
     )
 
     api_key: SecretStr | None = Field(
@@ -191,6 +206,15 @@ class LLMConfig(BaseSettings):
         if resolved_synthesis_provider == "codex-cli" and synthesis_effort:
             synthesis_config["reasoning_effort"] = synthesis_effort
 
+        # Add Anthropic thinking configuration
+        if resolved_utility_provider == "anthropic":
+            utility_config["thinking_enabled"] = self.anthropic_thinking_enabled
+            utility_config["thinking_budget_tokens"] = self.anthropic_thinking_budget_tokens
+
+        if resolved_synthesis_provider == "anthropic":
+            synthesis_config["thinking_enabled"] = self.anthropic_thinking_enabled
+            synthesis_config["thinking_budget_tokens"] = self.anthropic_thinking_budget_tokens
+
         return utility_config, synthesis_config
 
     def get_default_models(self) -> tuple[str, str]:
@@ -213,6 +237,13 @@ class LLMConfig(BaseSettings):
         elif self.provider == "codex-cli":
             # Codex CLI: nominal label; require explicit model if desired
             return ("codex", "codex")
+        elif self.provider == "anthropic":
+            # Anthropic: Haiku 4.5 for utility (fast/cheap), Sonnet 4.5 for synthesis (powerful)
+            # Claude 4.5 generation models:
+            # - claude-haiku-4-5-20251001: Fastest model with near-frontier intelligence
+            # - claude-sonnet-4-5-20250929: Smartest model for complex agents and coding
+            # - claude-opus-4-1-20250805: Exceptional model for specialized reasoning
+            return ("claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929")
         else:
             return ("gpt-5-nano", "gpt-5")
 
@@ -279,19 +310,19 @@ class LLMConfig(BaseSettings):
 
         parser.add_argument(
             "--llm-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli"],
+            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic"],
             help="Default LLM provider for both roles",
         )
 
         parser.add_argument(
             "--llm-utility-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli"],
+            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic"],
             help="Override LLM provider for utility operations",
         )
 
         parser.add_argument(
             "--llm-synthesis-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli"],
+            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic"],
             help="Override LLM provider for synthesis operations",
         )
 
