@@ -12,13 +12,28 @@ import pytest
 from pathlib import Path
 
 from chunkhound.core.types.common import ChunkType, FileId, Language
-from chunkhound.parsers.parser_factory import ParserFactory, get_parser_factory
+from chunkhound.parsers.parser_factory import ParserFactory
+from chunkhound.parsers.vue_parser import VueParser
 
 
 @pytest.fixture
 def parser_factory():
     """Create a parser factory instance."""
     return ParserFactory()
+
+
+def _parse_vue(code: str, filename: str = "test.vue"):
+    """Helper to parse Vue SFC code.
+
+    Args:
+        code: Vue SFC content
+        filename: Filename for the parsed content
+
+    Returns:
+        List of parsed chunks
+    """
+    parser = VueParser()
+    return parser.parse_content(code, Path(filename), file_id=FileId(1))
 
 
 # =============================================================================
@@ -29,16 +44,13 @@ def parser_factory():
 class TestVueCompilerMacros:
     """Test Vue 3 compiler macros in script setup.
 
-    NOTE: Vue compiler macros are typically const assignments which the
-    current parser doesn't extract as separate chunks. These tests document
-    the expected behavior for future enhancement.
+    These tests verify the desired extraction behavior for Vue compiler macros.
+    The parser should extract variables (props, emit, etc.) and functions from
+    script setup sections with appropriate metadata.
     """
 
-    @pytest.mark.xfail(reason="Vue parser does not extract const assignments with macros")
-    def test_with_defaults_macro(self, parser_factory):
+    def test_with_defaults_macro(self):
         """Test withDefaults macro for props."""
-        parser = parser_factory.create_parser(Language.VUE)
-
         code = """<script setup lang="ts">
 interface Props {
     msg?: string;
@@ -57,23 +69,38 @@ const props = withDefaults(defineProps<Props>(), {
     <div>{{ props.msg }} - {{ props.count }}</div>
 </template>
 """
-        chunks = parser.parse_content(code, "WithDefaults.vue", FileId(1))
+        chunks = _parse_vue(code, "WithDefaults.vue")
 
-        assert len(chunks) > 0, "Should extract at least one chunk"
-        # Should find the interface
+        # Verify Props interface extracted
         interface_chunks = [c for c in chunks if c.chunk_type == ChunkType.INTERFACE]
-        assert len(interface_chunks) > 0, "Should extract Props interface"
+        assert len(interface_chunks) == 1, "Should extract exactly one Props interface"
+        assert interface_chunks[0].symbol == "Props", "Interface should be named Props"
+        assert "msg?: string" in interface_chunks[0].code, "Interface should contain msg property"
 
-        # Verify withDefaults macro content is present
-        all_code = " ".join([c.code for c in chunks])
-        assert "withDefaults" in all_code or "defineProps" in all_code, \
-            "Should capture withDefaults or defineProps macro"
+        # Verify props variable extracted
+        variable_chunks = [c for c in chunks if c.chunk_type == ChunkType.VARIABLE]
+        props_chunks = [c for c in variable_chunks if c.symbol == "props"]
+        assert len(props_chunks) == 1, "Should extract props variable"
+        assert "withDefaults" in props_chunks[0].code, "props should contain withDefaults"
+        assert "defineProps" in props_chunks[0].code, "props should contain defineProps"
 
-    @pytest.mark.xfail(reason="Vue parser does not extract const assignments with macros")
-    def test_define_model_macro(self, parser_factory):
+        # Verify Vue metadata
+        script_chunks = [c for c in chunks if c.metadata.get("vue_section") == "script"]
+        assert len(script_chunks) > 0, "Should have script chunks"
+        assert all(c.metadata.get("vue_script_setup") for c in script_chunks), \
+            "All script chunks should be marked as setup"
+        assert all(c.metadata.get("vue_script_lang") == "ts" for c in script_chunks), \
+            "All script chunks should have lang=ts"
+
+        # Verify macros detected in metadata
+        macros_found = set()
+        for c in script_chunks:
+            macros_found.update(c.metadata.get("vue_macros", []))
+        assert "defineProps" in macros_found, "defineProps should be in detected macros"
+        assert "withDefaults" in macros_found, "withDefaults should be in detected macros"
+
+    def test_define_model_macro(self):
         """Test defineModel macro for v-model support."""
-        parser = parser_factory.create_parser(Language.VUE)
-
         code = """<script setup>
 const modelValue = defineModel()
 const count = defineModel('count', { type: Number, default: 0 })
@@ -84,18 +111,35 @@ const count = defineModel('count', { type: Number, default: 0 })
     <input v-model="count" type="number" />
 </template>
 """
-        chunks = parser.parse_content(code, "DefineModel.vue", FileId(1))
+        chunks = _parse_vue(code, "DefineModel.vue")
 
-        assert len(chunks) > 0, "Should extract at least one chunk"
-        # Verify defineModel is present in content
-        all_code = " ".join([c.code for c in chunks])
-        assert "defineModel" in all_code, "Should capture defineModel macro"
+        # Verify both model variables extracted
+        variable_chunks = [c for c in chunks if c.chunk_type == ChunkType.VARIABLE]
 
-    @pytest.mark.xfail(reason="Vue parser does not extract const assignments with macros")
-    def test_define_slots_macro(self, parser_factory):
+        model_value_chunks = [c for c in variable_chunks if c.symbol == "modelValue"]
+        assert len(model_value_chunks) == 1, "Should extract modelValue variable"
+        assert "defineModel()" in model_value_chunks[0].code, \
+            "modelValue should contain defineModel()"
+
+        count_chunks = [c for c in variable_chunks if c.symbol == "count"]
+        assert len(count_chunks) == 1, "Should extract count variable"
+        assert "defineModel('count'" in count_chunks[0].code, \
+            "count should contain defineModel with name"
+
+        # Verify Vue metadata
+        script_chunks = [c for c in chunks if c.metadata.get("vue_section") == "script"]
+        assert len(script_chunks) > 0, "Should have script chunks"
+        assert all(c.metadata.get("vue_script_setup") for c in script_chunks), \
+            "All script chunks should be marked as setup"
+
+        # Verify macros detected
+        macros_found = set()
+        for c in script_chunks:
+            macros_found.update(c.metadata.get("vue_macros", []))
+        assert "defineModel" in macros_found, "defineModel should be in detected macros"
+
+    def test_define_slots_macro(self):
         """Test defineSlots macro with TypeScript."""
-        parser = parser_factory.create_parser(Language.VUE)
-
         code = """<script setup lang="ts">
 const slots = defineSlots<{
     default: () => any;
@@ -112,18 +156,29 @@ const slots = defineSlots<{
     </div>
 </template>
 """
-        chunks = parser.parse_content(code, "DefineSlots.vue", FileId(1))
+        chunks = _parse_vue(code, "DefineSlots.vue")
 
-        assert len(chunks) > 0, "Should extract at least one chunk"
-        # Verify defineSlots is present
-        all_code = " ".join([c.code for c in chunks])
-        assert "defineSlots" in all_code, "Should capture defineSlots macro"
+        # Verify slots variable extracted
+        variable_chunks = [c for c in chunks if c.chunk_type == ChunkType.VARIABLE]
+        slots_chunks = [c for c in variable_chunks if c.symbol == "slots"]
+        assert len(slots_chunks) == 1, "Should extract slots variable"
+        assert "defineSlots" in slots_chunks[0].code, "slots should contain defineSlots"
+        assert "header:" in slots_chunks[0].code, "slots should contain header slot type"
+        assert "footer:" in slots_chunks[0].code, "slots should contain footer slot type"
 
-    @pytest.mark.xfail(reason="Vue parser does not extract top-level macro calls")
-    def test_define_options_macro(self, parser_factory):
+        # Verify Vue metadata
+        script_chunks = [c for c in chunks if c.metadata.get("vue_section") == "script"]
+        assert all(c.metadata.get("vue_script_lang") == "ts" for c in script_chunks), \
+            "All script chunks should have lang=ts"
+
+        # Verify macros detected
+        macros_found = set()
+        for c in script_chunks:
+            macros_found.update(c.metadata.get("vue_macros", []))
+        assert "defineSlots" in macros_found, "defineSlots should be in detected macros"
+
+    def test_define_options_macro(self):
         """Test defineOptions macro for component options."""
-        parser = parser_factory.create_parser(Language.VUE)
-
         code = """<script setup>
 defineOptions({
     name: 'MyCustomComponent',
@@ -140,18 +195,26 @@ const message = 'Hello'
     <div v-bind="$attrs">{{ message }}</div>
 </template>
 """
-        chunks = parser.parse_content(code, "DefineOptions.vue", FileId(1))
+        chunks = _parse_vue(code, "DefineOptions.vue")
 
-        assert len(chunks) > 0, "Should extract at least one chunk"
-        # Verify defineOptions is present
-        all_code = " ".join([c.code for c in chunks])
-        assert "defineOptions" in all_code, "Should capture defineOptions macro"
+        # Verify message variable extracted
+        variable_chunks = [c for c in chunks if c.chunk_type == ChunkType.VARIABLE]
+        message_chunks = [c for c in variable_chunks if c.symbol == "message"]
+        assert len(message_chunks) == 1, "Should extract message variable"
+        assert "'Hello'" in message_chunks[0].code, "message should contain 'Hello'"
 
-    @pytest.mark.xfail(reason="Vue parser does not extract const assignments with macros")
-    def test_define_props_runtime(self, parser_factory):
+        # Verify Vue metadata
+        script_chunks = [c for c in chunks if c.metadata.get("vue_section") == "script"]
+        assert len(script_chunks) > 0, "Should have script chunks"
+
+        # Verify defineOptions detected in macros
+        macros_found = set()
+        for c in script_chunks:
+            macros_found.update(c.metadata.get("vue_macros", []))
+        assert "defineOptions" in macros_found, "defineOptions should be in detected macros"
+
+    def test_define_props_runtime(self):
         """Test defineProps with runtime declaration."""
-        parser = parser_factory.create_parser(Language.VUE)
-
         code = """<script setup>
 const props = defineProps({
     title: {
@@ -176,17 +239,29 @@ const props = defineProps({
     </div>
 </template>
 """
-        chunks = parser.parse_content(code, "DefinePropsRuntime.vue", FileId(1))
+        chunks = _parse_vue(code, "DefinePropsRuntime.vue")
 
-        assert len(chunks) > 0, "Should extract at least one chunk"
-        all_code = " ".join([c.code for c in chunks])
-        assert "defineProps" in all_code, "Should capture defineProps"
+        # Verify props variable extracted
+        variable_chunks = [c for c in chunks if c.chunk_type == ChunkType.VARIABLE]
+        props_chunks = [c for c in variable_chunks if c.symbol == "props"]
+        assert len(props_chunks) == 1, "Should extract props variable"
+        assert "defineProps" in props_chunks[0].code, "props should contain defineProps"
+        assert "title:" in props_chunks[0].code, "props should contain title property"
+        assert "required: true" in props_chunks[0].code, "props should contain required validation"
 
-    @pytest.mark.xfail(reason="Vue parser does not extract const assignments with macros")
-    def test_define_emits_with_validation(self, parser_factory):
+        # Verify Vue metadata
+        script_chunks = [c for c in chunks if c.metadata.get("vue_section") == "script"]
+        assert all(c.metadata.get("vue_script_setup") for c in script_chunks), \
+            "All script chunks should be marked as setup"
+
+        # Verify macros detected
+        macros_found = set()
+        for c in script_chunks:
+            macros_found.update(c.metadata.get("vue_macros", []))
+        assert "defineProps" in macros_found, "defineProps should be in detected macros"
+
+    def test_define_emits_with_validation(self):
         """Test defineEmits with validation functions."""
-        parser = parser_factory.create_parser(Language.VUE)
-
         code = """<script setup>
 const emit = defineEmits({
     submit: (payload) => {
@@ -208,17 +283,31 @@ function handleSubmit() {
     </form>
 </template>
 """
-        chunks = parser.parse_content(code, "DefineEmitsValidation.vue", FileId(1))
+        chunks = _parse_vue(code, "DefineEmitsValidation.vue")
 
-        assert len(chunks) > 0, "Should extract at least one chunk"
-        all_code = " ".join([c.code for c in chunks])
-        assert "defineEmits" in all_code, "Should capture defineEmits"
+        # Verify emit variable extracted
+        variable_chunks = [c for c in chunks if c.chunk_type == ChunkType.VARIABLE]
+        emit_chunks = [c for c in variable_chunks if c.symbol == "emit"]
+        assert len(emit_chunks) == 1, "Should extract emit variable"
+        assert "defineEmits" in emit_chunks[0].code, "emit should contain defineEmits"
+        assert "submit:" in emit_chunks[0].code, "emit should contain submit event"
 
-    @pytest.mark.xfail(reason="Vue parser does not extract top-level macro calls")
-    def test_define_expose_macro(self, parser_factory):
+        # Verify handleSubmit function extracted
+        function_chunks = [c for c in chunks if c.chunk_type == ChunkType.FUNCTION]
+        handle_submit_chunks = [c for c in function_chunks if c.symbol == "handleSubmit"]
+        assert len(handle_submit_chunks) == 1, "Should extract handleSubmit function"
+        assert "emit('submit'" in handle_submit_chunks[0].code, \
+            "handleSubmit should call emit with submit"
+
+        # Verify Vue metadata
+        script_chunks = [c for c in chunks if c.metadata.get("vue_section") == "script"]
+        macros_found = set()
+        for c in script_chunks:
+            macros_found.update(c.metadata.get("vue_macros", []))
+        assert "defineEmits" in macros_found, "defineEmits should be in detected macros"
+
+    def test_define_expose_macro(self):
         """Test defineExpose macro."""
-        parser = parser_factory.create_parser(Language.VUE)
-
         code = """<script setup>
 import { ref } from 'vue'
 
@@ -246,11 +335,37 @@ defineExpose({
     <div>{{ message }} - {{ count }}</div>
 </template>
 """
-        chunks = parser.parse_content(code, "DefineExpose.vue", FileId(1))
+        chunks = _parse_vue(code, "DefineExpose.vue")
 
-        assert len(chunks) > 0, "Should extract at least one chunk"
-        all_code = " ".join([c.code for c in chunks])
-        assert "defineExpose" in all_code, "Should capture defineExpose"
+        # Verify ref variables extracted
+        variable_chunks = [c for c in chunks if c.chunk_type == ChunkType.VARIABLE]
+
+        count_chunks = [c for c in variable_chunks if c.symbol == "count"]
+        assert len(count_chunks) == 1, "Should extract count variable"
+        assert "ref(0)" in count_chunks[0].code, "count should contain ref(0)"
+
+        message_chunks = [c for c in variable_chunks if c.symbol == "message"]
+        assert len(message_chunks) == 1, "Should extract message variable"
+        assert "ref('Hello')" in message_chunks[0].code, "message should contain ref('Hello')"
+
+        # Verify functions extracted
+        function_chunks = [c for c in chunks if c.chunk_type == ChunkType.FUNCTION]
+
+        increment_chunks = [c for c in function_chunks if c.symbol == "increment"]
+        assert len(increment_chunks) == 1, "Should extract increment function"
+        assert "count.value++" in increment_chunks[0].code, \
+            "increment should modify count.value"
+
+        reset_chunks = [c for c in function_chunks if c.symbol == "reset"]
+        assert len(reset_chunks) == 1, "Should extract reset function"
+        assert "count.value = 0" in reset_chunks[0].code, "reset should set count to 0"
+
+        # Verify Vue metadata
+        script_chunks = [c for c in chunks if c.metadata.get("vue_section") == "script"]
+        macros_found = set()
+        for c in script_chunks:
+            macros_found.update(c.metadata.get("vue_macros", []))
+        assert "defineExpose" in macros_found, "defineExpose should be in detected macros"
 
 
 # =============================================================================
@@ -259,12 +374,15 @@ defineExpose({
 
 
 class TestVueOptionsAPILifecycle:
-    """Test Vue Options API lifecycle hooks."""
+    """Test Vue Options API lifecycle hooks.
 
-    def test_options_api_lifecycle_hooks(self, parser_factory):
+    These tests verify that the parser correctly extracts Options API
+    components including lifecycle hooks, methods, computed properties,
+    and watchers.
+    """
+
+    def test_options_api_lifecycle_hooks(self):
         """Test Options API with lifecycle hooks."""
-        parser = parser_factory.create_parser(Language.VUE)
-
         code = """<script>
 export default {
     name: 'LifecycleComponent',
@@ -304,18 +422,33 @@ export default {
     <div>{{ message }}</div>
 </template>
 """
-        chunks = parser.parse_content(code, "LifecycleComponent.vue", FileId(1))
+        chunks = _parse_vue(code, "LifecycleComponent.vue")
 
-        assert len(chunks) > 0, "Should extract at least one chunk"
-        # Should capture the export default object
-        all_code = " ".join([c.code for c in chunks])
-        assert "export default" in all_code or "created" in all_code, \
-            "Should capture Options API component"
+        # Verify script chunks exist
+        script_chunks = [c for c in chunks if c.metadata.get("vue_section") == "script"]
+        assert len(script_chunks) > 0, "Should have script chunks"
 
-    def test_options_api_computed_watch(self, parser_factory):
+        # Verify the script contains lifecycle hooks
+        script_code = " ".join([c.code for c in script_chunks])
+        assert "export default" in script_code, "Should contain export default"
+        assert "created()" in script_code or "created:" in script_code, \
+            "Should contain created lifecycle hook"
+        assert "mounted()" in script_code or "mounted:" in script_code, \
+            "Should contain mounted lifecycle hook"
+        assert "beforeUnmount()" in script_code or "beforeUnmount:" in script_code, \
+            "Should contain beforeUnmount lifecycle hook"
+
+        # Verify methods are present
+        assert "fetchData" in script_code, "Should contain fetchData method"
+        assert "setupEventListeners" in script_code, "Should contain setupEventListeners method"
+        assert "cleanup" in script_code, "Should contain cleanup method"
+
+        # Options API should NOT be marked as script setup
+        assert not any(c.metadata.get("vue_script_setup") for c in script_chunks), \
+            "Options API should not be marked as setup"
+
+    def test_options_api_computed_watch(self):
         """Test Options API computed properties and watchers."""
-        parser = parser_factory.create_parser(Language.VUE)
-
         code = """<script>
 export default {
     data() {
@@ -354,17 +487,31 @@ export default {
     </div>
 </template>
 """
-        chunks = parser.parse_content(code, "ComputedWatch.vue", FileId(1))
+        chunks = _parse_vue(code, "ComputedWatch.vue")
 
-        assert len(chunks) > 0, "Should extract at least one chunk"
-        all_code = " ".join([c.code for c in chunks])
-        assert "computed" in all_code or "watch" in all_code, \
-            "Should capture computed/watch properties"
+        # Verify script chunks exist
+        script_chunks = [c for c in chunks if c.metadata.get("vue_section") == "script"]
+        assert len(script_chunks) > 0, "Should have script chunks"
 
-    def test_options_api_mixins(self, parser_factory):
+        # Verify computed properties are present
+        script_code = " ".join([c.code for c in script_chunks])
+        assert "computed:" in script_code or "computed" in script_code, \
+            "Should contain computed section"
+        assert "fullName" in script_code, "Should contain fullName computed property"
+        assert "itemCount" in script_code, "Should contain itemCount computed property"
+
+        # Verify watchers are present
+        assert "watch:" in script_code or "watch" in script_code, \
+            "Should contain watch section"
+        assert "firstName" in script_code, "Should contain firstName watcher"
+        assert "deep: true" in script_code, "Should contain deep watcher option"
+
+        # Verify data function
+        assert "data()" in script_code or "data:" in script_code, \
+            "Should contain data function"
+
+    def test_options_api_mixins(self):
         """Test Options API with mixins."""
-        parser = parser_factory.create_parser(Language.VUE)
-
         code = """<script>
 import { loggingMixin, validationMixin } from './mixins'
 
@@ -391,9 +538,22 @@ export default {
     </form>
 </template>
 """
-        chunks = parser.parse_content(code, "MixinsComponent.vue", FileId(1))
+        chunks = _parse_vue(code, "MixinsComponent.vue")
 
-        assert len(chunks) > 0, "Should extract at least one chunk"
+        # Verify script chunks exist
+        script_chunks = [c for c in chunks if c.metadata.get("vue_section") == "script"]
+        assert len(script_chunks) > 0, "Should have script chunks"
+
+        # Verify imports and content are present
+        script_code = " ".join([c.code for c in script_chunks])
+        assert "loggingMixin" in script_code, "Should contain loggingMixin import"
+        assert "validationMixin" in script_code, "Should contain validationMixin import"
+
+        # Verify mixins and methods are present
+        assert "mixins:" in script_code or "mixins" in script_code, \
+            "Should contain mixins section"
+        assert "submit()" in script_code or "submit:" in script_code, \
+            "Should contain submit method"
 
 
 # =============================================================================
@@ -402,12 +562,15 @@ export default {
 
 
 class TestVueCompositionAPIAdvanced:
-    """Test advanced Composition API patterns."""
+    """Test advanced Composition API patterns.
 
-    def test_composable_with_typescript(self, parser_factory):
+    These tests verify that the parser correctly extracts interfaces,
+    functions, and variables from advanced Composition API patterns
+    including composables, provide/inject, and reactivity transforms.
+    """
+
+    def test_composable_with_typescript(self):
         """Test composable function with TypeScript."""
-        parser = parser_factory.create_parser(Language.VUE)
-
         code = """<script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 
@@ -452,17 +615,46 @@ const { user, loading, error } = useUser(1)
     <div v-else>{{ user?.name }}</div>
 </template>
 """
-        chunks = parser.parse_content(code, "ComposableTS.vue", FileId(1))
+        chunks = _parse_vue(code, "ComposableTS.vue")
 
-        assert len(chunks) > 0, "Should extract at least one chunk"
-        # Should find interface and functions
+        # Verify User interface extracted
         interface_chunks = [c for c in chunks if c.chunk_type == ChunkType.INTERFACE]
-        assert len(interface_chunks) > 0, "Should extract User interface"
+        assert len(interface_chunks) == 1, "Should extract exactly one User interface"
+        assert interface_chunks[0].symbol == "User", "Interface should be named User"
+        assert "id: number" in interface_chunks[0].code, "Interface should contain id property"
+        assert "email: string" in interface_chunks[0].code, "Interface should contain email property"
 
-    def test_provide_inject_typed(self, parser_factory):
+        # Verify useUser composable function extracted
+        function_chunks = [c for c in chunks if c.chunk_type == ChunkType.FUNCTION]
+        use_user_chunks = [c for c in function_chunks if c.symbol == "useUser"]
+        assert len(use_user_chunks) == 1, "Should extract useUser composable function"
+        assert "userId: number" in use_user_chunks[0].code, \
+            "useUser should have typed parameter"
+        assert "return { user, loading, error" in use_user_chunks[0].code, \
+            "useUser should return composable state"
+
+        # Verify script chunks contain imports
+        script_chunks = [c for c in chunks if c.metadata.get("vue_section") == "script"]
+        script_code = " ".join([c.code for c in script_chunks])
+        assert "ref" in script_code, "Should import ref"
+        assert "computed" in script_code, "Should import computed"
+        assert "onMounted" in script_code, "Should import onMounted"
+
+        # Verify Vue metadata
+        script_chunks = [c for c in chunks if c.metadata.get("vue_section") == "script"]
+        assert all(c.metadata.get("vue_script_setup") for c in script_chunks), \
+            "All script chunks should be marked as setup"
+        assert all(c.metadata.get("vue_script_lang") == "ts" for c in script_chunks), \
+            "All script chunks should have lang=ts"
+
+        # Verify composables detected in metadata
+        composables_found = set()
+        for c in script_chunks:
+            composables_found.update(c.metadata.get("vue_composables", []))
+        assert "useUser" in composables_found, "useUser should be in detected composables"
+
+    def test_provide_inject_typed(self):
         """Test provide/inject with TypeScript types."""
-        parser = parser_factory.create_parser(Language.VUE)
-
         code = """<script setup lang="ts">
 import { provide, inject, ref, InjectionKey } from 'vue'
 
@@ -491,16 +683,30 @@ provide(configKey, config.value)
     </div>
 </template>
 """
-        chunks = parser.parse_content(code, "ProvideInject.vue", FileId(1))
+        chunks = _parse_vue(code, "ProvideInject.vue")
 
-        assert len(chunks) > 0, "Should extract at least one chunk"
+        # Verify AppConfig interface extracted
         interface_chunks = [c for c in chunks if c.chunk_type == ChunkType.INTERFACE]
-        assert len(interface_chunks) > 0, "Should extract AppConfig interface"
+        assert len(interface_chunks) == 1, "Should extract exactly one AppConfig interface"
+        assert interface_chunks[0].symbol == "AppConfig", "Interface should be named AppConfig"
+        assert "theme: string" in interface_chunks[0].code, \
+            "Interface should contain theme property"
+        assert "apiUrl: string" in interface_chunks[0].code, \
+            "Interface should contain apiUrl property"
 
-    def test_reactive_transform(self, parser_factory):
+        # Verify script chunks contain imports
+        script_chunks = [c for c in chunks if c.metadata.get("vue_section") == "script"]
+        script_code = " ".join([c.code for c in script_chunks])
+        assert "provide" in script_code, "Should import provide"
+        assert "inject" in script_code, "Should import inject"
+        assert "InjectionKey" in script_code, "Should import InjectionKey"
+
+        # Verify Vue metadata
+        assert all(c.metadata.get("vue_script_lang") == "ts" for c in script_chunks), \
+            "All script chunks should have lang=ts"
+
+    def test_reactive_transform(self):
         """Test Vue reactivity transform patterns."""
-        parser = parser_factory.create_parser(Language.VUE)
-
         code = """<script setup lang="ts">
 import { reactive, toRefs } from 'vue'
 
@@ -536,11 +742,44 @@ function addItem(item: string) {
     </div>
 </template>
 """
-        chunks = parser.parse_content(code, "ReactiveTransform.vue", FileId(1))
+        chunks = _parse_vue(code, "ReactiveTransform.vue")
 
-        assert len(chunks) > 0, "Should extract at least one chunk"
+        # Verify State interface extracted
         interface_chunks = [c for c in chunks if c.chunk_type == ChunkType.INTERFACE]
-        assert len(interface_chunks) > 0, "Should extract State interface"
+        assert len(interface_chunks) == 1, "Should extract exactly one State interface"
+        assert interface_chunks[0].symbol == "State", "Interface should be named State"
+        assert "count: number" in interface_chunks[0].code, \
+            "Interface should contain count property"
+
+        # Verify state variable extracted
+        variable_chunks = [c for c in chunks if c.chunk_type == ChunkType.VARIABLE]
+        state_chunks = [c for c in variable_chunks if c.symbol == "state"]
+        assert len(state_chunks) == 1, "Should extract state variable"
+        assert "reactive<State>" in state_chunks[0].code, \
+            "state should contain reactive<State>"
+
+        # Verify functions extracted
+        function_chunks = [c for c in chunks if c.chunk_type == ChunkType.FUNCTION]
+
+        increment_chunks = [c for c in function_chunks if c.symbol == "increment"]
+        assert len(increment_chunks) == 1, "Should extract increment function"
+        assert "count.value++" in increment_chunks[0].code, \
+            "increment should modify count.value"
+
+        add_item_chunks = [c for c in function_chunks if c.symbol == "addItem"]
+        assert len(add_item_chunks) == 1, "Should extract addItem function"
+        assert "item: string" in add_item_chunks[0].code, \
+            "addItem should have typed parameter"
+
+        # Verify script chunks contain imports
+        script_chunks = [c for c in chunks if c.metadata.get("vue_section") == "script"]
+        script_code = " ".join([c.code for c in script_chunks])
+        assert "reactive" in script_code, "Should import reactive"
+        assert "toRefs" in script_code, "Should import toRefs"
+
+        # Verify Vue metadata
+        assert all(c.metadata.get("vue_script_lang") == "ts" for c in script_chunks), \
+            "All script chunks should have lang=ts"
 
 
 # =============================================================================
@@ -549,12 +788,14 @@ function addItem(item: string) {
 
 
 class TestVueEdgeCases:
-    """Test edge cases in Vue SFC parsing."""
+    """Test edge cases in Vue SFC parsing.
 
-    def test_multiple_script_blocks(self, parser_factory):
+    These tests verify that the parser correctly handles edge cases
+    like multiple script blocks, empty scripts, and type-only imports.
+    """
+
+    def test_multiple_script_blocks(self):
         """Test SFC with both script and script setup."""
-        parser = parser_factory.create_parser(Language.VUE)
-
         code = """<script>
 export default {
     name: 'HybridComponent',
@@ -579,14 +820,38 @@ function increment() {
     </div>
 </template>
 """
-        chunks = parser.parse_content(code, "HybridComponent.vue", FileId(1))
+        chunks = _parse_vue(code, "HybridComponent.vue")
 
-        assert len(chunks) > 0, "Should extract at least one chunk"
+        # Verify we have script chunks
+        script_chunks = [c for c in chunks if c.metadata.get("vue_section") == "script"]
+        assert len(script_chunks) > 0, "Should have script chunks"
 
-    def test_empty_script_setup(self, parser_factory):
+        # Verify content from regular script
+        non_setup_chunks = [c for c in script_chunks if not c.metadata.get("vue_script_setup")]
+        if non_setup_chunks:
+            non_setup_code = " ".join([c.code for c in non_setup_chunks])
+            assert "HybridComponent" in non_setup_code or "export default" in non_setup_code, \
+                "Non-setup script should contain component definition"
+
+        # Verify content from script setup
+        setup_chunks = [c for c in script_chunks if c.metadata.get("vue_script_setup")]
+        if setup_chunks:
+            setup_code = " ".join([c.code for c in setup_chunks])
+            assert "ref" in setup_code, "Setup script should import ref"
+
+        # Verify function from script setup
+        function_chunks = [c for c in chunks if c.chunk_type == ChunkType.FUNCTION]
+        increment_chunks = [c for c in function_chunks if c.symbol == "increment"]
+        assert len(increment_chunks) == 1, "Should extract increment function"
+        assert "count.value++" in increment_chunks[0].code, \
+            "increment should modify count.value"
+
+        # Verify we have both setup and non-setup script chunks
+        assert len(setup_chunks) > 0, "Should have setup script chunks"
+        assert len(non_setup_chunks) > 0, "Should have non-setup script chunks"
+
+    def test_empty_script_setup(self):
         """Test SFC with empty script setup."""
-        parser = parser_factory.create_parser(Language.VUE)
-
         code = """<script setup>
 </script>
 
@@ -594,15 +859,23 @@ function increment() {
     <div>Static content</div>
 </template>
 """
-        chunks = parser.parse_content(code, "EmptyScript.vue", FileId(1))
+        chunks = _parse_vue(code, "EmptyScript.vue")
 
-        # Should at least extract template
-        assert len(chunks) >= 1, "Should extract at least template chunk"
+        # Should extract template chunk
+        template_chunks = [c for c in chunks if c.metadata.get("vue_section") == "template"]
+        assert len(template_chunks) == 1, "Should extract exactly one template chunk"
+        assert "Static content" in template_chunks[0].code, \
+            "Template should contain static content"
 
-    def test_script_with_type_imports(self, parser_factory):
+        # Should not have any script chunks with code (empty script)
+        script_chunks = [c for c in chunks if c.metadata.get("vue_section") == "script"]
+        # Empty script may or may not produce chunks, but if it does they should be minimal
+        for chunk in script_chunks:
+            # Empty script shouldn't have meaningful code
+            assert len(chunk.code.strip()) < 50, "Script chunks should be minimal for empty script"
+
+    def test_script_with_type_imports(self):
         """Test script with type-only imports."""
-        parser = parser_factory.create_parser(Language.VUE)
-
         code = """<script setup lang="ts">
 import type { PropType } from 'vue'
 import type { User, Config } from './types'
@@ -619,11 +892,39 @@ const props = defineProps<Props>()
     <div>{{ props.user.name }}</div>
 </template>
 """
-        chunks = parser.parse_content(code, "TypeImports.vue", FileId(1))
+        chunks = _parse_vue(code, "TypeImports.vue")
 
-        assert len(chunks) > 0, "Should extract at least one chunk"
+        # Verify Props interface extracted
         interface_chunks = [c for c in chunks if c.chunk_type == ChunkType.INTERFACE]
-        assert len(interface_chunks) > 0, "Should extract Props interface"
+        assert len(interface_chunks) == 1, "Should extract exactly one Props interface"
+        assert interface_chunks[0].symbol == "Props", "Interface should be named Props"
+        assert "user: User" in interface_chunks[0].code, \
+            "Interface should contain user property"
+        assert "config: Config" in interface_chunks[0].code, \
+            "Interface should contain config property"
+
+        # Verify Vue metadata
+        script_chunks = [c for c in chunks if c.metadata.get("vue_section") == "script"]
+        assert len(script_chunks) > 0, "Should have script chunks"
+
+        # Verify type imports are in script
+        script_code = " ".join([c.code for c in script_chunks])
+        assert "import type" in script_code, "Should have type-only imports"
+        assert "PropType" in script_code, "Should import PropType"
+        assert "User" in script_code, "Should import User"
+        assert "Config" in script_code, "Should import Config"
+
+        # Verify script setup metadata
+        assert all(c.metadata.get("vue_script_setup") for c in script_chunks), \
+            "All script chunks should be marked as setup"
+        assert all(c.metadata.get("vue_script_lang") == "ts" for c in script_chunks), \
+            "All script chunks should have lang=ts"
+
+        # Verify macros detected
+        macros_found = set()
+        for c in script_chunks:
+            macros_found.update(c.metadata.get("vue_macros", []))
+        assert "defineProps" in macros_found, "defineProps should be in detected macros"
 
 
 if __name__ == "__main__":

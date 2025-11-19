@@ -1517,6 +1517,8 @@ class UniversalParser:
                 return ChunkType.TYPE_ALIAS
             elif kind == "namespace" or "namespace" in node_type:
                 return ChunkType.NAMESPACE
+            elif kind == "variable" or "variable" in node_type:
+                return ChunkType.VARIABLE
             else:
                 return ChunkType.FUNCTION  # Default for definitions
 

@@ -16,6 +16,9 @@ from chunkhound.parsers.mappings._shared.js_family_extraction import (
 from chunkhound.parsers.mappings._shared.js_query_patterns import (
     TOP_LEVEL_LEXICAL_CONFIG,
     TOP_LEVEL_VAR_CONFIG,
+    TOP_LEVEL_LEXICAL_CALL,
+    TOP_LEVEL_VAR_CALL,
+    # TOP_LEVEL_LEXICAL_PRIMITIVE intentionally not imported - we don't extract primitives
     COMMONJS_MODULE_EXPORTS,
     COMMONJS_NESTED_EXPORTS,
     COMMONJS_EXPORTS_SHORTHAND,
@@ -244,6 +247,11 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
                         """,
                         TOP_LEVEL_LEXICAL_CONFIG,
                         TOP_LEVEL_VAR_CONFIG,
+                        TOP_LEVEL_LEXICAL_CALL,
+                        TOP_LEVEL_VAR_CALL,
+                        # Note: TOP_LEVEL_LEXICAL_PRIMITIVE intentionally excluded
+                        # to match Python's behavior - only extract structured data
+                        # (objects, arrays, function calls), not simple primitives
                         # Function/arrow declarators at top level
                         """
                         (program

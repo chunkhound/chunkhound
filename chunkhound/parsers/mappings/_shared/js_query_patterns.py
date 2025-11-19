@@ -31,6 +31,87 @@ TOP_LEVEL_VAR_CONFIG = """
 )
 """
 
+# Top-level const/let with call_expression initializer
+# Captures patterns like: const props = defineProps(), const logger = createLogger()
+TOP_LEVEL_LEXICAL_CALL = """
+; Top-level const/let with call_expression initializer
+(program
+    (lexical_declaration
+        (variable_declarator
+            name: (identifier) @name
+            value: (call_expression)
+        )
+    ) @definition
+)
+"""
+
+# Top-level var with call_expression initializer
+TOP_LEVEL_VAR_CALL = """
+; Top-level var with call_expression initializer
+(program
+    (variable_declaration
+        (variable_declarator
+            name: (identifier) @name
+            value: (call_expression)
+        )
+    ) @definition
+)
+"""
+
+# Top-level const/let with primitive initializer (string, number, boolean, etc.)
+# Captures patterns like: const message = 'Hello', const count = 42
+TOP_LEVEL_LEXICAL_PRIMITIVE = """
+; Top-level const/let with string initializer
+(program
+    (lexical_declaration
+        (variable_declarator
+            name: (identifier) @name
+            value: (string)
+        )
+    ) @definition
+)
+
+; Top-level const/let with number initializer
+(program
+    (lexical_declaration
+        (variable_declarator
+            name: (identifier) @name
+            value: (number)
+        )
+    ) @definition
+)
+
+; Top-level const/let with template_string initializer
+(program
+    (lexical_declaration
+        (variable_declarator
+            name: (identifier) @name
+            value: (template_string)
+        )
+    ) @definition
+)
+
+; Top-level const/let with boolean initializer
+(program
+    (lexical_declaration
+        (variable_declarator
+            name: (identifier) @name
+            value: [(true) (false)]
+        )
+    ) @definition
+)
+
+; Top-level const/let with null/undefined
+(program
+    (lexical_declaration
+        (variable_declarator
+            name: (identifier) @name
+            value: [(null) (undefined)]
+        )
+    ) @definition
+)
+"""
+
 # CommonJS patterns
 COMMONJS_MODULE_EXPORTS = """
 ; CommonJS assignment: module.exports = ...
