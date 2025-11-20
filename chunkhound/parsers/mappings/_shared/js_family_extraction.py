@@ -58,6 +58,10 @@ class JSFamilyExtraction:
 
         if concept == UniversalConcept.DEFINITION and "definition" in captures:
             node = captures["definition"]
+            # Set node_type for chunk type determination in universal_parser
+            def_node_type = getattr(node, "type", "")
+            meta["node_type"] = def_node_type
+
             init = captures.get("init")
             target = init or node
             try:
@@ -67,16 +71,36 @@ class JSFamilyExtraction:
                 elif node_type == "array":
                     meta["chunk_type_hint"] = "array"
                 else:
+                    found_specific_type = False
                     for i in range(getattr(target, "child_count", 0)):
                         child = target.child(i)
                         if not child:
                             continue
                         if child.type == "object":
                             meta["chunk_type_hint"] = "object"
+                            found_specific_type = True
                             break
                         if child.type == "array":
                             meta["chunk_type_hint"] = "array"
+                            found_specific_type = True
                             break
+                        # Check for class/function inside export_statement
+                        if child.type == "class_declaration":
+                            meta["kind"] = "class"
+                            found_specific_type = True
+                            break
+                        if child.type in ("function_declaration", "function_expression"):
+                            meta["kind"] = "function"
+                            found_specific_type = True
+                            break
+
+                    # For lexical/variable declarations without specific type,
+                    # mark as variable (e.g., const x = defineProps(), const y = ref())
+                    if not found_specific_type and def_node_type in (
+                        "lexical_declaration",
+                        "variable_declaration",
+                    ):
+                        meta["kind"] = "variable"
             except Exception:
                 # Best-effort only; do not set hint on failure
                 pass

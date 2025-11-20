@@ -2010,6 +2010,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     "name": result[1],
                     "content": result[2],
                     "chunk_type": result[3],
+                    "type": result[3],  # Alias for backward compatibility with tests
                     "start_line": result[4],
                     "end_line": result[5],
                     "file_path": result[6],  # Keep stored format
