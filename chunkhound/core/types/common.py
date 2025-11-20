@@ -153,6 +153,7 @@ class Language(Enum):
     PHP = "php"
     VUE = "vue"
     SWIFT = "swift"
+    DART = "dart"
 
     # Documentation languages
     MARKDOWN = "markdown"
@@ -211,6 +212,7 @@ class Language(Enum):
             ".make": cls.MAKEFILE,
             ".md": cls.MARKDOWN,
             ".markdown": cls.MARKDOWN,
+            ".dart": cls.DART,
             ".hcl": cls.HCL,
             ".tf": cls.HCL,
             ".tfvars": cls.HCL,
@@ -278,6 +280,7 @@ class Language(Enum):
             Language.PHP,
             Language.VUE,
             Language.SWIFT,
+            Language.DART,
         }
 
     @property
@@ -298,6 +301,7 @@ class Language(Enum):
             Language.PHP,
             Language.VUE,
             Language.SWIFT,
+            Language.DART,
         }
 
     @property
@@ -338,7 +342,9 @@ class Language(Enum):
 
         # Extract all extensions (keys starting with '.')
         # Filter out filename patterns like "Makefile" which don't start with '.'
-        extensions = {ext for ext in EXTENSION_TO_LANGUAGE.keys() if ext.startswith('.')}
+        extensions = {
+            ext for ext in EXTENSION_TO_LANGUAGE.keys() if ext.startswith(".")
+        }
 
         return extensions
 
@@ -379,7 +385,7 @@ class Language(Enum):
 
         # Add patterns for all keys in EXTENSION_TO_LANGUAGE
         for key in EXTENSION_TO_LANGUAGE.keys():
-            if key.startswith('.'):
+            if key.startswith("."):
                 # Extension-based pattern (e.g., ".py" -> "**/*.py")
                 patterns.append(f"**/*{key}")
             else:
