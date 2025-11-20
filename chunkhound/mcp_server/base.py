@@ -53,6 +53,9 @@ class MCPServerBase(ABC):
             "yes",
         )
 
+        # Registry will be created lazily during initialize() to avoid import-time issues
+        self._registry: Any | None = None
+
         # Service components - initialized lazily or eagerly based on subclass
         self.services: DatabaseServices | None = None
         self.embedding_manager: EmbeddingManager | None = None
@@ -110,6 +113,13 @@ class MCPServerBase(ABC):
 
             self.debug_log("Starting service initialization")
 
+            # Create isolated registry instance for this MCP server instance
+            # This allows multiple MCP servers to run in the same process without conflicts
+            if self._registry is None:
+                from chunkhound.registry import create_registry
+                self._registry = create_registry()
+                self.debug_log("Created isolated registry instance")
+
             # Validate database configuration
             if not self.config.database or not self.config.database.path:
                 raise ValueError("Database configuration not initialized")
@@ -153,11 +163,15 @@ class MCPServerBase(ABC):
                 # Unexpected error - log but continue
                 self.debug_log(f"Unexpected error setting up LLM provider: {e}")
 
-            # Create services using unified factory (lazy connect for fast init)
+            # Create services using unified factory with isolated registry
+            # This ensures each MCP server instance has its own database connection
+            # and service layer, preventing conflicts when multiple servers run in
+            # the same process
             self.services = create_services(
                 db_path=db_path,
                 config=self.config,
                 embedding_manager=self.embedding_manager,
+                registry=self._registry,
             )
 
             # Determine target path for scanning and watching

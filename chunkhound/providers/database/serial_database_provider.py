@@ -40,6 +40,7 @@ class SerialDatabaseProvider(ABC):
         base_directory: Path,
         embedding_manager: EmbeddingManager | None = None,
         config: "DatabaseConfig | None" = None,
+        registry: Any | None = None,
     ):
         """Initialize serial database provider.
 
@@ -48,11 +49,13 @@ class SerialDatabaseProvider(ABC):
             base_directory: Base directory for path normalization (always set)
             embedding_manager: Optional embedding manager for vector generation
             config: Database configuration for provider-specific settings
+            registry: Optional registry instance for service creation (if None, uses global)
         """
         self._services_initialized = False
         self.embedding_manager = embedding_manager
         self.config = config
         self._db_path = db_path
+        self._registry = registry  # Store registry for service initialization
 
         # Create serial executor for all database operations
         self._executor = SerialDatabaseExecutor()
@@ -161,40 +164,42 @@ class SerialDatabaseProvider(ABC):
         logger.debug("Initializing service layer components")
 
         try:
-            # Lazy import from registry to avoid circular dependency
-            import importlib
+            # Use the registry instance provided during construction if available,
+            # otherwise fall back to global registry for backward compatibility
+            if self._registry is not None:
+                registry = self._registry
+            else:
+                # Lazy import from registry to avoid circular dependency
+                import importlib
 
-            registry_module = importlib.import_module("chunkhound.registry")
-            get_registry = getattr(registry_module, "get_registry")
-            create_indexing_coordinator = getattr(
-                registry_module, "create_indexing_coordinator"
-            )
-            create_search_service = getattr(registry_module, "create_search_service")
-            create_embedding_service = getattr(
-                registry_module, "create_embedding_service"
-            )
+                registry_module = importlib.import_module("chunkhound.registry")
+                get_registry = getattr(registry_module, "get_registry")
+                registry = get_registry()
 
-            # Get registry and register self as database provider
+            # Register self as database provider if not already registered
             # NOTE: ProviderRegistry.register_provider expects an instance, not a factory.
             # Using a lambda here caused the registry to hold a function object, leading
             # to AttributeError when services attempted to call provider.connect().
             # Register the instance directly to maintain correct type semantics.
-            registry = get_registry()
-            registry.register_provider("database", self, singleton=True)
+            try:
+                registry.register_provider("database", self, singleton=True)
+            except Exception:
+                # Provider might already be registered (e.g., by database_factory)
+                pass
 
             # Initialize service layer components from registry
             if (
                 not hasattr(self, "_indexing_coordinator")
                 or self._indexing_coordinator is None
             ):
-                self._indexing_coordinator = create_indexing_coordinator()
+                self._indexing_coordinator = registry.create_indexing_coordinator()
             if not hasattr(self, "_search_service") or self._search_service is None:
-                self._search_service = create_search_service()
+                self._search_service = registry.create_search_service()
             if (
                 not hasattr(self, "_embedding_service")
                 or self._embedding_service is None
             ):
-                self._embedding_service = create_embedding_service()
+                self._embedding_service = registry.create_embedding_service()
 
             logger.debug("Service layer components initialized successfully")
 
