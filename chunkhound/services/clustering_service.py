@@ -112,7 +112,7 @@ class ClusteringService:
         # Phase 1: HDBSCAN discovery of natural clusters
         logger.debug("Phase 1: Discovering natural clusters with HDBSCAN")
         embeddings_array = np.array(embeddings)
-        labels, clusterer, phase1_meta = self._discover_natural_clusters(
+        labels, phase1_meta = self._discover_natural_clusters(
             embeddings_array
         )
 
@@ -128,7 +128,7 @@ class ClusteringService:
 
         # Phase 2: Greedy grouping to token budget
         logger.debug("Phase 2: Grouping clusters to token budget")
-        final_clusters = self._group_clusters_to_budget(
+        final_clusters, cluster_id_to_final_idx = self._group_clusters_to_budget(
             native_clusters, files, labels, embeddings_array
         )
 
@@ -173,16 +173,15 @@ class ClusteringService:
 
     def _discover_natural_clusters(
         self, embeddings: np.ndarray
-    ) -> tuple[np.ndarray, hdbscan.HDBSCAN, dict[str, int]]:
+    ) -> tuple[np.ndarray, dict[str, int]]:
         """Phase 1: Use HDBSCAN to discover natural semantic clusters.
 
         Args:
             embeddings: Array of embedding vectors (n_samples, n_features)
 
         Returns:
-            Tuple of (labels, clusterer, metadata) where:
+            Tuple of (labels, metadata) where:
                 - labels: Array of cluster IDs (-1 for outliers)
-                - clusterer: Fitted HDBSCAN object (for centroid extraction)
                 - metadata: Dict with num_native_clusters and num_outliers
         """
         # Adjust min_cluster_size if too large for dataset
@@ -220,7 +219,7 @@ class ClusteringService:
                 "num_native_clusters": 1,
                 "num_outliers": 0,
             }
-            return labels, clusterer, metadata
+            return labels, metadata
 
         # Count native clusters (excluding outliers with label=-1)
         unique_labels = set(labels)
@@ -237,7 +236,7 @@ class ClusteringService:
             "num_outliers": num_outliers,
         }
 
-        return labels, clusterer, metadata
+        return labels, metadata
 
     def _group_clusters_to_budget(
         self,
@@ -245,7 +244,7 @@ class ClusteringService:
         files: dict[str, str],
         labels: np.ndarray,
         embeddings: np.ndarray,
-    ) -> list[list[str]]:
+    ) -> tuple[list[list[str]], dict[int, int]]:
         """Phase 2: Greedily merge clusters to approach token budget.
 
         Strategy:
@@ -261,7 +260,9 @@ class ClusteringService:
             embeddings: Array of embedding vectors
 
         Returns:
-            List of final clusters, where each cluster is a list of file_paths
+            Tuple of (final_clusters, cluster_id_to_final_idx) where:
+                - final_clusters: List of file path lists
+                - cluster_id_to_final_idx: Maps native cluster_id to final cluster index
         """
         # Step 1: Calculate token counts per native cluster
         cluster_tokens: dict[int, int] = {}
@@ -278,7 +279,7 @@ class ClusteringService:
         # Handle edge case: no native clusters, only outliers
         if not native_clusters:
             logger.warning("No native clusters found, using outliers as single cluster")
-            return [outlier_cluster] if outlier_cluster else []
+            return ([outlier_cluster] if outlier_cluster else [], {})
 
         # Step 2: Calculate cluster centroids from embeddings
         cluster_ids = sorted([cid for cid in native_clusters.keys()])
@@ -332,14 +333,17 @@ class ClusteringService:
             del group_to_clusters[group_j]
             del group_tokens[group_j]
 
-        # Step 4: Build final cluster file lists
+        # Step 4: Build final cluster file lists and mapping
         final_clusters: list[list[str]] = []
+        cluster_id_to_final_idx: dict[int, int] = {}
 
-        # Add merged groups
-        for group_id in sorted(group_to_clusters.keys()):
+        # Add merged groups and build mapping
+        for final_idx, group_id in enumerate(sorted(group_to_clusters.keys())):
             cluster_files: list[str] = []
             for cluster_id in group_to_clusters[group_id]:
                 cluster_files.extend(native_clusters[cluster_id])
+                # Map each native cluster_id to this final cluster index
+                cluster_id_to_final_idx[cluster_id] = final_idx
             final_clusters.append(cluster_files)
 
         # Merge outliers into nearest clusters (respecting token budget)
@@ -351,6 +355,8 @@ class ClusteringService:
                 labels,
                 embeddings,
                 np.array(centroids),
+                cluster_id_to_final_idx,
+                cluster_ids,
             )
             logger.debug(
                 f"Merged {outliers_merged} outlier files into nearest clusters, "
@@ -361,7 +367,7 @@ class ClusteringService:
             if len(outlier_cluster) > 0:
                 final_clusters.append(outlier_cluster)
 
-        return final_clusters
+        return final_clusters, cluster_id_to_final_idx
 
     def _find_best_merge_candidate(
         self,
@@ -413,6 +419,8 @@ class ClusteringService:
         labels: np.ndarray,
         embeddings: np.ndarray,
         centroids: np.ndarray,
+        cluster_id_to_final_idx: dict[int, int],
+        cluster_ids: list[int],
     ) -> int:
         """Merge outlier files into their nearest clusters while respecting token budget.
 
@@ -422,7 +430,9 @@ class ClusteringService:
             files: Dictionary mapping file_path -> content
             labels: Original HDBSCAN labels array
             embeddings: Array of all embedding vectors
-            centroids: Array of cluster centroids
+            centroids: Array of cluster centroids (indexed by position in sorted cluster_ids)
+            cluster_id_to_final_idx: Maps native cluster_id to final_clusters index
+            cluster_ids: Sorted list of native cluster IDs (matches centroids order)
 
         Returns:
             Number of outliers successfully merged
@@ -451,12 +461,16 @@ class ClusteringService:
             distances_to_centroids = np.linalg.norm(
                 centroids - outlier_embedding, axis=1
             )
-            sorted_cluster_indices = np.argsort(distances_to_centroids)
+            sorted_centroid_indices = np.argsort(distances_to_centroids)
 
             merged = False
-            for cluster_idx in sorted_cluster_indices:
+            for centroid_idx in sorted_centroid_indices:
+                # Map centroid index to native cluster_id, then to final cluster index
+                native_cluster_id = cluster_ids[centroid_idx]
+                final_cluster_idx = cluster_id_to_final_idx[native_cluster_id]
+
                 # Calculate current cluster token count
-                cluster_files = final_clusters[cluster_idx]
+                cluster_files = final_clusters[final_cluster_idx]
                 cluster_tokens = sum(
                     self._llm_provider.estimate_tokens(files[fp])
                     for fp in cluster_files
@@ -464,7 +478,7 @@ class ClusteringService:
 
                 # Check if adding outlier respects budget
                 if cluster_tokens + outlier_tokens <= self._max_tokens_per_cluster:
-                    final_clusters[cluster_idx].append(outlier_file)
+                    final_clusters[final_cluster_idx].append(outlier_file)
                     outliers_merged += 1
                     merged = True
                     break
