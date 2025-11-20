@@ -72,7 +72,6 @@ class TestFunctionDeclarations:
         assert any("fetchData" in c.code for c in chunks), "Should extract async function"
         assert any("async" in c.code for c in chunks), "Should preserve async keyword"
 
-    @pytest.mark.xfail(reason="Generator functions not yet extracted by JS-family parsers")
     def test_generator_function(self):
         """Test generator function declaration."""
         code = "function* generateIds() { yield 1; yield 2; }"
@@ -82,7 +81,6 @@ class TestFunctionDeclarations:
         assert any("generateIds" in c.code for c in chunks), "Should extract generator function"
         assert any("function*" in c.code for c in chunks), "Should preserve generator syntax"
 
-    @pytest.mark.xfail(reason="Async generator functions not yet extracted by JS-family parsers")
     def test_async_generator_function(self):
         """Test async generator function declaration."""
         code = "async function* asyncGenerator() { yield await Promise.resolve(1); }"
@@ -92,7 +90,6 @@ class TestFunctionDeclarations:
         assert any("asyncGenerator" in c.code for c in chunks), "Should extract async generator"
         assert any("async function*" in c.code for c in chunks), "Should preserve async generator syntax"
 
-    @pytest.mark.xfail(reason="Async generator functions not yet extracted by JS-family parsers")
     def test_async_generator_with_fetch(self):
         """Test async generator function with real async operation.
 
@@ -152,7 +149,6 @@ class TestFunctionExpressions:
         matching_chunks = [c for c in chunks if "foo" in c.code and "bar" in c.code]
         assert len(matching_chunks) > 0, "Should extract named function expression with both names"
 
-    @pytest.mark.xfail(reason="let function expressions extract function but lose declaration keyword")
     def test_let_function_expression(self):
         """Test let function expression."""
         code = "let foo = function() { return 42; };"
@@ -161,7 +157,6 @@ class TestFunctionExpressions:
         assert len(chunks) > 0, "Should extract at least one chunk"
         assert any("let" in c.code and "foo" in c.code for c in chunks), "Should extract let function expression"
 
-    @pytest.mark.xfail(reason="var function expressions extract function but lose declaration keyword")
     def test_var_function_expression(self):
         """Test var function expression."""
         code = "var foo = function() { return 42; };"
@@ -197,7 +192,6 @@ class TestArrowFunctions:
         assert any("foo" in c.code for c in chunks), "Should extract const arrow function"
         assert any("=>" in c.code for c in chunks), "Should preserve arrow syntax"
 
-    @pytest.mark.xfail(reason="let arrow functions extract function but lose declaration keyword")
     def test_let_arrow_function(self):
         """Test let arrow function."""
         code = "let foo = () => { return 42; };"
@@ -206,7 +200,6 @@ class TestArrowFunctions:
         assert len(chunks) > 0, "Should extract at least one chunk"
         assert any("let" in c.code and "foo" in c.code for c in chunks), "Should extract let arrow function"
 
-    @pytest.mark.xfail(reason="var arrow functions extract function but lose declaration keyword")
     def test_var_arrow_function(self):
         """Test var arrow function."""
         code = "var foo = () => { return 42; };"
@@ -453,7 +446,6 @@ function foo(a: string | number): string | number {
 class TestComplexFunctionPatterns:
     """Test complex function patterns and edge cases."""
 
-    @pytest.mark.xfail(reason="IIFEs not yet extracted by JS-family parsers")
     def test_iife(self):
         """Test immediately invoked function expression."""
         code = "(function() { console.log('IIFE'); })();"
@@ -463,7 +455,6 @@ class TestComplexFunctionPatterns:
         assert len(chunks) > 0, "Should extract at least one chunk"
         assert any("IIFE" in c.code for c in chunks), "Should capture IIFE"
 
-    @pytest.mark.xfail(reason="Arrow IIFEs not yet extracted by JS-family parsers")
     def test_arrow_iife(self):
         """Test immediately invoked arrow function."""
         code = "(() => { console.log('arrow IIFE'); })();"
@@ -524,7 +515,6 @@ class TestComplexFunctionPatterns:
         assert len(chunks) > 0, "Should extract at least one chunk"
         assert any("asyncFetch" in c.code for c in chunks), "Should extract async arrow"
 
-    @pytest.mark.xfail(reason="Inline callbacks in method chains not yet extracted")
     def test_callback_function(self):
         """Test function passed as callback."""
         code = "const numbers = [1, 2, 3].map(function(n) { return n * 2; });"
@@ -732,7 +722,6 @@ class TestCrossLanguageConsistency:
         assert any("loadData" in c.code for c in chunks), f"{lang.value} should find loadData"
         assert any("async" in c.code for c in chunks), f"{lang.value} should preserve async keyword"
 
-    @pytest.mark.xfail(reason="Generator functions not yet extracted by JS-family parsers")
     @pytest.mark.parametrize("lang,ext", [
         (Language.JAVASCRIPT, ".js"),
         (Language.JSX, ".jsx"),

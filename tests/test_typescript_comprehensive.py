@@ -212,6 +212,35 @@ export function processUser(user: User) {
         assert len(results) > 0, "Import statements from fixture should be extracted"
 
 
+class TestBasicInterfaces:
+    """Test suite for basic TypeScript interface constructs."""
+
+    async def test_basic_interface(self, test_services, temp_db_dir):
+        """Test that basic interface with primitive types is extracted."""
+        test_file = temp_db_dir / "test_basic_interface.ts"
+        test_file.write_text('''
+// Basic interface
+interface User {
+    name: string;
+    age: number;
+}
+
+// UNIQUE_BASIC_INTERFACE_MARKER_ABC123
+''')
+
+        await test_services.indexing_coordinator.process_file(test_file)
+
+        # Search for the interface
+        results = test_services.provider.search_chunks_regex("interface User")
+
+        assert len(results) > 0, "Basic interface declaration should be extracted as a chunk"
+
+        # Verify chunk type is INTERFACE
+        interface_chunks = [c for c in results if "User" in c["content"]]
+        assert any(chunk["type"] == ChunkType.INTERFACE.value for chunk in interface_chunks), \
+            "Interface should be classified as ChunkType.INTERFACE"
+
+
 class TestTypeScriptInterfaces:
     """Test suite for TypeScript interface extraction."""
 
@@ -303,6 +332,89 @@ interface Repository {
         assert len(results) > 0, "ApiResponse interface should be extracted from fixture"
 
 
+class TestBasicEnums:
+    """Test suite for basic TypeScript enum constructs."""
+
+    async def test_numeric_enum(self, test_services, temp_db_dir):
+        """Test that numeric auto-incrementing enum is extracted."""
+        test_file = temp_db_dir / "test_numeric_enum.ts"
+        test_file.write_text('''
+// Numeric enum
+enum Color {
+    Red,
+    Green,
+    Blue
+}
+
+// UNIQUE_NUMERIC_ENUM_MARKER_JKL012
+''')
+
+        await test_services.indexing_coordinator.process_file(test_file)
+
+        # Search for the enum
+        results = test_services.provider.search_chunks_regex("enum Color")
+
+        assert len(results) > 0, "Numeric enum should be extracted as a chunk"
+
+        # Verify chunk type is ENUM
+        enum_chunks = [c for c in results if "Color" in c["content"]]
+        assert any(chunk["type"] == ChunkType.ENUM.value for chunk in enum_chunks), \
+            "Enum should be classified as ChunkType.ENUM"
+
+    async def test_string_enum(self, test_services, temp_db_dir):
+        """Test that string enum is extracted."""
+        test_file = temp_db_dir / "test_string_enum_basic.ts"
+        test_file.write_text('''
+// String enum
+enum Status {
+    Active = "ACTIVE",
+    Pending = "PENDING"
+}
+
+// UNIQUE_STRING_ENUM_BASIC_MARKER_MNO345
+''')
+
+        await test_services.indexing_coordinator.process_file(test_file)
+
+        # Search for the enum
+        results = test_services.provider.search_chunks_regex("enum Status")
+
+        assert len(results) > 0, "String enum should be extracted as a chunk"
+
+        # Verify content includes enum members
+        status_chunks = [c for c in results if "Status" in c["content"]]
+        assert any("Active" in chunk["content"] and "ACTIVE" in chunk["content"]
+                  for chunk in status_chunks), \
+            "String enum values should be captured in content"
+
+    async def test_mixed_enum(self, test_services, temp_db_dir):
+        """Test that mixed enum (numeric and string) is extracted."""
+        test_file = temp_db_dir / "test_mixed_enum.ts"
+        test_file.write_text('''
+// Mixed enum
+enum Mixed {
+    A,
+    B = "b",
+    C = 2
+}
+
+// UNIQUE_MIXED_ENUM_MARKER_PQR678
+''')
+
+        await test_services.indexing_coordinator.process_file(test_file)
+
+        # Search for the enum
+        results = test_services.provider.search_chunks_regex("enum Mixed")
+
+        assert len(results) > 0, "Mixed enum should be extracted as a chunk"
+
+        # Verify content includes both numeric and string values
+        mixed_chunks = [c for c in results if "Mixed" in c["content"]]
+        assert any("A" in chunk["content"] and "B" in chunk["content"]
+                  for chunk in mixed_chunks), \
+            "Mixed enum members should be captured in content"
+
+
 class TestTypeScriptEnums:
     """Test suite for TypeScript enum extraction."""
 
@@ -389,6 +501,55 @@ enum Color {
         results = test_services.provider.search_chunks_regex("enum Status")
 
         assert len(results) > 0, "Status enum should be extracted from fixture"
+
+
+class TestBasicTypeAliases:
+    """Test suite for basic TypeScript type alias constructs."""
+
+    async def test_basic_type_alias(self, test_services, temp_db_dir):
+        """Test that basic union type alias is extracted."""
+        test_file = temp_db_dir / "test_basic_type_alias.ts"
+        test_file.write_text('''
+// Basic type alias
+type ID = string | number;
+
+// UNIQUE_BASIC_TYPE_ALIAS_MARKER_DEF456
+''')
+
+        await test_services.indexing_coordinator.process_file(test_file)
+
+        # Search for the type alias
+        results = test_services.provider.search_chunks_regex("type ID")
+
+        assert len(results) > 0, "Basic type alias should be extracted as a chunk"
+
+        # Verify chunk type is TYPE_ALIAS
+        type_chunks = [c for c in results if "ID" in c["content"]]
+        assert any(chunk["type"] == ChunkType.TYPE_ALIAS.value for chunk in type_chunks), \
+            "Type alias should be classified as ChunkType.TYPE_ALIAS"
+
+    async def test_type_alias_object(self, test_services, temp_db_dir):
+        """Test that object type alias is extracted."""
+        test_file = temp_db_dir / "test_type_alias_object.ts"
+        test_file.write_text('''
+// Object type alias
+type Point = { x: number; y: number };
+
+// UNIQUE_TYPE_ALIAS_OBJECT_MARKER_GHI789
+''')
+
+        await test_services.indexing_coordinator.process_file(test_file)
+
+        # Search for the type alias
+        results = test_services.provider.search_chunks_regex("type Point")
+
+        assert len(results) > 0, "Object type alias should be extracted as a chunk"
+
+        # Verify content includes object properties
+        point_chunks = [c for c in results if "Point" in c["content"]]
+        assert any("x" in chunk["content"] and "y" in chunk["content"]
+                  for chunk in point_chunks), \
+            "Object properties should be captured in content"
 
 
 class TestTypeScriptTypeAliases:
@@ -597,14 +758,163 @@ declare module 'my-library' {
         assert len(results) > 0, "Module declaration should be extracted as a chunk"
 
 
+class TestConstAssertions:
+    """Test suite for TypeScript const assertions."""
+
+    async def test_const_assertion_array(self, test_services, temp_db_dir):
+        """Test that const assertion on array is extracted."""
+        test_file = temp_db_dir / "test_const_assertion_array.ts"
+        test_file.write_text('''
+// Const assertion array
+const arr = [1, 2, 3] as const;
+
+// UNIQUE_CONST_ASSERTION_ARRAY_MARKER_STU901
+''')
+
+        await test_services.indexing_coordinator.process_file(test_file)
+
+        # Search for the const assertion
+        results = test_services.provider.search_chunks_regex("as const")
+
+        assert len(results) > 0, "Const assertion array should be extracted as a chunk"
+
+        # Verify it's captured as a variable chunk
+        arr_chunks = [c for c in results if "arr" in c["content"]]
+        assert len(arr_chunks) > 0, \
+            "Const assertion variable should be extracted"
+
+    async def test_const_assertion_object(self, test_services, temp_db_dir):
+        """Test that const assertion on object is extracted."""
+        test_file = temp_db_dir / "test_const_assertion_object.ts"
+        test_file.write_text('''
+// Const assertion object
+const obj = { x: 1, y: 2 } as const;
+
+// UNIQUE_CONST_ASSERTION_OBJECT_MARKER_VWX234
+''')
+
+        await test_services.indexing_coordinator.process_file(test_file)
+
+        # Search for the const assertion
+        results = test_services.provider.search_chunks_regex("as const")
+
+        assert len(results) > 0, "Const assertion object should be extracted as a chunk"
+
+        # Verify it contains object properties
+        obj_chunks = [c for c in results if "obj" in c["content"]]
+        assert any("x" in chunk["content"] and "y" in chunk["content"]
+                  for chunk in obj_chunks), \
+            "Const assertion object properties should be captured"
+
+
+class TestTypeGuards:
+    """Test suite for TypeScript type guards."""
+
+    async def test_user_defined_type_guard(self, test_services, temp_db_dir):
+        """Test that user-defined type guard function is extracted."""
+        test_file = temp_db_dir / "test_type_guard.ts"
+        test_file.write_text('''
+// User-defined type guard
+function isString(x: any): x is string {
+    return typeof x === 'string';
+}
+
+// UNIQUE_TYPE_GUARD_MARKER_YZA567
+''')
+
+        await test_services.indexing_coordinator.process_file(test_file)
+
+        # Search for the type guard function
+        results = test_services.provider.search_chunks_regex("x is string")
+
+        assert len(results) > 0, "Type guard function should be extracted as a chunk"
+
+        # Verify it's a function chunk
+        guard_chunks = [c for c in results if "isString" in c["content"]]
+        assert len(guard_chunks) > 0, \
+            "Type guard function should be captured with 'x is string' predicate"
+
+    async def test_assertion_function(self, test_services, temp_db_dir):
+        """Test that assertion function is extracted."""
+        test_file = temp_db_dir / "test_assertion_function.ts"
+        test_file.write_text('''
+// Assertion function
+function assert(condition: any): asserts condition {
+    if (!condition) throw new Error();
+}
+
+// UNIQUE_ASSERTION_FUNCTION_MARKER_BCD890
+''')
+
+        await test_services.indexing_coordinator.process_file(test_file)
+
+        # Search for the assertion function
+        results = test_services.provider.search_chunks_regex("asserts condition")
+
+        assert len(results) > 0, "Assertion function should be extracted as a chunk"
+
+        # Verify it contains assertion signature
+        assert_chunks = [c for c in results if "assert" in c["content"]]
+        assert len(assert_chunks) > 0, \
+            "Assertion function should be captured with 'asserts' keyword"
+
+
+class TestAmbientDeclarations:
+    """Test suite for TypeScript ambient declarations."""
+
+    async def test_declare_const(self, test_services, temp_db_dir):
+        """Test that declare const is extracted."""
+        test_file = temp_db_dir / "test_declare_const.ts"
+        test_file.write_text('''
+// Ambient const declaration
+declare const ENV: string;
+
+// UNIQUE_DECLARE_CONST_MARKER_EFG123
+''')
+
+        await test_services.indexing_coordinator.process_file(test_file)
+
+        # Search for the declare const
+        results = test_services.provider.search_chunks_regex("declare const ENV")
+
+        assert len(results) > 0, "Declare const should be extracted as a chunk"
+
+        # Verify it contains the declaration
+        env_chunks = [c for c in results if "ENV" in c["content"]]
+        assert len(env_chunks) > 0, \
+            "Ambient const declaration should be captured"
+
+    async def test_declare_function(self, test_services, temp_db_dir):
+        """Test that declare function is extracted."""
+        test_file = temp_db_dir / "test_declare_function.ts"
+        test_file.write_text('''
+// Ambient function declaration
+declare function lib(): void;
+
+// UNIQUE_DECLARE_FUNCTION_MARKER_HIJ456
+''')
+
+        await test_services.indexing_coordinator.process_file(test_file)
+
+        # Search for the declare function
+        results = test_services.provider.search_chunks_regex("declare function lib")
+
+        assert len(results) > 0, "Declare function should be extracted as a chunk"
+
+        # Verify it contains the declaration
+        lib_chunks = [c for c in results if "lib" in c["content"]]
+        assert len(lib_chunks) > 0, \
+            "Ambient function declaration should be captured"
+
+
 class TestTypeScriptVariableFiltering:
     """Test suite for proper variable filtering (simple vs complex)."""
 
     async def test_simple_string_variable_not_extracted(self, test_services, temp_db_dir):
-        """Test that simple string variables are NOT extracted as chunks."""
+        """Test that simple string variables ARE extracted as chunks."""
         test_file = temp_db_dir / "test_simple_var.ts"
         test_file.write_text('''
-// Simple variables (should NOT be extracted)
+// Simple variables (SHOULD be extracted)
 const API_URL = 'https://api.example.com';
 const MAX_RETRIES = 3;
 const ENABLED = true;
@@ -619,21 +929,38 @@ function doWork() {
 
         await test_services.indexing_coordinator.process_file(test_file)
 
-        # Search - should NOT find simple variable declarations
+        # Search - SHOULD find simple variable declarations
         api_results = test_services.provider.search_chunks_regex("const API_URL =")
         max_results = test_services.provider.search_chunks_regex("const MAX_RETRIES =")
+        enabled_results = test_services.provider.search_chunks_regex("const ENABLED =")
 
-        # Simple variables should NOT be extracted as separate chunks
-        # (they might appear in function content, but shouldn't be standalone chunks)
+        # Simple variables SHOULD be extracted as separate chunks
         # More robust chunk field access
-        simple_var_chunks = [
+        api_var_chunks = [
             c for c in api_results
             if "API_URL" in c.get("symbol", "")
             or "API_URL" in c.get("name", "")
             or "API_URL" in str(c.get("chunk", {}).get("symbol", ""))
         ]
-        assert len(simple_var_chunks) == 0, \
-            f"Simple string variables should NOT be extracted, but found: {simple_var_chunks}"
+        max_var_chunks = [
+            c for c in max_results
+            if "MAX_RETRIES" in c.get("symbol", "")
+            or "MAX_RETRIES" in c.get("name", "")
+            or "MAX_RETRIES" in str(c.get("chunk", {}).get("symbol", ""))
+        ]
+        enabled_var_chunks = [
+            c for c in enabled_results
+            if "ENABLED" in c.get("symbol", "")
+            or "ENABLED" in c.get("name", "")
+            or "ENABLED" in str(c.get("chunk", {}).get("symbol", ""))
+        ]
+
+        assert len(api_var_chunks) > 0, \
+            "Simple string variable API_URL should be extracted"
+        assert len(max_var_chunks) > 0, \
+            "Simple number variable MAX_RETRIES should be extracted"
+        assert len(enabled_var_chunks) > 0, \
+            "Simple boolean variable ENABLED should be extracted"
 
     async def test_object_variable_extracted(self, test_services, temp_db_dir):
         """Test that object/array variables ARE extracted as chunks."""
@@ -669,13 +996,13 @@ const items = [
             "Object variable content should include object properties"
 
     async def test_fixture_file_variable_filtering(self, test_services, ts_test_file):
-        """Test that fixture file properly filters variables."""
+        """Test that fixture file properly extracts all variables."""
         if not ts_test_file.exists():
             pytest.skip(f"Test fixture not found: {ts_test_file}")
 
         await test_services.indexing_coordinator.process_file(ts_test_file)
 
-        # Simple variables should NOT be chunks
+        # Simple variables SHOULD be chunks
         simple_results = test_services.provider.search_chunks_regex("const API_URL =")
         # More robust chunk field access
         simple_chunks = [
@@ -684,8 +1011,8 @@ const items = [
             or "API_URL" in c.get("name", "")
             or "API_URL" in str(c.get("chunk", {}).get("symbol", ""))
         ]
-        assert len(simple_chunks) == 0, \
-            f"Simple variables from fixture should NOT be extracted, but found: {simple_chunks}"
+        assert len(simple_chunks) > 0, \
+            "Simple string variable API_URL from fixture should be extracted"
 
         # Object variables SHOULD be chunks
         config_results = test_services.provider.search_chunks_regex("const config")

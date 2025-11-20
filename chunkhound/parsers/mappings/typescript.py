@@ -160,18 +160,57 @@ class TypeScriptMapping(JavaScriptMapping):
                     (module name: (_) @name)
                 ) @definition
 
+                ; Ambient const declaration: declare const X: T;
+                (ambient_declaration
+                    (lexical_declaration
+                        (variable_declarator
+                            name: (identifier) @name
+                        )
+                    )
+                ) @definition
+
+                ; Ambient var declaration: declare var X: T;
+                (ambient_declaration
+                    (variable_declaration
+                        (variable_declarator
+                            name: (identifier) @name
+                        )
+                    )
+                ) @definition
+
+                ; Ambient function declaration: declare function foo(): void;
+                (program
+                    (ambient_declaration
+                        (function_signature
+                            name: (identifier) @name
+                        )
+                    ) @definition
+                )
+
                 ; Abstract class declaration
                 (abstract_class_declaration
                     name: (type_identifier) @name
                 ) @definition
 
-                ; Top-level const with 'as const' assertion
+                ; Top-level const with 'as const' assertion (object)
                 (program
                     (lexical_declaration
                         (variable_declarator
                             name: (identifier) @name
                             value: (as_expression
                                 (object)
+                            )
+                        )
+                    ) @definition
+                )
+
+                ; Top-level const with 'as const' assertion (array)
+                (program
+                    (lexical_declaration
+                        (variable_declarator
+                            name: (identifier) @name
+                            value: (as_expression
+                                (array)
                             )
                         )
                     ) @definition

@@ -191,12 +191,12 @@ class OptimizedList extends React.PureComponent {
 class TestJSXHigherOrderComponents:
     """Test higher-order component patterns in JSX."""
 
-    @pytest.mark.xfail(reason="JSX parser does not extract const with React.memo - inner function not detected")
     def test_memo_component(self, parser_factory):
         """Test React.memo component.
 
         NOTE: Parser doesn't extract the inner function inside React.memo.
-        This documents expected behavior for future enhancement.
+        This test documents the expected behavior that the parser should extract
+        at least the constant assignment or the inner function.
         """
         parser = parser_factory.create_parser(Language.JSX)
 
@@ -211,12 +211,12 @@ const MemoizedCounter = React.memo(function Counter({ count }) {
         memo_chunks = [c for c in chunks if "MemoizedCounter" in c.code or "Counter" in c.code]
         assert len(memo_chunks) > 0, "Should find memo component"
 
-    @pytest.mark.xfail(reason="JSX parser does not extract const with React.forwardRef arrow function")
     def test_forward_ref_component(self, parser_factory):
         """Test React.forwardRef component.
 
         NOTE: Parser doesn't extract arrow functions inside React.forwardRef.
-        This documents expected behavior for future enhancement.
+        This test documents the expected behavior that the parser should extract
+        the constant assignment with forwardRef.
         """
         parser = parser_factory.create_parser(Language.JSX)
 
@@ -231,12 +231,12 @@ const FancyInput = React.forwardRef((props, ref) => (
         ref_chunks = [c for c in chunks if "FancyInput" in c.code]
         assert len(ref_chunks) > 0, "Should find forwardRef component"
 
-    @pytest.mark.xfail(reason="JSX parser does not extract const with React.lazy")
     def test_lazy_component(self, parser_factory):
         """Test React.lazy component.
 
         NOTE: Parser doesn't extract const assignments with React.lazy.
-        This documents expected behavior for future enhancement.
+        This test documents the expected behavior that the parser should extract
+        the constant assignment with React.lazy.
         """
         parser = parser_factory.create_parser(Language.JSX)
 
@@ -552,6 +552,35 @@ function FocusInput() {
 
         assert len(chunks) > 0, "Should extract at least one chunk"
         assert any("useRef" in c.code for c in chunks), "Should preserve useRef hook"
+
+    def test_use_layout_effect_hook(self, parser_factory):
+        """Test useLayoutEffect hook."""
+        parser = parser_factory.create_parser(Language.JSX)
+
+        code = """
+function MeasureComponent() {
+    const divRef = useRef(null)
+    const [dimensions, setDimensions] = useState({ width: 0, height: 0 })
+
+    useLayoutEffect(() => {
+        if (divRef.current) {
+            const { width, height } = divRef.current.getBoundingClientRect()
+            setDimensions({ width, height })
+        }
+    }, [])
+
+    return (
+        <div ref={divRef}>
+            <p>Width: {dimensions.width}px</p>
+            <p>Height: {dimensions.height}px</p>
+        </div>
+    )
+}
+"""
+        chunks = parser.parse_content(code, "MeasureComponent.jsx", FileId(1))
+
+        assert len(chunks) > 0, "Should extract at least one chunk"
+        assert any("useLayoutEffect" in c.code for c in chunks), "Should preserve useLayoutEffect hook"
 
 
 class TestCustomHooks:
@@ -1663,9 +1692,13 @@ function Tooltip({ text, targetRef }) {
         assert len(chunks) > 0, "Should extract at least one chunk"
         assert any("useLayoutEffect" in c.code for c in chunks), "Should preserve useLayoutEffect"
 
-    @pytest.mark.xfail(reason="JSX parser does not extract React.forwardRef arrow functions")
     def test_use_imperative_handle(self, parser_factory):
-        """Test useImperativeHandle hook."""
+        """Test useImperativeHandle hook.
+
+        NOTE: Parser doesn't extract arrow functions inside React.forwardRef.
+        This test documents the expected behavior that the parser should extract
+        the forwardRef constant assignment and preserve useImperativeHandle calls.
+        """
         parser = parser_factory.create_parser(Language.JSX)
 
         code = """

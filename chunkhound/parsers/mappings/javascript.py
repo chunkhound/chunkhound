@@ -18,7 +18,7 @@ from chunkhound.parsers.mappings._shared.js_query_patterns import (
     TOP_LEVEL_VAR_CONFIG,
     TOP_LEVEL_LEXICAL_CALL,
     TOP_LEVEL_VAR_CALL,
-    # TOP_LEVEL_LEXICAL_PRIMITIVE intentionally not imported - we don't extract primitives
+    TOP_LEVEL_LEXICAL_PRIMITIVE,
     COMMONJS_MODULE_EXPORTS,
     COMMONJS_NESTED_EXPORTS,
     COMMONJS_EXPORTS_SHORTHAND,
@@ -164,6 +164,10 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
                             name: (identifier) @name
                         ) @definition
 
+                        (generator_function_declaration
+                            name: (identifier) @name
+                        ) @definition
+
                         (class_declaration
                             name: (identifier) @name
                         ) @definition
@@ -235,6 +239,13 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
                             )
                         ) @definition
 
+                        ; Exported generator function declaration
+                        (export_statement
+                            (generator_function_declaration
+                                name: (identifier) @name
+                            )
+                        ) @definition
+
                         ; Exported class declaration
                         (export_statement
                             (class_declaration
@@ -249,9 +260,31 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
                         TOP_LEVEL_VAR_CONFIG,
                         TOP_LEVEL_LEXICAL_CALL,
                         TOP_LEVEL_VAR_CALL,
-                        # Note: TOP_LEVEL_LEXICAL_PRIMITIVE intentionally excluded
-                        # to match Python's behavior - only extract structured data
-                        # (objects, arrays, function calls), not simple primitives
+                        TOP_LEVEL_LEXICAL_PRIMITIVE,
+                        # IIFE patterns (Immediately Invoked Function Expressions)
+                        """
+                        ; IIFE with function expression: (function() { ... })()
+                        (program
+                            (expression_statement
+                                (call_expression
+                                    function: (parenthesized_expression
+                                        (function_expression)
+                                    )
+                                ) @definition
+                            )
+                        )
+
+                        ; IIFE with arrow function: (() => { ... })()
+                        (program
+                            (expression_statement
+                                (call_expression
+                                    function: (parenthesized_expression
+                                        (arrow_function)
+                                    )
+                                ) @definition
+                            )
+                        )
+                        """,
                         # Function/arrow declarators at top level
                         """
                         (program
@@ -259,32 +292,32 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
                                 (variable_declarator
                                     name: (identifier) @name
                                     value: (function_expression)
-                                ) @definition
-                            )
+                                )
+                            ) @definition
                         )
                         (program
                             (lexical_declaration
                                 (variable_declarator
                                     name: (identifier) @name
                                     value: (arrow_function)
-                                ) @definition
-                            )
+                                )
+                            ) @definition
                         )
                         (program
                             (variable_declaration
                                 (variable_declarator
                                     name: (identifier) @name
                                     value: (function_expression)
-                                ) @definition
-                            )
+                                )
+                            ) @definition
                         )
                         (program
                             (variable_declaration
                                 (variable_declarator
                                     name: (identifier) @name
                                     value: (arrow_function)
-                                ) @definition
-                            )
+                                )
+                            ) @definition
                         )
                         ; Class expression assigned to const/let at top level
                         (program

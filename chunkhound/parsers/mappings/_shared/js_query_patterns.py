@@ -58,6 +58,30 @@ TOP_LEVEL_VAR_CALL = """
 )
 """
 
+# Top-level const/let with boolean/null/undefined initializer ONLY
+# Excludes strings, numbers, template_strings (those are NOT extracted)
+TOP_LEVEL_LEXICAL_BOOLEAN_NULL_UNDEFINED = """
+; Top-level const/let with boolean initializer
+(program
+    (lexical_declaration
+        (variable_declarator
+            name: (identifier) @name
+            value: [(true) (false)]
+        )
+    ) @definition
+)
+
+; Top-level const/let with null/undefined
+(program
+    (lexical_declaration
+        (variable_declarator
+            name: (identifier) @name
+            value: [(null) (undefined)]
+        )
+    ) @definition
+)
+"""
+
 # Top-level const/let with primitive initializer (string, number, boolean, etc.)
 # Captures patterns like: const message = 'Hello', const count = 42
 TOP_LEVEL_LEXICAL_PRIMITIVE = """

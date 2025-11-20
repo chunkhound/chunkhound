@@ -81,12 +81,19 @@ class TestDeclarationTypes:
         (Language.TYPESCRIPT, "ts"),
         (Language.TSX, "tsx"),
     ])
-    def test_uninitialized_let_may_not_extract(self, language, ext):
-        """Uninitialized let declarations may or may not be extracted."""
-        code = "let uninitializedVar"
+    def test_uninitialized_let(self, language, ext):
+        """Uninitialized let declarations should be handled gracefully.
+
+        Tests that uninitialized let declarations don't cause parsing errors.
+        These may or may not be extracted as chunks depending on filtering behavior.
+        The parser should handle them without crashing.
+        """
+        code = "let value;"
         chunks = _parse(code, f"test.{ext}", language)
-        # Document behavior - uninitialized vars may not be extracted
-        # This is acceptable behavior
+        # Should not crash - behavior is implementation-defined
+        # May or may not extract, but should parse successfully
+        assert isinstance(chunks, list), \
+            f"Parser should return list for uninitialized let in {language}"
 
     @pytest.mark.parametrize("language,ext", [
         (Language.JAVASCRIPT, "js"),
@@ -94,11 +101,19 @@ class TestDeclarationTypes:
         (Language.TYPESCRIPT, "ts"),
         (Language.TSX, "tsx"),
     ])
-    def test_uninitialized_var_may_not_extract(self, language, ext):
-        """Uninitialized var declarations may or may not be extracted."""
-        code = "var uninitializedVar"
+    def test_uninitialized_var(self, language, ext):
+        """Uninitialized var declarations should be handled gracefully.
+
+        Tests that uninitialized var declarations don't cause parsing errors.
+        These may or may not be extracted as chunks depending on filtering behavior.
+        The parser should handle them without crashing.
+        """
+        code = "var value;"
         chunks = _parse(code, f"test.{ext}", language)
-        # Document behavior - uninitialized vars may not be extracted
+        # Should not crash - behavior is implementation-defined
+        # May or may not extract, but should parse successfully
+        assert isinstance(chunks, list), \
+            f"Parser should return list for uninitialized var in {language}"
 
 
 # =============================================================================
@@ -180,10 +195,16 @@ class TestInitializerTypes:
         (Language.TSX, "tsx"),
     ])
     def test_simple_string_may_not_extract(self, language, ext):
-        """Simple string literals may not be extracted (filtering behavior)."""
+        """Simple string literals should be extracted (updated behavior).
+
+        Previously simple primitives were filtered out, but now all primitive literals
+        at the top level are extracted.
+        """
         code = "const str = 'hello'"
         chunks = _parse(code, f"test.{ext}", language)
-        # Simple primitives may be filtered out - document behavior
+        symbols = _get_symbols(chunks)
+        assert "str" in symbols, \
+            f"Simple string literal 'str' should be extracted for {language}"
 
     @pytest.mark.parametrize("language,ext", [
         (Language.JAVASCRIPT, "js"),
@@ -192,10 +213,126 @@ class TestInitializerTypes:
         (Language.TSX, "tsx"),
     ])
     def test_simple_number_may_not_extract(self, language, ext):
-        """Simple number literals may not be extracted (filtering behavior)."""
+        """Simple number literals should be extracted (updated behavior).
+
+        Previously simple primitives were filtered out, but now all primitive literals
+        at the top level are extracted.
+        """
         code = "const num = 42"
         chunks = _parse(code, f"test.{ext}", language)
-        # Simple primitives may be filtered out - document behavior
+        symbols = _get_symbols(chunks)
+        assert "num" in symbols, \
+            f"Simple number literal 'num' should be extracted for {language}"
+
+    @pytest.mark.parametrize("language,ext", [
+        (Language.JAVASCRIPT, "js"),
+        (Language.JSX, "jsx"),
+        (Language.TYPESCRIPT, "ts"),
+        (Language.TSX, "tsx"),
+    ])
+    def test_boolean_literal(self, language, ext):
+        """Boolean literals should be extracted as chunks.
+
+        Tests that const/let/var with boolean initializers (true/false) are properly
+        extracted. Based on new query patterns that include boolean literals.
+        """
+        code = "const flag = true; const disabled = false"
+        chunks = _parse(code, f"test.{ext}", language)
+        symbols = _get_symbols(chunks)
+        assert "flag" in symbols, \
+            f"Boolean literal 'flag' should be extracted for {language}"
+        assert "disabled" in symbols, \
+            f"Boolean literal 'disabled' should be extracted for {language}"
+
+    @pytest.mark.parametrize("language,ext", [
+        (Language.JAVASCRIPT, "js"),
+        (Language.JSX, "jsx"),
+        (Language.TYPESCRIPT, "ts"),
+        (Language.TSX, "tsx"),
+    ])
+    def test_null_literal(self, language, ext):
+        """Null literals should be extracted as chunks.
+
+        Tests that variables initialized with null are properly extracted.
+        Based on new query patterns that include null literals.
+        """
+        code = "const value = null"
+        chunks = _parse(code, f"test.{ext}", language)
+        symbols = _get_symbols(chunks)
+        assert "value" in symbols, \
+            f"Null literal 'value' should be extracted for {language}"
+
+    @pytest.mark.parametrize("language,ext", [
+        (Language.JAVASCRIPT, "js"),
+        (Language.JSX, "jsx"),
+        (Language.TYPESCRIPT, "ts"),
+        (Language.TSX, "tsx"),
+    ])
+    def test_undefined_literal(self, language, ext):
+        """Undefined literals should be extracted as chunks.
+
+        Tests that variables explicitly initialized with undefined are properly extracted.
+        Based on new query patterns that include undefined literals.
+        """
+        code = "const value = undefined"
+        chunks = _parse(code, f"test.{ext}", language)
+        symbols = _get_symbols(chunks)
+        assert "value" in symbols, \
+            f"Undefined literal 'value' should be extracted for {language}"
+
+    @pytest.mark.parametrize("language,ext", [
+        (Language.JAVASCRIPT, "js"),
+        (Language.JSX, "jsx"),
+        (Language.TYPESCRIPT, "ts"),
+        (Language.TSX, "tsx"),
+    ])
+    def test_string_literal(self, language, ext):
+        """String literals should be extracted as chunks.
+
+        Tests that variables initialized with string literals are properly extracted.
+        Based on new query patterns that include string literals.
+        """
+        code = "const message = 'hello world'"
+        chunks = _parse(code, f"test.{ext}", language)
+        symbols = _get_symbols(chunks)
+        assert "message" in symbols, \
+            f"String literal 'message' should be extracted for {language}"
+
+    @pytest.mark.parametrize("language,ext", [
+        (Language.JAVASCRIPT, "js"),
+        (Language.JSX, "jsx"),
+        (Language.TYPESCRIPT, "ts"),
+        (Language.TSX, "tsx"),
+    ])
+    def test_number_literal(self, language, ext):
+        """Number literals should be extracted as chunks.
+
+        Tests that variables initialized with number literals are properly extracted.
+        Based on new query patterns that include number literals.
+        """
+        code = "const count = 42"
+        chunks = _parse(code, f"test.{ext}", language)
+        symbols = _get_symbols(chunks)
+        assert "count" in symbols, \
+            f"Number literal 'count' should be extracted for {language}"
+
+    @pytest.mark.parametrize("language,ext", [
+        (Language.JAVASCRIPT, "js"),
+        (Language.JSX, "jsx"),
+        (Language.TYPESCRIPT, "ts"),
+        (Language.TSX, "tsx"),
+    ])
+    def test_template_string_literal(self, language, ext):
+        """Template string literals should be extracted as chunks.
+
+        Tests that variables initialized with template strings are properly extracted.
+        Based on new query patterns that include template_string literals.
+        """
+        code = "const greeting = `Hello ${name}, welcome!`"
+        chunks = _parse(code, f"test.{ext}", language)
+        symbols = _get_symbols(chunks)
+        assert "greeting" in symbols, \
+            f"Template string literal 'greeting' should be extracted for {language}"
 
     @pytest.mark.parametrize("language,ext", [
         (Language.JAVASCRIPT, "js"),
@@ -204,10 +341,10 @@ class TestInitializerTypes:
         (Language.TSX, "tsx"),
     ])
     def test_template_literal_may_extract(self, language, ext):
-        """Template literals may be extracted."""
+        """Template literals may be extracted (alias for test_template_string_literal)."""
         code = "const tpl = `Hello ${name}, welcome!`"
         chunks = _parse(code, f"test.{ext}", language)
-        # Document behavior for template literals
+        # Document behavior for template literals - now covered by test_template_string_literal
 
     @pytest.mark.parametrize("language,ext", [
         (Language.JAVASCRIPT, "js"),
@@ -647,6 +784,87 @@ const config = { multiplier: 2 }
         chunks = _parse(code, "test.vue", Language.VUE)
         assert "config" in _get_symbols(chunks), \
             "Vue config object should be extracted"
+
+
+# =============================================================================
+# COMPUTED PROPERTIES
+# =============================================================================
+
+class TestComputedProperties:
+    """Tests for computed property names in object literals."""
+
+    @pytest.mark.parametrize("language,ext", [
+        (Language.JAVASCRIPT, "js"),
+        (Language.JSX, "jsx"),
+        (Language.TYPESCRIPT, "ts"),
+        (Language.TSX, "tsx"),
+    ])
+    def test_computed_property_names(self, language, ext):
+        """Computed property names should work in object literals.
+
+        Tests that objects with computed property names (using [] syntax) are properly
+        extracted. Includes both variable-based and string literal computed properties.
+        """
+        code = """
+const key = 'prop';
+const obj = { [key]: 'value', ['literal']: 1 }
+"""
+        chunks = _parse(code, f"test.{ext}", language)
+        symbols = _get_symbols(chunks)
+        assert "obj" in symbols, \
+            f"Object with computed properties should be extracted for {language}"
+        # Verify the object contains the computed property syntax
+        obj_chunk = next((c for c in chunks if c.symbol == "obj"), None)
+        assert obj_chunk is not None, "Should find obj chunk"
+        assert "[" in obj_chunk.code, \
+            "Computed property syntax should be in chunk code"
+
+    @pytest.mark.parametrize("language,ext", [
+        (Language.JAVASCRIPT, "js"),
+        (Language.JSX, "jsx"),
+        (Language.TYPESCRIPT, "ts"),
+        (Language.TSX, "tsx"),
+    ])
+    def test_computed_property_with_template_literal(self, language, ext):
+        """Computed properties with template literals.
+
+        Tests that computed properties using template literals are properly extracted.
+        """
+        code = """
+const prefix = 'user';
+const obj = { [`${prefix}_name`]: 'John', [`${prefix}_age`]: 30 }
+"""
+        chunks = _parse(code, f"test.{ext}", language)
+        symbols = _get_symbols(chunks)
+        assert "obj" in symbols, \
+            f"Object with template literal computed properties should be extracted for {language}"
+
+    @pytest.mark.parametrize("language,ext", [
+        (Language.JAVASCRIPT, "js"),
+        (Language.JSX, "jsx"),
+        (Language.TYPESCRIPT, "ts"),
+        (Language.TSX, "tsx"),
+    ])
+    def test_computed_method_names(self, language, ext):
+        """Computed method names in objects.
+
+        Tests that objects with computed method names are properly extracted.
+        """
+        code = """
+const methodName = 'getData';
+const obj = {
+  [methodName]() {
+    return 'data';
+  },
+  [`set${methodName}`](value) {
+    this.data = value;
+  }
+}
+"""
+        chunks = _parse(code, f"test.{ext}", language)
+        symbols = _get_symbols(chunks)
+        assert "obj" in symbols, \
+            f"Object with computed method names should be extracted for {language}"
 
 
 # =============================================================================
