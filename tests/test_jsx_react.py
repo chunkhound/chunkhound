@@ -117,7 +117,6 @@ function Profile({ name, age, email }) {
 class TestJSXClassComponents:
     """Test class component extraction in JSX."""
 
-    @pytest.mark.xfail(reason="JSX parser does not extract classes - only functions are extracted")
     def test_class_component(self, parser_factory):
         """Test basic class component extraction.
 
@@ -1243,7 +1242,6 @@ class App extends React.Component {
         class_chunks = [c for c in chunks if c.chunk_type == ChunkType.CLASS]
         assert len(class_chunks) > 0, "Should find class in TSX"
 
-    @pytest.mark.xfail(reason="JSX parser does not extract class components")
     def test_class_component_consistency_jsx(self, parser_factory):
         """Test class component is extracted in JSX.
 
