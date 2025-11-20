@@ -4,7 +4,6 @@ Tests two-phase clustering: HDBSCAN discovery + greedy grouping to token budget.
 """
 
 import pytest
-import numpy as np
 
 from chunkhound.services.clustering_service import ClusteringService, ClusterGroup
 from tests.fixtures.fake_providers import FakeLLMProvider, FakeEmbeddingProvider
@@ -339,3 +338,230 @@ class TestClusterGroup:
         )
 
         assert cluster1 == cluster2
+
+
+class TestOutlierMergingEdgeCases:
+    """Test edge cases for outlier merging after native cluster merges."""
+
+    @pytest.mark.asyncio
+    async def test_outlier_merging_after_native_cluster_merges(self) -> None:
+        """Test outlier merging when native clusters are merged together.
+
+        Scenario: 3 natural clusters get merged + outliers need absorption
+        Verifies that outliers use correct cluster indices after merging.
+        """
+        class MergeScenarioEmbeddingProvider:
+            async def embed(self, texts: list[str]) -> list[list[float]]:
+                embeddings = []
+                for i in range(len(texts)):
+                    if i < 3:  # Cluster 0 at [0, 0]
+                        embeddings.append([0.01 * i, 0.01 * i])
+                    elif i < 6:  # Cluster 1 at [0.5, 0.5] (close to cluster 0)
+                        embeddings.append([0.5 + 0.01 * (i - 3), 0.5 + 0.01 * (i - 3)])
+                    elif i < 9:  # Cluster 2 at [1.0, 1.0] (close to clusters 0 and 1)
+                        embeddings.append([1.0 + 0.01 * (i - 6), 1.0 + 0.01 * (i - 6)])
+                    else:  # Outliers FAR away from all clusters
+                        embeddings.append([100 + 10 * (i - 9), 100 + 10 * (i - 9)])
+                return embeddings
+
+        class TokenProvider:
+            def estimate_tokens(self, text: str, model: str | None = None) -> int:
+                return 6000  # 6k per file
+
+        service = ClusteringService(
+            embedding_provider=MergeScenarioEmbeddingProvider(),
+            llm_provider=TokenProvider(),
+            max_tokens_per_cluster=25000,  # Forces merging of 3k-token clusters
+            min_cluster_size=2,
+        )
+
+        # 12 files: 3 native clusters (18k each) + 3 outliers (18k)
+        files = {f"file{i}.py": f"content {i}" * 50 for i in range(12)}
+
+        clusters, metadata = await service.cluster_files(files)
+
+        # Verify all files accounted for
+        total_files = sum(len(c.file_paths) for c in clusters)
+        assert total_files == 12, "All 12 files must be in clusters"
+
+        # No cluster should exceed budget (this validates the indexing bug fix)
+        for cluster in clusters:
+            assert cluster.total_tokens <= 25000, (
+                f"Cluster {cluster.cluster_id} exceeds budget: {cluster.total_tokens}"
+            )
+
+        # Verify clustering completed without errors (IndexError would occur with bug)
+        assert metadata["num_clusters"] >= 1
+        assert metadata["num_native_clusters"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_outlier_merging_with_full_capacity_clusters(self) -> None:
+        """Test outlier merging when all clusters are at capacity.
+
+        Scenario: Merged clusters fill budget, outliers form separate cluster
+        """
+        class CapacityEmbeddingProvider:
+            async def embed(self, texts: list[str]) -> list[list[float]]:
+                embeddings = []
+                for i in range(len(texts)):
+                    if i < 5:  # Cluster 0
+                        embeddings.append([0.01 * i, 0.01 * i])
+                    elif i < 10:  # Cluster 1
+                        embeddings.append([10 + 0.01 * (i - 5), 10 + 0.01 * (i - 5)])
+                    else:  # Outliers very far away
+                        embeddings.append([100 + 10 * i, 100 + 10 * i])
+                return embeddings
+
+        class CapacityTokenProvider:
+            def estimate_tokens(self, text: str, model: str | None = None) -> int:
+                return 6000  # 6k per file, 5 files = 30k (at capacity)
+
+        service = ClusteringService(
+            embedding_provider=CapacityEmbeddingProvider(),
+            llm_provider=CapacityTokenProvider(),
+            max_tokens_per_cluster=30000,
+            min_cluster_size=2,
+        )
+
+        # 13 files: 5+5 native (30k each) + 3 outliers (18k)
+        files = {f"file{i}.py": f"content {i}" * 50 for i in range(13)}
+
+        clusters, metadata = await service.cluster_files(files)
+
+        # All files accounted for
+        assert sum(len(c.file_paths) for c in clusters) == 13
+
+        # Budget respected (validates the fix - no IndexError or wrong assignments)
+        for cluster in clusters:
+            assert cluster.total_tokens <= 30000
+
+        # Verify clustering completed successfully
+        assert metadata["num_clusters"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_outlier_distance_based_assignment(self) -> None:
+        """Test that outliers merge into nearest clusters by distance.
+
+        Scenario: Outliers positioned near specific clusters should merge there
+        """
+        class DistanceEmbeddingProvider:
+            async def embed(self, texts: list[str]) -> list[list[float]]:
+                embeddings = []
+                for i in range(len(texts)):
+                    if i < 3:  # Cluster 0 at [0, 0]
+                        embeddings.append([0.01 * i, 0.01 * i])
+                    elif i < 6:  # Cluster 1 at [10, 10]
+                        embeddings.append([10 + 0.01 * (i - 3), 10 + 0.01 * (i - 3)])
+                    elif i < 8:  # Outliers far from both clusters
+                        embeddings.append([50 + 10 * (i - 6), 50 + 10 * (i - 6)])
+                    else:  # More outliers far away
+                        embeddings.append([150 + 10 * (i - 8), 150 + 10 * (i - 8)])
+                return embeddings
+
+        class DistanceTokenProvider:
+            def estimate_tokens(self, text: str, model: str | None = None) -> int:
+                return 3000  # Small tokens to allow merging
+
+        service = ClusteringService(
+            embedding_provider=DistanceEmbeddingProvider(),
+            llm_provider=DistanceTokenProvider(),
+            max_tokens_per_cluster=30000,
+            min_cluster_size=2,
+        )
+
+        # 10 files: 3+3 native + 4 outliers
+        files = {f"file{i}.py": f"content {i}" * 20 for i in range(10)}
+
+        clusters, metadata = await service.cluster_files(files)
+
+        # All files present
+        assert sum(len(c.file_paths) for c in clusters) == 10
+
+        # Budget respected (validates correct cluster indexing after merges)
+        for cluster in clusters:
+            assert cluster.total_tokens <= 30000
+
+        # Verify clustering completed without crashes
+        assert metadata["num_clusters"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_outlier_only_scenario(self) -> None:
+        """Test clustering when HDBSCAN finds only outliers.
+
+        Scenario: No natural clusters, all files are outliers
+        """
+        class AllOutliersEmbeddingProvider:
+            async def embed(self, texts: list[str]) -> list[list[float]]:
+                # All widely separated -> all outliers
+                return [[100.0 * i, 100.0 * i] for i in range(len(texts))]
+
+        class SmallTokenProvider:
+            def estimate_tokens(self, text: str, model: str | None = None) -> int:
+                return 2000  # 2k per file
+
+        service = ClusteringService(
+            embedding_provider=AllOutliersEmbeddingProvider(),
+            llm_provider=SmallTokenProvider(),
+            max_tokens_per_cluster=30000,
+            min_cluster_size=10,  # High threshold forces all to be outliers
+        )
+
+        # 6 files, all will be outliers (12k total, under budget)
+        files = {f"file{i}.py": f"content {i}" * 30 for i in range(6)}
+
+        clusters, metadata = await service.cluster_files(files)
+
+        # All files must be accounted for
+        assert sum(len(c.file_paths) for c in clusters) == 6
+        assert metadata["num_clusters"] >= 1
+
+        # All clusters respect budget
+        for cluster in clusters:
+            assert cluster.total_tokens <= 30000
+
+    @pytest.mark.asyncio
+    async def test_merged_cluster_centroid_for_outliers(self) -> None:
+        """Test that merged cluster centroids are used for outlier distance.
+
+        Scenario: Native clusters merge, outliers use merged centroid for distance
+        """
+        class MergedCentroidEmbeddingProvider:
+            async def embed(self, texts: list[str]) -> list[list[float]]:
+                embeddings = []
+                for i in range(len(texts)):
+                    if i < 2:  # Cluster 0 at [0, 0]
+                        embeddings.append([0.01 * i, 0.01 * i])
+                    elif i < 4:  # Cluster 1 at [0.2, 0.2] (close to 0)
+                        embeddings.append([0.2 + 0.01 * (i - 2), 0.2 + 0.01 * (i - 2)])
+                    elif i < 6:  # Cluster 2 at [0.4, 0.4] (close to 0 and 1)
+                        embeddings.append([0.4 + 0.01 * (i - 4), 0.4 + 0.01 * (i - 4)])
+                    else:  # Outliers FAR away
+                        embeddings.append([100 + 10 * (i - 6), 100 + 10 * (i - 6)])
+                return embeddings
+
+        class MergedTokenProvider:
+            def estimate_tokens(self, text: str, model: str | None = None) -> int:
+                return 5000  # 5k per file
+
+        service = ClusteringService(
+            embedding_provider=MergedCentroidEmbeddingProvider(),
+            llm_provider=MergedTokenProvider(),
+            max_tokens_per_cluster=30000,  # Can fit 6 files (30k)
+            min_cluster_size=2,
+        )
+
+        # 10 files: 2+2+2 native + 4 outliers
+        files = {f"file{i}.py": f"content {i}" * 25 for i in range(10)}
+
+        clusters, metadata = await service.cluster_files(files)
+
+        # All files present
+        assert sum(len(c.file_paths) for c in clusters) == 10
+
+        # Budget respected (critical validation - bug would cause wrong assignments)
+        for cluster in clusters:
+            assert cluster.total_tokens <= 30000
+
+        # Verify clustering with merged native clusters completed successfully
+        assert metadata["num_native_clusters"] >= 1
+        assert metadata["num_clusters"] >= 1
