@@ -59,7 +59,10 @@ class DirectoryIndexingService:
             self.indexing_coordinator.progress = progress
 
     async def process_directory(
-        self, target_path: Path, no_embeddings: bool = False
+        self,
+        target_path: Path,
+        no_embeddings: bool = False,
+        thin_missing_embeddings: bool = False,
     ) -> IndexingStats:
         """
         Main processing pipeline - extracted from run.py.
@@ -89,8 +92,14 @@ class DirectoryIndexingService:
 
             # Embedding generation (extracted from run.py:85-88, 287-312)
             if not no_embeddings:
-                self.progress_callback("Checking for missing embeddings...")
-                embed_result = await self._generate_missing_embeddings(exclude_patterns)
+                # Thin mode: if no new chunks were created, skip the missing-embeddings pass entirely
+                if thin_missing_embeddings and stats.chunks_created == 0:
+                    embed_result = {"status": "complete", "generated": 0}
+                else:
+                    self.progress_callback("Checking for missing embeddings...")
+                    embed_result = await self._generate_missing_embeddings(
+                        exclude_patterns, thin_check=False
+                    )
                 stats.embeddings_generated = embed_result.get("generated", 0)
 
             stats.processing_time = time.time() - start_time
@@ -133,11 +142,11 @@ class DirectoryIndexingService:
         return result
 
     async def _generate_missing_embeddings(
-        self, exclude_patterns: list[str]
+        self, exclude_patterns: list[str], *, thin_check: bool = False
     ) -> dict[str, Any]:
         """Extracted from run.py:287-312 - embedding generation workflow."""
         embed_result = await self.indexing_coordinator.generate_missing_embeddings(
-            exclude_patterns=exclude_patterns
+            exclude_patterns=exclude_patterns, thin_check=thin_check
         )
 
         if embed_result["status"] not in ["success", "up_to_date", "complete"]:

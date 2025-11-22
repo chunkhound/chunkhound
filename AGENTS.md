@@ -199,3 +199,8 @@ KISS - Keep It Simple:
 - ALWAYS Clean up after completing tasks
 - ALWAYS Produce clean code first time - no temporary backwards compatibility
 - ALWAYS Use sleep for waiting, not polling
+
+# Review Protocol
+
+When asked to perform analysis of a branch:
+Use code_research to analyze the current working branch vs main and conduct a detailed QA research of the sources. Distill each function into new subquery to code_research and make sure the code is DRY and KISS
