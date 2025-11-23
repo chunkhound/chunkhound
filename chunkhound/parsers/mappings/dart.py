@@ -45,96 +45,37 @@ class DartMapping(BaseMapping):
     def get_function_query(self) -> str:
         """Get tree-sitter query pattern for Dart function definitions.
 
-        Handles:
-        - Function signatures with function bodies
-        - Standalone function signatures
-
-        Returns:
-            Tree-sitter query string for finding Dart function definitions
+        Delegates to UniversalConcept.DEFINITION query to avoid duplication.
         """
-        return """
-            (function_signature
-                name: (identifier) @function_name
-            ) @function_def
-        """
+        return self.get_query_for_concept(UniversalConcept.DEFINITION) or ""
 
     def get_class_query(self) -> str:
         """Get tree-sitter query pattern for Dart class definitions.
 
-        Handles:
-        - Regular class definitions
-        - Classes with inheritance
-        - Classes with mixins
-        - Abstract classes
-        - Enum declarations
-        - Mixin declarations
-
-        Returns:
-            Tree-sitter query string for finding Dart class definitions
+        Delegates to UniversalConcept.DEFINITION query to avoid duplication.
         """
-        return """
-            (class_definition
-                name: (identifier) @class_name
-            ) @class_def
-
-            (enum_declaration
-                name: (identifier) @enum_name
-            ) @enum_def
-
-            (mixin_declaration
-                name: (identifier) @mixin_name
-            ) @mixin_def
-        """
+        return self.get_query_for_concept(UniversalConcept.DEFINITION) or ""
 
     def get_method_query(self) -> str:
         """Get tree-sitter query pattern for Dart method definitions.
 
-        Handles:
-        - Method signatures within class bodies
-        - Constructor methods
-
-        Returns:
-            Tree-sitter query string for finding Dart method definitions
+        Delegates to UniversalConcept.DEFINITION query to avoid duplication.
         """
-        return """
-            (class_definition
-                (class_body
-                    (method_signature
-                        (function_signature
-                            name: (identifier) @method_name
-                        )
-                    ) @method_def
-                )
-            )
-        """
+        return self.get_query_for_concept(UniversalConcept.DEFINITION) or ""
 
     def get_comment_query(self) -> str:
         """Get tree-sitter query pattern for Dart comments.
 
-        Handles:
-        - Single-line comments: // comment
-        - Multi-line comments: /* comment */
-        - Documentation comments: /// comment and /** comment */
-
-        Returns:
-            Tree-sitter query string for finding Dart comments
+        Delegates to UniversalConcept.COMMENT query to avoid duplication.
         """
-        return """
-            (comment) @comment
-        """
+        return self.get_query_for_concept(UniversalConcept.COMMENT) or ""
 
     def get_docstring_query(self) -> str:
         """Get tree-sitter query pattern for Dart documentation comments.
 
-        Dart uses /// for doc comments and /** */ for block doc comments.
-
-        Returns:
-            Tree-sitter query string for finding Dart documentation comments
+        Delegates to UniversalConcept.COMMENT query to avoid duplication.
         """
-        return """
-            (comment) @doc_comment
-            (#match? @doc_comment "^///|^/\\*\\*")
-        """
+        return self.get_query_for_concept(UniversalConcept.COMMENT) or ""
 
     def get_import_query(self) -> str:
         """Get tree-sitter query pattern for Dart import statements.
@@ -149,7 +90,7 @@ class DartMapping(BaseMapping):
             Tree-sitter query string for finding Dart import statements
         """
         return """
-            (import_declaration) @import
+            (library_import) @import
         """
 
     def extract_function_name(self, node: Any, source: str) -> str:
@@ -395,10 +336,10 @@ class DartMapping(BaseMapping):
         elif concept == UniversalConcept.IMPORT:
             if "definition" in captures:
                 node = captures["definition"]
-                node_text = self.get_node_text(node, source).strip()
-                if node_text.startswith("import"):
-                    module_name = node_text[6:].strip()
-                    return f"import {module_name}"
+                uri_node = self.find_child_by_type(node, "configurable_uri")
+                if uri_node:
+                    uri_text = self.get_node_text(uri_node, source).strip().strip("'\"")
+                    return f"import {uri_text}"
             return "unnamed_import"
 
         elif concept == UniversalConcept.BLOCK:
@@ -435,7 +376,7 @@ class DartMapping(BaseMapping):
         return ""
 
     def extract_metadata(
-        self, concept: Any, captures: dict[str, Any], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, Any], content: bytes
     ) -> dict[str, Any]:
         """Extract Dart-specific metadata."""
         source = content.decode("utf-8")
