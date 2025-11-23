@@ -89,14 +89,8 @@ class TestFunctionExtractionConsistency:
         assert "multiply" in all_content, f"Arrow function 'multiply' not found in {lang}"
 
     @pytest.mark.parametrize("lang,ext", JS_FAMILY_LANGUAGES)
-    @pytest.mark.skip(reason="Generator functions not currently extracted by JS-family parsers - known gap")
     def test_generator_function(self, lang, ext):
-        """Generator function should be extracted consistently.
-
-        NOTE: This test is skipped because generator functions are not currently
-        being extracted by the JS-family parsers. This is a known parser gap
-        that should be addressed in parser consolidation work.
-        """
+        """Generator function should be extracted consistently."""
         code = "function* generate() { yield 1; yield 2; }"
         chunks = _parse(code, f"test{ext}", lang)
 

@@ -378,12 +378,14 @@ def build_symbol_table(
 
     # Also handle full script content if provided (for comprehensive coverage)
     if script_content and script_chunks:
+        # Find actual min/max line numbers (chunks may not be in line order due to nesting)
+        min_line = min(chunk.start_line for chunk in script_chunks)
+        max_line = max(chunk.end_line for chunk in script_chunks)
         first_chunk = script_chunks[0]
-        last_chunk = script_chunks[-1] if len(script_chunks) > 1 else first_chunk
         temp_chunk = Chunk(
             symbol="<full_script>",
-            start_line=first_chunk.start_line,
-            end_line=last_chunk.end_line,
+            start_line=min_line,
+            end_line=max_line,
             code=script_content,
             chunk_type=first_chunk.chunk_type,
             file_id=first_chunk.file_id,

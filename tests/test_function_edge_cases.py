@@ -93,7 +93,6 @@ const obj = {
         # Verify await is preserved
         assert any("await" in c.code for c in async_chunks), "Should preserve await keyword"
 
-    @pytest.mark.xfail(reason="Generator method shorthand not yet extracted by JS-family parsers")
     def test_generator_method_shorthand(self):
         """Test generator method shorthand in object literal.
 
@@ -151,7 +150,6 @@ class TestAccessorFunctions:
     These use special syntax: get prop() { ... } and set prop(value) { ... }
     """
 
-    @pytest.mark.xfail(reason="Getter functions not yet extracted by JS-family parsers")
     def test_getter(self):
         """Test getter accessor function.
 
@@ -176,7 +174,6 @@ const obj = {
         assert any("get" in c.code and "prop" in c.code for c in getter_chunks), \
             "Should preserve 'get' keyword"
 
-    @pytest.mark.xfail(reason="Setter functions not yet extracted by JS-family parsers")
     def test_setter(self):
         """Test setter accessor function.
 
@@ -201,7 +198,6 @@ const obj = {
         assert any("set" in c.code and "prop" in c.code and "value" in c.code
                    for c in setter_chunks), "Should preserve 'set' keyword and parameter"
 
-    @pytest.mark.xfail(reason="Getter/setter pairs not yet extracted by JS-family parsers")
     def test_getter_and_setter(self):
         """Test object with both getter and setter for same property.
 
@@ -231,7 +227,6 @@ const obj = {
         assert has_getter, "Should extract getter"
         assert has_setter, "Should extract setter"
 
-    @pytest.mark.xfail(reason="TypeScript getters not yet extracted")
     def test_typescript_getter_with_type(self):
         """Test TypeScript getter with return type annotation.
 
@@ -294,7 +289,6 @@ function Person(name, age) {
         assert any("this.name" in c.code for c in person_chunks), \
             "Should preserve this assignments"
 
-    @pytest.mark.xfail(reason="Prototype method assignments not yet extracted separately")
     def test_constructor_with_prototype(self):
         """Test constructor function with prototype methods.
 
@@ -326,6 +320,98 @@ Person.prototype.farewell = function() {
             "Should find constructor function"
         # Should find prototype methods
         assert any("greet" in c.code for c in chunks), "Should find prototype method"
+
+    def test_static_method_assignments(self):
+        """Test static method assignments on constructor.
+
+        Pattern: Constructor.staticMethod = function() {}
+        Expected: Static methods should be extracted as separate chunks
+        """
+        code = """
+function MathUtils() {}
+
+MathUtils.add = function(a, b) {
+    return a + b;
+};
+
+MathUtils.multiply = function(a, b) {
+    return a * b;
+};
+"""
+        chunks = parse_code(code, "test.js", Language.JAVASCRIPT)
+
+        assert len(chunks) >= 3, "Should extract constructor and static methods"
+        # Should find constructor
+        assert any("MathUtils" in c.code and c.code.strip().startswith("function MathUtils")
+                   for c in chunks), "Should find constructor"
+        # Should find static methods
+        assert any("add" in c.code and "MathUtils.add" in c.code for c in chunks), \
+            "Should find static add method"
+        assert any("multiply" in c.code and "MathUtils.multiply" in c.code for c in chunks), \
+            "Should find static multiply method"
+
+    def test_prototype_property_assignments(self):
+        """Test prototype property assignments (non-function values).
+
+        Pattern: Constructor.prototype.property = value
+        Expected: Property assignments should be extracted
+        """
+        code = """
+function Animal(name) {
+    this.name = name;
+}
+
+Animal.prototype.species = 'Unknown';
+Animal.prototype.legs = 4;
+Animal.prototype.sound = function() {
+    return 'noise';
+};
+"""
+        chunks = parse_code(code, "test.js", Language.JAVASCRIPT)
+
+        assert len(chunks) >= 4, "Should extract constructor, properties, and method"
+        # Should find constructor
+        assert any("Animal" in c.code and "this.name" in c.code for c in chunks), \
+            "Should find constructor"
+        # Should find prototype assignments (both properties and methods)
+        assert any("species" in c.code for c in chunks), "Should find species property"
+        assert any("sound" in c.code and "function" in c.code for c in chunks), \
+            "Should find sound method"
+
+    def test_mixed_prototype_and_static_assignments(self):
+        """Test constructor with both prototype and static assignments.
+
+        Pattern: Mix of Constructor.prototype.x and Constructor.y patterns
+        Expected: All assignments should be extracted separately
+        """
+        code = """
+function Calculator(initial) {
+    this.value = initial || 0;
+}
+
+Calculator.prototype.add = function(n) {
+    this.value += n;
+    return this;
+};
+
+Calculator.create = function(initial) {
+    return new Calculator(initial);
+};
+
+Calculator.VERSION = '1.0.0';
+"""
+        chunks = parse_code(code, "test.js", Language.JAVASCRIPT)
+
+        assert len(chunks) >= 4, "Should extract constructor, prototype method, static method, and constant"
+        # Should find constructor
+        assert any("Calculator" in c.code and "this.value" in c.code for c in chunks), \
+            "Should find constructor"
+        # Should find prototype method
+        assert any("prototype.add" in c.code for c in chunks), "Should find prototype method"
+        # Should find static method
+        assert any("Calculator.create" in c.code for c in chunks), "Should find static method"
+        # Should find static property
+        assert any("VERSION" in c.code for c in chunks), "Should find static property"
 
     @pytest.mark.parametrize("language,ext", [
         (Language.JAVASCRIPT, "js"),
@@ -592,7 +678,6 @@ Animal.prototype.sleep = function() {
         assert any("speak" in c.code or "eat" in c.code or "sleep" in c.code for c in chunks), \
             "Should find methods"
 
-    @pytest.mark.xfail(reason="Complex accessor patterns not yet fully supported")
     def test_typescript_class_with_accessors(self):
         """Test TypeScript class with getter/setter and regular methods.
 

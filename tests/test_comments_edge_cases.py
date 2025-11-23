@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from chunkhound.core.types.common import Language, ChunkType
-from chunkhound.parsers.parser_factory import ParserFactory
+from chunkhound.parsers.parser_factory import ParserFactory, OXC_AVAILABLE
 
 
 def _parse(code: str, filename: str, language: Language):

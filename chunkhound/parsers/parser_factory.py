@@ -6,6 +6,8 @@ This module provides the ParserFactory class that:
 3. Creates UniversalParser instances with the correct language configuration
 4. Provides a clean interface for the rest of the system
 5. Handles cases where tree-sitter modules aren't available gracefully
+6. Uses OxcParser for JS/TS/JSX/TSX when oxc-python is available, with
+   automatic fallback to tree-sitter if unavailable
 
 All tree-sitter language modules are imported explicitly to avoid dynamic import
 complexity and ensure better error handling during startup.
@@ -56,6 +58,19 @@ from chunkhound.parsers.universal_engine import SetupError, TreeSitterEngine
 from chunkhound.parsers.universal_parser import CASTConfig, UniversalParser
 
 logger = logging.getLogger(__name__)
+
+# Try to import OxcParser - it may not be available if oxc_python isn't installed
+# or if the installed version has an incompatible API
+try:
+    from chunkhound.parsers.oxc_parser import OxcParser
+    # Verify we can actually instantiate the parser
+    _test_parser = OxcParser(Language.JAVASCRIPT)
+    del _test_parser
+    OXC_AVAILABLE = True
+except (ImportError, AttributeError, TypeError) as e:
+    OxcParser = None  # type: ignore[misc, assignment]
+    OXC_AVAILABLE = False
+    logger.debug(f"OxcParser not available: {e}")
 
 # Explicit tree-sitter language imports
 # Import all available tree-sitter languages explicitly to avoid
@@ -626,6 +641,15 @@ class ParserFactory:
             from chunkhound.parsers.vue_parser import VueParser
 
             return VueParser(cast_config)
+
+        # Use OxcParser for JavaScript-family languages if available
+        if OXC_AVAILABLE and language in (Language.JAVASCRIPT, Language.TYPESCRIPT, Language.JSX, Language.TSX):
+            cache_key = self._cache_key(language)
+            if cache_key in self._parser_cache:
+                return self._parser_cache[cache_key]
+            parser = OxcParser(language)
+            self._parser_cache[cache_key] = parser
+            return parser
 
         # Use cache to avoid recreating parsers
         cache_key = self._cache_key(language)

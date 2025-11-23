@@ -53,14 +53,8 @@ TS_LANGUAGES = [
     (Language.TSX, ".tsx"),
 ]
 
-# Languages that currently extract ES6 imports (TS/TSX do, JS/JSX don't yet)
-# JS and JSX parsers use JavaScript mapping which doesn't have import queries yet
-ES6_IMPORT_SUPPORTED = [
-    pytest.param(Language.JAVASCRIPT, ".js", marks=pytest.mark.xfail(reason="JS parser doesn't extract ES6 imports yet")),
-    pytest.param(Language.JSX, ".jsx", marks=pytest.mark.xfail(reason="JSX parser doesn't extract ES6 imports yet")),
-    pytest.param(Language.TYPESCRIPT, ".ts"),
-    pytest.param(Language.TSX, ".tsx"),
-]
+# All JS-family languages now support ES6 import extraction via OxcParser
+ES6_IMPORT_SUPPORTED = ES6_LANGUAGES
 
 
 class TestES6DefaultImport:
@@ -88,7 +82,6 @@ class TestES6DefaultImport:
         assert any("MyComponent" in c.code for c in chunks), \
             f"Import should contain 'MyComponent' for {lang.value}"
 
-    @pytest.mark.xfail(reason="JS parser doesn't extract ES6 imports yet")
     def test_default_import_javascript_direct(self):
         """Direct unit test for JavaScript default import."""
         code = "import React from 'react';"
@@ -448,11 +441,9 @@ export default {
 class TestCrossLanguageConsistency:
     """Test that imports produce consistent results across languages.
 
-    Note: These tests currently fail for JS/JSX because those parsers don't
-    extract static ES6 imports yet. They pass for TypeScript/TSX.
+    All JS-family languages now extract imports consistently via OxcParser.
     """
 
-    @pytest.mark.xfail(reason="JS/JSX parsers don't extract ES6 imports yet - only TS/TSX pass")
     def test_default_import_consistency(self):
         """Test that default import extraction is consistent across languages."""
         code = "import React from 'react';"
@@ -470,7 +461,6 @@ class TestCrossLanguageConsistency:
             assert result["count"] > 0, f"{lang_name} should extract import"
             assert result["has_react"], f"{lang_name} should contain 'React'"
 
-    @pytest.mark.xfail(reason="JS/JSX parsers don't extract ES6 imports yet - only TS/TSX pass")
     def test_named_import_consistency(self):
         """Test that named import extraction is consistent across languages."""
         code = "import { useState, useEffect } from 'react';"
@@ -491,7 +481,6 @@ class TestCrossLanguageConsistency:
             assert result["has_useState"], f"{lang_name} should contain 'useState'"
             assert result["has_useEffect"], f"{lang_name} should contain 'useEffect'"
 
-    @pytest.mark.xfail(reason="JS/JSX parsers don't extract ES6 imports yet - only TS/TSX pass")
     def test_namespace_import_consistency(self):
         """Test that namespace import extraction is consistent."""
         code = "import * as utils from './utils';"
@@ -663,7 +652,6 @@ class TestImportChunkType:
 class TestJavaScriptParserImports:
     """Direct unit tests for JavaScript parser import extraction."""
 
-    @pytest.mark.xfail(reason="JS parser doesn't extract ES6 imports yet")
     def test_js_default_import(self):
         """Test JavaScript default import extraction."""
         parser = create_parser(Language.JAVASCRIPT)
@@ -675,7 +663,6 @@ class TestJavaScriptParserImports:
         assert len(chunks) > 0
         assert any("React" in c.code for c in chunks)
 
-    @pytest.mark.xfail(reason="JS parser doesn't extract ES6 imports yet")
     def test_js_named_import(self):
         """Test JavaScript named import extraction."""
         parser = create_parser(Language.JAVASCRIPT)
@@ -715,7 +702,6 @@ class TestTypeScriptParserImports:
 class TestJSXParserImports:
     """Direct unit tests for JSX parser import extraction."""
 
-    @pytest.mark.xfail(reason="JSX parser doesn't extract ES6 imports yet")
     def test_jsx_default_import(self):
         """Test JSX default import extraction."""
         parser = create_parser(Language.JSX)
@@ -726,7 +712,6 @@ class TestJSXParserImports:
         )
         assert len(chunks) > 0
 
-    @pytest.mark.xfail(reason="JSX parser doesn't extract ES6 imports yet")
     def test_jsx_combined_import(self):
         """Test JSX combined import extraction."""
         parser = create_parser(Language.JSX)

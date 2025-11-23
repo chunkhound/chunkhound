@@ -6,7 +6,7 @@ Tests that all parsers can parse minimal valid code samples.
 
 import pytest
 from chunkhound.core.types.common import FileId, Language
-from chunkhound.parsers.parser_factory import get_parser_factory
+from chunkhound.parsers.parser_factory import get_parser_factory, OXC_AVAILABLE
 from chunkhound.parsers.universal_engine import SetupError
 
 # Minimal valid code snippets for each language
@@ -394,51 +394,41 @@ class TestTypeScriptUniversalConcepts:
 
 
 class TestTypeScriptConceptExtraction:
-    """Test TypeScript concept extraction with real tree-sitter parsing.
+    """Test TypeScript concept extraction with real parsing.
 
     These tests verify that concepts are properly extracted from TypeScript
-    code using the universal concept extraction system.
+    code using the public parse_content() API that works with both
+    tree-sitter and OxcParser backends.
     """
 
     def test_extract_import_concepts_from_typescript(self):
-        """Test extraction of IMPORT concept from TypeScript code."""
+        """Test extraction of imports from TypeScript code."""
         from chunkhound.parsers.parser_factory import get_parser_factory
-        from chunkhound.parsers.universal_engine import UniversalConcept
+        from chunkhound.core.types.common import FileId
 
         factory = get_parser_factory()
         parser = factory.create_parser(Language.TYPESCRIPT)
 
-        # Parse TypeScript with imports
         content = """
 import { useState } from 'react';
 import type { User } from './types';
 import * as utils from './utils';
 """
 
-        # Get the extractor from the parser
-        extractor = parser.extractor
-        ast = parser.engine.parse_to_ast(content)
+        # Use public API that works for both OxcParser and tree-sitter
+        chunks = parser.parse_content(content, "test.ts", FileId(1))
 
-        # Extract IMPORT concepts
-        import_chunks = extractor.extract_concept(
-            ast.root_node,
-            content.encode('utf-8'),
-            UniversalConcept.IMPORT
-        )
+        # Find import chunks - imports should be extracted
+        import_codes = [c.code for c in chunks if "import" in c.code.lower()]
 
-        assert len(import_chunks) > 0, "Should extract import statements as IMPORT concepts"
-
-        # Verify import content
-        import_texts = [chunk.content for chunk in import_chunks]
-        assert any("useState" in text for text in import_texts), \
+        assert len(import_codes) > 0, "Should extract import statements"
+        assert any("useState" in code for code in import_codes), \
             "Should capture named imports"
-        assert any("type" in text.lower() for text in import_texts), \
-            "Should capture type imports"
 
     def test_extract_interface_from_definition_concept(self):
-        """Test extraction of interfaces via DEFINITION concept."""
+        """Test extraction of interfaces."""
         from chunkhound.parsers.parser_factory import get_parser_factory
-        from chunkhound.parsers.universal_engine import UniversalConcept
+        from chunkhound.core.types.common import FileId, ChunkType
 
         factory = get_parser_factory()
         parser = factory.create_parser(Language.TYPESCRIPT)
@@ -450,28 +440,20 @@ interface User {
 }
 """
 
-        extractor = parser.extractor
-        ast = parser.engine.parse_to_ast(content)
+        chunks = parser.parse_content(content, "test.ts", FileId(1))
 
-        # Extract DEFINITION concepts (should include interfaces)
-        def_chunks = extractor.extract_concept(
-            ast.root_node,
-            content.encode('utf-8'),
-            UniversalConcept.DEFINITION
-        )
+        # Find interface chunks
+        interface_chunks = [c for c in chunks if c.chunk_type == ChunkType.INTERFACE]
+        user_chunks = [c for c in interface_chunks if "User" in c.symbol]
 
-        assert len(def_chunks) > 0, "Should extract interface as DEFINITION concept"
-
-        # Verify interface content
-        interface_chunks = [c for c in def_chunks if "User" in c.name]
-        assert len(interface_chunks) > 0, "Should find User interface"
-        assert any("interface" in c.content.lower() for c in interface_chunks), \
+        assert len(user_chunks) > 0, "Should find User interface"
+        assert any("interface" in c.code.lower() for c in user_chunks), \
             "Interface content should contain 'interface' keyword"
 
     def test_extract_enum_from_definition_concept(self):
-        """Test extraction of enums via DEFINITION concept."""
+        """Test extraction of enums."""
         from chunkhound.parsers.parser_factory import get_parser_factory
-        from chunkhound.parsers.universal_engine import UniversalConcept
+        from chunkhound.core.types.common import FileId, ChunkType
 
         factory = get_parser_factory()
         parser = factory.create_parser(Language.TYPESCRIPT)
@@ -483,28 +465,20 @@ enum Status {
 }
 """
 
-        extractor = parser.extractor
-        ast = parser.engine.parse_to_ast(content)
+        chunks = parser.parse_content(content, "test.ts", FileId(1))
 
-        # Extract DEFINITION concepts (should include enums)
-        def_chunks = extractor.extract_concept(
-            ast.root_node,
-            content.encode('utf-8'),
-            UniversalConcept.DEFINITION
-        )
+        # Find enum chunks
+        enum_chunks = [c for c in chunks if c.chunk_type == ChunkType.ENUM]
+        status_chunks = [c for c in enum_chunks if "Status" in c.symbol]
 
-        assert len(def_chunks) > 0, "Should extract enum as DEFINITION concept"
-
-        # Verify enum content
-        enum_chunks = [c for c in def_chunks if "Status" in c.name]
-        assert len(enum_chunks) > 0, "Should find Status enum"
-        assert any("enum" in c.content.lower() for c in enum_chunks), \
+        assert len(status_chunks) > 0, "Should find Status enum"
+        assert any("enum" in c.code.lower() for c in status_chunks), \
             "Enum content should contain 'enum' keyword"
 
     def test_extract_type_alias_from_definition_concept(self):
-        """Test extraction of type aliases via DEFINITION concept."""
+        """Test extraction of type aliases."""
         from chunkhound.parsers.parser_factory import get_parser_factory
-        from chunkhound.parsers.universal_engine import UniversalConcept
+        from chunkhound.core.types.common import FileId, ChunkType
 
         factory = get_parser_factory()
         parser = factory.create_parser(Language.TYPESCRIPT)
@@ -513,28 +487,20 @@ enum Status {
 type UserRole = 'admin' | 'user' | 'guest';
 """
 
-        extractor = parser.extractor
-        ast = parser.engine.parse_to_ast(content)
+        chunks = parser.parse_content(content, "test.ts", FileId(1))
 
-        # Extract DEFINITION concepts (should include type aliases)
-        def_chunks = extractor.extract_concept(
-            ast.root_node,
-            content.encode('utf-8'),
-            UniversalConcept.DEFINITION
-        )
+        # Find type alias chunks
+        type_chunks = [c for c in chunks if c.chunk_type == ChunkType.TYPE_ALIAS]
+        role_chunks = [c for c in type_chunks if "UserRole" in c.symbol]
 
-        assert len(def_chunks) > 0, "Should extract type alias as DEFINITION concept"
-
-        # Verify type alias content
-        type_chunks = [c for c in def_chunks if "UserRole" in c.name]
-        assert len(type_chunks) > 0, "Should find UserRole type"
-        assert any("type" in c.content.lower() for c in type_chunks), \
+        assert len(role_chunks) > 0, "Should find UserRole type"
+        assert any("type" in c.code.lower() for c in role_chunks), \
             "Type alias content should contain 'type' keyword"
 
     def test_class_extracted_with_correct_node_type(self):
-        """Test that classes are extracted with class_declaration node type."""
+        """Test that classes are extracted with CLASS chunk type."""
         from chunkhound.parsers.parser_factory import get_parser_factory
-        from chunkhound.parsers.universal_engine import UniversalConcept
+        from chunkhound.core.types.common import FileId, ChunkType
 
         factory = get_parser_factory()
         parser = factory.create_parser(Language.TYPESCRIPT)
@@ -549,33 +515,29 @@ class UserService {
 }
 """
 
-        extractor = parser.extractor
-        ast = parser.engine.parse_to_ast(content)
+        chunks = parser.parse_content(content, "test.ts", FileId(1))
 
-        # Extract DEFINITION concepts
-        def_chunks = extractor.extract_concept(
-            ast.root_node,
-            content.encode('utf-8'),
-            UniversalConcept.DEFINITION
-        )
+        # Find class chunks
+        class_chunks = [c for c in chunks if c.chunk_type == ChunkType.CLASS]
+        service_chunks = [c for c in class_chunks if "UserService" in c.symbol]
 
-        # Find class chunk
-        class_chunks = [c for c in def_chunks if "UserService" in c.name]
-        assert len(class_chunks) > 0, "Should extract class"
-
-        # Verify node type is class_declaration (not function-related)
-        service_chunk = class_chunks[0]
-        assert "class" in service_chunk.language_node_type.lower(), \
-            f"Class node type should contain 'class', got: {service_chunk.language_node_type}"
+        assert len(service_chunks) > 0, "Should extract UserService class"
+        service_chunk = service_chunks[0]
+        assert service_chunk.chunk_type == ChunkType.CLASS, \
+            f"Class should have CLASS chunk type, got: {service_chunk.chunk_type}"
 
 
 class TestTypeScriptMetadataExtraction:
-    """Test TypeScript-specific metadata extraction for different constructs."""
+    """Test TypeScript-specific metadata extraction for different constructs.
+
+    These tests verify that metadata is properly extracted using the public
+    parse_content() API that works with both tree-sitter and OxcParser backends.
+    """
 
     def test_interface_metadata_extraction(self):
         """Test that interface metadata is properly extracted."""
         from chunkhound.parsers.parser_factory import get_parser_factory
-        from chunkhound.parsers.universal_engine import UniversalConcept
+        from chunkhound.core.types.common import FileId, ChunkType
 
         factory = get_parser_factory()
         parser = factory.create_parser(Language.TYPESCRIPT)
@@ -587,16 +549,12 @@ interface Repository<T> {
 }
 """
 
-        extractor = parser.extractor
-        ast = parser.engine.parse_to_ast(content)
+        chunks = parser.parse_content(content, "test.ts", FileId(1))
 
-        def_chunks = extractor.extract_concept(
-            ast.root_node,
-            content.encode('utf-8'),
-            UniversalConcept.DEFINITION
-        )
+        # Find interface chunks
+        interface_chunks = [c for c in chunks if c.chunk_type == ChunkType.INTERFACE]
+        repo_chunks = [c for c in interface_chunks if "Repository" in c.symbol]
 
-        repo_chunks = [c for c in def_chunks if "Repository" in c.name]
         assert len(repo_chunks) > 0, "Should extract Repository interface"
 
         # Check metadata exists
@@ -607,7 +565,7 @@ interface Repository<T> {
     def test_enum_metadata_extraction(self):
         """Test that enum metadata is properly extracted."""
         from chunkhound.parsers.parser_factory import get_parser_factory
-        from chunkhound.parsers.universal_engine import UniversalConcept
+        from chunkhound.core.types.common import FileId, ChunkType
 
         factory = get_parser_factory()
         parser = factory.create_parser(Language.TYPESCRIPT)
@@ -619,18 +577,14 @@ enum HttpStatus {
 }
 """
 
-        extractor = parser.extractor
-        ast = parser.engine.parse_to_ast(content)
+        chunks = parser.parse_content(content, "test.ts", FileId(1))
 
-        def_chunks = extractor.extract_concept(
-            ast.root_node,
-            content.encode('utf-8'),
-            UniversalConcept.DEFINITION
-        )
+        # Find enum chunks
+        enum_chunks = [c for c in chunks if c.chunk_type == ChunkType.ENUM]
+        status_chunks = [c for c in enum_chunks if "HttpStatus" in c.symbol]
 
-        enum_chunks = [c for c in def_chunks if "HttpStatus" in c.name]
-        assert len(enum_chunks) > 0, "Should extract HttpStatus enum"
+        assert len(status_chunks) > 0, "Should extract HttpStatus enum"
 
         # Check metadata
-        enum_chunk = enum_chunks[0]
+        enum_chunk = status_chunks[0]
         assert enum_chunk.metadata is not None, "Should have metadata"

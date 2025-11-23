@@ -5,6 +5,7 @@ string/env-like tokens are embedded and discoverable.
 """
 
 from pathlib import Path
+import pytest
 
 from chunkhound.core.types.common import Language, ChunkType
 from chunkhound.parsers.parser_factory import ParserFactory
