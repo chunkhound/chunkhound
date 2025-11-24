@@ -225,8 +225,12 @@ def should_include_file(
     Returns:
         True if file should be included, False otherwise
     """
-    rel_path = file_path.relative_to(root_dir)
-    rel_path_str = rel_path.as_posix()
+    try:
+        rel_path = file_path.relative_to(root_dir)
+        rel_path_str = rel_path.as_posix()
+    except ValueError:
+        # Symlink pointing outside root_dir - use filename only for matching
+        rel_path_str = file_path.name
     filename = file_path.name
 
     for pattern in patterns:

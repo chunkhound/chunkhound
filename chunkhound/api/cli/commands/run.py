@@ -186,7 +186,8 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
                 seen: set[str] = set()
                 for p in skipped_timeouts:
                     try:
-                        rel = Path(p).resolve().relative_to(base_dir).as_posix()
+                        # Don't resolve symlinks - use logical path for worktree support
+                        rel = Path(p).relative_to(base_dir).as_posix()
                     except Exception:
                         # If not under base_dir, keep as-is (rare)
                         rel = Path(p).as_posix()
@@ -518,7 +519,12 @@ async def _simulate_index(args: argparse.Namespace, config: Config) -> None:
             size = int(st.st_size)
         except Exception:
             size = 0
-        rel = p.resolve().relative_to(base_dir).as_posix()
+        # Don't resolve symlinks - use logical path for worktree support
+        try:
+            rel = p.relative_to(base_dir).as_posix()
+        except ValueError:
+            # Fallback for edge cases
+            rel = p.name
         items.append((rel, size))
 
     # Sort
@@ -614,14 +620,19 @@ async def _check_ignores(args: argparse.Namespace, config: Config) -> None:
     for fp in candidates:
         repo = _nearest_repo_root(fp.parent, base_dir) or base_dir
         try:
-            rel = fp.resolve().relative_to(repo if repo else base_dir).as_posix()
+            # Don't resolve symlinks - use logical path for worktree support
+            rel = fp.relative_to(repo if repo else base_dir).as_posix()
         except Exception:
             rel = fp.name
         git_decision = _git_ignored(repo, rel) if repo else False
         ch_decision = _ch_ignored(base_dir, fp)
         if git_decision != ch_decision:
+            try:
+                display_path = fp.relative_to(base_dir).as_posix()
+            except ValueError:
+                display_path = fp.name
             mismatches.append({
-                "path": fp.resolve().relative_to(base_dir).as_posix(),
+                "path": display_path,
                 "git": git_decision,
                 "ch": ch_decision,
             })
