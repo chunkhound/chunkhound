@@ -224,6 +224,24 @@ class IndexingCoordinator(BaseService):
         return language if language != Language.UNKNOWN else None
 
     # ------------------------------------------------------------------
+    # Global gitignore helper
+    # ------------------------------------------------------------------
+    def _extend_with_global_gitignore(self, effective_excludes: list[str]) -> None:
+        """Add global gitignore patterns to effective_excludes in-place.
+
+        Reads patterns from the user's global gitignore file (core.excludesFile
+        or default locations) and extends the provided list.
+        """
+        try:
+            from chunkhound.utils.ignore_engine import _collect_global_gitignore_patterns
+
+            global_pats = _collect_global_gitignore_patterns()
+            if global_pats:
+                effective_excludes.extend(global_pats)
+        except Exception as e:
+            logger.debug(f"Global gitignore not loaded: {e}")
+
+    # ------------------------------------------------------------------
     # Ignore engine caching helpers (per-run, process-local)
     # ------------------------------------------------------------------
     def _engine_cache_key(
@@ -1785,6 +1803,8 @@ class IndexingCoordinator(BaseService):
                 else []
             )
         )
+        # Add global gitignore patterns to effective excludes
+        self._extend_with_global_gitignore(effective_excludes)
         # Also add dynamic DB path exclusion when DB lives under the directory
         try:
             dbp = getattr(self._db, "db_path", None)
@@ -2376,6 +2396,10 @@ class IndexingCoordinator(BaseService):
             from chunkhound.core.config.indexing_config import IndexingConfig as _Idx
 
             effective_excludes = _Idx._default_excludes()
+
+        # Add global gitignore patterns to effective excludes
+        self._extend_with_global_gitignore(effective_excludes)
+
         # Also exclude dynamic DB path when it lives under directory
         try:
             dbp = getattr(self._db, "db_path", None)
