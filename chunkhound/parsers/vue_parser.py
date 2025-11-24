@@ -4,8 +4,8 @@ Vue SFCs require special handling because they contain multiple language
 sections (template, script, style) that need to be parsed separately.
 """
 
+from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from chunkhound.core.models.chunk import Chunk
 from chunkhound.core.types.common import (
@@ -15,14 +15,22 @@ from chunkhound.core.types.common import (
     Language,
     LineNumber,
 )
+from chunkhound.interfaces.language_parser import LanguageParser
 from chunkhound.parsers.mappings.vue import VueMapping
 from chunkhound.parsers.mappings.vue_template import VueTemplateMapping
 from chunkhound.parsers.parser_factory import create_parser_for_language
 from chunkhound.parsers.universal_parser import CASTConfig, UniversalParser
 from chunkhound.parsers.vue_cross_ref import add_cross_references
 
-if TYPE_CHECKING:
-    pass
+# Map script lang attribute values to Language enum
+SCRIPT_LANG_TO_LANGUAGE = {
+    "js": Language.JAVASCRIPT,
+    "javascript": Language.JAVASCRIPT,
+    "ts": Language.TYPESCRIPT,
+    "typescript": Language.TYPESCRIPT,
+    "jsx": Language.JSX,
+    "tsx": Language.TSX,
+}
 
 
 class VueParser:
@@ -34,7 +42,7 @@ class VueParser:
     VueParser uses custom orchestration instead of UniversalParser because:
 
     1. Multi-Language Sections:
-       - <script>: JavaScript/TypeScript (uses TypeScript tree-sitter grammar)
+       - <script>: JS/TS (uses OxcParser when available, else tree-sitter)
        - <template>: Vue template syntax (uses Vue tree-sitter grammar)
        - <style>: CSS/SCSS (extracted as text chunks)
 
@@ -81,11 +89,31 @@ class VueParser:
         self.vue_template_mapping = VueTemplateMapping()
         self.cast_config = cast_config or CASTConfig()
 
-        # Create TypeScript parser for script sections
-        self.ts_parser = create_parser_for_language(Language.TYPESCRIPT, cast_config)
+        # Cache script parsers by language to avoid recreating them
+        self._script_parsers: dict[Language, LanguageParser] = {}
 
         # Create template parser using tree-sitter-vue
         self.template_parser = self._create_template_parser()
+
+    def _get_script_parser(self, script_lang: str) -> LanguageParser:
+        """Get the appropriate parser for a script section based on its language.
+
+        Args:
+            script_lang: The lang attribute value (js, ts, tsx, jsx, etc.)
+
+        Returns:
+            LanguageParser instance for the appropriate language
+        """
+        # Map script_lang to Language enum (default to JavaScript)
+        language = SCRIPT_LANG_TO_LANGUAGE.get(script_lang, Language.JAVASCRIPT)
+
+        # Use cached parser if available
+        if language not in self._script_parsers:
+            self._script_parsers[language] = create_parser_for_language(
+                language, self.cast_config
+            )
+
+        return self._script_parsers[language]
 
     def _create_template_parser(self) -> UniversalParser | None:
         """Create a UniversalParser for Vue template content.
@@ -151,7 +179,7 @@ class VueParser:
         # Extract sections using tree-sitter (falls back to regex if not available)
         sections = self.vue_mapping.extract_sections_ts(content)
 
-        # Parse script sections with TypeScript parser
+        # Parse script sections with appropriate parser based on lang attribute
         for attrs, script_content, start_line in sections["script"]:
             # Store script content for cross-reference analysis
             full_script_content = script_content
@@ -162,8 +190,11 @@ class VueParser:
             vue_macros = self.vue_mapping.detect_vue_macros(script_content)
             vue_composables = self.vue_mapping.detect_composables(script_content)
 
-            # Parse script content as TypeScript/JavaScript
-            parsed_chunks = self.ts_parser.parse_content(
+            # Get the appropriate parser for this script's language
+            script_parser = self._get_script_parser(script_lang)
+
+            # Parse script content with the appropriate parser
+            parsed_chunks = script_parser.parse_content(
                 script_content, file_path, file_id
             )
 
@@ -186,8 +217,6 @@ class VueParser:
 
                 # Create new chunk with adjusted line numbers and metadata
                 # Chunks are frozen dataclasses, so we need to create a new one
-                from dataclasses import replace
-
                 adjusted_chunk = replace(
                     chunk,
                     start_line=LineNumber(chunk.start_line + start_line),
@@ -301,8 +330,6 @@ class VueParser:
             # Adjust line numbers to account for:
             # 1. The <template> wrapper line (subtract 1)
             # 2. Template section position in file (add start_line)
-            from dataclasses import replace
-
             adjusted_chunks = []
             for chunk in template_chunks:
                 adjusted_chunk = replace(

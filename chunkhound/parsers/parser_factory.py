@@ -6,6 +6,7 @@ This module provides the ParserFactory class that:
 3. Creates UniversalParser instances with the correct language configuration
 4. Provides a clean interface for the rest of the system
 5. Handles cases where tree-sitter modules aren't available gracefully
+6. Uses OxcParser with CAST optimization for JS/TS/JSX/TSX parsing (oxc-python is required)
 
 All tree-sitter language modules are imported explicitly to avoid dynamic import
 complexity and ensure better error handling during startup.
@@ -29,9 +30,7 @@ from chunkhound.parsers.mappings import (
     HaskellMapping,
     HclMapping,
     JavaMapping,
-    JavaScriptMapping,
     JsonMapping,
-    JSXMapping,
     KotlinMapping,
     MakefileMapping,
     MarkdownMapping,
@@ -44,8 +43,6 @@ from chunkhound.parsers.mappings import (
     SwiftMapping,
     TextMapping,
     TomlMapping,
-    TSXMapping,
-    TypeScriptMapping,
     VueMapping,
     YamlMapping,
     ZigMapping,
@@ -56,6 +53,8 @@ from chunkhound.parsers.universal_engine import SetupError, TreeSitterEngine
 from chunkhound.parsers.universal_parser import CASTConfig, UniversalParser
 
 logger = logging.getLogger(__name__)
+
+from chunkhound.parsers.oxc_parser import OxcParser
 
 # Explicit tree-sitter language imports
 # Import all available tree-sitter languages explicitly to avoid
@@ -70,21 +69,6 @@ except ImportError:
     ts_python = None
     PYTHON_AVAILABLE = False
 
-try:
-    import tree_sitter_javascript as ts_javascript
-
-    JAVASCRIPT_AVAILABLE = True
-except ImportError:
-    ts_javascript = None
-    JAVASCRIPT_AVAILABLE = False
-
-try:
-    import tree_sitter_typescript as ts_typescript
-
-    TYPESCRIPT_AVAILABLE = True
-except ImportError:
-    ts_typescript = None
-    TYPESCRIPT_AVAILABLE = False
 
 try:
     import tree_sitter_java as ts_java
@@ -322,9 +306,6 @@ except ImportError:
     ts_zig = None
     ZIG_AVAILABLE = False
 
-# Additional language extensions (these might use the same parser as base language)
-JSX_AVAILABLE = JAVASCRIPT_AVAILABLE  # JSX uses JavaScript parser
-TSX_AVAILABLE = TYPESCRIPT_AVAILABLE  # TSX uses TypeScript parser
 
 
 class LanguageConfig:
@@ -433,12 +414,6 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.PYTHON: LanguageConfig(
         ts_python, PythonMapping, PYTHON_AVAILABLE, "python"
     ),
-    Language.JAVASCRIPT: LanguageConfig(
-        ts_javascript, JavaScriptMapping, JAVASCRIPT_AVAILABLE, "javascript"
-    ),
-    Language.TYPESCRIPT: LanguageConfig(
-        ts_typescript, TypeScriptMapping, TYPESCRIPT_AVAILABLE, "typescript"
-    ),
     Language.JAVA: LanguageConfig(ts_java, JavaMapping, JAVA_AVAILABLE, "java"),
     Language.C: LanguageConfig(ts_c, CMapping, C_AVAILABLE, "c"),
     Language.CPP: LanguageConfig(ts_cpp, CppMapping, CPP_AVAILABLE, "cpp"),
@@ -465,8 +440,8 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.PHP: LanguageConfig(ts_php, PHPMapping, PHP_AVAILABLE, "php"),
     Language.SWIFT: LanguageConfig(ts_swift, SwiftMapping, SWIFT_AVAILABLE, "swift"),
     Language.VUE: LanguageConfig(
-        ts_typescript, VueMapping, TYPESCRIPT_AVAILABLE, "vue"
-    ),  # Vue uses TypeScript parser for script sections
+        None, VueMapping, True, "vue"
+    ),  # Vue uses custom VueParser
     Language.JSON: LanguageConfig(ts_json, JsonMapping, JSON_AVAILABLE, "json"),
     Language.YAML: LanguageConfig(ts_yaml, YamlMapping, YAML_AVAILABLE, "yaml"),
     Language.TOML: LanguageConfig(ts_toml, TomlMapping, TOML_AVAILABLE, "toml"),
@@ -477,12 +452,6 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.MAKEFILE: LanguageConfig(
         ts_make, MakefileMapping, MAKEFILE_AVAILABLE, "makefile"
     ),
-    Language.JSX: LanguageConfig(
-        ts_typescript, JSXMapping, JSX_AVAILABLE, "jsx"
-    ),  # JSX uses TSX grammar
-    Language.TSX: LanguageConfig(
-        ts_typescript, TSXMapping, TSX_AVAILABLE, "tsx"
-    ),  # TSX uses TS parser with tsx language
     Language.TEXT: LanguageConfig(
         None, TextMapping, True, "text"
     ),  # Text doesn't need tree-sitter
@@ -626,6 +595,19 @@ class ParserFactory:
             from chunkhound.parsers.vue_parser import VueParser
 
             return VueParser(cast_config)
+
+        # Use OxcParser with CAST for JavaScript-family languages
+        if language in (Language.JAVASCRIPT, Language.TYPESCRIPT, Language.JSX, Language.TSX):
+            cache_key = self._cache_key(language)
+            if cache_key in self._parser_cache:
+                return self._parser_cache[cache_key]
+
+            # Use cast_config from factory or method parameter
+            config = cast_config or self.default_cast_config
+            parser = OxcParser(language, config)
+
+            self._parser_cache[cache_key] = parser
+            return parser
 
         # Use cache to avoid recreating parsers
         cache_key = self._cache_key(language)
