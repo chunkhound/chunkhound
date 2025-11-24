@@ -283,3 +283,6 @@ tickets/
 
 # hatch-vcs generated version file
 chunkhound/_version.py
+
+# metrics
+cluster_eval.json
