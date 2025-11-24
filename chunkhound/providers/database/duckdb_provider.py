@@ -61,6 +61,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         base_directory: Path,
         embedding_manager: "EmbeddingManager | None" = None,
         config: "DatabaseConfig | None" = None,
+        registry: Any | None = None,
     ):
         """Initialize DuckDB provider.
 
@@ -69,9 +70,10 @@ class DuckDBProvider(SerialDatabaseProvider):
             base_directory: Base directory for path normalization
             embedding_manager: Optional embedding manager for vector generation
             config: Database configuration for provider-specific settings
+            registry: Optional registry instance for service creation (if None, uses global)
         """
-        # Initialize base class
-        super().__init__(db_path, base_directory, embedding_manager, config)
+        # Initialize base class with registry parameter
+        super().__init__(db_path, base_directory, embedding_manager, config, registry)
 
         self.provider_type = "duckdb"  # Identify this as DuckDB provider
 

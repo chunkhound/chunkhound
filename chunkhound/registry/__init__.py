@@ -271,7 +271,7 @@ class ProviderRegistry:
             from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 
             provider = DuckDBProvider(
-                db_path=".chunkhound/db", base_directory=Path.cwd()
+                db_path=".chunkhound/db", base_directory=Path.cwd(), registry=self
             )
             provider.connect()
             self.register_provider("database", provider, singleton=True)
@@ -283,25 +283,25 @@ class ProviderRegistry:
         # Get base directory from config (guaranteed to be set)
         base_directory = self._config.target_dir
 
-        # Create the appropriate provider
+        # Create the appropriate provider, passing registry instance for isolation
         if provider_type == "duckdb":
             from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 
             provider = DuckDBProvider(
-                db_path, base_directory, config=self._config.database
+                db_path, base_directory, config=self._config.database, registry=self
             )
         elif provider_type == "lancedb":
             from chunkhound.providers.database.lancedb_provider import LanceDBProvider
 
             provider = LanceDBProvider(
-                db_path, base_directory, config=self._config.database
+                db_path, base_directory, config=self._config.database, registry=self
             )
         else:
             logger.warning(f"Unknown provider {provider_type}, defaulting to DuckDB")
             from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 
             provider = DuckDBProvider(
-                db_path, base_directory, config=self._config.database
+                db_path, base_directory, config=self._config.database, registry=self
             )
 
         # Connect and register
@@ -404,27 +404,56 @@ class ProviderRegistry:
         return self._config
 
 
-# Global registry instance
+# Global registry instance (for backward compatibility)
 _registry: ProviderRegistry | None = None
 
 
 def get_registry() -> ProviderRegistry:
-    """Get the global registry instance."""
+    """Get the global registry instance.
+
+    Note: For multi-instance scenarios (e.g., multiple MCP servers in one process),
+    use create_registry() instead to avoid conflicts.
+    """
     global _registry
     if _registry is None:
         _registry = ProviderRegistry()
     return _registry
 
 
-def configure_registry(config: Config | dict[str, Any]) -> None:
-    """Configure the global provider registry."""
+def create_registry() -> ProviderRegistry:
+    """Create a new independent registry instance.
+
+    Use this for multi-instance scenarios where you need isolated registries
+    (e.g., multiple MCP servers in the same process).
+
+    Returns:
+        A new, independent ProviderRegistry instance
+    """
+    return ProviderRegistry()
+
+
+def configure_registry(config: Config | dict[str, Any], registry: ProviderRegistry | None = None) -> ProviderRegistry:
+    """Configure a provider registry.
+
+    Args:
+        config: Configuration object or dict
+        registry: Optional registry instance. If None, uses global singleton.
+
+    Returns:
+        The configured registry instance
+    """
+    if registry is None:
+        registry = get_registry()
+
     if isinstance(config, dict):
         from chunkhound.core.config.config import Config as ConfigClass
 
         config_obj = ConfigClass(**config)
-        get_registry().configure(config_obj)
+        registry.configure(config_obj)
     else:
-        get_registry().configure(config)
+        registry.configure(config)
+
+    return registry
 
 
 # Convenience functions for common operations
@@ -453,6 +482,7 @@ def create_embedding_service() -> EmbeddingService:
 __all__ = [
     "ProviderRegistry",
     "get_registry",
+    "create_registry",
     "configure_registry",
     "get_provider",
     "create_indexing_coordinator",
