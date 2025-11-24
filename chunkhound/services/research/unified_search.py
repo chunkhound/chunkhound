@@ -52,6 +52,7 @@ class UnifiedSearch:
         emit_event_callback: Any = None,
         node_id: int | None = None,
         depth: int | None = None,
+        path_filter: str | None = None,
     ) -> list[dict[str, Any]]:
         """Perform unified semantic + symbol-based regex search (Steps 2-6).
 
@@ -118,6 +119,7 @@ class UnifiedSearch:
                     page_size=30,
                     threshold=RELEVANCE_THRESHOLD,
                     force_strategy="multi_hop",
+                    path_filter=path_filter,
                 )
                 for expanded_q in expanded_queries
             ]
@@ -173,6 +175,7 @@ class UnifiedSearch:
                 page_size=30,
                 threshold=RELEVANCE_THRESHOLD,
                 force_strategy="multi_hop",
+                path_filter=path_filter,
             )
             logger.debug(f"Semantic search returned {len(semantic_results)} chunks")
 
@@ -227,7 +230,9 @@ class UnifiedSearch:
                         depth=depth,
                     )
 
-                    regex_results = await self.search_by_symbols(top_symbols)
+                    regex_results = await self.search_by_symbols(
+                        top_symbols, path_filter=path_filter
+                    )
 
                     # Emit regex search results
                     await emit_event(
@@ -314,7 +319,9 @@ class UnifiedSearch:
         )
         return filtered_symbols
 
-    async def search_by_symbols(self, symbols: list[str]) -> list[dict[str, Any]]:
+    async def search_by_symbols(
+        self, symbols: list[str], path_filter: str | None = None
+    ) -> list[dict[str, Any]]:
         """Search codebase for top-ranked symbols using parallel async regex (Step 5).
 
         Uses async execution to avoid blocking the event loop, enabling better
@@ -344,6 +351,7 @@ class UnifiedSearch:
                     pattern=pattern,
                     page_size=10,  # Limit per symbol to avoid overwhelming results
                     offset=0,
+                    path_filter=path_filter,
                 )
 
                 logger.debug(f"Found {len(results)} chunks for symbol '{symbol}'")

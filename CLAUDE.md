@@ -66,6 +66,74 @@ mcp_http: uv run chunkhound mcp http --port 5173
 - JSON-RPC errors: Check for print() statements in mcp_server/ (stdio.py, http_server.py, tools.py)
 - "unsupported operand type(s) for |: 'str' and 'NoneType'": Forward reference with | operator (remove quotes)
 
+## KNOWN_DEPRECATION_WARNINGS
+
+### HDBSCAN + scikit-learn: force_all_finite Parameter (Non-Breaking)
+**Warning Message:**
+```
+FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and will be removed in 1.8.
+  warnings.warn(
+```
+
+**Root Cause:**
+- HDBSCAN 0.8.40 uses deprecated `force_all_finite` parameter in sklearn's `check_array()` function
+- Appears in clustering service during Code Research tool execution
+- Source: `/Users/ofri/Documents/GitHub/chunkhound/chunkhound/.venv/lib/python3.11/site-packages/hdbscan/hdbscan_.py:753,1211`
+
+**Current Impact:**
+- ⚠️ Warning only (does not break functionality)
+- sklearn 1.7.2: Compatible but shows deprecation warning
+- sklearn 1.8: Will become an error if HDBSCAN not updated
+
+**Resolution Status:**
+- Upstream issue: https://github.com/scikit-learn-contrib/hdbscan/issues/689 (Open)
+- ChunkHound code: No changes required (correct API usage)
+- Waiting for HDBSCAN upstream fix
+
+**Action Required:**
+- Monitor HDBSCAN releases for sklearn 1.8 compatibility
+- Warning is non-breaking; safe to ignore until HDBSCAN upstream fix
+
+## MIGRATION_NOTES
+
+### Clustering Algorithm: K-means → HDBSCAN (Two-Phase Approach)
+
+**What Changed:**
+- **Old**: K-means clustering with predetermined k (calculated from token budget)
+- **New**: Two-phase HDBSCAN clustering:
+  - Phase 1: HDBSCAN discovers natural semantic clusters
+  - Phase 2: Greedy grouping merges clusters to approach token budget
+
+**Impact on Users:**
+1. **Cluster Assignments**: Files may be grouped differently due to semantic clustering
+2. **Cluster Counts**: Number of clusters may vary (HDBSCAN finds natural groups vs. fixed k)
+3. **Outlier Detection**: HDBSCAN identifies semantically distant files as outliers, merging them into nearest clusters when possible
+4. **Metadata Schema**: New fields added to clustering metadata:
+   - `num_native_clusters`: Natural clusters discovered by HDBSCAN (Phase 1)
+   - `num_outliers`: Files detected as outliers (noise points)
+   - `num_clusters`: Final cluster count after merging (Phase 2) - **existing field**
+
+**Benefits:**
+- More semantic clustering (files grouped by meaning, not arbitrary k)
+- Better handling of diverse codebases (natural cluster discovery)
+- Outlier detection identifies files that don't fit semantically
+
+**Performance Considerations:**
+- HDBSCAN has O(n²) complexity for baseline implementation (vs. K-means O(n·k·d·iterations))
+- For typical workloads (n<1000 files for synthesis), O(n²) is acceptable but untested
+- Greedy merge phase is O(k³) typical case, O(k⁴) worst-case where k = num_native_clusters (typically <100)
+- Performance testing recommended before production use at scale
+
+**Backward Compatibility:**
+- **API**: `ClusteringService.cluster_files()` signature unchanged
+- **Metadata**: Existing fields (`num_clusters`, `total_files`, etc.) remain unchanged
+- **Integration**: No changes required to synthesis_engine.py or other consumers
+
+**Migration Path:**
+- No action required for most users
+- If you have custom code that inspects clustering metadata keys, update to handle new fields
+- If synthesis quality changes, file a bug report with comparison results
+
 ## DIRECTORY_STRUCTURE
 ```
 chunkhound/

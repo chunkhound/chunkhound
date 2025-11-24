@@ -12,10 +12,12 @@ Tests run parametrically against all available reranking-capable providers:
 - Ollama (if Ollama server and reranking service running)
 """
 
-import pytest
 import os
 from pathlib import Path
 from unittest.mock import Mock, patch, call
+
+import pytest
+
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.providers.embeddings.voyageai_provider import VoyageAIEmbeddingProvider
 from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
@@ -25,8 +27,8 @@ from chunkhound.core.types.common import Language
 from chunkhound.parsers.parser_factory import create_parser_for_language
 
 
-from .test_utils import get_api_key_for_tests
 from .provider_configs import get_reranking_providers
+from tests.fixtures.fake_providers import FakeEmbeddingProvider
 
 # Cache providers at module level to avoid multiple calls during parametrize
 reranking_providers = get_reranking_providers()
@@ -259,10 +261,14 @@ async def test_vocabulary_bridging(content_aware_test_data):
     
     original_find_neighbors = db.find_similar_chunks
     
-    def track_expansion(chunk_id, provider, model, limit=10, threshold=None):
+    def track_expansion(
+        chunk_id, provider, model, limit=10, threshold=None, path_filter=None
+    ):
         nonlocal expansion_occurred
         expansion_occurred = True
-        neighbors = original_find_neighbors(chunk_id, provider, model, limit, threshold)
+        neighbors = original_find_neighbors(
+            chunk_id, provider, model, limit, threshold, path_filter
+        )
         return neighbors
     
     with patch.object(db, 'find_similar_chunks', side_effect=track_expansion):
@@ -395,8 +401,12 @@ async def test_semantic_distance_traversal(content_aware_test_data):
     
     original_find_neighbors = db.find_similar_chunks
     
-    def track_semantic_bridges(chunk_id, provider, model, limit=10, threshold=None):
-        neighbors = original_find_neighbors(chunk_id, provider, model, limit, threshold)
+    def track_semantic_bridges(
+        chunk_id, provider, model, limit=10, threshold=None, path_filter=None
+    ):
+        neighbors = original_find_neighbors(
+            chunk_id, provider, model, limit, threshold, path_filter
+        )
         
         # Get source chunk domain
         source_chunks = db.get_chunk_by_id(chunk_id)
@@ -457,3 +467,131 @@ async def test_semantic_distance_traversal(content_aware_test_data):
             relevant_results += 1
     
     assert relevant_results > 0, f"Should find auth/config related content: {relevant_results}"
+
+
+@pytest.mark.asyncio
+async def test_multi_hop_respects_path_filter_scope(tmp_path):
+    """Semantic search with path_filter should respect scope boundaries."""
+    base_dir = tmp_path
+    db = DuckDBProvider(":memory:", base_directory=base_dir)
+    db.connect()
+
+    # Use deterministic fake embedding provider with reranking support
+    embedding_provider = FakeEmbeddingProvider()
+
+    parser = create_parser_for_language(Language.PYTHON)
+    coordinator = IndexingCoordinator(
+        db, base_dir, embedding_provider, {Language.PYTHON: parser}
+    )
+
+    # Create two synthetic "repos" under the same base directory
+    repos = ["repo_a", "repo_b"]
+    for repo in repos:
+        repo_dir = base_dir / repo
+        repo_dir.mkdir(parents=True, exist_ok=True)
+
+        # Each repo has highly similar content with multiple functions so
+        # semantic neighbors cross repo boundaries and multi-hop has enough
+        # high-scoring candidates for expansion.
+        content = f"""
+def shared_function_{repo}_one():
+    \"\"\"Shared multi-hop scope test in {repo}.\"\"\"
+    value = "shared-{repo}-one"
+    return value
+
+def shared_function_{repo}_two():
+    \"\"\"Shared multi-hop scope test in {repo}.\"\"\"
+    value = "shared-{repo}-two"
+    return value
+
+def shared_function_{repo}_three():
+    \"\"\"Shared multi-hop scope test in {repo}.\"\"\"
+    value = "shared-{repo}-three"
+    return value
+"""
+        file_path = repo_dir / "module.py"
+        file_path.write_text(content)
+        await coordinator.process_file(file_path)
+
+    search_service = SearchService(db, embedding_provider)
+
+    results, _ = await search_service.search_semantic(
+        query="multi-hop scope test",
+        page_size=10,
+        path_filter="repo_a",
+    )
+
+    # All returned results must be scoped to repo_a when path_filter is set
+    assert results, "Semantic search should return results within scoped repo"
+    for result in results:
+        file_path = result.get("file_path", "")
+        assert file_path.startswith(
+            "repo_a/"
+        ), f"Result {file_path} should be constrained to repo_a/"
+
+
+@pytest.mark.asyncio
+async def test_find_similar_chunks_enforces_path_filter(tmp_path):
+    """find_similar_chunks should enforce path_filter at the database layer."""
+    base_dir = tmp_path
+    db = DuckDBProvider(":memory:", base_directory=base_dir)
+    db.connect()
+
+    embedding_provider = FakeEmbeddingProvider()
+    parser = create_parser_for_language(Language.PYTHON)
+    coordinator = IndexingCoordinator(
+        db, base_dir, embedding_provider, {Language.PYTHON: parser}
+    )
+
+    # Create synthetic repos with very similar content and multiple files per repo
+    for repo in ["repo_a", "repo_b"]:
+        repo_dir = base_dir / repo
+        repo_dir.mkdir(parents=True, exist_ok=True)
+
+        for idx in range(2):
+            content = f"""
+def repo_function_{idx}():
+    \"\"\"Repository-specific function {idx} for {repo}.\"\"\"
+    return \"{repo}-value-{idx}\"
+"""
+            file_path = repo_dir / f"module_{idx}.py"
+            file_path.write_text(content)
+            await coordinator.process_file(file_path)
+
+    # Use regex search to get a chunk from repo_a
+    regex_results, _ = db.search_regex(pattern="Repository-specific function", page_size=50)
+    assert regex_results, "Expected at least one chunk from regex search"
+
+    repo_a_chunk = next(
+        (r for r in regex_results if r.get("file_path", "").startswith("repo_a/")), None
+    )
+    assert repo_a_chunk is not None, "Expected a chunk from repo_a"
+
+    chunk_id = repo_a_chunk["chunk_id"]
+
+    # Without path_filter, similar chunks should include both repos
+    neighbors_unscoped = db.find_similar_chunks(
+        chunk_id=chunk_id,
+        provider=embedding_provider.name,
+        model=embedding_provider.model,
+        limit=20,
+        threshold=None,
+    )
+    assert neighbors_unscoped, "Expected unscoped neighbors for similarity search"
+    assert any(
+        n.get("file_path", "").startswith("repo_b/") for n in neighbors_unscoped
+    ), "Unscoped neighbors should include repo_b results"
+
+    # With path_filter='repo_a', all neighbors must stay within repo_a
+    neighbors_scoped = db.find_similar_chunks(
+        chunk_id=chunk_id,
+        provider=embedding_provider.name,
+        model=embedding_provider.model,
+        limit=20,
+        threshold=None,
+        path_filter="repo_a",
+    )
+    assert neighbors_scoped, "Expected scoped neighbors for similarity search"
+    assert all(
+        n.get("file_path", "").startswith("repo_a/") for n in neighbors_scoped
+    ), "Scoped neighbors must all be within repo_a/"

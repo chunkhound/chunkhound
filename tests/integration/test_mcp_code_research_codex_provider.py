@@ -86,3 +86,61 @@ async def test_code_research_uses_codex_cli_for_synthesis(monkeypatch, tmp_path:
         isinstance(result, str) and "SYNTH_OK" in result
     ), "code_research did not use codex-cli synthesis path"
     assert called["count"] >= 1, "Codex CLI provider was not invoked"
+
+
+@pytest.mark.asyncio
+async def test_code_research_forwards_path_argument_to_impl(monkeypatch, tmp_path: Path):
+    """Ensure execute_tool forwards path argument to deep_research_impl."""
+
+    # Minimal DB and services
+    db_path = tmp_path / "test.db"
+
+    em = EmbeddingManager()
+    em.register_provider(_DummyEmbeddingProvider(), set_default=True)
+
+    services = create_services(db_path=db_path, config={}, embedding_manager=em)
+    services.provider.connect()
+
+    # LLM manager can be any configured provider; stub won't use it
+    util_conf = {"provider": "codex-cli", "model": "codex"}
+    synth_conf = {"provider": "codex-cli", "model": "codex"}
+    llm = LLMManager(util_conf, synth_conf)
+
+    # Capture arguments received by deep_research_impl
+    captured: dict[str, Any] = {}
+
+    from chunkhound.mcp_server import tools as tools_mod
+
+    async def _stub_deep_research_impl(
+        *,
+        services,
+        embedding_manager,
+        llm_manager,
+        query,
+        progress=None,
+        path=None,
+    ):
+        captured["services"] = services
+        captured["embedding_manager"] = embedding_manager
+        captured["llm_manager"] = llm_manager
+        captured["query"] = query
+        captured["path"] = path
+        return {"answer": "PATH_OK"}
+
+    # Replace implementation and registry entry
+    monkeypatch.setattr(tools_mod, "deep_research_impl", _stub_deep_research_impl, raising=True)
+    tools_mod.TOOL_REGISTRY["code_research"].implementation = _stub_deep_research_impl
+
+    result = await execute_tool(
+        tool_name="code_research",
+        services=services,
+        embedding_manager=em,
+        arguments={"query": "dummy question", "path": "repo-a"},
+        scan_progress=None,
+        llm_manager=llm,
+    )
+
+    # execute_tool flattens code_research dict responses to raw markdown string
+    assert result == "PATH_OK"
+    assert captured.get("query") == "dummy question"
+    assert captured.get("path") == "repo-a"

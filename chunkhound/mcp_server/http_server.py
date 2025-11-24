@@ -146,14 +146,19 @@ class HttpMCPServer(MCPServerBase):
             )
 
         @self.app.tool(description=TOOL_REGISTRY["code_research"].description)
-        async def code_research(query: str) -> dict[str, Any]:
+        async def code_research(query: str, path: str | None = None) -> dict[str, Any]:
             await self.initialize()
+
+            # Build arguments dict (path is optional scope prefix)
+            args: dict[str, Any] = {"query": query}
+            if path is not None:
+                args["path"] = path
 
             result = await execute_tool(
                 tool_name="code_research",
                 services=self.ensure_services(),
                 embedding_manager=self.embedding_manager,
-                arguments={"query": query},
+                arguments=parse_mcp_arguments(args),
                 llm_manager=self.llm_manager,
             )
             # code_research returns raw markdown string, wrap it for FastMCP

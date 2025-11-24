@@ -216,6 +216,14 @@ async def test_code_research_http_schema_details(http_server):
         "query description should mention 'research'"
     )
 
+    # Optional path parameter should exist and describe scoping behavior
+    assert "path" in props, "code_research tool missing optional 'path' parameter"
+    assert "description" in props["path"], "path parameter missing description"
+    path_desc = props["path"]["description"].lower()
+    assert "scope" in path_desc or "limit" in path_desc or "path" in path_desc, (
+        "path description should explain it limits research scope to a subdirectory"
+    )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

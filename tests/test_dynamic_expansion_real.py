@@ -271,6 +271,99 @@ async def test_multi_hop_semantic_chain_discovery(indexed_codebase):
 @pytest.mark.parametrize("indexed_codebase", reranking_providers, indirect=True)
 @requires_provider
 @pytest.mark.asyncio
+async def test_multi_hop_with_path_filter_respects_scope(indexed_codebase):
+    """
+    Multi-hop dynamic expansion should respect path_filter scoping.
+
+    Reuses the real indexed codebase and similar instrumentation as
+    test_multi_hop_semantic_chain_discovery, but constrains search to a
+    specific subdirectory via path_filter. Verifies that:
+    - Expansion still occurs (find_similar_chunks is called)
+    - All returned file paths stay within the requested scope
+    """
+    db, provider = indexed_codebase
+
+    # Instrument search service to track multi-hop mechanics
+    search_service = SearchService(db, provider)
+
+    expansion_metrics = {
+        "rerank_calls": 0,
+        "find_similar_calls": 0,
+        "expansion_rounds": 0,
+        "total_time": 0,
+    }
+
+    original_search = search_service._multi_hop_strategy.search
+
+    async def instrumented_search(*args, **kwargs):
+        start = time.perf_counter()
+
+        # Track reranking calls (proves expansion occurred)
+        original_rerank = search_service._embedding_provider.rerank
+
+        async def track_rerank(*rerank_args, **rerank_kwargs):
+            expansion_metrics["rerank_calls"] += 1
+            return await original_rerank(*rerank_args, **rerank_kwargs)
+
+        search_service._embedding_provider.rerank = track_rerank
+
+        # Track similarity searches (proves neighbor discovery)
+        original_find = search_service._db.find_similar_chunks
+
+        def track_find(*find_args, **find_kwargs):
+            expansion_metrics["find_similar_calls"] += 1
+            return original_find(*find_args, **find_kwargs)
+
+        search_service._db.find_similar_chunks = track_find
+
+        result = await original_search(*args, **kwargs)
+
+        expansion_metrics["total_time"] = time.perf_counter() - start
+        expansion_metrics["expansion_rounds"] = (
+            expansion_metrics["find_similar_calls"] // 5
+        )
+
+        # Restore original methods
+        search_service._embedding_provider.rerank = original_rerank
+        search_service._db.find_similar_chunks = original_find
+
+        return result
+
+    search_service._multi_hop_strategy.search = instrumented_search
+    search_service.expansion_metrics = expansion_metrics
+
+    # Use a scoped path that is well represented in the indexed corpus
+    scoped_path = "chunkhound/providers/database"
+
+    query = "database provider vector index hnsw"
+    results, pagination = await search_service.search_semantic(
+        query, page_size=30, path_filter=scoped_path
+    )
+
+    metrics = expansion_metrics
+
+    # Multi-hop should still expand within the scoped path
+    assert metrics["find_similar_calls"] >= 5, (
+        "Multi-hop with path_filter should still perform neighbor discovery, "
+        f"got {metrics['find_similar_calls']}"
+    )
+    assert metrics["expansion_rounds"] >= 1, (
+        "Multi-hop with path_filter should still have at least one expansion "
+        f"round, got {metrics['expansion_rounds']}"
+    )
+
+    # All results must respect the scoped path filter
+    assert results, "Scoped multi-hop search should return results"
+    for result in results:
+        file_path = result.get("file_path", "")
+        assert file_path.startswith(
+            scoped_path
+        ), f"Result {file_path} should be constrained to {scoped_path}"
+
+
+@pytest.mark.parametrize("indexed_codebase", reranking_providers, indirect=True)
+@requires_provider
+@pytest.mark.asyncio
 async def test_mcp_authentication_chain(indexed_codebase):
     """
     Test discovery of MCP → authentication → provider configuration chain.

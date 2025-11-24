@@ -568,6 +568,7 @@ async def deep_research_impl(
     llm_manager: LLMManager,
     query: str,
     progress: Any = None,
+    path: str | None = None,
 ) -> dict[str, Any]:
     """Core deep research implementation.
 
@@ -577,6 +578,8 @@ async def deep_research_impl(
         llm_manager: LLM manager instance
         query: Research query
         progress: Optional Rich Progress instance for terminal UI (None for MCP)
+        path: Optional relative path to limit research scope
+            (e.g., 'tree-sitter-haskell', 'src/')
 
     Returns:
         Dict with answer and metadata
@@ -616,6 +619,7 @@ async def deep_research_impl(
         llm_manager=llm_manager,
         tool_name="code_research",  # Matches tool registration below
         progress=progress,  # Pass progress for terminal UI (None in MCP mode)
+        path_filter=path,
     )
 
     # Perform code research with fixed depth and dynamic budgets

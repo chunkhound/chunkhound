@@ -185,6 +185,7 @@ class DatabaseProvider(Protocol):
         model: str,
         limit: int = 10,
         threshold: float | None = None,
+        path_filter: str | None = None,
     ) -> list[dict[str, Any]]:
         """Find chunks similar to the given chunk using its embedding.
 
@@ -194,6 +195,7 @@ class DatabaseProvider(Protocol):
             model: Embedding model name
             limit: Maximum number of results to return
             threshold: Optional similarity threshold
+            path_filter: Optional relative path to limit search scope
 
         Returns:
             List of similar chunks with scores and metadata
