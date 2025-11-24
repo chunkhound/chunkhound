@@ -174,14 +174,13 @@ def list_repo_files_via_git(
     out: list[Path] = []
     pcache: dict[str, object] = {}
     # Evaluate includes/excludes relative to filter_root (CH root) when provided; otherwise start_dir
-    try:
-        base_for_filters = (filter_root or start_dir).resolve()
-    except Exception:
-        base_for_filters = (filter_root or start_dir)
+    # Don't resolve symlinks for filter base - use logical path for worktree support
+    base_for_filters = filter_root or start_dir
 
     for rel in rel_paths:
-        abs_path = (repo_root / rel).resolve()
-        # Filter to files that still exist as files
+        # Don't resolve symlinks - use logical path for worktree support
+        abs_path = repo_root / rel
+        # Filter to files that still exist as files (follows symlink for existence check only)
         try:
             if not abs_path.is_file():
                 continue
