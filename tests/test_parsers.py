@@ -6,7 +6,7 @@ Tests that all parsers can parse minimal valid code samples.
 
 import pytest
 from chunkhound.core.types.common import FileId, Language
-from chunkhound.parsers.parser_factory import get_parser_factory, OXC_AVAILABLE
+from chunkhound.parsers.parser_factory import get_parser_factory
 from chunkhound.parsers.universal_engine import SetupError
 
 # Minimal valid code snippets for each language

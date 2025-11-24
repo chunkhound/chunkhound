@@ -5,22 +5,10 @@ from pathlib import Path
 
 from chunkhound.core.types.common import Language, FileId, ChunkType
 
-# Import OXC_AVAILABLE flag to conditionally skip tests
-from chunkhound.parsers.parser_factory import OXC_AVAILABLE
-
-
-# Marker for tests requiring OXC
-requires_oxc = pytest.mark.skipif(
-    not OXC_AVAILABLE,
-    reason="oxc_python not available or incompatible API"
-)
-
 
 @pytest.fixture
 def js_parser():
     """Create a JavaScript OxcParser."""
-    if not OXC_AVAILABLE:
-        pytest.skip("oxc_python not available")
     from chunkhound.parsers.oxc_parser import OxcParser
     return OxcParser(Language.JAVASCRIPT)
 
@@ -28,8 +16,6 @@ def js_parser():
 @pytest.fixture
 def ts_parser():
     """Create a TypeScript OxcParser."""
-    if not OXC_AVAILABLE:
-        pytest.skip("oxc_python not available")
     from chunkhound.parsers.oxc_parser import OxcParser
     return OxcParser(Language.TYPESCRIPT)
 
@@ -37,8 +23,6 @@ def ts_parser():
 @pytest.fixture
 def jsx_parser():
     """Create a JSX OxcParser."""
-    if not OXC_AVAILABLE:
-        pytest.skip("oxc_python not available")
     from chunkhound.parsers.oxc_parser import OxcParser
     return OxcParser(Language.JSX)
 
@@ -46,13 +30,10 @@ def jsx_parser():
 @pytest.fixture
 def tsx_parser():
     """Create a TSX OxcParser."""
-    if not OXC_AVAILABLE:
-        pytest.skip("oxc_python not available")
     from chunkhound.parsers.oxc_parser import OxcParser
     return OxcParser(Language.TSX)
 
 
-@requires_oxc
 class TestOxcParserBasics:
     """Basic parsing tests."""
 
@@ -133,7 +114,6 @@ class TestOxcParserBasics:
         assert chunks == []
 
 
-@requires_oxc
 class TestOxcParserNodeTypes:
     """Test specific node type extraction."""
 
@@ -186,7 +166,6 @@ class TestOxcParserNodeTypes:
         assert len(chunks) >= 1
 
 
-@requires_oxc
 class TestOxcParserMetadata:
     """Test metadata extraction."""
 
@@ -220,28 +199,6 @@ class TestOxcParserMetadata:
         assert func_chunks[0].start_line == 2
 
 
-@requires_oxc
-class TestOxcParserFactoryIntegration:
-    """Integration tests with ParserFactory."""
-
-    def test_factory_returns_correct_parser_type(self):
-        """Test that factory returns OxcParser when available, else UniversalParser."""
-        from chunkhound.parsers.parser_factory import ParserFactory, OXC_AVAILABLE
-
-        factory = ParserFactory()
-
-        for lang in [Language.JAVASCRIPT, Language.TYPESCRIPT, Language.JSX, Language.TSX]:
-            parser = factory.create_parser(lang)
-            if OXC_AVAILABLE:
-                from chunkhound.parsers.oxc_parser import OxcParser
-                assert isinstance(parser, OxcParser), f"Expected OxcParser for {lang}, got {type(parser)}"
-            else:
-                # Falls back to tree-sitter UniversalParser
-                from chunkhound.parsers.universal_parser import UniversalParser
-                assert isinstance(parser, UniversalParser), f"Expected UniversalParser fallback for {lang}"
-
-
-@requires_oxc
 class TestOxcParserEdgeCases:
     """Test edge cases and error handling."""
 
@@ -298,19 +255,76 @@ class TestOxcParserEdgeCases:
         assert len(errors) > 0
 
 
-# Test that runs regardless of OXC availability
-class TestOxcAvailabilityFlag:
-    """Test that OXC_AVAILABLE flag works correctly."""
+class TestOxcParserIIFEDetection:
+    """Test IIFE (Immediately Invoked Function Expression) detection."""
 
-    def test_oxc_available_is_boolean(self):
-        """Verify OXC_AVAILABLE is a boolean."""
-        assert isinstance(OXC_AVAILABLE, bool)
+    def test_iife_unary_bang_operator(self, js_parser):
+        """Test IIFE with unary ! operator (jQuery-style)."""
+        code = '!function(e,t){"use strict"; return 42;}(window, window.document)'
+        chunks = js_parser.parse_content(code)
+        assert len(chunks) >= 1, "Should extract IIFE with ! operator"
 
-    def test_factory_handles_oxc_unavailable(self):
-        """Factory should work regardless of OXC availability."""
-        from chunkhound.parsers.parser_factory import ParserFactory
+    def test_iife_wrapped_style(self, js_parser):
+        """Test classic wrapped IIFE."""
+        code = "(function(){ return 1; }())"
+        chunks = js_parser.parse_content(code)
+        assert len(chunks) >= 1, "Should extract wrapped IIFE"
 
-        factory = ParserFactory()
-        # Should not raise - either returns OxcParser or falls back to UniversalParser
-        parser = factory.create_parser(Language.JAVASCRIPT)
-        assert parser is not None
+    def test_iife_unary_plus_operator(self, js_parser):
+        """Test IIFE with unary + operator."""
+        code = "+function(){ console.log('init'); }()"
+        chunks = js_parser.parse_content(code)
+        assert len(chunks) >= 1, "Should extract IIFE with + operator"
+
+    def test_iife_void_operator(self, js_parser):
+        """Test IIFE with void operator."""
+        code = "void function(){ console.log('init'); }()"
+        chunks = js_parser.parse_content(code)
+        assert len(chunks) >= 1, "Should extract IIFE with void operator"
+
+    def test_iife_async_function(self, js_parser):
+        """Test async IIFE."""
+        code = "void async function(){ await fetch('/api'); }()"
+        chunks = js_parser.parse_content(code)
+        assert len(chunks) >= 1, "Should extract async IIFE"
+
+    def test_iife_arrow_function(self, js_parser):
+        """Test arrow function IIFE."""
+        code = "(()=>{ return 42; })()"
+        chunks = js_parser.parse_content(code)
+        assert len(chunks) >= 1, "Should extract arrow function IIFE"
+
+    def test_non_iife_expression_statement_filtered(self, js_parser):
+        """Test that normal expression statements are still filtered out."""
+        # These should NOT be extracted
+        non_extractable = [
+            'console.log("hello")',
+            'alert("test")',
+            'someFunction()',
+            'x++',
+            '"use strict"',
+        ]
+
+        for code in non_extractable:
+            chunks = js_parser.parse_content(code)
+            assert len(chunks) == 0, f"Should NOT extract: {code}"
+
+    def test_extractable_assignments_still_work(self, js_parser):
+        """Test that extractable assignments still work alongside IIFE detection."""
+        # These SHOULD be extracted
+        extractable = [
+            'module.exports = {x: 1}',
+            'Constructor.prototype.method = function(){}',
+            'Utils.helper = function(){}',
+        ]
+
+        for code in extractable:
+            chunks = js_parser.parse_content(code)
+            assert len(chunks) >= 1, f"Should extract: {code}"
+
+    def test_minified_library_pattern(self, js_parser):
+        """Test realistic minified library pattern."""
+        # Simulated jQuery-style minified library
+        code = '!function(w,d){"use strict";var lib={version:"1.0"};w.MyLib=lib}(window,document)'
+        chunks = js_parser.parse_content(code)
+        assert len(chunks) >= 1, "Should extract minified library IIFE"

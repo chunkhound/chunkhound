@@ -450,7 +450,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.6.0" },
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "openai", specifier = ">=1.0.0" },
-    { name = "oxc-python", specifier = ">=0.1.0" },
+    { name = "oxc-python", specifier = ">=0.1.1" },
     { name = "pandas", specifier = ">=2.3.0" },
     { name = "pathspec", specifier = ">=0.12.1" },
     { name = "psutil", specifier = ">=5.8.0" },
@@ -1817,14 +1817,14 @@ wheels = [
 
 [[package]]
 name = "oxc-python"
-version = "0.1.0"
+version = "0.1.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/65/09/5d557ef20453096b3f6cd0709e92c3da6381b73c7bf77481aae98d137cd0/oxc_python-0.1.0.tar.gz", hash = "sha256:41a03398ce4a347c1f3b09c6daab89e4771679cf923d23747d63b105c863e8e8", size = 115382, upload-time = "2025-11-22T19:06:28.529Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/15/c0/e1f1a8f6a07702a62874d6b203973c748013db2b81a3d14870875b076d33/oxc_python-0.1.1.tar.gz", hash = "sha256:66d13a40e6a7ae76d9bb4d014f9cd6653b9f40188948375bb229a475ddbdd6a8", size = 118577, upload-time = "2025-11-23T17:23:47.109Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9e/75/8f920f6026eee823122c5e3b31fe8e2460db3484316b56137b52d6bfd878/oxc_python-0.1.0-cp310-abi3-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl", hash = "sha256:385d8e70201b6b8d63d51e723ddaeb3e602a1063403f4e0ee0e3c2a9c8bff9c7", size = 1365085, upload-time = "2025-11-22T19:06:22.517Z" },
-    { url = "https://files.pythonhosted.org/packages/dc/ae/77ef986f7fc93ecac2419ed03c4b92cfed1cbb52d52af19d38484e300de3/oxc_python-0.1.0-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:114ead03ba206f84e8c8742c75b70690cdbba769bf0249f25a36336ee6b14421", size = 709348, upload-time = "2025-11-22T19:06:24.083Z" },
-    { url = "https://files.pythonhosted.org/packages/52/f3/0c7687c728fb9c658515c9250128fd9b2b6a985a275ea75855b214eb4f45/oxc_python-0.1.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:95c124176128e55610792fba98bbdf0e94fa856532e87f6e4d4e827667900887", size = 730042, upload-time = "2025-11-22T19:06:25.682Z" },
-    { url = "https://files.pythonhosted.org/packages/26/63/f935cd1f0a7f1a060786bb8f2893b1abda2e37e6bc576733759734b1a270/oxc_python-0.1.0-cp310-abi3-win_amd64.whl", hash = "sha256:b224de41990e1eb778f2c9e0cacda29364cb2d657518aa9b70d111b5ba9efb2b", size = 638955, upload-time = "2025-11-22T19:06:26.97Z" },
+    { url = "https://files.pythonhosted.org/packages/db/0a/8b3e320a6c216b7748920cb3cea08d8d0c7807d89cdd55783e721e5003d0/oxc_python-0.1.1-cp310-abi3-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl", hash = "sha256:c43c8de4673b4e70aca89b1beb60d4d2da845d09b7050b0b8e4dafba6ec780ac", size = 1363420, upload-time = "2025-11-23T17:23:39.968Z" },
+    { url = "https://files.pythonhosted.org/packages/36/8a/011b200e47b7a7c273dcc084e1235762b54f4ebb8c45d0608e9ab876012b/oxc_python-0.1.1-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:b34e0604742941d35dee2ca2e6818883274444075807800ab678a59fbb876d54", size = 708163, upload-time = "2025-11-23T17:23:41.72Z" },
+    { url = "https://files.pythonhosted.org/packages/e1/52/075f5606e37e166d8476323bcf35b409033178755ad47dd27e7c28aec5ca/oxc_python-0.1.1-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:3c06270545445c3f237d0f8950ed9299c67af3dbe85dea97d599d62e613f2fa6", size = 727603, upload-time = "2025-11-23T17:23:43.579Z" },
+    { url = "https://files.pythonhosted.org/packages/4d/db/a193dd1767aa33574d9c210409d4bd5e89c1310c6a3ac8fd695d25f949df/oxc_python-0.1.1-cp310-abi3-win_amd64.whl", hash = "sha256:cbe58484e8b49b1965cf90421301042bb99d7c24e9522e8b5c09e5e9e98bd7c0", size = 634790, upload-time = "2025-11-23T17:23:45.388Z" },
 ]
 
 [[package]]
