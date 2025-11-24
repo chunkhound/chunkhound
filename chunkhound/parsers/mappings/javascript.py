@@ -16,16 +16,9 @@ from chunkhound.parsers.mappings._shared.js_family_extraction import (
 from chunkhound.parsers.mappings._shared.js_query_patterns import (
     TOP_LEVEL_LEXICAL_CONFIG,
     TOP_LEVEL_VAR_CONFIG,
-    COMMONJS_MODULE_EXPORTS,
-    COMMONJS_NESTED_EXPORTS,
-    COMMONJS_EXPORTS_SHORTHAND,
-)
-from chunkhound.parsers.mappings._shared.js_family_extraction import (
-    JSFamilyExtraction,
-)
-from chunkhound.parsers.mappings._shared.js_query_patterns import (
-    TOP_LEVEL_LEXICAL_CONFIG,
-    TOP_LEVEL_VAR_CONFIG,
+    TOP_LEVEL_LEXICAL_CALL,
+    TOP_LEVEL_VAR_CALL,
+    TOP_LEVEL_LEXICAL_PRIMITIVE,
     COMMONJS_MODULE_EXPORTS,
     COMMONJS_NESTED_EXPORTS,
     COMMONJS_EXPORTS_SHORTHAND,
@@ -157,7 +150,11 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
           object/array configs (e.g., `export default { ... }`, `module.exports = {}`)
           become chunks.
         """
-        if concept == UniversalConcept.DEFINITION:
+        if concept == UniversalConcept.IMPORT:
+            return """
+            (import_statement) @definition
+            """
+        elif concept == UniversalConcept.DEFINITION:
             return (
                 "\n".join(
                     [
@@ -167,15 +164,127 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
                             name: (identifier) @name
                         ) @definition
 
+                        (generator_function_declaration
+                            name: (identifier) @name
+                        ) @definition
+
                         (class_declaration
                             name: (identifier) @name
                         ) @definition
 
-                        ; Top-level export (default or named)
+                        ; Exported const/let with object/array initializer
+                        (export_statement
+                            (lexical_declaration
+                                (variable_declarator
+                                    name: (identifier) @name
+                                    value: [(object) (array)]
+                                )
+                            )
+                        ) @definition
+
+                        ; Exported const/let with function/arrow
+                        (export_statement
+                            (lexical_declaration
+                                (variable_declarator
+                                    name: (identifier) @name
+                                    value: [(function_expression) (arrow_function)]
+                                )
+                            )
+                        ) @definition
+
+                        ; Exported var with object/array initializer
+                        (export_statement
+                            (variable_declaration
+                                (variable_declarator
+                                    name: (identifier) @name
+                                    value: [(object) (array)]
+                                )
+                            )
+                        ) @definition
+
+                        ; Exported var with function/arrow
+                        (export_statement
+                            (variable_declaration
+                                (variable_declarator
+                                    name: (identifier) @name
+                                    value: [(function_expression) (arrow_function)]
+                                )
+                            )
+                        ) @definition
+
+                        ; Exported class expression (const/let)
+                        (export_statement
+                            (lexical_declaration
+                                (variable_declarator
+                                    name: (identifier) @name
+                                    value: (class)
+                                )
+                            )
+                        ) @definition
+
+                        ; Exported class expression (var)
+                        (export_statement
+                            (variable_declaration
+                                (variable_declarator
+                                    name: (identifier) @name
+                                    value: (class)
+                                )
+                            )
+                        ) @definition
+
+                        ; Exported function declaration
+                        (export_statement
+                            (function_declaration
+                                name: (identifier) @name
+                            )
+                        ) @definition
+
+                        ; Exported generator function declaration
+                        (export_statement
+                            (generator_function_declaration
+                                name: (identifier) @name
+                            )
+                        ) @definition
+
+                        ; Exported class declaration
+                        (export_statement
+                            (class_declaration
+                                name: (identifier) @name
+                            )
+                        ) @definition
+
+                        ; Top-level export (default or named) - generic fallback
                         (export_statement) @definition
                         """,
                         TOP_LEVEL_LEXICAL_CONFIG,
                         TOP_LEVEL_VAR_CONFIG,
+                        TOP_LEVEL_LEXICAL_CALL,
+                        TOP_LEVEL_VAR_CALL,
+                        TOP_LEVEL_LEXICAL_PRIMITIVE,
+                        # IIFE patterns (Immediately Invoked Function Expressions)
+                        """
+                        ; IIFE with function expression: (function() { ... })()
+                        (program
+                            (expression_statement
+                                (call_expression
+                                    function: (parenthesized_expression
+                                        (function_expression)
+                                    )
+                                ) @definition
+                            )
+                        )
+
+                        ; IIFE with arrow function: (() => { ... })()
+                        (program
+                            (expression_statement
+                                (call_expression
+                                    function: (parenthesized_expression
+                                        (arrow_function)
+                                    )
+                                ) @definition
+                            )
+                        )
+                        """,
                         # Function/arrow declarators at top level
                         """
                         (program
@@ -183,33 +292,51 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
                                 (variable_declarator
                                     name: (identifier) @name
                                     value: (function_expression)
-                                ) @definition
-                            )
+                                )
+                            ) @definition
                         )
                         (program
                             (lexical_declaration
                                 (variable_declarator
                                     name: (identifier) @name
                                     value: (arrow_function)
-                                ) @definition
-                            )
+                                )
+                            ) @definition
                         )
                         (program
                             (variable_declaration
                                 (variable_declarator
                                     name: (identifier) @name
                                     value: (function_expression)
-                                ) @definition
-                            )
+                                )
+                            ) @definition
                         )
                         (program
                             (variable_declaration
                                 (variable_declarator
                                     name: (identifier) @name
                                     value: (arrow_function)
-                                ) @definition
-                            )
+                                )
+                            ) @definition
                         )
+                        ; Class expression assigned to const/let at top level
+                        (program
+                            (lexical_declaration
+                                (variable_declarator
+                                    name: (identifier) @name
+                                    value: (class)
+                                )
+                            )
+                        ) @definition
+                        ; Class expression assigned to var at top level
+                        (program
+                            (variable_declaration
+                                (variable_declarator
+                                    name: (identifier) @name
+                                    value: (class)
+                                )
+                            )
+                        ) @definition
                         """,
                         COMMONJS_MODULE_EXPORTS,
                         COMMONJS_NESTED_EXPORTS,

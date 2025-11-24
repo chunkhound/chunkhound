@@ -1111,6 +1111,36 @@ class UniversalParser:
                 if current_kind == "rule" and next_kind == "rule":
                     semantic_mismatch = True
 
+                # Don't merge top-level definitions (classes, functions) with each other
+                # These are discrete semantic units that should remain separate
+                current_node_type = current_chunk.metadata.get("node_type", "")
+                next_node_type = next_chunk.metadata.get("node_type", "")
+                top_level_types = {
+                    "class_declaration",
+                    "function_declaration",
+                    "interface_declaration",
+                    "type_alias_declaration",
+                    "enum_declaration",
+                    "namespace_declaration",
+                    "module_declaration",
+                    "lexical_declaration",  # const/let with functions/objects
+                    "variable_declaration",  # var with functions/objects
+                    "export_statement",  # exported definitions
+                }
+                if (
+                    current_node_type in top_level_types
+                    and next_node_type in top_level_types
+                ):
+                    semantic_mismatch = True
+
+                # Also prevent merging when there's a gap (empty lines) between
+                # top-level definitions, regardless of node type
+                line_gap = next_chunk.start_line - current_chunk.end_line
+                if line_gap > 1:
+                    # There's at least one empty line between chunks
+                    # Top-level definitions with gaps should not be merged
+                    semantic_mismatch = True
+
             # Determine maximum allowed gap based on chunk types
             # For cross-concept merges involving COMMENT, require strict adjacency (gap <= 1)
             # to preserve standalone comments while allowing immediate docstrings to merge
@@ -1279,9 +1309,36 @@ class UniversalParser:
                 else:
                     # Multiple chunks with identical content - select most specific
                     # Use max() with specificity key to find best chunk
+                    # Also prefer chunks with proper names over fallback names
+                    def name_quality(chunk: UniversalChunk) -> int:
+                        """Return quality score for chunk name (higher = better).
+
+                        Scores:
+                        - 2: Name appears in content (actual identifier)
+                        - 1: Proper name not in content (e.g., export_default)
+                        - 0: Fallback name (definition_line_X, etc.)
+                        """
+                        name = chunk.name
+                        # Fallback names look like: definition_line_X, comment_line_X, unnamed_X
+                        if name.startswith("definition_line_"):
+                            return 0
+                        if name.startswith("comment_line_"):
+                            return 0
+                        if name.startswith("unnamed_"):
+                            return 0
+                        if name.startswith("export_default"):
+                            return 1
+                        if name.startswith("module_exports"):
+                            return 1
+                        # Prefer names that appear in the content (actual identifiers)
+                        if name in chunk.content:
+                            return 2
+                        return 1
+
                     best_chunk = max(
                         chunk_group,
                         key=lambda c: (
+                            name_quality(c),  # Prefer better names
                             self._get_chunk_specificity(c),
                             -(c.end_line - c.start_line),  # Smaller spans preferred
                         ),
@@ -1456,6 +1513,12 @@ class UniversalParser:
                 return ChunkType.INTERFACE
             elif kind == "trait" or "trait" in node_type:
                 return ChunkType.TRAIT
+            elif kind == "type_alias" or "type_alias" in node_type:
+                return ChunkType.TYPE_ALIAS
+            elif kind == "namespace" or "namespace" in node_type:
+                return ChunkType.NAMESPACE
+            elif kind == "variable" or "variable" in node_type:
+                return ChunkType.VARIABLE
             else:
                 return ChunkType.FUNCTION  # Default for definitions
 

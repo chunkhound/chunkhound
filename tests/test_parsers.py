@@ -300,3 +300,338 @@ class TestParserValidation:
 
         except Exception as e:
             pytest.fail(f"Parser for {language.value} failed to parse large array content: {e}")
+
+
+class TestTypeScriptUniversalConcepts:
+    """Test TypeScript-specific universal concept queries and extraction.
+
+    These tests verify that the TypeScript mapping properly implements
+    UniversalConcept queries for IMPORT and enhanced DEFINITION concepts.
+    """
+
+    def test_typescript_import_concept_query_exists(self):
+        """Test that TypeScript mapping provides IMPORT concept query."""
+        from chunkhound.parsers.mappings.typescript import TypeScriptMapping
+        from chunkhound.parsers.universal_engine import UniversalConcept
+
+        mapping = TypeScriptMapping()
+        query = mapping.get_query_for_concept(UniversalConcept.IMPORT)
+
+        assert query is not None, "TypeScript should provide IMPORT concept query"
+        assert isinstance(query, str), "IMPORT query should be a string"
+        assert len(query.strip()) > 0, "IMPORT query should not be empty"
+
+    def test_typescript_import_query_includes_import_statement(self):
+        """Test that IMPORT query includes ES6 import statements."""
+        from chunkhound.parsers.mappings.typescript import TypeScriptMapping
+        from chunkhound.parsers.universal_engine import UniversalConcept
+
+        mapping = TypeScriptMapping()
+        query = mapping.get_query_for_concept(UniversalConcept.IMPORT)
+
+        # Should reference import_statement node type
+        assert "import_statement" in query or "import_specifier" in query or "import_clause" in query, \
+            "IMPORT query should reference import-related tree-sitter nodes"
+
+    def test_typescript_definition_includes_interfaces(self):
+        """Test that DEFINITION concept includes interface declarations."""
+        from chunkhound.parsers.mappings.typescript import TypeScriptMapping
+        from chunkhound.parsers.universal_engine import UniversalConcept
+
+        mapping = TypeScriptMapping()
+        query = mapping.get_query_for_concept(UniversalConcept.DEFINITION)
+
+        assert query is not None, "TypeScript should provide DEFINITION concept query"
+        assert "interface_declaration" in query, \
+            "DEFINITION query should include interface_declaration"
+
+    def test_typescript_definition_includes_enums(self):
+        """Test that DEFINITION concept includes enum declarations."""
+        from chunkhound.parsers.mappings.typescript import TypeScriptMapping
+        from chunkhound.parsers.universal_engine import UniversalConcept
+
+        mapping = TypeScriptMapping()
+        query = mapping.get_query_for_concept(UniversalConcept.DEFINITION)
+
+        assert query is not None, "TypeScript should provide DEFINITION concept query"
+        assert "enum_declaration" in query, \
+            "DEFINITION query should include enum_declaration"
+
+    def test_typescript_definition_includes_type_aliases(self):
+        """Test that DEFINITION concept includes type alias declarations."""
+        from chunkhound.parsers.mappings.typescript import TypeScriptMapping
+        from chunkhound.parsers.universal_engine import UniversalConcept
+
+        mapping = TypeScriptMapping()
+        query = mapping.get_query_for_concept(UniversalConcept.DEFINITION)
+
+        assert query is not None, "TypeScript should provide DEFINITION concept query"
+        assert "type_alias_declaration" in query, \
+            "DEFINITION query should include type_alias_declaration"
+
+    def test_typescript_definition_includes_classes(self):
+        """Test that DEFINITION concept includes class declarations."""
+        from chunkhound.parsers.mappings.typescript import TypeScriptMapping
+        from chunkhound.parsers.universal_engine import UniversalConcept
+
+        mapping = TypeScriptMapping()
+        query = mapping.get_query_for_concept(UniversalConcept.DEFINITION)
+
+        assert query is not None, "TypeScript should provide DEFINITION concept query"
+        assert "class_declaration" in query, \
+            "DEFINITION query should include class_declaration"
+
+    def test_typescript_definition_includes_functions(self):
+        """Test that DEFINITION concept includes function declarations."""
+        from chunkhound.parsers.mappings.typescript import TypeScriptMapping
+        from chunkhound.parsers.universal_engine import UniversalConcept
+
+        mapping = TypeScriptMapping()
+        query = mapping.get_query_for_concept(UniversalConcept.DEFINITION)
+
+        assert query is not None, "TypeScript should provide DEFINITION concept query"
+        assert "function_declaration" in query, \
+            "DEFINITION query should include function_declaration"
+
+
+class TestTypeScriptConceptExtraction:
+    """Test TypeScript concept extraction with real tree-sitter parsing.
+
+    These tests verify that concepts are properly extracted from TypeScript
+    code using the universal concept extraction system.
+    """
+
+    def test_extract_import_concepts_from_typescript(self):
+        """Test extraction of IMPORT concept from TypeScript code."""
+        from chunkhound.parsers.parser_factory import get_parser_factory
+        from chunkhound.parsers.universal_engine import UniversalConcept
+
+        factory = get_parser_factory()
+        parser = factory.create_parser(Language.TYPESCRIPT)
+
+        # Parse TypeScript with imports
+        content = """
+import { useState } from 'react';
+import type { User } from './types';
+import * as utils from './utils';
+"""
+
+        # Get the extractor from the parser
+        extractor = parser.extractor
+        ast = parser.engine.parse_to_ast(content)
+
+        # Extract IMPORT concepts
+        import_chunks = extractor.extract_concept(
+            ast.root_node,
+            content.encode('utf-8'),
+            UniversalConcept.IMPORT
+        )
+
+        assert len(import_chunks) > 0, "Should extract import statements as IMPORT concepts"
+
+        # Verify import content
+        import_texts = [chunk.content for chunk in import_chunks]
+        assert any("useState" in text for text in import_texts), \
+            "Should capture named imports"
+        assert any("type" in text.lower() for text in import_texts), \
+            "Should capture type imports"
+
+    def test_extract_interface_from_definition_concept(self):
+        """Test extraction of interfaces via DEFINITION concept."""
+        from chunkhound.parsers.parser_factory import get_parser_factory
+        from chunkhound.parsers.universal_engine import UniversalConcept
+
+        factory = get_parser_factory()
+        parser = factory.create_parser(Language.TYPESCRIPT)
+
+        content = """
+interface User {
+    id: number;
+    name: string;
+}
+"""
+
+        extractor = parser.extractor
+        ast = parser.engine.parse_to_ast(content)
+
+        # Extract DEFINITION concepts (should include interfaces)
+        def_chunks = extractor.extract_concept(
+            ast.root_node,
+            content.encode('utf-8'),
+            UniversalConcept.DEFINITION
+        )
+
+        assert len(def_chunks) > 0, "Should extract interface as DEFINITION concept"
+
+        # Verify interface content
+        interface_chunks = [c for c in def_chunks if "User" in c.name]
+        assert len(interface_chunks) > 0, "Should find User interface"
+        assert any("interface" in c.content.lower() for c in interface_chunks), \
+            "Interface content should contain 'interface' keyword"
+
+    def test_extract_enum_from_definition_concept(self):
+        """Test extraction of enums via DEFINITION concept."""
+        from chunkhound.parsers.parser_factory import get_parser_factory
+        from chunkhound.parsers.universal_engine import UniversalConcept
+
+        factory = get_parser_factory()
+        parser = factory.create_parser(Language.TYPESCRIPT)
+
+        content = """
+enum Status {
+    Pending = 'pending',
+    Success = 'success'
+}
+"""
+
+        extractor = parser.extractor
+        ast = parser.engine.parse_to_ast(content)
+
+        # Extract DEFINITION concepts (should include enums)
+        def_chunks = extractor.extract_concept(
+            ast.root_node,
+            content.encode('utf-8'),
+            UniversalConcept.DEFINITION
+        )
+
+        assert len(def_chunks) > 0, "Should extract enum as DEFINITION concept"
+
+        # Verify enum content
+        enum_chunks = [c for c in def_chunks if "Status" in c.name]
+        assert len(enum_chunks) > 0, "Should find Status enum"
+        assert any("enum" in c.content.lower() for c in enum_chunks), \
+            "Enum content should contain 'enum' keyword"
+
+    def test_extract_type_alias_from_definition_concept(self):
+        """Test extraction of type aliases via DEFINITION concept."""
+        from chunkhound.parsers.parser_factory import get_parser_factory
+        from chunkhound.parsers.universal_engine import UniversalConcept
+
+        factory = get_parser_factory()
+        parser = factory.create_parser(Language.TYPESCRIPT)
+
+        content = """
+type UserRole = 'admin' | 'user' | 'guest';
+"""
+
+        extractor = parser.extractor
+        ast = parser.engine.parse_to_ast(content)
+
+        # Extract DEFINITION concepts (should include type aliases)
+        def_chunks = extractor.extract_concept(
+            ast.root_node,
+            content.encode('utf-8'),
+            UniversalConcept.DEFINITION
+        )
+
+        assert len(def_chunks) > 0, "Should extract type alias as DEFINITION concept"
+
+        # Verify type alias content
+        type_chunks = [c for c in def_chunks if "UserRole" in c.name]
+        assert len(type_chunks) > 0, "Should find UserRole type"
+        assert any("type" in c.content.lower() for c in type_chunks), \
+            "Type alias content should contain 'type' keyword"
+
+    def test_class_extracted_with_correct_node_type(self):
+        """Test that classes are extracted with class_declaration node type."""
+        from chunkhound.parsers.parser_factory import get_parser_factory
+        from chunkhound.parsers.universal_engine import UniversalConcept
+
+        factory = get_parser_factory()
+        parser = factory.create_parser(Language.TYPESCRIPT)
+
+        content = """
+class UserService {
+    constructor() {}
+
+    getUser(id: number) {
+        return null;
+    }
+}
+"""
+
+        extractor = parser.extractor
+        ast = parser.engine.parse_to_ast(content)
+
+        # Extract DEFINITION concepts
+        def_chunks = extractor.extract_concept(
+            ast.root_node,
+            content.encode('utf-8'),
+            UniversalConcept.DEFINITION
+        )
+
+        # Find class chunk
+        class_chunks = [c for c in def_chunks if "UserService" in c.name]
+        assert len(class_chunks) > 0, "Should extract class"
+
+        # Verify node type is class_declaration (not function-related)
+        service_chunk = class_chunks[0]
+        assert "class" in service_chunk.language_node_type.lower(), \
+            f"Class node type should contain 'class', got: {service_chunk.language_node_type}"
+
+
+class TestTypeScriptMetadataExtraction:
+    """Test TypeScript-specific metadata extraction for different constructs."""
+
+    def test_interface_metadata_extraction(self):
+        """Test that interface metadata is properly extracted."""
+        from chunkhound.parsers.parser_factory import get_parser_factory
+        from chunkhound.parsers.universal_engine import UniversalConcept
+
+        factory = get_parser_factory()
+        parser = factory.create_parser(Language.TYPESCRIPT)
+
+        content = """
+interface Repository<T> {
+    find(id: string): Promise<T>;
+    save(item: T): void;
+}
+"""
+
+        extractor = parser.extractor
+        ast = parser.engine.parse_to_ast(content)
+
+        def_chunks = extractor.extract_concept(
+            ast.root_node,
+            content.encode('utf-8'),
+            UniversalConcept.DEFINITION
+        )
+
+        repo_chunks = [c for c in def_chunks if "Repository" in c.name]
+        assert len(repo_chunks) > 0, "Should extract Repository interface"
+
+        # Check metadata exists
+        repo_chunk = repo_chunks[0]
+        assert repo_chunk.metadata is not None, "Should have metadata"
+        assert isinstance(repo_chunk.metadata, dict), "Metadata should be dict"
+
+    def test_enum_metadata_extraction(self):
+        """Test that enum metadata is properly extracted."""
+        from chunkhound.parsers.parser_factory import get_parser_factory
+        from chunkhound.parsers.universal_engine import UniversalConcept
+
+        factory = get_parser_factory()
+        parser = factory.create_parser(Language.TYPESCRIPT)
+
+        content = """
+enum HttpStatus {
+    OK = 200,
+    NotFound = 404
+}
+"""
+
+        extractor = parser.extractor
+        ast = parser.engine.parse_to_ast(content)
+
+        def_chunks = extractor.extract_concept(
+            ast.root_node,
+            content.encode('utf-8'),
+            UniversalConcept.DEFINITION
+        )
+
+        enum_chunks = [c for c in def_chunks if "HttpStatus" in c.name]
+        assert len(enum_chunks) > 0, "Should extract HttpStatus enum"
+
+        # Check metadata
+        enum_chunk = enum_chunks[0]
+        assert enum_chunk.metadata is not None, "Should have metadata"
