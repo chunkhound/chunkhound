@@ -472,6 +472,32 @@ class TestContextManagement:
         result = provider._build_context_management()
         assert result["edits"][0]["keep"] == "all"
 
+    def test_build_context_management_thinking_active_override(self):
+        """Test thinking_active=False skips clear_thinking even when thinking_enabled=True.
+
+        This is critical for complete_structured() which uses forced tool choice
+        that's incompatible with thinking - the context management should not
+        include clear_thinking_20251015 in that case.
+        """
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            thinking_enabled=True,  # Enabled at provider level
+            context_management_enabled=True,
+        )
+
+        # Default: should include clear_thinking
+        result_with_thinking = provider._build_context_management()
+        assert result_with_thinking is not None
+        assert len(result_with_thinking["edits"]) == 2
+        assert result_with_thinking["edits"][0]["type"] == "clear_thinking_20251015"
+
+        # Override: thinking_active=False should skip clear_thinking
+        result_no_thinking = provider._build_context_management(thinking_active=False)
+        assert result_no_thinking is not None
+        # Should only have tool_uses edit, no thinking edit
+        assert len(result_no_thinking["edits"]) == 1
+        assert result_no_thinking["edits"][0]["type"] == "clear_tool_uses_20250919"
+
 
 @pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
 class TestBetaHeaders:
