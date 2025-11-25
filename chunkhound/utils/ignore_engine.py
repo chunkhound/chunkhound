@@ -57,6 +57,41 @@ def _compile_gitwildmatch(patterns: Iterable[str]) -> "PathSpec":
     return PathSpec.from_lines(GitWildMatchPattern, patterns)
 
 
+def _collect_global_gitignore_patterns() -> list[str]:
+    """Collect patterns from the global gitignore file.
+
+    Reads core.excludesFile from git config or checks default locations.
+    Global patterns apply at any directory level (no transformation needed).
+    """
+    from chunkhound.utils.git_safe import get_global_excludes_file
+
+    global_file = get_global_excludes_file()
+    if not global_file:
+        return []
+
+    try:
+        lines = global_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return []
+
+    patterns: list[str] = []
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Global patterns match anywhere, so prefix with **/ if not already anchored
+        if line.startswith("/"):
+            # Anchored to root - keep as is (rare in global gitignore)
+            patterns.append(line)
+        elif line.startswith("**/") or line.startswith("!"):
+            # Already has recursive prefix or is negation
+            patterns.append(line)
+        else:
+            # Make pattern match anywhere in tree
+            patterns.append(f"**/{line}")
+    return patterns
+
+
 def build_ignore_engine(
     root: Path,
     sources: list[str],
@@ -66,7 +101,7 @@ def build_ignore_engine(
     """Build an IgnoreEngine for the given root and sources.
 
     Currently supports:
-    - gitignore: uses only the root-level .gitignore file
+    - gitignore: local .gitignore files plus global gitignore (core.excludesFile)
     - config: uses provided glob-like patterns (gitwildmatch semantics)
     """
     compiled: list[tuple[Path, PathSpec]] = []
@@ -78,7 +113,16 @@ def build_ignore_engine(
 
     for src in sources:
         if src == "gitignore":
-            # Collect and transform .gitignore rules across the tree to root-relative patterns
+            # First, add global gitignore patterns (lowest priority, applied first)
+            global_pats = _collect_global_gitignore_patterns()
+            if global_pats:
+                from chunkhound.utils.git_safe import get_global_excludes_file
+
+                global_file = get_global_excludes_file()
+                source_path = global_file or Path.home() / ".gitignore_global"
+                compiled.append((source_path, _compile_gitwildmatch(global_pats)))
+
+            # Then collect and transform .gitignore rules across the tree to root-relative patterns
             pre_spec = None
             if config_exclude:
                 pre_spec = _compile_gitwildmatch(config_exclude)
