@@ -259,8 +259,15 @@ class AnthropicLLMProvider(LLMProvider):
 
         return headers
 
-    def _build_context_management(self) -> dict[str, Any] | None:
+    def _build_context_management(
+        self, thinking_active: bool | None = None
+    ) -> dict[str, Any] | None:
         """Build context management configuration if enabled.
+
+        Args:
+            thinking_active: Override for whether thinking is active in this request.
+                If None, uses self._thinking_enabled. Pass False for requests
+                where thinking is skipped (e.g., complete_structured with forced tool choice).
 
         Returns:
             Context management dict for API request, or None if disabled
@@ -268,10 +275,15 @@ class AnthropicLLMProvider(LLMProvider):
         if not self._context_management_enabled:
             return None
 
+        # Determine if thinking is actually active for this request
+        is_thinking_active = (
+            thinking_active if thinking_active is not None else self._thinking_enabled
+        )
+
         edits: list[dict[str, Any]] = []
 
         # Thinking block clearing (must come first per API docs)
-        if self._thinking_enabled:
+        if is_thinking_active:
             thinking_edit: dict[str, Any] = {"type": "clear_thinking_20251015"}
             if self._clear_thinking_keep_turns is not None:
                 thinking_edit["keep"] = {
@@ -545,8 +557,9 @@ class AnthropicLLMProvider(LLMProvider):
             if output_config:
                 request_kwargs["output_config"] = output_config
 
-            # Add context management if enabled
-            context_management = self._build_context_management()
+            # Add context management if enabled (with thinking_active=False since
+            # forced tool choice is incompatible with thinking)
+            context_management = self._build_context_management(thinking_active=False)
             if context_management:
                 request_kwargs["context_management"] = context_management
 
