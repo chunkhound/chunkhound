@@ -1303,7 +1303,9 @@ class IndexingCoordinator(BaseService):
             return 0
 
     async def generate_missing_embeddings(
-        self, exclude_patterns: list[str] | None = None
+        self,
+        exclude_patterns: list[str] | None = None,
+        thin_check: bool = False,
     ) -> dict[str, Any]:
         """Generate embeddings for chunks that don't have them.
 
@@ -1321,6 +1323,74 @@ class IndexingCoordinator(BaseService):
             }
 
         try:
+            # Optional fast-path: only if explicitly requested
+            if thin_check and self._embedding_provider:
+                try:
+                    provider = getattr(self._embedding_provider, "name", None)
+                    model = getattr(self._embedding_provider, "model", None)
+                    if provider and model:
+                        # Discover embedding tables
+                        tables: list[str] = []
+                        try:
+                            rows = self._db.execute_query(
+                                """
+                                SELECT table_name AS name
+                                FROM information_schema.tables
+                                WHERE table_name LIKE 'embeddings_%'
+                                """,
+                                [],
+                            )
+                            for r in rows or []:
+                                name = r.get("name") if isinstance(r, dict) else None
+                                if name:
+                                    tables.append(str(name))
+                        except Exception:
+                            tables = []
+
+                        # If we cannot enumerate tables, fallback to normal path
+                        if tables:
+                            clauses = []
+                            for _ in tables:
+                                clauses.append(
+                                    """
+                                    NOT EXISTS (
+                                        SELECT 1 FROM {table} e
+                                        WHERE e.chunk_id = c.id AND e.provider = ? AND e.model = ?
+                                    )
+                                    """
+                                )
+                            # Build query by injecting table names safely
+                            not_exists_sql = " AND ".join(
+                                clause.format(table=t) for clause in clauses
+                            )
+                            probe_sql = f"""
+                                SELECT 1
+                                FROM chunks c
+                                WHERE {not_exists_sql}
+                                LIMIT 1
+                            """
+                            params = []
+                            # Repeat provider/model params for each table
+                            for _ in tables:
+                                params.extend([provider, model])
+                            probe = self._db.execute_query(probe_sql, params)
+                            if not probe:
+                                # No missing embeddings: short-circuit
+                                return {"status": "complete", "generated": 0}
+                        else:
+                            # No embedding tables present; if there are no chunks, report complete
+                            try:
+                                any_chunk = self._db.execute_query(
+                                    "SELECT 1 FROM chunks LIMIT 1", []
+                                )
+                                if not any_chunk:
+                                    return {"status": "complete", "generated": 0}
+                            except Exception:
+                                pass
+                except Exception:
+                    # On any probe error, fall through to normal generation
+                    pass
+
             # Use EmbeddingService for embedding generation
             from .embedding_service import EmbeddingService
 

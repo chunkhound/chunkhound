@@ -201,6 +201,16 @@ def add_run_subparser(subparsers: Any) -> argparse.ArgumentParser:
         ),
     )
 
+    # Opt-in: thin missing-embeddings check to speed up no-change runs
+    run_parser.add_argument(
+        "--thin-missing-embeddings",
+        action="store_true",
+        help=(
+            "Skip the missing-embeddings generation step when no new chunks were created "
+            "in this run (fast no-change runs)."
+        ),
+    )
+
     # Discovery backend (A/B experiments): default remains python
     run_parser.add_argument(
         "--discovery-backend",

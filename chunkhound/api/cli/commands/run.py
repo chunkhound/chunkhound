@@ -114,7 +114,9 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
 
             # Process directory - service layers will add subtasks to progress_instance
             stats = await indexing_service.process_directory(
-                Path(args.path), no_embeddings=args.no_embeddings
+                Path(args.path),
+                no_embeddings=args.no_embeddings,
+                thin_missing_embeddings=getattr(args, "thin_missing_embeddings", False),
             )
 
         # Display results
