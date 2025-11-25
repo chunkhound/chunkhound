@@ -5,6 +5,7 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.interfaces.llm_provider import LLMProvider
+from chunkhound.providers.llm.anthropic_llm_provider import AnthropicLLMProvider
 from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider
 from chunkhound.providers.llm.openai_llm_provider import OpenAILLMProvider
@@ -21,6 +22,7 @@ class LLMManager:
     # Registry of available providers
     _providers: dict[str, type[LLMProvider] | Any] = {
         "openai": OpenAILLMProvider,
+        "anthropic": AnthropicLLMProvider,
         "claude-code-cli": ClaudeCodeCLIProvider,
         "codex-cli": CodexCLIProvider,
     }
@@ -81,6 +83,36 @@ class LLMManager:
                 effort = config.get("reasoning_effort")
                 if effort:
                     provider_kwargs["reasoning_effort"] = effort
+            elif provider_name == "anthropic":
+                # Add Anthropic configuration
+                # Extended thinking
+                provider_kwargs["thinking_enabled"] = config.get(
+                    "thinking_enabled", False
+                )
+                provider_kwargs["thinking_budget_tokens"] = config.get(
+                    "thinking_budget_tokens", 10000
+                )
+                provider_kwargs["interleaved_thinking"] = config.get(
+                    "interleaved_thinking", False
+                )
+
+                # Effort parameter (Opus 4.5 only)
+                if effort := config.get("effort"):
+                    provider_kwargs["effort"] = effort
+
+                # Context management
+                if config.get("context_management_enabled"):
+                    provider_kwargs["context_management_enabled"] = True
+                    if (
+                        keep_turns := config.get("clear_thinking_keep_turns")
+                    ) is not None:
+                        provider_kwargs["clear_thinking_keep_turns"] = keep_turns
+                    if (
+                        trigger := config.get("clear_tool_uses_trigger_tokens")
+                    ) is not None:
+                        provider_kwargs["clear_tool_uses_trigger_tokens"] = trigger
+                    if (keep := config.get("clear_tool_uses_keep")) is not None:
+                        provider_kwargs["clear_tool_uses_keep"] = keep
 
             provider = provider_class(**provider_kwargs)
             return provider

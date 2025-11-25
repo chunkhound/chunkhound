@@ -49,25 +49,34 @@ class LLMConfig(BaseSettings):
         "ollama",
         "claude-code-cli",
         "codex-cli",
+        "anthropic",
     ] = Field(
         default="openai",
         description="Default LLM provider for both roles (utility, synthesis)",
     )
 
     # Optional per-role overrides (utility vs synthesis)
-    utility_provider: Literal[
-        "openai",
-        "ollama",
-        "claude-code-cli",
-        "codex-cli",
-    ] | None = Field(default=None, description="Override provider for utility ops")
+    utility_provider: (
+        Literal[
+            "openai",
+            "ollama",
+            "claude-code-cli",
+            "codex-cli",
+            "anthropic",
+        ]
+        | None
+    ) = Field(default=None, description="Override provider for utility ops")
 
-    synthesis_provider: Literal[
-        "openai",
-        "ollama",
-        "claude-code-cli",
-        "codex-cli",
-    ] | None = Field(default=None, description="Override provider for synthesis ops")
+    synthesis_provider: (
+        Literal[
+            "openai",
+            "ollama",
+            "claude-code-cli",
+            "codex-cli",
+            "anthropic",
+        ]
+        | None
+    ) = Field(default=None, description="Override provider for synthesis ops")
 
     # Model Configuration (dual-model architecture)
     utility_model: str = Field(
@@ -84,13 +93,74 @@ class LLMConfig(BaseSettings):
         default=None,
         description="Default Codex CLI reasoning effort (Responses API thinking level)",
     )
-    codex_reasoning_effort_utility: Literal["minimal", "low", "medium", "high"] | None = Field(
+    codex_reasoning_effort_utility: (
+        Literal["minimal", "low", "medium", "high"] | None
+    ) = Field(
         default=None,
         description="Codex CLI reasoning effort override for utility-stage operations",
     )
-    codex_reasoning_effort_synthesis: Literal["minimal", "low", "medium", "high"] | None = Field(
+    codex_reasoning_effort_synthesis: (
+        Literal["minimal", "low", "medium", "high"] | None
+    ) = Field(
         default=None,
         description="Codex CLI reasoning effort override for synthesis-stage operations",
+    )
+
+    # Anthropic Extended Thinking Configuration
+    anthropic_thinking_enabled: bool = Field(
+        default=False,
+        description="Enable Anthropic extended thinking (shows Claude's reasoning process)",
+    )
+
+    anthropic_thinking_budget_tokens: int = Field(
+        default=10000,
+        ge=1024,
+        description="Token budget for Anthropic thinking (min 1024, recommend 10000)",
+    )
+
+    anthropic_interleaved_thinking: bool = Field(
+        default=False,
+        description=(
+            "Enable interleaved thinking for tool use (Claude 4 models only). "
+            "Allows Claude to think between tool calls for more sophisticated reasoning."
+        ),
+    )
+
+    # Anthropic Effort Parameter (Opus 4.5 only)
+    anthropic_effort: Literal["low", "medium", "high"] | None = Field(
+        default=None,
+        description=(
+            "Control token usage vs thoroughness tradeoff (Opus 4.5 only). "
+            "high=maximum capability (default), medium=balanced, low=most efficient"
+        ),
+    )
+
+    # Anthropic Context Management
+    anthropic_context_management_enabled: bool = Field(
+        default=False,
+        description="Enable automatic context management (tool result and thinking block clearing)",
+    )
+
+    anthropic_clear_thinking_keep_turns: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Number of recent assistant turns with thinking blocks to preserve. "
+            "Set to None to keep all thinking blocks. Only used when context_management_enabled=True."
+        ),
+    )
+
+    anthropic_clear_tool_uses_trigger_tokens: int | None = Field(
+        default=None,
+        description=(
+            "Input token threshold to trigger tool result clearing. "
+            "Default is 100,000 tokens if not specified."
+        ),
+    )
+
+    anthropic_clear_tool_uses_keep: int | None = Field(
+        default=None,
+        description="Number of recent tool use/result pairs to keep after clearing. Default is 3.",
     )
 
     api_key: SecretStr | None = Field(
@@ -136,7 +206,6 @@ class LLMConfig(BaseSettings):
         if isinstance(v, str):
             return v.strip().lower()
         return v
-
 
     def get_provider_configs(self) -> tuple[dict[str, Any], dict[str, Any]]:
         """
@@ -192,6 +261,55 @@ class LLMConfig(BaseSettings):
         if resolved_synthesis_provider in ("codex-cli", "openai") and synthesis_effort:
             synthesis_config["reasoning_effort"] = synthesis_effort
 
+        # Add Anthropic configuration
+        if resolved_utility_provider == "anthropic":
+            utility_config["thinking_enabled"] = self.anthropic_thinking_enabled
+            utility_config["thinking_budget_tokens"] = (
+                self.anthropic_thinking_budget_tokens
+            )
+            utility_config["interleaved_thinking"] = self.anthropic_interleaved_thinking
+            if self.anthropic_effort:
+                utility_config["effort"] = self.anthropic_effort
+            if self.anthropic_context_management_enabled:
+                utility_config["context_management_enabled"] = True
+                if self.anthropic_clear_thinking_keep_turns is not None:
+                    utility_config["clear_thinking_keep_turns"] = (
+                        self.anthropic_clear_thinking_keep_turns
+                    )
+                if self.anthropic_clear_tool_uses_trigger_tokens is not None:
+                    utility_config["clear_tool_uses_trigger_tokens"] = (
+                        self.anthropic_clear_tool_uses_trigger_tokens
+                    )
+                if self.anthropic_clear_tool_uses_keep is not None:
+                    utility_config["clear_tool_uses_keep"] = (
+                        self.anthropic_clear_tool_uses_keep
+                    )
+
+        if resolved_synthesis_provider == "anthropic":
+            synthesis_config["thinking_enabled"] = self.anthropic_thinking_enabled
+            synthesis_config["thinking_budget_tokens"] = (
+                self.anthropic_thinking_budget_tokens
+            )
+            synthesis_config["interleaved_thinking"] = (
+                self.anthropic_interleaved_thinking
+            )
+            if self.anthropic_effort:
+                synthesis_config["effort"] = self.anthropic_effort
+            if self.anthropic_context_management_enabled:
+                synthesis_config["context_management_enabled"] = True
+                if self.anthropic_clear_thinking_keep_turns is not None:
+                    synthesis_config["clear_thinking_keep_turns"] = (
+                        self.anthropic_clear_thinking_keep_turns
+                    )
+                if self.anthropic_clear_tool_uses_trigger_tokens is not None:
+                    synthesis_config["clear_tool_uses_trigger_tokens"] = (
+                        self.anthropic_clear_tool_uses_trigger_tokens
+                    )
+                if self.anthropic_clear_tool_uses_keep is not None:
+                    synthesis_config["clear_tool_uses_keep"] = (
+                        self.anthropic_clear_tool_uses_keep
+                    )
+
         return utility_config, synthesis_config
 
     def get_default_models(self) -> tuple[str, str]:
@@ -214,6 +332,14 @@ class LLMConfig(BaseSettings):
         elif self.provider == "codex-cli":
             # Codex CLI: nominal label; require explicit model if desired
             return ("codex", "codex")
+        elif self.provider == "anthropic":
+            # Anthropic: Haiku 4.5 for utility (fast/cheap), Sonnet 4.5 for synthesis (powerful)
+            # Claude 4.5 generation models:
+            # - claude-haiku-4-5-20251001: Fastest model with near-frontier intelligence
+            # - claude-sonnet-4-5-20250929: Smartest model for complex agents and coding
+            # - claude-opus-4-5-20251101: Most capable model with effort control (supports effort parameter)
+            # - claude-opus-4-1-20250805: Exceptional model for specialized reasoning (legacy)
+            return ("claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929")
         else:
             return ("gpt-5-nano", "gpt-5")
 
@@ -280,19 +406,19 @@ class LLMConfig(BaseSettings):
 
         parser.add_argument(
             "--llm-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli"],
+            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic"],
             help="Default LLM provider for both roles",
         )
 
         parser.add_argument(
             "--llm-utility-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli"],
+            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic"],
             help="Override LLM provider for utility operations",
         )
 
         parser.add_argument(
             "--llm-synthesis-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli"],
+            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic"],
             help="Override LLM provider for synthesis operations",
         )
 
@@ -335,10 +461,16 @@ class LLMConfig(BaseSettings):
             config["synthesis_model"] = synthesis_model
         if codex_effort := os.getenv("CHUNKHOUND_LLM_CODEX_REASONING_EFFORT"):
             config["codex_reasoning_effort"] = codex_effort.strip().lower()
-        if codex_effort_util := os.getenv("CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_UTILITY"):
+        if codex_effort_util := os.getenv(
+            "CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_UTILITY"
+        ):
             config["codex_reasoning_effort_utility"] = codex_effort_util.strip().lower()
-        if codex_effort_syn := os.getenv("CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_SYNTHESIS"):
-            config["codex_reasoning_effort_synthesis"] = codex_effort_syn.strip().lower()
+        if codex_effort_syn := os.getenv(
+            "CHUNKHOUND_LLM_CODEX_REASONING_EFFORT_SYNTHESIS"
+        ):
+            config["codex_reasoning_effort_synthesis"] = (
+                codex_effort_syn.strip().lower()
+            )
 
         return config
 
@@ -361,13 +493,26 @@ class LLMConfig(BaseSettings):
             overrides["utility_provider"] = args.llm_utility_provider
         if hasattr(args, "llm_synthesis_provider") and args.llm_synthesis_provider:
             overrides["synthesis_provider"] = args.llm_synthesis_provider
-        if hasattr(args, "llm_codex_reasoning_effort") and args.llm_codex_reasoning_effort:
+        if (
+            hasattr(args, "llm_codex_reasoning_effort")
+            and args.llm_codex_reasoning_effort
+        ):
             overrides["codex_reasoning_effort"] = args.llm_codex_reasoning_effort
-        if hasattr(args, "llm_codex_reasoning_effort_utility") and args.llm_codex_reasoning_effort_utility:
-            overrides["codex_reasoning_effort_utility"] = args.llm_codex_reasoning_effort_utility
-        if hasattr(args, "llm_codex_reasoning_effort_synthesis") and args.llm_codex_reasoning_effort_synthesis:
-            overrides["codex_reasoning_effort_synthesis"] = args.llm_codex_reasoning_effort_synthesis
-        
+        if (
+            hasattr(args, "llm_codex_reasoning_effort_utility")
+            and args.llm_codex_reasoning_effort_utility
+        ):
+            overrides["codex_reasoning_effort_utility"] = (
+                args.llm_codex_reasoning_effort_utility
+            )
+        if (
+            hasattr(args, "llm_codex_reasoning_effort_synthesis")
+            and args.llm_codex_reasoning_effort_synthesis
+        ):
+            overrides["codex_reasoning_effort_synthesis"] = (
+                args.llm_codex_reasoning_effort_synthesis
+            )
+
         return overrides
 
     def __repr__(self) -> str:
