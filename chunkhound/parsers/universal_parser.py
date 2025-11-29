@@ -32,6 +32,7 @@ from chunkhound.core.types.common import (
 )
 from chunkhound.core.utils import estimate_tokens
 from chunkhound.interfaces.language_parser import ParseResult
+from chunkhound.utils.chunk_deduplication import deduplicate_chunks, get_chunk_specificity
 from chunkhound.utils.normalization import normalize_content
 
 from .concept_extractor import ConceptExtractor
@@ -358,7 +359,7 @@ class UniversalParser:
         # NEW: Deduplicate chunks with identical content before processing
         # This prevents issues where the same source code is extracted multiple
         # times as different concepts (e.g., function as DEFINITION, COMMENT, STRUCTURE)
-        universal_chunks = self._deduplicate_overlapping_chunks(universal_chunks)
+        universal_chunks = deduplicate_chunks(universal_chunks, self.language_name)
 
         # Group chunks by concept type for structured processing
         chunks_by_concept: dict[UniversalConcept, list[UniversalChunk]] = {}
@@ -1136,8 +1137,8 @@ class UniversalParser:
                 # (e.g., DEFINITION over COMMENT) for name and concept
                 if current_chunk.concept != next_chunk.concept:
                     # Determine which chunk is more specific
-                    current_spec = self._get_chunk_specificity(current_chunk)
-                    next_spec = self._get_chunk_specificity(next_chunk)
+                    current_spec = get_chunk_specificity(current_chunk)
+                    next_spec = get_chunk_specificity(next_chunk)
 
                     if next_spec > current_spec:
                         # Next chunk is more specific - use its name and concept
@@ -1177,177 +1178,6 @@ class UniversalParser:
         result.append(current_chunk)
 
         return result
-
-    def _get_chunk_specificity(self, chunk: UniversalChunk) -> int:
-        """Get specificity ranking for a chunk's concept.
-
-        More specific concepts are preferred when deduplicating overlapping chunks.
-        This implements a semantic hierarchy where definitions (functions, classes)
-        are more valuable than generic structures (file organization).
-
-        Args:
-            chunk: The chunk to evaluate
-
-        Returns:
-            Specificity score (higher = more specific)
-
-        Specificity Ranking:
-        - DEFINITION (4): Functions, classes, methods - most semantically valuable
-        - IMPORT (3): Import statements - specific but less central
-        - COMMENT (2): Documentation - useful but supplementary
-        - BLOCK (1): Generic code blocks - least specific
-        - STRUCTURE (0): File-level organization - least specific
-        """
-        specificity = {
-            UniversalConcept.DEFINITION: 4,
-            UniversalConcept.IMPORT: 3,
-            UniversalConcept.COMMENT: 2,
-            UniversalConcept.BLOCK: 1,
-            UniversalConcept.STRUCTURE: 0,
-        }
-        return specificity.get(chunk.concept, -1)
-
-    def _deduplicate_overlapping_chunks(
-        self, chunks: list[UniversalChunk]
-    ) -> list[UniversalChunk]:
-        """Remove duplicate and overlapping chunks.
-
-        When tree-sitter extraction creates multiple chunks for the same or overlapping
-        source code (e.g., a function extracted as both DEFINITION and STRUCTURE, or a
-        BLOCK chunk whose content is contained within a DEFINITION), keep only the most
-        semantically specific chunk.
-
-        This handles common duplication patterns:
-        - Python: Function extracted as function, comment (docstring), namespace, block
-        - Vue: Similar content extracted at different AST levels
-        - All languages: Same semantic unit captured by multiple queries
-        - Overlapping: BLOCK chunks contained within DEFINITION chunks
-
-        The deduplication handles two cases:
-        1. Identical content: Chunks with exactly the same content
-        2. Substring content: Chunks whose content is fully contained in another chunk
-
-        Args:
-            chunks: List of chunks potentially containing duplicates
-
-        Returns:
-            Deduplicated list with only the most specific chunk for each unique content
-
-        Example:
-            Input: [
-                UniversalChunk(concept=DEFINITION, content="def foo():\n    return 1"),
-                UniversalChunk(concept=BLOCK, content="return 1"),  # substring
-                UniversalChunk(concept=STRUCTURE, content="def foo():\n    return 1"),
-            ]
-            Output: [
-                UniversalChunk(concept=DEFINITION, content="def foo():\n    return 1"),
-            ]
-            (Keeps DEFINITION as most specific, removes both BLOCK and STRUCTURE)
-        """
-        if not chunks:
-            return []
-
-        # Group chunks by normalized content (exact match required)
-        content_groups: dict[str, list[UniversalChunk]] = {}
-
-        for chunk in chunks:
-            # Normalize content for comparison (strip whitespace)
-            normalized_content = chunk.content.strip()
-
-            # Skip empty chunks (should already be filtered, but defensive)
-            if not normalized_content:
-                continue
-
-            # Group by exact content match
-            if normalized_content not in content_groups:
-                content_groups[normalized_content] = []
-            content_groups[normalized_content].append(chunk)
-
-        # For each content group with exact matches, keep only the most specific
-        result = []
-        for chunk_group in content_groups.values():
-            if len(chunk_group) == 1:
-                # No duplicates - keep the single chunk
-                result.append(chunk_group[0])
-            else:
-                # Exempt specific languages from identical content deduplication
-                # Vue: Needs both directives (DEFINITION) and elements (BLOCK) preserved
-                # Haskell: Complex type class nesting requires preserving all chunks
-                if self.language_name.lower() in ["vue", "vue_template", "haskell"]:
-                    # Keep all chunks with identical content for these languages
-                    result.extend(chunk_group)
-                else:
-                    # Multiple chunks with identical content - select most specific
-                    # Use max() with specificity key to find best chunk
-                    best_chunk = max(
-                        chunk_group,
-                        key=lambda c: (
-                            self._get_chunk_specificity(c),
-                            -(c.end_line - c.start_line),  # Smaller spans preferred
-                        ),
-                    )
-                    result.append(best_chunk)
-
-        # Second pass: Remove BLOCK chunks whose content is a substring
-        # of DEFINITION/STRUCTURE chunks AND have overlapping line ranges
-        # This handles BLOCK chunks contained within DEFINITION chunks
-        final_result = []
-        for i, chunk_i in enumerate(result):
-            is_substring = False
-            normalized_i = chunk_i.content.strip()
-
-            # Only apply substring deduplication to BLOCK chunks
-            # This prevents removing DEFINITION chunks sharing text
-            if chunk_i.concept != UniversalConcept.BLOCK:
-                final_result.append(chunk_i)
-                continue
-
-            # Exempt specific languages from substring deduplication
-            # Vue: Needs both directives (DEFINITION) and elements (BLOCK) preserved
-            # Haskell: Complex type class nesting requires preserving all BLOCK chunks
-            if self.language_name.lower() in ["vue", "vue_template", "haskell"]:
-                final_result.append(chunk_i)
-                continue
-
-            for j, chunk_j in enumerate(result):
-                if i == j:
-                    continue
-
-                normalized_j = chunk_j.content.strip()
-
-                # Only deduplicate BLOCKs contained in DEFINITION or STRUCTURE chunks
-                if chunk_j.concept not in (
-                    UniversalConcept.DEFINITION,
-                    UniversalConcept.STRUCTURE,
-                ):
-                    continue
-
-                # Check if chunks have overlapping line ranges
-                lines_overlap = not (
-                    chunk_i.end_line < chunk_j.start_line
-                    or chunk_i.start_line > chunk_j.end_line
-                )
-
-                # Check if chunk_i's content is substring of chunk_j
-                # Only deduplicate if:
-                # 1. chunk_i BLOCK, chunk_j DEFINITION or STRUCTURE
-                # 2. Content is substring
-                # 3. Lines overlap (same source location)
-                # 4. chunk_j has higher specificity (DEFINITION/STRUCTURE > BLOCK)
-                if (
-                    normalized_i in normalized_j
-                    and len(normalized_i) < len(normalized_j)
-                    and lines_overlap
-                ):
-                    # BLOCK chunk is contained within DEFINITION/STRUCTURE chunk
-                    # at the same source location - remove the BLOCK
-                    is_substring = True
-                    break
-
-            if not is_substring:
-                final_result.append(chunk_i)
-
-        return final_result
 
     def _convert_to_chunks(
         self,

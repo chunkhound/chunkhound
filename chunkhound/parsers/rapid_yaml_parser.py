@@ -19,6 +19,7 @@ from chunkhound.core.types.common import ChunkType, FileId, Language, LineNumber
 from chunkhound.interfaces.language_parser import LanguageParser, ParseResult
 from chunkhound.parsers.universal_parser import UniversalParser
 from chunkhound.parsers.yaml_template_sanitizer import sanitize_helm_templates
+from chunkhound.utils.chunk_deduplication import deduplicate_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -320,11 +321,38 @@ class _LineLocator:
             else:
                 bucket.append(idx)
 
+        # Multi-line context index for more accurate disambiguation
+        # Maps (line1, line2, line3) tuples to list of starting indices
+        self._context_index: dict[tuple[str, ...], List[int]] = {}
+        for idx in range(len(self._stripped_lines)):
+            # Build context from up to 3 lines
+            context = tuple(self._stripped_lines[idx : idx + 3])
+            if context not in self._context_index:
+                self._context_index[context] = [idx]
+            else:
+                self._context_index[context].append(idx)
+
     def truncate(self, depth: int) -> None:
         if depth + 1 < len(self.depth_positions):
             self.depth_positions = self.depth_positions[: depth + 1]
 
-    def locate(self, first_line: str, depth: int) -> tuple[int, int]:
+    def locate(
+        self,
+        first_line: str,
+        depth: int,
+        node_type: str = "KEYVAL",
+        parent_key: str | None = None,
+        emitted_yaml: str | None = None,
+    ) -> tuple[int, int]:
+        """Locate source lines for a YAML node using progressive fallback strategy.
+
+        Args:
+            first_line: First line of emitted YAML
+            depth: Nesting depth of node
+            node_type: Type of node (KEYVAL, KEYSEQ, KEYMAP)
+            parent_key: Optional parent key name for scoped search
+            emitted_yaml: Full emitted YAML for multi-line context
+        """
         _t0 = perf_counter()
         if not self.lines:
             self.fallback_line += 1
@@ -334,34 +362,80 @@ class _LineLocator:
                 self.perf.locate_calls += 1
             return start, end
 
+        # Ensure depth_positions is large enough
         while len(self.depth_positions) <= depth:
             self.depth_positions.append(self.depth_positions[-1])
 
         start_search = self.depth_positions[depth]
-        idx = self._find_from(first_line, start_search)
+        idx = None
+
+        # Level 1: Multi-line context match (most accurate)
+        if emitted_yaml:
+            context_lines = self._extract_context_signature(emitted_yaml, max_lines=3)
+            if len(context_lines) >= 2:  # Need at least 2 lines for good context
+                idx = self._find_by_context(context_lines, start_search)
+                if idx is None and start_search > 0:
+                    # Retry from beginning if not found
+                    idx = self._find_by_context(context_lines, 0)
+
+        # Level 2: Single-line with parent scope awareness
+        if idx is None and parent_key:
+            idx = self._find_with_parent_scope(first_line, start_search, parent_key)
+
+        # Level 3: Node-type specific search (KEYSEQ special handling)
         if idx is None:
-            idx = self._find_from(first_line, 0)
+            idx = self._find_from(first_line, start_search, node_type)
+            if idx is None and start_search > 0:
+                idx = self._find_from(first_line, 0, node_type)
+
+        # Level 4: Fallback counter
         if idx is None:
             self.fallback_line += 1
             return self.fallback_line, self.fallback_line
 
+        # Update position tracking
         self.depth_positions[depth] = idx + 1
         for i in range(depth + 1, len(self.depth_positions)):
             self.depth_positions[i] = max(self.depth_positions[i], idx + 1)
 
-        end_idx = self._compute_block_end(idx)
+        # Compute block end
+        end_idx = self._compute_block_end(idx, node_type)
+
         start, end = idx + 1, end_idx + 1
         if self.perf is not None:
             self.perf.locate += perf_counter() - _t0
             self.perf.locate_calls += 1
         return start, end
 
-    def _find_from(self, target_line: str, start: int) -> int | None:
+    def _find_from(self, target_line: str, start: int, node_type: str = "KEYVAL") -> int | None:
+        """Find target line with node-type specific logic."""
         stripped_target = target_line.strip()
         if not stripped_target:
             return None
 
-        # Fast path: exact matches via pre-indexed positions
+        # KEYSEQ nodes need special handling
+        if node_type == "KEYSEQ":
+            # Block-style arrays: "- item"
+            if stripped_target.startswith("- "):
+                return self._find_keyseq_item(stripped_target, start)
+            # Inline arrays: "key: [...]" - use fuzzy matching for JSON normalization
+            # RapidYAML may normalize spaces in JSON arrays
+            if "[" in stripped_target:
+                # Extract key part before the array
+                key_part = stripped_target.split("[")[0].strip()
+                for idx in range(max(0, start), len(self._stripped_lines)):
+                    cand = self._stripped_lines[idx]
+                    if cand.startswith(key_part) and "[" in cand:
+                        return idx
+                # Retry from beginning if not found
+                if start > 0:
+                    for idx in range(0, len(self._stripped_lines)):
+                        cand = self._stripped_lines[idx]
+                        if cand.startswith(key_part) and "[" in cand:
+                            return idx
+                return None
+
+        # KEYVAL and KEYMAP use standard index-based search
         positions = self._index_map.get(stripped_target)
         if positions:
             pos = bisect_left(positions, max(0, start))
@@ -377,19 +451,41 @@ class _LineLocator:
                 return idx
         return None
 
-    def _compute_block_end(self, start_idx: int) -> int:
+    def _compute_block_end(self, start_idx: int, node_type: str = "KEYVAL") -> int:
+        """Find end of block with node-type specific logic.
+
+        Args:
+            start_idx: Starting line index (0-based)
+            node_type: Type of node to help with boundary detection
+        """
+        if start_idx >= len(self.lines):
+            return start_idx
+
         base_indent = self._indent_level(self.lines[start_idx])
         end_idx = start_idx
+
         for idx in range(start_idx + 1, len(self.lines)):
             line = self.lines[idx]
             stripped = line.strip()
-            if not stripped:
+
+            if not stripped:  # Blank lines belong to block
                 end_idx = idx
                 continue
+
             indent = self._indent_level(line)
+
+            # For KEYSEQ, be inclusive of all list items at same/higher indent
+            if node_type == "KEYSEQ" and stripped.startswith("- "):
+                if indent >= base_indent:
+                    end_idx = idx
+                    continue
+
+            # Stop at same or less indent (unless continuing array)
             if indent <= base_indent and not stripped.startswith("- "):
                 break
+
             end_idx = idx
+
         return end_idx
 
     @staticmethod
@@ -401,6 +497,108 @@ class _LineLocator:
             else:
                 break
         return idx
+
+    def _extract_context_signature(self, text: str, max_lines: int = 3) -> list[str]:
+        """Extract up to max_lines of non-blank text as context signature.
+
+        Multi-line context is more unique than single lines and helps
+        disambiguate identical first lines in different locations.
+        Skips leading blank lines to maximize context quality.
+        """
+        lines = text.splitlines()
+        # Filter blank lines first, then take up to max_lines
+        non_blank = [line.strip() for line in lines if line.strip()]
+        return non_blank[:max_lines]
+
+    def _find_by_context(self, context_lines: list[str], start: int) -> int | None:
+        """Find location using multi-line context signature.
+
+        More accurate than single-line matching for disambiguating
+        duplicate content in different parts of file.
+        """
+        if not context_lines:
+            return None
+
+        # Convert to tuple for indexing
+        context_tuple = tuple(context_lines)
+
+        # Fast path: exact context match via index
+        positions = self._context_index.get(context_tuple)
+        if positions:
+            pos = bisect_left(positions, max(0, start))
+            if pos < len(positions):
+                return positions[pos]
+
+        # Fallback: sequential search for context match
+        for idx in range(max(0, start), len(self._stripped_lines)):
+            # Check if context starting at idx matches
+            window = tuple(self._stripped_lines[idx : idx + len(context_lines)])
+            if window == context_tuple:
+                return idx
+
+        return None
+
+    def _find_with_parent_scope(self, target_line: str, start: int, parent_key: str) -> int | None:
+        """Find target_line within parent key's scope.
+
+        Strategy: Search for parent_key, then look for target_line after it
+        within the parent's indentation block.
+        """
+        stripped_target = target_line.strip()
+        parent_stripped = f"{parent_key}:"
+
+        # Find parent key starting from start position
+        parent_idx = None
+        for idx in range(max(0, start), len(self._stripped_lines)):
+            if self._stripped_lines[idx] == parent_stripped:
+                parent_idx = idx
+                break
+
+        if parent_idx is None:
+            return None
+
+        # Get parent indentation
+        parent_indent = self._indent_level(self.lines[parent_idx])
+
+        # Search for target_line within parent's block (higher indent)
+        for idx in range(parent_idx + 1, len(self.lines)):
+            line = self.lines[idx]
+            stripped = line.strip()
+
+            if not stripped:  # Skip blank lines
+                continue
+
+            indent = self._indent_level(line)
+            if indent <= parent_indent:  # Exited parent block
+                break
+
+            if stripped == stripped_target or stripped.startswith(stripped_target):
+                return idx
+
+        return None
+
+    def _find_keyseq_item(self, target_line: str, start: int) -> int | None:
+        """Find KEYSEQ list item starting from position.
+
+        KEYSEQ nodes only return first array element from emit_yaml(),
+        so we search from start position (after parent key) for the
+        first occurrence to avoid matching unrelated earlier arrays.
+        """
+        stripped_target = target_line.strip()
+
+        # Search from start for list item
+        for idx in range(max(0, start), len(self._stripped_lines)):
+            cand = self._stripped_lines[idx]
+            if not cand:
+                continue
+            # Exact match preferred for list markers
+            if cand == stripped_target:
+                return idx
+            # Fallback to prefix match
+            if cand.startswith(stripped_target):
+                return idx
+
+        return None
 
 
 class _RapidYamlChunkBuilder:
@@ -453,14 +651,23 @@ class _RapidYamlChunkBuilder:
                 symbol = key_text
             else:
                 symbol = f"yaml_node_{node}"
-            chunk = self._create_chunk(node, node_type, symbol, depth)
+
+            # Get parent key from path for context-aware line location
+            # path[-1] is the current node, path[-2] is the actual parent
+            parent_key = path[-2] if len(path) >= 2 else None
+
+            chunk = self._create_chunk(node, node_type, symbol, depth, parent_key)
             if chunk:
                 chunks.append(chunk)
+
+        # Deduplicate chunks to prevent duplicate chunk IDs
+        # (e.g., YAML files with repeated config values like "name: example-config")
+        chunks = deduplicate_chunks(chunks, Language.YAML)
 
         return chunks
 
     def _create_chunk(
-        self, node: int, node_type: str, symbol: str, depth: int
+        self, node: int, node_type: str, symbol: str, depth: int, parent_key: str | None = None
     ) -> Chunk | None:
         with _suppress_c_output():
             _t0 = perf_counter()
@@ -470,7 +677,13 @@ class _RapidYamlChunkBuilder:
                 self.perf.emit_calls += 1
         normalized = emitted.lstrip("\n")
         first_line = normalized.splitlines()[0] if normalized else symbol
-        start_line, end_line = self.locator.locate(first_line, depth)
+        start_line, end_line = self.locator.locate(
+            first_line=first_line,
+            depth=depth,
+            node_type=node_type,
+            parent_key=parent_key,
+            emitted_yaml=normalized,
+        )
 
         file_snippet = self._slice_content(start_line, end_line)
         if not file_snippet.strip():

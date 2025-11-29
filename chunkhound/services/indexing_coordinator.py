@@ -1093,6 +1093,12 @@ class IndexingCoordinator(BaseService):
                 if task.total:
                     self.progress.update(parse_task, completed=task.total)
 
+            # Optimize tables after parsing/chunking if fragmentation high
+            if agg_total_chunks > 0 and hasattr(self._db, "optimize_tables"):
+                if hasattr(self._db, "should_optimize") and self._db.should_optimize("post-chunking"):
+                    logger.debug("Optimizing database after chunking phase...")
+                    self._db.optimize_tables()
+
             # Record startup profile if enabled (before heavy parse+store dominates totals)
             if _t0 is not None:
                 try:
@@ -1139,7 +1145,16 @@ class IndexingCoordinator(BaseService):
 
             # Optimize tables after bulk operations (provider-specific)
             if total_chunks > 0 and hasattr(self._db, "optimize_tables"):
-                logger.debug("Optimizing database tables after bulk operations...")
+                if hasattr(self._db, "should_optimize") and self._db.should_optimize("post-bulk"):
+                    logger.debug("Optimizing database tables after bulk operations...")
+                    self._db.optimize_tables()
+
+            # FINAL PASS: Always optimize at end of indexing for consistent UX
+            # Even if fragments are below threshold (e.g., 90 → 20), users expect
+            # the database to be in optimal state after indexing completes.
+            # This ensures predictable search performance regardless of threshold tuning.
+            if hasattr(self._db, "optimize_tables"):
+                logger.debug("Final optimization pass at end of indexing...")
                 self._db.optimize_tables()
 
             return {
