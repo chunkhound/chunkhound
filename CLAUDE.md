@@ -6,7 +6,14 @@ Built: 100% by AI agents - NO human-written code
 Purpose: Transform codebases into searchable knowledge bases for AI assistants
 
 ## CRITICAL_CONSTRAINTS
-- DuckDB/LanceDB: SINGLE_THREADED_ONLY (concurrent access = segfault/corruption)
+- DuckDB: SINGLE_THREADED_ONLY (concurrent access = segfault/corruption)
+- LanceDB: MULTI_PROCESS_SAFE_WITH_MVCC
+  - Within process: Single-threaded via SerialDatabaseExecutor (ChunkHound constraint)
+  - Between processes: MVCC + automatic conflict resolution (LanceDB internal)
+  - Write concurrency: Supported with retry/backoff (handled by LanceDB, not ChunkHound)
+  - Read concurrency: Fully concurrent (MVCC snapshots)
+  - ChunkHound layer: Serialized DB operations within each process (SerialDatabaseExecutor)
+  - LanceDB layer: Handles multi-process coordination via Rust internals (not visible in Python)
 - Embedding batching: MANDATORY (100x performance difference)
 - Vector index optimization: DROP_BEFORE_BULK_INSERT (20x speedup for >50 embeddings)
 - MCP server: NO_STDOUT_LOGS (breaks JSON-RPC protocol)
@@ -18,6 +25,69 @@ Purpose: Transform codebases into searchable knowledge bases for AI assistants
 - Global state in MCP: STDIO_CONSTRAINT (stateless would break connection)
 - Database wrapper: LEGACY_COMPATIBILITY (provides migration path)
 - Transaction backup tables: ATOMIC_FILE_UPDATES (ensures consistency)
+
+## CONCURRENCY_MODEL_CLARIFICATION
+
+### LanceDB Multi-Process Architecture
+**Important**: LanceDB uses MVCC (Multi-Version Concurrency Control) internally, not exposed file locks
+
+**Architecture Layers**:
+1. **ChunkHound Layer** (Python):
+   - Uses SerialDatabaseExecutor (single-threaded queue) within each process
+   - All DB operations in one process go through single executor thread
+   - Prevents intra-process concurrency issues
+
+2. **LanceDB Layer** (Rust):
+   - Implements MVCC for multi-process coordination
+   - Automatic conflict resolution via retries with exponential backoff
+   - Read operations use MVCC snapshots (fully concurrent)
+   - Write operations use conflict-free upsert semantics (`merge_insert`)
+
+**Guarantees**:
+- **Multi-process safe**: YES - No corruption, automatic conflict resolution
+- **Read concurrency**: YES - Multiple processes read simultaneously via MVCC snapshots
+- **Write concurrency**: YES - With automatic retry/backoff for conflicts (LanceDB handles internally)
+- **Within-process**: SERIALIZED - SerialDatabaseExecutor enforces single-threaded access
+
+**What changed in recent commits**: Improved understanding and documentation
+- ChunkHound uses `merge_insert` for idempotency AND concurrent write safety
+- LanceDB's MVCC handles multi-process coordination (not ChunkHound's responsibility)
+- Conflict resolution via automatic retries happens transparently in Rust layer
+
+### LanceDB Fragmentation and Deduplication
+
+**Fragment Behavior**:
+- LanceDB stores data in fragments (separate files per write operation)
+- Each `merge_insert` creates a new fragment until compaction threshold (100 operations)
+- `.search().where()` queries may return duplicates across fragments before compaction
+- `.to_pandas()` properly deduplicates (but not suitable for large result sets)
+
+**Critical Fix Applied** (2025-11-29):
+- **Problem**: `search_regex` and `search_semantic` returned duplicate `chunk_id` values
+- **Root Cause**: `.search().where()` without vector query doesn't deduplicate across fragments
+- **Solution**: Explicit deduplication via `_deduplicate_by_id()` helper after all search queries
+- **Impact**: All search results now guaranteed unique, pagination counts accurate
+
+**Deduplication Strategy**:
+```python
+# ALWAYS deduplicate multi-result queries
+results = self._chunks_table.search().where(condition).to_list()
+results = _deduplicate_by_id(results)  # Critical for correctness
+
+# Single-result queries don't need deduplication
+result = self._files_table.search().where(f"id = {id}").to_list()[0]
+```
+
+**When to Deduplicate**:
+- ✅ **MUST**: Any query returning multiple chunks (`search_regex`, `get_chunks_by_file_id`)
+- ✅ **MUST**: Semantic search (fragments may cause edge cases during concurrent writes)
+- ❌ **Skip**: Single-result queries (`get_file_by_id`, `get_chunk_by_id` - first result only)
+- ❌ **Skip**: Stats queries (use `.to_pandas()` which deduplicates automatically)
+
+**Testing Requirements**:
+- Tests must simulate fragmentation (50+ fragments) to catch deduplication bugs
+- Use `fragmented_lancedb_provider` fixture for regression testing
+- Verify: `len(chunk_ids) == len(set(chunk_ids))` (no duplicates)
 
 ## MODIFICATION_RULES
 - NEVER: Remove SerialDatabaseProvider wrapper
@@ -39,6 +109,21 @@ Purpose: Transform codebases into searchable knowledge bases for AI assistants
 | File update (1000 chunks) | 60s | 5s | Drop/recreate indexes |
 | File parsing | Sequential | Parallel (CPU cores) | ProcessPoolExecutor |
 | DB operations | - | - | Single-threaded only |
+
+### LanceDB Fragment Optimization
+
+Fragment optimization controls when LanceDB compacts data files for better query performance.
+
+| Threshold | Use Case | Write Performance | Read Performance |
+|-----------|----------|-------------------|------------------|
+| 0 (always) | Testing/development | Slowest (compact every write) | Fastest (always optimized) |
+| 50 (aggressive) | Read-heavy workloads | Slower (frequent compaction) | Faster (well optimized) |
+| 100 (balanced, default) | Mixed workloads | Good balance | Good balance |
+| 500 (conservative) | Write-heavy workloads | Faster (rare compaction) | Slower (fragmented) |
+
+**Configuration**: Set via `lancedb_optimize_fragment_threshold` in database config or `CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_FRAGMENT_THRESHOLD` environment variable.
+
+**How it works**: LanceDB stores data in fragments. More fragments = slower reads but faster writes. Optimization merges fragments to improve read performance at the cost of write overhead.
 
 ## KEY_COMMANDS
 ```bash
