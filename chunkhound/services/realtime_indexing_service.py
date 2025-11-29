@@ -187,6 +187,11 @@ class SimpleEventHandler(FileSystemEventHandler):
 class RealtimeIndexingService:
     """Simple real-time indexing service with search responsiveness."""
 
+    # Event deduplication window - suppress duplicate events within this period
+    _EVENT_DEDUP_WINDOW_SECONDS = 2.0
+    # Retention period for event history - entries older than this are cleaned up
+    _EVENT_HISTORY_RETENTION_SECONDS = 10.0
+
     def __init__(
         self,
         services: DatabaseServices,
@@ -213,6 +218,8 @@ class RealtimeIndexingService:
         self._pending_debounce: dict[str, float] = {}  # file_path -> timestamp
         self._debounce_delay = 0.5  # 500ms delay from research
         self._debounce_tasks: set[asyncio.Task] = set()  # Track active debounce tasks
+
+        self._recent_file_events: dict[str, tuple[str, float]] = {}  # Layer 3: event dedup
 
         # Background scan state
         self.scan_iterator: Iterator | None = None
@@ -554,6 +561,30 @@ class RealtimeIndexingService:
                 except asyncio.TimeoutError:
                     # Normal timeout, continue to check if task should stop
                     continue
+
+                # Layer 3: Event deduplication to prevent redundant processing
+                # Suppress duplicate events within 2-second window (e.g., created + modified from same editor save)
+                file_key = str(file_path)
+                current_time = time.time()
+
+                if file_key in self._recent_file_events:
+                    last_event_type, last_event_time = self._recent_file_events[file_key]
+                    if last_event_type == event_type and (current_time - last_event_time) < self._EVENT_DEDUP_WINDOW_SECONDS:
+                        logger.debug(f"Suppressing duplicate {event_type} event for {file_path} (within {self._EVENT_DEDUP_WINDOW_SECONDS}s window)")
+                        self._debug(f"suppressed duplicate {event_type}: {file_path}")
+                        self.event_queue.task_done()
+                        continue
+
+                # Record this event
+                self._recent_file_events[file_key] = (event_type, current_time)
+
+                # Cleanup old entries to keep dict bounded (max 1000 files)
+                if len(self._recent_file_events) > 1000:
+                    cutoff = current_time - self._EVENT_HISTORY_RETENTION_SECONDS
+                    self._recent_file_events = {
+                        k: v for k, v in self._recent_file_events.items()
+                        if v[1] > cutoff
+                    }
 
                 if event_type in ("created", "modified"):
                     # Use existing add_file method for deduplication and priority

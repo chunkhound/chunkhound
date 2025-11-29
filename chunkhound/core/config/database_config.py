@@ -30,6 +30,18 @@ class DatabaseConfig(BaseModel):
         default="duckdb", description="Database provider to use"
     )
 
+    # LanceDB-specific settings
+    lancedb_index_type: Literal["auto", "ivf_hnsw_sq", "ivf_rq"] | None = Field(
+        default=None,
+        description="LanceDB vector index type: auto (default), ivf_hnsw_sq, or ivf_rq (requires 0.25.3+)",
+    )
+
+    lancedb_optimize_fragment_threshold: int = Field(
+        default=100,
+        ge=0,
+        description="Minimum fragment count to trigger optimization (0 = always optimize, 50 = aggressive, 100 = balanced, 500 = conservative)",
+    )
+
     @field_validator("path")
     def validate_path(cls, v: Path | None) -> Path | None:
         """Convert string paths to Path objects."""
@@ -46,7 +58,15 @@ class DatabaseConfig(BaseModel):
         return v
 
     def get_db_path(self) -> Path:
-        """Get the full database file path based on provider."""
+        """Get the actual database location for the configured provider.
+
+        Returns the final path used by the provider, including all
+        provider-specific transformations:
+        - DuckDB: path/chunks.db (file)
+        - LanceDB: path/lancedb.lancedb/ (directory with .lancedb suffix)
+
+        This is the authoritative source for database location checks.
+        """
         if self.path is None:
             raise ValueError("Database path not configured")
 
@@ -56,7 +76,10 @@ class DatabaseConfig(BaseModel):
         if self.provider == "duckdb":
             return self.path / "chunks.db"
         elif self.provider == "lancedb":
-            return self.path / "lancedb"
+            # LanceDB adds .lancedb suffix to prevent naming collisions
+            # and clarify storage structure (see lancedb_provider.py:111-113)
+            lancedb_base = self.path / "lancedb"
+            return lancedb_base.parent / f"{lancedb_base.stem}.lancedb"
         else:
             raise ValueError(f"Unknown database provider: {self.provider}")
 
@@ -94,6 +117,10 @@ class DatabaseConfig(BaseModel):
             config["path"] = Path(db_path)
         if provider := os.getenv("CHUNKHOUND_DATABASE__PROVIDER"):
             config["provider"] = provider
+        if index_type := os.getenv("CHUNKHOUND_DATABASE__LANCEDB_INDEX_TYPE"):
+            config["lancedb_index_type"] = index_type
+        if threshold := os.getenv("CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_FRAGMENT_THRESHOLD"):
+            config["lancedb_optimize_fragment_threshold"] = int(threshold)
         return config
 
     @classmethod
