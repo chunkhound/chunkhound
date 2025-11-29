@@ -7,6 +7,7 @@ from typing import Any, cast
 
 from loguru import logger
 
+from chunkhound.api.cli.utils import verify_database_exists
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.database_factory import create_services
@@ -34,16 +35,12 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
     # Initialize Rich output formatter
     formatter = RichOutputFormatter(verbose=args.verbose)
 
-    # Use database path from config
-    if not config.database.path:
-        formatter.error("Database path not configured")
-        sys.exit(1)
-    db_path = Path(config.database.path)
-
-    # Check if database exists
-    if not db_path.exists():
-        formatter.error(f"Database not found at {db_path}")
-        formatter.info("Run 'chunkhound index' to create the database first")
+    # Verify database exists and get paths
+    try:
+        verify_database_exists(config)  # Validates and raises if missing
+        db_path = config.database.path  # Raw path for provider
+    except (ValueError, FileNotFoundError) as e:
+        formatter.error(str(e))
         sys.exit(1)
 
     # Configure registry with the Config object (like index command does)
