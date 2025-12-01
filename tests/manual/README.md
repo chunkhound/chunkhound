@@ -2,9 +2,9 @@
 
 These scripts test ChunkHound features with real API calls. They require valid API keys and make actual requests to external services.
 
-## Gemini Thinking Tests
+## Anthropic Extended Thinking Tests
 
-Test the Gemini provider with thinking support (Gemini 3 uses `thinking_level`, Gemini 2.5 uses `thinking_budget`).
+Test the Anthropic provider with extended thinking support.
 
 ### Prerequisites
 
@@ -13,42 +13,41 @@ Test the Gemini provider with thinking support (Gemini 3 uses `thinking_level`, 
 uv sync
 
 # Set API key
-export GOOGLE_API_KEY=AIza...
+export ANTHROPIC_API_KEY=sk-ant-api03-...
 ```
 
 ### Run Tests
 
 ```bash
-uv run python tests/manual/test_gemini_thinking.py
+uv run python tests/manual/test_anthropic_thinking.py
 ```
 
 ### What It Tests
 
-1. **Basic Completion**: Standard completion without explicit thinking control
-2. **Gemini 3 Thinking**: Completion with thinking_level (low/high)
-3. **Gemini 2.5 Thinking**: Completion with thinking_budget (converted from level)
-4. **Structured Output**: JSON schema-based structured output
-5. **Health Check**: Provider connectivity and configuration
-6. **Usage Stats**: Token usage tracking
+1. **Basic Completion**: Standard completion without thinking
+2. **Thinking Completion**: Completion with extended thinking enabled
+3. **Structured Output**: JSON schema-based structured output
+4. **Health Check**: Provider connectivity and configuration
+5. **Usage Stats**: Token usage tracking
 
 ### Expected Output
 
 ```
 ================================================================================
-Gemini Provider Thinking Tests
+Anthropic Provider Extended Thinking Tests
 ================================================================================
-API Key: XXXXXXX...
+API Key: sk-ant-api03-XXXXXXX...
 
 ================================================================================
-TEST 1: Basic Completion (Gemini 3)
+TEST 1: Basic Completion (no thinking)
 ================================================================================
 Prompt: What is 2+2? Answer in one sentence.
 Response: 2 + 2 equals 4.
 Tokens used: 23
-Finish reason: STOP
+Finish reason: end_turn
 
 ================================================================================
-TEST 2: Gemini 3 with High Thinking
+TEST 2: Completion with Extended Thinking
 ================================================================================
 ...
 
@@ -56,8 +55,7 @@ TEST 2: Gemini 3 with High Thinking
 TEST SUMMARY
 ================================================================================
 ✅ PASS: Basic Completion
-✅ PASS: Gemini 3 High Thinking
-✅ PASS: Gemini 2.5 Low Thinking
+✅ PASS: Thinking Completion
 ✅ PASS: Structured Output
 ✅ PASS: Health Check
 ✅ PASS: Usage Stats
@@ -67,7 +65,7 @@ TEST SUMMARY
 
 ## Notes
 
-- Gemini 3 uses `thinking_level` ("low", "high")
-- Gemini 2.5 uses `thinking_budget` (converted from thinking_level: low=0, high=auto)
-- Default temperature is 1.0 (optimized for Gemini 3)
-- Token usage includes prompt, completion, and total counts
+- Extended thinking is only supported on Claude Opus 4.1, Opus 4, Sonnet 4, and Sonnet 3.7
+- Thinking budget must be at least 1024 tokens
+- Thinking blocks are processed but not included in text output by default
+- Token usage includes full thinking tokens (not just summary) for billing

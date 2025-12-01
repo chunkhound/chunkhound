@@ -78,6 +78,7 @@ dependencies = [
     "pathspec>=0.12.1",
     "pygit2>=1.12.0",
     "google-genai>=1.51.0",
+    "anthropic>=0.75.0",
 ]
 
 [project.optional-dependencies]

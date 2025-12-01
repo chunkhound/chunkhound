@@ -248,6 +248,169 @@ chunkhound/
 - MCP protocol (stdio and HTTP)
 - Pydantic (configuration validation)
 
+## LLM_PROVIDERS
+
+ChunkHound supports multiple LLM providers for deep research code analysis with dual-model architecture (utility + synthesis).
+
+### Supported Providers
+
+**1. Anthropic (Native Provider)** - RECOMMENDED for quality
+- Models: Claude 4.5 generation (Opus 4.5, Sonnet 4.5, Haiku 4.5)
+- Extended Thinking: Shows Claude's reasoning process before final response
+- Interleaved Thinking: Thinking between tool calls for sophisticated reasoning
+- Effort Parameter: Control token usage vs thoroughness tradeoff (Opus 4.5 only)
+- Context Management: Automatic clearing of tool results and thinking blocks
+- Tool Use: Function calling with JSON schema validation
+- Structured Output: Tool-based (more reliable than prompt engineering)
+- Streaming: Required for outputs > 21,333 tokens
+- Default: Haiku 4.5 (utility), Sonnet 4.5 (synthesis)
+
+**2. OpenAI**
+- Models: GPT-5 series, GPT-4 series
+- Structured Output: Native JSON schema validation
+- Default: GPT-5-Nano (utility), GPT-5 (synthesis)
+
+**3. Ollama** (Local)
+- Models: Any Ollama-compatible model
+- Use case: Local development, privacy-sensitive workloads
+
+**4. Claude Code CLI**
+- Integration with Claude Code editor
+- Uses Claude Haiku 4.5 for both roles
+
+**5. Codex CLI**
+- Configurable reasoning effort (minimal/low/medium/high)
+
+### Anthropic Extended Thinking
+
+**What it is**: Claude shows its reasoning process in separate thinking blocks before generating the final response.
+
+**When to use**:
+- Complex code analysis requiring step-by-step reasoning
+- Mathematical or logical problems
+- Multi-step transformations
+- Architectural decisions
+
+**Configuration**:
+```bash
+export CHUNKHOUND_LLM_PROVIDER="anthropic"
+export CHUNKHOUND_LLM_API_KEY="sk-ant-api03-..."
+export CHUNKHOUND_LLM_ANTHROPIC_THINKING_ENABLED="true"
+export CHUNKHOUND_LLM_ANTHROPIC_THINKING_BUDGET_TOKENS="10000"  # Min: 1024
+export CHUNKHOUND_LLM_ANTHROPIC_INTERLEAVED_THINKING="true"  # Optional: thinking between tool calls
+```
+
+**Supported Models**:
+- claude-opus-4-5-20251101: Most capable model with effort control (supports effort parameter)
+- claude-sonnet-4-5-20250929: Smartest model for complex agents and coding
+- claude-haiku-4-5-20251001: Fastest model with near-frontier intelligence
+- claude-opus-4-1-20250805: Exceptional model for specialized reasoning (legacy)
+
+**Important**: `max_tokens` must be greater than `thinking.budget_tokens`. The provider automatically adjusts if needed.
+
+**Token Billing**: Billed for FULL thinking tokens (not just the summary shown in response).
+
+### Opus 4.5 Effort Parameter
+
+**What it is**: Controls how many tokens Claude uses when responding, trading off between thoroughness and efficiency. Only available on Opus 4.5.
+
+**Effort Levels**:
+- `high`: Maximum capability—Claude uses as many tokens as needed (default)
+- `medium`: Balanced approach with moderate token savings
+- `low`: Most efficient—significant token savings with some capability reduction
+
+**Configuration**:
+```bash
+export CHUNKHOUND_LLM_PROVIDER="anthropic"
+export CHUNKHOUND_LLM_SYNTHESIS_MODEL="claude-opus-4-5-20251101"
+export CHUNKHOUND_LLM_ANTHROPIC_EFFORT="medium"  # low, medium, or high
+```
+
+**Use Cases**:
+- Use `high` (default) for complex reasoning, difficult coding problems
+- Use `medium` for balanced speed/quality
+- Use `low` for simple tasks, subagent operations, high-volume use cases
+
+### Anthropic Context Management
+
+**What it is**: Automatic management of conversation context to stay within limits.
+
+**Strategies**:
+- `clear_thinking_20251015`: Clears older thinking blocks from previous turns
+- `clear_tool_uses_20250919`: Clears old tool results when context grows
+
+**Configuration**:
+```bash
+export CHUNKHOUND_LLM_ANTHROPIC_CONTEXT_MANAGEMENT_ENABLED="true"
+export CHUNKHOUND_LLM_ANTHROPIC_CLEAR_THINKING_KEEP_TURNS="2"  # Keep last 2 turns
+export CHUNKHOUND_LLM_ANTHROPIC_CLEAR_TOOL_USES_TRIGGER_TOKENS="100000"
+export CHUNKHOUND_LLM_ANTHROPIC_CLEAR_TOOL_USES_KEEP="5"  # Keep last 5 tool uses
+```
+
+### Configuration Examples
+
+**Anthropic with Extended Thinking**:
+```bash
+export CHUNKHOUND_LLM_PROVIDER="anthropic"
+export CHUNKHOUND_LLM_API_KEY="$ANTHROPIC_API_KEY"
+export CHUNKHOUND_LLM_ANTHROPIC_THINKING_ENABLED="true"
+export CHUNKHOUND_LLM_ANTHROPIC_THINKING_BUDGET_TOKENS="10000"
+export CHUNKHOUND_LLM_UTILITY_MODEL="claude-haiku-4-5-20251001"
+export CHUNKHOUND_LLM_SYNTHESIS_MODEL="claude-sonnet-4-5-20250929"
+```
+
+**Anthropic Opus 4.5 with Full Features**:
+```bash
+export CHUNKHOUND_LLM_PROVIDER="anthropic"
+export CHUNKHOUND_LLM_API_KEY="$ANTHROPIC_API_KEY"
+export CHUNKHOUND_LLM_SYNTHESIS_MODEL="claude-opus-4-5-20251101"
+export CHUNKHOUND_LLM_ANTHROPIC_THINKING_ENABLED="true"
+export CHUNKHOUND_LLM_ANTHROPIC_THINKING_BUDGET_TOKENS="16000"
+export CHUNKHOUND_LLM_ANTHROPIC_INTERLEAVED_THINKING="true"
+export CHUNKHOUND_LLM_ANTHROPIC_EFFORT="medium"
+export CHUNKHOUND_LLM_ANTHROPIC_CONTEXT_MANAGEMENT_ENABLED="true"
+```
+
+**OpenAI**:
+```bash
+export CHUNKHOUND_LLM_PROVIDER="openai"
+export CHUNKHOUND_LLM_API_KEY="$OPENAI_API_KEY"
+export CHUNKHOUND_LLM_UTILITY_MODEL="gpt-5-nano"
+export CHUNKHOUND_LLM_SYNTHESIS_MODEL="gpt-5"
+```
+
+**Ollama (Local)**:
+```bash
+export CHUNKHOUND_LLM_PROVIDER="ollama"
+export CHUNKHOUND_LLM_BASE_URL="http://localhost:11434/v1"
+export CHUNKHOUND_LLM_UTILITY_MODEL="llama3.2"
+export CHUNKHOUND_LLM_SYNTHESIS_MODEL="llama3.2"
+```
+
+### Provider-Specific Features
+
+| Feature | Anthropic | OpenAI | Ollama |
+|---------|-----------|--------|--------|
+| Extended Thinking | ✅ (native) | ❌ | ❌ |
+| Interleaved Thinking | ✅ (Claude 4) | ❌ | ❌ |
+| Effort Parameter | ✅ (Opus 4.5 only) | ❌ | ❌ |
+| Context Management | ✅ (beta) | ❌ | ❌ |
+| Structured Output | ✅ (tool-based) | ✅ (native) | ⚠️ (limited) |
+| Tool Use | ✅ | ✅ | ⚠️ (limited) |
+| Streaming | ✅ | ✅ | ✅ |
+| Custom Endpoint | ✅ | ✅ | ✅ |
+
+### Testing LLM Providers
+
+```bash
+# Manual integration test (all features)
+source ~/.env.private
+uv run python tests/manual/test_anthropic_thinking.py
+
+# Unit tests
+uv run pytest tests/test_anthropic_provider.py -v
+```
+
 ## RERANKING_SUPPORT
 
 ### Overview
