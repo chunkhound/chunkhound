@@ -9,6 +9,7 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.core.config.config import Config
+from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.registry import configure_registry, create_indexing_coordinator
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.version import __version__
@@ -124,6 +125,7 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
         if getattr(args, "profile_startup", False):
             try:
                 import json as _json
+
                 prof = getattr(indexing_coordinator, "_startup_profile", None) or {}
                 if isinstance(prof, dict):
                     prof = dict(prof)
@@ -152,7 +154,10 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
                     if gpc is not None:
                         prof["git_pathspecs_capped"] = bool(gpc)
                 if prof:
-                    print(_json.dumps({"startup_profile": prof}, indent=2), file=sys.stderr)
+                    print(
+                        _json.dumps({"startup_profile": prof}, indent=2),
+                        file=sys.stderr,
+                    )
             except Exception:
                 pass
 
@@ -179,20 +184,19 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
 
             # Only prompt in interactive TTY and when there are timeouts
             if skipped_timeouts and sys.stdin.isatty():
-                base_dir = Path(args.path).resolve() if hasattr(args, "path") else Path.cwd().resolve()
+                base_dir = (
+                    Path(args.path).resolve()
+                    if hasattr(args, "path")
+                    else Path.cwd().resolve()
+                )
 
                 # Convert to unique relative paths within the project
                 rel_paths: list[str] = []
                 seen: set[str] = set()
                 for p in skipped_timeouts:
                     try:
-                        # Resolve for display (handles Windows 8.3 names) unless symlink
-                        path_obj = Path(p)
-                        if path_obj.is_symlink():
-                            rel = path_obj.relative_to(base_dir).as_posix()
-                        else:
-                            rel = path_obj.resolve().relative_to(base_dir.resolve()).as_posix()
-                    except Exception:
+                        rel = get_relative_path_safe(Path(p), base_dir).as_posix()
+                    except ValueError:
                         # If not under base_dir, keep as-is (rare)
                         rel = Path(p).as_posix()
                     if rel not in seen:
@@ -202,7 +206,11 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
                 formatter.info(
                     f"{len(rel_paths)} timed-out files can be excluded from future runs."
                 )
-                reply = input("Add these to indexing.exclude in .chunkhound.json? [y/N]: ").strip().lower()
+                reply = (
+                    input("Add these to indexing.exclude in .chunkhound.json? [y/N]: ")
+                    .strip()
+                    .lower()
+                )
                 if reply in ("y", "yes"):
                     local_config_path = base_dir / ".chunkhound.json"
                     # Load or initialize config data
@@ -335,7 +343,9 @@ async def _simulate_index(args: argparse.Namespace, config: Config) -> None:
     Minimal implementation: perform discovery via the coordinator and print
     the discovered files sorted. Later we may reflect change-detection.
     """
-    base_dir = Path(args.path).resolve() if hasattr(args, "path") else Path.cwd().resolve()
+    base_dir = (
+        Path(args.path).resolve() if hasattr(args, "path") else Path.cwd().resolve()
+    )
 
     # Optional debug output about ignore configuration (stderr to avoid breaking JSON piping)
     try:
@@ -374,7 +384,9 @@ async def _simulate_index(args: argparse.Namespace, config: Config) -> None:
     try:
         # Prefer an in-memory DB to keep simulate side-effect free
         # Only override when path is unset or points to a non-existent parent.
-        db_path = Path(getattr(config.database, "path", Path(":memory:")) or Path(":memory:"))
+        db_path = Path(
+            getattr(config.database, "path", Path(":memory:")) or Path(":memory:")
+        )
         if str(db_path) != ":memory":  # typos
             if str(db_path) != ":memory:" and not db_path.parent.exists():
                 # If parent path doesn't exist, switch to in-memory
@@ -404,7 +416,9 @@ async def _simulate_index(args: argparse.Namespace, config: Config) -> None:
     # Resolve patterns using the DirectoryIndexingService helper to keep logic aligned
     from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 
-    svc = DirectoryIndexingService(indexing_coordinator=indexing_coordinator, config=config)
+    svc = DirectoryIndexingService(
+        indexing_coordinator=indexing_coordinator, config=config
+    )
     include_patterns, exclude_patterns = svc._resolve_file_patterns()
 
     # Normalize include patterns and call internal discovery
@@ -416,6 +430,7 @@ async def _simulate_index(args: argparse.Namespace, config: Config) -> None:
     files = []
     if getattr(args, "profile_startup", False):
         import time as _t
+
         _t0 = _t.perf_counter()
         files = await indexing_coordinator._discover_files(  # type: ignore[attr-defined]
             base_dir, processed_patterns, exclude_patterns
@@ -423,10 +438,15 @@ async def _simulate_index(args: argparse.Namespace, config: Config) -> None:
         _t1 = _t.perf_counter()
         try:
             import json as _json
+
             prof = {
                 "discovery_ms": round((_t1 - _t0) * 1000.0, 3),
                 "files_discovered": len(files),
-                "backend": (getattr(config.indexing, "discovery_backend", "python") if getattr(config, "indexing", None) else "python"),
+                "backend": (
+                    getattr(config.indexing, "discovery_backend", "python")
+                    if getattr(config, "indexing", None)
+                    else "python"
+                ),
             }
             rb = getattr(indexing_coordinator, "_resolved_discovery_backend", None)
             if rb:
@@ -472,12 +492,17 @@ async def _simulate_index(args: argparse.Namespace, config: Config) -> None:
                 detect_repo_roots as _detect_roots,
                 build_ignore_engine as _build_root_engine,
             )
-            roots = _detect_roots(base_dir, config.indexing.get_effective_config_excludes())
+
+            roots = _detect_roots(
+                base_dir, config.indexing.get_effective_config_excludes()
+            )
             if not roots:
                 eng = _build_root_engine(
                     root=base_dir,
                     sources=["gitignore"],
-                    chignore_file=getattr(config.indexing, "chignore_file", ".chignore"),
+                    chignore_file=getattr(
+                        config.indexing, "chignore_file", ".chignore"
+                    ),
                     config_exclude=config.indexing.get_effective_config_excludes(),
                 )
                 files = [p for p in files if not eng.matches(p, is_dir=False)]
@@ -488,6 +513,7 @@ async def _simulate_index(args: argparse.Namespace, config: Config) -> None:
     # Respect config_file_size_threshold_kb for structured config languages to mirror real indexing
     try:
         from chunkhound.core.types.common import Language as _Lang
+
         if getattr(config, "indexing", None) is not None:
             _thr = getattr(config.indexing, "config_file_size_threshold_kb", 20)
             try:
@@ -523,14 +549,9 @@ async def _simulate_index(args: argparse.Namespace, config: Config) -> None:
             size = int(st.st_size)
         except Exception:
             size = 0
-        # Resolve for display (handles Windows 8.3 names) unless symlink
         try:
-            if p.is_symlink():
-                rel = p.relative_to(base_dir).as_posix()
-            else:
-                rel = p.resolve().relative_to(base_dir.resolve()).as_posix()
+            rel = get_relative_path_safe(p, base_dir).as_posix()
         except ValueError:
-            # Fallback for edge cases
             rel = p.name
         items.append((rel, size))
 
@@ -544,11 +565,16 @@ async def _simulate_index(args: argparse.Namespace, config: Config) -> None:
         items.sort(key=lambda x: x[0])
 
     import json as _json
+
     if getattr(args, "json", False):
         try:
             print(
                 _json.dumps(
-                    {"files": [{"path": rel, "size_bytes": size} for rel, size in items]},
+                    {
+                        "files": [
+                            {"path": rel, "size_bytes": size} for rel, size in items
+                        ]
+                    },
                     indent=2,
                 )
             )
@@ -579,7 +605,9 @@ async def _simulate_index(args: argparse.Namespace, config: Config) -> None:
 
 async def _check_ignores(args: argparse.Namespace, config: Config) -> None:
     """Compare ChunkHound ignore decisions with a sentinel (currently: Git)."""
-    base_dir = Path(args.path).resolve() if hasattr(args, "path") else Path.cwd().resolve()
+    base_dir = (
+        Path(args.path).resolve() if hasattr(args, "path") else Path.cwd().resolve()
+    )
 
     vs = getattr(args, "vs", "git") or "git"
     if vs != "git":
@@ -600,7 +628,12 @@ async def _check_ignores(args: argparse.Namespace, config: Config) -> None:
     def _git_ignored(repo_root: Path, rel_path: str) -> bool:
         try:
             from chunkhound.utils.git_safe import run_git
-            proc = run_git(["check-ignore", "-q", "--no-index", rel_path], cwd=repo_root, timeout_s=5.0)
+
+            proc = run_git(
+                ["check-ignore", "-q", "--no-index", rel_path],
+                cwd=repo_root,
+                timeout_s=5.0,
+            )
             return proc.returncode == 0
         except Exception:
             return False
@@ -626,33 +659,33 @@ async def _check_ignores(args: argparse.Namespace, config: Config) -> None:
     mismatches: list[dict[str, Any]] = []
     for fp in candidates:
         repo = _nearest_repo_root(fp.parent, base_dir) or base_dir
+        effective_repo = repo if repo else base_dir
         try:
-            # Resolve for comparison (handles Windows 8.3 names) unless symlink
-            effective_repo = repo if repo else base_dir
-            if fp.is_symlink():
-                rel = fp.relative_to(effective_repo).as_posix()
-            else:
-                rel = fp.resolve().relative_to(effective_repo.resolve()).as_posix()
-        except Exception:
+            rel = get_relative_path_safe(fp, effective_repo).as_posix()
+        except ValueError:
             rel = fp.name
         git_decision = _git_ignored(repo, rel) if repo else False
         ch_decision = _ch_ignored(base_dir, fp)
         if git_decision != ch_decision:
             try:
-                if fp.is_symlink():
-                    display_path = fp.relative_to(base_dir).as_posix()
-                else:
-                    display_path = fp.resolve().relative_to(base_dir.resolve()).as_posix()
+                display_path = get_relative_path_safe(fp, base_dir).as_posix()
             except ValueError:
                 display_path = fp.name
-            mismatches.append({
-                "path": display_path,
-                "git": git_decision,
-                "ch": ch_decision,
-            })
+            mismatches.append(
+                {
+                    "path": display_path,
+                    "git": git_decision,
+                    "ch": ch_decision,
+                }
+            )
 
     import json as _json
-    report = {"mismatches": mismatches, "total": len(candidates), "base": base_dir.as_posix()}
+
+    report = {
+        "mismatches": mismatches,
+        "total": len(candidates),
+        "base": base_dir.as_posix(),
+    }
     if getattr(args, "json", False):
         try:
             print(_json.dumps(report, indent=2))
