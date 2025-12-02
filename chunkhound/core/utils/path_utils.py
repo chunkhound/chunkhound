@@ -11,10 +11,9 @@ def normalize_path_for_lookup(
     Converts absolute paths to relative paths using base directory,
     and ensures forward slash normalization for cross-platform compatibility.
 
-    Note: Symlinks are NOT resolved on the input path. This is intentional to
-    support git worktrees and other setups where symlinks point outside the
-    base directory. Only the base directory itself is resolved to handle
-    platform quirks (e.g., /var -> /private/var on macOS).
+    Resolves regular files to handle platform quirks (Windows 8.3 short names,
+    /var -> /private/var on macOS), but preserves symlink logical paths to
+    support git worktrees where symlinks may point outside the base directory.
 
     Args:
         input_path: Path to normalize (can be absolute or relative)
@@ -41,18 +40,20 @@ def normalize_path_for_lookup(
 
     try:
         # Resolve base_dir to canonical form (handles /var -> /private/var on macOS)
-        # but do NOT resolve the input path - keep symlinks as logical paths
         resolved_base_dir = base_dir.resolve()
 
-        # For the input path, we need it to be comparable to resolved_base_dir
-        # Use the original path but ensure it's under the base directory
-        # by checking if the non-resolved path starts with the resolved base
-        # or if the path string starts with the base directory string
+        # Only resolve non-symlinks to preserve logical paths for worktree symlinks
+        # Regular files need resolution for Windows 8.3 short name compatibility
+        if path_obj.is_symlink():
+            path_to_use = path_obj
+        else:
+            path_to_use = path_obj.resolve()
+
         try:
-            relative_path = path_obj.relative_to(resolved_base_dir)
+            relative_path = path_to_use.relative_to(resolved_base_dir)
             return relative_path.as_posix()
         except ValueError:
-            # Try with non-resolved base_dir for edge cases
+            # Fallback for symlinks with unresolved base
             relative_path = path_obj.relative_to(base_dir)
             return relative_path.as_posix()
     except ValueError:

@@ -226,7 +226,11 @@ def should_include_file(
         True if file should be included, False otherwise
     """
     try:
-        rel_path = file_path.relative_to(root_dir)
+        # Resolve for comparison (handles Windows 8.3 names) unless symlink
+        if file_path.is_symlink():
+            rel_path = file_path.relative_to(root_dir)
+        else:
+            rel_path = file_path.resolve().relative_to(root_dir.resolve())
         rel_path_str = rel_path.as_posix()
     except ValueError:
         # Symlink pointing outside root_dir - use filename only for matching

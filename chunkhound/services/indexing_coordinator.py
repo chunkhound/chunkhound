@@ -167,18 +167,25 @@ class IndexingCoordinator(BaseService):
         self._base_directory: Path = base_directory
 
     def _get_relative_path(self, file_path: Path) -> Path:
-        """Get relative path without resolving symlinks on input.
+        """Get relative path, preserving symlink logical paths.
 
-        Only resolves the base directory to handle platform quirks (e.g.,
-        /var -> /private/var on macOS). The input file path is NOT resolved
-        to support git worktrees and other setups where symlinks point to
-        files outside the base directory.
+        Resolves both paths for consistency (handles Windows 8.3 short names,
+        /var -> /private/var on macOS), BUT preserves symlink logical paths
+        for git worktrees where symlinks may point outside the base directory.
         """
         resolved_base = self._base_directory.resolve()
+
+        # Only resolve non-symlinks to preserve logical paths for worktree symlinks
+        # Regular files need resolution for Windows 8.3 short name compatibility
+        if file_path.is_symlink():
+            path_to_use = file_path
+        else:
+            path_to_use = file_path.resolve()
+
         try:
-            return file_path.relative_to(resolved_base)
+            return path_to_use.relative_to(resolved_base)
         except ValueError:
-            # Try with non-resolved base for edge cases
+            # Fallback for edge cases (e.g., symlink with unresolved base)
             return file_path.relative_to(self._base_directory)
 
     def add_language_parser(self, language: Language, parser: UniversalParser) -> None:

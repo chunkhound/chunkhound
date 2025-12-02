@@ -186,8 +186,12 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
                 seen: set[str] = set()
                 for p in skipped_timeouts:
                     try:
-                        # Don't resolve symlinks - use logical path for worktree support
-                        rel = Path(p).relative_to(base_dir).as_posix()
+                        # Resolve for display (handles Windows 8.3 names) unless symlink
+                        path_obj = Path(p)
+                        if path_obj.is_symlink():
+                            rel = path_obj.relative_to(base_dir).as_posix()
+                        else:
+                            rel = path_obj.resolve().relative_to(base_dir.resolve()).as_posix()
                     except Exception:
                         # If not under base_dir, keep as-is (rare)
                         rel = Path(p).as_posix()
@@ -519,9 +523,12 @@ async def _simulate_index(args: argparse.Namespace, config: Config) -> None:
             size = int(st.st_size)
         except Exception:
             size = 0
-        # Don't resolve symlinks - use logical path for worktree support
+        # Resolve for display (handles Windows 8.3 names) unless symlink
         try:
-            rel = p.relative_to(base_dir).as_posix()
+            if p.is_symlink():
+                rel = p.relative_to(base_dir).as_posix()
+            else:
+                rel = p.resolve().relative_to(base_dir.resolve()).as_posix()
         except ValueError:
             # Fallback for edge cases
             rel = p.name
@@ -620,15 +627,22 @@ async def _check_ignores(args: argparse.Namespace, config: Config) -> None:
     for fp in candidates:
         repo = _nearest_repo_root(fp.parent, base_dir) or base_dir
         try:
-            # Don't resolve symlinks - use logical path for worktree support
-            rel = fp.relative_to(repo if repo else base_dir).as_posix()
+            # Resolve for comparison (handles Windows 8.3 names) unless symlink
+            effective_repo = repo if repo else base_dir
+            if fp.is_symlink():
+                rel = fp.relative_to(effective_repo).as_posix()
+            else:
+                rel = fp.resolve().relative_to(effective_repo.resolve()).as_posix()
         except Exception:
             rel = fp.name
         git_decision = _git_ignored(repo, rel) if repo else False
         ch_decision = _ch_ignored(base_dir, fp)
         if git_decision != ch_decision:
             try:
-                display_path = fp.relative_to(base_dir).as_posix()
+                if fp.is_symlink():
+                    display_path = fp.relative_to(base_dir).as_posix()
+                else:
+                    display_path = fp.resolve().relative_to(base_dir.resolve()).as_posix()
             except ValueError:
                 display_path = fp.name
             mismatches.append({
