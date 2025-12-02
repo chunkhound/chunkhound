@@ -15,6 +15,7 @@ from chunkhound.core.exceptions.core import (
     ChunkHoundError,
     ConfigurationError,
     DatabaseError,
+    DiskUsageLimitExceededError,
     EmbeddingError,
     ModelError,
     ParsingError,
@@ -32,5 +33,6 @@ __all__ = [
     "ParsingError",
     "DatabaseError",
     "ConfigurationError",
+    "DiskUsageLimitExceededError",
     "ProviderError",
 ]

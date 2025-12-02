@@ -26,6 +26,7 @@ from loguru import logger
 from rich.progress import Progress, TaskID
 
 from chunkhound.core.detection import detect_language
+from chunkhound.core.exceptions import DiskUsageLimitExceededError
 from chunkhound.core.models import Chunk, File
 from chunkhound.core.types.common import FilePath, Language
 from chunkhound.interfaces.database_provider import DatabaseProvider
@@ -417,6 +418,14 @@ class IndexingCoordinator(BaseService):
                 stats = store_result
                 file_id = None
 
+            # Check for disk limit exceeded error and raise it immediately
+            for error in stats.get("errors", []):
+                if isinstance(error, dict) and error.get("disk_limit_exceeded"):
+                    raise DiskUsageLimitExceededError(
+                        current_size_mb=error["current_size_mb"],
+                        limit_mb=error["limit_mb"],
+                    )
+
             # Generate embeddings if needed
             # CRITICAL FIX: Wrap embedding generation in transaction with checkpoint
             # RATIONALE: Embeddings must be checkpointed to be visible to semantic search
@@ -672,9 +681,57 @@ class IndexingCoordinator(BaseService):
                         else:
                             on_batch(batch_result)
                     except Exception as e:
-                        logger.warning(f"on_batch handler failed: {e}")
+                        # Re-raise all exceptions from on_batch to propagate disk limit errors
+                        raise
 
         return all_results
+
+    def _check_disk_usage_limit(self) -> DiskUsageLimitExceededError | None:
+        """Check if database file size exceeds configured limit.
+
+        Returns:
+            DiskUsageLimitExceededError if limit exceeded, None otherwise
+        """
+        # Handle both full Config objects and direct DatabaseConfig objects
+        if not self.config:
+            return None  # No limit configured
+
+        # Extract max_disk_usage_mb from config
+        max_disk_usage_mb = None
+        if hasattr(self.config, 'database') and hasattr(self.config.database, 'max_disk_usage_mb'):
+            # Full Config object
+            max_disk_usage_mb = self.config.database.max_disk_usage_mb
+        elif hasattr(self.config, 'max_disk_usage_mb'):
+            # Direct DatabaseConfig object (for tests)
+            max_disk_usage_mb = self.config.max_disk_usage_mb
+
+        if max_disk_usage_mb is None:
+            return None  # No limit configured
+
+        try:
+            db_path = self._db.db_path
+            if isinstance(db_path, str):
+                db_path = Path(db_path)
+
+            # Determine the actual database file path
+            if db_path.is_dir():
+                # For DuckDB, the database file is inside the directory
+                db_file = db_path / "chunks.db"
+            else:
+                # db_path is the database file directly
+                db_file = db_path
+
+            if db_file.exists():
+                # Get file size in MB
+                size_mb = db_file.stat().st_size / (1024**2)
+                if size_mb >= max_disk_usage_mb:
+                    return DiskUsageLimitExceededError(
+                        current_size_mb=size_mb,
+                        limit_mb=max_disk_usage_mb,
+                    )
+        except Exception as e:
+            logger.warning(f"Failed to check disk usage: {e}")
+        return None
 
     async def _store_parsed_results(
         self,
@@ -698,6 +755,20 @@ class IndexingCoordinator(BaseService):
             "errors": [],
             "chunk_ids_needing_embeddings": [],
         }
+
+        # Check disk usage limit before storing data
+        disk_limit_error = self._check_disk_usage_limit()
+        if disk_limit_error:
+            # Add disk limit error to stats for consistent error handling
+            stats["errors"].append({
+                "file": None,  # Global error, not file-specific
+                "error": str(disk_limit_error),
+                "disk_limit_exceeded": True,
+                "current_size_mb": disk_limit_error.current_size_mb,
+                "limit_mb": disk_limit_error.limit_mb,
+            })
+            # Return early - don't process any files if disk limit exceeded
+            return stats
 
         # Track file_ids for single-file case
         file_ids = []
@@ -1077,6 +1148,8 @@ class IndexingCoordinator(BaseService):
                 )
                 if isinstance(stats_part, tuple):
                     stats_part = stats_part[0]
+
+
                 agg_total_files += stats_part.get("total_files", 0)
                 agg_total_chunks += stats_part.get("total_chunks", 0)
                 agg_errors.extend(stats_part.get("errors", []))
@@ -1157,6 +1230,16 @@ class IndexingCoordinator(BaseService):
                 logger.debug("Final optimization pass at end of indexing...")
                 self._db.optimize_tables()
 
+            # Check for disk limit exceeded errors
+            for error in agg_errors:
+                if isinstance(error, dict) and error.get("disk_limit_exceeded"):
+                    return {
+                        "status": "disk_limit_exceeded",
+                        "current_size_mb": error["current_size_mb"],
+                        "limit_mb": error["limit_mb"],
+                        "error": error["error"],
+                    }
+
             return {
                 "status": "success",
                 "files_processed": total_files,
@@ -1167,12 +1250,23 @@ class IndexingCoordinator(BaseService):
                 "skipped_filtered": skipped_filtered,
             }
 
+
+
         except Exception as e:
             import traceback
 
             logger.error(f"Failed to process directory {directory}: {e}")
             logger.error(f"Traceback: {traceback.format_exc()}")
-            return {"status": "error", "error": str(e)}
+
+            if isinstance(e, DiskUsageLimitExceededError):
+                return {
+                    "status": "disk_limit_exceeded",
+                    "current_size_mb": e.current_size_mb,
+                    "limit_mb": e.limit_mb,
+                    "error": str(e),
+                }
+            else:
+                return {"status": "error", "error": str(e)}
 
     def _extract_file_id(self, file_record: dict[str, Any] | File) -> int | None:
         """Safely extract file ID from either dict or File model."""
