@@ -49,6 +49,7 @@ class LLMConfig(BaseSettings):
         "ollama",
         "claude-code-cli",
         "codex-cli",
+        "gemini",
         "anthropic",
     ] = Field(
         default="openai",
@@ -56,27 +57,23 @@ class LLMConfig(BaseSettings):
     )
 
     # Optional per-role overrides (utility vs synthesis)
-    utility_provider: (
-        Literal[
-            "openai",
-            "ollama",
-            "claude-code-cli",
-            "codex-cli",
-            "anthropic",
-        ]
-        | None
-    ) = Field(default=None, description="Override provider for utility ops")
+    utility_provider: Literal[
+        "openai",
+        "ollama",
+        "claude-code-cli",
+        "codex-cli",
+        "anthropic",
+        "gemini",
+    ] | None = Field(default=None, description="Override provider for utility ops")
 
-    synthesis_provider: (
-        Literal[
-            "openai",
-            "ollama",
-            "claude-code-cli",
-            "codex-cli",
-            "anthropic",
-        ]
-        | None
-    ) = Field(default=None, description="Override provider for synthesis ops")
+    synthesis_provider: Literal[
+        "openai",
+        "ollama",
+        "claude-code-cli",
+        "codex-cli",
+        "anthropic",
+        "gemini",
+    ] | None = Field(default=None, description="Override provider for synthesis ops")
 
     # Model Configuration (dual-model architecture)
     utility_model: str = Field(
@@ -332,6 +329,10 @@ class LLMConfig(BaseSettings):
         elif self.provider == "codex-cli":
             # Codex CLI: nominal label; require explicit model if desired
             return ("codex", "codex")
+        elif self.provider == "gemini":
+            # Gemini: Use Gemini 3 Pro for both (advanced reasoning)
+            # Alternative models: gemini-2.5-pro (balanced), gemini-2.5-flash (fast)
+            return ("gemini-3-pro-preview", "gemini-3-pro-preview")
         elif self.provider == "anthropic":
             # Anthropic: Haiku 4.5 for utility (fast/cheap), Sonnet 4.5 for synthesis (powerful)
             # Claude 4.5 generation models:
@@ -406,19 +407,19 @@ class LLMConfig(BaseSettings):
 
         parser.add_argument(
             "--llm-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic"],
+            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic", "gemini"],
             help="Default LLM provider for both roles",
         )
 
         parser.add_argument(
             "--llm-utility-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic"],
+            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic", "gemini"],
             help="Override LLM provider for utility operations",
         )
 
         parser.add_argument(
             "--llm-synthesis-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic"],
+            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic", "gemini"],
             help="Override LLM provider for synthesis operations",
         )
 

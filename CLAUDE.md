@@ -243,8 +243,8 @@ chunkhound/
 - DuckDB (primary) / LanceDB (alternative)
 - Tree-sitter (27 language parsers: Python, JavaScript, TypeScript, JSX, TSX, Java, Kotlin, Groovy, C, C++, C#, Go, Rust, Haskell, Swift, Bash, MATLAB, Makefile, Objective-C, PHP, Vue, Zig, JSON, YAML, TOML, HCL, Markdown)
 - Custom parsers (2 formats: TEXT, PDF)
-- OpenAI/Ollama/VoyageAI embeddings
-- Anthropic/OpenAI/Ollama LLMs for deep research
+- Embedding providers: OpenAI, Ollama, VoyageAI
+- LLM providers (for deep research): OpenAI, Gemini (Google Gen AI SDK), Claude Code CLI, Codex CLI
 - MCP protocol (stdio and HTTP)
 - Pydantic (configuration validation)
 
@@ -616,6 +616,54 @@ print(f"Success! Got {len(results)} results")
 - **Recovery**: Set `CHUNKHOUND_EMBEDDING__RERANK_BATCH_SIZE` to match server limit
 - **Example**: `export CHUNKHOUND_EMBEDDING__RERANK_BATCH_SIZE=32` for TEI servers
 - **Note**: User override is bounded by model caps for safety (prevents OOM)
+
+## LLM_PROVIDERS
+
+### Overview
+ChunkHound supports multiple LLM providers for deep research (`code_research` tool). Dual-model architecture: utility (fast, cheap) and synthesis (high-quality, large-context).
+
+### Supported Providers
+
+**1. Gemini (Google Gen AI SDK)**
+- Models: gemini-3-pro-preview (default), gemini-2.5-pro, gemini-2.5-flash
+- Features: Native async with .aio client, thinking_level/thinking_budget support, structured outputs
+- Authentication: API key from https://aistudio.google.com/apikey
+- Best for: Advanced reasoning, cost-effective with Flash models
+- Implementation: Uses official `google-genai` SDK with proper async patterns
+
+**2. Claude Code CLI**
+- Models: claude-sonnet-4-5-20250929, claude-haiku-4-5-20251001
+- Features: Uses existing Claude subscription (no API credits), workspace isolation
+- Authentication: Subscription-based (no API key needed)
+- Best for: Users with Claude Pro/Team subscriptions
+
+**3. Codex CLI**
+- Models: configurable via CHUNKHOUND_CODEX_DEFAULT_MODEL
+- Features: Reasoning effort control, local deployment support
+- Authentication: CLI handles auth
+- Best for: Custom local deployments
+
+### Configuration
+```bash
+# Gemini provider
+export CHUNKHOUND_LLM__PROVIDER=gemini
+export CHUNKHOUND_LLM__API_KEY=your-google-ai-key
+export CHUNKHOUND_LLM__UTILITY_MODEL=gemini-2.5-flash
+export CHUNKHOUND_LLM__SYNTHESIS_MODEL=gemini-3-pro-preview
+
+# OpenAI provider
+export CHUNKHOUND_LLM__PROVIDER=openai
+export CHUNKHOUND_LLM__API_KEY=your-openai-key
+
+# Claude Code CLI provider (no API key)
+export CHUNKHOUND_LLM__PROVIDER=claude-code-cli
+```
+
+### Common Errors
+- "API key required": Set CHUNKHOUND_LLM__API_KEY for OpenAI/Gemini
+- "Model not found" (404): Check model name or API availability
+- "Rate limit exceeded" (429): Reduce concurrency or add delays
+- "Invalid authentication" (401/403): Verify API key is correct
 
 ## TESTING_APPROACH
 - Smoke tests: MANDATORY before any commit (tests/test_smoke.py)
