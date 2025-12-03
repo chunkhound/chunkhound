@@ -51,7 +51,6 @@ format: uv run ruff format chunkhound
 
 # Version management
 update_version: uv run scripts/update_version.py X.Y.Z
-sync_version: uv run scripts/sync_version.py
 
 # Running
 index: uv run chunkhound index [directory]
@@ -147,12 +146,17 @@ chunkhound --version
 - Testing philosophy: Fast feedback loops for AI development cycles
 
 ## Agent Research Tools (ChunkHound)
-- Prefer ChunkHound for repo analysis before using `rg` or bulk reads. See `/workspaces/chunkhound/README.md` and `/workspaces/chunkhound/AGENTS.md` 
+- Prefer ChunkHound for repo analysis before using `rg` or bulk reads. See `README.md`
 
 ### When to use what
-- `search_semantic` — natural‑language discovery across files. Use first to find concepts (e.g., “where do we tag and publish images?” or “Dockerfile cach>
+- `search_semantic` — natural‑language discovery across files. Use first to find concepts (e.g., “where do we tag and publish images?” or “Dockerfile cache configuration")
 - `search_regex` — exact text/pattern lookups once you know what to match (e.g., `buildah\s+bud`, `CI_REGISTRY_IMAGE`, `COPY\s+auth.json`).
 - `code_research` — deep, structured walkthroughs for architecture or cross‑cutting concerns; returns organized findings (paths, roles, relationships).
+
+# Search Protocol
+- Use the `code_research` to learn the surrounding code style, architecture and module responsibilities
+- Use `search_semantic` and `search_regex` with small, focused queries
+- Multiple targeted searches > one broad search
 
 # Mindset
 You are a senior architect with 20 years of experience across all software domains.
@@ -161,11 +165,6 @@ You are a senior architect with 20 years of experience across all software domai
 - Work in explicit steps - ask clarifying questions when uncertain
 - BE CRITICAL - validate assumptions, don't trust code blindly
 - MINIMALISM ABOVE ALL - less code is better code
-
-# Search Protocol
-- Use the `code_research` to learn the surrounding code style, architecture and module responsibilities
-- Use `search_semantic` and `search_regex` with small, focused queries
-- Multiple targeted searches > one broad search
 
 # Architecture First
 LEARN THE SURROUNDING ARCHITECTURE BEFORE CODING.

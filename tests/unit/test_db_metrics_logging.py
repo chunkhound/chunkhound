@@ -1,4 +1,5 @@
 import io
+import os
 from pathlib import Path
 
 from loguru import logger
@@ -8,7 +9,10 @@ from chunkhound.core.models import File, Chunk
 from chunkhound.core.types.common import FilePath, Language, ChunkType, LineNumber
 
 
-def test_duckdb_chunk_metrics_emitted(tmp_path: Path):
+def test_duckdb_chunk_metrics_emitted(tmp_path: Path, monkeypatch):
+    # Ensure CHUNKHOUND_MCP_MODE is not set (prevents optimize_tables from returning early)
+    monkeypatch.delenv("CHUNKHOUND_MCP_MODE", raising=False)
+
     db_dir = tmp_path / "db"
 
     # Capture loguru output

@@ -14,6 +14,7 @@ import pytest
 import gc
 import time
 from chunkhound.core.config.config import Config
+from chunkhound.core.config.embedding_config import EmbeddingConfig
 from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
 from chunkhound.registry import configure_registry, get_registry
 from tests.utils.windows_compat import database_cleanup_context, cleanup_database_resources, windows_safe_tempdir
@@ -182,3 +183,39 @@ def test_config_loading_from_json_file(clean_environment):
             # Clean up any registry state
             _cleanup_registry_and_connections()
             os.chdir(original_cwd)
+
+
+def test_embedding_config_rerank_env_vars(monkeypatch, clean_environment):
+    """
+    Test that reranking environment variables are loaded correctly by load_from_env().
+
+    This is a regression test for the bug where CHUNKHOUND_EMBEDDING__RERANK_*
+    env vars were not loaded despite being documented in tests/RERANKING_TEST_SETUP.md.
+    """
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING__RERANK_MODEL", "test-rerank-model")
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING__RERANK_URL", "http://localhost:8080/rerank")
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING__RERANK_FORMAT", "tei")
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING__RERANK_BATCH_SIZE", "64")
+
+    config = EmbeddingConfig.load_from_env()
+
+    assert config["rerank_model"] == "test-rerank-model"
+    assert config["rerank_url"] == "http://localhost:8080/rerank"
+    assert config["rerank_format"] == "tei"
+    assert config["rerank_batch_size"] == 64
+
+
+def test_embedding_config_rerank_batch_size_invalid_silently_ignored(monkeypatch, clean_environment):
+    """
+    Test that invalid rerank_batch_size env var is silently ignored.
+
+    ChunkHound uses a silent-failure pattern for numeric env vars: invalid values
+    are ignored rather than crashing config loading, allowing defaults to apply.
+    This matches the pattern in indexing_config.py:386-389.
+    """
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING__RERANK_BATCH_SIZE", "not-a-number")
+
+    config = EmbeddingConfig.load_from_env()
+
+    # Invalid value should be silently ignored (not in config dict)
+    assert "rerank_batch_size" not in config

@@ -20,6 +20,7 @@ from chunkhound.core.config.config import Config
 
 # Import embedding factory for unified provider creation
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+from chunkhound.embeddings import EmbeddingManager
 
 # Import core types
 from chunkhound.core.types.common import Language
@@ -108,6 +109,7 @@ class ProviderRegistry:
         self._providers: dict[str, Any] = {}
         self._language_parsers: LazyLanguageParsers = LazyLanguageParsers()
         self._config: Config | None = None
+        self._embedding_manager: EmbeddingManager | None = None
 
     def configure(self, config: Config) -> None:
         """Configure the registry with application settings."""
@@ -278,7 +280,8 @@ class ProviderRegistry:
             return
 
         provider_type = self._config.database.provider
-        db_path = str(self._config.database.path)
+        # Use get_db_path() to get the actual database location (includes provider-specific transformations)
+        db_path = str(self._config.database.get_db_path())
 
         # Get base directory from config (guaranteed to be set)
         base_directory = self._config.target_dir
@@ -293,8 +296,13 @@ class ProviderRegistry:
         elif provider_type == "lancedb":
             from chunkhound.providers.database.lancedb_provider import LanceDBProvider
 
+            # Get embedding_manager if available for dimension detection
+            embedding_manager = getattr(self, '_embedding_manager', None)
+
             provider = LanceDBProvider(
-                db_path, base_directory, config=self._config.database
+                db_path, base_directory,
+                embedding_manager=embedding_manager,
+                config=self._config.database
             )
         else:
             logger.warning(f"Unknown provider {provider_type}, defaulting to DuckDB")
@@ -340,11 +348,18 @@ class ProviderRegistry:
             f"[REGISTRY] Found embedding config: provider={self._config.embedding.provider}"
         )
         try:
+            # Create EmbeddingManager and store as instance variable
+            self._embedding_manager = EmbeddingManager()
+
             # Use the factory to create the provider
             logger.debug("[REGISTRY] Creating embedding provider from factory")
             provider = EmbeddingProviderFactory.create_provider(self._config.embedding)
             logger.debug(f"[REGISTRY] Created provider: {type(provider)}")
 
+            # Register provider with the manager (enables dimension detection)
+            self._embedding_manager.register_provider(provider, set_default=True)
+
+            # Also register provider in registry for backward compatibility
             logger.debug("[REGISTRY] Registering embedding provider")
             self.register_provider("embedding", provider, singleton=True)
             logger.debug("[REGISTRY] Successfully registered embedding provider")

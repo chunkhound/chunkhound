@@ -96,6 +96,9 @@ class PythonMapping(BaseMapping):
             (comment) @comment
         """
 
+    # Universal Concept integration is implemented below in the
+    # LanguageMapping protocol methods to avoid duplication.
+
     def get_docstring_query(self) -> str:
         """Get tree-sitter query pattern for Python docstrings.
 
@@ -479,6 +482,16 @@ class PythonMapping(BaseMapping):
             (class_definition
                 name: (identifier) @name
             ) @definition
+
+            ; Top-level assignment with literal RHS (dict/list)
+            (module
+                (expression_statement
+                    (assignment
+                        left: (_) @lhs
+                        right: [(dictionary) (list)] @rhs
+                    ) @definition
+                )
+            )
             """
 
         elif concept == UniversalConcept.BLOCK:
@@ -560,12 +573,26 @@ class PythonMapping(BaseMapping):
         source = content.decode("utf-8")
 
         if concept == UniversalConcept.DEFINITION:
-            # Try to get the name from the name capture
+            # Prefer explicit name capture (functions/classes)
             if "name" in captures:
                 name_node = captures["name"]
                 name = self.get_node_text(name_node, source).strip()
                 if name:
                     return name
+
+            # Handle top-level assignments: prefer LHS capture
+            if "lhs" in captures:
+                lhs_text = self.get_node_text(captures["lhs"], source).strip()
+                # Extract final identifier token for simple targets
+                token = lhs_text.split()[-1].rstrip(":") if lhs_text else ""
+                if token:
+                    return token
+
+            # Fallback to line-based naming
+            if "definition" in captures:
+                node = captures["definition"]
+                line = node.start_point[0] + 1
+                return f"assignment_line_{line}"
 
             return "unnamed_definition"
 
@@ -716,6 +743,14 @@ class PythonMapping(BaseMapping):
                     superclasses = self.extract_inheritance(def_node, source)
                     if superclasses:
                         metadata["superclasses"] = superclasses
+
+                # Hint based on RHS literal kind when available
+                rhs = captures.get("rhs")
+                if rhs is not None:
+                    if getattr(rhs, "type", "") == "dictionary":
+                        metadata["chunk_type_hint"] = "object"
+                    elif getattr(rhs, "type", "") == "list":
+                        metadata["chunk_type_hint"] = "array"
 
         elif concept == UniversalConcept.IMPORT:
             if "definition" in captures:

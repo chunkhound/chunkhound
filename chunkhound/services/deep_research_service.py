@@ -198,6 +198,7 @@ class DeepResearchService:
         llm_manager: LLMManager,
         tool_name: str = "code_research",
         progress: "TreeProgressDisplay | None" = None,
+        path_filter: str | None = None,
     ):
         """Initialize deep research service.
 
@@ -224,6 +225,7 @@ class DeepResearchService:
         self._question_generator = QuestionGenerator(llm_manager)
         self._citation_manager = CitationManager()
         self._quality_validator = QualityValidator(llm_manager)
+        self._path_filter = path_filter
 
     async def _ensure_progress_lock(self) -> None:
         """Ensure progress lock exists (must be called in async event loop context).
@@ -925,6 +927,7 @@ class DeepResearchService:
                     page_size=30,
                     threshold=RELEVANCE_THRESHOLD,
                     force_strategy="multi_hop",
+                    path_filter=self._path_filter,
                 )
                 for expanded_q in expanded_queries
             ]
@@ -980,6 +983,7 @@ class DeepResearchService:
                 page_size=30,
                 threshold=RELEVANCE_THRESHOLD,
                 force_strategy="multi_hop",
+                path_filter=self._path_filter,
             )
             logger.debug(f"Semantic search returned {len(semantic_results)} chunks")
 
@@ -1153,6 +1157,7 @@ class DeepResearchService:
                     pattern=pattern,
                     page_size=10,  # Limit per symbol to avoid overwhelming results
                     offset=0,
+                    path_filter=self._path_filter,
                 )
 
                 logger.debug(f"Found {len(results)} chunks for symbol '{symbol}'")

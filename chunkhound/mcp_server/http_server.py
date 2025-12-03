@@ -16,7 +16,7 @@ from chunkhound.core.config.config import Config
 
 from .base import MCPServerBase
 from .common import parse_mcp_arguments
-from .tools import execute_tool
+from .tools import TOOL_REGISTRY, execute_tool
 
 
 class HttpMCPServer(MCPServerBase):
@@ -50,36 +50,37 @@ class HttpMCPServer(MCPServerBase):
         self._register_tools()
 
     def _register_tools(self) -> None:
-        """Register all tools from the registry with FastMCP."""
+        """Register all tools from the registry with FastMCP.
+
+        Uses TOOL_REGISTRY for descriptions to ensure consistency with stdio mode.
+        """
         # FastMCP requires explicit function signatures, not **kwargs
         # So we create specific handler functions for each tool
 
-        @self.app.tool()
+        @self.app.tool(description=TOOL_REGISTRY["get_stats"].description)
         async def get_stats() -> dict[str, Any]:
-            """Get database statistics including file, chunk, and embedding counts"""
             await self.initialize()
-            result = await execute_tool(
+            return await execute_tool(
                 tool_name="get_stats",
                 services=self.ensure_services(),
                 embedding_manager=self.embedding_manager,
                 arguments={},
                 scan_progress=self._scan_progress,
+                llm_manager=self.llm_manager,
             )
-            return dict(result) if hasattr(result, "__dict__") else result
 
-        @self.app.tool()
+        @self.app.tool(description=TOOL_REGISTRY["health_check"].description)
         async def health_check() -> dict[str, Any]:
-            """Check server health status"""
             await self.initialize()
-            result = await execute_tool(
+            return await execute_tool(
                 tool_name="health_check",
                 services=self.ensure_services(),
                 embedding_manager=self.embedding_manager,
                 arguments={},
+                llm_manager=self.llm_manager,
             )
-            return dict(result) if hasattr(result, "__dict__") else result
 
-        @self.app.tool()
+        @self.app.tool(description=TOOL_REGISTRY["search_regex"].description)
         async def search_regex(
             pattern: str,
             page_size: int = 10,
@@ -87,7 +88,6 @@ class HttpMCPServer(MCPServerBase):
             max_response_tokens: int = 20000,
             path: str | None = None,
         ) -> dict[str, Any]:
-            """Search code chunks using regex patterns with pagination support."""
             await self.initialize()
 
             # Build arguments dict
@@ -100,26 +100,25 @@ class HttpMCPServer(MCPServerBase):
             if path is not None:
                 args["path"] = path
 
-            result = await execute_tool(
+            return await execute_tool(
                 tool_name="search_regex",
                 services=self.ensure_services(),
                 embedding_manager=self.embedding_manager,
                 arguments=parse_mcp_arguments(args),
+                llm_manager=self.llm_manager,
             )
-            return dict(result) if hasattr(result, "__dict__") else result
 
-        @self.app.tool()
+        @self.app.tool(description=TOOL_REGISTRY["search_semantic"].description)
         async def search_semantic(
             query: str,
             page_size: int = 10,
             offset: int = 0,
             max_response_tokens: int = 20000,
             path: str | None = None,
-            provider: str = "openai",
-            model: str = "text-embedding-3-small",
+            provider: str | None = None,
+            model: str | None = None,
             threshold: float | None = None,
         ) -> dict[str, Any]:
-            """Search code using semantic similarity with pagination support."""
             await self.initialize()
 
             # Build arguments dict
@@ -128,21 +127,64 @@ class HttpMCPServer(MCPServerBase):
                 "page_size": page_size,
                 "offset": offset,
                 "max_response_tokens": max_response_tokens,
-                "provider": provider,
-                "model": model,
             }
             if path is not None:
                 args["path"] = path
+            if provider is not None:
+                args["provider"] = provider
+            if model is not None:
+                args["model"] = model
             if threshold is not None:
                 args["threshold"] = threshold
 
-            result = await execute_tool(
+            return await execute_tool(
                 tool_name="search_semantic",
                 services=self.ensure_services(),
                 embedding_manager=self.embedding_manager,
                 arguments=parse_mcp_arguments(args),
+                llm_manager=self.llm_manager,
             )
+
+        @self.app.tool(description=TOOL_REGISTRY["code_research"].description)
+        async def code_research(query: str, path: str | None = None) -> dict[str, Any]:
+            await self.initialize()
+
+            # Build arguments dict (path is optional scope prefix)
+            args: dict[str, Any] = {"query": query}
+            if path is not None:
+                args["path"] = path
+
+            result = await execute_tool(
+                tool_name="code_research",
+                services=self.ensure_services(),
+                embedding_manager=self.embedding_manager,
+                arguments=parse_mcp_arguments(args),
+                llm_manager=self.llm_manager,
+            )
+            # code_research returns raw markdown string, wrap it for FastMCP
+            if isinstance(result, str):
+                return {"answer": result}
             return dict(result) if hasattr(result, "__dict__") else result
+
+        # Patch tool schemas after all decorators have executed
+        # This replaces FastMCP's auto-generated schemas with TOOL_REGISTRY schemas
+        self._patch_tool_schema("get_stats")
+        self._patch_tool_schema("health_check")
+        self._patch_tool_schema("search_regex")
+        self._patch_tool_schema("search_semantic")
+        self._patch_tool_schema("code_research")
+
+    def _patch_tool_schema(self, tool_name: str) -> None:
+        """Replace FastMCP's auto-generated schema with TOOL_REGISTRY schema.
+
+        Args:
+            tool_name: Name of tool to patch
+        """
+        try:
+            tool = self.app._tool_manager._tools[tool_name]
+            tool.parameters = TOOL_REGISTRY[tool_name].parameters
+        except (AttributeError, KeyError) as e:
+            self.debug_log(f"Warning: Could not patch schema for {tool_name}: {e}")
 
     async def run(self) -> None:
         """Run the HTTP server.
@@ -195,8 +237,6 @@ async def main() -> None:
     # Mark process as MCP mode so downstream code avoids interactive prompts
     os.environ["CHUNKHOUND_MCP_MODE"] = "1"
 
-    # Mark MCP mode and create/validate configuration
-    os.environ["CHUNKHOUND_MCP_MODE"] = "1"
     # Create and validate configuration
     config, validation_errors = create_validated_config(args, "mcp")
 

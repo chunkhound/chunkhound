@@ -323,6 +323,19 @@ class EmbeddingConfig(BaseSettings):
         if model := os.getenv("CHUNKHOUND_EMBEDDING__MODEL"):
             config["model"] = model
 
+        # Reranking configuration
+        if rerank_model := os.getenv("CHUNKHOUND_EMBEDDING__RERANK_MODEL"):
+            config["rerank_model"] = rerank_model
+        if rerank_url := os.getenv("CHUNKHOUND_EMBEDDING__RERANK_URL"):
+            config["rerank_url"] = rerank_url
+        if rerank_format := os.getenv("CHUNKHOUND_EMBEDDING__RERANK_FORMAT"):
+            config["rerank_format"] = rerank_format
+        if rerank_batch_size := os.getenv("CHUNKHOUND_EMBEDDING__RERANK_BATCH_SIZE"):
+            try:
+                config["rerank_batch_size"] = int(rerank_batch_size)
+            except ValueError:
+                pass
+
         return config
 
     @classmethod

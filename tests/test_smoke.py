@@ -316,7 +316,7 @@ async def test():
     try:
         # Just test that critical imports work - this catches most startup issues
         from chunkhound.mcp_server.stdio import StdioMCPServer
-        from chunkhound.mcp_server.http import HttpMCPServer  
+        from chunkhound.mcp_server.http_server import HttpMCPServer
         from chunkhound.core.config.config import Config
         
         # Test config creation
@@ -373,17 +373,18 @@ sys.exit(asyncio.run(test()))
                 "database": {"path": str(db_path), "provider": "duckdb"},
                 "indexing": {"include": ["*.py"]}
             }
-            
+
             # Add embedding config if API key available
+            # Note: code_research requires reranker+LLM to EXECUTE, but only embeddings to REGISTER
             api_key = os.environ.get("OPENAI_API_KEY")
             if api_key:
                 config["embedding"] = {
                     "provider": "openai",
                     "model": "text-embedding-3-small"
                 }
-            
+
             config_path.write_text(json.dumps(config))
-            
+
             # Start MCP server (it will auto-index on startup)
             mcp_env = get_safe_subprocess_env(os.environ)
             mcp_env["CHUNKHOUND_MCP_MODE"] = "1"
@@ -431,14 +432,72 @@ sys.exit(asyncio.run(test()))
                 assert "get_stats" in tool_names, f"get_stats not in tools: {tool_names}"
                 assert "health_check" in tool_names, f"health_check not in tools: {tool_names}"
 
-                # Semantic search only if embeddings available
+                # Semantic search and code_research only if embeddings available
                 if api_key:
                     assert "search_semantic" in tool_names, f"search_semantic not in tools: {tool_names}"
+                    assert "code_research" in tool_names, f"code_research not in tools: {tool_names}"
 
             except asyncio.TimeoutError:
                 pytest.fail("MCP stdio protocol handshake timed out")
             finally:
                 await client.close()
+
+    @pytest.mark.asyncio
+    async def test_mcp_http_tool_registration(self):
+        """Test MCP HTTP server registers all 5 tools including code_research."""
+        # Test tool registration directly without subprocess complexity
+        from chunkhound.mcp_server.http_server import HttpMCPServer
+        from chunkhound.core.config.config import Config
+        from chunkhound.core.config.embedding_config import EmbeddingConfig
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            db_path = temp_path / ".chunkhound" / "test.db"
+            db_path.parent.mkdir(exist_ok=True)
+
+            # Create minimal config
+            config = Config()
+            config.database.path = db_path
+
+            # Create server instance without embeddings first
+            server_no_embeddings = HttpMCPServer(config, port=5173, host="127.0.0.1")
+
+            # Check registered tools (without embeddings)
+            tools_basic = await server_no_embeddings.app.get_tools()
+            # get_tools() returns list of Tool objects or tool names depending on FastMCP version
+            registered_tools_basic = [tool.name if hasattr(tool, 'name') else tool for tool in tools_basic]
+
+            # Should have at least basic tools (no embeddings required)
+            assert "search_regex" in registered_tools_basic, f"search_regex not registered: {registered_tools_basic}"
+            assert "get_stats" in registered_tools_basic, f"get_stats not registered: {registered_tools_basic}"
+            assert "health_check" in registered_tools_basic, f"health_check not registered: {registered_tools_basic}"
+
+            # Test with embeddings configured
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if api_key:
+                # Create new config with embeddings
+                config_with_embeddings = Config()
+                config_with_embeddings.database.path = db_path
+                config_with_embeddings.embedding = EmbeddingConfig(
+                    provider="openai",
+                    model="text-embedding-3-small",
+                    api_key=api_key
+                )
+
+                # Create server with embeddings
+                server_with_embeddings = HttpMCPServer(config_with_embeddings, port=5174, host="127.0.0.1")
+
+                # Check registered tools (with embeddings)
+                tools_full = await server_with_embeddings.app.get_tools()
+                registered_tools_full = [tool.name if hasattr(tool, 'name') else tool for tool in tools_full]
+
+                # Should have all 5 tools when embeddings are configured
+                assert "search_regex" in registered_tools_full, f"search_regex not registered: {registered_tools_full}"
+                assert "get_stats" in registered_tools_full, f"get_stats not registered: {registered_tools_full}"
+                assert "health_check" in registered_tools_full, f"health_check not registered: {registered_tools_full}"
+                assert "search_semantic" in registered_tools_full, f"search_semantic not registered: {registered_tools_full}"
+                assert "code_research" in registered_tools_full, f"code_research not registered: {registered_tools_full}"
 
 
 class TestParserLoading:

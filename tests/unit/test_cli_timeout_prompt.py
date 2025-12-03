@@ -31,6 +31,7 @@ async def test_timeout_prompt_adds_exclusions(tmp_path: Path, monkeypatch: pytes
 
     # Pretend we are in a TTY and accept the prompt
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.delenv("CHUNKHOUND_MCP_MODE", raising=False)
     monkeypatch.delenv("CHUNKHOUND_NO_PROMPTS", raising=False)
     monkeypatch.setattr("builtins.input", lambda *_: "y")
 

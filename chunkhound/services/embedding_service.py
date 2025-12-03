@@ -1,16 +1,5 @@
 """Embedding service for ChunkHound - manages embedding generation and caching."""
 
-# CRITICAL: Add module-level debug logging to confirm this code loads
-from datetime import datetime
-
-try:
-    debug_file = "/tmp/chunkhound_module_debug.log"
-    with open(debug_file, "a") as f:
-        f.write(f"[{datetime.now().isoformat()}] EMBEDDING_SERVICE MODULE LOADED\n")
-        f.flush()
-except:
-    pass
-
 import asyncio
 from typing import Any
 
@@ -227,6 +216,12 @@ class EmbeddingService(BaseService):
             generated_count = await self.generate_embeddings_for_chunks(
                 chunk_id_list, chunk_texts, show_progress=True
             )
+
+            # Optimize if fragmentation high after embedding generation
+            if generated_count > 0 and hasattr(self._db, "optimize_tables"):
+                if hasattr(self._db, "should_optimize") and self._db.should_optimize("post-embedding"):
+                    logger.debug("Optimizing database after embedding generation...")
+                    self._db.optimize_tables()
 
             return {
                 "status": "success",
@@ -808,10 +803,10 @@ class EmbeddingService(BaseService):
             all_chunks = filtered_chunks
 
         # Extract chunk IDs with consistent field handling
-        # Use "chunk_id" field as it's the actual field name in the database
+        # DuckDB uses "chunk_id", LanceDB uses "id" - handle both
         all_chunk_ids: list[int] = []
         for chunk in all_chunks:
-            chunk_id = chunk.get("chunk_id")
+            chunk_id = chunk.get("chunk_id", chunk.get("id"))
             if chunk_id is not None:
                 all_chunk_ids.append(int(chunk_id))
 

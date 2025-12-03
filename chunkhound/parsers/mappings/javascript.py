@@ -5,10 +5,31 @@ for semantic code analysis. It handles JavaScript-specific language features lik
 arrow functions, ES6 classes, JSDoc comments, and modern module syntax.
 """
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.universal_engine import UniversalConcept
+from chunkhound.parsers.mappings._shared.js_family_extraction import (
+    JSFamilyExtraction,
+)
+from chunkhound.parsers.mappings._shared.js_query_patterns import (
+    TOP_LEVEL_LEXICAL_CONFIG,
+    TOP_LEVEL_VAR_CONFIG,
+    COMMONJS_MODULE_EXPORTS,
+    COMMONJS_NESTED_EXPORTS,
+    COMMONJS_EXPORTS_SHORTHAND,
+)
+from chunkhound.parsers.mappings._shared.js_family_extraction import (
+    JSFamilyExtraction,
+)
+from chunkhound.parsers.mappings._shared.js_query_patterns import (
+    TOP_LEVEL_LEXICAL_CONFIG,
+    TOP_LEVEL_VAR_CONFIG,
+    COMMONJS_MODULE_EXPORTS,
+    COMMONJS_NESTED_EXPORTS,
+    COMMONJS_EXPORTS_SHORTHAND,
+)
 
 if TYPE_CHECKING:
     from tree_sitter import Node as TSNode
@@ -22,7 +43,7 @@ except ImportError:
     TSNode = None
 
 
-class JavaScriptMapping(BaseMapping):
+class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
     """JavaScript language mapping for tree-sitter parsing.
 
     Provides JavaScript-specific queries and extraction methods for:
@@ -126,6 +147,86 @@ class JavaScriptMapping(BaseMapping):
         return """
         (comment) @comment
         """
+
+    # Universal Concept integration -------------------------------------------------
+    def get_query_for_concept(self, concept: "UniversalConcept") -> str | None:  # type: ignore[override]
+        """Provide a richer DEFINITION query including top-level config patterns.
+
+        - Keep standard function/class patterns
+        - Add export statements and top-level declarations/assignments so
+          object/array configs (e.g., `export default { ... }`, `module.exports = {}`)
+          become chunks.
+        """
+        if concept == UniversalConcept.DEFINITION:
+            return (
+                "\n".join(
+                    [
+                        """
+                        ; Standard definitions
+                        (function_declaration
+                            name: (identifier) @name
+                        ) @definition
+
+                        (class_declaration
+                            name: (identifier) @name
+                        ) @definition
+
+                        ; Top-level export (default or named)
+                        (export_statement) @definition
+                        """,
+                        TOP_LEVEL_LEXICAL_CONFIG,
+                        TOP_LEVEL_VAR_CONFIG,
+                        # Function/arrow declarators at top level
+                        """
+                        (program
+                            (lexical_declaration
+                                (variable_declarator
+                                    name: (identifier) @name
+                                    value: (function_expression)
+                                ) @definition
+                            )
+                        )
+                        (program
+                            (lexical_declaration
+                                (variable_declarator
+                                    name: (identifier) @name
+                                    value: (arrow_function)
+                                ) @definition
+                            )
+                        )
+                        (program
+                            (variable_declaration
+                                (variable_declarator
+                                    name: (identifier) @name
+                                    value: (function_expression)
+                                ) @definition
+                            )
+                        )
+                        (program
+                            (variable_declaration
+                                (variable_declarator
+                                    name: (identifier) @name
+                                    value: (arrow_function)
+                                ) @definition
+                            )
+                        )
+                        """,
+                        COMMONJS_MODULE_EXPORTS,
+                        COMMONJS_NESTED_EXPORTS,
+                        COMMONJS_EXPORTS_SHORTHAND,
+                    ]
+                )
+            )
+
+        elif concept == UniversalConcept.COMMENT:
+            return """
+            (comment) @definition
+            """
+
+        # Use default handling for other concepts
+        return None
+
+    # Extraction trio inherited from JSFamilyExtraction to avoid duplication
 
     def get_docstring_query(self) -> str:
         """Get tree-sitter query for JSDoc comments.

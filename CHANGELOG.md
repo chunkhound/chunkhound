@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- OpenAI Responses API support for reasoning models (gpt-5.1, gpt-5.1-codex, o-series, gpt-5-pro) - enables deep code research with enhanced reasoning capabilities
+- Automatic API routing between Chat Completions and Responses API based on model compatibility - supports 30+ models including all GPT-5, GPT-4.1, GPT-4o, and o-series models
+- Reasoning effort control for deep research LLM operations - configurable levels (none, minimal, low, medium, high) via `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT` with per-role overrides for utility and synthesis operations
+- Structured JSON output support for Responses API - maintains schema validation consistency across both Chat Completions and Responses endpoints
+
+### Performance
+- LanceDB table creation now detects embedding dimensions upfront from configured embedding provider, eliminating O(n) table recreation penalty during first embedding insertion - significantly improves indexing performance for large codebases (e.g., 16,000+ chunks no longer require full table migration)
+
+### Fixed
+- Global chunk deduplication now applies to all parsers (YAML, Universal) - prevents duplicate chunk IDs that caused indexing failures with repeated config values
+
+## [4.1.0b1] - 2025-11-15
+
+### Added
+- PHP configuration files with top-level return arrays are now searchable - config patterns like `return ['key' => 'value'];` are automatically indexed
+- Universal config-literal parsing across Python, JavaScript, TypeScript, and JSX/TSX - all exported configuration objects and arrays are now discoverable through semantic search
+
+### Enhanced
+- Windows compatibility improved with cross-platform temporary directory handling for Claude Code CLI provider
+- JavaScript-family parsers (JavaScript, TypeScript, JSX/TSX) internally streamlined to reduce maintenance overhead while preserving all functionality
+- Version management now supports PEP 440 pre-release formats (beta, release candidate) for clearer update channels
+- Version tagging includes safety checks to prevent accidental releases from uncommitted work
+
+### Fixed
+- Code quality improvements addressing linting warnings for cleaner, more maintainable codebase
+
 ## [4.0.1] - 2025-11-12
 
 ### Fixed
@@ -589,7 +616,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 For more information, visit: https://github.com/chunkhound/chunkhound
 
-[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v4.0.1...HEAD
+[Unreleased]: https://github.com/chunkhound/chunkhound/compare/v4.1.0b1...HEAD
+[4.1.0b1]: https://github.com/chunkhound/chunkhound/compare/v4.0.1...v4.1.0b1
 [4.0.1]: https://github.com/chunkhound/chunkhound/compare/v4.0.0...v4.0.1
 [4.0.0]: https://github.com/chunkhound/chunkhound/compare/v3.3.1...v4.0.0
 [3.3.1]: https://github.com/chunkhound/chunkhound/compare/v3.3.0...v3.3.1

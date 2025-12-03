@@ -4,18 +4,10 @@ from pathlib import Path
 import pytest
 
 
-lancedb = pytest.importorskip("lancedb")
-
-
-def test_lancedb_checksums_saved_on_first_index(tmp_path: Path):
+def test_lancedb_checksums_saved_on_first_index(lancedb_provider, tmp_path):
     """Verify checksums are computed and saved during first indexing pass with LanceDB."""
-    from chunkhound.providers.database.lancedb_provider import LanceDBProvider
     from chunkhound.services.indexing_coordinator import IndexingCoordinator
     from chunkhound.utils.hashing import compute_file_hash
-
-    db_path = tmp_path / "ldb"
-    provider = LanceDBProvider(db_path, base_directory=tmp_path)
-    provider.connect()
 
     # Create test files
     test_files = []
@@ -24,7 +16,7 @@ def test_lancedb_checksums_saved_on_first_index(tmp_path: Path):
         p.write_text(f"# Test file {i}\nprint('hello')\n")
         test_files.append(p)
 
-    coord = IndexingCoordinator(database_provider=provider, base_directory=tmp_path)
+    coord = IndexingCoordinator(database_provider=lancedb_provider, base_directory=tmp_path)
 
     # First indexing pass - files are new
     result1 = asyncio.run(
@@ -37,7 +29,7 @@ def test_lancedb_checksums_saved_on_first_index(tmp_path: Path):
     # Verify checksums were saved in database
     for p in test_files:
         rel_path = p.relative_to(tmp_path).as_posix()
-        db_file = provider.get_file_by_path(rel_path, as_model=False)
+        db_file = lancedb_provider.get_file_by_path(rel_path, as_model=False)
         assert db_file is not None, f"File {rel_path} should exist in DB"
 
         # Verify checksum was saved
@@ -59,17 +51,12 @@ def test_lancedb_checksums_saved_on_first_index(tmp_path: Path):
     assert result2.get("skipped_unchanged", 0) == 3, "All 3 files should be skipped on second pass"
 
 
-def test_lancedb_checksum_skip_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_lancedb_checksum_skip_unchanged(lancedb_provider, tmp_path, monkeypatch: pytest.MonkeyPatch):
     """Verify LanceDB skips files with matching checksums."""
     from chunkhound.core.models.file import File
     from chunkhound.core.types.common import Language
-    from chunkhound.providers.database.lancedb_provider import LanceDBProvider
     from chunkhound.services.indexing_coordinator import IndexingCoordinator
     from chunkhound.utils.hashing import compute_file_hash
-
-    db_path = tmp_path / "ldb"
-    provider = LanceDBProvider(db_path, base_directory=tmp_path)
-    provider.connect()
 
     # Create files and insert prior state with content hash
     files = []
@@ -86,10 +73,10 @@ def test_lancedb_checksum_skip_unchanged(tmp_path: Path, monkeypatch: pytest.Mon
             size_bytes=int(st.st_size),
             content_hash=content_hash,
         )
-        provider.insert_file(f)
+        lancedb_provider.insert_file(f)
         files.append(p)
 
-    coord = IndexingCoordinator(database_provider=provider, base_directory=tmp_path)
+    coord = IndexingCoordinator(database_provider=lancedb_provider, base_directory=tmp_path)
 
     # Avoid parsing: record what would be parsed
     called = []

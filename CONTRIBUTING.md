@@ -118,10 +118,34 @@ uv pip compile pyproject.toml --all-extras -o requirements-lock.txt
 
 ### Release Process
 
-The `scripts/prepare_release.sh` script automatically:
-1. Regenerates `requirements-lock.txt` with exact versions
-2. Ensures all lock files are synchronized
-3. Creates reproducible release artifacts
+ChunkHound uses **dynamic versioning** via hatch-vcs - versions are automatically derived from git tags during builds.
+
+#### Creating a New Version
+
+Use the `update_version.py` script to create PEP 440 compliant version tags:
+
+```bash
+# Release versions
+uv run scripts/update_version.py 4.1.0           # Standard release
+uv run scripts/update_version.py --bump minor    # Bump to next minor
+
+# Pre-release versions (for beta channel)
+uv run scripts/update_version.py 4.1.0b1         # Beta release
+uv run scripts/update_version.py 4.1.0rc1        # Release candidate
+uv run scripts/update_version.py --bump minor b1 # Bump to next minor beta
+```
+
+#### Publishing Workflow
+
+1. **Create version tag**: Use `update_version.py` (see above)
+2. **Run smoke tests**: `uv run pytest tests/test_smoke.py -v` (MANDATORY)
+3. **Prepare release**: `./scripts/prepare_release.sh`
+   - Regenerates `requirements-lock.txt` with exact versions
+   - Ensures all lock files are synchronized
+   - Creates reproducible release artifacts
+4. **Test locally**: `pip install dist/chunkhound-X.Y.Z-py3-none-any.whl`
+5. **Push tag**: `git push origin vX.Y.Z`
+6. **Publish**: `uv publish` (requires PYPI_TOKEN)
 
 This ensures that users can install ChunkHound with either:
 - **Library install**: `pip install chunkhound` (flexible dependencies)

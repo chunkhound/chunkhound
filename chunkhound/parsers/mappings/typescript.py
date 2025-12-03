@@ -12,6 +12,16 @@ from loguru import logger
 
 from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.mappings._shared.js_family_extraction import (
+    JSFamilyExtraction,
+)
+from chunkhound.parsers.mappings._shared.js_query_patterns import (
+    TOP_LEVEL_LEXICAL_CONFIG,
+    COMMONJS_MODULE_EXPORTS,
+    COMMONJS_NESTED_EXPORTS,
+    COMMONJS_EXPORTS_SHORTHAND,
+)
+from chunkhound.parsers.universal_engine import UniversalConcept
 
 if TYPE_CHECKING:
     from tree_sitter import Node as TSNode
@@ -25,7 +35,7 @@ except ImportError:
     # TSNode is already defined in TYPE_CHECKING block
 
 
-class TypeScriptMapping(BaseMapping):
+class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
     """TypeScript language mapping for tree-sitter parsing.
 
     This mapping handles TypeScript-specific AST patterns including:
@@ -93,6 +103,62 @@ class TypeScriptMapping(BaseMapping):
         return """
             (comment) @comment
         """
+
+    # Universal Concept integration -------------------------------------------------
+    def get_query_for_concept(self, concept: "UniversalConcept") -> str | None:  # type: ignore[override]
+        """Provide a richer DEFINITION query including top-level config patterns.
+
+        - Keep standard function/class definitions (duplicated here for completeness)
+        - Add export statements and top-level declarations/assignments, so TS config
+          modules that export object literals are chunked.
+        """
+        if concept == UniversalConcept.DEFINITION:
+            return ("\n".join([
+                """
+                ; Standard definitions
+                (function_declaration
+                    name: (identifier) @name
+                ) @definition
+
+                (class_declaration
+                    name: (type_identifier) @name
+                ) @definition
+
+                ; Top-level export (default or named)
+                (export_statement) @definition
+                """,
+                TOP_LEVEL_LEXICAL_CONFIG,
+                # Top-level function/arrow declarators
+                """
+                (program
+                    (lexical_declaration
+                        (variable_declarator
+                            name: (identifier) @name
+                            value: (function_expression)
+                        ) @definition
+                    )
+                )
+                (program
+                    (lexical_declaration
+                        (variable_declarator
+                            name: (identifier) @name
+                            value: (arrow_function)
+                        ) @definition
+                    )
+                )
+                """,
+                COMMONJS_MODULE_EXPORTS,
+                COMMONJS_NESTED_EXPORTS,
+                COMMONJS_EXPORTS_SHORTHAND,
+            ]))
+        elif concept == UniversalConcept.COMMENT:
+            return """
+            (comment) @definition
+            """
+        return None
+
+    # extract_name / extract_metadata / extract_content are inherited
+    # from JSFamilyExtraction (de-duplicated across JS/TS/JSX)
 
     def get_interface_query(self) -> str:
         """Get tree-sitter query pattern for TypeScript interface definitions.

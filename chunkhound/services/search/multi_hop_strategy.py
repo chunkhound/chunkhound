@@ -179,6 +179,7 @@ class MultiHopStrategy:
                         model=model,
                         limit=20,  # Get more neighbors per round
                         threshold=None,
+                        path_filter=path_filter,
                     )
 
                     # Filter out already seen chunks
