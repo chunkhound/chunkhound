@@ -687,7 +687,11 @@ class IndexingCoordinator(BaseService):
         return all_results
 
     def _check_disk_usage_limit(self) -> DiskUsageLimitExceededError | None:
-        """Check if database file size exceeds configured limit.
+        """Check if database size exceeds configured limit.
+
+        For directory-based databases (e.g., LanceDB), calculates total size of all files
+        in the directory recursively. For file-based databases (e.g., DuckDB), checks
+        the main database file size.
 
         Returns:
             DiskUsageLimitExceededError if limit exceeded, None otherwise
@@ -713,25 +717,44 @@ class IndexingCoordinator(BaseService):
             if isinstance(db_path, str):
                 db_path = Path(db_path)
 
-            # Determine the actual database file path
+            # Calculate total database size
             if db_path.is_dir():
-                # For DuckDB, the database file is inside the directory
-                db_file = db_path / "chunks.db"
+                # Directory-based provider: sum all files recursively
+                size_mb = self._calculate_directory_size_mb(db_path)
             else:
-                # db_path is the database file directly
-                db_file = db_path
+                # File-based provider: check single file size
+                if db_path.exists():
+                    size_mb = db_path.stat().st_size / (1024**2)
+                else:
+                    size_mb = 0.0
 
-            if db_file.exists():
-                # Get file size in MB
-                size_mb = db_file.stat().st_size / (1024**2)
-                if size_mb >= max_disk_usage_mb:
-                    return DiskUsageLimitExceededError(
-                        current_size_mb=size_mb,
-                        limit_mb=max_disk_usage_mb,
-                    )
+            if size_mb >= max_disk_usage_mb:
+                return DiskUsageLimitExceededError(
+                    current_size_mb=size_mb,
+                    limit_mb=max_disk_usage_mb,
+                )
         except Exception as e:
             logger.warning(f"Failed to check disk usage: {e}")
         return None
+
+    def _calculate_directory_size_mb(self, directory: Path) -> float:
+        """Calculate total size of all files in directory recursively.
+
+        Args:
+            directory: Directory to calculate size for
+
+        Returns:
+            Total size in MB
+        """
+        total_size = 0
+        try:
+            for file_path in directory.rglob('*'):
+                if file_path.is_file():
+                    total_size += file_path.stat().st_size
+        except Exception:
+            # If directory traversal fails, return 0 to avoid blocking indexing
+            return 0.0
+        return total_size / (1024**2)
 
     async def _store_parsed_results(
         self,

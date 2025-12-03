@@ -214,6 +214,114 @@ class TestIndexingCoordinatorDiskUsage:
         # Should not raise DiskUsageLimitExceededError, just log warning
         coord._check_disk_usage_limit()
 
+    def test_check_disk_usage_limit_exact_boundary(self, tmp_path):
+        """Test that exact limit size triggers exceeded (uses >= comparison)."""
+        db_path = tmp_path / "test.db"
+        # Create the actual database file with exactly 1MB content
+        actual_db_path = db_path / "chunks.db"
+        actual_db_path.parent.mkdir(parents=True, exist_ok=True)
+        # Write exactly 1MB (1024*1024 bytes)
+        actual_db_path.write_bytes(b"x" * (1024 * 1024))
+
+        db = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
+        config = DatabaseConfig(max_disk_usage_mb=1.0)  # 1MB limit
+        coord = IndexingCoordinator(
+            database_provider=db,
+            base_directory=tmp_path,
+            config=config
+        )
+
+        error = coord._check_disk_usage_limit()
+        assert error is not None
+        assert isinstance(error, DiskUsageLimitExceededError)
+        assert error.limit_mb == 1.0
+        assert abs(error.current_size_mb - 1.0) < 0.001  # Should be very close to 1.0
+
+    def test_check_disk_usage_limit_directory_size(self, tmp_path):
+        """Test directory size calculation for directory-based providers."""
+        db_path = tmp_path / "test.db"
+        # Create directory structure with multiple files
+        db_path.mkdir(parents=True, exist_ok=True)
+
+        # Create main database file (1MB)
+        (db_path / "chunks.db").write_bytes(b"x" * (1024 * 1024))
+
+        # Create additional files (0.5MB each)
+        (db_path / "chunks.db.wal").write_bytes(b"y" * (512 * 1024))
+        (db_path / "chunks.db.tmp").write_bytes(b"z" * (512 * 1024))
+
+        # Create subdirectory with file (0.25MB)
+        subdir = db_path / "subdir"
+        subdir.mkdir()
+        (subdir / "extra.db").write_bytes(b"w" * (256 * 1024))
+
+        db = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
+        config = DatabaseConfig(max_disk_usage_mb=2.0)  # 2MB limit
+        coord = IndexingCoordinator(
+            database_provider=db,
+            base_directory=tmp_path,
+            config=config
+        )
+
+        error = coord._check_disk_usage_limit()
+        assert error is not None
+        assert isinstance(error, DiskUsageLimitExceededError)
+        assert error.limit_mb == 2.0
+        # Total should be 1 + 0.5 + 0.5 + 0.25 = 2.25MB
+        assert error.current_size_mb > 2.0
+
+    def test_check_disk_usage_limit_directory_size_calculation(self, tmp_path):
+        """Test that directory size calculation works correctly for database directories."""
+        # Use a local directory for test files instead of tmp
+        test_dir = Path(__file__).parent / "test_disk_size_db"
+        test_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            # Create database directory with files
+            db_path = test_dir / "test.db"
+            db_path.mkdir(parents=True, exist_ok=True)
+            (db_path / "chunks.db").write_bytes(b"x" * (512 * 1024))  # 0.5MB
+            (db_path / "chunks.db.wal").write_bytes(b"y" * (256 * 1024))  # 0.25MB
+
+            db = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
+            config = DatabaseConfig(max_disk_usage_mb=1.0)  # 1MB limit
+            coord = IndexingCoordinator(
+                database_provider=db,
+                base_directory=tmp_path,
+                config=config
+            )
+
+            # Should work normally - calculates size of all files in directory
+            coord._check_disk_usage_limit()
+        finally:
+            # Clean up test directory
+            import shutil
+            if test_dir.exists():
+                shutil.rmtree(test_dir)
+
+    def test_check_disk_usage_limit_filesystem_errors(self, tmp_path, monkeypatch):
+        """Test handling of various filesystem errors."""
+        db_path = tmp_path / "test.db"
+        db_path.mkdir(parents=True)
+        (db_path / "chunks.db").write_bytes(b"x" * 100)
+
+        db = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
+        config = DatabaseConfig(max_disk_usage_mb=1024.0)
+        coord = IndexingCoordinator(
+            database_provider=db,
+            base_directory=tmp_path,
+            config=config
+        )
+
+        # Mock rglob to raise PermissionError
+        def mock_rglob(*args, **kwargs):
+            raise PermissionError("Access denied")
+
+        monkeypatch.setattr("pathlib.Path.rglob", mock_rglob)
+
+        # Should not raise exception, just log warning and continue
+        coord._check_disk_usage_limit()
+
 
 class TestIndexingCoordinatorIntegration:
     """Test integration of disk usage limiting with processing."""
