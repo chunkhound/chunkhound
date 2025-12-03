@@ -31,6 +31,7 @@ classifiers = [
 dependencies = [
     "duckdb>=1.4.0",
     "openai>=1.0.0",
+    "packaging>=21.0",
     "aiohttp>=3.12.15",
     "rapidyaml>=0.10.0",
     "tree-sitter>=0.25.0",
@@ -63,7 +64,7 @@ dependencies = [
     "tree-sitter-json>=0.24.8",
     "tree-sitter-php>=0.24.0",
     "tree-sitter-toml>=0.7.0",
-    "lancedb>=0.25.2",
+    "lancedb>=0.25.3",
     "pandas>=2.3.0",
     "pylance>=0.31.0",
     "voyageai>=0.2.0",
@@ -76,6 +77,8 @@ dependencies = [
     "numpy>=1.24.0",
     "pathspec>=0.12.1",
     "pygit2>=1.12.0",
+    "google-genai>=1.51.0",
+    "anthropic>=0.75.0",
 ]
 
 [project.optional-dependencies]

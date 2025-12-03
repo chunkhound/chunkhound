@@ -6,7 +6,14 @@ Built: 100% by AI agents - NO human-written code
 Purpose: Transform codebases into searchable knowledge bases for AI assistants
 
 ## CRITICAL_CONSTRAINTS
-- DuckDB/LanceDB: SINGLE_THREADED_ONLY (concurrent access = segfault/corruption)
+- DuckDB: SINGLE_THREADED_ONLY (concurrent access = segfault/corruption)
+- LanceDB: MULTI_PROCESS_SAFE_WITH_MVCC
+  - Within process: Single-threaded via SerialDatabaseExecutor (ChunkHound constraint)
+  - Between processes: MVCC + automatic conflict resolution (LanceDB internal)
+  - Write concurrency: Supported with retry/backoff (handled by LanceDB, not ChunkHound)
+  - Read concurrency: Fully concurrent (MVCC snapshots)
+  - ChunkHound layer: Serialized DB operations within each process (SerialDatabaseExecutor)
+  - LanceDB layer: Handles multi-process coordination via Rust internals (not visible in Python)
 - Embedding batching: MANDATORY (100x performance difference)
 - Vector index optimization: DROP_BEFORE_BULK_INSERT (20x speedup for >50 embeddings)
 - MCP server: NO_STDOUT_LOGS (breaks JSON-RPC protocol)
@@ -18,6 +25,69 @@ Purpose: Transform codebases into searchable knowledge bases for AI assistants
 - Global state in MCP: STDIO_CONSTRAINT (stateless would break connection)
 - Database wrapper: LEGACY_COMPATIBILITY (provides migration path)
 - Transaction backup tables: ATOMIC_FILE_UPDATES (ensures consistency)
+
+## CONCURRENCY_MODEL_CLARIFICATION
+
+### LanceDB Multi-Process Architecture
+**Important**: LanceDB uses MVCC (Multi-Version Concurrency Control) internally, not exposed file locks
+
+**Architecture Layers**:
+1. **ChunkHound Layer** (Python):
+   - Uses SerialDatabaseExecutor (single-threaded queue) within each process
+   - All DB operations in one process go through single executor thread
+   - Prevents intra-process concurrency issues
+
+2. **LanceDB Layer** (Rust):
+   - Implements MVCC for multi-process coordination
+   - Automatic conflict resolution via retries with exponential backoff
+   - Read operations use MVCC snapshots (fully concurrent)
+   - Write operations use conflict-free upsert semantics (`merge_insert`)
+
+**Guarantees**:
+- **Multi-process safe**: YES - No corruption, automatic conflict resolution
+- **Read concurrency**: YES - Multiple processes read simultaneously via MVCC snapshots
+- **Write concurrency**: YES - With automatic retry/backoff for conflicts (LanceDB handles internally)
+- **Within-process**: SERIALIZED - SerialDatabaseExecutor enforces single-threaded access
+
+**What changed in recent commits**: Improved understanding and documentation
+- ChunkHound uses `merge_insert` for idempotency AND concurrent write safety
+- LanceDB's MVCC handles multi-process coordination (not ChunkHound's responsibility)
+- Conflict resolution via automatic retries happens transparently in Rust layer
+
+### LanceDB Fragmentation and Deduplication
+
+**Fragment Behavior**:
+- LanceDB stores data in fragments (separate files per write operation)
+- Each `merge_insert` creates a new fragment until compaction threshold (100 operations)
+- `.search().where()` queries may return duplicates across fragments before compaction
+- `.to_pandas()` properly deduplicates (but not suitable for large result sets)
+
+**Critical Fix Applied** (2025-11-29):
+- **Problem**: `search_regex` and `search_semantic` returned duplicate `chunk_id` values
+- **Root Cause**: `.search().where()` without vector query doesn't deduplicate across fragments
+- **Solution**: Explicit deduplication via `_deduplicate_by_id()` helper after all search queries
+- **Impact**: All search results now guaranteed unique, pagination counts accurate
+
+**Deduplication Strategy**:
+```python
+# ALWAYS deduplicate multi-result queries
+results = self._chunks_table.search().where(condition).to_list()
+results = _deduplicate_by_id(results)  # Critical for correctness
+
+# Single-result queries don't need deduplication
+result = self._files_table.search().where(f"id = {id}").to_list()[0]
+```
+
+**When to Deduplicate**:
+- ✅ **MUST**: Any query returning multiple chunks (`search_regex`, `get_chunks_by_file_id`)
+- ✅ **MUST**: Semantic search (fragments may cause edge cases during concurrent writes)
+- ❌ **Skip**: Single-result queries (`get_file_by_id`, `get_chunk_by_id` - first result only)
+- ❌ **Skip**: Stats queries (use `.to_pandas()` which deduplicates automatically)
+
+**Testing Requirements**:
+- Tests must simulate fragmentation (50+ fragments) to catch deduplication bugs
+- Use `fragmented_lancedb_provider` fixture for regression testing
+- Verify: `len(chunk_ids) == len(set(chunk_ids))` (no duplicates)
 
 ## MODIFICATION_RULES
 - NEVER: Remove SerialDatabaseProvider wrapper
@@ -39,6 +109,21 @@ Purpose: Transform codebases into searchable knowledge bases for AI assistants
 | File update (1000 chunks) | 60s | 5s | Drop/recreate indexes |
 | File parsing | Sequential | Parallel (CPU cores) | ProcessPoolExecutor |
 | DB operations | - | - | Single-threaded only |
+
+### LanceDB Fragment Optimization
+
+Fragment optimization controls when LanceDB compacts data files for better query performance.
+
+| Threshold | Use Case | Write Performance | Read Performance |
+|-----------|----------|-------------------|------------------|
+| 0 (always) | Testing/development | Slowest (compact every write) | Fastest (always optimized) |
+| 50 (aggressive) | Read-heavy workloads | Slower (frequent compaction) | Faster (well optimized) |
+| 100 (balanced, default) | Mixed workloads | Good balance | Good balance |
+| 500 (conservative) | Write-heavy workloads | Faster (rare compaction) | Slower (fragmented) |
+
+**Configuration**: Set via `lancedb_optimize_fragment_threshold` in database config or `CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_FRAGMENT_THRESHOLD` environment variable.
+
+**How it works**: LanceDB stores data in fragments. More fragments = slower reads but faster writes. Optimization merges fragments to improve read performance at the cost of write overhead.
 
 ## KEY_COMMANDS
 ```bash
@@ -158,9 +243,173 @@ chunkhound/
 - DuckDB (primary) / LanceDB (alternative)
 - Tree-sitter (27 language parsers: Python, JavaScript, TypeScript, JSX, TSX, Java, Kotlin, Groovy, C, C++, C#, Go, Rust, Haskell, Swift, Bash, MATLAB, Makefile, Objective-C, PHP, Vue, Zig, JSON, YAML, TOML, HCL, Markdown)
 - Custom parsers (2 formats: TEXT, PDF)
-- OpenAI/Ollama embeddings
+- Embedding providers: OpenAI, Ollama, VoyageAI
+- LLM providers (for deep research): OpenAI, Gemini (Google Gen AI SDK), Claude Code CLI, Codex CLI
 - MCP protocol (stdio and HTTP)
 - Pydantic (configuration validation)
+
+## LLM_PROVIDERS
+
+ChunkHound supports multiple LLM providers for deep research code analysis with dual-model architecture (utility + synthesis).
+
+### Supported Providers
+
+**1. Anthropic (Native Provider)** - RECOMMENDED for quality
+- Models: Claude 4.5 generation (Opus 4.5, Sonnet 4.5, Haiku 4.5)
+- Extended Thinking: Shows Claude's reasoning process before final response
+- Interleaved Thinking: Thinking between tool calls for sophisticated reasoning
+- Effort Parameter: Control token usage vs thoroughness tradeoff (Opus 4.5 only)
+- Context Management: Automatic clearing of tool results and thinking blocks
+- Tool Use: Function calling with JSON schema validation
+- Structured Output: Tool-based (more reliable than prompt engineering)
+- Streaming: Required for outputs > 21,333 tokens
+- Default: Haiku 4.5 (utility), Sonnet 4.5 (synthesis)
+
+**2. OpenAI**
+- Models: GPT-5 series, GPT-4 series
+- Structured Output: Native JSON schema validation
+- Default: GPT-5-Nano (utility), GPT-5 (synthesis)
+
+**3. Ollama** (Local)
+- Models: Any Ollama-compatible model
+- Use case: Local development, privacy-sensitive workloads
+
+**4. Claude Code CLI**
+- Integration with Claude Code editor
+- Uses Claude Haiku 4.5 for both roles
+
+**5. Codex CLI**
+- Configurable reasoning effort (minimal/low/medium/high)
+
+### Anthropic Extended Thinking
+
+**What it is**: Claude shows its reasoning process in separate thinking blocks before generating the final response.
+
+**When to use**:
+- Complex code analysis requiring step-by-step reasoning
+- Mathematical or logical problems
+- Multi-step transformations
+- Architectural decisions
+
+**Configuration**:
+```bash
+export CHUNKHOUND_LLM_PROVIDER="anthropic"
+export CHUNKHOUND_LLM_API_KEY="sk-ant-api03-..."
+export CHUNKHOUND_LLM_ANTHROPIC_THINKING_ENABLED="true"
+export CHUNKHOUND_LLM_ANTHROPIC_THINKING_BUDGET_TOKENS="10000"  # Min: 1024
+export CHUNKHOUND_LLM_ANTHROPIC_INTERLEAVED_THINKING="true"  # Optional: thinking between tool calls
+```
+
+**Supported Models**:
+- claude-opus-4-5-20251101: Most capable model with effort control (supports effort parameter)
+- claude-sonnet-4-5-20250929: Smartest model for complex agents and coding
+- claude-haiku-4-5-20251001: Fastest model with near-frontier intelligence
+- claude-opus-4-1-20250805: Exceptional model for specialized reasoning (legacy)
+
+**Important**: `max_tokens` must be greater than `thinking.budget_tokens`. The provider automatically adjusts if needed.
+
+**Token Billing**: Billed for FULL thinking tokens (not just the summary shown in response).
+
+### Opus 4.5 Effort Parameter
+
+**What it is**: Controls how many tokens Claude uses when responding, trading off between thoroughness and efficiency. Only available on Opus 4.5.
+
+**Effort Levels**:
+- `high`: Maximum capability—Claude uses as many tokens as needed (default)
+- `medium`: Balanced approach with moderate token savings
+- `low`: Most efficient—significant token savings with some capability reduction
+
+**Configuration**:
+```bash
+export CHUNKHOUND_LLM_PROVIDER="anthropic"
+export CHUNKHOUND_LLM_SYNTHESIS_MODEL="claude-opus-4-5-20251101"
+export CHUNKHOUND_LLM_ANTHROPIC_EFFORT="medium"  # low, medium, or high
+```
+
+**Use Cases**:
+- Use `high` (default) for complex reasoning, difficult coding problems
+- Use `medium` for balanced speed/quality
+- Use `low` for simple tasks, subagent operations, high-volume use cases
+
+### Anthropic Context Management
+
+**What it is**: Automatic management of conversation context to stay within limits.
+
+**Strategies**:
+- `clear_thinking_20251015`: Clears older thinking blocks from previous turns
+- `clear_tool_uses_20250919`: Clears old tool results when context grows
+
+**Configuration**:
+```bash
+export CHUNKHOUND_LLM_ANTHROPIC_CONTEXT_MANAGEMENT_ENABLED="true"
+export CHUNKHOUND_LLM_ANTHROPIC_CLEAR_THINKING_KEEP_TURNS="2"  # Keep last 2 turns
+export CHUNKHOUND_LLM_ANTHROPIC_CLEAR_TOOL_USES_TRIGGER_TOKENS="100000"
+export CHUNKHOUND_LLM_ANTHROPIC_CLEAR_TOOL_USES_KEEP="5"  # Keep last 5 tool uses
+```
+
+### Configuration Examples
+
+**Anthropic with Extended Thinking**:
+```bash
+export CHUNKHOUND_LLM_PROVIDER="anthropic"
+export CHUNKHOUND_LLM_API_KEY="$ANTHROPIC_API_KEY"
+export CHUNKHOUND_LLM_ANTHROPIC_THINKING_ENABLED="true"
+export CHUNKHOUND_LLM_ANTHROPIC_THINKING_BUDGET_TOKENS="10000"
+export CHUNKHOUND_LLM_UTILITY_MODEL="claude-haiku-4-5-20251001"
+export CHUNKHOUND_LLM_SYNTHESIS_MODEL="claude-sonnet-4-5-20250929"
+```
+
+**Anthropic Opus 4.5 with Full Features**:
+```bash
+export CHUNKHOUND_LLM_PROVIDER="anthropic"
+export CHUNKHOUND_LLM_API_KEY="$ANTHROPIC_API_KEY"
+export CHUNKHOUND_LLM_SYNTHESIS_MODEL="claude-opus-4-5-20251101"
+export CHUNKHOUND_LLM_ANTHROPIC_THINKING_ENABLED="true"
+export CHUNKHOUND_LLM_ANTHROPIC_THINKING_BUDGET_TOKENS="16000"
+export CHUNKHOUND_LLM_ANTHROPIC_INTERLEAVED_THINKING="true"
+export CHUNKHOUND_LLM_ANTHROPIC_EFFORT="medium"
+export CHUNKHOUND_LLM_ANTHROPIC_CONTEXT_MANAGEMENT_ENABLED="true"
+```
+
+**OpenAI**:
+```bash
+export CHUNKHOUND_LLM_PROVIDER="openai"
+export CHUNKHOUND_LLM_API_KEY="$OPENAI_API_KEY"
+export CHUNKHOUND_LLM_UTILITY_MODEL="gpt-5-nano"
+export CHUNKHOUND_LLM_SYNTHESIS_MODEL="gpt-5"
+```
+
+**Ollama (Local)**:
+```bash
+export CHUNKHOUND_LLM_PROVIDER="ollama"
+export CHUNKHOUND_LLM_BASE_URL="http://localhost:11434/v1"
+export CHUNKHOUND_LLM_UTILITY_MODEL="llama3.2"
+export CHUNKHOUND_LLM_SYNTHESIS_MODEL="llama3.2"
+```
+
+### Provider-Specific Features
+
+| Feature | Anthropic | OpenAI | Ollama |
+|---------|-----------|--------|--------|
+| Extended Thinking | ✅ (native) | ❌ | ❌ |
+| Interleaved Thinking | ✅ (Claude 4) | ❌ | ❌ |
+| Effort Parameter | ✅ (Opus 4.5 only) | ❌ | ❌ |
+| Context Management | ✅ (beta) | ❌ | ❌ |
+| Structured Output | ✅ (tool-based) | ✅ (native) | ⚠️ (limited) |
+| Tool Use | ✅ | ✅ | ⚠️ (limited) |
+| Streaming | ✅ | ✅ | ✅ |
+| Custom Endpoint | ✅ | ✅ | ✅ |
+
+### Testing LLM Providers
+
+```bash
+# Manual integration test (all features)
+source ~/.env.private
+uv run python tests/manual/test_anthropic_thinking.py
+
+# Unit tests
+uv run pytest tests/test_anthropic_provider.py -v
+```
 
 ## RERANKING_SUPPORT
 
@@ -367,6 +616,54 @@ print(f"Success! Got {len(results)} results")
 - **Recovery**: Set `CHUNKHOUND_EMBEDDING__RERANK_BATCH_SIZE` to match server limit
 - **Example**: `export CHUNKHOUND_EMBEDDING__RERANK_BATCH_SIZE=32` for TEI servers
 - **Note**: User override is bounded by model caps for safety (prevents OOM)
+
+## LLM_PROVIDERS
+
+### Overview
+ChunkHound supports multiple LLM providers for deep research (`code_research` tool). Dual-model architecture: utility (fast, cheap) and synthesis (high-quality, large-context).
+
+### Supported Providers
+
+**1. Gemini (Google Gen AI SDK)**
+- Models: gemini-3-pro-preview (default), gemini-2.5-pro, gemini-2.5-flash
+- Features: Native async with .aio client, thinking_level/thinking_budget support, structured outputs
+- Authentication: API key from https://aistudio.google.com/apikey
+- Best for: Advanced reasoning, cost-effective with Flash models
+- Implementation: Uses official `google-genai` SDK with proper async patterns
+
+**2. Claude Code CLI**
+- Models: claude-sonnet-4-5-20250929, claude-haiku-4-5-20251001
+- Features: Uses existing Claude subscription (no API credits), workspace isolation
+- Authentication: Subscription-based (no API key needed)
+- Best for: Users with Claude Pro/Team subscriptions
+
+**3. Codex CLI**
+- Models: configurable via CHUNKHOUND_CODEX_DEFAULT_MODEL
+- Features: Reasoning effort control, local deployment support
+- Authentication: CLI handles auth
+- Best for: Custom local deployments
+
+### Configuration
+```bash
+# Gemini provider
+export CHUNKHOUND_LLM__PROVIDER=gemini
+export CHUNKHOUND_LLM__API_KEY=your-google-ai-key
+export CHUNKHOUND_LLM__UTILITY_MODEL=gemini-2.5-flash
+export CHUNKHOUND_LLM__SYNTHESIS_MODEL=gemini-3-pro-preview
+
+# OpenAI provider
+export CHUNKHOUND_LLM__PROVIDER=openai
+export CHUNKHOUND_LLM__API_KEY=your-openai-key
+
+# Claude Code CLI provider (no API key)
+export CHUNKHOUND_LLM__PROVIDER=claude-code-cli
+```
+
+### Common Errors
+- "API key required": Set CHUNKHOUND_LLM__API_KEY for OpenAI/Gemini
+- "Model not found" (404): Check model name or API availability
+- "Rate limit exceeded" (429): Reduce concurrency or add delays
+- "Invalid authentication" (401/403): Verify API key is correct
 
 ## TESTING_APPROACH
 - Smoke tests: MANDATORY before any commit (tests/test_smoke.py)
