@@ -2,7 +2,7 @@
 
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -118,6 +118,39 @@ def _deduplicate_by_id(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return unique
 
 
+def _validate_integer_ids(ids: list[Any], operation: str) -> list[int]:
+    """Validate and convert IDs to integers for safe SQL construction.
+
+    Defense-in-depth against type confusion when building SQL IN clauses.
+    All chunk/file IDs in ChunkHound are 64-bit integers.
+
+    Args:
+        ids: List of values that should be integers
+        operation: Name of calling operation for error messages
+
+    Returns:
+        List of validated integer IDs
+
+    Raises:
+        ValueError: If any ID cannot be converted to integer
+    """
+    if not ids:
+        return []
+
+    validated = []
+    for i, id_val in enumerate(ids):
+        try:
+            int_id = int(id_val)
+            validated.append(int_id)
+        except (TypeError, ValueError) as e:
+            type_name = type(id_val).__name__
+            raise ValueError(
+                f"{operation}: Invalid ID at index {i}: {id_val!r} ({type_name})"
+            ) from e
+
+    return validated
+
+
 class LanceDBProvider(SerialDatabaseProvider):
     """LanceDB implementation using serial executor pattern."""
 
@@ -172,7 +205,18 @@ class LanceDBProvider(SerialDatabaseProvider):
         original_cwd = os.getcwd()
         try:
             os.chdir(abs_db_path.parent)
-            conn = lancedb.connect(abs_db_path.name)
+            # Enable 3-second eventual consistency for read operations.
+            # This ensures cached table handles refresh to see recent deletes within 3s,
+            # aligning with ChunkHound's event processing architecture:
+            # - Debounce delay: 500ms
+            # - Event dedup window: 2s
+            # - Typical processing: 500ms-1.5s
+            # - Total pipeline: ~3s from file change to search availability
+            # Without this, cached handles read stale table versions indefinitely.
+            conn = lancedb.connect(
+                abs_db_path.name,
+                read_consistency_interval=timedelta(seconds=3)
+            )
             return conn
         finally:
             os.chdir(original_cwd)
@@ -875,6 +919,29 @@ class LanceDBProvider(SerialDatabaseProvider):
             except Exception as e:
                 logger.error(f"Error deleting chunk {chunk_id}: {e}")
 
+    def delete_chunks_batch(self, chunk_ids: list[int]) -> None:
+        """Delete multiple chunks by ID efficiently."""
+        self._execute_in_db_thread_sync("delete_chunks_batch", chunk_ids)
+
+    def _executor_delete_chunks_batch(
+        self, conn: Any, state: dict[str, Any], chunk_ids: list[int]
+    ) -> None:
+        """Executor method for delete_chunks_batch - runs in DB thread."""
+        if not chunk_ids or not self._chunks_table:
+            return
+        try:
+            # Validate IDs for defense-in-depth before SQL construction
+            validated_ids = _validate_integer_ids(chunk_ids, "delete_chunks_batch")
+            ids_str = ",".join(str(id) for id in validated_ids)
+            self._chunks_table.delete(f"id IN ({ids_str})")
+
+            # Trigger compaction after batch delete if fragment threshold exceeded
+            # Uses existing configuration (lancedb_optimize_fragment_threshold)
+            if self.should_optimize("post-delete"):
+                self._executor_optimize_tables(conn, state)
+        except Exception as e:
+            logger.error(f"Error deleting chunks batch: {e}")
+
     def update_chunk(self, chunk_id: int, **kwargs) -> None:
         """Update chunk record with new values."""
         # LanceDB doesn't support in-place updates, need to implement via delete/insert
@@ -1015,8 +1082,9 @@ class LanceDBProvider(SerialDatabaseProvider):
 
             # Determine optimal batch size if not provided
             if batch_size is None:
-                # Use larger batches for better performance, but cap at 10k to avoid memory issues
-                batch_size = min(10000, len(embeddings_data))
+                # LanceDB recommends 200k-500k batch sizes for optimal performance
+                # Use 100k as a balance between throughput (10x improvement) and memory
+                batch_size = min(100000, len(embeddings_data))
 
             total_updated = 0
 
@@ -1045,7 +1113,11 @@ class LanceDBProvider(SerialDatabaseProvider):
                 # NOTE: Using Lance SQL filter instead of .search() because .search()
                 # may not reliably find rows with NULL embedding columns (vector search semantics)
                 chunk_ids = list(embedding_lookup.keys())
-                chunk_ids_str = ','.join(map(str, chunk_ids))
+                # Validate IDs for defense-in-depth before SQL construction
+                validated_chunk_ids = _validate_integer_ids(
+                    chunk_ids, "bulk_embedding_insert"
+                )
+                chunk_ids_str = ",".join(map(str, validated_chunk_ids))
 
                 try:
                     # Primary: Use LanceDB's native Lance filter (efficient for large tables)
@@ -1107,27 +1179,17 @@ class LanceDBProvider(SerialDatabaseProvider):
                     )
 
                 # Merge embedding data into existing rows (full row data required)
+                # Use to_dict('records') instead of iterrows() for 10-100x speedup
+                ids_to_update = existing_df["id"].isin(embedding_lookup.keys())
+                rows_to_merge = existing_df[ids_to_update].to_dict("records")
+
                 merge_data = []
-                for _, row in existing_df.iterrows():
-                    chunk_id = row["id"]
-                    if chunk_id in embedding_lookup:
-                        emb_data = embedding_lookup[chunk_id]
-                        merge_data.append(
-                            {
-                                "id": row["id"],
-                                "file_id": row["file_id"],
-                                "content": row["content"],
-                                "start_line": row["start_line"],
-                                "end_line": row["end_line"],
-                                "chunk_type": row["chunk_type"],
-                                "language": row["language"],
-                                "name": row["name"],
-                                "embedding": emb_data["embedding"],
-                                "provider": emb_data["provider"],
-                                "model": emb_data["model"],
-                                "created_time": row["created_time"],
-                            }
-                        )
+                for row in rows_to_merge:
+                    emb_data = embedding_lookup[row["id"]]
+                    row["embedding"] = emb_data["embedding"]
+                    row["provider"] = emb_data["provider"]
+                    row["model"] = emb_data["model"]
+                    merge_data.append(row)
 
                 # merge_insert with PyArrow table to avoid nullable field mismatches
                 # (see LanceDB GitHub issue #2366)
@@ -2035,34 +2097,54 @@ class LanceDBProvider(SerialDatabaseProvider):
         return self._execute_in_db_thread_sync("optimize_tables")
 
     def _executor_optimize_tables(self, conn: Any, state: dict[str, Any]) -> None:
-        """Executor method for optimize_tables - runs in DB thread."""
+        """Executor method for optimize_tables - runs in DB thread.
+
+        Uses cross-process file lock to prevent concurrent optimization operations.
+        LanceDB's MVCC handles concurrent reads/writes safely, but aggressive cleanup
+        during optimize() can delete fragment files still referenced by readers in
+        other processes. The non-blocking lock ensures only one process optimizes
+        at a time while others skip silently.
+        """
         from datetime import timedelta
 
+        from filelock import FileLock, Timeout
+
+        # Create lock file in database directory (each database has its own lock)
+        lock_path = self._db_path / ".optimize.lock"
+        lock = FileLock(lock_path, timeout=0)  # Non-blocking: skip if already locked
+
         try:
-            if self._chunks_table:
-                logger.debug("Optimizing chunks table - compacting fragments...")
-                # Use minimal cleanup window (1 minute) to focus on fragment consolidation
-                # rather than time-based cleanup. The goal is compaction, not age-based deletion.
-                stats = self._chunks_table.optimize(
-                    cleanup_older_than=timedelta(minutes=1), delete_unverified=True
-                )
-                if stats is not None:
-                    logger.debug(
-                        f"Chunks table cleanup freed {stats.bytes_removed / 1024 / 1024:.2f} MB"
+            with lock:
+                # Only one process can optimize at a time
+                if self._chunks_table:
+                    logger.debug("Optimizing chunks table - compacting fragments...")
+                    # Keep versions for 5 minutes to allow readers to finish.
+                    # Never delete unverified files - they may be referenced by readers.
+                    stats = self._chunks_table.optimize(
+                        cleanup_older_than=timedelta(minutes=5),
+                        delete_unverified=False,
                     )
-                logger.debug("Chunks table optimization complete")
+                    if stats is not None:
+                        logger.debug(
+                            f"Chunks table cleanup freed {stats.bytes_removed / 1024 / 1024:.2f} MB"
+                        )
+                    logger.debug("Chunks table optimization complete")
 
-            if self._files_table:
-                logger.debug("Optimizing files table - compacting fragments...")
-                stats = self._files_table.optimize(
-                    cleanup_older_than=timedelta(minutes=1), delete_unverified=True
-                )
-                if stats is not None:
-                    logger.debug(
-                        f"Files table cleanup freed {stats.bytes_removed / 1024 / 1024:.2f} MB"
+                if self._files_table:
+                    logger.debug("Optimizing files table - compacting fragments...")
+                    stats = self._files_table.optimize(
+                        cleanup_older_than=timedelta(minutes=5),
+                        delete_unverified=False,
                     )
-                logger.debug("Files table optimization complete")
+                    if stats is not None:
+                        logger.debug(
+                            f"Files table cleanup freed {stats.bytes_removed / 1024 / 1024:.2f} MB"
+                        )
+                    logger.debug("Files table optimization complete")
 
+        except Timeout:
+            # Another process is optimizing - skip silently to avoid contention
+            logger.debug("Skipping optimization - another process holds the lock")
         except Exception as e:
             logger.warning(f"Failed to optimize tables: {e}")
 

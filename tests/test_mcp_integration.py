@@ -277,9 +277,9 @@ def delete_test_unique_function():
         
         # Delete the file
         delete_file.unlink()
-        
+
         # Wait for deletion processing
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(4.0)  # Deletion + 3s consistency interval
         
         # Verify content is no longer searchable
         after_delete = await execute_tool(

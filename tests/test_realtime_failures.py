@@ -198,9 +198,9 @@ class TestRealtimeFailures:
         
         # Delete the file
         test_file.unlink()
-        
+
         # Wait for deletion processing
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(4.0)  # Deletion + 3s consistency interval
         
         # Check if file was removed from database - use resolved path
         file_record_after = services.provider.get_file_by_path(str(test_file.resolve()))
