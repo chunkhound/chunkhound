@@ -701,13 +701,8 @@ class IndexingCoordinator(BaseService):
             return None  # No limit configured
 
         # Extract max_disk_usage_mb from config
-        max_disk_usage_mb = None
-        if hasattr(self.config, 'database') and hasattr(self.config.database, 'max_disk_usage_mb'):
-            # Full Config object
-            max_disk_usage_mb = self.config.database.max_disk_usage_mb
-        elif hasattr(self.config, 'max_disk_usage_mb'):
-            # Direct DatabaseConfig object (for tests)
-            max_disk_usage_mb = self.config.max_disk_usage_mb
+        database_config = getattr(self.config, "database", self.config)
+        max_disk_usage_mb = getattr(database_config, "max_disk_usage_mb", None)
 
         if max_disk_usage_mb is None:
             return None  # No limit configured

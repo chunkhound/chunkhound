@@ -272,8 +272,8 @@ class TestIndexingCoordinatorDiskUsage:
 
     def test_check_disk_usage_limit_directory_size_calculation(self, tmp_path):
         """Test that directory size calculation works correctly for database directories."""
-        # Use a local directory for test files instead of tmp
-        test_dir = Path(__file__).parent / "test_disk_size_db"
+        # Use a local working directory instead of tmp to avoid test failures caused by not having OS privileges to create symlink
+        test_dir = Path.cwd() / "test_disk_size_db"
         test_dir.mkdir(parents=True, exist_ok=True)
 
         try:
