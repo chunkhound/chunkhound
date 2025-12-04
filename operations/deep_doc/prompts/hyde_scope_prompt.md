@@ -1,26 +1,19 @@
-You are generating a hypothetical, best-effort research plan for a software subsystem
-based ONLY on the file layout, without relying on any pre-indexed embeddings, code
-search, or prior knowledge about the project.
+You are generating a hypothetical, best-effort research plan for a software project.
 
 Workspace commit context (if available):
 - created_from_sha: {created}
-- previous_target_sha: {previous}
-- target_sha: {target}
 
-In-scope folder (relative to the workspace root):
+In-scope project (relative to the workspace root):
 - {scope_display}
 
 Within this scope, the following files and directories currently exist (sampled and capped):
 {files_block}
 
-Sample code snippets from a small subset of files (for planning only, not exhaustive):
+Sample code snippets from files (might be a subset, not full content, try to fill in gaps):
 {code_context_block}
 
 HyDE objective:
-- You do NOT have full semantic understanding of every file; treat the file names
-  and their relative locations as hints.
-- Based on those hints and your general software architecture intuition, hallucinate
-  a plausible but coherent picture of how this in-scope folder is likely structured.
+- Hallucinate a plausible picture of how this in-scope project is likely structured.
 - Your primary deliverable is a list of focused research hooks (questions / topics)
   that a separate deep code research system will investigate using real code.
 - Hooks should aim to cover the full breadth of the subsystem (core, providers,
@@ -68,15 +61,11 @@ Output format:
       failure modes, or performance guardrails.
 
 Guidelines:
-- Make generous but coherent assumptions based on naming (for example, `core`, `config`,
-  `services`, `providers`, `parsers`, `tests`) but do not assert facts as guaranteed
-  truth; you are proposing hypotheses.
-- Prefer concise bullet lists over long prose paragraphs, but you may use vivid,
-  imaginative wording inside each bullet as long as the research question remains clear.
+- Make generous assumptions based on naming (for example, `core`, `config`,
+  `services`, `providers`, `parsers`, `tests`) and on the inlined project content
+- Prefer bullet lists, but you may use vivid, imaginative wording inside each bullet as long as the research question remains clear.
 - Err on the side of being over-generative rather than conservative: for a non-trivial
-  scope, produce a long, exploratory plan with many hooks (dozens, if appropriate) and
+  scope, produce a long, exploratory plan with many hooks and
   several distinct subsystem groups rather than a short outline.
 - Every `- ` bullet under "Global Hooks" and "Subsystem Hooks" should be a standalone
   research question that would make sense as a deep code_research query.
-- Do NOT include citations, sources tables, or a full Agent Doc; your output is a plan
-  for future research, not the final documentation.

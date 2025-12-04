@@ -44,11 +44,17 @@ class CodexCLIProvider(LLMProvider):
         timeout: int = 60,
         max_retries: int = 3,
         reasoning_effort: str | None = None,
+        use_base_codex_config: bool = False,
     ) -> None:
         self._model = model
         self._timeout = timeout
         self._max_retries = max_retries
         self._reasoning_effort = self._resolve_reasoning_effort(reasoning_effort)
+        # When True, the overlay CODEX_HOME will be created as a full copy of
+        # the user's existing CODEX_HOME (including config.toml and MCP/tool
+        # settings). This is primarily used by the deep-doc HyDE assembly
+        # provider so its behavior matches a manual `codex exec` run.
+        self._use_base_codex_config = use_base_codex_config
 
         # Usage accounting (estimates)
         self._requests_made = 0
@@ -88,7 +94,7 @@ class CodexCLIProvider(LLMProvider):
         """Resolve reasoning effort override."""
         env_override = os.getenv("CHUNKHOUND_CODEX_REASONING_EFFORT")
         candidate = requested or env_override
-        allowed = {"minimal", "low", "medium", "high"}
+        allowed = {"minimal", "low", "medium", "high", "xhigh"}
 
         if not candidate:
             return "low"
@@ -149,21 +155,38 @@ class CodexCLIProvider(LLMProvider):
         overlay = Path(tempfile.mkdtemp(prefix="chunkhound-codex-overlay-"))
         base = self._get_base_codex_home()
         model_name = self._resolve_model_name(model_override or self._model)
+        # When _use_base_codex_config is True we copy the entire CODEX_HOME
+        # tree so the overlay behaves exactly like the user's normal Codex
+        # configuration. Otherwise we keep the original minimal overlay
+        # behavior (auth/session only + small, history-less config.toml).
+        use_base_config = self._use_base_codex_config
         try:
             if base and base.exists():
-                self._copy_minimal_codex_state(base, overlay)
+                if use_base_config:
+                    # Copy the entire CODEX_HOME tree so the overlay behaves
+                    # exactly like the user's normal Codex configuration.
+                    shutil.copytree(base, overlay, dirs_exist_ok=True)
+                else:
+                    # Default behavior: copy only minimal auth/session state
+                    # and then write a small, history-less config.toml.
+                    self._copy_minimal_codex_state(base, overlay)
 
-            # Write our minimal config.toml ensuring no MCP and no history
-            config_path = overlay / "config.toml"
-            # Many Codex builds expect top-level `model` keys (not a [model] table)
-            cfg_lines = [
-                "[history]",
-                'persistence = "none"',
-                "",
-                f'model = "{model_name}"',
-                f'model_reasoning_effort = "{self._reasoning_effort}"',
-            ]
-            config_path.write_text("\n".join(cfg_lines) + "\n", encoding="utf-8")
+            # When using the base config, we intentionally do NOT overwrite
+            # config.toml so that all user settings (model, verbosity, MCP,
+            # features, etc.) remain intact. For the default overlay mode we
+            # still write our own minimal config.toml.
+            if not use_base_config:
+                config_path = overlay / "config.toml"
+                # Many Codex builds expect top-level `model` keys (not a
+                # [model] table).
+                cfg_lines = [
+                    "[history]",
+                    'persistence = "none"',
+                    "",
+                    f'model = "{model_name}"',
+                    f'model_reasoning_effort = "{self._reasoning_effort}"',
+                ]
+                config_path.write_text("\n".join(cfg_lines) + "\n", encoding="utf-8")
         except Exception as e:
             logger.warning(f"Failed to build Codex overlay home: {e}")
         return str(overlay)

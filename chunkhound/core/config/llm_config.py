@@ -86,18 +86,18 @@ class LLMConfig(BaseSettings):
         description="Model for final synthesis (large context analysis)",
     )
 
-    codex_reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = Field(
+    codex_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = Field(
         default=None,
         description="Default Codex CLI reasoning effort (Responses API thinking level)",
     )
     codex_reasoning_effort_utility: (
-        Literal["minimal", "low", "medium", "high"] | None
+        Literal["minimal", "low", "medium", "high", "xhigh"] | None
     ) = Field(
         default=None,
         description="Codex CLI reasoning effort override for utility-stage operations",
     )
     codex_reasoning_effort_synthesis: (
-        Literal["minimal", "low", "medium", "high"] | None
+        Literal["minimal", "low", "medium", "high", "xhigh"] | None
     ) = Field(
         default=None,
         description="Codex CLI reasoning effort override for synthesis-stage operations",
@@ -124,7 +124,7 @@ class LLMConfig(BaseSettings):
         description="Alias for assembly_model used by some configurations.",
     )
 
-    assembly_reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = Field(
+    assembly_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = Field(
         default=None,
         description="Codex/OpenAI reasoning effort override for agent-doc final assembly.",
     )
@@ -225,6 +225,7 @@ class LLMConfig(BaseSettings):
         mode="before",
     )
     def normalize_codex_effort(cls, v: str | None) -> str | None:  # noqa: N805
+        """Normalize Codex effort strings."""
         if v is None:
             return v
         if isinstance(v, str):

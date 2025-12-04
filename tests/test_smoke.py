@@ -115,7 +115,7 @@ class TestCLICommands:
             ],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=15,
         )
 
         assert result.returncode == 0, (

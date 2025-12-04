@@ -465,9 +465,13 @@ async def _run_research_query_with_metadata(
     llm_manager: LLMManager | None,
     prompt: str,
     scope_label: str | None = None,
+    path_override: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Run deep_research_impl and return (answer, metadata)."""
-    path_filter = None if scope_label in (None, "/") else scope_label
+    if path_override is not None and path_override.strip():
+        path_filter = path_override.strip()
+    else:
+        path_filter = None if scope_label in (None, "/") else scope_label
     result: dict[str, Any] = await deep_research_impl(
         services=services,
         embedding_manager=embedding_manager,
@@ -506,6 +510,51 @@ def _iter_scope_files(scope_path: Path, project_root: Path) -> list[str]:
             continue
         file_paths.append(str(rel).replace("\\", "/"))
     return file_paths
+
+
+def _infer_hyde_unit_path(
+    scope_label: str,
+    title: str,
+    body: str,
+) -> str | None:
+    """Infer a scoped path_filter for a HyDE unit (section or bullet).
+
+    This helper looks for explicit module hints in the HyDE plan, primarily
+    backticked paths in section titles such as:
+
+        ### Core Research Agent / Orchestration (`internal/agent`)
+
+    When a relative path is found, it is resolved against the scope_label
+    (e.g. 'arguseek') so that deep_research_impl receives a prefix such as
+    'arguseek/internal/agent'. If no clear path can be inferred, this returns
+    None and the caller falls back to the broader scope_label filter.
+    """
+    import re
+
+    text = f"{title}\n{body}"
+    match = re.search(r"\(`([^`]+)`\)", text)
+    if not match:
+        return None
+
+    raw = match.group(1).strip()
+    if not raw:
+        return None
+
+    # Normalize common relative path patterns
+    candidate = raw.lstrip("./").replace("\\", "/")
+    scope_clean = scope_label.strip().strip("/")
+
+    if not scope_clean:
+        # Scope is the workspace root; use the candidate as-is.
+        return candidate
+
+    # If the candidate already appears to be scoped (e.g. 'arguseek/internal/agent'),
+    # respect it directly.
+    if candidate == scope_clean or candidate.startswith(scope_clean + "/"):
+        return candidate
+
+    # Otherwise treat it as relative to the scoped folder.
+    return f"{scope_clean}/{candidate}"
 
 
 def _collect_scope_files(
@@ -659,7 +708,7 @@ class HydeConfig:
         max_snippet_chars = 0
         max_tokens = 30_000
         # Global snippet token budget for HyDE source/context section.
-        max_snippet_tokens = 100_000
+        max_snippet_tokens = 50_000
 
         def _parse_positive_int(env_name: str, default: int) -> int:
             value = os.getenv(env_name)
@@ -1004,6 +1053,10 @@ async def _run_hyde_map_passes(
     findings: list[dict[str, Any]] = []
     calls = 0
 
+    path_routing_enabled = os.getenv(
+        "CH_AGENT_DOC_CODE_RESEARCH_HYDE_PATH_ROUTING", "0"
+    ) == "1"
+
     for unit in units:
         title = unit["title"]
         body = unit["body"]
@@ -1017,12 +1070,17 @@ async def _run_hyde_map_passes(
             section_body=body,
         ).strip()
 
+        path_override: str | None = None
+        if path_routing_enabled:
+            path_override = _infer_hyde_unit_path(scope_label, title, body)
+
         answer, meta = await _run_research_query_with_metadata(
             services=services,
             embedding_manager=embedding_manager,
             llm_manager=llm_manager,
             prompt=query,
             scope_label=scope_label,
+            path_override=path_override,
         )
         calls += 1
 
@@ -1384,6 +1442,14 @@ def _build_llm_metadata_and_assembly(
                 assembly_cfg["model"] = assembly_model_name
             if assembly_effort:
                 assembly_cfg["reasoning_effort"] = assembly_effort.strip().lower()
+
+            # Optional HyDE-specific behavior: when enabled, request that the
+            # Codex CLI overlay uses the full CODEX_HOME configuration instead
+            # of the minimal, history-less overlay. This keeps code_research
+            # providers on the default overlay while allowing HyDE + assembly
+            # to mimic a manual `codex exec` run.
+            if os.getenv("CH_AGENT_DOC_HYDE_USE_FULL_CODEX_CONFIG", "0") == "1":
+                assembly_cfg["use_base_codex_config"] = True
 
             # Use the public factory on LLMManager to construct the provider.
             assembly_provider = llm_manager.create_provider_for_config(assembly_cfg)
