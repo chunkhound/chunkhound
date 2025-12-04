@@ -1641,6 +1641,14 @@ class IndexingCoordinator(BaseService):
         effective_excludes = list(
             (self.config.indexing.get_effective_config_excludes() if self.config and getattr(self.config, "indexing", None) else [])
         )
+        # Add global gitignore patterns to effective excludes
+        try:
+            from chunkhound.utils.ignore_engine import _collect_global_gitignore_patterns
+            global_pats = _collect_global_gitignore_patterns()
+            if global_pats:
+                effective_excludes.extend(global_pats)
+        except Exception:
+            pass
         # Also add dynamic DB path exclusion when DB lives under the directory
         try:
             dbp = getattr(self._db, "db_path", None)
@@ -2138,6 +2146,16 @@ class IndexingCoordinator(BaseService):
         except Exception:
             from chunkhound.core.config.indexing_config import IndexingConfig as _Idx
             effective_excludes = _Idx._default_excludes()
+
+        # Add global gitignore patterns to effective excludes
+        try:
+            from chunkhound.utils.ignore_engine import _collect_global_gitignore_patterns
+            global_pats = _collect_global_gitignore_patterns()
+            if global_pats:
+                effective_excludes.extend(global_pats)
+        except Exception:
+            pass
+
         # Also exclude dynamic DB path when it lives under directory
         try:
             dbp = getattr(self._db, "db_path", None)

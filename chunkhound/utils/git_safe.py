@@ -36,6 +36,44 @@ def _build_git_env() -> dict[str, str]:
     return env
 
 
+def get_global_excludes_file() -> Path | None:
+    """Get the path to the global gitignore file from git config.
+
+    Reads core.excludesFile from git config (without the isolation env
+    that run_git uses) to support global gitignore patterns.
+
+    Returns:
+        Path to global excludes file if configured and exists, None otherwise.
+    """
+    try:
+        # Run git config WITHOUT the isolation env to read user config
+        proc = subprocess.run(
+            ["git", "config", "--global", "--get", "core.excludesFile"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            text=True,
+            timeout=5,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            path = Path(proc.stdout.strip()).expanduser()
+            if path.exists():
+                return path
+    except Exception:
+        pass
+
+    # Fallback: check default locations
+    for default in [
+        Path.home() / ".gitignore_global",
+        Path.home() / ".gitignore",
+        Path.home() / ".config" / "git" / "ignore",
+    ]:
+        if default.exists():
+            return default
+
+    return None
+
+
 def run_git(args: Sequence[str], cwd: Path | None, timeout_s: float | None = None) -> subprocess.CompletedProcess:
     cmd = ["git", *list(args)]
     env = _build_git_env()
