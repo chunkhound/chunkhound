@@ -297,3 +297,29 @@ class ProviderError(ChunkHoundError):
         self.service = service
         self.status_code = status_code
         self.reason = reason
+
+
+class DiskUsageLimitExceededError(ChunkHoundError):
+    """Raised when database disk usage exceeds configured limits.
+
+    This exception is used when the database file size grows beyond the
+    configured maximum disk usage limit, preventing further indexing operations.
+    """
+
+    def __init__(
+        self,
+        current_size_mb: float,
+        limit_mb: float,
+        context: dict[str, Any] | None = None,
+    ):
+        """Initialize disk usage limit exceeded error.
+
+        Args:
+            current_size_mb: Current database size in MB
+            limit_mb: Configured limit in MB
+            context: Optional additional context
+        """
+        message = f"Database disk usage limit exceeded: {current_size_mb:.1f} MB >= {limit_mb:.1f} MB"
+        super().__init__(message, context)
+        self.current_size_mb = current_size_mb
+        self.limit_mb = limit_mb

@@ -281,3 +281,23 @@ chunkhound index --check-ignores --vs git --json > ignore_diff.json
 
 Notes:
 - When piping simulate output to tools like `head`, BrokenPipe is handled gracefully; prefer `CHUNKHOUND_NO_RICH=1` for easy JSON parsing.
+
+## Retrieval & Clustering Benchmarks
+
+Two built-in harnesses make it easy to track retrieval and clustering quality with sane defaults:
+
+- **Language retrieval (semantic)**  
+  - Command: `make bench-lang`  
+  - Builds/refreshes the `lang-eval-dev` synthetic corpus under `.chunkhound/benches/lang-eval-dev/source`, runs semantic search across all supported languages with `k=10`, and writes a JSON report to `.chunkhound/benches/lang-eval-dev/eval_semantic_k10.json`.  
+  - Optional: override config via `make bench-lang CONFIG=.chunkhound.json`.
+
+- **Clustering stress test**  
+  - Command: `make bench-cluster`  
+  - Uses the `cluster-stress-dev` synthetic corpus under `.chunkhound/benches/cluster-stress-dev/source` (generate via `uv run python scripts/generate_cluster_bench.py --bench-id cluster-stress-dev` if needed), runs the clustering evaluation harness, and writes metrics to `.chunkhound/benches/cluster-stress-dev/cluster_eval.json`.  
+  - Optional: override config via `make bench-cluster CONFIG=.chunkhound.json`.
+
+Both harnesses also accept a `--bench-root` argument on their underlying
+CLI (`chunkhound.tools.eval.search` and `chunkhound.tools.eval_cluster`)
+to point at alternative bench directories instead of the default
+`.chunkhound/benches` tree. This is useful when running experiments in
+scratch or temporary locations. 

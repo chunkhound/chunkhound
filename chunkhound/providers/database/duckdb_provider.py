@@ -1856,9 +1856,9 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             if normalized_path is not None:
                 query += " AND f.path LIKE ?"
-                params.append(
-                    f"{normalized_path}%"
-                )  # Simple prefix match on relative paths
+                # Use substring match so callers can pass repo-relative paths
+                # even when the database base_directory is higher (e.g., monorepo root).
+                params.append(f"%{normalized_path}%")
 
             # Get total count for pagination
             # Build count query separately to avoid string replacement issues
@@ -1878,9 +1878,8 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             if normalized_path is not None:
                 count_query += " AND f.path LIKE ?"
-                count_params.append(
-                    f"{normalized_path}%"
-                )  # Simple prefix match on relative paths
+                # Substring match for consistency with main query
+                count_params.append(f"%{normalized_path}%")
 
             total_count = conn.execute(count_query, count_params).fetchone()[0]
 
@@ -1968,9 +1967,8 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             if normalized_path is not None:
                 where_conditions.append("f.path LIKE ?")
-                params.append(
-                    f"{normalized_path}%"
-                )  # Simple prefix match on relative paths
+                # Allow matching repo-relative segments inside stored paths
+                params.append(f"%{normalized_path}%")
 
             where_clause = " AND ".join(where_conditions)
 
@@ -2152,7 +2150,8 @@ class DuckDBProvider(SerialDatabaseProvider):
             params: list[Any] = [target_embedding, provider, model, chunk_id]
             if normalized_path is not None:
                 path_condition = "AND f.path LIKE ?"
-                params.append(f"{normalized_path}%")
+                # Substring match so repo-relative scopes still work when base_directory is higher
+                params.append(f"%{normalized_path}%")
 
             # Query for similar chunks (exclude the original chunk)
             # Cast the target embedding to match the table's embedding type

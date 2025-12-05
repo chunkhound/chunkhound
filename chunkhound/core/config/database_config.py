@@ -42,6 +42,13 @@ class DatabaseConfig(BaseModel):
         description="Minimum fragment count to trigger optimization (0 = always optimize, 50 = aggressive, 100 = balanced, 500 = conservative)",
     )
 
+    # Disk usage limits
+    max_disk_usage_mb: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Maximum database size in MB before indexing is stopped (None = no limit)",
+    )
+
     @field_validator("path")
     def validate_path(cls, v: Path | None) -> Path | None:
         """Convert string paths to Path objects."""
@@ -108,6 +115,12 @@ class DatabaseConfig(BaseModel):
             help="Database provider to use",
         )
 
+        parser.add_argument(
+            "--max-disk-usage-gb",
+            type=float,
+            help="Maximum database size in GB before indexing is stopped",
+        )
+
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
         """Load database config from environment variables."""
@@ -123,6 +136,13 @@ class DatabaseConfig(BaseModel):
             config["lancedb_index_type"] = index_type
         if threshold := os.getenv("CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_FRAGMENT_THRESHOLD"):
             config["lancedb_optimize_fragment_threshold"] = int(threshold)
+        # Disk usage limit from environment
+        if max_disk_gb := os.getenv("CHUNKHOUND_DATABASE__MAX_DISK_USAGE_GB"):
+            try:
+                config["max_disk_usage_mb"] = float(max_disk_gb) * 1024.0
+            except ValueError:
+                # Invalid value - silently ignore
+                pass
         return config
 
     @classmethod
@@ -135,8 +155,13 @@ class DatabaseConfig(BaseModel):
             overrides["path"] = args.database_path
         if hasattr(args, "database_provider") and args.database_provider:
             overrides["provider"] = args.database_provider
+        if hasattr(args, "max_disk_usage_gb") and args.max_disk_usage_gb is not None:
+            overrides["max_disk_usage_mb"] = args.max_disk_usage_gb * 1024.0
         return overrides
 
     def __repr__(self) -> str:
         """String representation of database configuration."""
-        return f"DatabaseConfig(provider={self.provider}, path={self.path})"
+        parts = [f"provider={self.provider}", f"path={self.path}"]
+        if self.max_disk_usage_mb is not None:
+            parts.append(f"max_disk_usage_mb={self.max_disk_usage_mb}")
+        return f"DatabaseConfig({', '.join(parts)})"
