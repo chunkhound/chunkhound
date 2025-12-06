@@ -51,29 +51,38 @@ class LLMConfig(BaseSettings):
         "codex-cli",
         "gemini",
         "anthropic",
+        "opencode-cli",
     ] = Field(
         default="openai",
         description="Default LLM provider for both roles (utility, synthesis)",
     )
 
     # Optional per-role overrides (utility vs synthesis)
-    utility_provider: Literal[
-        "openai",
-        "ollama",
-        "claude-code-cli",
-        "codex-cli",
-        "anthropic",
-        "gemini",
-    ] | None = Field(default=None, description="Override provider for utility ops")
+    utility_provider: (
+        Literal[
+            "openai",
+            "ollama",
+            "claude-code-cli",
+            "codex-cli",
+            "anthropic",
+            "gemini",
+            "opencode-cli",
+        ]
+        | None
+    ) = Field(default=None, description="Override provider for utility ops")
 
-    synthesis_provider: Literal[
-        "openai",
-        "ollama",
-        "claude-code-cli",
-        "codex-cli",
-        "anthropic",
-        "gemini",
-    ] | None = Field(default=None, description="Override provider for synthesis ops")
+    synthesis_provider: (
+        Literal[
+            "openai",
+            "ollama",
+            "claude-code-cli",
+            "codex-cli",
+            "anthropic",
+            "gemini",
+            "opencode-cli",
+        ]
+        | None
+    ) = Field(default=None, description="Override provider for synthesis ops")
 
     # Model Configuration (dual-model architecture)
     utility_model: str = Field(
@@ -341,6 +350,9 @@ class LLMConfig(BaseSettings):
             # - claude-opus-4-5-20251101: Most capable model with effort control (supports effort parameter)
             # - claude-opus-4-1-20250805: Exceptional model for specialized reasoning (legacy)
             return ("claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929")
+        elif self.provider == "opencode-cli":
+            # OpenCode CLI: Use OpenAI models by default (provider/model format)
+            return ("opencode/grok-code", "opencode/grok-code")
         else:
             return ("gpt-5-nano", "gpt-5")
 
@@ -353,13 +365,13 @@ class LLMConfig(BaseSettings):
         """
         resolved_utility_provider = self.utility_provider or self.provider
         resolved_synthesis_provider = self.synthesis_provider or self.provider
-        no_key_required = {"ollama", "claude-code-cli", "codex-cli"}
+        no_key_required = {"ollama", "claude-code-cli", "codex-cli", "opencode-cli"}
         if (
             resolved_utility_provider in no_key_required
             and resolved_synthesis_provider in no_key_required
         ):
-            # Ollama and Claude Code CLI don't require API key
-            # Claude Code CLI uses subscription-based authentication
+            # Ollama, Claude Code CLI, and OpenCode CLI don't require API key
+            # Claude Code CLI and OpenCode CLI use subscription-based authentication
             return True
         else:
             # OpenAI and Anthropic require API key
@@ -375,7 +387,8 @@ class LLMConfig(BaseSettings):
         missing = []
 
         if (
-            self.provider not in ("ollama", "claude-code-cli", "codex-cli")
+            self.provider
+            not in ("ollama", "claude-code-cli", "codex-cli", "opencode-cli")
             and not self.api_key
         ):
             missing.append("api_key (set CHUNKHOUND_LLM_API_KEY)")
@@ -407,19 +420,43 @@ class LLMConfig(BaseSettings):
 
         parser.add_argument(
             "--llm-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic", "gemini"],
+            choices=[
+                "openai",
+                "ollama",
+                "claude-code-cli",
+                "codex-cli",
+                "anthropic",
+                "gemini",
+                "opencode-cli",
+            ],
             help="Default LLM provider for both roles",
         )
 
         parser.add_argument(
             "--llm-utility-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic", "gemini"],
+            choices=[
+                "openai",
+                "ollama",
+                "claude-code-cli",
+                "codex-cli",
+                "anthropic",
+                "gemini",
+                "opencode-cli",
+            ],
             help="Override LLM provider for utility operations",
         )
 
         parser.add_argument(
             "--llm-synthesis-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic", "gemini"],
+            choices=[
+                "openai",
+                "ollama",
+                "claude-code-cli",
+                "codex-cli",
+                "anthropic",
+                "gemini",
+                "opencode-cli",
+            ],
             help="Override LLM provider for synthesis operations",
         )
 
