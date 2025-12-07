@@ -685,7 +685,8 @@ def _display_detected_configs(
                 table.add_row(f"• {provider_name} configured via environment")
             else:
                 table.add_row(
-                    f"• {provider_name} server detected at {config.get('base_url', 'unknown')}"
+                        f"• {provider_name} server detected at "
+                        f"{config.get('base_url', 'unknown')}"
                 )
 
     if formatter.console is not None:
@@ -701,7 +702,8 @@ def _display_detected_configs(
                 elif provider == "local":
                     provider_name = config.get("provider_name", "Unknown")
                     print(
-                        f"• {provider_name} server detected at {config.get('base_url', 'unknown')}"
+                    f"• {provider_name} server detected at "
+                    f"{config.get('base_url', 'unknown')}"
                     )
 
 
@@ -854,7 +856,8 @@ async def _setup_claude_code(target_path: Path, formatter: RichOutputFormatter) 
         formatter.success(f"✓ ChunkHound MCP server added to {mcp_path}")
         print("You can now use ChunkHound tools directly in Claude Code!")
         print(
-            "Claude Code will prompt you to approve this project-scoped server on first use."
+            "Claude Code will prompt you to approve this project-scoped "
+            "server on first use."
         )
         return True
     else:
