@@ -42,7 +42,8 @@ class OpenCodeCLIProvider(LLMProvider):
 
         Args:
             api_key: Not used (credentials managed by opencode auth)
-            model: Model name to use in provider/model format (e.g., "opencode/grok-code")
+            model: Model name to use in provider/model format
+                (e.g., "opencode/grok-code")
             base_url: Not used (CLI uses default endpoints)
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts for failed requests
@@ -141,11 +142,13 @@ class OpenCodeCLIProvider(LLMProvider):
                 if process.returncode != 0:
                     error_msg = stderr.decode("utf-8") if stderr else "Unknown error"
                     last_error = RuntimeError(
-                        f"OpenCode CLI command failed (exit {process.returncode}): {error_msg}"
+                        f"OpenCode CLI command failed (exit {process.returncode}): "
+                        f"{error_msg}"
                     )
                     if attempt < self._max_retries - 1:
                         logger.warning(
-                            f"OpenCode CLI attempt {attempt + 1} failed, retrying: {error_msg}"
+                            f"OpenCode CLI attempt {attempt + 1} failed, "
+                            f"retrying: {error_msg}"
                         )
                         continue
                     raise last_error
@@ -226,8 +229,8 @@ class OpenCodeCLIProvider(LLMProvider):
                     f"(model={self._model}, prompt_length={len(prompt)})"
                 )
                 raise RuntimeError(
-                    "LLM returned empty response from OpenCode CLI. "
-                    "This may indicate a CLI error, authentication issue, or model refusal."
+                    "LLM returned empty response from OpenCode CLI. This may "
+                    "indicate a CLI error, authentication issue, or model refusal."
                 )
 
             # Track usage (estimates since CLI doesn't return token counts)
@@ -280,7 +283,8 @@ class OpenCodeCLIProvider(LLMProvider):
             RuntimeError: If output is not valid JSON or doesn't match schema
         """
         # Build structured prompt with schema
-        structured_prompt = f"""Please respond with ONLY valid JSON that conforms to this schema:
+        structured_prompt = f"""Please respond with ONLY valid JSON that conforms
+to this schema:
 
 {json.dumps(json_schema, indent=2)}
 
@@ -299,7 +303,8 @@ Respond with JSON only, no additional text."""
                     "OpenCode CLI structured completion returned empty content"
                 )
                 raise RuntimeError(
-                    "LLM structured completion returned empty response from OpenCode CLI"
+                    "LLM structured completion returned empty response from "
+                    "OpenCode CLI"
                 )
 
             # Track usage
