@@ -147,6 +147,12 @@ class LanceDBProvider(SerialDatabaseProvider):
         self._fragment_threshold = (
             config.lancedb_optimize_fragment_threshold if config else 100
         )
+        self._optimize_during_indexing = (
+            config.lancedb_optimize_during_indexing if config else True
+        )
+        self._indexing_fragment_threshold = (
+            config.lancedb_indexing_fragment_threshold if config else 50
+        )
         self.connection: Any | None = (
             None  # For backward compatibility only - do not use directly
         )
@@ -2029,6 +2035,23 @@ class LanceDBProvider(SerialDatabaseProvider):
         except Exception as e:
             logger.debug(f"Could not check fragment count, will optimize: {e}")
             return True
+
+    def should_optimize_during_indexing(self) -> bool:
+        """Check if optimization should run during indexing to prevent fragmentation.
+
+        Returns:
+            True if proactive optimization is enabled and fragment threshold exceeded
+        """
+        if not self._optimize_during_indexing:
+            return False
+
+        try:
+            counts = self.get_fragment_count()
+            chunks_fragments = counts.get("chunks", 0)
+            return chunks_fragments >= self._indexing_fragment_threshold
+        except Exception as e:
+            logger.debug(f"Could not check fragment count for indexing optimization: {e}")
+            return False
 
     def optimize_tables(self) -> None:
         """Optimize tables by compacting fragments and rebuilding indexes."""

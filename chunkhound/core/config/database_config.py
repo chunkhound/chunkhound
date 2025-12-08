@@ -49,6 +49,33 @@ class DatabaseConfig(BaseModel):
         description="Maximum database size in MB before indexing is stopped (None = no limit)",
     )
 
+    # Retry configuration
+    retry_on_timeout: bool = Field(
+        default=True,
+        description="Enable automatic retry for database timeouts"
+    )
+    max_retries: int = Field(
+        default=3,
+        ge=0,
+        description="Maximum retry attempts for timed-out operations"
+    )
+    retry_backoff_seconds: float = Field(
+        default=1.0,
+        ge=0.0,
+        description="Base backoff time between retries (exponential)"
+    )
+
+    # LanceDB-specific optimization
+    lancedb_optimize_during_indexing: bool = Field(
+        default=True,
+        description="Run optimization during indexing to prevent fragmentation"
+    )
+    lancedb_indexing_fragment_threshold: int = Field(
+        default=50,
+        ge=1,
+        description="Fragment count threshold for optimization during indexing"
+    )
+
     @field_validator("path")
     def validate_path(cls, v: Path | None) -> Path | None:
         """Convert string paths to Path objects."""
@@ -143,6 +170,30 @@ class DatabaseConfig(BaseModel):
             except ValueError:
                 # Invalid value - silently ignore
                 pass
+
+        # Retry configuration
+        if retry_on_timeout := os.getenv("CHUNKHOUND_DATABASE__RETRY_ON_TIMEOUT"):
+            config["retry_on_timeout"] = retry_on_timeout.lower() in ("true", "1", "yes")
+        if max_retries := os.getenv("CHUNKHOUND_DATABASE__MAX_RETRIES"):
+            try:
+                config["max_retries"] = int(max_retries)
+            except ValueError:
+                pass
+        if retry_backoff := os.getenv("CHUNKHOUND_DATABASE__RETRY_BACKOFF_SECONDS"):
+            try:
+                config["retry_backoff_seconds"] = float(retry_backoff)
+            except ValueError:
+                pass
+
+        # LanceDB-specific optimization
+        if optimize_during_indexing := os.getenv("CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_DURING_INDEXING"):
+            config["lancedb_optimize_during_indexing"] = optimize_during_indexing.lower() in ("true", "1", "yes")
+        if fragment_threshold := os.getenv("CHUNKHOUND_DATABASE__LANCEDB_INDEXING_FRAGMENT_THRESHOLD"):
+            try:
+                config["lancedb_indexing_fragment_threshold"] = int(fragment_threshold)
+            except ValueError:
+                pass
+
         return config
 
     @classmethod

@@ -1160,6 +1160,11 @@ class IndexingCoordinator(BaseService):
                         if (r.error or "").lower() == "timeout":
                             agg_skipped_timeout.append(str(r.file_path))
 
+                # PRE-BATCH: Optimize proactively to prevent fragmentation
+                if hasattr(self._db, 'should_optimize_during_indexing') and self._db.should_optimize_during_indexing():
+                    logger.info("Running proactive optimization during indexing to maintain performance...")
+                    self._db.optimize_tables()
+
                 # Store this batch immediately
                 stats_part = await self._store_parsed_results(
                     batch, store_task, cumulative_counters=store_progress_counters
