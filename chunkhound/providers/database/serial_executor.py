@@ -129,22 +129,38 @@ class SerialDatabaseExecutor:
         """Execute named operation synchronously in DB thread (single attempt)."""
 
         def executor_operation() -> Any:
-            # Get thread-local connection (created on first access)
-            conn = get_thread_local_connection(provider)
+            # PERFORMANCE PROFILING: Start timing
+            op_start_time = time.time()
 
-            # Get thread-local state
-            state = get_thread_local_state()
+            try:
+                # Get thread-local connection (created on first access)
+                conn = get_thread_local_connection(provider)
 
-            # Update last activity time for ALL operations
-            state["last_activity_time"] = time.time()
+                # Get thread-local state
+                state = get_thread_local_state()
 
-            # Include base directory if provider has it
-            if hasattr(provider, "get_base_directory"):
-                state["base_directory"] = provider.get_base_directory()
+                # Update last activity time for ALL operations
+                state["last_activity_time"] = time.time()
 
-            # Execute operation - look for method named _executor_{operation_name}
-            op_func = getattr(provider, f"_executor_{operation_name}")
-            return op_func(conn, state, *args, **kwargs)
+                # Include base directory if provider has it
+                if hasattr(provider, "get_base_directory"):
+                    state["base_directory"] = provider.get_base_directory()
+
+                # Execute operation - look for method named _executor_{operation_name}
+                op_func = getattr(provider, f"_executor_{operation_name}")
+                result = op_func(conn, state, *args, **kwargs)
+
+                # PERFORMANCE PROFILING: Log execution time
+                op_duration = time.time() - op_start_time
+                logger.debug(f"Database operation '{operation_name}' completed in {op_duration:.3f}s")
+
+                return result
+
+            except Exception as e:
+                # PERFORMANCE PROFILING: Log failed operations
+                op_duration = time.time() - op_start_time
+                logger.warning(f"Database operation '{operation_name}' failed after {op_duration:.3f}s: {e}")
+                raise
 
         # Run in executor synchronously with timeout (env override)
         future = self._db_executor.submit(executor_operation)
@@ -153,13 +169,18 @@ class SerialDatabaseExecutor:
             timeout_s = float(os.getenv("CHUNKHOUND_DB_EXECUTE_TIMEOUT", "30"))
         except Exception:
             timeout_s = 30.0
+
+        # PERFORMANCE PROFILING: Track timeout attempts
+        timeout_start = time.time()
         try:
             return future.result(timeout=timeout_s)
         except concurrent.futures.TimeoutError:
+            timeout_duration = time.time() - timeout_start
             logger.error(
-                f"Database operation '{operation_name}' timed out after {timeout_s} seconds"
+                f"Database operation '{operation_name}' timed out after {timeout_duration:.3f}s "
+                f"(configured timeout: {timeout_s}s)"
             )
-            raise TimeoutError(f"Operation '{operation_name}' timed out")
+            raise TimeoutError(f"Operation '{operation_name}' timed out after {timeout_duration:.3f}s")
 
     async def execute_async(
         self, provider: Any, operation_name: str, *args, **kwargs
@@ -224,6 +245,9 @@ class SerialDatabaseExecutor:
             except TimeoutError as e:
                 last_exception = e
                 if not self._retry_on_timeout or attempt >= self._max_retries:
+                    logger.error(
+                        f"Database operation failed after {self._max_retries + 1} attempts: {e}"
+                    )
                     raise
 
                 backoff_time = self._retry_backoff * (2 ** attempt)

@@ -255,12 +255,12 @@ class IndexingCoordinator(BaseService):
             return None
 
     def _determine_db_batch_size(self, pending_inserts: list[Chunk]) -> int:
-        """Compute an insert batch size using env/config or dynamic memory heuristics.
+        """Compute an insert batch size using env/config or dynamic memory/fragmentation heuristics.
 
         Priority:
         - Env CHUNKHOUND_DB_BATCH_SIZE when set (>0)
         - Config indexing.db_batch_size when set (>0)
-        - Dynamic: use a fraction of available memory with sane limits.
+        - Dynamic: use a fraction of available memory with fragmentation adjustments.
         """
         # 1) Environment override
         try:
@@ -279,10 +279,11 @@ class IndexingCoordinator(BaseService):
         except Exception:
             pass
 
-        # 3) Dynamic heuristic
+        # 3) Dynamic heuristic with fragmentation adjustment
         # - Budget 10% of available RAM (min 64MB, max 512MB)
         # - Estimate average bytes per chunk from a sample (code length dominates)
-        # - Constrain final batch size to [1000, 20000]
+        # - Reduce batch size if fragmentation is high to prevent timeouts
+        # - Constrain final batch size to [500, 20000]
         def _mem_available_bytes() -> int:
             # Try psutil first
             try:
@@ -315,17 +316,41 @@ class IndexingCoordinator(BaseService):
         # Estimate bytes per chunk from a small sample (code length dominates payload)
         sample = pending_inserts[: min(200, len(pending_inserts))]
         if not sample:
-            return 5000
-        total_bytes = 0
-        for ch in sample:
-            code = getattr(ch, "code", "") or ""
-            total_bytes += len(code.encode("utf-8", errors="ignore")) + 256  # overhead estimate
-        avg = max(512, total_bytes // len(sample))
+            base_size = 5000
+        else:
+            total_bytes = 0
+            for ch in sample:
+                code = getattr(ch, "code", "") or ""
+                total_bytes += len(code.encode("utf-8", errors="ignore")) + 256  # overhead estimate
+            avg = max(512, total_bytes // len(sample))
 
-        # Compute batch size and clamp
-        est = max(1, budget // avg)
-        est = max(1000, min(int(est), 20000))
-        return est
+            # Compute base batch size and clamp
+            base_size = max(1, budget // avg)
+            base_size = max(500, min(int(base_size), 20000))
+
+        # 4) Fragmentation-based adjustment (LanceDB specific)
+        # Reduce batch size if fragmentation is high to prevent timeout cascades
+        final_size = base_size
+        if hasattr(self, '_db') and hasattr(self._db, 'get_fragment_count'):
+            try:
+                counts = self._db.get_fragment_count()
+                chunks_fragments = counts.get('chunks', 0)
+
+                # Reduce batch size progressively as fragmentation increases
+                if chunks_fragments >= 200:
+                    final_size = max(500, base_size // 2)
+                elif chunks_fragments >= 500:
+                    final_size = max(200, base_size // 4)
+                elif chunks_fragments >= 100:
+                    final_size = max(1000, base_size // 1.5)
+
+                if final_size != base_size:
+                    logger.debug(f"Reduced batch size from {base_size} to {final_size} due to high fragmentation ({chunks_fragments} chunks)")
+
+            except Exception as e:
+                logger.debug(f"Could not check fragmentation for batch sizing: {e}")
+
+        return final_size
 
     async def _get_file_lock(self, file_path: Path) -> asyncio.Lock:
         """Get or create a lock for the given file path.
@@ -1160,15 +1185,64 @@ class IndexingCoordinator(BaseService):
                         if (r.error or "").lower() == "timeout":
                             agg_skipped_timeout.append(str(r.file_path))
 
+                # MONITOR: Log fragment counts before batch processing
+                if hasattr(self._db, 'get_fragment_count'):
+                    try:
+                        pre_counts = self._db.get_fragment_count()
+                        logger.debug(f"Fragment counts before batch: chunks={pre_counts.get('chunks', 0)}, files={pre_counts.get('files', 0)}")
+                    except Exception as e:
+                        logger.debug(f"Could not get pre-batch fragment counts: {e}")
+
                 # PRE-BATCH: Optimize proactively to prevent fragmentation
+                optimization_ran = False
                 if hasattr(self._db, 'should_optimize_during_indexing') and self._db.should_optimize_during_indexing():
                     logger.info("Running proactive optimization during indexing to maintain performance...")
-                    self._db.optimize_tables()
+                    try:
+                        self._db.optimize_tables()
+                        optimization_ran = True
+                        # Log fragment counts after optimization
+                        if hasattr(self._db, 'get_fragment_count'):
+                            try:
+                                post_opt_counts = self._db.get_fragment_count()
+                                logger.info(f"Fragment counts after optimization: chunks={post_opt_counts.get('chunks', 0)}, files={post_opt_counts.get('files', 0)}")
+                            except Exception as e:
+                                logger.debug(f"Could not get post-optimization fragment counts: {e}")
+                    except Exception as e:
+                        logger.warning(f"Pre-batch optimization failed: {e}")
 
                 # Store this batch immediately
                 stats_part = await self._store_parsed_results(
                     batch, store_task, cumulative_counters=store_progress_counters
                 )
+
+                # POST-BATCH: Check if optimization is needed after storage
+                post_batch_optimization_ran = False
+                if hasattr(self._db, 'should_optimize_during_indexing') and self._db.should_optimize_during_indexing():
+                    logger.info("Running post-batch optimization during indexing to prevent fragmentation...")
+                    try:
+                        self._db.optimize_tables()
+                        post_batch_optimization_ran = True
+                        # Log fragment counts after post-batch optimization
+                        if hasattr(self._db, 'get_fragment_count'):
+                            try:
+                                post_opt_counts = self._db.get_fragment_count()
+                                logger.info(f"Fragment counts after post-batch optimization: chunks={post_opt_counts.get('chunks', 0)}, files={post_opt_counts.get('files', 0)}")
+                            except Exception as e:
+                                logger.debug(f"Could not get post-batch optimization fragment counts: {e}")
+                    except Exception as e:
+                        logger.warning(f"Post-batch optimization failed: {e}")
+
+                # POST-BATCH: Log final fragment counts after storage and any optimization
+                if hasattr(self._db, 'get_fragment_count'):
+                    try:
+                        final_counts = self._db.get_fragment_count()
+                        logger.debug(f"Final fragment counts after batch: chunks={final_counts.get('chunks', 0)}, files={final_counts.get('files', 0)}")
+                        if optimization_ran or post_batch_optimization_ran:
+                            pre_chunks = pre_counts.get('chunks', 0) if 'pre_counts' in locals() else 0
+                            reduction = pre_chunks - final_counts.get('chunks', 0)
+                            logger.info(f"Total fragment reduction from optimization: {reduction} chunks")
+                    except Exception as e:
+                        logger.debug(f"Could not get final fragment counts: {e}")
                 if isinstance(stats_part, tuple):
                     stats_part = stats_part[0]
 

@@ -71,7 +71,7 @@ class DatabaseConfig(BaseModel):
         description="Run optimization during indexing to prevent fragmentation"
     )
     lancedb_indexing_fragment_threshold: int = Field(
-        default=50,
+        default=25,
         ge=1,
         description="Fragment count threshold for optimization during indexing"
     )
