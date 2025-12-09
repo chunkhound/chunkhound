@@ -18,6 +18,7 @@ from .database_config import DatabaseConfig
 from .embedding_config import EmbeddingConfig
 from .indexing_config import IndexingConfig
 from .llm_config import LLMConfig
+from .logging_config import LoggingConfig
 from .mcp_config import MCPConfig
 
 
@@ -31,6 +32,7 @@ class Config(BaseModel):
     llm: LLMConfig | None = Field(default=None)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     indexing: IndexingConfig = Field(default_factory=IndexingConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
     debug: bool = Field(default=False)
 
     # Private field to store the target directory from CLI args
@@ -173,6 +175,11 @@ class Config(BaseModel):
             # Create LLMConfig instance with the data
             config_data["llm"] = LLMConfig(**config_data["llm"])
 
+        # Special handling for LoggingConfig
+        if "logging" in config_data and isinstance(config_data["logging"], dict):
+            # Create LoggingConfig instance with the data
+            config_data["logging"] = LoggingConfig(**config_data["logging"])
+
         # Add target_dir to config_data for initialization
         config_data["target_dir"] = target_dir
 
@@ -242,6 +249,8 @@ class Config(BaseModel):
             overrides["mcp"] = mcp_overrides
         if indexing_overrides := IndexingConfig.extract_cli_overrides(args):
             overrides["indexing"] = indexing_overrides
+        if logging_overrides := LoggingConfig.extract_cli_overrides(args):
+            overrides["logging"] = logging_overrides
 
         return overrides
 
