@@ -26,7 +26,12 @@ def setup_logging(verbose: bool = False, config: Any = None) -> None:
     logger.remove()
 
     # Console logging (always enabled)
-    if verbose:
+    # When file logging is enabled, keep console clean by only showing WARNING/ERROR
+    # File logging will capture INFO/DEBUG levels
+    file_logging_enabled = config and getattr(config, 'logging', None) and config.logging.is_enabled()
+
+    if verbose and not file_logging_enabled:
+        # Full verbose console logging when file logging is disabled
         logger.add(
             sys.stderr,
             level="DEBUG",
@@ -38,6 +43,8 @@ def setup_logging(verbose: bool = False, config: Any = None) -> None:
             ),
         )
     else:
+        # Minimal console logging (WARNING+) to keep output clean
+        # When file logging is enabled, INFO/DEBUG goes to files only
         logger.add(
             sys.stderr,
             level="WARNING",
@@ -48,7 +55,7 @@ def setup_logging(verbose: bool = False, config: Any = None) -> None:
         )
 
     # File logging (optional)
-    if config and hasattr(config, 'logging') and config.logging.file.enabled:
+    if config and getattr(config, 'logging', None) and config.logging.file.enabled:
         file_config = config.logging.file
         logger.add(
             file_config.path,
@@ -60,7 +67,7 @@ def setup_logging(verbose: bool = False, config: Any = None) -> None:
         )
 
     # Performance logging (optional)
-    if config and hasattr(config, 'logging') and config.logging.performance.enabled:
+    if config and getattr(config, 'logging', None) and config.logging.performance.enabled:
         perf_config = config.logging.performance
         logger.add(
             perf_config.path,
