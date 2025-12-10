@@ -34,9 +34,9 @@ class FileLoggingConfig(BaseModel):
         """Validate log file path."""
         if not v.strip():
             raise ValueError("Log file path cannot be empty")
-        # Check if path is valid (basic check)
+        # Basic path validation
         try:
-            Path(v).parent.mkdir(parents=True, exist_ok=True)
+            Path(v)
         except Exception as e:
             raise ValueError(f"Invalid log file path '{v}': {e}")
         return v
@@ -61,7 +61,7 @@ class PerformanceLoggingConfig(BaseModel):
         if not v.strip():
             raise ValueError("Performance log file path cannot be empty")
         try:
-            Path(v).parent.mkdir(parents=True, exist_ok=True)
+            Path(v)
         except Exception as e:
             raise ValueError(f"Invalid performance log file path '{v}': {e}")
         return v

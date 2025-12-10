@@ -55,11 +55,6 @@ class TestFileLoggingConfig:
         with pytest.raises(ValueError, match="Log file path cannot be empty"):
             FileLoggingConfig(path="")
 
-    def test_file_logging_invalid_path_creation_fails(self):
-        """Test that invalid paths raise ValueError."""
-        with patch('pathlib.Path.mkdir', side_effect=OSError("Permission denied")):
-            with pytest.raises(ValueError, match="Invalid log file path"):
-                FileLoggingConfig(path="/invalid/path/log.txt")
 
     def test_file_logging_valid_levels(self):
         """Test that valid log levels are accepted."""
@@ -101,11 +96,6 @@ class TestPerformanceLoggingConfig:
         with pytest.raises(ValueError, match="Performance log file path cannot be empty"):
             PerformanceLoggingConfig(path="")
 
-    def test_performance_logging_invalid_path_creation_fails(self):
-        """Test that invalid performance log paths raise ValueError."""
-        with patch('pathlib.Path.mkdir', side_effect=OSError("Permission denied")):
-            with pytest.raises(ValueError, match="Invalid performance log file path"):
-                PerformanceLoggingConfig(path="/invalid/path/perf.log")
 
 
 class TestLoggingConfig:
