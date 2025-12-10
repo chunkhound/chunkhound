@@ -61,8 +61,8 @@ chunkhound index . --database-path /path/to/db --database-provider lancedb
 # Embedding configuration
 chunkhound index . --embedding-provider openai --embedding-model text-embedding-3-small
 
-# MCP configuration
-chunkhound mcp --mcp-transport http --mcp-port 3000 --mcp-cors
+# MCP configuration (stdio only)
+chunkhound mcp
 
 # Indexing configuration
 chunkhound index . --indexing-batch-size 1000

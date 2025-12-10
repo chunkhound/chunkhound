@@ -139,8 +139,7 @@ update_version: uv run scripts/update_version.py X.Y.Z
 
 # Running
 index: uv run chunkhound index [directory]
-mcp_stdio: uv run chunkhound mcp stdio
-mcp_http: uv run chunkhound mcp http --port 5173
+mcp: uv run chunkhound mcp
 ```
 
 ## COMMON_ERRORS_AND_SOLUTIONS
@@ -148,7 +147,7 @@ mcp_http: uv run chunkhound mcp http --port 5173
 - "segmentation fault": Concurrent DB access attempted
 - "Rate limit exceeded": Reduce embedding_batch_size or max_concurrent_batches
 - "Out of memory": Reduce chunk_batch_size or file_batch_size
-- JSON-RPC errors: Check for print() statements in mcp_server/ (stdio.py, http_server.py, tools.py)
+- JSON-RPC errors: Check for print() statements in mcp_server/ (stdio.py, tools.py)
 - "unsupported operand type(s) for |: 'str' and 'NoneType'": Forward reference with | operator (remove quotes)
 
 ## KNOWN_DEPRECATION_WARNINGS
