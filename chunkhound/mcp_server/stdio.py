@@ -52,17 +52,29 @@ from .base import MCPServerBase
 from .common import handle_tool_call
 from .tools import TOOL_REGISTRY
 
-# CRITICAL: Disable ALL logging to prevent JSON-RPC corruption
+# CRITICAL: Disable console logging to prevent JSON-RPC corruption
+# But allow file logging for debugging purposes
 logging.disable(logging.CRITICAL)
 for logger_name in ["", "mcp", "server", "fastmcp"]:
     logging.getLogger(logger_name).setLevel(logging.CRITICAL + 1)
 
-# Disable loguru logger
+# Configure loguru for MCP mode: file logging enabled by default, console disabled
 try:
-    from loguru import logger as loguru_logger
+    from loguru import logger
 
-    loguru_logger.remove()
-    loguru_logger.add(lambda _: None, level="CRITICAL")
+    # Remove default handlers
+    logger.remove()
+
+    # File logging enabled by default in MCP mode (no console logging)
+    logger.add(
+        "chunkhound-mcp.log",
+        level="INFO",
+        rotation="10 MB",
+        retention="1 week",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+        encoding="utf-8",
+    )
+
 except ImportError:
     pass
 

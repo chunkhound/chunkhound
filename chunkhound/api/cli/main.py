@@ -16,38 +16,33 @@ from .utils.config_factory import create_validated_config
 multiprocessing.freeze_support()
 
 
-def setup_logging(verbose: bool = False, config: Any = None) -> None:
+def setup_logging(verbose: bool = False, config: Any = None, mcp_mode: bool = False) -> None:
     """Configure logging for the CLI.
 
     Args:
         verbose: Whether to enable verbose logging
         config: Configuration object with logging settings
+        mcp_mode: Whether running in MCP mode (affects console logging)
     """
     logger.remove()
 
-    # Console logging (always enabled)
-    # When file logging is enabled, keep console clean by only showing WARNING/ERROR
-    # File logging will capture INFO/DEBUG levels
-    file_logging_enabled = config and getattr(config, 'logging', None) and config.logging.is_enabled()
+    # Determine console logging level
+    console_level = "WARNING"  # Default
+    if config and getattr(config, 'logging', None):
+        console_level = getattr(config.logging, 'console_level', 'WARNING')
 
-    if verbose and not file_logging_enabled:
-        # Full verbose console logging when file logging is disabled
-        logger.add(
-            sys.stderr,
-            level="DEBUG",
-            format=(
-                "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
-                "<level>{level: <8}</level> | "
-                "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
-                "<level>{message}</level>"
-            ),
-        )
+    # Override console level if verbose is enabled
+    if verbose:
+        console_level = "DEBUG"
+
+    # MCP mode: no console logging at all (breaks JSON-RPC protocol)
+    if mcp_mode:
+        console_level = "CRITICAL"  # Effectively disable console logging
     else:
-        # Minimal console logging (WARNING+) to keep output clean
-        # When file logging is enabled, INFO/DEBUG goes to files only
+        # Console logging configuration
         logger.add(
             sys.stderr,
-            level="WARNING",
+            level=console_level,
             format=(
                 "<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | "
                 "<level>{message}</level>"

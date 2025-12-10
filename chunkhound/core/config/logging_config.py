@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 class FileLoggingConfig(BaseModel):
     """Configuration for file-based logging."""
 
-    enabled: bool = Field(default=False, description="Enable file logging")
+    enabled: bool = Field(default=True, description="Enable file logging")
     path: str = Field(default="chunkhound.log", description="Path to log file")
     level: str = Field(default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR)")
     rotation: str = Field(default="10 MB", description="Log rotation size (e.g., '10 MB', '1 week')")
@@ -45,7 +45,7 @@ class FileLoggingConfig(BaseModel):
 class PerformanceLoggingConfig(BaseModel):
     """Configuration for performance timing logs."""
 
-    enabled: bool = Field(default=False, description="Enable performance logging")
+    enabled: bool = Field(default=True, description="Enable performance logging")
     path: str = Field(default="chunkhound-performance.log", description="Path to performance log file")
     rotation: str = Field(default="50 MB", description="Log rotation size")
     retention: str = Field(default="1 month", description="Log retention period")
@@ -72,6 +72,16 @@ class LoggingConfig(BaseModel):
 
     file: FileLoggingConfig = Field(default_factory=FileLoggingConfig)
     performance: PerformanceLoggingConfig = Field(default_factory=PerformanceLoggingConfig)
+    console_level: str = Field(default="WARNING", description="Console logging level (DEBUG, INFO, WARNING, ERROR)")
+
+    @field_validator("console_level")
+    @classmethod
+    def validate_console_level(cls, v: str) -> str:
+        """Validate console logging level."""
+        valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+        if v.upper() not in valid_levels:
+            raise ValueError(f"Invalid console log level '{v}'. Must be one of: {', '.join(valid_levels)}")
+        return v.upper()
 
     def is_enabled(self) -> bool:
         """Check if any logging is enabled."""

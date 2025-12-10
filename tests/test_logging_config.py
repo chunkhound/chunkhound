@@ -21,7 +21,7 @@ class TestFileLoggingConfig:
     def test_file_logging_config_defaults(self):
         """Test default file logging configuration."""
         config = FileLoggingConfig()
-        assert config.enabled is False
+        assert config.enabled is True
         assert config.path == "chunkhound.log"
         assert config.level == "INFO"
         assert config.rotation == "10 MB"
@@ -75,7 +75,7 @@ class TestPerformanceLoggingConfig:
     def test_performance_logging_config_defaults(self):
         """Test default performance logging configuration."""
         config = PerformanceLoggingConfig()
-        assert config.enabled is False
+        assert config.enabled is True
         assert config.path == "chunkhound-performance.log"
         assert config.rotation == "50 MB"
         assert config.retention == "1 month"
@@ -116,7 +116,7 @@ class TestLoggingConfig:
         config = LoggingConfig()
         assert isinstance(config.file, FileLoggingConfig)
         assert isinstance(config.performance, PerformanceLoggingConfig)
-        assert config.is_enabled() is False
+        assert config.is_enabled() is True  # File logging enabled by default
 
     def test_logging_config_file_enabled(self):
         """Test that file logging enabled makes is_enabled() True."""
