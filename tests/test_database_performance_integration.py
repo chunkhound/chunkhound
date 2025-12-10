@@ -17,13 +17,11 @@ class TestRetryAndOptimizationIntegration:
 
     def test_retry_with_optimization_during_indexing(self):
         """Test that retry logic works with optimization during indexing."""
-        # Create config with retry enabled and optimization enabled
+        # Create config with retry enabled (optimization is now always enabled)
         config = DatabaseConfig(
             retry_on_timeout=True,
             max_retries=2,
-            retry_backoff_seconds=0.01,
-            lancedb_optimize_during_indexing=True,
-            lancedb_indexing_fragment_threshold=10
+            retry_backoff_seconds=0.01
         )
 
         # Mock LanceDB provider
@@ -53,12 +51,10 @@ class TestRetryAndOptimizationIntegration:
     @patch('chunkhound.services.indexing_coordinator.logger')
     def test_indexing_coordinator_retry_and_optimization(self, mock_logger):
         """Test indexing coordinator integrates retry and optimization."""
-        # Create config with both features enabled
+        # Create config with retry enabled (optimization is now always enabled)
         db_config = DatabaseConfig(
             retry_on_timeout=True,
-            max_retries=1,
-            lancedb_optimize_during_indexing=True,
-            lancedb_indexing_fragment_threshold=5
+            max_retries=1
         )
 
         # Mock database provider with retry executor
@@ -148,11 +144,8 @@ class TestFragmentationAndBatchSizeIntegration:
         """Test that optimization is triggered based on fragmentation during indexing."""
         from chunkhound.core.config.config import Config
 
-        # Create config with low threshold
-        db_config = DatabaseConfig(
-            lancedb_optimize_during_indexing=True,
-            lancedb_indexing_fragment_threshold=20
-        )
+        # Create config (optimization is now always enabled)
+        db_config = DatabaseConfig()
 
         # Mock DB with high fragmentation
         mock_db = MagicMock()
@@ -186,9 +179,7 @@ class TestEndToEndPerformanceScenario:
         db_config = DatabaseConfig(
             retry_on_timeout=True,
             max_retries=3,
-            retry_backoff_seconds=0.1,
-            lancedb_optimize_during_indexing=True,
-            lancedb_indexing_fragment_threshold=30
+            retry_backoff_seconds=0.1
         )
 
         # Mock database provider
@@ -218,11 +209,8 @@ class TestEndToEndPerformanceScenario:
         """Test that performance features gracefully handle DuckDB (non-LanceDB) providers."""
         from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 
-        # Create config with LanceDB-specific settings
-        db_config = DatabaseConfig(
-            lancedb_optimize_during_indexing=True,
-            lancedb_indexing_fragment_threshold=50
-        )
+        # Create config (LanceDB-specific settings removed)
+        db_config = DatabaseConfig()
 
         # Use DuckDB provider (doesn't have LanceDB methods)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -275,8 +263,7 @@ class TestErrorHandlingIntegration:
         """Test that retry logic handles optimization failures during indexing."""
         config = DatabaseConfig(
             retry_on_timeout=True,
-            max_retries=2,
-            lancedb_optimize_during_indexing=True
+            max_retries=2
         )
 
         # Mock provider that fails optimization but succeeds operation

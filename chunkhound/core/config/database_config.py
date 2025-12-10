@@ -65,16 +65,6 @@ class DatabaseConfig(BaseModel):
         description="Base backoff time between retries (exponential)"
     )
 
-    # LanceDB-specific optimization
-    lancedb_optimize_during_indexing: bool = Field(
-        default=True,
-        description="Run optimization during indexing to prevent fragmentation"
-    )
-    lancedb_indexing_fragment_threshold: int = Field(
-        default=25,
-        ge=1,
-        description="Fragment count threshold for optimization during indexing"
-    )
 
     @field_validator("path")
     def validate_path(cls, v: Path | None) -> Path | None:
@@ -190,19 +180,6 @@ class DatabaseConfig(BaseModel):
             except ValueError:
                 pass
 
-        # LanceDB-specific optimization
-        if optimize_during_indexing := os.getenv("CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_DURING_INDEXING"):
-            lower_value = optimize_during_indexing.lower()
-            if lower_value in ("true", "1", "yes"):
-                config["lancedb_optimize_during_indexing"] = True
-            elif lower_value in ("false", "0", "no"):
-                config["lancedb_optimize_during_indexing"] = False
-            # Invalid values are silently ignored
-        if fragment_threshold := os.getenv("CHUNKHOUND_DATABASE__LANCEDB_INDEXING_FRAGMENT_THRESHOLD"):
-            try:
-                config["lancedb_indexing_fragment_threshold"] = int(fragment_threshold)
-            except ValueError:
-                pass
 
         return config
 
