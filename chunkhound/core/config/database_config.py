@@ -173,7 +173,12 @@ class DatabaseConfig(BaseModel):
 
         # Retry configuration
         if retry_on_timeout := os.getenv("CHUNKHOUND_DATABASE__RETRY_ON_TIMEOUT"):
-            config["retry_on_timeout"] = retry_on_timeout.lower() in ("true", "1", "yes")
+            lower_value = retry_on_timeout.lower()
+            if lower_value in ("true", "1", "yes"):
+                config["retry_on_timeout"] = True
+            elif lower_value in ("false", "0", "no"):
+                config["retry_on_timeout"] = False
+            # Invalid values are silently ignored
         if max_retries := os.getenv("CHUNKHOUND_DATABASE__MAX_RETRIES"):
             try:
                 config["max_retries"] = int(max_retries)
@@ -187,7 +192,12 @@ class DatabaseConfig(BaseModel):
 
         # LanceDB-specific optimization
         if optimize_during_indexing := os.getenv("CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_DURING_INDEXING"):
-            config["lancedb_optimize_during_indexing"] = optimize_during_indexing.lower() in ("true", "1", "yes")
+            lower_value = optimize_during_indexing.lower()
+            if lower_value in ("true", "1", "yes"):
+                config["lancedb_optimize_during_indexing"] = True
+            elif lower_value in ("false", "0", "no"):
+                config["lancedb_optimize_during_indexing"] = False
+            # Invalid values are silently ignored
         if fragment_threshold := os.getenv("CHUNKHOUND_DATABASE__LANCEDB_INDEXING_FRAGMENT_THRESHOLD"):
             try:
                 config["lancedb_indexing_fragment_threshold"] = int(fragment_threshold)
