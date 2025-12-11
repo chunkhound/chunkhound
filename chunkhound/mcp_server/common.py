@@ -267,8 +267,8 @@ def parse_mcp_arguments(args: dict[str, Any]) -> dict[str, Any]:
 def add_common_mcp_arguments(parser: Any) -> None:
     """Add common MCP server arguments to a parser.
 
-    This function adds all the configuration arguments that both
-    stdio and HTTP MCP servers support.
+    This function adds all the configuration arguments that the
+    stdio MCP server supports.
 
     Args:
         parser: ArgumentParser to add arguments to

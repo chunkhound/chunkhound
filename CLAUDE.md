@@ -225,10 +225,9 @@ chunkhound/
 ├── services/          # Orchestration and batching logic
 ├── core/              # Data models and configuration
 ├── interfaces/        # Protocol definitions (contracts)
-├── api/               # CLI and HTTP interfaces
-├── mcp_server/        # MCP server implementations
+├── api/               # CLI interfaces
+├── mcp_server/        # MCP server implementation (stdio only)
 │   ├── stdio.py       # Stdio transport server
-│   ├── http_server.py # HTTP transport server
 │   ├── tools.py       # Unified tool registry (single source of truth)
 │   ├── base.py        # Common server base class
 │   └── common.py      # Shared utilities
@@ -244,7 +243,7 @@ chunkhound/
 - Custom parsers (2 formats: TEXT, PDF)
 - Embedding providers: OpenAI, Ollama, VoyageAI
 - LLM providers (for deep research): OpenAI, Gemini (Google Gen AI SDK), Claude Code CLI, Codex CLI
-- MCP protocol (stdio and HTTP)
+- MCP protocol (stdio only)
 - Pydantic (configuration validation)
 
 ## LLM_PROVIDERS
