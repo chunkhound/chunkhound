@@ -737,8 +737,8 @@ class RealtimeIndexingService:
                 if hasattr(self.services.provider, "flush"):
                     await self.services.provider.flush()
 
-                # If we skipped embeddings, queue for embedding generation
-                if skip_embeddings:
+                # If we skipped embeddings, queue for embedding generation only if we have an embedding provider
+                if skip_embeddings and self.services.embedding_service._embedding_provider is not None:
                     await self.add_file(file_path, priority="embed")
 
                 # Record processing summary into MCP debug log
