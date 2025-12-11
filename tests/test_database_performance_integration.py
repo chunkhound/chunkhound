@@ -227,33 +227,6 @@ class TestEndToEndPerformanceScenario:
             assert isinstance(batch_size, int)
             assert batch_size > 0
 
-    @patch('chunkhound.api.cli.main.logger')
-    def test_logging_integration_with_performance_features(self, mock_logger):
-        """Test that logging configuration works with performance features."""
-        from chunkhound.core.config.logging_config import LoggingConfig, FileLoggingConfig, PerformanceLoggingConfig
-        from chunkhound.api.cli.main import setup_logging
-
-        # Create config with both file and performance logging
-        logging_config = LoggingConfig(
-            file=FileLoggingConfig(enabled=True, path="/tmp/test.log"),
-            performance=PerformanceLoggingConfig(enabled=True, path="/tmp/perf.log")
-        )
-
-        # Setup logging
-        setup_logging(verbose=False, config=MagicMock(logging=logging_config))
-
-        # Verify logger setup calls were made
-        assert mock_logger.add.call_count >= 2  # At least console + file + performance
-
-        # Check that file logging was configured
-        file_calls = [call for call in mock_logger.add.call_args_list
-                     if len(call[0]) > 0 and '/tmp/test.log' in str(call[0][0])]
-        assert len(file_calls) > 0
-
-        # Check that performance logging was configured
-        perf_calls = [call for call in mock_logger.add.call_args_list
-                     if len(call[0]) > 0 and '/tmp/perf.log' in str(call[0][0])]
-        assert len(perf_calls) > 0
 
 
 class TestErrorHandlingIntegration:

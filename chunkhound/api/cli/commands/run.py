@@ -33,6 +33,20 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
     # Initialize Rich output formatter
     formatter = RichOutputFormatter(verbose=args.verbose)
 
+    # Ignore decision check (formerly top-level 'diagnose')
+    if getattr(args, "check_ignores", False):
+        # Ensure this mode doesn't require embeddings either
+        setattr(args, "no_embeddings", True)
+        await _check_ignores(args, config)
+        return
+
+    # Simulate mode
+    if getattr(args, "simulate", False):
+        # Ensure simulate doesn't require embeddings
+        setattr(args, "no_embeddings", True)
+        await _simulate_index(args, config)
+        return
+
     # Check if local config was found (for logging purposes)
     project_dir = Path(args.path) if hasattr(args, "path") else Path.cwd()
     local_config_path = project_dir / ".chunkhound.json"
@@ -49,20 +63,6 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
         if log_files:
             formatter.info(f"Logging to: {', '.join(log_files)}")
 
-    # Ignore decision check (formerly top-level 'diagnose')
-    if getattr(args, "check_ignores", False):
-        # Ensure this mode doesn't require embeddings either
-        setattr(args, "no_embeddings", True)
-        await _check_ignores(args, config)
-        return
-
-    # Simulate mode
-    if getattr(args, "simulate", False):
-        # Ensure simulate doesn't require embeddings
-        setattr(args, "no_embeddings", True)
-        await _simulate_index(args, config)
-        return
-
     # Use database path from config
     db_path = Path(config.database.path)
 
@@ -71,7 +71,7 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
         version=__version__,
         directory=str(args.path),
         database=str(db_path),
-        config=config.__dict__ if hasattr(config, "__dict__") else {},
+        config=config.__dict__ if getattr(config, "__dict__", None) else {},
     )
 
     # Process and validate batch arguments (includes deprecation warnings)

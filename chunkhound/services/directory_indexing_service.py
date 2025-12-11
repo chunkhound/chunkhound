@@ -105,7 +105,7 @@ class DirectoryIndexingService:
         """Extracted from run.py:152-175 - file pattern resolution logic."""
         # Use patterns from config (CLI overrides already applied during config creation)
         include_patterns = list(self.config.indexing.include)
-        exclude_patterns = list(self.config.indexing.exclude)
+        exclude_patterns = list(self.config.indexing.get_effective_config_excludes())
 
         return include_patterns, exclude_patterns
 

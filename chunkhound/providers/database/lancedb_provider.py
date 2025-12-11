@@ -1962,7 +1962,7 @@ class LanceDBProvider(SerialDatabaseProvider):
 
                     except Exception as fallback_error:
                         logger.error(f"Fallback regex search failed: {fallback_error}")
-                        return [], {"offset": offset, "page_size": 0, "has_more": False, "total": 0}
+                        raise RuntimeError(f"Regex search failed: {fallback_error}") from fallback_error
                     break
 
             # Deduplicate results (fragments may cause duplicates)
