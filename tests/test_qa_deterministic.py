@@ -124,11 +124,11 @@ class ExistingClass:
             })
             semantic_count = len(existing_semantic.get('results', []))
         except Exception as e:
-            print(f"⚠ Semantic search skipped: {e}")
+            print(f"Semantic search skipped: {e}")
             semantic_count = "N/A"
         
         assert len(existing_regex.get('results', [])) > 0, "Should find existing file content with regex"
-        print(f"✓ Existing file search: regex={len(existing_regex.get('results', []))}, semantic={semantic_count}")
+        print(f"Existing file search: regex={len(existing_regex.get('results', []))}, semantic={semantic_count}")
         
         # QA Item 2: Add new file and search for it
         new_file = watch_dir / "new_added_file.py"
@@ -162,10 +162,10 @@ class NewlyAddedClass:
             new_semantic_count = "N/A"
         
         assert len(new_regex.get('results', [])) > 0, "Should find newly added file content with regex"
-        print(f"✓ New file search: regex={len(new_regex.get('results', []))}, semantic={new_semantic_count}")
-        
+        print(f"New file search: regex={len(new_regex.get('results', []))}, semantic={new_semantic_count}")
+
         # QA Item 3: Edit existing file - adding, deleting, and modifying content
-        
+
         # 3a: Add content to existing file
         modified_content = existing_content + """
 
@@ -175,15 +175,15 @@ def added_during_edit():
 """
         existing_file.write_text(modified_content)
         await asyncio.sleep(3.5)
-        
+
         added_regex = await execute_tool("search_regex", services, None, {
             "pattern": "added_content_edit_qa",
             "page_size": 10,
             "offset": 0
         })
         assert len(added_regex.get('results', [])) > 0, "Should find content added during edit"
-        print("✓ Edit (add content): Found added content")
-        
+        print("Edit (add content): Found added content")
+
         # 3b: Delete some content and modify existing
         deleted_and_modified_content = """def existing_function():
     '''This function was MODIFIED during edit'''
@@ -197,7 +197,7 @@ def added_during_edit():
 """
         existing_file.write_text(deleted_and_modified_content)
         await asyncio.sleep(3.5)
-        
+
         # Check modification worked
         modified_regex = await execute_tool("search_regex", services, None, {
             "pattern": "MODIFIED_existing_content",
@@ -210,25 +210,25 @@ def added_during_edit():
             "page_size": 10,
             "offset": 0
         })
-        
+
         assert len(modified_regex.get('results', [])) > 0, "Should find modified content"
         assert len(deleted_regex.get('results', [])) == 0, "Should not find deleted content"
-        print("✓ Edit (modify/delete): Found modified content, deleted content removed")
-        
+        print("Edit (modify/delete): Found modified content, deleted content removed")
+
         # QA Item 4: Delete file and verify search results
         delete_target = new_file  # Delete the new file we created
         delete_target.unlink()
         await asyncio.sleep(3.5)
-        
+
         # Search for deleted file content
         deleted_file_regex = await execute_tool("search_regex", services, None, {
             "pattern": "newly_added_content_unique_string",
             "page_size": 10,
             "offset": 0
         })
-        
+
         assert len(deleted_file_regex.get('results', [])) == 0, "Should not find content from deleted file"
-        print("✓ File deletion: Deleted file content not found in search")
+        print("File deletion: Deleted file content not found in search")
 
     @pytest.mark.asyncio
     async def test_language_coverage_comprehensive(self, qa_setup):
@@ -314,7 +314,7 @@ def added_during_edit():
             indexed_files = db_stats.get('total_files', 0)
 
             if indexed_files >= expected_file_count:
-                print(f"📊 All {expected_file_count} files processed in {elapsed:.1f}s")
+                print(f"All {expected_file_count} files processed in {elapsed:.1f}s")
                 break
 
             await asyncio.sleep(poll_interval)
@@ -322,7 +322,7 @@ def added_during_edit():
 
         # Final stats check
         db_stats = await execute_tool("get_stats", services, None, {})
-        print(f"📊 Final: {db_stats.get('total_files', 0)} files, {db_stats.get('total_chunks', 0)} chunks")
+        print(f"Final: {db_stats.get('total_files', 0)} files, {db_stats.get('total_chunks', 0)} chunks")
 
         # QA Item 5: Test concurrent processing for all languages
         # Search for each language's unique content
@@ -346,11 +346,11 @@ def added_during_edit():
             except Exception as e:
                 failed_languages.append(f"{language.value} (error: {e})")
         
-        print(f"✓ Languages successfully tested: {len(successful_languages)}")
-        print(f"✓ Successful languages: {successful_languages}")
-        
+        print(f"Languages successfully tested: {len(successful_languages)}")
+        print(f"Successful languages: {successful_languages}")
+
         if failed_languages:
-            print(f"⚠ Failed languages: {failed_languages}")
+            print(f"Failed languages: {failed_languages}")
         
         # QA requirement: At least major languages should work
         major_languages = ['python', 'javascript', 'typescript', 'java', 'go']
@@ -364,10 +364,10 @@ def added_during_edit():
         
         # Report findings for manual review
         success_rate = len(successful_languages) / len(created_files) if created_files else 0
-        print(f"📊 Language success rate: {success_rate:.1%} ({len(successful_languages)}/{len(created_files)})")
-        
+        print(f"Language success rate: {success_rate:.1%} ({len(successful_languages)}/{len(created_files)})")
+
         if success_rate < 0.5:
-            print("⚠ LOW SUCCESS RATE: This may indicate indexing or parsing issues with some languages")
+            print("LOW SUCCESS RATE: This may indicate indexing or parsing issues with some languages")
 
     @pytest.mark.asyncio
     async def test_concurrent_operations_and_timing(self, qa_setup):
@@ -483,20 +483,20 @@ class RapidClass_{i}:
         
         successful_modifications = [r for r in modification_results if 'error' not in r]
         
-        print(f"✓ Concurrent operations completed in {total_concurrent_time:.2f}s")
-        print(f"✓ Successful searches: {len(successful_searches)}/{len(search_results)}")
-        print(f"✓ Successful modifications: {len(successful_modifications)}/{len(modification_results)}")
-        
+        print(f"Concurrent operations completed in {total_concurrent_time:.2f}s")
+        print(f"Successful searches: {len(successful_searches)}/{len(search_results)}")
+        print(f"Successful modifications: {len(successful_modifications)}/{len(modification_results)}")
+
         # Key assertions for QA item 7
         assert len(successful_searches) > len(search_results) * 0.8, "Most searches should succeed during concurrent operations"
         assert len(failed_searches) == 0 or len(failed_searches) < 3, "Should have minimal search failures"
-        
+
         # Measure average search time
         search_times = [r['search_time'] for r in successful_searches]
         if search_times:
             avg_search_time = sum(search_times) / len(search_times)
             max_search_time = max(search_times)
-            print(f"✓ Search timing: avg={avg_search_time:.3f}s, max={max_search_time:.3f}s")
+            print(f"Search timing: avg={avg_search_time:.3f}s, max={max_search_time:.3f}s")
             
             # Search should not block - reasonable performance expected
             assert avg_search_time < 2.0, f"Average search time should be < 2s, got {avg_search_time:.3f}s"
@@ -522,8 +522,8 @@ class RapidClass_{i}:
             "offset": 0
         })
         assert len(non_existing_results.get('results', [])) == 0, "Non-existing pattern should return empty results"
-        print("✓ Pagination test 1: Non-existing pattern returns empty")
-        
+        print("Pagination test 1: Non-existing pattern returns empty")
+
         # 2. Create single file with unique content (no pagination needed)
         single_file = watch_dir / "single_result_test.py"
         single_content = """def single_unique_function():
@@ -532,14 +532,14 @@ class RapidClass_{i}:
 """
         single_file.write_text(single_content)
         await asyncio.sleep(3.0)
-        
+
         single_results = await execute_tool("search_regex", services, None, {
             "pattern": "single_unique_result_qa_test",
             "page_size": 10,
             "offset": 0
         })
         assert len(single_results.get('results', [])) == 1, "Single unique pattern should return exactly 1 result"
-        print("✓ Pagination test 2: Single result handled correctly")
+        print("Pagination test 2: Single result handled correctly")
         
         # 3. Create many files with common pattern to test pagination
         # Each file must be large enough to avoid cAST merging (>1600 chars each)
@@ -808,28 +808,28 @@ if __name__ == "__main__":
                 total_count = pagination.get('total', len(all_results))  # Track actual total
                 print(f"  Pagination metadata: {pagination}")
 
-        print(f"✓ Pagination test 3: Retrieved {len(all_results)} total results across {page_count} pages")
+        print(f"Pagination test 3: Retrieved {len(all_results)} total results across {page_count} pages")
 
         # Validate pagination worked correctly
         # Note: May not find all files if some aren't processed yet - test pagination behavior with available data
         assert len(all_results) >= 10, f"Should find reasonable number of results for pagination testing, got {len(all_results)}"
         assert page_count >= 2, f"Should require multiple pages with page_size={page_size}, used {page_count} pages"
-        
+
         # Report actual vs expected for manual review
         expected_files = 15  # Updated to match new file count
         # Note: Due to cAST algorithm's semantic chunking, files may be merged into fewer chunks
         # than expected based on size. This is by design for better semantic coherence.
         if len(all_results) < expected_files * 2:  # Each substantial file ideally creates multiple chunks
             processing_rate = len(all_results) / (expected_files * 2)
-            print(f"📊 Chunk processing rate: {processing_rate:.1%} ({len(all_results)}/{expected_files * 2} expected chunks)")
-        
+            print(f"Chunk processing rate: {processing_rate:.1%} ({len(all_results)}/{expected_files * 2} expected chunks)")
+
         # 4. Compare with external validation using ripgrep if available
         try:
             # Try to use ripgrep for external validation
             rg_result = subprocess.run([
                 'rg', '--count', '--no-heading', common_pattern, str(watch_dir)
             ], capture_output=True, text=True, timeout=10)
-            
+
             if rg_result.returncode == 0:
                 # Parse ripgrep results - count matches across files
                 rg_lines = rg_result.stdout.strip().split('\n') if rg_result.stdout.strip() else []
@@ -841,22 +841,22 @@ if __name__ == "__main__":
                             rg_total_matches += count
                         except ValueError:
                             pass
-                
-                print(f"✓ External validation: ripgrep found {rg_total_matches} matches")
-                
+
+                print(f"External validation: ripgrep found {rg_total_matches} matches")
+
                 # Allow some variance due to different matching behavior
                 # ChunkHound uses chunk-based search (semantic units) vs ripgrep's line-based search
                 # A chunk containing multiple pattern occurrences counts as 1 result in ChunkHound
                 # but each line occurrence counts as 1 result in ripgrep, hence the large discrepancy
                 match_ratio = len(all_results) / max(rg_total_matches, 1)
                 assert 0.05 <= match_ratio <= 3.0, f"ChunkHound uses chunk-based search (semantic units) vs ripgrep's line-based search: {len(all_results)} chunks vs {rg_total_matches} line matches"
-                
+
             else:
-                print("⚠ ripgrep not available or failed, skipping external validation")
-                
+                print("ripgrep not available or failed, skipping external validation")
+
         except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
-            print("⚠ ripgrep not available, skipping external validation")
-        
+            print("ripgrep not available, skipping external validation")
+
         # 5. Test edge cases
         # Test offset beyond available results
         # Use total_count from pagination metadata, not len(all_results) which may be partial
@@ -867,7 +867,7 @@ if __name__ == "__main__":
             "offset": actual_total + 100  # Truly beyond all results
         })
         assert len(beyond_results.get('results', [])) == 0, f"Offset {actual_total + 100} beyond total {actual_total} should return empty"
-        
+
         # Test large page size
         large_page_results = await execute_tool("search_regex", services, None, {
             "pattern": common_pattern,
@@ -876,8 +876,8 @@ if __name__ == "__main__":
         })
         large_page_count = len(large_page_results.get('results', []))
         assert large_page_count <= actual_total, f"Large page size should not exceed total ({large_page_count} <= {actual_total})"
-        
-        print("✓ Pagination edge cases handled correctly")
+
+        print("Pagination edge cases handled correctly")
 
     @pytest.mark.asyncio
     async def test_qa_comprehensive_report(self, qa_setup):
@@ -932,27 +932,27 @@ if __name__ == "__main__":
         # Get database stats
         stats_results = await execute_tool("get_stats", services, None, {})
         
-        print(f"📊 DATABASE STATISTICS:")
+        print(f"DATABASE STATISTICS:")
         print(f"   Total files: {stats_results.get('total_files', 'Unknown')}")
         print(f"   Total chunks: {stats_results.get('total_chunks', 'Unknown')}")
         print(f"   Total embeddings: {stats_results.get('total_embeddings', 'Unknown')}")
-        
-        print(f"\n⏱ PERFORMANCE MEASUREMENTS:")
+
+        print(f"\nPERFORMANCE MEASUREMENTS:")
         print(f"   File change → searchable: {indexing_time:.2f}s")
         print(f"   Search execution time: {search_time:.3f}s")
         print(f"   Search results returned: {len(performance_results.get('results', []))}")
-        
-        print(f"\n✅ QA VALIDATION SUMMARY:")
+
+        print(f"\nQA VALIDATION SUMMARY:")
         print(f"   File lifecycle operations: TESTED")
-        print(f"   Language coverage: TESTED") 
+        print(f"   Language coverage: TESTED")
         print(f"   Concurrent operations: TESTED")
         print(f"   Pagination functionality: TESTED")
         print(f"   Performance measurements: COMPLETED")
-        
-        print(f"\n📋 QA REQUIREMENTS STATUS:")
-        print(f"   Real-time indexing: {'✅ WORKING' if indexing_time < 10 else '❌ SLOW'}")
-        print(f"   Search performance: {'✅ GOOD' if search_time < 1.0 else '⚠ ACCEPTABLE' if search_time < 3.0 else '❌ SLOW'}")
-        print(f"   Non-blocking searches: ✅ VERIFIED")
+
+        print(f"\nQA REQUIREMENTS STATUS:")
+        print(f"   Real-time indexing: {'WORKING' if indexing_time < 10 else 'SLOW'}")
+        print(f"   Search performance: {'GOOD' if search_time < 1.0 else 'ACCEPTABLE' if search_time < 3.0 else 'SLOW'}")
+        print(f"   Non-blocking searches: VERIFIED")
         
         print("="*60)
         
