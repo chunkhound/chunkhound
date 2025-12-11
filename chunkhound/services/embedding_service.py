@@ -173,13 +173,17 @@ class EmbeddingService(BaseService):
         provider_name: str | None = None,
         model_name: str | None = None,
         exclude_patterns: list[str] | None = None,
+        batch_size: int | None = None,
     ) -> dict[str, Any]:
         """Generate embeddings for all chunks that don't have them yet.
+
+        Uses pagination to handle large codebases without memory issues.
 
         Args:
             provider_name: Optional specific provider to generate for
             model_name: Optional specific model to generate for
             exclude_patterns: Optional file patterns to exclude from embedding generation
+            batch_size: Optional batch size for processing chunks (default: 10000)
 
         Returns:
             Dictionary with generation statistics
@@ -196,37 +200,59 @@ class EmbeddingService(BaseService):
             target_provider = provider_name or self._embedding_provider.name
             target_model = model_name or self._embedding_provider.model
 
-            # First, just get the count and IDs of chunks without embeddings (fast query)
-            chunk_ids_without_embeddings = self._get_chunk_ids_without_embeddings(
-                target_provider, target_model, exclude_patterns
-            )
+            # Default batch size for processing chunks
+            if batch_size is None:
+                batch_size = 10000  # Process 10k chunks at a time to avoid memory issues
 
-            if not chunk_ids_without_embeddings:
-                return {
-                    "status": "complete",
-                    "generated": 0,
-                    "message": "All chunks have embeddings",
-                }
+            logger.info(f"Starting missing embeddings generation (batch_size={batch_size})")
 
-            # Load chunk content and generate embeddings
-            chunks_data = self._get_chunks_by_ids(chunk_ids_without_embeddings)
-            chunk_id_list = [chunk["id"] for chunk in chunks_data]
-            chunk_texts = [chunk["code"] for chunk in chunks_data]
+            total_generated = 0
+            total_processed = 0
+            offset = 0
 
-            generated_count = await self.generate_embeddings_for_chunks(
-                chunk_id_list, chunk_texts, show_progress=True
-            )
+            while True:
+                # Get next batch of chunk IDs without embeddings
+                chunk_ids_batch = self._get_chunk_ids_without_embeddings_paginated(
+                    target_provider, target_model, exclude_patterns, limit=batch_size, offset=offset
+                )
+
+                if not chunk_ids_batch:
+                    # No more chunks to process
+                    break
+
+                logger.debug(f"Processing batch: offset={offset}, size={len(chunk_ids_batch)}")
+
+                # Load chunk content for this batch
+                chunks_data = self._get_chunks_by_ids(chunk_ids_batch)
+                chunk_id_list = [chunk["id"] for chunk in chunks_data]
+                chunk_texts = [chunk["code"] for chunk in chunks_data]
+
+                # Generate embeddings for this batch
+                batch_generated = await self.generate_embeddings_for_chunks(
+                    chunk_id_list, chunk_texts, show_progress=True
+                )
+
+                total_generated += batch_generated
+                total_processed += len(chunk_ids_batch)
+                offset += batch_size
+
+                logger.info(f"Batch completed: generated={batch_generated}, total_processed={total_processed}, total_generated={total_generated}")
+
+                # Safety check: prevent infinite loops
+                if len(chunk_ids_batch) < batch_size:
+                    # This was the last batch
+                    break
 
             # Optimize if fragmentation high after embedding generation
-            if generated_count > 0 and hasattr(self._db, "optimize_tables"):
+            if total_generated > 0 and hasattr(self._db, "optimize_tables"):
                 if hasattr(self._db, "should_optimize") and self._db.should_optimize("post-embedding"):
                     logger.debug("Optimizing database after embedding generation...")
                     self._db.optimize_tables()
 
             return {
                 "status": "success",
-                "generated": generated_count,
-                "total_chunks": len(chunk_ids_without_embeddings),
+                "generated": total_generated,
+                "total_chunks": total_processed,
                 "provider": target_provider,
                 "model": target_model,
             }
@@ -782,48 +808,198 @@ class EmbeddingService(BaseService):
     def _get_chunk_ids_without_embeddings(
         self, provider: str, model: str, exclude_patterns: list[str] | None = None
     ) -> list[ChunkId]:
-        """Get just the IDs of chunks that don't have embeddings (provider-agnostic)."""
-        # Get all chunks with metadata using provider-agnostic method
-        all_chunks = self._db.get_all_chunks_with_metadata()
+        """Get just the IDs of chunks that don't have embeddings (provider-agnostic).
 
-        # Apply exclude patterns filter using fnmatch (no SQL dependency)
+        Uses SQL-based filtering to avoid loading all chunks into memory for large codebases.
+        """
+        # Use SQL-based approach to find chunks without embeddings
+        # This avoids loading millions of chunks into memory
+
+        # Get all embedding tables
+        embedding_tables = self._db._get_all_embedding_tables()
+
+        if not embedding_tables:
+            # No embedding tables exist, return all chunks (but fetch IDs only for efficiency)
+            query = """
+                SELECT c.id
+                FROM chunks c
+                ORDER BY c.id
+            """
+            chunk_ids_result = self._db.execute_query(query, [])
+
+            # Apply exclude patterns filter if provided
+            if exclude_patterns:
+                import fnmatch
+
+                # Get file paths for filtering
+                filtered_ids = []
+                for row in chunk_ids_result:
+                    chunk_id = row["id"]
+                    # Get file path for this chunk
+                    file_query = """
+                        SELECT f.path
+                        FROM files f
+                        JOIN chunks c ON f.id = c.file_id
+                        WHERE c.id = ?
+                    """
+                    file_result = self._db.execute_query(file_query, [chunk_id])
+                    if file_result:
+                        file_path = file_result[0]["path"]
+                        should_exclude = False
+                        for pattern in exclude_patterns:
+                            if fnmatch.fnmatch(file_path, pattern):
+                                should_exclude = True
+                                break
+                        if not should_exclude:
+                            filtered_ids.append(chunk_id)
+                return [ChunkId(cid) for cid in filtered_ids]
+            else:
+                return [ChunkId(row["id"]) for row in chunk_ids_result]
+
+        # Build NOT EXISTS clauses for all embedding tables
+        not_exists_clauses = []
+        for table_name in embedding_tables:
+            not_exists_clauses.append(f"""
+                NOT EXISTS (
+                    SELECT 1 FROM {table_name} e
+                    WHERE e.chunk_id = c.id
+                    AND e.provider = ?
+                    AND e.model = ?
+                )
+            """)
+
+        # Query for chunks that don't have embeddings for this provider/model
+        query = f"""
+            SELECT c.id, f.path
+            FROM chunks c
+            JOIN files f ON c.file_id = f.id
+            WHERE {" AND ".join(not_exists_clauses)}
+            ORDER BY c.id
+        """
+
+        # Parameters need to be repeated for each table
+        params = [provider, model] * len(embedding_tables)
+        chunk_ids_result = self._db.execute_query(query, params)
+
+        # Apply exclude patterns filter if provided
         if exclude_patterns:
             import fnmatch
 
-            filtered_chunks = []
-            for chunk in all_chunks:
-                file_path = chunk.get("file_path", "")
+            filtered_ids = []
+            for row in chunk_ids_result:
+                file_path = row["path"]
                 should_exclude = False
                 for pattern in exclude_patterns:
                     if fnmatch.fnmatch(file_path, pattern):
                         should_exclude = True
                         break
                 if not should_exclude:
-                    filtered_chunks.append(chunk)
-            all_chunks = filtered_chunks
+                    filtered_ids.append(row["id"])
+            return [ChunkId(cid) for cid in filtered_ids]
+        else:
+            return [ChunkId(row["id"]) for row in chunk_ids_result]
 
-        # Extract chunk IDs with consistent field handling
-        # DuckDB uses "chunk_id", LanceDB uses "id" - handle both
-        all_chunk_ids: list[int] = []
-        for chunk in all_chunks:
-            chunk_id = chunk.get("chunk_id", chunk.get("id"))
-            if chunk_id is not None:
-                all_chunk_ids.append(int(chunk_id))
+    def _get_chunk_ids_without_embeddings_paginated(
+        self, provider: str, model: str, exclude_patterns: list[str] | None = None,
+        limit: int = 10000, offset: int = 0
+    ) -> list[ChunkId]:
+        """Get chunk IDs without embeddings using pagination to handle large datasets.
 
-        if not all_chunk_ids:
-            return []
+        Args:
+            provider: Embedding provider name
+            model: Embedding model name
+            exclude_patterns: Optional file patterns to exclude
+            limit: Maximum number of chunk IDs to return
+            offset: Number of chunk IDs to skip
 
-        # Use provider-agnostic get_existing_embeddings to check which chunks already have embeddings
-        existing_chunk_ids = self._db.get_existing_embeddings(
-            chunk_ids=all_chunk_ids, provider=provider, model=model
-        )
+        Returns:
+            List of chunk IDs without embeddings
+        """
+        # Get all embedding tables
+        embedding_tables = self._db._get_all_embedding_tables()
 
-        # Return only chunks that don't have embeddings (convert back to ChunkId)
-        return [
-            ChunkId(chunk_id)
-            for chunk_id in all_chunk_ids
-            if chunk_id not in existing_chunk_ids
-        ]
+        if not embedding_tables:
+            # No embedding tables exist, return all chunks with pagination
+            query = """
+                SELECT c.id
+                FROM chunks c
+                ORDER BY c.id
+                LIMIT ? OFFSET ?
+            """
+            chunk_ids_result = self._db.execute_query(query, [limit, offset])
+
+            # Apply exclude patterns filter if provided
+            if exclude_patterns:
+                import fnmatch
+
+                # Get file paths for filtering
+                filtered_ids = []
+                for row in chunk_ids_result:
+                    chunk_id = row["id"]
+                    # Get file path for this chunk
+                    file_query = """
+                        SELECT f.path
+                        FROM files f
+                        JOIN chunks c ON f.id = c.file_id
+                        WHERE c.id = ?
+                    """
+                    file_result = self._db.execute_query(file_query, [chunk_id])
+                    if file_result:
+                        file_path = file_result[0]["path"]
+                        should_exclude = False
+                        for pattern in exclude_patterns:
+                            if fnmatch.fnmatch(file_path, pattern):
+                                should_exclude = True
+                                break
+                        if not should_exclude:
+                            filtered_ids.append(chunk_id)
+                return [ChunkId(cid) for cid in filtered_ids]
+            else:
+                return [ChunkId(row["id"]) for row in chunk_ids_result]
+
+        # Build NOT EXISTS clauses for all embedding tables
+        not_exists_clauses = []
+        for table_name in embedding_tables:
+            not_exists_clauses.append(f"""
+                NOT EXISTS (
+                    SELECT 1 FROM {table_name} e
+                    WHERE e.chunk_id = c.id
+                    AND e.provider = ?
+                    AND e.model = ?
+                )
+            """)
+
+        # Query for chunks that don't have embeddings for this provider/model with pagination
+        query = f"""
+            SELECT c.id, f.path
+            FROM chunks c
+            JOIN files f ON c.file_id = f.id
+            WHERE {" AND ".join(not_exists_clauses)}
+            ORDER BY c.id
+            LIMIT ? OFFSET ?
+        """
+
+        # Parameters need to be repeated for each table, plus limit and offset
+        params = [provider, model] * len(embedding_tables) + [limit, offset]
+        chunk_ids_result = self._db.execute_query(query, params)
+
+        # Apply exclude patterns filter if provided
+        if exclude_patterns:
+            import fnmatch
+
+            filtered_ids = []
+            for row in chunk_ids_result:
+                file_path = row["path"]
+                should_exclude = False
+                for pattern in exclude_patterns:
+                    if fnmatch.fnmatch(file_path, pattern):
+                        should_exclude = True
+                        break
+                if not should_exclude:
+                    filtered_ids.append(row["id"])
+            return [ChunkId(cid) for cid in filtered_ids]
+        else:
+            return [ChunkId(row["id"]) for row in chunk_ids_result]
 
     def _get_chunks_without_embeddings(
         self, provider: str, model: str
