@@ -254,34 +254,15 @@ class TestSetupLogging:
         assert file_call[1]['rotation'] == '10 MB'
         assert file_call[1]['retention'] == '1 week'
 
-    @patch('chunkhound.api.cli.main.logger')
-    def test_setup_logging_performance_config(self, mock_logger):
-        """Test that performance logging config is applied."""
-        # Create a mock config object with logging attribute
-        class MockConfig:
-            def __init__(self):
-                self.logging = LoggingConfig(performance=PerformanceLoggingConfig(
-                    enabled=True,
-                    path="/tmp/perf.log",
-                    rotation="50 MB",
-                    retention="1 month"
-                ))
+    def test_setup_logging_performance_config_removed(self):
+        """Test that performance logging is no longer configured in main process.
 
-        config = MockConfig()
-        setup_logging(verbose=False, config=config)
-
-        # Should have performance logging call
-        assert mock_logger.add.call_count >= 1
-        # Find the performance logging call
-        perf_call = None
-        for call in mock_logger.add.call_args_list:
-            if len(call[0]) > 0 and str(call[0][0]) == '/tmp/perf.log':
-                perf_call = call
-                break
-        assert perf_call is not None
-        assert perf_call[1]['level'] == 'INFO'
-        assert perf_call[1]['rotation'] == '50 MB'
-        assert perf_call[1]['retention'] == '1 month'
+        Performance logging is now only configured in worker processes where
+        the actual performance logging calls occur.
+        """
+        # This test verifies that performance logging setup was intentionally
+        # removed from the main process since all performance logs come from workers.
+        pass
 
     @patch('chunkhound.api.cli.main.logger')
     def test_setup_logging_config_none_handling(self, mock_logger):

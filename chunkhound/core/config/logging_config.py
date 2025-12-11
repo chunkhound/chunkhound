@@ -85,7 +85,7 @@ class LoggingConfig(BaseModel):
 
     def is_enabled(self) -> bool:
         """Check if any logging is enabled."""
-        return self.file.enabled or self.performance.enabled
+        return self.file.enabled
 
     @classmethod
     def extract_cli_overrides(cls, args: Any) -> dict[str, Any] | None:

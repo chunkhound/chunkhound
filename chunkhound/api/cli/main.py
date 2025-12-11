@@ -61,18 +61,6 @@ def setup_logging(verbose: bool = False, config: Any = None, mcp_mode: bool = Fa
             encoding="utf-8",
         )
 
-    # Performance logging (optional)
-    if config and getattr(config, 'logging', None) and config.logging.performance.enabled:
-        perf_config = config.logging.performance
-        logger.add(
-            perf_config.path,
-            level="INFO",
-            rotation=perf_config.rotation,
-            retention=perf_config.retention,
-            format=perf_config.format,
-            filter=lambda record: record["extra"].get("operation") is not None,
-            encoding="utf-8",
-        )
 
     # Also set stdlib logging level to avoid mixed loggers being noisy
     _pylogging.basicConfig(level=_pylogging.DEBUG if verbose else _pylogging.ERROR)

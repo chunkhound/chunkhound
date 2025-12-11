@@ -681,6 +681,10 @@ class IndexingCoordinator(BaseService):
                 # Cap concurrent timeout children to avoid resource exhaustion
                 "max_concurrent_timeouts": min(num_workers * 2, 32),
             }
+
+            # Pass performance logging config to worker processes
+            if self.config and getattr(self.config, 'logging', None) and self.config.logging.performance.enabled:
+                config_dict["performance_log_path"] = self.config.logging.performance.path
             futures = [
                 loop.run_in_executor(executor, process_file_batch, batch, config_dict)
                 for batch in file_batches

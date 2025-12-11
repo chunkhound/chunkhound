@@ -185,6 +185,24 @@ def process_file_batch(
     """
     results = []
 
+    # Set up performance logging in worker process if configured
+    if "performance_log_path" in config_dict:
+        try:
+            from loguru import logger
+            perf_path = config_dict["performance_log_path"]
+            logger.add(
+                perf_path,
+                level="INFO",
+                rotation="50 MB",
+                retention="1 month",
+                format="{time:YYYY-MM-DD HH:mm:ss} | {extra[operation]: <20} | {extra[duration_ms]: >8.1f}ms | {message}",
+                filter=lambda record: record["extra"].get("operation") is not None,
+                encoding="utf-8",
+            )
+        except Exception:
+            # If performance logging setup fails, continue without it
+            pass
+
     # Read timeout config once
     timeout_s = float(config_dict.get("per_file_timeout_seconds", 0.0) or 0.0)
     # Respect explicit 0 so users can apply timeout to all file sizes.
