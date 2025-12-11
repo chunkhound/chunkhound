@@ -72,24 +72,15 @@ class TestPerformanceLoggingConfig:
         config = PerformanceLoggingConfig()
         assert config.enabled is True
         assert config.path == "chunkhound-performance.log"
-        assert config.rotation == "50 MB"
-        assert config.retention == "1 month"
-        assert "duration_ms" in config.format
 
     def test_performance_logging_config_custom_values(self):
         """Test custom performance logging configuration."""
         config = PerformanceLoggingConfig(
             enabled=True,
-            path="/custom/perf.log",
-            rotation="100 MB",
-            retention="1 year",
-            format="Custom perf format"
+            path="/custom/perf.log"
         )
         assert config.enabled is True
         assert config.path == "/custom/perf.log"
-        assert config.rotation == "100 MB"
-        assert config.retention == "1 year"
-        assert config.format == "Custom perf format"
 
     def test_performance_logging_invalid_path_empty(self):
         """Test that empty performance log paths raise ValueError."""
@@ -114,8 +105,14 @@ class TestLoggingConfig:
         assert config.is_enabled() is True
 
     def test_logging_config_performance_enabled(self):
-        """Test that performance logging enabled makes is_enabled() True."""
+        """Test that performance logging enabled does not affect is_enabled().
+
+        Performance logging is now handled separately in worker processes
+        and does not affect whether logging is considered "enabled" in the main process.
+        Since file logging is enabled by default, is_enabled() should still return True.
+        """
         config = LoggingConfig(performance=PerformanceLoggingConfig(enabled=True))
+        # File logging is enabled by default, so is_enabled() should be True regardless of performance logging
         assert config.is_enabled() is True
 
     def test_logging_config_both_enabled(self):

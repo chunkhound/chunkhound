@@ -47,12 +47,6 @@ class PerformanceLoggingConfig(BaseModel):
 
     enabled: bool = Field(default=True, description="Enable performance logging")
     path: str = Field(default="chunkhound-performance.log", description="Path to performance log file")
-    rotation: str = Field(default="50 MB", description="Log rotation size")
-    retention: str = Field(default="1 month", description="Log retention period")
-    format: str = Field(
-        default="{time:YYYY-MM-DD HH:mm:ss} | {extra[operation]: <20} | {extra[duration_ms]: >8.1f}ms | {message}",
-        description="Performance log format"
-    )
 
     @field_validator("path")
     @classmethod
