@@ -20,6 +20,10 @@ def _dbg_log(msg: str, operation: str | None = None, duration_ms: float | None =
 
     Uses loguru if available (for performance logging), otherwise falls back to file logging.
     """
+    import os
+    if os.environ.get("CHUNKHOUND_SUPPRESS_CONSOLE_LOGGING"):
+        return
+
     try:
         from loguru import logger
 

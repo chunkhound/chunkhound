@@ -439,20 +439,28 @@ class ProgressManager:
         self.console = console
         self._tasks: dict[str, TaskID] = {}
         self._live: Live | None = None
-        self._original_handlers: list = []
+        self._original_console_handlers: list = []
 
     def __enter__(self) -> "ProgressManager":
-        # Store current logger handlers before modification
-        self._original_handlers = logger._core.handlers.copy()
+        # Store and remove only console handlers to preserve file logging
+        import sys
+        self._original_console_handlers = []
 
-        # Only suppress INFO and DEBUG levels, keep WARNING/ERROR/CRITICAL
-        logger.remove()
-        logger.add(
-            lambda message: None
-            if message.record["level"].no < 30
-            else sys.stderr.write(str(message)),
-            level="WARNING",
-        )
+        # Find and store console handlers (those writing to stderr)
+        for handler_id, handler in logger._core.handlers.items():
+            # Check if this is a console handler by examining its stream
+            if hasattr(handler, 'stream') and handler.stream == sys.stderr:
+                self._original_console_handlers.append((handler_id, handler))
+                # Remove console handler from logger
+                logger.remove(handler_id)
+
+        # If we removed console handlers, add a no-op handler to suppress any remaining console logging
+        if self._original_console_handlers:
+            logger.add(lambda message: None, level="CRITICAL")
+
+        # Also suppress logging in subprocesses by setting environment variable
+        import os
+        os.environ["CHUNKHOUND_SUPPRESS_CONSOLE_LOGGING"] = "1"
 
         self._live = Live(self.progress, console=self.console, refresh_per_second=10)
         self._live.start()
@@ -464,17 +472,17 @@ class ProgressManager:
                 self._live.stop()
         finally:
             # Always restore logger configuration, even if Live fails
-            logger.remove()
+            # Remove the no-op handler if it was added
+            if self._original_console_handlers:
+                logger.remove()
 
-            # Restore original handlers if we have them
-            if self._original_handlers:
-                for handler_id, handler in self._original_handlers.items():
-                    logger._core.handlers[handler_id] = handler
-            else:
-                # Fallback to default CLI logging if no handlers stored
-                import sys
+            # Restore original console handlers
+            for handler_id, handler in self._original_console_handlers:
+                logger._core.handlers[handler_id] = handler
 
-                logger.add(sys.stderr, level="WARNING")
+            # Clean up environment variable
+            import os
+            os.environ.pop("CHUNKHOUND_SUPPRESS_CONSOLE_LOGGING", None)
 
     def add_task(
         self,
