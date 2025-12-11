@@ -151,6 +151,28 @@ class DatabaseProvider(Protocol):
         """Get all chunks with their metadata including file paths (provider-agnostic)."""
         ...
 
+    def get_chunk_ids_without_embeddings_paginated(
+        self,
+        provider: str,
+        model: str,
+        exclude_patterns: list[str] | None = None,
+        limit: int = 10000,
+        offset: int = 0,
+    ) -> list[int]:
+        """Get chunk IDs that don't have embeddings for the specified provider/model with pagination.
+
+        Args:
+            provider: Embedding provider name
+            model: Embedding model name
+            exclude_patterns: Optional file patterns to exclude
+            limit: Maximum number of chunk IDs to return
+            offset: Number of chunk IDs to skip
+
+        Returns:
+            List of chunk IDs without embeddings for the provider/model
+        """
+        ...
+
     # Search Operations
     def search_semantic(
         self,

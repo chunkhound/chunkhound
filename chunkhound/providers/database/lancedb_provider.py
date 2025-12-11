@@ -2140,6 +2140,77 @@ class LanceDBProvider(SerialDatabaseProvider):
         """Perform health check and return status information."""
         return self._execute_in_db_thread_sync("health_check")
 
+    def _executor_get_chunk_ids_without_embeddings_paginated(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        provider: str,
+        model: str,
+        exclude_patterns: list[str] | None,
+        limit: int,
+        offset: int,
+    ) -> list[int]:
+        """Executor method for get_chunk_ids_without_embeddings_paginated - runs in DB thread."""
+        if not self._chunks_table:
+            return []
+
+        try:
+            # In LanceDB, embeddings are stored in the chunks table
+            # We need to find chunks where embedding is NULL or provider/model don't match
+            query = self._chunks_table.search().where(
+                f"(embedding IS NULL OR provider != '{provider}' OR model != '{model}')"
+            )
+
+            # Apply exclude patterns if provided
+            if exclude_patterns:
+                # We need to join with files table for path filtering
+                # LanceDB doesn't support complex joins in search, so we'll filter after querying
+                pass
+
+            # Get all matching chunks first, then apply pagination and filtering
+            all_results = query.to_list()
+
+            # Apply exclude patterns by filtering file paths
+            if exclude_patterns:
+                filtered_results = []
+                for result in all_results:
+                    file_path = ""
+                    if self._files_table and "file_id" in result:
+                        try:
+                            file_results = (
+                                self._files_table.search()
+                                .where(f"id = {result['file_id']}")
+                                .to_list()
+                            )
+                            if file_results:
+                                file_path = file_results[0].get("path", "")
+                        except Exception:
+                            pass
+
+                    # Check if path matches any exclude pattern
+                    should_exclude = False
+                    if exclude_patterns and file_path:
+                        for pattern in exclude_patterns:
+                            if pattern in file_path:
+                                should_exclude = True
+                                break
+
+                    if not should_exclude:
+                        filtered_results.append(result)
+                all_results = filtered_results
+
+            # Apply pagination
+            paginated_results = all_results[offset : offset + limit]
+
+            # Extract chunk IDs
+            chunk_ids = [result["id"] for result in paginated_results]
+
+            return chunk_ids
+
+        except Exception as e:
+            logger.error(f"Failed to get chunk IDs without embeddings: {e}")
+            return []
+
     def _executor_health_check(
         self, conn: Any, state: dict[str, Any]
     ) -> dict[str, Any]:
@@ -2168,6 +2239,24 @@ class LanceDBProvider(SerialDatabaseProvider):
                 )
 
         return health_status
+
+    def get_chunk_ids_without_embeddings_paginated(
+        self,
+        provider: str,
+        model: str,
+        exclude_patterns: list[str] | None = None,
+        limit: int = 10000,
+        offset: int = 0,
+    ) -> list[int]:
+        """Get chunk IDs that don't have embeddings for the specified provider/model with pagination."""
+        return self._execute_in_db_thread_sync(
+            "get_chunk_ids_without_embeddings_paginated",
+            provider,
+            model,
+            exclude_patterns,
+            limit,
+            offset,
+        )
 
     def get_connection_info(self) -> dict[str, Any]:
         """Get information about the database connection."""

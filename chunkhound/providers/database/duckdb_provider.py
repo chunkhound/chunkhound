@@ -2482,11 +2482,110 @@ class DuckDBProvider(SerialDatabaseProvider):
                 "dimensions": 0,
             }
 
+    def get_chunk_ids_without_embeddings_paginated(
+        self,
+        provider: str,
+        model: str,
+        exclude_patterns: list[str] | None = None,
+        limit: int = 10000,
+        offset: int = 0,
+    ) -> list[int]:
+        """Get chunk IDs that don't have embeddings for the specified provider/model with pagination."""
+        return self._execute_in_db_thread_sync(
+            "get_chunk_ids_without_embeddings_paginated",
+            provider,
+            model,
+            exclude_patterns,
+            limit,
+            offset,
+        )
+
     def execute_query(
         self, query: str, params: list[Any] | None = None
     ) -> list[dict[str, Any]]:
         """Execute a SQL query and return results."""
         return self._execute_in_db_thread_sync("execute_query", query, params)
+
+    def _executor_get_chunk_ids_without_embeddings_paginated(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        provider: str,
+        model: str,
+        exclude_patterns: list[str] | None,
+        limit: int,
+        offset: int,
+    ) -> list[int]:
+        """Executor method for get_chunk_ids_without_embeddings_paginated - runs in DB thread."""
+        try:
+            # Get all embedding tables
+            embedding_tables = self._executor_get_all_embedding_tables(conn, state)
+
+            if not embedding_tables:
+                # No embedding tables exist, return all chunks with pagination and exclude patterns
+                query = """
+                    SELECT c.id
+                    FROM chunks c
+                    JOIN files f ON c.file_id = f.id
+                """
+                params = []
+
+                # Apply exclude patterns if provided
+                if exclude_patterns:
+                    exclude_conditions = []
+                    for pattern in exclude_patterns:
+                        exclude_conditions.append("f.path NOT LIKE ?")
+                        params.append(f"%{pattern}%")
+                    if exclude_conditions:
+                        query += " WHERE " + " AND ".join(exclude_conditions)
+
+                query += " ORDER BY c.id LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
+
+                results = conn.execute(query, params).fetchall()
+                return [row[0] for row in results]
+
+            # Build NOT EXISTS clauses for all embedding tables
+            not_exists_clauses = []
+            for table_name in embedding_tables:
+                not_exists_clauses.append(f"""
+                    NOT EXISTS (
+                        SELECT 1 FROM {table_name} e
+                        WHERE e.chunk_id = c.id
+                        AND e.provider = ?
+                        AND e.model = ?
+                    )
+                """)
+
+            # Query for chunks that don't have embeddings for this provider/model
+            query = f"""
+                SELECT c.id
+                FROM chunks c
+                JOIN files f ON c.file_id = f.id
+                WHERE {" AND ".join(not_exists_clauses)}
+            """
+
+            # Parameters need to be repeated for each table
+            params = [provider, model] * len(embedding_tables)
+
+            # Apply exclude patterns if provided
+            if exclude_patterns:
+                exclude_conditions = []
+                for pattern in exclude_patterns:
+                    exclude_conditions.append("f.path NOT LIKE ?")
+                    params.append(f"%{pattern}%")
+                if exclude_conditions:
+                    query += " AND " + " AND ".join(exclude_conditions)
+
+            query += " ORDER BY c.id LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+
+            results = conn.execute(query, params).fetchall()
+            return [row[0] for row in results]
+
+        except Exception as e:
+            logger.error(f"Failed to get chunk IDs without embeddings: {e}")
+            return []
 
     def _executor_execute_query(
         self, conn: Any, state: dict[str, Any], query: str, params: list[Any] | None
