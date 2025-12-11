@@ -32,14 +32,14 @@ class DatabaseConfig(BaseModel):
 
     # LanceDB-specific settings
     lancedb_index_type: Literal["auto", "ivf_hnsw_sq", "ivf_rq"] | None = Field(
-        default=None,
-        description="LanceDB vector index type: auto (default), ivf_hnsw_sq, or ivf_rq (requires 0.25.3+)",
+        default="ivf_hnsw_sq",
+        description="LanceDB vector index type: auto, ivf_hnsw_sq (recommended for large datasets), or ivf_rq (requires 0.25.3+)",
     )
 
     lancedb_optimize_fragment_threshold: int = Field(
-        default=100,
+        default=50,
         ge=0,
-        description="Minimum fragment count to trigger optimization (0 = always optimize, 50 = aggressive, 100 = balanced, 500 = conservative)",
+        description="Minimum fragment count to trigger optimization (0 = always optimize, 50 = aggressive for large datasets, 100 = balanced, 500 = conservative)",
     )
 
     # Disk usage limits
