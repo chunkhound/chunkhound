@@ -47,26 +47,44 @@ from chunkhound.utils.file_patterns import (
 )
 
 
-# CRITICAL FIX: Force spawn multiprocessing start method to prevent fork + asyncio issues
-# RATIONALE: Linux defaults to 'fork' which is unsafe with asyncio event loops
-# - Forking an active asyncio event loop causes segfaults (background threads/locks copied)
-# - 'spawn' starts fresh Python interpreter, avoiding fork-related issues
-# - Windows/macOS already use 'spawn' by default
-# - Python 3.14 will make 'spawn' the default on all platforms
-# - See: https://github.com/chunkhound/chunkhound/pull/47
-desired_mp_method = os.getenv("CHUNKHOUND_MP_START_METHOD", "spawn")
-current_mp_method = multiprocessing.get_start_method(allow_none=True)
-if current_mp_method != desired_mp_method:
-    try:
-        multiprocessing.set_start_method(desired_mp_method, force=True)
-        logger.debug(
-            f"Set multiprocessing start method to '{desired_mp_method}' (was {current_mp_method})"
-        )
-    except RuntimeError:
-        # Start method may already be set elsewhere; log and continue
-        logger.debug(
-            f"Multiprocessing start method remains '{multiprocessing.get_start_method()}'; desired '{desired_mp_method}'"
-        )
+# Platform-aware multiprocessing start method setting
+# Linux needs 'spawn' to prevent segfaults with asyncio + fork
+# Windows/macOS already default to 'spawn', forcing it can cause issues
+import platform
+system = platform.system()
+if system == "Linux":
+    # Linux needs spawn to prevent fork + asyncio segfaults
+    desired_mp_method = os.getenv("CHUNKHOUND_MP_START_METHOD", "spawn")
+    current_mp_method = multiprocessing.get_start_method(allow_none=True)
+    if current_mp_method != desired_mp_method:
+        try:
+            multiprocessing.set_start_method(desired_mp_method, force=True)
+            logger.debug(
+                f"Set multiprocessing start method to '{desired_mp_method}' (was {current_mp_method})"
+            )
+        except RuntimeError:
+            # Start method may already be set elsewhere; log and continue
+            logger.debug(
+                f"Multiprocessing start method remains '{multiprocessing.get_start_method()}'; desired '{desired_mp_method}'"
+            )
+elif system in ("Windows", "Darwin"):  # Darwin = macOS
+    # Windows/macOS already default to 'spawn' - don't interfere
+    logger.debug(f"Platform {system} uses safe default multiprocessing start method")
+else:
+    # Unknown platform - default to spawn for safety
+    logger.warning(f"Unknown platform {system} - defaulting to spawn multiprocessing")
+    desired_mp_method = os.getenv("CHUNKHOUND_MP_START_METHOD", "spawn")
+    current_mp_method = multiprocessing.get_start_method(allow_none=True)
+    if current_mp_method != desired_mp_method:
+        try:
+            multiprocessing.set_start_method(desired_mp_method, force=True)
+            logger.debug(
+                f"Set multiprocessing start method to '{desired_mp_method}' (was {current_mp_method})"
+            )
+        except RuntimeError:
+            logger.debug(
+                f"Multiprocessing start method remains '{multiprocessing.get_start_method()}'; desired '{desired_mp_method}'"
+            )
 
 
 # Performance tuning constants for parallel operations
