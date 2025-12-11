@@ -816,7 +816,7 @@ class EmbeddingService(BaseService):
         # This avoids loading millions of chunks into memory
 
         # Get all embedding tables
-        embedding_tables = self._db._get_all_embedding_tables()
+        embedding_tables = self._get_all_embedding_tables()
 
         if not embedding_tables:
             # No embedding tables exist, return all chunks (but fetch IDs only for efficiency)
@@ -916,7 +916,7 @@ class EmbeddingService(BaseService):
             List of chunk IDs without embeddings
         """
         # Get all embedding tables
-        embedding_tables = self._db._get_all_embedding_tables()
+        embedding_tables = self._get_all_embedding_tables()
 
         if not embedding_tables:
             # No embedding tables exist, return all chunks with pagination
