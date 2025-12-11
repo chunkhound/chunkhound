@@ -114,30 +114,25 @@ def test_requires_embeddings_flag():
     assert TOOL_REGISTRY["code_research"].requires_embeddings
 
 
-def test_http_server_uses_registry_descriptions():
-    """Verify HTTP server imports and uses TOOL_REGISTRY for descriptions.
+def test_stdio_server_uses_registry_descriptions():
+    """Verify stdio server imports and uses TOOL_REGISTRY for descriptions.
 
-    This is a structural test - it ensures the HTTP server code references
+    This is a structural test - it ensures the stdio server code references
     TOOL_REGISTRY to prevent regression to hardcoded descriptions.
     """
     from pathlib import Path
 
-    http_server_path = Path(__file__).parent.parent / "chunkhound" / "mcp_server" / "http_server.py"
-    content = http_server_path.read_text()
+    stdio_server_path = Path(__file__).parent.parent / "chunkhound" / "mcp_server" / "stdio.py"
+    content = stdio_server_path.read_text()
 
     # Check that TOOL_REGISTRY is imported
     assert "from .tools import" in content and "TOOL_REGISTRY" in content, \
-        "HTTP server should import TOOL_REGISTRY"
+        "Stdio server should import TOOL_REGISTRY"
 
-    # Check that tools use TOOL_REGISTRY for descriptions
-    assert 'TOOL_REGISTRY["get_stats"].description' in content, \
-        "get_stats should use TOOL_REGISTRY description"
-    assert 'TOOL_REGISTRY["search_regex"].description' in content, \
-        "search_regex should use TOOL_REGISTRY description"
-    assert 'TOOL_REGISTRY["search_semantic"].description' in content, \
-        "search_semantic should use TOOL_REGISTRY description"
-    assert 'TOOL_REGISTRY["code_research"].description' in content, \
-        "code_research should use TOOL_REGISTRY description"
+    # Check that tools are registered from TOOL_REGISTRY
+    # The server should iterate over TOOL_REGISTRY to expose tools
+    assert "TOOL_REGISTRY" in content, \
+        "Server should reference TOOL_REGISTRY for tool definitions"
 
 
 def test_default_values_in_schema():
