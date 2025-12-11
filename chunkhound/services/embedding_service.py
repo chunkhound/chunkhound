@@ -200,27 +200,79 @@ class EmbeddingService(BaseService):
             target_provider = provider_name or self._embedding_provider.name
             target_model = model_name or self._embedding_provider.model
 
-            # Default batch size for processing chunks
+            # Dynamic batch size configuration
             if batch_size is None:
-                batch_size = 10000  # Process 10k chunks at a time to avoid memory issues
+                # Start with conservative batch size for large databases
+                initial_batch_size = 100
+                min_batch_size = 50
+                max_batch_size = 10000
+                target_batch_time = 15.0  # Target 15 seconds per batch
+                slow_threshold = 30.0     # Consider >30s as too slow
+                fast_threshold = 5.0      # Consider <5s as very fast
+            else:
+                # Use fixed batch size if explicitly provided
+                initial_batch_size = batch_size
+                min_batch_size = batch_size
+                max_batch_size = batch_size
+                target_batch_time = float('inf')  # Disable dynamic sizing
+                slow_threshold = float('inf')
+                fast_threshold = 0.0
 
-            logger.info(f"Starting missing embeddings generation (batch_size={batch_size})")
+            current_batch_size = initial_batch_size
+            logger.info(f"Starting missing embeddings generation (initial_batch_size={current_batch_size})")
 
             total_generated = 0
             total_processed = 0
             offset = 0
+            batch_count = 0
 
             while True:
-                # Get next batch of chunk IDs without embeddings
-                chunk_ids_batch = self._db.get_chunk_ids_without_embeddings_paginated(
-                    target_provider, target_model, exclude_patterns, limit=batch_size, offset=offset
-                )
+                batch_count += 1
+                import time as time_module
+
+                # Measure time for chunk ID retrieval
+                start_time = time_module.time()
+
+                try:
+                    # Get next batch of chunk IDs without embeddings
+                    chunk_ids_batch = self._db.get_chunk_ids_without_embeddings_paginated(
+                        target_provider, target_model, exclude_patterns, limit=current_batch_size, offset=offset
+                    )
+                except Exception as e:
+                    # If batch fails, reduce batch size and retry once
+                    if current_batch_size > min_batch_size:
+                        old_batch_size = current_batch_size
+                        current_batch_size = max(min_batch_size, current_batch_size // 2)
+                        logger.warning(f"Batch retrieval failed (size={old_batch_size}), reducing to {current_batch_size}: {e}")
+                        continue
+                    else:
+                        raise  # Re-raise if already at minimum
+
+                retrieval_time = time_module.time() - start_time
 
                 if not chunk_ids_batch:
                     # No more chunks to process
                     break
 
-                logger.debug(f"Processing batch: offset={offset}, size={len(chunk_ids_batch)}")
+                logger.debug(f"Batch {batch_count}: offset={offset}, size={len(chunk_ids_batch)}, retrieval_time={retrieval_time:.2f}s")
+
+                # Adjust batch size based on retrieval time (only if dynamic sizing enabled)
+                if target_batch_time != float('inf'):
+                    if retrieval_time > slow_threshold and current_batch_size > min_batch_size:
+                        # Too slow, reduce batch size
+                        old_batch_size = current_batch_size
+                        current_batch_size = max(min_batch_size, current_batch_size // 2)
+                        logger.info(f"Batch too slow ({retrieval_time:.2f}s > {slow_threshold}s), reducing batch size: {old_batch_size} -> {current_batch_size}")
+                    elif retrieval_time < fast_threshold and current_batch_size < max_batch_size:
+                        # Very fast, can increase batch size more aggressively
+                        old_batch_size = current_batch_size
+                        current_batch_size = min(max_batch_size, int(current_batch_size * 2.0))
+                        logger.debug(f"Batch very fast ({retrieval_time:.2f}s < {fast_threshold}s), increasing batch size: {old_batch_size} -> {current_batch_size}")
+                    elif retrieval_time < target_batch_time and current_batch_size < max_batch_size:
+                        # Reasonably fast, small increase
+                        old_batch_size = current_batch_size
+                        current_batch_size = min(max_batch_size, int(current_batch_size * 1.5))
+                        logger.debug(f"Batch reasonably fast ({retrieval_time:.2f}s), small increase: {old_batch_size} -> {current_batch_size}")
 
                 # Load chunk content for this batch
                 chunks_data = self._get_chunks_by_ids(chunk_ids_batch)
@@ -234,12 +286,12 @@ class EmbeddingService(BaseService):
 
                 total_generated += batch_generated
                 total_processed += len(chunk_ids_batch)
-                offset += batch_size
+                offset += len(chunk_ids_batch)  # Use actual batch size, not current_batch_size
 
-                logger.info(f"Batch completed: generated={batch_generated}, total_processed={total_processed}, total_generated={total_generated}")
+                logger.info(f"Batch {batch_count} completed: generated={batch_generated}, total_processed={total_processed}, total_generated={total_generated}, current_batch_size={current_batch_size}")
 
                 # Safety check: prevent infinite loops
-                if len(chunk_ids_batch) < batch_size:
+                if len(chunk_ids_batch) < current_batch_size:
                     # This was the last batch
                     break
 
