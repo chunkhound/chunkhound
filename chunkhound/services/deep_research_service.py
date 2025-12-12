@@ -1297,9 +1297,25 @@ class DeepResearchService:
             )
             return start_line, end_line
 
-        # Convert to 0-indexed for array access
+        # Convert to 0-indexed for array access. Chunk metadata can drift
+        # slightly from real file length (for example, after manual edits or
+        # legacy index entries), so we defensively clamp to valid bounds.
+        max_idx = len(lines) - 1
         start_idx = max(0, start_line - 1)
-        end_idx = min(len(lines) - 1, end_line - 1)
+        if start_idx > max_idx:
+            logger.debug(
+                f"Start line {start_line} for {file_path} exceeds file length "
+                f"{len(lines)}; clamping to last line."
+            )
+            start_idx = max_idx
+
+        end_idx = min(max_idx, end_line - 1)
+        if end_idx < start_idx:
+            logger.debug(
+                f"End line {end_line} for {file_path} precedes start line "
+                f"{start_line}; normalizing to start."
+            )
+            end_idx = start_idx
 
         # Expand backward to find function/class start
         expanded_start = start_idx

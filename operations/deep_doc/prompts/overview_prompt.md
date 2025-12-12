@@ -1,39 +1,13 @@
-Architecture and operations overview for agents, scoped to a specific folder
-within a larger workspace.
+Use code_research tool to generate provenance based and highly grounded documentation based on 
+an idealized documentation for the in scope:
 
-Scope for this documentation:
-- workspace root: the directory passed as --path
-- in-scope folder: {scope_display}
-
-You are a deep research system running inside an indexed workspace. Your job is
-to synthesize a self-contained architecture and operations document for the
-in-scope folder that future AI agents can rely on when they do not have access
-to live tools.
-
-Commit metadata for this documentation build:
-- created_from_sha (first documentation baseline): {created}
-
-Git diff summary (name-status) between created_from_sha and current_target_sha:
-{diff_created_block}
-
-Git diff summary (name-status) between previous_target_sha and current_target_sha:
-{diff_previous_block}
-
+=== HYDE BLOCK ===
 {plan_block}
-
-HyDE-style synthesis backbone for this run:
-- First, imagine an ideal, well-structured documentation set for the in-scope
-  folder ({scope_display}) *ignoring* the current code.
-- Use that imagined structure as a scaffold to drive retrieval of real code,
-  tests, and docs from the indexed workspace.
-- Then revise the documentation so that every statement is grounded in actual
-  code and tests, while preserving the helpful structure and explanations from
-  the hypothetical draft.
+=== END HYDE BLOCK ===
 
 Goals:
-1. Provide a deep, accurate explanation of this folder's architecture,
-   responsibilities, and operational boundaries, targeting an AI agent that will
-   be modifying this code.
+1. Rewrite the possibly highly halucinated HyDe documentation into semantic and research driven
+   document
 2. Explain major subsystems and how they fit together: how configuration, data
    models, services, and entrypoints (CLI/API/tests) interact.
 3. Highlight any critical constraints and invariants you discover in configs,
@@ -44,36 +18,13 @@ Goals:
 5. Use a chain-of-thought style inside the document itself: for each major
    subsystem and design decision, spell out the reasoning, tradeoffs, and
    failure modes in small, explicit steps instead of only stating conclusions.
+6. Use tables and flow charts at will whenever they fit the picture
 
-Output format:
-- Return a single markdown document with these exact top-level headings:
-  # Agent Doc
-  ## 1. Project Identity and Constraints
-  ## 2. Architecture Overview
-  ## 3. Subsystem Guides
-  ## 4. Operations, Commands, and Testing
-  ## 5. Known Pitfalls and Debugging Patterns
+Output format: Markdown
 
 Guidelines:
 - Aim for a long, detailed document rather than a brief overview. It is
   acceptable (and preferred) to spend many paragraphs on each subsystem as long
   as the structure stays clear.
-- Under "Subsystem Guides", start with 1–3 overview paragraphs (before any '###'
-  headings) that explain how the main subsystems relate to each other and how to
-  read the rest of the section. After that, group information by natural
-  submodules or packages
-  within the in-scope folder (for example, core libraries, providers, services,
-  interfaces, CLI/API entrypoints, utilities, operations, tests). For each
-  package or logical area, follow this internal pattern:
-  - What role it plays in the overall system.
-  - How it interacts with other layers (configuration, services, storage,
-    external APIs, tests).
-  - Why it is designed that way (tradeoffs, alternatives that were rejected,
-    constraints it enforces).
-  - How an agent should safely extend or modify it (dos and don'ts).
-- Within sections, use bullet lists or short numbered steps to show intermediate reasoning where it helps
-  understanding (e.g., "First this happens, then that, therefore we need X").
--- Use file paths and, where helpful, key function/class names with best-effort
-  line numbers based on the current codebase.
 - Do NOT include any commit metadata comments; the caller will prepend them.
   Only output the markdown content starting from "# Agent Doc".

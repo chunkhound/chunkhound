@@ -1731,6 +1731,19 @@ async def _run_deep_doc_body_pipeline(
                 scope_label=scope_label,
             )
 
+            # Optional debug hook: persist the raw overview code_research answer
+            # before any post-processing or assembly. This mirrors the HyDE
+            # prompt/plan dump behavior so engineers can inspect exactly what
+            # deep_research_impl returned for the overview stage.
+            dump_overview = os.getenv(
+                "CH_AGENT_DOC_CODE_RESEARCH_DUMP_OVERVIEW", "0"
+            ) == "1"
+            if dump_overview and out_dir is not None:
+                safe_scope = scope_label.replace("/", "_") or "root"
+                overview_path = out_dir / f"overview_code_research_{safe_scope}.md"
+                overview_path.parent.mkdir(parents=True, exist_ok=True)
+                overview_path.write_text(overview_answer, encoding="utf-8")
+
             # Deep research synthesis already appends a Sources footer. Strip it
             # so we can build a unified footer later from merged sources.
             body, _ = _split_sources_footer(overview_answer)
