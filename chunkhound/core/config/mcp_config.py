@@ -1,7 +1,7 @@
 """MCP (Model Context Protocol) server configuration for ChunkHound.
 
-This module provides configuration for the MCP server including
-transport type, network settings, and server behavior.
+This module provides configuration for the stdio MCP server
+including transport settings and server behavior.
 """
 
 import argparse
@@ -14,8 +14,7 @@ from pydantic import BaseModel, Field
 class MCPConfig(BaseModel):
     """Configuration for MCP server operation.
 
-    Controls how the MCP server operates including transport type,
-    network configuration, and server behavior.
+    Controls how the MCP server operates (stdio transport only).
     """
 
     # Transport configuration - stdio only

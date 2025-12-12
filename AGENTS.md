@@ -81,10 +81,10 @@ chunkhound/
 ## TECHNOLOGY_STACK
 - Python 3.10+ (async/await patterns)
 - uv (package manager - ALWAYS use this)
-- DuckDB (primary) / LanceDB (alternative) 
+- DuckDB (primary) / LanceDB (alternative)
 - Tree-sitter (20+ language parsers)
 - OpenAI/Ollama embeddings
-- MCP protocol (stdio and HTTP)
+- MCP protocol (stdio only)
 - Pydantic (configuration validation)
 
 ## TESTING_APPROACH

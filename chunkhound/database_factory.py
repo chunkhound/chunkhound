@@ -18,7 +18,6 @@ INTEGRATION REQUIREMENT:
 Any changes to this factory must be tested across all execution paths:
 - CLI commands (chunkhound run)
 - MCP stdio server
-- MCP HTTP server
 - File change processing
 """
 

@@ -1,7 +1,7 @@
-"""Test consistency of tool descriptions between HTTP and stdio MCP servers.
+"""Test consistency of tool descriptions in the MCP server.
 
-This test ensures that both server modes expose identical tool metadata,
-preventing the issue where tools had different descriptions in different modes.
+This test ensures the MCP stdio server exposes correct tool metadata from TOOL_REGISTRY,
+preventing issues where tools have incorrect or missing descriptions.
 """
 
 import pytest
