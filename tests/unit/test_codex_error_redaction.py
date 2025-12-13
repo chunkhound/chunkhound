@@ -71,4 +71,5 @@ async def test_codex_error_redaction(monkeypatch, tmp_path: Path):
     assert "[REDACTED]" in msg
     # Overlay should be cleaned
     assert not overlay_dir.exists(), "overlay CODEX_HOME should be removed after error"
-    assert requested_model.get("value") == "gpt-5-codex"
+    # "codex" alias should resolve to the default Codex model
+    assert requested_model.get("value") == "gpt-5.1-codex"
