@@ -79,7 +79,8 @@ class CodexCLIProvider(LLMProvider):
     def _resolve_model_name(self, requested: str | None) -> str:
         """Resolve requested model name to Codex CLI model identifier."""
         env_override = os.getenv("CHUNKHOUND_CODEX_DEFAULT_MODEL")
-        default_model = env_override.strip() if env_override else "gpt-5-codex"
+        # Default to the current Codex reasoning model unless explicitly overridden
+        default_model = env_override.strip() if env_override else "gpt-5.1-codex"
 
         if not requested:
             return default_model
@@ -180,11 +181,11 @@ class CodexCLIProvider(LLMProvider):
                 # Many Codex builds expect top-level `model` keys (not a
                 # [model] table).
                 cfg_lines = [
-                    "[history]",
-                    'persistence = "none"',
-                    "",
                     f'model = "{model_name}"',
                     f'model_reasoning_effort = "{self._reasoning_effort}"',
+                    "",
+                    "[history]",
+                    'persistence = "none"'
                 ]
                 config_path.write_text("\n".join(cfg_lines) + "\n", encoding="utf-8")
         except Exception as e:
@@ -225,6 +226,7 @@ class CodexCLIProvider(LLMProvider):
 
         env = os.environ.copy()
         effective_model = self._resolve_model_name(model or self._model)
+        keep_overlay = os.getenv("CHUNKHOUND_CODEX_KEEP_OVERLAY", "0") == "1"
 
         # Helper to forward selected env keys
         def _forward_env(keys: list[str]) -> None:
@@ -349,6 +351,19 @@ class CodexCLIProvider(LLMProvider):
                         )
                         continue
                     raise last_error from e
+                except (BrokenPipeError, ConnectionResetError) as e:
+                    # Treat BrokenPipe/connection reset on stdin as "no stdin support" and fall back to argv
+                    if use_stdin:
+                        use_stdin = False
+                        if attempt < self._max_retries - 1:
+                            logger.warning(
+                                "codex exec stdin connection lost; retrying with argv mode"
+                            )
+                            continue
+                        raise RuntimeError(
+                            "codex exec failed: stdin connection lost and no retries left"
+                        ) from e
+                    raise
                 except OSError as e:
                     # Handle OS-level argv length errors by switching to stdin mode
                     if e.errno == 7:  # Argument list too long
@@ -357,13 +372,6 @@ class CodexCLIProvider(LLMProvider):
                             logger.warning("codex exec argv too long; retrying with stdin mode")
                             continue
                     raise
-                except BrokenPipeError as e:
-                    # Switch to argv mode on BrokenPipe
-                    use_stdin = False
-                    if attempt < self._max_retries - 1:
-                        logger.warning("codex exec BrokenPipe on stdin; retrying with argv mode")
-                        continue
-                    raise RuntimeError("codex exec failed: BrokenPipe on stdin and no retries left") from e
                 # Let unexpected exceptions propagate; overlay cleanup happens in the outer finally
                 finally:
                     # No per-attempt cleanup of overlay; cleanup performed in outer finally
@@ -373,7 +381,13 @@ class CodexCLIProvider(LLMProvider):
             # Cleanup temporary resources regardless of success or failure
             try:
                 if overlay_home and Path(overlay_home).exists():
-                    shutil.rmtree(overlay_home, ignore_errors=True)
+                    if keep_overlay:
+                        logger.warning(
+                            "CHUNKHOUND_CODEX_KEEP_OVERLAY=1; preserving Codex overlay at %s",
+                            overlay_home,
+                        )
+                    else:
+                        shutil.rmtree(overlay_home, ignore_errors=True)
             except Exception:
                 pass
 

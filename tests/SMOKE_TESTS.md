@@ -34,18 +34,17 @@ uv run pytest tests/test_smoke.py::TestCLICommands -v
 ### 2. CLI Command Tests
 - **Purpose**: Ensure CLI doesn't crash on basic operations
 - **Coverage**: All major commands with --help flag
-- **Special Test**: Direct import of mcp_http_server module
 
 ### 3. Server Startup Tests
-- **Purpose**: Verify servers can start without immediate crashes
-- **Coverage**: MCP HTTP server startup (2-second timeout)
+- **Purpose**: Verify MCP stdio server can start without immediate crashes
+- **Coverage**: MCP stdio server startup and protocol handshake
 
 ### 4. Type Annotation Pattern Tests
 - **Purpose**: Detect problematic patterns before they cause crashes
 - **Coverage**: Scans for forward reference union patterns
 
 ## REAL_WORLD_EXAMPLE
-The type annotation bug that crashed MCP HTTP server:
+The type annotation bug that previously crashed the MCP server:
 ```python
 # BAD - Crashes at import time
 _server_config: "Config" | None = None
@@ -54,12 +53,7 @@ _server_config: "Config" | None = None
 _server_config: Config | None = None
 ```
 
-This smoke test would have caught it immediately:
-```bash
-$ uv run pytest tests/test_smoke.py::TestCLICommands::test_mcp_http_import -v
-FAILED - subprocess.TimeoutExpired: Command '['uv', 'run', 'python', '-c', 
-'import chunkhound.mcp_http_server']' failed with TypeError
-```
+Smoke tests catch these issues immediately at import time, preventing runtime failures.
 
 ## DESIGN_PRINCIPLES
 1. **FAST**: Total runtime < 10 seconds

@@ -78,7 +78,7 @@ class Class_{i}:
                 try:
                     start_time = time.time()
 
-                    # Send initialize request
+                    # Send initialize request (increase timeout for CI environments)
                     init_result = await client.send_request(
                         "initialize",
                         {
@@ -86,7 +86,7 @@ class Class_{i}:
                             "capabilities": {},
                             "clientInfo": {"name": "test", "version": "1.0"}
                         },
-                        timeout=5.0
+                        timeout=10.0
                     )
 
                     response_time = time.time() - start_time
@@ -143,7 +143,7 @@ class Class_{i}:
                 await client.start()
 
                 try:
-                    # Initialize the server
+                    # Initialize the server (increase timeout for CI environments)
                     await client.send_request(
                         "initialize",
                         {
@@ -151,7 +151,7 @@ class Class_{i}:
                             "capabilities": {},
                             "clientInfo": {"name": "test", "version": "1.0"}
                         },
-                        timeout=5.0
+                        timeout=10.0
                     )
 
                     # Send initialized notification

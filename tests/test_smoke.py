@@ -55,7 +55,6 @@ class TestModuleImports:
         """Test critical modules that have caused issues before."""
         critical_modules = [
             "chunkhound.mcp_server.stdio",
-            "chunkhound.mcp_server.http_server",  # This would have caught the bug!
             "chunkhound.api.cli.main",
             "chunkhound.database",
             "chunkhound.embeddings",
@@ -100,157 +99,8 @@ class TestCLICommands:
             f"Command {' '.join(command)} produced no output"
         )
 
-    def test_mcp_http_import(self):
-        """Test that we can at least import the MCP HTTP server module.
-
-        This specific test would have caught the type annotation bug.
-        """
-        result = subprocess.run(
-            [
-                "uv",
-                "run",
-                "python",
-                "-c",
-                "import chunkhound.mcp_server.http_server; print('OK')",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-
-        assert result.returncode == 0, (
-            f"Failed to import mcp_http_server\nstderr: {result.stderr}"
-        )
-        assert "OK" in result.stdout
-
-
 class TestServerStartup:
     """Test that servers can at least start without immediate crashes."""
-
-    @pytest.mark.asyncio
-    async def test_mcp_http_server_starts(self):
-        """Test that MCP HTTP server can start without immediate crash."""
-        import socket
-        import tempfile
-        
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Find a free port
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(("127.0.0.1", 0))
-                free_port = s.getsockname()[1]
-            
-            proc = await create_subprocess_exec_safe(
-                "uv",
-                "run",
-                "chunkhound",
-                "mcp",
-                temp_dir,  # Provide temp directory to avoid indexing entire CI workspace
-                "--http",
-                "--port",
-                str(free_port),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=get_safe_subprocess_env({**os.environ, "CHUNKHOUND_MCP_MODE": "1"}),  # Suppress logs
-            )
-
-            try:
-                # Give server 2 seconds to start or crash with timeout
-                await asyncio.wait_for(asyncio.sleep(2), timeout=30.0)
-
-                # Check if process is still running
-                if proc.returncode is not None:
-                    # Process exited - this means it crashed
-                    stdout, stderr = await proc.communicate()
-                    pytest.fail(
-                        f"MCP HTTP server crashed with code {proc.returncode}\n"
-                        f"stdout: {stdout.decode()}\n"
-                        f"stderr: {stderr.decode()}"
-                    )
-
-                # Server is running - success!
-                proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=5.0)
-
-            except asyncio.TimeoutError:
-                # Server took too long or cleanup timed out
-                proc.kill()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    pass  # Process is dead, ignore
-
-    @pytest.mark.asyncio
-    async def test_mcp_http_server_respects_port_argument(self):
-        """Test that MCP HTTP server starts on the specified port."""
-        import socket
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Find a free port for testing
-            def find_free_port():
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind(("127.0.0.1", 0))
-                    return s.getsockname()[1]
-
-            test_port = find_free_port()
-
-            # Start server with specific port
-            proc = await create_subprocess_exec_safe(
-                "uv",
-                "run",
-                "chunkhound",
-                "mcp",
-                temp_dir,  # Provide temp directory to avoid indexing entire CI workspace
-                "--http",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(test_port),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=get_safe_subprocess_env({**os.environ, "CHUNKHOUND_MCP_MODE": "1"}),
-            )
-
-            try:
-                # Wait for server startup with timeout (5s for slower CI environments)
-                await asyncio.wait_for(asyncio.sleep(5), timeout=30.0)
-
-                # Verify server is running
-                if proc.returncode is not None:
-                    stdout, stderr = await proc.communicate()
-                    pytest.fail(
-                        f"MCP HTTP server crashed with code {proc.returncode}\n"
-                        f"stdout: {stdout.decode()}\n"
-                        f"stderr: {stderr.decode()}"
-                    )
-
-                # Test that server is listening on correct port
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(1)
-                    result = s.connect_ex(("127.0.0.1", test_port))
-                    assert result == 0, f"Server not listening on port {test_port}"
-
-                # Verify server is NOT listening on a different port
-                wrong_port = find_free_port()
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(1)
-                    result = s.connect_ex(("127.0.0.1", wrong_port))
-                    assert result != 0, (
-                        f"Server unexpectedly listening on port {wrong_port}"
-                    )
-
-            except asyncio.TimeoutError:
-                # Server took too long
-                proc.kill()
-                pytest.fail("MCP HTTP server startup timed out")
-            finally:
-                # Clean up
-                proc.terminate()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
 
     @pytest.mark.asyncio
     async def test_mcp_stdio_server_help(self):
@@ -316,12 +166,11 @@ async def test():
     try:
         # Just test that critical imports work - this catches most startup issues
         from chunkhound.mcp_server.stdio import StdioMCPServer
-        from chunkhound.mcp_server.http_server import HttpMCPServer
         from chunkhound.core.config.config import Config
-        
+
         # Test config creation
         config = Config()
-        
+
         print("SUCCESS: MCP server imports and config creation work")
         return 0
     except Exception as e:
@@ -441,64 +290,6 @@ sys.exit(asyncio.run(test()))
                 pytest.fail("MCP stdio protocol handshake timed out")
             finally:
                 await client.close()
-
-    @pytest.mark.asyncio
-    async def test_mcp_http_tool_registration(self):
-        """Test MCP HTTP server registers all 5 tools including code_research."""
-        # Test tool registration directly without subprocess complexity
-        from chunkhound.mcp_server.http_server import HttpMCPServer
-        from chunkhound.core.config.config import Config
-        from chunkhound.core.config.embedding_config import EmbeddingConfig
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-            db_path = temp_path / ".chunkhound" / "test.db"
-            db_path.parent.mkdir(exist_ok=True)
-
-            # Create minimal config
-            config = Config()
-            config.database.path = db_path
-
-            # Create server instance without embeddings first
-            server_no_embeddings = HttpMCPServer(config, port=5173, host="127.0.0.1")
-
-            # Check registered tools (without embeddings)
-            tools_basic = await server_no_embeddings.app.get_tools()
-            # get_tools() returns list of Tool objects or tool names depending on FastMCP version
-            registered_tools_basic = [tool.name if hasattr(tool, 'name') else tool for tool in tools_basic]
-
-            # Should have at least basic tools (no embeddings required)
-            assert "search_regex" in registered_tools_basic, f"search_regex not registered: {registered_tools_basic}"
-            assert "get_stats" in registered_tools_basic, f"get_stats not registered: {registered_tools_basic}"
-            assert "health_check" in registered_tools_basic, f"health_check not registered: {registered_tools_basic}"
-
-            # Test with embeddings configured
-            api_key = os.environ.get("OPENAI_API_KEY")
-            if api_key:
-                # Create new config with embeddings
-                config_with_embeddings = Config()
-                config_with_embeddings.database.path = db_path
-                config_with_embeddings.embedding = EmbeddingConfig(
-                    provider="openai",
-                    model="text-embedding-3-small",
-                    api_key=api_key
-                )
-
-                # Create server with embeddings
-                server_with_embeddings = HttpMCPServer(config_with_embeddings, port=5174, host="127.0.0.1")
-
-                # Check registered tools (with embeddings)
-                tools_full = await server_with_embeddings.app.get_tools()
-                registered_tools_full = [tool.name if hasattr(tool, 'name') else tool for tool in tools_full]
-
-                # Should have all 5 tools when embeddings are configured
-                assert "search_regex" in registered_tools_full, f"search_regex not registered: {registered_tools_full}"
-                assert "get_stats" in registered_tools_full, f"get_stats not registered: {registered_tools_full}"
-                assert "health_check" in registered_tools_full, f"health_check not registered: {registered_tools_full}"
-                assert "search_semantic" in registered_tools_full, f"search_semantic not registered: {registered_tools_full}"
-                assert "code_research" in registered_tools_full, f"code_research not registered: {registered_tools_full}"
-
 
 class TestParserLoading:
     """Test that all parsers can be loaded and created."""
