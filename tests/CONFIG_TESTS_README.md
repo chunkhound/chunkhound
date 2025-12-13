@@ -9,8 +9,7 @@ This directory contains TDD (Test-Driven Development) tests for the config syste
 
 **Key Tests**:
 - `TestCLIConfigHandling`: Tests CLI commands use `args_to_config()` with validation
-- `TestMCPServerConfigHandling`: Tests MCP servers use environment-based config with validation  
-- `TestMCPHTTPServerConfigHandling`: Tests HTTP server follows same pattern as stdio
+- `TestMCPServerConfigHandling`: Tests MCP stdio server uses environment-based config with validation
 - `TestConfigConsistencyIntegration`: Tests all paths use same validation and registry setup
 
 **Expected Failures**: Most tests will fail until:
@@ -24,7 +23,6 @@ This directory contains TDD (Test-Driven Development) tests for the config syste
 
 **Key Tests**:
 - `TestMCPServerStdioConfigPattern`: Tests stdio server configuration lifecycle
-- `TestMCPServerHTTPConfigPattern`: Tests HTTP server configuration consistency
 - `TestMCPServerCodeAnalysis`: Static analysis tests for required imports and patterns
 - `TestMCPServerErrorHandling`: Tests error handling for validation failures
 
@@ -88,7 +86,7 @@ python tests/run_config_tests.py
 
 ### 2. **Comprehensive Coverage**
 - CLI command configuration
-- MCP server configuration (stdio & HTTP)
+- MCP stdio server configuration
 - Registry configuration
 - Database factory usage
 - Error handling

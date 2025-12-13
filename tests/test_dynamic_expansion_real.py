@@ -61,12 +61,10 @@ async def indexed_codebase(request, tmp_path):
         "chunkhound/services/search_service.py",
         "chunkhound/services/indexing_coordinator.py",
         
-        # MCP authentication chain: tools → config → validation → factory
+        # MCP configuration chain: tools → config → validation → factory
         "chunkhound/core/config/embedding_config.py",
-        "chunkhound/core/config/embedding_factory.py", 
-        "chunkhound/mcp/tools.py",
-        "chunkhound/mcp/http.py",
-        "chunkhound/mcp/http_server.py",
+        "chunkhound/core/config/embedding_factory.py",
+        "chunkhound/mcp_server/tools.py",
         
         # Provider configuration chain: interfaces → implementations → usage
         "chunkhound/providers/embeddings/openai_provider.py",
@@ -371,10 +369,9 @@ async def test_mcp_authentication_chain(indexed_codebase):
     This tests the discovered multi-hop pattern:
     1. Direct: embedding_factory.py - Provider-specific information
     2. Hop 1: embedding_config.py - API key validation
-    3. Hop 2: mcp/tools.py - MCP tool implementations
-    4. Hop 3: mcp/http.py - Configuration validation
-    
-    Expected semantic flow: factory creation → validation → MCP integration → configuration
+    3. Hop 2: mcp_server/tools.py - MCP tool implementations
+
+    Expected semantic flow: factory creation → validation → MCP integration
     """
     db, provider = indexed_codebase
     search_service = SearchService(db, provider)
@@ -465,10 +462,8 @@ async def test_mcp_authentication_chain(indexed_codebase):
     # Verify file chain discovery
     expected_files = {
         'embedding_factory.py',
-        'embedding_config.py', 
+        'embedding_config.py',
         'tools.py',
-        'http.py',
-        'http_server.py',
         'openai_provider.py',
         'voyageai_provider.py'
     }

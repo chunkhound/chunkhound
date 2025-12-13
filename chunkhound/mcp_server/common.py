@@ -1,6 +1,6 @@
-"""Common utilities and error handling for MCP servers.
+"""Common utilities and error handling for MCP server.
 
-This module provides shared utilities used by both stdio and HTTP servers,
+This module provides shared utilities for the stdio MCP server,
 including error handling, response formatting, and validation helpers.
 """
 
@@ -215,11 +215,11 @@ def format_json_response(data: Any) -> str:
 
 
 def format_tool_response(result: Any, format_type: str = "dict") -> Any:
-    """Format tool result based on server type.
+    """Format tool result for MCP protocol.
 
     Args:
         result: Tool execution result
-        format_type: "dict" for HTTP, "json" for stdio
+        format_type: "json" for stdio protocol, "dict" for direct dict response
 
     Returns:
         Formatted result
@@ -267,8 +267,8 @@ def parse_mcp_arguments(args: dict[str, Any]) -> dict[str, Any]:
 def add_common_mcp_arguments(parser: Any) -> None:
     """Add common MCP server arguments to a parser.
 
-    This function adds all the configuration arguments that both
-    stdio and HTTP MCP servers support.
+    This function adds all the configuration arguments that the
+    stdio MCP server supports.
 
     Args:
         parser: ArgumentParser to add arguments to
