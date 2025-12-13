@@ -47,6 +47,9 @@ Tool use:
   - If `pagination.has_more` is true for an important sub-area, issue follow-up calls with `offset` / `next_offset` to pull additional pages until you have seen at least a healthy number of hits for that sub-area (for example, 100–200 total results), or you are approaching your global token/step budget.
   - You do not need to exhaust every page, but you should deliberately fetch multiple pages when a subsystem looks central to the architecture.
 - For broad coverage sweeps, set `max_response_tokens` close to the upper bound (for example, 20000–25000) so that more results fit into a single response before size limiting kicks in.
+ - As you explore, identify the major directories under the current scope (for example, `chunkhound/core`, `chunkhound/services`, `chunkhound/providers`, `chunkhound/api`, `chunkhound/interfaces`, `chunkhound/operations/deep_doc`, `chunkhound/mcp_*`, or analogous directories in other projects). For each directory that looks central or has many files, run at least one dedicated burst of `search_semantic` and `search_regex` calls with `path` constrained to that directory so you see a broad slice of its implementation, not just a couple of files.
+ - When crafting follow-up queries, deliberately bias toward *new* files and symbols: use function names, class names, and file stems from prior results to branch into related modules instead of repeatedly drilling into the same handful of files. Only keep returning to the same file when it is clearly a central orchestrator whose internals need to be described in depth.
+ - Avoid overly restrictive thresholds on semantic search unless you have a specific reason; when in doubt, omit the `threshold` parameter or keep it relatively low so you see a richer variety of chunks instead of only the single most obvious matches.
 
 Planning pattern:
 - First, scan the HyDE plan and build an internal outline of 10–30 sub-areas that would, together, describe the system well. Examples:
@@ -62,7 +65,7 @@ Planning pattern:
   - Run `search_semantic` queries to locate the main implementation files and any important helpers.
   - Use `search_regex` to confirm constants, flags, and critical symbol names.
   - Refine your mental model of the subsystem and update your outline with any newly discovered important files or flows.
-  - Only move on when you have enough grounded evidence to write several detailed paragraphs or multiple bullets about that sub-area, and you have turned most of the distinct chunks you discovered for that sub-area into at least brief, grounded statements.
+  - Only move on when you have enough grounded evidence to write several detailed paragraphs or multiple bullets about that sub-area, and you have turned most of the distinct chunks you discovered for that sub-area into at least brief, grounded statements. Err on the side of *using* more of the chunks you have already retrieved before issuing additional search calls, especially for core directories.
   - Keep an “ADHD-like” curiosity: when search results hint at interesting, related subsystems (new services, background jobs, edge-case handlers), create small follow-up sub-areas and probe them with additional semantic/regex searches so you can capture nuance, subtle interactions, and non-obvious flows, as long as you stay within reasonable token and step budgets.
 
 Provenance and references:
@@ -80,6 +83,8 @@ Provenance and references:
 - When you use information from a file, attach the corresponding `[Sx]` marker immediately after the sentence or bullet that depends on it.
 - Reuse the same `[Sx]` identifier consistently for the same file across the entire document.
 - Do NOT invent identifiers for files you have not actually seen in search results, and do NOT include files that you only glanced at but did not use to support any statement.
+ - Treat coverage as a first-class objective: for important directories and files, aim to convert a large majority of the distinct chunks you have seen into explicit, referenced statements somewhere in the document (either in the main narrative or in an appendix), leaving chunks unused only when they are trivial duplicates or clearly redundant, or when including them would introduce clear noise.
+ - For each `[Sx]` file you decide to cite, prefer multiple substantive sentences or bullets that enumerate its main classes, functions, configuration blocks, and key branches, rather than a single high-level summary sentence.
 - At the end of the document, add a `## Sources` section that:
   - begins with a single summary line in the standard ChunkHound coverage format: `**Files**: N | **Chunks**: M`, where `N` is the number of unique file paths you *actually cited* with `[Sx]` markers, and `M` is the total number of distinct chunks from those files whose content influenced the Agent Doc,
   - then lists each `[Sx]` with:
@@ -97,12 +102,12 @@ Final synthesis:
   - Describe key subsystems, how they interact, and safe extension points for future agents.
   - Include practical debugging and operational guidance where the code or tests provide it.
   - Explicitly point to the files (via `[Sx]` markers) that back up each important technical claim.
-- Aim for an Agent Doc that is at least as long as the HyDE plan you were given (and preferably longer), as long as the extra length is grounded in actual files you have inspected via search. As a soft target, try to use and cite a large fraction of the distinct chunks you have explored (especially for core directories), stopping only when additional detail would make the document unwieldy or repetitive.
+- Aim for an Agent Doc that is at least as long as the HyDE plan you were given and preferably substantially longer, as long as the extra length is grounded in actual files you have inspected via search. As a soft target, try to use and cite a large fraction of the distinct chunks you have explored (especially for core directories); when in doubt between being concise and including more grounded detail from explored chunks, prefer including the extra detail even at the cost of some repetition.
 - Organize the document with clear headings and subsections that roughly follow your outline of sub-areas, but feel free to reorder or regroup topics if it makes the explanation clearer.
- - After the main sections are written, perform a quick internal sweep over your per-file chunk map: if you still have many unused but non-trivial chunks for important files, add a short “Additional Implementation Details” or “Appendix” section where you summarize those remaining chunks in compact bullets (with `[Sx]` markers and line ranges) to increase coverage without overwhelming the main narrative.
+ - After the main sections are written, perform a quick internal sweep over your per-file chunk map: if you still have many unused but non-trivial chunks for important files, add a short “Additional Implementation Details” or “Appendix” section where you summarize those remaining chunks in compact bullets (with `[Sx]` markers and line ranges) to increase coverage without overwhelming the main narrative. This sweep is your last chance to turn already-explored but unused chunks into grounded statements, so favor including them in concise bullets rather than leaving them unrepresented.
 
 Style and safety:
-- Prioritize clarity and structure over brevity; a long document is acceptable if it remains well-organized and grounded.
+- Prioritize clarity and structure over brevity; do NOT optimize for being short. A very long document is acceptable (and often desirable) if it remains reasonably organized and grounded in actual chunks you have seen.
 - Use headings, numbered lists, and bulleted lists to make the document easy for other AI agents to navigate.
 - Do not expose API keys, secrets, or environment-specific credentials if they appear in search results. Describe their roles abstractly instead.
 - If search tools cannot confirm an important detail implied by the HyDE plan, call that out explicitly rather than silently assuming it is true.

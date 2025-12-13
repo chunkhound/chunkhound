@@ -58,6 +58,7 @@ def create_parser() -> argparse.ArgumentParser:
     from .parsers.calibrate_parser import add_calibrate_subparser
     from .parsers.mcp_parser import add_mcp_subparser
     from .parsers.research_parser import add_research_subparser
+    from .parsers.autodoc_parser import add_autodoc_subparser
     from .parsers.run_parser import add_run_subparser
     from .parsers.search_parser import add_search_subparser
 
@@ -69,6 +70,7 @@ def create_parser() -> argparse.ArgumentParser:
     add_mcp_subparser(subparsers)
     add_search_subparser(subparsers)
     add_research_subparser(subparsers)
+    add_autodoc_subparser(subparsers)
     # Diagnose command retired; functionality lives under: index --check-ignores
     add_calibrate_subparser(subparsers)
 
@@ -79,6 +81,16 @@ async def async_main() -> None:
     """Async main entry point for the CLI."""
     parser = create_parser()
     args = parser.parse_args()
+
+    # For the 'autodoc' command, the positional path argument represents a
+    # documentation scope rather than the project root used for configuration
+    # discovery. To ensure we still pick up the project-level .chunkhound.json
+    # and default database path, temporarily clear args.path before config
+    # creation and restore it only for the autodoc handler.
+    autodoc_scope_path = None
+    if getattr(args, "command", None) == "autodoc" and hasattr(args, "path"):
+        autodoc_scope_path = args.path
+        setattr(args, "path", None)
 
     if not args.command:
         parser.print_help()
@@ -155,6 +167,15 @@ async def async_main() -> None:
             from .commands.research import research_command
 
             await research_command(args, config)
+        elif args.command == "autodoc":
+            # Restore scope path for autodoc now that config/project root are resolved
+            if autodoc_scope_path is not None:
+                setattr(args, "path", autodoc_scope_path)
+
+            # Dynamic import to avoid early chunkhound module loading
+            from .commands.autodoc import autodoc_command
+
+            await autodoc_command(args, config)
         elif args.command == "calibrate":
             # Dynamic import to avoid early chunkhound module loading
             from .commands.calibrate import calibrate_command
