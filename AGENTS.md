@@ -190,6 +190,7 @@ KISS - Keep It Simple:
 - Use `date +"%Y-%m-%dT%H:%M:%S%z" | sed -E 's/([+-][0-9]{2})([0-9]{2})$/\1:\2/'` for ISO-8601
 - Use flat directories with grep-friendly naming
 - Point out unproductive paths directly
+- Treat each database path as owned by a single process in production; experiments show that LanceDB can tolerate 1 writer + N readers across processes (see `operations/experiments/lancedb_concurrency_probe.py`) while DuckDB rejects multi-process access (see `operations/experiments/duckdb_concurrency_probe.py`), but ChunkHound continues to enforce single-threaded, single-owner access via SerialDatabaseProvider.
 
 # Critical Constraints
 - NEVER Commit without explicit request
