@@ -165,6 +165,15 @@ class LanceDBProvider(SerialDatabaseProvider):
             LanceDB connection object
         """
         import lancedb
+        import logging as python_logging
+
+        # Enable LanceDB internal logging for debugging timeouts
+        lancedb_logger = python_logging.getLogger('lancedb')
+        lancedb_logger.setLevel(python_logging.DEBUG)
+
+        # Also enable lower-level Lance logging if available
+        lance_logger = python_logging.getLogger('lance')
+        lance_logger.setLevel(python_logging.DEBUG)
 
         abs_db_path = self._db_path
 
@@ -712,12 +721,19 @@ class LanceDBProvider(SerialDatabaseProvider):
         if not self._chunks_table:
             self._executor_create_schema(conn, state)
 
+        # PERFORMANCE PROFILING: Track total batch operation time
+        batch_start_time = time.time()
+
         # Process in optimal batch sizes (LanceDB best practice: 1000+ items)
         batch_size = 1000
         all_chunk_ids = []
 
         for i in range(0, len(chunks), batch_size):
             batch_chunks = chunks[i : i + batch_size]
+
+            # PERFORMANCE PROFILING: Track individual sub-batch time
+            sub_batch_start = time.time()
+
             chunk_data_list = []
             chunk_ids = []
 
@@ -749,10 +765,18 @@ class LanceDBProvider(SerialDatabaseProvider):
                 }
                 chunk_data_list.append(chunk_data)
 
+            # PERFORMANCE PROFILING: Track table creation time
+            table_create_start = time.time()
+
             # Use PyArrow Table directly to avoid LanceDB DataFrame schema alignment bug
             chunks_table = pa.Table.from_pylist(
                 chunk_data_list, schema=get_chunks_schema()
             )
+
+            table_create_time = time.time() - table_create_start
+
+            # PERFORMANCE PROFILING: Track merge_insert time
+            merge_start = time.time()
 
             # Use merge_insert for atomic upsert with conflict-free semantics
             # Handles idempotency (same file indexed multiple times) and concurrent writes
@@ -764,11 +788,19 @@ class LanceDBProvider(SerialDatabaseProvider):
                 .when_not_matched_insert_all()
                 .execute(chunks_table)
             )
+
+            merge_time = time.time() - merge_start
+            sub_batch_total = time.time() - sub_batch_start
+
             all_chunk_ids.extend(chunk_ids)
 
-            logger.debug(f"Bulk inserted batch of {len(batch_chunks)} chunks")
+            logger.debug(
+                f"Bulk inserted batch of {len(batch_chunks)} chunks in {sub_batch_total:.3f}s "
+                f"(table_create: {table_create_time:.3f}s, merge_insert: {merge_time:.3f}s)"
+            )
 
-        logger.debug(f"Completed bulk insert of {len(chunks)} chunks in batches")
+        total_batch_time = time.time() - batch_start_time
+        logger.debug(f"Completed bulk insert of {len(chunks)} chunks in {total_batch_time:.3f}s total")
         return all_chunk_ids
 
     def get_chunk_by_id(
@@ -1991,7 +2023,17 @@ class LanceDBProvider(SerialDatabaseProvider):
         if self._chunks_table:
             try:
                 stats = self._chunks_table.stats()
-                result["chunks"] = stats.fragment_stats.num_fragments
+                # stats is a dict, access fragment info directly
+                if isinstance(stats, dict) and "fragment_stats" in stats:
+                    fragment_stats = stats["fragment_stats"]
+                    if hasattr(fragment_stats, "num_fragments"):
+                        result["chunks"] = fragment_stats.num_fragments
+                    elif isinstance(fragment_stats, dict) and "num_fragments" in fragment_stats:
+                        result["chunks"] = fragment_stats["num_fragments"]
+                    else:
+                        result["chunks"] = 0
+                else:
+                    result["chunks"] = 0
             except Exception as e:
                 logger.debug(f"Could not get chunks fragment count: {e}")
                 result["chunks"] = 0
@@ -1999,7 +2041,17 @@ class LanceDBProvider(SerialDatabaseProvider):
         if self._files_table:
             try:
                 stats = self._files_table.stats()
-                result["files"] = stats.fragment_stats.num_fragments
+                # stats is a dict, access fragment info directly
+                if isinstance(stats, dict) and "fragment_stats" in stats:
+                    fragment_stats = stats["fragment_stats"]
+                    if hasattr(fragment_stats, "num_fragments"):
+                        result["files"] = fragment_stats.num_fragments
+                    elif isinstance(fragment_stats, dict) and "num_fragments" in fragment_stats:
+                        result["files"] = fragment_stats["num_fragments"]
+                    else:
+                        result["files"] = 0
+                else:
+                    result["files"] = 0
             except Exception as e:
                 logger.debug(f"Could not get files fragment count: {e}")
                 result["files"] = 0
@@ -2029,6 +2081,24 @@ class LanceDBProvider(SerialDatabaseProvider):
         except Exception as e:
             logger.debug(f"Could not check fragment count, will optimize: {e}")
             return True
+
+    def should_optimize_during_indexing(self) -> bool:
+        """Check if optimization should run during indexing to prevent fragmentation.
+
+        LanceDB optimization during indexing is now always enabled for optimal performance.
+
+        Returns:
+            True - optimization always runs during indexing for LanceDB
+        """
+        try:
+            counts = self.get_fragment_count()
+            chunks_fragments = counts.get("chunks", 0)
+            should_optimize = chunks_fragments >= 25  # Default threshold for optimization
+            logger.debug(f"Fragment check: chunks={chunks_fragments}, threshold=25, should_optimize={should_optimize}")
+            return should_optimize
+        except Exception as e:
+            logger.debug(f"Could not check fragment count for indexing optimization: {e}")
+            return False
 
     def optimize_tables(self) -> None:
         """Optimize tables by compacting fragments and rebuilding indexes."""

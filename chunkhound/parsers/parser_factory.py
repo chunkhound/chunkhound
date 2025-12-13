@@ -11,10 +11,11 @@ All tree-sitter language modules are imported explicitly to avoid dynamic import
 complexity and ensure better error handling during startup.
 """
 
-import logging
 import os
 from pathlib import Path
 from typing import Any
+
+from loguru import logger
 
 from chunkhound.core.types.common import Language
 from chunkhound.interfaces.language_parser import LanguageParser
@@ -55,8 +56,6 @@ from chunkhound.parsers.mappings import (
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import SetupError, TreeSitterEngine
 from chunkhound.parsers.universal_parser import CASTConfig, UniversalParser
-
-logger = logging.getLogger(__name__)
 
 # Explicit tree-sitter language imports
 # Import all available tree-sitter languages explicitly to avoid

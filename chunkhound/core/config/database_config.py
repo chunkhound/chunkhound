@@ -49,6 +49,23 @@ class DatabaseConfig(BaseModel):
         description="Maximum database size in MB before indexing is stopped (None = no limit)",
     )
 
+    # Retry configuration
+    retry_on_timeout: bool = Field(
+        default=True,
+        description="Enable automatic retry for database timeouts"
+    )
+    max_retries: int = Field(
+        default=3,
+        ge=0,
+        description="Maximum retry attempts for timed-out operations"
+    )
+    retry_backoff_seconds: float = Field(
+        default=1.0,
+        ge=0.0,
+        description="Base backoff time between retries (exponential)"
+    )
+
+
     @field_validator("path")
     def validate_path(cls, v: Path | None) -> Path | None:
         """Convert string paths to Path objects."""
@@ -143,6 +160,27 @@ class DatabaseConfig(BaseModel):
             except ValueError:
                 # Invalid value - silently ignore
                 pass
+
+        # Retry configuration
+        if retry_on_timeout := os.getenv("CHUNKHOUND_DATABASE__RETRY_ON_TIMEOUT"):
+            lower_value = retry_on_timeout.lower()
+            if lower_value in ("true", "1", "yes"):
+                config["retry_on_timeout"] = True
+            elif lower_value in ("false", "0", "no"):
+                config["retry_on_timeout"] = False
+            # Invalid values are silently ignored
+        if max_retries := os.getenv("CHUNKHOUND_DATABASE__MAX_RETRIES"):
+            try:
+                config["max_retries"] = int(max_retries)
+            except ValueError:
+                pass
+        if retry_backoff := os.getenv("CHUNKHOUND_DATABASE__RETRY_BACKOFF_SECONDS"):
+            try:
+                config["retry_backoff_seconds"] = float(retry_backoff)
+            except ValueError:
+                pass
+
+
         return config
 
     @classmethod

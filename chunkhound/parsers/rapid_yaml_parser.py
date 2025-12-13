@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 import re
 from collections import Counter
@@ -14,14 +13,14 @@ from typing import List, Sequence
 from bisect import bisect_left
 from time import perf_counter
 
+from loguru import logger
+
 from chunkhound.core.models.chunk import Chunk
 from chunkhound.core.types.common import ChunkType, FileId, Language, LineNumber
 from chunkhound.interfaces.language_parser import LanguageParser, ParseResult
 from chunkhound.parsers.universal_parser import UniversalParser
 from chunkhound.parsers.yaml_template_sanitizer import sanitize_helm_templates
 from chunkhound.utils.chunk_deduplication import deduplicate_chunks
-
-logger = logging.getLogger(__name__)
 
 
 def _env_wants_tree_sitter() -> bool:

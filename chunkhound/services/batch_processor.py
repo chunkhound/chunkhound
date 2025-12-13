@@ -15,18 +15,34 @@ from chunkhound.core.detection import detect_language
 from chunkhound.core.types.common import FileId, Language
 from time import perf_counter
 
-def _dbg_log(msg: str) -> None:
+def _dbg_log(msg: str, operation: str | None = None, duration_ms: float | None = None) -> None:
+    """Log debug/performance information.
+
+    Uses loguru if available (for performance logging), otherwise falls back to file logging.
+    """
     try:
-        import os, datetime
-        path = os.getenv("CHUNKHOUND_DEBUG_FILE")
-        if not path:
-            return
-        ts = datetime.datetime.now().isoformat()
-        pid = os.getpid()
-        with open(path, "a", encoding="utf-8", errors="ignore") as f:
-            f.write(f"[{ts}][PID {pid}] {msg}\n")
-    except Exception:
-        pass
+        from loguru import logger
+
+        # Check if we have a performance logger configured
+        if operation and duration_ms is not None:
+            # This is a performance timing log
+            logger.bind(operation=operation, duration_ms=duration_ms).info(msg)
+        else:
+            # Regular debug log
+            logger.debug(msg)
+    except ImportError:
+        # Fallback to original file logging for compatibility
+        try:
+            import os, datetime
+            path = os.getenv("CHUNKHOUND_DEBUG_FILE")
+            if not path:
+                return
+            ts = datetime.datetime.now().isoformat()
+            pid = os.getpid()
+            with open(path, "a", encoding="utf-8", errors="ignore") as f:
+                f.write(f"[{ts}][PID {pid}] {msg}\n")
+        except Exception:
+            pass
 from chunkhound.parsers.parser_factory import create_parser_for_language
 
 
@@ -211,7 +227,8 @@ def process_file_batch(
                         error="Unknown file type",
                     )
                 )
-                _dbg_log(f"END   file={file_path} status=skipped reason=unknown_type dur_ms={(perf_counter()-t0)*1000:.1f}")
+                duration_ms = (perf_counter() - t0) * 1000
+                _dbg_log(f"END   file={file_path} status=skipped reason=unknown_type", "file_parsing", duration_ms)
                 continue
 
             # Skip large config/data files (config files are typically < 20KB)
@@ -233,7 +250,8 @@ def process_file_batch(
                             error="large_config_file",
                         )
                     )
-                    _dbg_log(f"END   file={file_path} status=skipped reason=large_config_file dur_ms={(perf_counter()-t0)*1000:.1f}")
+                    duration_ms = (perf_counter() - t0) * 1000
+                    _dbg_log(f"END   file={file_path} status=skipped reason=large_config_file", "file_parsing", duration_ms)
                     continue
 
             # Parse file and generate chunks (with optional per-file timeout)
@@ -261,7 +279,8 @@ def process_file_batch(
                             error="timeout",
                         )
                     )
-                    _dbg_log(f"END   file={file_path} status=skipped reason=timeout dur_ms={(perf_counter()-t0)*1000:.1f}")
+                    duration_ms = (perf_counter() - t0) * 1000
+                    _dbg_log(f"END   file={file_path} status=skipped reason=timeout", "file_parsing", duration_ms)
                     continue
                 elif status == "error":
                     results.append(
@@ -276,7 +295,8 @@ def process_file_batch(
                             error=str(payload),
                         )
                     )
-                    _dbg_log(f"END   file={file_path} status=error reason={payload} dur_ms={(perf_counter()-t0)*1000:.1f}")
+                    duration_ms = (perf_counter() - t0) * 1000
+                    _dbg_log(f"END   file={file_path} status=error reason={payload}", "file_parsing", duration_ms)
                     continue
                 else:
                     chunks_data = payload if isinstance(payload, list) else []
@@ -312,7 +332,8 @@ def process_file_batch(
                     status="success",
                 )
             )
-            _dbg_log(f"END   file={file_path} status=success dur_ms={(perf_counter()-t0)*1000:.1f} chunks={len(chunks_data)}")
+            duration_ms = (perf_counter() - t0) * 1000
+            _dbg_log(f"END   file={file_path} status=success chunks={len(chunks_data)}", "file_parsing", duration_ms)
 
         except Exception as e:
             # Capture errors but continue processing other files in batch

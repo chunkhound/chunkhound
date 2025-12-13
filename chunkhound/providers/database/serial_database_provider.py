@@ -55,7 +55,7 @@ class SerialDatabaseProvider(ABC):
         self._db_path = db_path
 
         # Create serial executor for all database operations
-        self._executor = SerialDatabaseExecutor()
+        self._executor = SerialDatabaseExecutor(config)
 
         # Service layer components
         self._indexing_coordinator: IndexingCoordinator | None = None
