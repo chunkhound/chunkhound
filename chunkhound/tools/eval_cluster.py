@@ -38,8 +38,16 @@ from chunkhound.llm_manager import LLMManager
 from chunkhound.services.clustering_service import ClusteringService
 
 
-def _bench_root(bench_id: str) -> Path:
-    """Return the source root for a given bench ID."""
+def _bench_root(bench_id: str, bench_root: Path | None = None) -> Path:
+    """Return the source root for a given bench ID.
+
+    When bench_root is provided it is treated as the full path to the bench
+    source directory; otherwise it defaults to:
+
+        .chunkhound/benches/<bench-id>/source/
+    """
+    if bench_root is not None:
+        return bench_root
     return Path.cwd() / ".chunkhound" / "benches" / bench_id / "source"
 
 
@@ -68,7 +76,10 @@ def _derive_label(rel_path: Path) -> str:
     return parts[0]
 
 
-def _load_bench_files(bench_id: str) -> tuple[dict[str, str], list[str], list[str]]:
+def _load_bench_files(
+    bench_id: str,
+    bench_root: Path | None,
+) -> tuple[dict[str, str], list[str], list[str]]:
     """Load bench files and derive true labels.
 
     Returns:
@@ -76,7 +87,7 @@ def _load_bench_files(bench_id: str) -> tuple[dict[str, str], list[str], list[st
         file_keys:  Ordered list of keys used for metrics
         true_labels:True label per file_key entry
     """
-    root = _bench_root(bench_id)
+    root = _bench_root(bench_id, bench_root)
     if not root.exists():
         raise RuntimeError(
             f"Bench source directory not found at {root}. "
@@ -120,7 +131,11 @@ def _load_bench_files(bench_id: str) -> tuple[dict[str, str], list[str], list[st
     return files, file_keys, true_labels
 
 
-def _build_config(bench_id: str, config_path: str | None) -> Config:
+def _build_config(
+    bench_id: str,
+    config_path: str | None,
+    bench_root: Path | None,
+) -> Config:
     """Construct Config for clustering evaluation.
 
     Uses project-root configuration (or explicit --config) but routes the
@@ -132,13 +147,8 @@ def _build_config(bench_id: str, config_path: str | None) -> Config:
 
     config = Config(args=args)
 
-    db_path = (
-        Path.cwd()
-        / ".chunkhound"
-        / "benches"
-        / bench_id
-        / "cluster_eval.db"
-    )
+    source_root = _bench_root(bench_id, bench_root)
+    db_path = source_root.parent / "cluster_eval.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     config.database.path = db_path
 
@@ -149,12 +159,13 @@ async def _cluster_and_evaluate(
     bench_id: str,
     config_path: str | None,
     max_tokens_per_cluster: int,
+    bench_root: Path | None,
 ) -> dict[str, Any]:
     """Run clustering on a bench corpus and compute metrics."""
-    files, file_keys, true_labels = _load_bench_files(bench_id)
+    files, file_keys, true_labels = _load_bench_files(bench_id, bench_root)
 
     # Build config and services bundle (configures registry consistently)
-    config = _build_config(bench_id, config_path)
+    config = _build_config(bench_id, config_path, bench_root)
 
     # Initialize embedding manager and provider (required for embeddings)
     embedding_manager = EmbeddingManager()
@@ -352,6 +363,15 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         help="Benchmark ID (default: cluster-stress-dev).",
     )
     parser.add_argument(
+        "--bench-root",
+        type=str,
+        default=None,
+        help=(
+            "Optional base directory for benchmark corpora. "
+            "If set, bench sources are read from <bench-root>/<bench-id>/source/."
+        ),
+    )
+    parser.add_argument(
         "--config",
         type=str,
         default=None,
@@ -375,11 +395,16 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
 async def _async_main(argv: Iterable[str] | None = None) -> int:
     args = _parse_args(argv)
 
+    bench_root: Path | None = None
+    if args.bench_root:
+        bench_root = Path(args.bench_root) / args.bench_id / "source"
+
     try:
         payload = await _cluster_and_evaluate(
             bench_id=args.bench_id,
             config_path=args.config,
             max_tokens_per_cluster=args.max_tokens_per_cluster,
+            bench_root=bench_root,
         )
     except Exception as exc:
         logger.error(f"Clustering evaluation failed: {exc}")

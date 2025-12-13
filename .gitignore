@@ -290,3 +290,6 @@ operations/tree-sitter*
 operations/docs*
 operations/chunkhound_agent_doc*
 operations/agent_docs/
+
+# Temporary documentation
+.tmp-docs/
