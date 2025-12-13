@@ -1,11 +1,9 @@
-"""Declarative tool registry for MCP servers.
+"""Declarative tool registry for MCP server.
 
-This module defines all MCP tools in a single location, allowing both
-stdio and HTTP servers to use the same tool implementations with their
-protocol-specific wrappers.
+This module defines all MCP tools in a single location, providing a unified
+registry that the stdio server uses for tool definitions.
 
-The registry pattern eliminates duplication and ensures consistent behavior
-across server types.
+The registry pattern ensures consistent tool metadata and behavior.
 """
 
 import inspect
