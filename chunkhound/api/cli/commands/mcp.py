@@ -53,85 +53,10 @@ async def mcp_command(args: argparse.Namespace, config) -> None:
     except ImportError:
         pass
 
-    # Handle transport selection
-    if hasattr(args, "http") and args.http:
-        # Show MCP setup instructions for HTTP mode (stdio can't print to stdout)
-        _show_mcp_setup_instructions_if_first_run(args)
+    # Use stdio transport (only supported mode)
+    from chunkhound.mcp_server.stdio import main
 
-        # Use HTTP transport via subprocess to avoid event loop conflicts
-        import subprocess
-
-        # Use config values instead of hardcoded fallbacks
-        # CLI args override config values
-        host = getattr(args, "host", None) or config.mcp.host
-        port = getattr(args, "port", None) or config.mcp.port
-
-        # Run HTTP server in subprocess
-        cmd = [
-            sys.executable,
-            "-m",
-            "chunkhound.mcp_server.http_server",
-            "--host",
-            str(host),
-            "--port",
-            str(port),
-        ]
-
-        if hasattr(args, "db") and args.db:
-            cmd.extend(["--db", str(args.db)])
-
-        # Set up environment with UTF-8 encoding for Windows compatibility
-        from chunkhound.utils.windows_constants import get_utf8_env
-
-        env = get_utf8_env()
-
-        process = subprocess.run(
-            cmd,
-            stdin=sys.stdin,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-            env=env,
-            encoding="utf-8",
-            errors="replace",  # Handle encoding errors gracefully
-        )
-        sys.exit(process.returncode)
-    else:
-        # Use stdio transport (default)
-        from chunkhound.mcp_server.stdio import main
-
-        await main(args=args)
-
-
-def _show_mcp_setup_instructions_if_first_run(args: argparse.Namespace) -> None:
-    """Show MCP setup instructions on first run (HTTP mode only)."""
-    project_path = Path(args.path)
-    config_path = project_path / ".chunkhound.json"
-
-    # Check if this looks like a first run (recent .chunkhound.json)
-    if not config_path.exists():
-        return
-
-    import time
-
-    file_age_seconds = time.time() - config_path.stat().st_mtime
-    if file_age_seconds > 300:  # More than 5 minutes old
-        return
-
-    # Only show once by creating a marker file
-    marker_path = project_path / ".chunkhound" / ".mcp_setup_shown"
-    if marker_path.exists():
-        return
-
-    # Show setup instructions
-    _show_mcp_setup_instructions(args, force_display=False)
-
-    # Create marker file
-    marker_path.parent.mkdir(exist_ok=True)
-    try:
-        with open(marker_path, "w") as f:
-            f.write("MCP setup instructions shown")
-    except Exception:
-        pass
+    await main(args=args)
 
 
 def _show_mcp_setup_instructions(
@@ -146,7 +71,6 @@ def _show_mcp_setup_instructions(
     import shutil
 
     project_path = Path(args.path)
-    is_http = hasattr(args, "http") and args.http
 
     # Detect installation method
     is_tool_installed = shutil.which("chunkhound") is not None
@@ -155,13 +79,7 @@ def _show_mcp_setup_instructions(
     _safe_print("\n" + "=" * 70)
     _safe_print(" ChunkHound MCP Server - Setup Instructions")
     _safe_print("=" * 70)
-
-    if is_http:
-        _safe_print(
-            f"\nHTTP Transport Mode: http://localhost:{getattr(args, 'port', 3000)}"
-        )
-    else:
-        _safe_print("\nStdio Transport Mode (default)")
+    _safe_print("\nStdio Transport Mode")
 
     _safe_print("\n" + "-" * 70)
     _safe_print(" Configuration for Different MCP Clients")
@@ -277,12 +195,6 @@ def _show_mcp_setup_instructions(
     _safe_print(f"\n• Project path: {project_path.absolute()}")
     _safe_print("• Local configs (.mcp.json, .vscode/mcp.json) don't need path arg")
     _safe_print("• Global configs (~/.claude/) require absolute path")
-
-    if is_http:
-        _safe_print(
-            f"\n• HTTP mode: Server accessible at http://localhost:{getattr(args, 'port', 3000)}"
-        )
-        _safe_print("• HTTP mode can print setup instructions safely")
 
     # Documentation link
     _safe_print("\n" + "-" * 70)

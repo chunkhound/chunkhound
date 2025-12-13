@@ -54,8 +54,7 @@ update_version: uv run scripts/update_version.py X.Y.Z
 
 # Running
 index: uv run chunkhound index [directory]
-mcp_stdio: uv run chunkhound mcp stdio
-mcp_http: uv run chunkhound mcp http --port 5173
+mcp: uv run chunkhound mcp
 ```
 
 ## COMMON_ERRORS_AND_SOLUTIONS
@@ -73,9 +72,8 @@ chunkhound/
 ├── services/          # Orchestration and batching logic
 ├── core/             # Data models and configuration
 ├── interfaces/       # Protocol definitions (contracts)
-├── api/              # CLI and HTTP interfaces
-├── mcp_server.py     # MCP stdio server
-├── mcp_http_server.py # MCP HTTP server
+├── api/              # CLI interfaces
+├── mcp_server/       # MCP server implementation (stdio)
 ├── database.py       # Legacy compatibility wrapper
 └── CLAUDE.md files   # Directory-specific LLM context
 ```
@@ -83,10 +81,10 @@ chunkhound/
 ## TECHNOLOGY_STACK
 - Python 3.10+ (async/await patterns)
 - uv (package manager - ALWAYS use this)
-- DuckDB (primary) / LanceDB (alternative) 
+- DuckDB (primary) / LanceDB (alternative)
 - Tree-sitter (20+ language parsers)
 - OpenAI/Ollama embeddings
-- MCP protocol (stdio and HTTP)
+- MCP protocol (stdio only)
 - Pydantic (configuration validation)
 
 ## TESTING_APPROACH

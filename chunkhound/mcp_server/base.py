@@ -6,7 +6,7 @@ This module provides a base class that handles:
 - Lifecycle management (startup/shutdown)
 - Common error handling patterns
 
-Architecture Note: Both stdio and HTTP servers inherit from this base
+Architecture Note: MCP server (stdio-only) inherits from this base
 to ensure consistent initialization while respecting protocol-specific constraints.
 """
 
@@ -30,7 +30,7 @@ class MCPServerBase(ABC):
     """Base class for MCP server implementations.
 
     Provides common initialization, configuration validation, and lifecycle
-    management for both stdio and HTTP server variants.
+    management for stdio MCP server.
 
     Subclasses must implement:
     - _register_tools(): Register protocol-specific tool handlers
