@@ -1089,8 +1089,8 @@ class LanceDBProvider(SerialDatabaseProvider):
 
             # Determine optimal batch size if not provided
             if batch_size is None:
-                # Use larger batches for better performance, but cap at 10k to avoid memory issues
-                batch_size = min(10000, len(embeddings_data))
+                # Use smaller batches to reduce reading overhead and prevent timeouts
+                batch_size = min(2000, len(embeddings_data))
 
             total_updated = 0
 

@@ -22,9 +22,9 @@ class EmbeddingService(BaseService):
         database_provider: DatabaseProvider,
         embedding_provider: EmbeddingProvider | None = None,
         embedding_batch_size: int = 1000,
-        db_batch_size: int = 5000,
+        db_batch_size: int = 2000,
         max_concurrent_batches: int | None = None,
-        optimization_batch_frequency: int = 1000,
+        optimization_batch_frequency: int = 100,
         progress: Progress | None = None,
     ):
         """Initialize embedding service.
@@ -197,6 +197,12 @@ class EmbeddingService(BaseService):
                     "generated": 0,
                 }
 
+            # Optimize database before starting if fragmentation is high
+            should_optimize = getattr(self._db, "should_optimize", None)
+            if should_optimize and should_optimize("pre-embedding"):
+                logger.info("Optimizing database before embedding generation to prevent fragmentation issues...")
+                self._db.optimize_tables()
+
             # Use provided provider/model or fall back to configured defaults
             target_provider = provider_name or self._embedding_provider.name
             target_model = model_name or self._embedding_provider.model
@@ -307,10 +313,11 @@ class EmbeddingService(BaseService):
                     break
 
             # Optimize if fragmentation high after embedding generation
-            if total_generated > 0 and hasattr(self._db, "optimize_tables"):
-                if hasattr(self._db, "should_optimize") and self._db.should_optimize("post-embedding"):
-                    logger.debug("Optimizing database after embedding generation...")
-                    self._db.optimize_tables()
+            optimize_tables = getattr(self._db, "optimize_tables", None)
+            should_optimize_func = getattr(self._db, "should_optimize", None)
+            if total_generated > 0 and optimize_tables and should_optimize_func and should_optimize_func("post-embedding"):
+                logger.debug("Optimizing database after embedding generation...")
+                optimize_tables()
 
             logger.info(f"Completed missing embeddings generation: generated={total_generated}, processed={total_processed}")
             return {
@@ -555,8 +562,9 @@ class EmbeddingService(BaseService):
 
         # Track batch count for periodic optimization
         completed_batch_count = 0
+        optimize_tables = getattr(self._db, "optimize_tables", None)
         should_optimize = (
-            hasattr(self._db, "optimize_tables")
+            optimize_tables is not None
             and self._optimization_batch_frequency > 0
         )
 
@@ -771,7 +779,7 @@ class EmbeddingService(BaseService):
                     f"Running periodic DB optimization after {completed_batch_count} total batches"
                 )
                 try:
-                    self._db.optimize_tables()
+                    optimize_tables()
                     logger.debug("Periodic optimization completed")
                 except Exception as e:
                     logger.warning(f"Periodic optimization failed: {e}")
