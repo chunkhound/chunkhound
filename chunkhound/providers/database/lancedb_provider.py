@@ -1549,6 +1549,12 @@ class LanceDBProvider(SerialDatabaseProvider):
         if self._chunks_table is None:
             raise RuntimeError("Chunks table not initialized")
 
+        # Optimize if fragmentation is high to ensure search performance
+        should_optimize = getattr(self, "should_optimize", None)
+        if should_optimize and should_optimize("pre-search"):
+            logger.debug("Optimizing database before semantic search...")
+            self.optimize_tables()
+
         # Validate embeddings exist for this provider/model
         try:
             chunks_count = self._chunks_table.count_rows()
@@ -1843,6 +1849,12 @@ class LanceDBProvider(SerialDatabaseProvider):
         """
         if not self._chunks_table or not self._files_table:
             return [], {"offset": offset, "page_size": 0, "has_more": False, "total": 0}
+
+        # Optimize if fragmentation is high to ensure search performance
+        should_optimize = getattr(self, "should_optimize", None)
+        if should_optimize and should_optimize("pre-search"):
+            logger.debug("Optimizing database before regex search...")
+            self.optimize_tables()
 
         try:
             # Optimize query based on pattern complexity
@@ -2453,6 +2465,12 @@ class LanceDBProvider(SerialDatabaseProvider):
         """
         if not self._chunks_table:
             return []
+
+        # Optimize if fragmentation is high to ensure read performance
+        should_optimize = getattr(self, "should_optimize", None)
+        if should_optimize and should_optimize("pre-read"):
+            logger.debug("Optimizing database before bulk read operation...")
+            self.optimize_tables()
 
         try:
             # For large datasets, we need to use a different approach since LanceDB
