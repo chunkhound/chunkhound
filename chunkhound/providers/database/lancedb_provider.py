@@ -2466,6 +2466,8 @@ class LanceDBProvider(SerialDatabaseProvider):
                 page_size = min(50000, max(limit * 10, 10000))  # Adaptive page size
                 collected_chunk_ids = []
 
+                logger.debug(f"Scanning {total_rows} total chunks, page_size={page_size}, target provider='{provider}', model='{model}'")
+
                 for scan_offset in range(0, total_rows, page_size):
                     try:
                         # Load a batch of rows
@@ -2473,16 +2475,38 @@ class LanceDBProvider(SerialDatabaseProvider):
                         if batch_df.empty:
                             break
 
-                        # Filter for chunks without valid embeddings for this provider/model
-                        embeddings_mask = batch_df["embedding"].apply(_has_valid_embedding)
-                        needs_embedding_mask = (
-                            ~embeddings_mask |
-                            (batch_df["provider"] != provider) |
-                            (batch_df["model"] != model)
-                        )
+                        logger.debug(f"Loaded batch at offset {scan_offset}: {len(batch_df)} chunks")
+
+                        # Debug: Sample chunk data
+                        if len(batch_df) > 0:
+                            sample_row = batch_df.iloc[0]
+                            sample_embedding = sample_row["embedding"]
+                            sample_provider = sample_row["provider"]
+                            sample_model = sample_row["model"]
+                            logger.debug(f"Sample chunk: id={sample_row['id']}, embedding={type(sample_embedding)} (len={len(sample_embedding) if hasattr(sample_embedding, '__len__') and sample_embedding is not None else 'N/A'}), provider='{sample_provider}', model='{sample_model}'")
+
+                        # More robust check for missing embeddings
+                        # Check for None, empty, or invalid embeddings explicitly
+                        def _needs_embedding_check(row):
+                            embedding = row["embedding"]
+                            # Check if embedding is None or empty
+                            if embedding is None or (hasattr(embedding, '__len__') and len(embedding) == 0):
+                                return True
+                            # Check if it's not valid
+                            if not _has_valid_embedding(embedding):
+                                return True
+                            # Check provider/model mismatch
+                            if row["provider"] != provider or row["model"] != model:
+                                return True
+                            return False
+
+                        needs_embedding_mask = batch_df.apply(_needs_embedding_check, axis=1)
 
                         matching_chunks = batch_df[needs_embedding_mask]
-                        collected_chunk_ids.extend(matching_chunks["id"].tolist())
+                        batch_ids = matching_chunks["id"].tolist()
+                        collected_chunk_ids.extend(batch_ids)
+
+                        logger.debug(f"Batch {scan_offset//page_size + 1}: found {len(batch_ids)} chunks needing embeddings (total collected: {len(collected_chunk_ids)})")
 
                         # If we have enough results, break early
                         if len(collected_chunk_ids) >= offset + limit:
@@ -2494,13 +2518,22 @@ class LanceDBProvider(SerialDatabaseProvider):
                         logger.warning("Using memory-intensive fallback for chunk_ids query")
                         try:
                             all_chunks_df = self._chunks_table.to_pandas()
-                            embeddings_mask = all_chunks_df["embedding"].apply(_has_valid_embedding)
-                            needs_embedding_df = all_chunks_df[
-                                ~embeddings_mask |
-                                (all_chunks_df["provider"] != provider) |
-                                (all_chunks_df["model"] != model)
-                            ]
+                            logger.debug(f"Fallback: loaded all {len(all_chunks_df)} chunks")
+
+                            def _fallback_needs_embedding_check(row):
+                                embedding = row["embedding"]
+                                if embedding is None or (hasattr(embedding, '__len__') and len(embedding) == 0):
+                                    return True
+                                if not _has_valid_embedding(embedding):
+                                    return True
+                                if row["provider"] != provider or row["model"] != model:
+                                    return True
+                                return False
+
+                            needs_embedding_mask = all_chunks_df.apply(_fallback_needs_embedding_check, axis=1)
+                            needs_embedding_df = all_chunks_df[needs_embedding_mask]
                             collected_chunk_ids = needs_embedding_df["id"].tolist()
+                            logger.debug(f"Fallback: found {len(collected_chunk_ids)} chunks needing embeddings")
                         except Exception as fallback_error:
                             logger.error(f"Fallback loading failed: {fallback_error}")
                             return []
@@ -2508,6 +2541,7 @@ class LanceDBProvider(SerialDatabaseProvider):
 
                 # Apply pagination to collected results
                 paginated_ids = collected_chunk_ids[offset : offset + limit]
+                logger.debug(f"Returning {len(paginated_ids)} chunk IDs (offset={offset}, limit={limit}, total collected={len(collected_chunk_ids)})")
                 return paginated_ids
 
             else:
