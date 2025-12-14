@@ -2,8 +2,9 @@
 
 import asyncio
 import json
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from chunkhound.interfaces.llm_provider import LLMResponse
 from chunkhound.providers.llm.opencode_cli_provider import OpenCodeCLIProvider
