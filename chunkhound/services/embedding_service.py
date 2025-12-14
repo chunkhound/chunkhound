@@ -879,16 +879,10 @@ class EmbeddingService(BaseService):
             logger.debug("_get_chunks_by_ids: no chunk_ids provided, returning empty list")
             return []
 
-        # Use provider-agnostic method to get all chunks with metadata
-        all_chunks_data = self._db.get_all_chunks_with_metadata()
-
-        # Filter to only the requested chunk IDs
-        chunk_id_set = set(chunk_ids)
         filtered_chunks = []
-
-        for chunk in all_chunks_data:
-            chunk_id = chunk.get("chunk_id", chunk.get("id"))
-            if chunk_id in chunk_id_set:
+        for chunk_id in chunk_ids:
+            chunk = self._db.get_chunk_by_id(chunk_id)
+            if chunk:
                 # Ensure we have the expected fields
                 filtered_chunk = {
                     "id": chunk_id,
