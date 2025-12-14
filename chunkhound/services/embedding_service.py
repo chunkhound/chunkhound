@@ -102,7 +102,7 @@ class EmbeddingService(BaseService):
             Number of embeddings successfully generated
         """
         if not self._embedding_provider:
-            logger.warning("No embedding provider configured")
+            logger.warning(f"No embedding provider configured in generate_embeddings_for_chunks (provider={self._embedding_provider})")
             return 0
 
         if len(chunk_ids) != len(chunk_texts):
@@ -132,7 +132,7 @@ class EmbeddingService(BaseService):
             )
 
             if not filtered_chunks:
-                logger.debug("All chunks already have embeddings")
+                logger.debug("All chunks already have embeddings, returning 0")
                 return 0
 
             # Generate embeddings in batches
@@ -190,6 +190,7 @@ class EmbeddingService(BaseService):
         """
         try:
             if not self._embedding_provider:
+                logger.warning("No embedding provider configured, returning error")
                 return {
                     "status": "error",
                     "error": "No embedding provider configured",
@@ -234,10 +235,12 @@ class EmbeddingService(BaseService):
                 start_time = time_module.time()
 
                 try:
+                    logger.debug(f"Retrieving chunk IDs batch: provider={target_provider}, model={target_model}, limit={current_batch_size}, offset={offset}")
                     # Get next batch of chunk IDs without embeddings
                     chunk_ids_batch = self._db.get_chunk_ids_without_embeddings_paginated(
                         target_provider, target_model, exclude_patterns, limit=current_batch_size, offset=offset
                     )
+                    logger.debug(f"Retrieved {len(chunk_ids_batch) if chunk_ids_batch else 0} chunk IDs")
                 except Exception as e:
                     # If batch fails, reduce batch size and retry once
                     if current_batch_size > min_batch_size:
@@ -246,12 +249,14 @@ class EmbeddingService(BaseService):
                         logger.warning(f"Batch retrieval failed (size={old_batch_size}), reducing to {current_batch_size}: {e}")
                         continue
                     else:
+                        logger.error(f"Batch retrieval failed permanently after reducing batch size: {e}")
                         raise  # Re-raise if already at minimum
 
                 retrieval_time = time_module.time() - start_time
 
                 if not chunk_ids_batch:
                     # No more chunks to process
+                    logger.info("No more chunks to process, exiting batch loop")
                     break
 
                 logger.debug(f"Batch {batch_count}: offset={offset}, size={len(chunk_ids_batch)}, retrieval_time={retrieval_time:.2f}s")
@@ -275,14 +280,18 @@ class EmbeddingService(BaseService):
                         logger.debug(f"Batch reasonably fast ({retrieval_time:.2f}s), small increase: {old_batch_size} -> {current_batch_size}")
 
                 # Load chunk content for this batch
+                logger.debug(f"Loading content for {len(chunk_ids_batch)} chunks")
                 chunks_data = self._get_chunks_by_ids(chunk_ids_batch)
                 chunk_id_list = [chunk["id"] for chunk in chunks_data]
                 chunk_texts = [chunk["code"] for chunk in chunks_data]
+                logger.debug(f"Loaded content for {len(chunks_data)} chunks")
 
                 # Generate embeddings for this batch
+                logger.debug(f"Calling generate_embeddings_for_chunks with {len(chunk_id_list)} chunks, provider={self._embedding_provider}")
                 batch_generated = await self.generate_embeddings_for_chunks(
                     chunk_id_list, chunk_texts, show_progress=True
                 )
+                logger.debug(f"generate_embeddings_for_chunks returned {batch_generated}")
 
                 total_generated += batch_generated
                 total_processed += len(chunk_ids_batch)
@@ -293,6 +302,7 @@ class EmbeddingService(BaseService):
                 # Safety check: prevent infinite loops
                 if len(chunk_ids_batch) < current_batch_size:
                     # This was the last batch
+                    logger.debug("Last batch detected (batch_size < current_batch_size), exiting loop")
                     break
 
             # Optimize if fragmentation high after embedding generation
@@ -301,6 +311,7 @@ class EmbeddingService(BaseService):
                     logger.debug("Optimizing database after embedding generation...")
                     self._db.optimize_tables()
 
+            logger.info(f"Completed missing embeddings generation: generated={total_generated}, processed={total_processed}")
             return {
                 "status": "success",
                 "generated": total_generated,
@@ -467,6 +478,7 @@ class EmbeddingService(BaseService):
             List of (chunk_id, text) tuples for chunks without embeddings
         """
         if not self._embedding_provider:
+            logger.debug("_filter_existing_embeddings: no embedding provider, returning empty list")
             return []
 
         provider_name = self._embedding_provider.name
@@ -527,6 +539,7 @@ class EmbeddingService(BaseService):
             Number of embeddings successfully generated
         """
         if not chunk_data:
+            logger.debug("_generate_embeddings_in_batches: no chunk data provided, returning 0")
             return 0
 
         # Create token-aware batches immediately (fast operation)
@@ -762,6 +775,7 @@ class EmbeddingService(BaseService):
                 except Exception as e:
                     logger.warning(f"Periodic optimization failed: {e}")
 
+        logger.debug(f"_generate_embeddings_in_batches: completed, total_generated={total_generated}")
         return total_generated
 
     def _create_token_aware_batches(
@@ -861,6 +875,7 @@ class EmbeddingService(BaseService):
     def _get_chunks_by_ids(self, chunk_ids: list[ChunkId]) -> list[dict[str, Any]]:
         """Get chunk data for specific chunk IDs."""
         if not chunk_ids:
+            logger.debug("_get_chunks_by_ids: no chunk_ids provided, returning empty list")
             return []
 
         # Use provider-agnostic method to get all chunks with metadata
@@ -886,6 +901,7 @@ class EmbeddingService(BaseService):
                 }
                 filtered_chunks.append(filtered_chunk)
 
+        logger.debug(f"_get_chunks_by_ids: found {len(filtered_chunks)} chunks out of {len(chunk_ids)} requested")
         return filtered_chunks
 
     def _get_chunks_by_file_path(self, file_path: str) -> list[dict[str, Any]]:
