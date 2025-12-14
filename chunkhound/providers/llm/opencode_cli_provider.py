@@ -61,7 +61,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                 timeout=5,
                 check=False,
             )
-            return result.returncode is not None
+            return result.returncode == 0
         except (subprocess.SubprocessError, FileNotFoundError):
             return False
 
@@ -136,7 +136,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
                     stdin=subprocess.DEVNULL,  # Prevent stdin inheritance
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    env=os.environ,  # Use existing environment (includes opencode auth)
+                    env=os.environ.copy(),  # Use copy of environment
                     cwd=tempfile.gettempdir(),  # Cross-platform temp directory
                 )
 

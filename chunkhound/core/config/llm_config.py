@@ -211,6 +211,9 @@ class LLMConfig(BaseSettings):
             return v
         if isinstance(v, str):
             return v.strip().lower()
+        # This branch is technically reachable if v is not None and not a str
+        # but pydantic should prevent that based on the type hint.
+        # However, for type safety we return v as is.
         return v
 
     def get_provider_configs(self) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -227,7 +230,7 @@ class LLMConfig(BaseSettings):
         resolved_utility_provider = self.utility_provider or self.provider
         resolved_synthesis_provider = self.synthesis_provider or self.provider
 
-        base_config = {
+        base_config: dict[str, Any] = {
             "timeout": self.timeout,
             "max_retries": self.max_retries,
         }
@@ -423,6 +426,7 @@ class LLMConfig(BaseSettings):
                 "codex-cli",
                 "anthropic",
                 "gemini",
+                "opencode-cli",
             ],
             help="Default LLM provider for both roles",
         )
@@ -436,6 +440,7 @@ class LLMConfig(BaseSettings):
                 "codex-cli",
                 "anthropic",
                 "gemini",
+                "opencode-cli",
             ],
             help="Override LLM provider for utility operations",
         )
@@ -449,6 +454,7 @@ class LLMConfig(BaseSettings):
                 "codex-cli",
                 "anthropic",
                 "gemini",
+                "opencode-cli",
             ],
             help="Override LLM provider for synthesis operations",
         )

@@ -184,8 +184,7 @@ class BaseCLIProvider(LLMProvider):
             RuntimeError: If output is not valid JSON or doesn't match schema
         """
         # Build structured prompt with schema
-        structured_prompt = f"""Please respond with ONLY valid JSON that \
-conforms to this schema:
+        structured_prompt = f"""Please respond with ONLY valid JSON that conforms to this schema:
 
 {json.dumps(json_schema, indent=2)}
 
@@ -242,7 +241,7 @@ Respond with JSON only, no additional text."""
 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse structured output as JSON: {e}")
-            logger.debug(f"Raw output: {locals().get('content', 'N/A')}")
+            logger.debug(f"Raw output: {content if 'content' in locals() else 'N/A'}")
             raise RuntimeError(f"Invalid JSON in structured output: {e}") from e
         except Exception as e:
             logger.error(f"{self.name} structured completion failed: {e}")
