@@ -51,29 +51,38 @@ class LLMConfig(BaseSettings):
         "codex-cli",
         "gemini",
         "anthropic",
+        "opencode-cli",
     ] = Field(
         default="openai",
         description="Default LLM provider for both roles (utility, synthesis)",
     )
 
     # Optional per-role overrides (utility vs synthesis)
-    utility_provider: Literal[
-        "openai",
-        "ollama",
-        "claude-code-cli",
-        "codex-cli",
-        "anthropic",
-        "gemini",
-    ] | None = Field(default=None, description="Override provider for utility ops")
+    utility_provider: (
+        Literal[
+            "openai",
+            "ollama",
+            "claude-code-cli",
+            "codex-cli",
+            "anthropic",
+            "gemini",
+            "opencode-cli",
+        ]
+        | None
+    ) = Field(default=None, description="Override provider for utility ops")
 
-    synthesis_provider: Literal[
-        "openai",
-        "ollama",
-        "claude-code-cli",
-        "codex-cli",
-        "anthropic",
-        "gemini",
-    ] | None = Field(default=None, description="Override provider for synthesis ops")
+    synthesis_provider: (
+        Literal[
+            "openai",
+            "ollama",
+            "claude-code-cli",
+            "codex-cli",
+            "anthropic",
+            "gemini",
+            "opencode-cli",
+        ]
+        | None
+    ) = Field(default=None, description="Override provider for synthesis ops")
 
     # Model Configuration (dual-model architecture)
     utility_model: str = Field(
@@ -407,19 +416,40 @@ class LLMConfig(BaseSettings):
 
         parser.add_argument(
             "--llm-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic", "gemini"],
+            choices=[
+                "openai",
+                "ollama",
+                "claude-code-cli",
+                "codex-cli",
+                "anthropic",
+                "gemini",
+            ],
             help="Default LLM provider for both roles",
         )
 
         parser.add_argument(
             "--llm-utility-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic", "gemini"],
+            choices=[
+                "openai",
+                "ollama",
+                "claude-code-cli",
+                "codex-cli",
+                "anthropic",
+                "gemini",
+            ],
             help="Override LLM provider for utility operations",
         )
 
         parser.add_argument(
             "--llm-synthesis-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic", "gemini"],
+            choices=[
+                "openai",
+                "ollama",
+                "claude-code-cli",
+                "codex-cli",
+                "anthropic",
+                "gemini",
+            ],
             help="Override LLM provider for synthesis operations",
         )
 
