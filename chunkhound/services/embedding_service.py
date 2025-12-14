@@ -237,8 +237,9 @@ class EmbeddingService(BaseService):
                 try:
                     logger.debug(f"Retrieving chunk IDs batch: provider={target_provider}, model={target_model}, limit={current_batch_size}, offset={offset}")
                     # Get next batch of chunk IDs without embeddings
+                    # Note: exclude_patterns not used for embeddings since indexing already handles exclusions
                     chunk_ids_batch = self._db.get_chunk_ids_without_embeddings_paginated(
-                        target_provider, target_model, exclude_patterns, limit=current_batch_size, offset=offset
+                        target_provider, target_model, None, limit=current_batch_size, offset=offset
                     )
                     logger.debug(f"Retrieved {len(chunk_ids_batch) if chunk_ids_batch else 0} chunk IDs")
                 except Exception as e:
