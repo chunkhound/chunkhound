@@ -1241,6 +1241,7 @@ class LanceDBProvider(SerialDatabaseProvider):
             logger.debug(
                 f"Successfully updated {total_updated} embeddings using merge_insert"
             )
+
             return total_updated
 
         except Exception as e:
@@ -1296,7 +1297,7 @@ class LanceDBProvider(SerialDatabaseProvider):
 
             # For large datasets, use paginated approach to avoid memory issues
             total_rows = self._chunks_table.count_rows()
-            page_size = 10000  # Process in reasonable chunks
+            page_size = 5000  # Process in smaller chunks to prevent memory issues
 
             if not chunk_ids:
                 # No specific chunk_ids provided - scan all chunks for embeddings
@@ -1429,7 +1430,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         try:
             # For large datasets, use streaming approach to avoid memory issues
             total_chunks = self._chunks_table.count_rows()
-            page_size = 10000  # Process in reasonable chunks
+            page_size = 5000  # Process in smaller chunks to prevent memory issues
             result = []
 
             # Build file_id to path mapping incrementally to avoid loading all files at once
@@ -1549,11 +1550,6 @@ class LanceDBProvider(SerialDatabaseProvider):
         if self._chunks_table is None:
             raise RuntimeError("Chunks table not initialized")
 
-        # Optimize if fragmentation is high to ensure search performance
-        should_optimize = getattr(self, "should_optimize", None)
-        if should_optimize and should_optimize("pre-search"):
-            logger.debug("Optimizing database before semantic search...")
-            self.optimize_tables()
 
         # Validate embeddings exist for this provider/model
         try:
@@ -1850,11 +1846,6 @@ class LanceDBProvider(SerialDatabaseProvider):
         if not self._chunks_table or not self._files_table:
             return [], {"offset": offset, "page_size": 0, "has_more": False, "total": 0}
 
-        # Optimize if fragmentation is high to ensure search performance
-        should_optimize = getattr(self, "should_optimize", None)
-        if should_optimize and should_optimize("pre-search"):
-            logger.debug("Optimizing database before regex search...")
-            self.optimize_tables()
 
         try:
             # Optimize query based on pattern complexity
@@ -1873,7 +1864,7 @@ class LanceDBProvider(SerialDatabaseProvider):
 
             # For large datasets, collect results with early termination
             total_rows = self._chunks_table.count_rows()
-            scan_page_size = min(50000, max(page_size * 5, 10000))  # Adaptive scanning
+            scan_page_size = min(10000, max(page_size * 2, 1000))  # Smaller adaptive scanning
             collected_results = []
             total_found = 0
 
@@ -2410,7 +2401,18 @@ class LanceDBProvider(SerialDatabaseProvider):
 
     def optimize_tables(self) -> None:
         """Optimize tables by compacting fragments and rebuilding indexes."""
-        return self._execute_in_db_thread_sync("optimize_tables")
+        # Use higher timeout for optimization operations (5 minutes vs default 30s)
+        import os
+        original_timeout = os.environ.get("CHUNKHOUND_DB_EXECUTE_TIMEOUT")
+        try:
+            os.environ["CHUNKHOUND_DB_EXECUTE_TIMEOUT"] = "300"  # 5 minutes
+            return self._execute_in_db_thread_sync("optimize_tables")
+        finally:
+            # Restore original timeout
+            if original_timeout is not None:
+                os.environ["CHUNKHOUND_DB_EXECUTE_TIMEOUT"] = original_timeout
+            elif "CHUNKHOUND_DB_EXECUTE_TIMEOUT" in os.environ:
+                del os.environ["CHUNKHOUND_DB_EXECUTE_TIMEOUT"]
 
     def _executor_optimize_tables(self, conn: Any, state: dict[str, Any]) -> None:
         """Executor method for optimize_tables - runs in DB thread."""
@@ -2466,11 +2468,6 @@ class LanceDBProvider(SerialDatabaseProvider):
         if not self._chunks_table:
             return []
 
-        # Optimize if fragmentation is high to ensure read performance
-        should_optimize = getattr(self, "should_optimize", None)
-        if should_optimize and should_optimize("pre-read"):
-            logger.debug("Optimizing database before bulk read operation...")
-            self.optimize_tables()
 
         try:
             # For large datasets, we need to use a different approach since LanceDB
@@ -2481,7 +2478,8 @@ class LanceDBProvider(SerialDatabaseProvider):
                 # Simple case: no path filtering needed
                 # Use pagination-friendly approach
                 total_rows = self._chunks_table.count_rows()
-                page_size = min(50000, max(limit * 10, 10000))  # Adaptive page size
+                # Reduce page size for large tables to prevent memory issues
+                page_size = min(10000, max(limit * 2, 1000))  # Smaller adaptive page size
                 collected_chunk_ids = []
 
                 logger.debug(f"Scanning {total_rows} total chunks, page_size={page_size}, target provider='{provider}', model='{model}'")
