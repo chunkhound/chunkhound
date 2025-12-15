@@ -61,11 +61,18 @@ def count_embeddings(db_path: Path, validation_level: str = "full") -> int:
         raise RuntimeError(f"Could not open chunks table: {e}")
 
     if validation_level == "none":
-        # Fastest: Just count non-null embeddings using LanceDB's native capabilities
+        # Fastest: Use LanceDB's native count_rows with filter (most efficient)
         try:
-            # LanceDB doesn't have a direct count with WHERE, so we use search and count results
-            all_results = chunks_table.search().where("embedding IS NOT NULL").to_list()
-            return len(all_results)
+            # Try the most efficient approach first - direct count with filter
+            count = chunks_table.count_rows(filter="embedding IS NOT NULL")
+            return count
+        except TypeError:
+            # Fallback: If filter parameter not supported, use search and count
+            try:
+                all_results = chunks_table.search().where("embedding IS NOT NULL").to_list()
+                return len(all_results)
+            except Exception as e:
+                raise RuntimeError(f"Could not count non-null embeddings: {e}")
         except Exception as e:
             raise RuntimeError(f"Could not count non-null embeddings: {e}")
 
