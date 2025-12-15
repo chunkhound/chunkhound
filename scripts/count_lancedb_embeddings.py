@@ -3,10 +3,15 @@
 Count embeddings in a LanceDB database.
 
 Usage:
-    uv run scripts/count_lancedb_embeddings.py --db-path /path/to/database.lancedb
+    uv run scripts/count_lancedb_embeddings.py --db-path /path/to/database.lancedb [--validation-level LEVEL]
 
-This script connects to a LanceDB database and counts the number of valid embeddings
-in the chunks table. It uses the same validation logic as the ChunkHound LanceDB provider.
+This script connects to a LanceDB database and counts embeddings in the chunks table.
+You can choose different validation levels for speed vs accuracy trade-offs.
+
+Validation levels:
+- none: Count all non-null embeddings (fastest, no data loading required)
+- basic: Count non-null + non-empty embeddings (requires loading, minimal processing)
+- full: Full validation including zero-vector detection (most accurate, current default)
 
 For large datasets, it processes embeddings in batches to avoid memory issues.
 Progress is reported for datasets larger than 5000 chunks.
@@ -35,7 +40,7 @@ def _has_valid_embedding(x) -> bool:
     return any(v != 0 for v in x)
 
 
-def count_embeddings(db_path: Path) -> int:
+def count_embeddings(db_path: Path, validation_level: str = "full") -> int:
     """Count valid embeddings in the LanceDB chunks table using memory-efficient pagination."""
     import lancedb
 
@@ -55,6 +60,16 @@ def count_embeddings(db_path: Path) -> int:
     except Exception as e:
         raise RuntimeError(f"Could not open chunks table: {e}")
 
+    if validation_level == "none":
+        # Fastest: Just count non-null embeddings using LanceDB's native capabilities
+        try:
+            # LanceDB doesn't have a direct count with WHERE, so we use search and count results
+            all_results = chunks_table.search().where("embedding IS NOT NULL").to_list()
+            return len(all_results)
+        except Exception as e:
+            raise RuntimeError(f"Could not count non-null embeddings: {e}")
+
+    # For "basic" and "full" validation, we need to load and inspect the data
     # Get total row count for progress tracking
     try:
         total_rows = chunks_table.count_rows()
@@ -69,22 +84,30 @@ def count_embeddings(db_path: Path) -> int:
     while True:
         try:
             # Use pagination to load chunks in batches
-            # Note: LanceDB's to_pandas() may not support offset/limit consistently,
-            # so we use search().limit() and manual offset handling
             if offset == 0:
                 # First batch
                 batch_results = chunks_table.search().where("embedding IS NOT NULL").limit(batch_size).to_list()
             else:
                 # Subsequent batches - get more results and slice
-                # This is less efficient but works around LanceDB's lack of native offset support
                 extended_results = chunks_table.search().where("embedding IS NOT NULL").limit(offset + batch_size).to_list()
                 batch_results = extended_results[offset:offset + batch_size]
 
             if not batch_results:
                 break
 
-            # Filter for valid embeddings in this batch
-            batch_valid_count = sum(1 for result in batch_results if _has_valid_embedding(result.get("embedding")))
+            # Apply validation based on level
+            if validation_level == "basic":
+                # Basic validation: check non-null and non-empty
+                batch_valid_count = sum(
+                    1 for result in batch_results
+                    if result.get("embedding") is not None and len(result.get("embedding", [])) > 0
+                )
+            elif validation_level == "full":
+                # Full validation: use the complete _has_valid_embedding function
+                batch_valid_count = sum(1 for result in batch_results if _has_valid_embedding(result.get("embedding")))
+            else:
+                raise ValueError(f"Unknown validation level: {validation_level}")
+
             valid_count += batch_valid_count
 
             # If we got fewer results than requested, we're done
@@ -112,6 +135,12 @@ def main():
         required=True,
         help="Path to the LanceDB database directory (.lancedb)"
     )
+    parser.add_argument(
+        "--validation-level",
+        choices=["none", "basic", "full"],
+        default="full",
+        help="Level of validation to perform (none=basic, basic=non-empty, full=zero-vector check)"
+    )
 
     args = parser.parse_args()
 
@@ -124,8 +153,13 @@ def main():
         return 1
 
     try:
-        count = count_embeddings(args.db_path)
-        print(f"Found {count} valid embeddings in {args.db_path}")
+        count = count_embeddings(args.db_path, args.validation_level)
+        level_desc = {
+            "none": "non-null embeddings",
+            "basic": "non-empty embeddings",
+            "full": "valid embeddings"
+        }
+        print(f"Found {count} {level_desc[args.validation_level]} in {args.db_path}")
         return 0
     except Exception as e:
         print(f"Error counting embeddings: {e}")
