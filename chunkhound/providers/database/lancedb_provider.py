@@ -1944,13 +1944,21 @@ class LanceDBProvider(SerialDatabaseProvider):
                 else:
                     full_condition = content_condition
 
-                # Execute the search with pagination
-                # LanceDB doesn't support OFFSET directly, so we fetch more and slice
-                fetch_limit = offset + page_size * 2  # Fetch extra for buffer
-                results = self._chunks_table.search().where(full_condition).limit(fetch_limit).to_list()
+                # Execute the search - fetch all results for accurate total count
+                # Note: This may use more memory for broad searches, but ensures correct pagination
+                results = self._chunks_table.search().where(full_condition).to_list()
 
                 # Deduplicate results (fragments may cause duplicates)
                 results = _deduplicate_by_id(results)
+
+                # Safeguard against excessive memory usage for broad searches
+                MAX_REGEX_RESULTS = 10000
+                if len(results) > MAX_REGEX_RESULTS:
+                    logger.warning(
+                        f"Regex search returned {len(results)} results, truncating to {MAX_REGEX_RESULTS} "
+                        f"for memory safety. Total count is approximate."
+                    )
+                    results = results[:MAX_REGEX_RESULTS]
 
                 # Apply offset manually
                 paginated_results = results[offset : offset + page_size]
