@@ -16,6 +16,7 @@ from chunkhound.embeddings import EmbeddingManager
 from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
 
 from .test_utils import get_api_key_for_tests, should_run_live_api_tests
+from .utils.windows_subprocess import terminate_process_tree
 
 
 async def test_official_openai_validation():
@@ -853,7 +854,7 @@ async def test_tei_format_end_to_end_with_mock_server():
 
     finally:
         if server_process:
-            server_process.terminate()
+            terminate_process_tree(server_process.pid)
             server_process.wait(timeout=5)
 
 
@@ -914,7 +915,7 @@ async def test_auto_detection_caches_format():
 
     finally:
         if server_process:
-            server_process.terminate()
+            terminate_process_tree(server_process.pid)
             server_process.wait(timeout=5)
 
 
@@ -966,7 +967,7 @@ async def test_concurrent_rerank_calls():
 
     finally:
         if server_process:
-            server_process.terminate()
+            terminate_process_tree(server_process.pid)
             server_process.wait(timeout=5)
 
 

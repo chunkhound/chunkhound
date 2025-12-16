@@ -17,6 +17,8 @@ from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_database_with_dependencies
 from chunkhound.embeddings import EmbeddingManager
 
+from tests.utils.windows_subprocess import terminate_async_process_tree
+
 
 class MCPServerTestFixture:
     """Test fixture for MCP server."""
@@ -56,14 +58,8 @@ class MCPServerTestFixture:
         """Stop MCP server gracefully."""
         if self.process:
             try:
-                # First try graceful termination
-                self.process.terminate()
-                try:
-                    await asyncio.wait_for(self._wait_for_process(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    # Force kill if graceful termination fails
-                    self.process.kill()
-                    await asyncio.wait_for(self._wait_for_process(), timeout=2.0)
+                # Use process tree termination to ensure all child processes are killed
+                await terminate_async_process_tree(self.process)
             except Exception:
                 # Ensure process is killed even if other steps fail
                 try:

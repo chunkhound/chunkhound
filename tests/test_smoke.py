@@ -20,7 +20,11 @@ import pytest
 from pathlib import Path
 
 # Import Windows-safe subprocess utilities
-from tests.utils.windows_subprocess import create_subprocess_exec_safe, get_safe_subprocess_env
+from tests.utils.windows_subprocess import (
+    create_subprocess_exec_safe,
+    get_safe_subprocess_env,
+    terminate_async_process_tree,
+)
 from tests.utils.windows_compat import windows_safe_tempdir
 from tests.utils import SubprocessJsonRpcClient
 
@@ -168,16 +172,11 @@ class TestServerStartup:
                     )
 
                 # Server is running - success!
-                proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=5.0)
+                await terminate_async_process_tree(proc)
 
             except asyncio.TimeoutError:
                 # Server took too long or cleanup timed out
-                proc.kill()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    pass  # Process is dead, ignore
+                await terminate_async_process_tree(proc)
 
     @pytest.mark.asyncio
     async def test_mcp_http_server_respects_port_argument(self):
@@ -241,16 +240,11 @@ class TestServerStartup:
 
             except asyncio.TimeoutError:
                 # Server took too long
-                proc.kill()
+                await terminate_async_process_tree(proc)
                 pytest.fail("MCP HTTP server startup timed out")
             finally:
                 # Clean up
-                proc.terminate()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
+                await terminate_async_process_tree(proc)
 
     @pytest.mark.asyncio
     async def test_mcp_stdio_server_help(self):
@@ -349,8 +343,7 @@ sys.exit(asyncio.run(test()))
                 assert "SUCCESS:" in stdout.decode(), f"Expected success message, got: {stdout.decode()}"
 
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+                await terminate_async_process_tree(proc)
                 pytest.fail("MCP stdio server test timed out")
 
     @pytest.mark.asyncio
