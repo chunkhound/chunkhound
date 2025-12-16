@@ -288,7 +288,11 @@ class CodexCLIProvider(LLMProvider):
                 use_stdin,
                 MAX_ARG_CHARS,
             )
-        add_skip_git = False
+        # Newer Codex builds require --skip-git-repo-check; default to passing
+        # it on the first attempt to avoid noisy negotiation warnings. This
+        # can be disabled via CHUNKHOUND_CODEX_SKIP_GIT_CHECK=0 if needed for
+        # older binaries.
+        add_skip_git = os.getenv("CHUNKHOUND_CODEX_SKIP_GIT_CHECK", "1") != "0"
 
         last_error: Exception | None = None
         try:

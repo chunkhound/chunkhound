@@ -219,19 +219,6 @@ async def _run_autodoc_overview_hyde(
         project_root=target_dir,
     )
 
-    # Optional debugging/traceability: when out_dir is provided, persist the
-    # exact HyDE scope prompt so that code_research runs can be inspected
-    # alongside the generated autodoc topics.
-    if out_dir is not None:
-        try:
-            safe_scope = scope_label.replace("/", "_") or "root"
-            prompt_path = out_dir / f"hyde_scope_prompt_{safe_scope}.md"
-            prompt_path.parent.mkdir(parents=True, exist_ok=True)
-            prompt_path.write_text(hyde_scope_prompt, encoding="utf-8")
-        except Exception:
-            # Prompt persistence is best-effort; never break main generation.
-            pass
-
     # Provide an explicit, comprehensiveness-aware target for the number of
     # points of interest so HyDE can bias its list length accordingly. We use
     # max_points directly as the upper bound, but allow the model to include
@@ -256,6 +243,19 @@ async def _run_autodoc_overview_hyde(
         "  - 1–2 sentences summarizing why this area is important.\n"
         "- Do not include any other sections or prose; just the numbered list.\n"
     )
+
+    # Optional debugging/traceability: when out_dir is provided, persist the
+    # exact PoI-generation prompt (scope + HyDE objective) so that code_research
+    # runs can be inspected alongside the generated autodoc topics.
+    if out_dir is not None:
+        try:
+            safe_scope = scope_label.replace("/", "_") or "root"
+            prompt_path = out_dir / f"hyde_scope_prompt_{safe_scope}.md"
+            prompt_path.parent.mkdir(parents=True, exist_ok=True)
+            prompt_path.write_text(overview_prompt, encoding="utf-8")
+        except Exception:
+            # Prompt persistence is best-effort; never break main generation.
+            pass
 
     overview_answer = await _run_hyde_only_query(
         llm_manager=llm_manager,
