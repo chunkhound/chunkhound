@@ -1961,25 +1961,18 @@ class LanceDBProvider(SerialDatabaseProvider):
                     # Use native LanceDB count_rows() for total chunks
                     stats["chunks"] = self._chunks_table.count_rows()
 
-                    # Count valid embeddings using native WHERE query instead of pandas filtering
+                    # Count embeddings using native count_rows for optimal performance
                     # This avoids loading the entire chunks table into memory
                     try:
-                        # Use LanceDB's native search with WHERE clause to count valid embeddings
-                        # We can't directly count with WHERE in LanceDB, so we get the results and count
-                        embedding_results = self._chunks_table.search().where(
-                            "embedding IS NOT NULL"
-                        ).to_list()
-
-                        # Filter for valid embeddings (non-empty, non-zero vectors)
-                        valid_embeddings = [
-                            result for result in embedding_results
-                            if _has_valid_embedding(result.get("embedding"))
-                        ]
-                        stats["embeddings"] = len(valid_embeddings)
+                        # Use LanceDB's count_rows with filter to count non-NULL embeddings
+                        # This is much faster than loading all results and filtering in Python
+                        stats["embeddings"] = self._chunks_table.count_rows(
+                            filter="embedding IS NOT NULL"
+                        )
 
                     except Exception as embedding_error:
-                        logger.warning(f"Failed to count embeddings with native query: {embedding_error}")
-                        # Fallback to pandas approach if native queries fail
+                        logger.warning(f"Failed to count embeddings with count_rows: {embedding_error}")
+                        # Fallback to pandas approach if count_rows fails
                         try:
                             chunks_df = self._chunks_table.to_pandas()
                             embeddings_mask = chunks_df["embedding"].apply(_has_valid_embedding)
