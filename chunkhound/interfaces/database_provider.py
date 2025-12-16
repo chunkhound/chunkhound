@@ -1,7 +1,7 @@
 """DatabaseProvider protocol for ChunkHound - abstract interface for database implementations."""
 
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from chunkhound.core.models import Chunk, Embedding, File
 
@@ -147,9 +147,6 @@ class DatabaseProvider(Protocol):
         """Delete all embeddings for a specific chunk."""
         ...
 
-    def get_all_chunks_with_metadata(self) -> list[dict[str, Any]]:
-        """Get all chunks with their metadata including file paths (provider-agnostic)."""
-        ...
 
     def get_chunk_ids_without_embeddings_paginated(
         self,

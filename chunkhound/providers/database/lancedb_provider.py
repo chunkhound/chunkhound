@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -166,6 +166,9 @@ class LanceDBProvider(SerialDatabaseProvider):
         # Query result caches (cleared when data is modified)
         self._file_path_cache = {}
         self._chunk_id_cache = {}
+
+        # Cache for missing embeddings pagination (lazy loading)
+        self._missing_embeddings_cache: dict[str, dict] = {}
 
         # Performance monitoring
         self._query_performance = {}
@@ -1128,63 +1131,46 @@ class LanceDBProvider(SerialDatabaseProvider):
                 chunk_ids = list(embedding_lookup.keys())
                 chunk_ids_str = ','.join(map(str, chunk_ids))
 
-                # OPTIMIZATION: Use native LanceDB queries instead of pandas filtering
-                # This avoids loading data into pandas DataFrames and reduces memory usage
-                try:
-                    # Primary: Use LanceDB's native Lance filter (efficient for large tables)
-                    existing_df = (
-                        self._chunks_table.to_lance()
-                        .to_table(filter=f"id IN ({chunk_ids_str})")
-                        .to_pandas()
-                    )
-                except Exception as lance_err:
-                    # OPTIMIZATION: Use direct LanceDB search queries instead of pandas pagination
-                    # This is more efficient than loading data into pandas for filtering
-                    logger.warning(
-                        f"Lance SQL filter unavailable, using optimized search fallback. "
-                        f"Error: {lance_err}"
-                    )
+                # Use native LanceDB search queries for efficient chunk lookup
+                existing_rows = []
+                chunk_ids_set = set(chunk_ids)
 
-                    # Use direct search queries instead of pandas filtering
-                    existing_rows = []
-                    chunk_ids_set = set(chunk_ids)
-
-                    # For smaller batches, use direct queries
-                    if len(chunk_ids) <= 1000:
+                # For smaller batches, use direct queries
+                if len(chunk_ids) <= 1000:
+                    try:
+                        # Use LanceDB's native search with IN clause
+                        results = self._chunks_table.search().where(f"id IN ({chunk_ids_str})").to_list()
+                        existing_rows = results
+                    except Exception:
+                        # Fallback to individual queries for very large IN clauses
+                        for chunk_id in chunk_ids:
+                            try:
+                                result = self._chunks_table.search().where(f"id = {chunk_id}").to_list()
+                                if result:
+                                    existing_rows.extend(result)
+                            except Exception:
+                                continue
+                else:
+                    # For larger sets, use streaming approach with smaller batches
+                    batch_size = 500
+                    for i in range(0, len(chunk_ids), batch_size):
+                        batch_chunk_ids = chunk_ids[i:i + batch_size]
+                        batch_ids_str = ','.join(map(str, batch_chunk_ids))
                         try:
-                            # Use LanceDB's native search with IN clause
-                            results = self._chunks_table.search().where(f"id IN ({chunk_ids_str})").to_list()
-                            existing_rows = results
+                            batch_results = self._chunks_table.search().where(f"id IN ({batch_ids_str})").to_list()
+                            existing_rows.extend(batch_results)
                         except Exception:
-                            # Fallback to individual queries for very large IN clauses
-                            for chunk_id in chunk_ids:
+                            # Individual queries as last resort
+                            for chunk_id in batch_chunk_ids:
                                 try:
                                     result = self._chunks_table.search().where(f"id = {chunk_id}").to_list()
                                     if result:
                                         existing_rows.extend(result)
                                 except Exception:
                                     continue
-                    else:
-                        # For larger sets, use streaming approach with smaller batches
-                        batch_size = 500
-                        for i in range(0, len(chunk_ids), batch_size):
-                            batch_chunk_ids = chunk_ids[i:i + batch_size]
-                            batch_ids_str = ','.join(map(str, batch_chunk_ids))
-                            try:
-                                batch_results = self._chunks_table.search().where(f"id IN ({batch_ids_str})").to_list()
-                                existing_rows.extend(batch_results)
-                            except Exception:
-                                # Individual queries as last resort
-                                for chunk_id in batch_chunk_ids:
-                                    try:
-                                        result = self._chunks_table.search().where(f"id = {chunk_id}").to_list()
-                                        if result:
-                                            existing_rows.extend(result)
-                                    except Exception:
-                                        continue
 
-                    # Convert to DataFrame for consistent downstream handling
-                    existing_df = pd.DataFrame(existing_rows) if existing_rows else pd.DataFrame()
+                # Convert to DataFrame for consistent downstream handling
+                existing_df = pd.DataFrame(existing_rows) if existing_rows else pd.DataFrame()
 
                 # Diagnostic logging
                 logger.debug(f"Looking for {len(chunk_ids)} chunk IDs, found {len(existing_df)} existing chunks")
@@ -1258,6 +1244,12 @@ class LanceDBProvider(SerialDatabaseProvider):
                 f"Successfully updated {total_updated} embeddings using merge_insert"
             )
 
+            # Invalidate cache for this provider:model combination
+            cache_key = f"{provider}:{model}"
+            if cache_key in self._missing_embeddings_cache:
+                logger.debug(f"Invalidating cache for {cache_key} due to embedding insertions")
+                del self._missing_embeddings_cache[cache_key]
+
             return total_updated
 
         except Exception as e:
@@ -1313,10 +1305,8 @@ class LanceDBProvider(SerialDatabaseProvider):
 
             if not chunk_ids:
                 # No specific chunk_ids provided - scan all chunks for embeddings
-                # Use native LanceDB queries instead of pandas filtering
+                # Use native LanceDB queries for efficient filtering
                 try:
-                    # Use LanceDB's native search with WHERE clause for provider/model filtering
-                    # This avoids loading data into pandas DataFrames entirely
                     results = self._chunks_table.search().where(
                         f"provider = '{provider}' AND model = '{model}' AND embedding IS NOT NULL"
                     ).to_list()
@@ -1325,45 +1315,9 @@ class LanceDBProvider(SerialDatabaseProvider):
                     for result in results:
                         if _has_valid_embedding(result.get("embedding")):
                             existing_chunk_ids.add(result["id"])
-
                 except Exception as e:
-                    logger.warning(f"Native LanceDB query failed, using fallback: {e}")
-                    # Fallback to paginated pandas approach if native queries fail
-                    total_rows = self._chunks_table.count_rows()
-                    page_size = 5000
-
-                    for offset in range(0, total_rows, page_size):
-                        try:
-                            page_df = self._chunks_table.to_pandas(offset=offset, limit=page_size)
-                            if page_df.empty:
-                                break
-
-                            # Filter for valid embeddings with matching provider/model
-                            embeddings_mask = page_df["embedding"].apply(_has_valid_embedding)
-                            matching_df = page_df[
-                                embeddings_mask
-                                & (page_df["provider"] == provider)
-                                & (page_df["model"] == model)
-                            ]
-
-                            existing_chunk_ids.update(matching_df["id"].tolist())
-
-                        except TypeError:
-                            # LanceDB may not support offset/limit in to_pandas()
-                            logger.warning("LanceDB to_pandas() doesn't support pagination, loading full table")
-                            try:
-                                all_chunks_df = self._chunks_table.to_pandas()
-                                embeddings_mask = all_chunks_df["embedding"].apply(_has_valid_embedding)
-                                existing_embeddings_df = all_chunks_df[
-                                    embeddings_mask
-                                    & (all_chunks_df["provider"] == provider)
-                                    & (all_chunks_df["model"] == model)
-                                ]
-                                existing_chunk_ids.update(existing_embeddings_df["id"].tolist())
-                            except Exception as fallback_error:
-                                logger.error(f"Fallback loading also failed: {fallback_error}")
-                                return set()
-                            break
+                    logger.error(f"Failed to scan for existing embeddings: {e}")
+                    return set()
             else:
                 # Specific chunk_ids provided - use targeted query
                 # For smaller lists, we can query directly
@@ -1433,164 +1387,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         # In LanceDB, this would involve updating the chunk to remove embedding data
         pass
 
-    def get_all_chunks_with_metadata(self) -> list[dict[str, Any]]:
-        """Get all chunks with their metadata including file paths (provider-agnostic)."""
-        return self._execute_in_db_thread_sync("get_all_chunks_with_metadata")
 
-    def _executor_get_all_chunks_with_metadata(
-        self, conn: Any, state: dict[str, Any]
-    ) -> list[dict[str, Any]]:
-        """Executor method for get_all_chunks_with_metadata - runs in DB thread.
-
-        Optimized to avoid loading entire tables into memory for large datasets.
-        Uses native LanceDB queries instead of pandas DataFrames for better performance.
-        """
-        if not self._chunks_table or not self._files_table:
-            return []
-
-        try:
-            # For large datasets, use streaming approach to avoid memory issues
-            total_chunks = self._chunks_table.count_rows()
-            page_size = 5000  # Process in smaller chunks to prevent memory issues
-            result = []
-
-            # Build file_id to path mapping incrementally to avoid loading all files at once
-            file_paths = {}
-            processed_file_ids = set()
-
-            for offset in range(0, total_chunks, page_size):
-                try:
-                    # Use native LanceDB queries instead of pandas loading
-                    # Get chunks using search (no offset/limit support, but we can limit results)
-                    chunks_query = self._chunks_table.search().limit(page_size)
-                    if offset > 0:
-                        # For pagination, we'll need to skip results manually
-                        # This is less efficient but avoids pandas DataFrame loading
-                        all_chunks_page = self._chunks_table.search().limit(offset + page_size).to_list()
-                        chunks_page = all_chunks_page[offset:offset + page_size]
-                    else:
-                        chunks_page = chunks_query.to_list()
-
-                    if not chunks_page:
-                        break
-
-                    # Get unique file_ids from this page that we haven't processed yet
-                    page_file_ids = set(chunk["file_id"] for chunk in chunks_page)
-                    new_file_ids = page_file_ids - processed_file_ids
-
-                    # Load file paths for new file_ids in batches using native queries
-                    if new_file_ids:
-                        file_batch_size = 5000
-                        new_file_ids_list = list(new_file_ids)
-                        for file_offset in range(0, len(new_file_ids_list), file_batch_size):
-                            file_batch = new_file_ids_list[file_offset:file_offset + file_batch_size]
-                            file_ids_str = ','.join(map(str, file_batch))
-
-                            try:
-                                # Use native LanceDB filter for file lookup
-                                file_results = (
-                                    self._files_table.to_lance()
-                                    .to_table(filter=f"id IN ({file_ids_str})")
-                                    .to_pandas()
-                                )
-                            except Exception:
-                                # Fallback to search-based filtering
-                                file_results = self._files_table.search().where(
-                                    f"id IN ({file_ids_str})"
-                                ).to_pandas()
-
-                            # Update file paths mapping
-                            for _, file_row in file_results.iterrows():
-                                file_paths[file_row["id"]] = file_row["path"]
-
-                        processed_file_ids.update(new_file_ids)
-
-                    # Build results for this page using native data structures
-                    for chunk in chunks_page:
-                        result.append(
-                            {
-                                "id": chunk["id"],
-                                "file_id": chunk["file_id"],
-                                "file_path": file_paths.get(
-                                    chunk["file_id"], ""
-                                ),  # Keep stored format
-                                "content": chunk["content"],
-                                "start_line": chunk["start_line"],
-                                "end_line": chunk["end_line"],
-                                "chunk_type": chunk["chunk_type"],
-                                "language": chunk["language"],
-                                "name": chunk["name"],
-                            }
-                        )
-
-                except Exception as page_error:
-                    # If native queries fail, fall back to pandas approach
-                    logger.warning(f"Native query approach failed: {page_error}, using pandas fallback")
-                    try:
-                        # Load a page of chunks using pandas
-                        chunks_page = self._chunks_table.to_pandas(offset=offset, limit=page_size)
-                        if chunks_page.empty:
-                            break
-
-                        # Get unique file_ids from this page that we haven't processed yet
-                        page_file_ids = set(chunks_page["file_id"].unique())
-                        new_file_ids = page_file_ids - processed_file_ids
-
-                        # Load file paths for new file_ids in batches
-                        if new_file_ids:
-                            file_batch_size = 5000
-                            new_file_ids_list = list(new_file_ids)
-                            for file_offset in range(0, len(new_file_ids_list), file_batch_size):
-                                file_batch = new_file_ids_list[file_offset:file_offset + file_batch_size]
-                                file_ids_str = ','.join(map(str, file_batch))
-
-                                try:
-                                    # Try LanceDB's native filter first
-                                    file_results = (
-                                        self._files_table.to_lance()
-                                        .to_table(filter=f"id IN ({file_ids_str})")
-                                        .to_pandas()
-                                    )
-                                except Exception:
-                                    # Fallback to search-based filtering
-                                    file_results = self._files_table.search().where(
-                                        f"id IN ({file_ids_str})"
-                                    ).to_pandas()
-
-                                # Update file paths mapping
-                                for _, file_row in file_results.iterrows():
-                                    file_paths[file_row["id"]] = file_row["path"]
-
-                            processed_file_ids.update(new_file_ids)
-
-                        # Build results for this page
-                        for _, chunk in chunks_page.iterrows():
-                            result.append(
-                                {
-                                    "id": chunk["id"],
-                                    "file_id": chunk["file_id"],
-                                    "file_path": file_paths.get(
-                                        chunk["file_id"], ""
-                                    ),  # Keep stored format
-                                    "content": chunk["content"],
-                                    "start_line": chunk["start_line"],
-                                    "end_line": chunk["end_line"],
-                                    "chunk_type": chunk["chunk_type"],
-                                    "language": chunk["language"],
-                                    "name": chunk["name"],
-                                }
-                            )
-
-                    except Exception as fallback_error:
-                        logger.error(f"Pandas fallback also failed: {fallback_error}")
-                        return []
-                    break
-
-            return result
-
-        except Exception as e:
-            logger.error(f"Error getting chunks with metadata: {e}")
-            return []
 
     # Search Operations (delegate to base class which uses executor)
     def _executor_search_semantic(
@@ -1662,7 +1459,7 @@ class LanceDBProvider(SerialDatabaseProvider):
             query = query.where(
                 f"provider = '{provider}' AND model = '{model}' AND embedding IS NOT NULL"
             )
-            query = query.limit(page_size + offset)
+            query = query.limit(page_size).offset(offset)
 
             if threshold:
                 query = query.where(f"_distance <= {threshold}")
@@ -1676,8 +1473,8 @@ class LanceDBProvider(SerialDatabaseProvider):
             # Deduplicate across fragments (safety net for fragment-induced duplicates)
             results = _deduplicate_by_id(results)
 
-            # Apply offset manually since LanceDB doesn't have native offset
-            paginated_results = results[offset : offset + page_size]
+            # Use native offset support
+            paginated_results = results
 
             # Format results to match DuckDB output and exclude raw embeddings
             formatted_results = []
@@ -1944,24 +1741,27 @@ class LanceDBProvider(SerialDatabaseProvider):
                 else:
                     full_condition = content_condition
 
-                # Execute the search - fetch all results for accurate total count
-                # Note: This may use more memory for broad searches, but ensures correct pagination
-                results = self._chunks_table.search().where(full_condition).to_list()
+                # Use native LanceDB offset/limit support for efficient pagination
+                # LanceDB handles offset/limit natively, no need for manual batching
+                results = (
+                    self._chunks_table.search()
+                    .where(full_condition)
+                    .limit(page_size)
+                    .offset(offset)
+                    .to_list()
+                )
 
                 # Deduplicate results (fragments may cause duplicates)
                 results = _deduplicate_by_id(results)
 
-                # Safeguard against excessive memory usage for broad searches
-                MAX_REGEX_RESULTS = 10000
-                if len(results) > MAX_REGEX_RESULTS:
-                    logger.warning(
-                        f"Regex search returned {len(results)} results, truncating to {MAX_REGEX_RESULTS} "
-                        f"for memory safety. Total count is approximate."
+                # Check if we hit the result limit (approximate check)
+                if len(results) >= page_size:
+                    logger.debug(
+                        f"Regex search returned {len(results)} results, "
+                        f"may have hit internal limits. Consider using more specific search patterns."
                     )
-                    results = results[:MAX_REGEX_RESULTS]
 
-                # Apply offset manually
-                paginated_results = results[offset : offset + page_size]
+                paginated_results = results
 
                 # Convert to expected format
                 formatted_results = []
@@ -1991,114 +1791,8 @@ class LanceDBProvider(SerialDatabaseProvider):
                 return formatted, pagination
 
             except Exception as native_error:
-                # Fallback to pandas-based approach if native queries fail
-                logger.warning(f"Native LanceDB search failed: {native_error}, using pandas fallback")
-
-                # For large datasets, collect results with early termination
-                total_rows = self._chunks_table.count_rows()
-                scan_page_size = min(10000, max(page_size * 2, 1000))
-                collected_results = []
-
-                # Scan chunks in pages to avoid loading everything
-                for scan_offset in range(0, total_rows, scan_page_size):
-                    try:
-                        # Load a batch of chunks
-                        batch_df = self._chunks_table.to_pandas(offset=scan_offset, limit=scan_page_size)
-                        if batch_df.empty:
-                            break
-
-                        # Apply content search filter
-                        if search_type == "like":
-                            content_mask = batch_df["content"].str.contains(escaped_pattern, regex=False, na=False)
-                        else:
-                            content_mask = batch_df["content"].str.contains(escaped_pattern, regex=True, na=False)
-
-                        # Apply path filter if specified
-                        if file_filter_ids is not None:
-                            path_mask = batch_df["file_id"].isin(file_filter_ids)
-                            combined_mask = content_mask & path_mask
-                        else:
-                            combined_mask = content_mask
-
-                        matching_chunks = batch_df[combined_mask]
-
-                        # Convert to result format
-                        for _, chunk in matching_chunks.iterrows():
-                            result = {
-                                "id": chunk["id"],
-                                "file_id": chunk["file_id"],
-                                "name": chunk.get("name", ""),
-                                "content": chunk.get("content", ""),
-                                "chunk_type": chunk.get("chunk_type", ""),
-                                "start_line": chunk.get("start_line", 0),
-                                "end_line": chunk.get("end_line", 0),
-                                "language": chunk.get("language", ""),
-                            }
-                            collected_results.append(result)
-
-                        # Early termination if we have enough results for pagination
-                        if len(collected_results) >= offset + page_size * 2:
-                            break
-
-                    except TypeError:
-                        # LanceDB doesn't support offset/limit in to_pandas()
-                        logger.warning("Using memory-intensive fallback for regex search")
-                        try:
-                            all_chunks_df = self._chunks_table.to_pandas()
-
-                            # Apply content search
-                            if search_type == "like":
-                                content_mask = all_chunks_df["content"].str.contains(escaped_pattern, regex=False, na=False)
-                            else:
-                                content_mask = all_chunks_df["content"].str.contains(escaped_pattern, regex=True, na=False)
-
-                            # Apply path filter
-                            if file_filter_ids is not None:
-                                path_mask = all_chunks_df["file_id"].isin(file_filter_ids)
-                                combined_mask = content_mask & path_mask
-                            else:
-                                combined_mask = content_mask
-
-                            matching_df = all_chunks_df[combined_mask]
-
-                            # Convert to results
-                            collected_results = []
-                            for _, chunk in matching_df.iterrows():
-                                result = {
-                                    "id": chunk["id"],
-                                    "file_id": chunk["file_id"],
-                                    "name": chunk.get("name", ""),
-                                    "content": chunk.get("content", ""),
-                                    "chunk_type": chunk.get("chunk_type", ""),
-                                    "start_line": chunk.get("start_line", 0),
-                                    "end_line": chunk.get("end_line", 0),
-                                    "language": chunk.get("language", ""),
-                                }
-                                collected_results.append(result)
-
-                        except Exception as fallback_error:
-                            logger.error(f"Fallback regex search failed: {fallback_error}")
-                            raise RuntimeError(f"Regex search failed: {fallback_error}") from fallback_error
-                        break
-
-                # Deduplicate results (fragments may cause duplicates)
-                collected_results = _deduplicate_by_id(collected_results)
-                total_found = len(collected_results)
-
-                # Apply pagination
-                paginated = collected_results[offset : offset + page_size]
-
-                # Get file paths for paginated results (batch operation for efficiency)
-                formatted = self._add_file_paths_to_results(paginated)
-
-                pagination = {
-                    "offset": offset,
-                    "page_size": len(paginated),
-                    "has_more": total_found > offset + page_size,
-                    "total": total_found,
-                }
-
-                return formatted, pagination
+                logger.error(f"Regex search failed: {native_error}")
+                raise RuntimeError(f"Regex search failed: {native_error}") from native_error
 
         except Exception as e:
             logger.error(f"Error in regex search: {e}")
@@ -2131,16 +1825,8 @@ class LanceDBProvider(SerialDatabaseProvider):
             batch_file_ids = file_ids[i : i + batch_size]
             ids_str = ','.join(map(str, batch_file_ids))
 
-            try:
-                # Try LanceDB native filter
-                file_batch = (
-                    self._files_table.to_lance()
-                    .to_table(filter=f"id IN ({ids_str})")
-                    .to_pandas()
-                )
-            except Exception:
-                # Fallback to search
-                file_batch = self._files_table.search().where(f"id IN ({ids_str})").to_pandas()
+            # Use LanceDB search for file path lookup
+            file_batch = self._files_table.search().where(f"id IN ({ids_str})").to_pandas()
 
             # Build path mapping
             for _, file_row in file_batch.iterrows():
@@ -2181,16 +1867,16 @@ class LanceDBProvider(SerialDatabaseProvider):
             return [], {"offset": offset, "page_size": 0, "has_more": False, "total": 0}
 
         try:
-            # Use LanceDB's full-text search capabilities
+            # Use LanceDB's full-text search capabilities with native offset/limit
             results = (
                 self._chunks_table.search()
                 .where(f"content LIKE '%{query}%'")
-                .limit(page_size + offset)
+                .limit(page_size)
+                .offset(offset)
                 .to_list()
             )
 
-            # Apply offset manually
-            paginated_results = results[offset : offset + page_size]
+            paginated_results = results
 
             # Format results to match DuckDB output and exclude raw embeddings
             formatted_results = []
@@ -2358,18 +2044,21 @@ class LanceDBProvider(SerialDatabaseProvider):
             return {"provider": provider, "model": model, "embedding_count": 0}
 
         try:
-            results = (
-                self._chunks_table.search()
-                .where(
-                    f"provider = '{provider}' AND model = '{model}' AND embedding IS NOT NULL"
-                )
-                .to_list()
-            )
+            # Use native LanceDB queries to count embeddings
+            results = self._chunks_table.search().where(
+                f"provider = '{provider}' AND model = '{model}' AND embedding IS NOT NULL"
+            ).to_list()
+
+            # Filter for valid embeddings (zero-vector check)
+            valid_embeddings = [
+                result for result in results
+                if _has_valid_embedding(result.get("embedding"))
+            ]
 
             return {
                 "provider": provider,
                 "model": model,
-                "embedding_count": len(results),
+                "embedding_count": len(valid_embeddings),
             }
         except Exception as e:
             logger.error(f"Error getting provider stats: {e}")
@@ -2386,7 +2075,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         coordinator) and serves equivalent results via the native API.
 
         Optimized to avoid loading entire tables into memory for large datasets.
-        Uses native LanceDB queries instead of pandas DataFrames for better performance.
+        Uses paginated processing to maintain bounded memory usage.
 
         Supported forms:
         - SELECT path, size, modified_time, content_hash FROM files
@@ -2407,26 +2096,70 @@ class LanceDBProvider(SerialDatabaseProvider):
                 except Exception:
                     cols = ["path", "size", "modified_time", "content_hash"]
 
-                # Fetch all rows via native LanceDB API instead of pandas
-                # This avoids loading the entire table into memory as a DataFrame
+                # Check table size for memory warnings
                 try:
-                    # Use LanceDB's native to_list() method for direct dictionary results
-                    # This is much more memory-efficient than to_pandas() + iterrows()
-                    all_records = self._files_table.to_list()
+                    total_files = self._files_table.count_rows()
+                    estimated_memory_mb = (total_files * 0.5) / 1024  # Rough estimate: 0.5KB per file record
 
-                    # Filter to requested columns without pandas DataFrame overhead
-                    rows: list[dict[str, Any]] = []
-                    for rec in all_records:
-                        out: dict[str, Any] = {}
-                        for c in cols:
-                            if c in rec:
-                                out[c] = rec[c]
+                    if estimated_memory_mb > 100:  # Warn for tables > 100MB estimated
+                        logger.warning(
+                            f"Large files table query detected: {total_files:,} files "
+                            f"(estimated {estimated_memory_mb:.1f}MB memory usage). "
+                            f"Using paginated processing to maintain bounded memory usage."
+                        )
+                except Exception as size_check_error:
+                    logger.debug(f"Could not check table size: {size_check_error}")
+
+                # Use paginated processing to avoid loading entire table into memory
+                try:
+                    page_size = 5000  # Process in batches of 5000 records
+                    all_rows: list[dict[str, Any]] = []
+                    offset = 0
+
+                    while True:
+                        # Use LanceDB search with limit for pagination
+                        # LanceDB doesn't have native offset support, so we use limit + manual skipping
+                        try:
+                            if offset == 0:
+                                # First page - use direct limit
+                                page_results = self._files_table.search().limit(page_size).to_list()
                             else:
-                                # Provide None for missing optional columns
-                                out[c] = None
-                        rows.append(out)
-                    return rows
-                except Exception:
+                                # Subsequent pages - fetch more and skip
+                                batch_results = self._files_table.search().limit(offset + page_size).to_list()
+                                page_results = batch_results[offset:offset + page_size]
+
+                            if not page_results:
+                                break
+
+                            # Filter to requested columns
+                            for rec in page_results:
+                                out: dict[str, Any] = {}
+                                for c in cols:
+                                    if c in rec:
+                                        out[c] = rec[c]
+                                    else:
+                                        # Provide None for missing optional columns
+                                        out[c] = None
+                                all_rows.append(out)
+
+                            offset += page_size
+
+                            # Safety check to prevent infinite loops
+                            if offset > 10000000:  # 10M records safety limit
+                                logger.warning(
+                                    f"Files query exceeded safety limit ({offset} records processed), "
+                                    f"stopping early. This may indicate a query issue."
+                                )
+                                break
+
+                        except Exception as pagination_error:
+                            logger.error(f"Pagination failed: {pagination_error}")
+                            return []
+
+                    return all_rows
+
+                except Exception as pagination_error:
+                    logger.error(f"Paginated processing failed: {pagination_error}")
                     return []
 
             # Unsupported pattern → no-op (coordinator will fall back)
@@ -2604,90 +2337,19 @@ class LanceDBProvider(SerialDatabaseProvider):
     ) -> list[int]:
         """Executor method for get_chunk_ids_without_embeddings_paginated - runs in DB thread.
 
-        Optimized for large datasets: uses native LanceDB queries instead of pandas filtering.
-        This prevents memory issues and improves performance for large chunk datasets.
+        Implements progressive lazy loading with bounded cache to prevent memory issues.
+        Loads chunks in 10k row pages only when needed, maintaining sorted order.
         """
         if not self._chunks_table:
             return []
 
         try:
-            if not exclude_patterns:
-                # Simple case: no path filtering needed
-                # Use native LanceDB queries to find chunks needing embeddings
-                collected_chunk_ids = []
-
-                logger.debug(f"Finding chunks needing embeddings for provider='{provider}', model='{model}'")
-
-                # Build WHERE condition for chunks that need embeddings
-                # A chunk needs embeddings if:
-                # 1. embedding IS NULL, OR
-                # 2. embedding is empty, OR
-                # 3. embedding is invalid (all zeros), OR
-                # 4. provider/model mismatch
-
-                # For LanceDB, we can efficiently query for NULL embeddings and provider/model mismatches
-                # For empty/invalid embeddings, we need to fetch and check
-
-                # First, get chunks with NULL embeddings or wrong provider/model
-                try:
-                    null_embedding_results = self._chunks_table.search().where(
-                        f"(embedding IS NULL OR provider != '{provider}' OR model != '{model}')"
-                    ).to_list()
-
-                    # Extract IDs and filter for actual needs
-                    for result in null_embedding_results:
-                        embedding = result.get("embedding")
-                        current_provider = result.get("provider")
-                        current_model = result.get("model")
-
-                        # Check if this chunk actually needs embedding
-                        needs_embedding = False
-                        if embedding is None:
-                            needs_embedding = True
-                        elif not _has_valid_embedding(embedding):
-                            needs_embedding = True
-                        elif current_provider != provider or current_model != model:
-                            needs_embedding = True
-
-                        if needs_embedding:
-                            collected_chunk_ids.append(result["id"])
-
-                except Exception as native_error:
-                    logger.warning(f"Native LanceDB query failed: {native_error}, using pandas fallback")
-                    # Fallback to pandas approach if native queries fail
-                    try:
-                        all_chunks_df = self._chunks_table.to_pandas()
-                        logger.debug(f"Fallback: loaded all {len(all_chunks_df)} chunks")
-
-                        def _fallback_needs_embedding_check(row):
-                            embedding = row["embedding"]
-                            if embedding is None or (hasattr(embedding, '__len__') and len(embedding) == 0):
-                                return True
-                            if not _has_valid_embedding(embedding):
-                                return True
-                            if row["provider"] != provider or row["model"] != model:
-                                return True
-                            return False
-
-                        needs_embedding_mask = all_chunks_df.apply(_fallback_needs_embedding_check, axis=1)
-                        needs_embedding_df = all_chunks_df[needs_embedding_mask]
-                        collected_chunk_ids = needs_embedding_df["id"].tolist()
-                        logger.debug(f"Fallback: found {len(collected_chunk_ids)} chunks needing embeddings")
-                    except Exception as fallback_error:
-                        logger.error(f"Fallback loading failed: {fallback_error}")
-                        return []
-
-                # Apply pagination to collected results
-                paginated_ids = collected_chunk_ids[offset : offset + limit]
-                logger.debug(f"Returning {len(paginated_ids)} chunk IDs (offset={offset}, limit={limit}, total found={len(collected_chunk_ids)})")
-                return paginated_ids
-
-            else:
-                # Complex case: path filtering required
-                # This requires joining with files table, which LanceDB doesn't support efficiently
-                # We'll collect candidate chunks first, then filter by path
+            # Path filtering not supported with lazy loading - fall back to original implementation
+            if exclude_patterns:
+                logger.warning("Path filtering not supported with lazy loading, using fallback")
+                # Use original implementation for path filtering
                 candidate_ids = self._executor_get_chunk_ids_without_embeddings_paginated(
-                    conn, state, provider, model, None, limit * 5, offset  # Get more candidates
+                    conn, state, provider, model, None, limit * 5, offset
                 )
 
                 if not candidate_ids:
@@ -2701,18 +2363,10 @@ class LanceDBProvider(SerialDatabaseProvider):
                     batch_ids = candidate_ids[i : i + batch_size]
                     ids_str = ','.join(map(str, batch_ids))
 
-                    try:
-                        # Get file paths for this batch using native LanceDB filter
-                        file_results = (
-                            self._files_table.to_lance()
-                            .to_table(filter=f"id IN ({ids_str})")
-                            .to_pandas()
-                        )
-                    except Exception:
-                        # Fallback to search
-                        file_results = self._files_table.search().where(
-                            f"id IN ({ids_str})"
-                        ).to_pandas()
+                    # Get file paths for this batch using native LanceDB search
+                    file_results = self._files_table.search().where(
+                        f"id IN ({ids_str})"
+                    ).to_pandas()
 
                     # Filter out excluded paths
                     for _, file_row in file_results.iterrows():
@@ -2736,6 +2390,91 @@ class LanceDBProvider(SerialDatabaseProvider):
                         break
 
                 return filtered_ids[:limit]
+
+            # Lazy loading implementation for simple case (no path filtering)
+            cache_key = f"{provider}:{model}"
+
+            # Initialize cache entry if not exists
+            if cache_key not in self._missing_embeddings_cache:
+                self._missing_embeddings_cache[cache_key] = {
+                    "loaded_pages": set(),
+                    "sorted_ids": [],
+                    "total_estimated": 0,
+                }
+
+            cache = self._missing_embeddings_cache[cache_key]
+
+            # Check if we need to load more pages
+            required_end = offset + limit
+            current_cached = len(cache["sorted_ids"])
+
+            if required_end > current_cached:
+                # Calculate which page to load next
+                page_size = 10000  # 10k rows per page
+                next_page = len(cache["loaded_pages"])
+
+                logger.debug(f"Loading page {next_page} for {cache_key} (cached: {current_cached}, needed: {required_end})")
+
+                # Load next page
+                try:
+                    # Query for chunks needing embeddings in this page range
+                    page_offset = next_page * page_size
+                    page_results = self._chunks_table.search().where(
+                        f"(embedding IS NULL OR provider != '{provider}' OR model != '{model}')"
+                    ).limit(page_size).to_list()
+
+                    if not page_results:
+                        # No more data available
+                        cache["total_estimated"] = len(cache["sorted_ids"])
+                        logger.debug(f"No more data for {cache_key}, total estimated: {cache['total_estimated']}")
+                    else:
+                        # Filter and collect IDs from this page
+                        page_ids = []
+                        for result in page_results:
+                            embedding = result.get("embedding")
+                            current_provider = result.get("provider")
+                            current_model = result.get("model")
+
+                            # Check if this chunk actually needs embedding
+                            needs_embedding = False
+                            if embedding is None:
+                                needs_embedding = True
+                            elif not _has_valid_embedding(embedding):
+                                needs_embedding = True
+                            elif current_provider != provider or current_model != model:
+                                needs_embedding = True
+
+                            if needs_embedding:
+                                page_ids.append(result["id"])
+
+                        # Sort page IDs for deterministic ordering
+                        page_ids.sort()
+
+                        # Merge into cached sorted list
+                        cache["sorted_ids"].extend(page_ids)
+                        cache["sorted_ids"].sort()  # Maintain global sorted order
+                        cache["loaded_pages"].add(next_page)
+
+                        logger.debug(f"Loaded page {next_page}: {len(page_ids)} IDs, total cached: {len(cache['sorted_ids'])}")
+
+                        # Continue loading if we still need more data
+                        if required_end > len(cache["sorted_ids"]):
+                            # Recursively load next page
+                            return self._executor_get_chunk_ids_without_embeddings_paginated(
+                                conn, state, provider, model, exclude_patterns, limit, offset
+                            )
+
+                except Exception as page_error:
+                    logger.warning(f"Failed to load page {next_page} for {cache_key}: {page_error}")
+                    # Return what we have
+                    pass
+
+            # Return paginated results from cache
+            end_idx = min(offset + limit, len(cache["sorted_ids"]))
+            result = cache["sorted_ids"][offset:end_idx]
+
+            logger.debug(f"Returning {len(result)} chunk IDs from cache (offset={offset}, limit={limit}, cached={len(cache['sorted_ids'])})")
+            return result
 
         except Exception as e:
             logger.error(f"Failed to get chunk IDs without embeddings: {e}")

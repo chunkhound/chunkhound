@@ -16,7 +16,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from loguru import logger
 
@@ -1678,51 +1678,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Delete all embeddings for a specific chunk - delegate to embedding repository."""
         self._embedding_repository.delete_embeddings_by_chunk_id(chunk_id)
 
-    def get_all_chunks_with_metadata(self) -> list[dict[str, Any]]:
-        """Get all chunks with their metadata including file paths - delegate to chunk repository."""
-        return self._execute_in_db_thread_sync("get_all_chunks_with_metadata")
 
-    def _executor_get_all_chunks_with_metadata(
-        self, conn: Any, state: dict[str, Any]
-    ) -> list[dict[str, Any]]:
-        """Executor method for get_all_chunks_with_metadata - runs in DB thread."""
-        query = """
-            SELECT 
-                c.id as chunk_id,
-                c.file_id,
-                c.chunk_type,
-                c.symbol,
-                c.code,
-                c.start_line,
-                c.end_line,
-                c.language as chunk_language,
-                f.path as file_path,
-                f.language as file_language
-            FROM chunks c
-            JOIN files f ON c.file_id = f.id
-            ORDER BY f.path, c.start_line
-        """
-
-        results = conn.execute(query).fetchall()
-
-        chunks_with_metadata = []
-        for row in results:
-            chunks_with_metadata.append(
-                {
-                    "chunk_id": row[0],
-                    "file_id": row[1],
-                    "chunk_type": row[2],
-                    "symbol": row[3],
-                    "code": row[4],
-                    "start_line": row[5],
-                    "end_line": row[6],
-                    "chunk_language": row[7],
-                    "file_path": row[8],  # Keep stored format
-                    "file_language": row[9],
-                }
-            )
-
-        return chunks_with_metadata
 
     def _validate_and_normalize_path_filter(
         self, path_filter: str | None
