@@ -228,6 +228,19 @@ class CodexCLIProvider(LLMProvider):
         effective_model = self._resolve_model_name(model or self._model)
         keep_overlay = os.getenv("CHUNKHOUND_CODEX_KEEP_OVERLAY", "0") == "1"
 
+         # Optional verbose diagnostics for large prompts / transport issues.
+        debug_codex = os.getenv("CHUNKHOUND_CODEX_DEBUG", "0") == "1"
+        content_chars = len(content)
+        estimated_tokens = self.estimate_tokens(content)
+        if debug_codex:
+            logger.debug(
+                "Codex CLI request: model=%s, chars=%d, est_tokens=%d, max_tokens=%d",
+                effective_model,
+                content_chars,
+                estimated_tokens,
+                max_tokens,
+            )
+
         # Helper to forward selected env keys
         def _forward_env(keys: list[str]) -> None:
             for k in keys:
@@ -268,6 +281,13 @@ class CodexCLIProvider(LLMProvider):
         MAX_ARG_CHARS = int(os.getenv("CHUNKHOUND_CODEX_ARG_LIMIT", "200000"))
         stdin_first = os.getenv("CHUNKHOUND_CODEX_STDIN_FIRST", "1") != "0"
         use_stdin = True if stdin_first else (len(content) > MAX_ARG_CHARS)
+        if debug_codex:
+            logger.debug(
+                "Codex CLI transport selection: stdin_first=%s, use_stdin=%s, MAX_ARG_CHARS=%d",
+                stdin_first,
+                use_stdin,
+                MAX_ARG_CHARS,
+            )
         add_skip_git = False
 
         last_error: Exception | None = None
@@ -276,6 +296,12 @@ class CodexCLIProvider(LLMProvider):
                 proc: asyncio.subprocess.Process | None = None
                 try:
                     if use_stdin:
+                        if debug_codex:
+                            logger.debug(
+                                "Codex CLI attempt %d using stdin transport (skip_git=%s)",
+                                attempt + 1,
+                                add_skip_git,
+                            )
                         proc = await asyncio.create_subprocess_exec(
                             binary,
                             "exec",
@@ -297,6 +323,12 @@ class CodexCLIProvider(LLMProvider):
                         )
                     else:
                         # argv mode
+                        if debug_codex:
+                            logger.debug(
+                                "Codex CLI attempt %d using argv transport (skip_git=%s)",
+                                attempt + 1,
+                                add_skip_git,
+                            )
                         proc = await asyncio.create_subprocess_exec(
                             binary,
                             "exec",
@@ -315,6 +347,13 @@ class CodexCLIProvider(LLMProvider):
                     if proc.returncode != 0:
                         raw_err = stderr.decode("utf-8", errors="ignore")
                         err = self._sanitize_text(raw_err)
+                        if debug_codex:
+                            logger.debug(
+                                "Codex CLI non-zero exit (attempt %d, use_stdin=%s): %s",
+                                attempt + 1,
+                                use_stdin,
+                                err,
+                            )
                         # Skip-git repo check negotiation for newer Codex builds
                         if "skip-git-repo-check" in err and not add_skip_git:
                             add_skip_git = True
@@ -345,6 +384,12 @@ class CodexCLIProvider(LLMProvider):
                     last_error = RuntimeError(
                         f"codex exec timed out after {request_timeout}s"
                     )
+                    if debug_codex:
+                        logger.debug(
+                            "Codex CLI timeout on attempt %d after %ds",
+                            attempt + 1,
+                            request_timeout,
+                        )
                     if attempt < self._max_retries - 1:
                         logger.warning(
                             f"codex exec attempt {attempt + 1} timed out; retrying"
@@ -355,6 +400,11 @@ class CodexCLIProvider(LLMProvider):
                     # Treat BrokenPipe/connection reset on stdin as "no stdin support" and fall back to argv
                     if use_stdin:
                         use_stdin = False
+                        if debug_codex:
+                            logger.debug(
+                                "Codex CLI stdin connection lost on attempt %d; switching to argv",
+                                attempt + 1,
+                            )
                         if attempt < self._max_retries - 1:
                             logger.warning(
                                 "codex exec stdin connection lost; retrying with argv mode"
@@ -369,6 +419,11 @@ class CodexCLIProvider(LLMProvider):
                     if e.errno == 7:  # Argument list too long
                         if not use_stdin:
                             use_stdin = True
+                            if debug_codex:
+                                logger.debug(
+                                    "Codex CLI argv too long on attempt %d; switching to stdin",
+                                    attempt + 1,
+                                )
                             logger.warning("codex exec argv too long; retrying with stdin mode")
                             continue
                     raise

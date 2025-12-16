@@ -19,6 +19,7 @@ Usage:
     budgets = calculator.get_adaptive_token_budgets(depth=2, max_depth=5, is_leaf=True)
 """
 
+import os
 from typing import Any
 
 from loguru import logger
@@ -131,6 +132,19 @@ class BudgetCalculator:
         else:
             # Large repos (>= 1M LOC): maximum input context
             input_tokens = SYNTHESIS_INPUT_TOKENS_LARGE
+
+        # Optional hard cap for synthesis input tokens, primarily to keep
+        # external LLM transports like codex exec within argv/stdin limits
+        # when used in higher-level tools (e.g., autodoc).
+        env_cap = os.getenv("CHUNKHOUND_SYNTHESIS_INPUT_TOKENS_MAX")
+        if env_cap:
+            try:
+                cap_value = int(env_cap)
+                if cap_value > 0:
+                    input_tokens = min(input_tokens, cap_value)
+            except ValueError:
+                # Ignore invalid override and keep calculated budget
+                pass
 
         overhead_tokens = SINGLE_PASS_OVERHEAD_TOKENS
         total_tokens = input_tokens + OUTPUT_TOKENS_WITH_REASONING + overhead_tokens

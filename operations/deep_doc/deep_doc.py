@@ -1430,11 +1430,19 @@ def _build_llm_metadata_and_assembly(
     if not assembly_effort and getattr(llm, "assembly_reasoning_effort", None):
         assembly_effort = llm.assembly_reasoning_effort
 
-    if llm_manager is not None and (
-        assembly_provider_name or assembly_model_name or assembly_effort
-    ):
+    # Always load provider configs so we can fall back to the synthesis
+    # configuration when no explicit assembly overrides are provided.
+    utility_cfg, synth_cfg = llm.get_provider_configs()
+
+    needs_custom_assembly = bool(
+        assembly_provider_name
+        or assembly_model_name
+        or assembly_effort
+        or os.getenv("CH_AGENT_DOC_HYDE_USE_FULL_CODEX_CONFIG", "0") == "1"
+    )
+
+    if llm_manager is not None and needs_custom_assembly:
         try:
-            utility_cfg, synth_cfg = llm.get_provider_configs()
             assembly_cfg = synth_cfg.copy()
             if assembly_provider_name:
                 assembly_cfg["provider"] = assembly_provider_name
@@ -1476,6 +1484,22 @@ def _build_llm_metadata_and_assembly(
             # the standard synthesis provider and omit assembly-specific
             # metadata.
             assembly_provider = None
+    else:
+        # No dedicated assembly overrides: treat the synthesis configuration as
+        # the effective assembly configuration so metadata remains explicit.
+        try:
+            synth_provider = synth_cfg.get("provider")
+            synth_model = synth_cfg.get("model")
+            if synth_provider:
+                llm_meta["assembly_synthesis_provider"] = str(synth_provider)
+            if synth_model:
+                llm_meta["assembly_synthesis_model"] = str(synth_model)
+            effort = synth_cfg.get("reasoning_effort")
+            if effort:
+                llm_meta["assembly_reasoning_effort"] = str(effort)
+        except Exception:
+            # Metadata fallback only; runtime still uses the synthesis provider.
+            pass
 
     return llm_meta, assembly_provider
 
@@ -1885,19 +1909,8 @@ def _build_generation_stats(
     services: Any | None,
     scope_label: str,
 ) -> dict[str, str]:
-    """Populate generation_stats for visibility into the generation process."""
+    """Populate generation_stats with coverage and diagnostic information."""
     gen_stats: dict[str, str] = {}
-    gen_stats["generator_mode"] = generator_mode
-    # HyDE planning is always enabled for code_research runs and skipped only
-    # in HyDE-only mode.
-    gen_stats["hyde_bootstrap"] = "0" if hyde_only else "1"
-    gen_stats["hyde_map_enabled"] = "1" if hyde_map_enabled else "0"
-    if code_research_map_only:
-        gen_stats["code_research_map_only"] = "1"
-    # Record which structural scheme was used for this run so downstream
-    # analysis can distinguish canonical vs fluid layouts.
-    if structure_mode:
-        gen_stats["structure_mode"] = structure_mode
 
     if not hyde_only and generator_mode == "code_research" and services is not None:
         gen_stats["code_research_total_calls"] = str(total_research_calls)
