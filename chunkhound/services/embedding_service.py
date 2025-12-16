@@ -306,12 +306,6 @@ class EmbeddingService(BaseService):
 
                 logger.info(f"Batch {batch_count} completed: generated={batch_generated}, total_processed={total_processed}, total_generated={total_generated}, current_batch_size={current_batch_size}")
 
-                # Safety check: prevent infinite loops
-                if len(chunk_ids_batch) < current_batch_size:
-                    # This was the last batch
-                    logger.debug("Last batch detected (batch_size < current_batch_size), exiting loop")
-                    break
-
             # Optimize if fragmentation high after embedding generation
             optimize_tables = getattr(self._db, "optimize_tables", None)
             should_optimize_func = getattr(self._db, "should_optimize", None)
