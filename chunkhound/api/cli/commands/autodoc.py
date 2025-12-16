@@ -527,8 +527,13 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
         max_points = 10
 
     # Capture Git and LLM configuration metadata for the run so the output
-    # document can be treated as a proper agent doc.
-    created_from_sha = _get_head_sha(target_dir)
+    # document can be treated as a proper agent doc. Prefer the Git HEAD for
+    # the scoped folder (so per-project roots in a workspace get accurate
+    # SHAs), but fall back to the workspace root when the scope is not inside
+    # a Git repository.
+    created_from_sha = _get_head_sha(scope_path)
+    if created_from_sha == "NO_GIT_HEAD" and scope_path != target_dir:
+        created_from_sha = _get_head_sha(target_dir)
     llm_meta, assembly_provider = _build_llm_metadata_and_assembly(
         config=config,
         llm_manager=llm_manager,
