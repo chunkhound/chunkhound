@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <strong>Deep Research for Code & Files</strong>
+  <strong>Don't search your code. Research it.</strong>
 </p>
 
 <p align="center">
@@ -18,7 +18,7 @@
   <a href="https://discord.gg/BAepHEXXnX"><img src="https://img.shields.io/badge/Discord-Join_Community-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
-Transform your codebase into a searchable knowledge base for AI assistants using [semantic search via cAST algorithm](https://arxiv.org/pdf/2506.15655) and regex search. Integrates with AI assistants via the [Model Context Protocol (MCP)](https://spec.modelcontextprotocol.io/).
+Your AI assistant searches code but doesn't understand it. ChunkHound researches your codebase—extracting architecture, patterns, and institutional knowledge at any scale. Integrates via [MCP](https://spec.modelcontextprotocol.io/).
 
 ## Features
 
@@ -29,9 +29,10 @@ Transform your codebase into a searchable knowledge base for AI assistants using
 - **Local-first** - Your code stays on your machine
 - **29 languages** with structured parsing
   - **Programming** (via [Tree-sitter](https://tree-sitter.github.io/tree-sitter/)): Python, JavaScript, TypeScript, JSX, TSX, Java, Kotlin, Groovy, C, C++, C#, Go, Rust, Haskell, Swift, Bash, MATLAB, Makefile, Objective-C, PHP, Vue, Zig
-  - **Configuration** (via Tree-sitter): JSON, YAML, TOML, HCL, Markdown
+  - **Configuration**: JSON, YAML, TOML, HCL, Markdown
   - **Text-based** (custom parsers): Text files, PDF
 - **[MCP integration](https://spec.modelcontextprotocol.io/)** - Works with Claude, VS Code, Cursor, Windsurf, Zed, etc
+- **Real-time indexing** - Automatic file watching, smart diffs, seamless branch switching
 
 ## Documentation
 
@@ -45,8 +46,8 @@ Transform your codebase into a searchable knowledge base for AI assistants using
 - Python 3.10+
 - [uv package manager](https://docs.astral.sh/uv/)
 - API keys (optional - regex search works without any keys)
-  - **Embeddings**: [OpenAI](https://platform.openai.com/api-keys) | [VoyageAI](https://dash.voyageai.com/) | [Local with Ollama](https://ollama.ai/)
-  - **LLM (for deep research)**: [Anthropic](https://console.anthropic.com/) | [OpenAI](https://platform.openai.com/api-keys) | [Local with Ollama](https://ollama.ai/)
+  - **Embeddings**: [VoyageAI](https://dash.voyageai.com/) (recommended) | [OpenAI](https://platform.openai.com/api-keys) | [Local with Ollama](https://ollama.ai/)
+  - **LLM (for Code Research)**: Claude Code CLI or Codex CLI (no API key needed) | [Anthropic](https://console.anthropic.com/) | [OpenAI](https://platform.openai.com/api-keys)
 
 ## Installation
 
@@ -60,15 +61,19 @@ uv tool install chunkhound
 
 ## Quick Start
 
-1. Create `.chunkhound.json` in project root file
+1. Create `.chunkhound.json` in project root
 ```json
 {
   "embedding": {
-    "provider": "openai",
-    "api_key": "your-api-key-here"
+    "provider": "voyageai",
+    "api_key": "your-voyageai-key"
+  },
+  "llm": {
+    "provider": "claude-code-cli"
   }
 }
 ```
+> **Note:** Use `"codex-cli"` instead if you prefer Codex. Both work equally well and require no API key.
 2. Index your codebase
 ```bash
 chunkhound index
@@ -76,55 +81,27 @@ chunkhound index
 
 **For configuration, IDE setup, and advanced usage, see the [documentation](https://chunkhound.github.io).**
 
-## YAML Parsing Benchmarks
-
-Use the reproducible benchmark harness to compare PyYAML, tree-sitter/cAST, and RapidYAML bindings on representative YAML workloads.
-
-```bash
-# Default synthetic cases with all available backends
-uv run python scripts/bench_yaml.py
-
-# Use your own fixtures or disable specific backends
-uv run python scripts/bench_yaml.py \
-  --cases-dir ./benchmarks/yaml \
-  --backends pyyaml_safe_load tree_sitter_universal \
-  --iterations 10
-```
-
-## Real-Time Indexing
-
-**Automatic File Watching**: MCP servers monitor your codebase and update the index automatically as you edit files. No manual re-indexing required.
-
-**Smart Content Diffs**: Only changed code chunks get re-processed. Unchanged chunks keep their existing embeddings, making updates efficient even for large codebases.
-
-**Seamless Branch Switching**: When you switch git branches, ChunkHound automatically detects and re-indexes only the files that actually changed between branches.
-
-**Live Memory Systems**: Index markdown notes or documentation that updates in real-time while you work, creating a dynamic knowledge base.
-
 ## Why ChunkHound?
 
-**Research Foundation**: Built on the [cAST (Chunking via Abstract Syntax Trees)](https://arxiv.org/pdf/2506.15655) algorithm from Carnegie Mellon University, providing:
-- **4.3 point gain** in Recall@5 on RepoEval retrieval
-- **2.67 point gain** in Pass@1 on SWE-bench generation
-- **Structure-aware chunking** that preserves code meaning
+| Approach | Capability | Scale | Maintenance |
+|----------|------------|-------|-------------|
+| Keyword Search | Exact matching | Fast | None |
+| Traditional RAG | Semantic search | Scales | Re-index files |
+| Knowledge Graphs | Relationship queries | Expensive | Continuous sync |
+| **ChunkHound** | Semantic + Regex + Code Research | Automatic | Incremental + realtime |
 
-**Local-First Architecture**:
-- Your code never leaves your machine
-- Works offline with [Ollama](https://ollama.ai/) local models
-- No per-token charges for large codebases
+**Ideal for:**
+- Large monorepos with cross-team dependencies
+- Security-sensitive codebases (local-only, no cloud)
+- Multi-language projects needing consistent search
+- Offline/air-gapped development environments
 
-**Universal Language Support**:
-- Structured parsing for 29 languages (Tree-sitter + custom parsers)
-- Same semantic concepts across all programming languages
-
-**Intelligent Code Discovery**:
-- Multi-hop search follows semantic relationships to find related implementations
-- Automatically discovers complete feature patterns: find "authentication" to get password hashing, token validation, session management
-- Convergence detection prevents semantic drift while maximizing discovery
+**Stop recreating code. Start with deep understanding.**
 
 ## License
 
 MIT
+<<<<<<< HEAD
 
 ## Startup profile (discovery diagnostics)
 
@@ -381,3 +358,5 @@ Outputs:
 - In full mode (default):
   - `<scope>_autodoc_index.md` listing all topics.
   - One `<scope>_topic_NN_<slug>.md` file per non-empty topic.
+=======
+>>>>>>> e7f0e6a0c9646b508f0210e51a26dd2164ef15b3
