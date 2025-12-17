@@ -154,25 +154,23 @@ class DatabaseProvider(Protocol):
         ...
 
 
-    def get_chunk_ids_without_embeddings_paginated(
+    def get_chunks_without_embeddings_paginated(
         self,
         provider: str,
         model: str,
-        exclude_patterns: list[str] | None = None,
         limit: int = 10000,
         offset: int = 0,
-    ) -> list[int]:
-        """Get chunk IDs that don't have embeddings for the specified provider/model with pagination.
+    ) -> list[dict[str, Any]]:
+        """Get chunk data that don't have embeddings for the specified provider/model with pagination.
 
         Args:
             provider: Embedding provider name
             model: Embedding model name
-            exclude_patterns: Optional file patterns to exclude
-            limit: Maximum number of chunk IDs to return
-            offset: Number of chunk IDs to skip
+            limit: Maximum number of chunks to return
+            offset: Number of chunks to skip
 
         Returns:
-            List of chunk IDs without embeddings for the provider/model
+            List of chunk dictionaries without embeddings for the provider/model
         """
         ...
 

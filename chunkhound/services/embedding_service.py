@@ -241,13 +241,12 @@ class EmbeddingService(BaseService):
                 start_time = time_module.time()
 
                 try:
-                    logger.debug(f"Retrieving chunk IDs batch: provider={target_provider}, model={target_model}, limit={current_batch_size}, offset={offset}")
-                    # Get next batch of chunk IDs without embeddings
-                    # Note: exclude_patterns not used for embeddings since indexing already handles exclusions
-                    chunk_ids_batch = self._db.get_chunk_ids_without_embeddings_paginated(
-                        target_provider, target_model, None, limit=current_batch_size, offset=offset
+                    logger.debug(f"Retrieving chunks batch: provider={target_provider}, model={target_model}, limit={current_batch_size}, offset={offset}")
+                    # Get next batch of chunks without embeddings
+                    chunks_data = self._db.get_chunks_without_embeddings_paginated(
+                        target_provider, target_model, limit=current_batch_size, offset=offset
                     )
-                    logger.debug(f"Retrieved {len(chunk_ids_batch) if chunk_ids_batch else 0} chunk IDs")
+                    logger.debug(f"Retrieved {len(chunks_data) if chunks_data else 0} chunks")
                 except Exception as e:
                     # If batch fails, reduce batch size and retry once
                     if current_batch_size > min_batch_size:
@@ -261,12 +260,12 @@ class EmbeddingService(BaseService):
 
                 retrieval_time = time_module.time() - start_time
 
-                if not chunk_ids_batch:
+                if not chunks_data:
                     # No more chunks to process
                     logger.info("No more chunks to process, exiting batch loop")
                     break
 
-                logger.debug(f"Batch {batch_count}: offset={offset}, size={len(chunk_ids_batch)}, retrieval_time={retrieval_time:.2f}s")
+                logger.debug(f"Batch {batch_count}: offset={offset}, size={len(chunks_data)}, retrieval_time={retrieval_time:.2f}s")
 
                 # Adjust batch size based on retrieval time (only if dynamic sizing enabled)
                 if target_batch_time != float('inf'):
@@ -286,12 +285,10 @@ class EmbeddingService(BaseService):
                         current_batch_size = min(max_batch_size, int(current_batch_size * 1.5))
                         logger.debug(f"Batch reasonably fast ({retrieval_time:.2f}s), small increase: {old_batch_size} -> {current_batch_size}")
 
-                # Load chunk content for this batch
-                logger.debug(f"Loading content for {len(chunk_ids_batch)} chunks")
-                chunks_data = self._get_chunks_by_ids(chunk_ids_batch)
+                # Extract chunk IDs and texts from retrieved chunks
                 chunk_id_list = [chunk["id"] for chunk in chunks_data]
                 chunk_texts = [chunk["code"] for chunk in chunks_data]
-                logger.debug(f"Loaded content for {len(chunks_data)} chunks")
+                logger.debug(f"Extracted content for {len(chunks_data)} chunks")
 
                 # Generate embeddings for this batch
                 logger.debug(f"Calling generate_embeddings_for_chunks with {len(chunk_id_list)} chunks, provider={self._embedding_provider}")
@@ -301,8 +298,8 @@ class EmbeddingService(BaseService):
                 logger.debug(f"generate_embeddings_for_chunks returned {batch_generated}")
 
                 total_generated += batch_generated
-                total_processed += len(chunk_ids_batch)
-                offset += len(chunk_ids_batch)  # Use actual batch size, not current_batch_size
+                total_processed += len(chunks_data)
+                offset += len(chunks_data)  # Use actual batch size, not current_batch_size
 
                 logger.info(f"Batch {batch_count} completed: generated={batch_generated}, total_processed={total_processed}, total_generated={total_generated}, current_batch_size={current_batch_size}")
 

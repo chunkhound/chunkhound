@@ -2502,20 +2502,18 @@ class DuckDBProvider(SerialDatabaseProvider):
                 "dimensions": 0,
             }
 
-    def get_chunk_ids_without_embeddings_paginated(
+    def get_chunks_without_embeddings_paginated(
         self,
         provider: str,
         model: str,
-        exclude_patterns: list[str] | None = None,
         limit: int = 10000,
         offset: int = 0,
-    ) -> list[int]:
-        """Get chunk IDs that don't have embeddings for the specified provider/model with pagination."""
+    ) -> list[dict[str, Any]]:
+        """Get chunk data that don't have embeddings for the specified provider/model with pagination."""
         return self._execute_in_db_thread_sync(
-            "get_chunk_ids_without_embeddings_paginated",
+            "get_chunks_without_embeddings_paginated",
             provider,
             model,
-            exclude_patterns,
             limit,
             offset,
         )
@@ -2526,44 +2524,36 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Execute a SQL query and return results."""
         return self._execute_in_db_thread_sync("execute_query", query, params)
 
-    def _executor_get_chunk_ids_without_embeddings_paginated(
+    def _executor_get_chunks_without_embeddings_paginated(
         self,
         conn: Any,
         state: dict[str, Any],
         provider: str,
         model: str,
-        exclude_patterns: list[str] | None,
         limit: int,
         offset: int,
-    ) -> list[int]:
-        """Executor method for get_chunk_ids_without_embeddings_paginated - runs in DB thread."""
+    ) -> list[dict[str, Any]]:
+        """Executor method for get_chunks_without_embeddings_paginated - runs in DB thread."""
         try:
             # Get all embedding tables
             embedding_tables = self._executor_get_all_embedding_tables(conn, state)
 
             if not embedding_tables:
-                # No embedding tables exist, return all chunks with pagination and exclude patterns
+                # No embedding tables exist, return all chunks with pagination
                 query = """
-                    SELECT c.id
+                    SELECT c.id, c.file_id, c.chunk_type, c.symbol, c.code, c.start_line, c.end_line,
+                           c.start_byte, c.end_byte, c.language, c.created_at, c.updated_at,
+                           f.path as file_path
                     FROM chunks c
                     JOIN files f ON c.file_id = f.id
                 """
                 params = []
 
-                # Apply exclude patterns if provided
-                if exclude_patterns:
-                    exclude_conditions = []
-                    for pattern in exclude_patterns:
-                        exclude_conditions.append("f.path NOT LIKE ?")
-                        params.append(f"%{pattern}%")
-                    if exclude_conditions:
-                        query += " WHERE " + " AND ".join(exclude_conditions)
-
                 query += " ORDER BY c.id LIMIT ? OFFSET ?"
                 params.extend([limit, offset])
 
                 results = conn.execute(query, params).fetchall()
-                return [row[0] for row in results]
+                return [dict(row) for row in results]
 
             # Build NOT EXISTS clauses for all embedding tables
             not_exists_clauses = []
@@ -2579,7 +2569,9 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             # Query for chunks that don't have embeddings for this provider/model
             query = f"""
-                SELECT c.id
+                SELECT c.id, c.file_id, c.chunk_type, c.symbol, c.code, c.start_line, c.end_line,
+                       c.start_byte, c.end_byte, c.language, c.created_at, c.updated_at,
+                       f.path as file_path
                 FROM chunks c
                 JOIN files f ON c.file_id = f.id
                 WHERE {" AND ".join(not_exists_clauses)}
@@ -2588,23 +2580,37 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Parameters need to be repeated for each table
             params = [provider, model] * len(embedding_tables)
 
-            # Apply exclude patterns if provided
-            if exclude_patterns:
-                exclude_conditions = []
-                for pattern in exclude_patterns:
-                    exclude_conditions.append("f.path NOT LIKE ?")
-                    params.append(f"%{pattern}%")
-                if exclude_conditions:
-                    query += " AND " + " AND ".join(exclude_conditions)
-
             query += " ORDER BY c.id LIMIT ? OFFSET ?"
             params.extend([limit, offset])
 
             results = conn.execute(query, params).fetchall()
-            return [row[0] for row in results]
+            chunk_count = len(results)
+
+            # Convert Row objects to dictionaries
+            chunks = []
+            for row in results:
+                chunks.append({
+                    "id": row[0],
+                    "file_id": row[1],
+                    "chunk_type": row[2],
+                    "symbol": row[3],
+                    "code": row[4],
+                    "start_line": row[5],
+                    "end_line": row[6],
+                    "start_byte": row[7],
+                    "end_byte": row[8],
+                    "language": row[9],
+                    "created_at": row[10],
+                    "updated_at": row[11],
+                    "file_path": row[12],
+                })
+
+            # Return whatever amount was retrieved without retry logic
+            logger.debug(f"Retrieved {chunk_count} chunks without embeddings (limit={limit}, offset={offset})")
+            return chunks
 
         except Exception as e:
-            logger.error(f"Failed to get chunk IDs without embeddings: {e}")
+            logger.error(f"Failed to get chunks without embeddings: {e}")
             return []
 
     def _executor_execute_query(

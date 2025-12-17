@@ -2368,72 +2368,23 @@ class LanceDBProvider(SerialDatabaseProvider):
         """Perform health check and return status information."""
         return self._execute_in_db_thread_sync("health_check")
 
-    def _executor_get_chunk_ids_without_embeddings_paginated(
+    def _executor_get_chunks_without_embeddings_paginated(
         self,
         conn: Any,
         state: dict[str, Any],
         provider: str,
         model: str,
-        exclude_patterns: list[str] | None,
         limit: int,
         offset: int,
-    ) -> list[int]:
-        """Executor method for get_chunk_ids_without_embeddings_paginated - runs in DB thread.
+    ) -> list[dict[str, Any]]:
+        """Executor method for get_chunks_without_embeddings_paginated - runs in DB thread.
 
-        Implements progressive lazy loading with bounded cache to prevent memory issues.
-        Loads chunks in 10k row pages only when needed, maintaining sorted order.
+        Returns full chunk data instead of just IDs to avoid duplicate queries.
         """
         if not self._chunks_table:
             return []
 
         try:
-            # Path filtering not supported with lazy loading - fall back to original implementation
-            if exclude_patterns:
-                logger.warning("Path filtering not supported with lazy loading, using fallback")
-                # Use original implementation for path filtering
-                candidate_ids = self._executor_get_chunk_ids_without_embeddings_paginated(
-                    conn, state, provider, model, None, limit * 5, offset
-                )
-
-                if not candidate_ids:
-                    return []
-
-                # Filter by exclude patterns using native queries
-                filtered_ids = []
-                batch_size = 1000
-
-                for i in range(0, len(candidate_ids), batch_size):
-                    batch_ids = candidate_ids[i : i + batch_size]
-                    ids_str = ','.join(map(str, batch_ids))
-
-                    # Get file paths for this batch using native LanceDB search
-                    file_results = self._files_table.search().where(
-                        f"id IN ({ids_str})"
-                    ).to_pandas()
-
-                    # Filter out excluded paths
-                    for _, file_row in file_results.iterrows():
-                        file_path = file_row["path"]
-                        should_exclude = False
-
-                        if exclude_patterns and file_path:
-                            for pattern in exclude_patterns:
-                                if pattern in file_path:
-                                    should_exclude = True
-                                    break
-
-                        if not should_exclude:
-                            # Find corresponding chunk_id from candidate_ids
-                            chunk_id = file_row["id"]
-                            if chunk_id in batch_ids:
-                                filtered_ids.append(chunk_id)
-
-                    # Stop if we have enough results
-                    if len(filtered_ids) >= limit:
-                        break
-
-                return filtered_ids[:limit]
-
             # Lazy loading implementation for simple case (no path filtering)
             cache_key = f"{provider}:{model}"
 
@@ -2441,7 +2392,7 @@ class LanceDBProvider(SerialDatabaseProvider):
             if cache_key not in self._missing_embeddings_cache:
                 self._missing_embeddings_cache[cache_key] = {
                     "loaded_pages": set(),
-                    "sorted_ids": [],
+                    "sorted_chunks": [],
                     "total_estimated": 0,
                 }
 
@@ -2449,7 +2400,7 @@ class LanceDBProvider(SerialDatabaseProvider):
 
             # Check if we need to load more pages
             required_end = offset + limit
-            current_cached = len(cache["sorted_ids"])
+            current_cached = len(cache["sorted_chunks"])
 
             if required_end > current_cached:
                 # Calculate which page to load next
@@ -2468,11 +2419,11 @@ class LanceDBProvider(SerialDatabaseProvider):
 
                     if not page_results:
                         # No more data available
-                        cache["total_estimated"] = len(cache["sorted_ids"])
+                        cache["total_estimated"] = len(cache["sorted_chunks"])
                         logger.debug(f"No more data for {cache_key}, total estimated: {cache['total_estimated']}")
                     else:
-                        # Filter and collect IDs from this page
-                        page_ids = []
+                        # Filter and collect chunks from this page
+                        page_chunks = []
                         for result in page_results:
                             embedding = result.get("embedding")
                             current_provider = result.get("provider")
@@ -2488,23 +2439,23 @@ class LanceDBProvider(SerialDatabaseProvider):
                                 needs_embedding = True
 
                             if needs_embedding:
-                                page_ids.append(result["id"])
+                                page_chunks.append(result)
 
-                        # Sort page IDs for deterministic ordering
-                        page_ids.sort()
+                        # Sort page chunks for deterministic ordering by ID
+                        page_chunks.sort(key=lambda x: x["id"])
 
                         # Merge into cached sorted list
-                        cache["sorted_ids"].extend(page_ids)
-                        cache["sorted_ids"].sort()  # Maintain global sorted order
+                        cache["sorted_chunks"].extend(page_chunks)
+                        cache["sorted_chunks"].sort(key=lambda x: x["id"])  # Maintain global sorted order
                         cache["loaded_pages"].add(next_page)
 
-                        logger.debug(f"Loaded page {next_page}: {len(page_ids)} IDs, total cached: {len(cache['sorted_ids'])}")
+                        logger.debug(f"Loaded page {next_page}: {len(page_chunks)} chunks, total cached: {len(cache['sorted_chunks'])}")
 
                         # Continue loading if we still need more data
-                        if required_end > len(cache["sorted_ids"]):
+                        if required_end > len(cache["sorted_chunks"]):
                             # Recursively load next page
-                            return self._executor_get_chunk_ids_without_embeddings_paginated(
-                                conn, state, provider, model, exclude_patterns, limit, offset
+                            return self._executor_get_chunks_without_embeddings_paginated(
+                                conn, state, provider, model, limit, offset
                             )
 
                 except Exception as page_error:
@@ -2513,14 +2464,35 @@ class LanceDBProvider(SerialDatabaseProvider):
                     pass
 
             # Return paginated results from cache
-            end_idx = min(offset + limit, len(cache["sorted_ids"]))
-            result = cache["sorted_ids"][offset:end_idx]
+            end_idx = min(offset + limit, len(cache["sorted_chunks"]))
+            result = cache["sorted_chunks"][offset:end_idx]
 
-            logger.debug(f"Returning {len(result)} chunk IDs from cache (offset={offset}, limit={limit}, cached={len(cache['sorted_ids'])})")
-            return result
+            logger.debug(f"Returning {len(result)} chunks from cache (offset={offset}, limit={limit}, cached={len(cache['sorted_chunks'])})")
+
+            # Convert LanceDB results to expected format
+            formatted_results = []
+            for chunk in result:
+                formatted_result = {
+                    "id": chunk["id"],
+                    "file_id": chunk["file_id"],
+                    "chunk_type": chunk.get("chunk_type", ""),
+                    "symbol": chunk.get("name", ""),
+                    "code": chunk.get("content", ""),
+                    "start_line": chunk.get("start_line", 0),
+                    "end_line": chunk.get("end_line", 0),
+                    "start_byte": chunk.get("start_byte", 0),
+                    "end_byte": chunk.get("end_byte", 0),
+                    "language": chunk.get("language", ""),
+                    "created_at": chunk.get("created_time"),
+                    "updated_at": chunk.get("created_time"),  # LanceDB doesn't have updated_at
+                    "file_path": "",  # Will be populated by caller if needed
+                }
+                formatted_results.append(formatted_result)
+
+            return formatted_results
 
         except Exception as e:
-            logger.error(f"Failed to get chunk IDs without embeddings: {e}")
+            logger.error(f"Failed to get chunks without embeddings: {e}")
             return []
 
     def _executor_health_check(
@@ -2552,20 +2524,18 @@ class LanceDBProvider(SerialDatabaseProvider):
 
         return health_status
 
-    def get_chunk_ids_without_embeddings_paginated(
+    def get_chunks_without_embeddings_paginated(
         self,
         provider: str,
         model: str,
-        exclude_patterns: list[str] | None = None,
         limit: int = 10000,
         offset: int = 0,
-    ) -> list[int]:
-        """Get chunk IDs that don't have embeddings for the specified provider/model with pagination."""
+    ) -> list[dict[str, Any]]:
+        """Get chunk data that don't have embeddings for the specified provider/model with pagination."""
         return self._execute_in_db_thread_sync(
-            "get_chunk_ids_without_embeddings_paginated",
+            "get_chunks_without_embeddings_paginated",
             provider,
             model,
-            exclude_patterns,
             limit,
             offset,
         )
