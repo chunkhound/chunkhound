@@ -18,6 +18,7 @@ from loguru import logger
 
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 from chunkhound.utils.json_extraction import extract_json_from_response
+from chunkhound.utils.text_sanitization import sanitize_error_text
 
 
 class CodexCLIProvider(LLMProvider):
@@ -357,29 +358,9 @@ class CodexCLIProvider(LLMProvider):
         raise last_error or RuntimeError("codex exec failed after retries")
 
     def _sanitize_text(self, s: str, max_len: int | None = None) -> str:
-        """Truncate and redact potential secrets in log/error text.
-
-        - Truncates to CHUNKHOUND_CODEX_LOG_MAX_ERR (default 800 chars)
-        - Redacts common token patterns and Authorization headers
-        """
-        try:
-            import re
-
-            limit = max_len or int(os.getenv("CHUNKHOUND_CODEX_LOG_MAX_ERR", "800"))
-            text = s if len(s) <= limit else (s[:limit] + "…[truncated]")
-            # Redact bearer tokens, API keys, and cookie-like secrets
-            patterns = [
-                r"(?i)(authorization\s*:\s*bearer\s+)[A-Za-z0-9._-]+",
-                r"(?i)(api[_-]?key\s*[=:]\s*)([A-Za-z0-9-_]{10,})",
-                r"(?i)(secret|token)[\s=:]+([A-Za-z0-9._-]{10,})",
-                r"(?i)(set-cookie\s*:\s*)([^;\n]+)",
-            ]
-            redacted = text
-            for pat in patterns:
-                redacted = re.sub(pat, r"\1[REDACTED]", redacted)
-            return redacted
-        except Exception:
-            return s[: max_len or 800]
+        """Truncate and redact secrets. Delegates to shared utility."""
+        limit = max_len or int(os.getenv("CHUNKHOUND_CODEX_LOG_MAX_ERR", "800"))
+        return sanitize_error_text(s, max_length=limit)
 
     def _merge_prompts(self, prompt: str, system: str | None) -> str:
         if system and system.strip():

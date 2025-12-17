@@ -18,10 +18,11 @@ try:
 except (ImportError, AttributeError):
     from typing_extensions import NotRequired
 
+from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
-from chunkhound.services.deep_research_service import DeepResearchService
+from chunkhound.services.research.factory import ResearchServiceFactory
 from chunkhound.version import __version__
 
 # Response size limits (tokens)
@@ -567,6 +568,7 @@ async def deep_research_impl(
     query: str,
     progress: Any = None,
     path: str | None = None,
+    config: Config | None = None,
 ) -> dict[str, Any]:
     """Core deep research implementation.
 
@@ -578,6 +580,7 @@ async def deep_research_impl(
         progress: Optional Rich Progress instance for terminal UI (None for MCP)
         path: Optional relative path to limit research scope
             (e.g., 'tree-sitter-haskell', 'src/')
+        config: Application configuration (optional, defaults to environment config)
 
     Returns:
         Dict with answer and metadata
@@ -609,10 +612,15 @@ async def deep_research_impl(
             "Configure a rerank_model in your embedding configuration."
         )
 
-    # Create code research service with dynamic tool name
+    # Create default config from environment if not provided
+    if config is None:
+        config = Config.from_environment()
+
+    # Create code research service using factory (v1 or v2 based on config)
     # This ensures followup suggestions automatically update if tool is renamed
-    research_service = DeepResearchService(
-        database_services=services,
+    research_service = ResearchServiceFactory.create(
+        config=config,
+        db_services=services,
         embedding_manager=embedding_manager,
         llm_manager=llm_manager,
         tool_name="code_research",  # Matches tool registration below
@@ -638,6 +646,7 @@ async def execute_tool(
     arguments: dict[str, Any],
     scan_progress: dict | None = None,
     llm_manager: Any = None,
+    config: Config | None = None,
 ) -> dict[str, Any]:
     """Execute a tool from the registry with proper argument handling.
 
@@ -648,6 +657,7 @@ async def execute_tool(
         arguments: Tool arguments from the request
         scan_progress: Optional scan progress from MCPServerBase
         llm_manager: Optional LLMManager instance for code_research
+        config: Optional Config instance for research service factory
 
     Returns:
         Tool execution result
@@ -675,6 +685,8 @@ async def execute_tool(
             kwargs["llm_manager"] = llm_manager
         elif param_name == "scan_progress":
             kwargs["scan_progress"] = scan_progress
+        elif param_name == "config":
+            kwargs["config"] = config
         elif param_name == "progress":
             # Progress parameter for terminal UI (None for MCP mode)
             kwargs["progress"] = None

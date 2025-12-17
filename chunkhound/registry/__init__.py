@@ -224,7 +224,9 @@ class ProviderRegistry:
                 logger.warning("No embedding provider configured for search service")
 
         return SearchService(
-            database_provider=database_provider, embedding_provider=embedding_provider
+            database_provider=database_provider,
+            embedding_provider=embedding_provider,
+            config=self._config.research if self._config else None,
         )
 
     def create_embedding_service(self) -> EmbeddingService:

@@ -4,8 +4,8 @@ This provider wraps the Claude Code CLI (claude --print) to enable deep research
 using the user's existing Claude subscription instead of API credits.
 
 Note: This provider is configured for vanilla LLM behavior:
-- All tools disabled (Write, Edit, Bash, WebFetch, etc.)
-- MCP servers disabled via --strict-mcp-config
+- All tools disabled via --tools ""
+- MCP servers disabled via empty --mcp-config
 - Workspace isolation (runs from temp directory to prevent context gathering)
 - Clean API access without workspace overhead
 """
@@ -21,6 +21,7 @@ from loguru import logger
 
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 from chunkhound.utils.json_extraction import extract_json_from_response
+from chunkhound.utils.text_sanitization import sanitize_error_text
 
 
 class ClaudeCodeCLIProvider(LLMProvider):
@@ -97,32 +98,17 @@ class ClaudeCodeCLIProvider(LLMProvider):
         model_arg = self._map_model_to_cli_arg(self._model)
         cmd = ["claude", "--print", "--model", model_arg, "--output-format", "text"]
 
-        # Disable all tools for vanilla LLM behavior (no workspace context needed)
-        cmd.extend([
-            "--disallowedTools",
-            "Write",
-            "Edit",
-            "Bash",
-            "SlashCommand",
-            "WebFetch",
-            "WebSearch",
-            "Agent",
-            "Glob",
-            "Grep",
-            "List",
-            "TodoWrite",
-            "Task",
-        ])
+        # Disable all tools for vanilla LLM behavior
+        cmd.extend(["--tools", ""])
 
         # Prevent MCP server loading for clean LLM access
-        cmd.extend(["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}'])
+        cmd.extend(["--mcp-config", '{"mcpServers":{}}'])
 
         # Add system prompt if provided (appends to default)
         if system:
             cmd.extend(["--append-system-prompt", system])
 
-        # Add the user prompt (-- separator must come after all flags)
-        cmd.extend(["--", prompt])
+        # Note: prompt is passed via stdin, not CLI args (avoids ARG_MAX limit)
 
         # Set environment for subscription-based auth
         env = os.environ.copy()
@@ -142,7 +128,7 @@ class ClaudeCodeCLIProvider(LLMProvider):
                 # Create subprocess with neutral CWD to prevent workspace scanning
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
-                    stdin=subprocess.DEVNULL,  # Prevent stdin inheritance
+                    stdin=subprocess.PIPE,  # Pass prompt via stdin (avoids ARG_MAX)
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     env=env,
@@ -150,13 +136,15 @@ class ClaudeCodeCLIProvider(LLMProvider):
                 )
 
                 # Wrap communicate() with timeout (this is the long-running part)
+                # Pass prompt via stdin to avoid OS ARG_MAX limits (~256KB on macOS)
                 stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
+                    process.communicate(input=prompt.encode("utf-8")),
                     timeout=request_timeout,
                 )
 
                 if process.returncode != 0:
-                    error_msg = stderr.decode("utf-8") if stderr else "Unknown error"
+                    raw_err = (stderr or stdout or b"").decode("utf-8", errors="ignore")
+                    error_msg = sanitize_error_text(raw_err.strip()) or f"Exit code {process.returncode}"
                     last_error = RuntimeError(
                         f"CLI command failed (exit {process.returncode}): {error_msg}"
                     )
@@ -408,6 +396,6 @@ Respond with JSON only, no additional text."""
         """Get recommended concurrency for parallel synthesis operations.
 
         Returns:
-            3 for Claude Code CLI (conservative default matching OpenAI pattern)
+            6 for Claude Code CLI (conservative default matching OpenAI pattern)
         """
-        return 3
+        return 6

@@ -1512,10 +1512,16 @@ class IndexingCoordinator(BaseService):
             valid_chunk_data = []
             empty_count = 0
             for chunk_id, chunk in zip(chunk_ids, chunks):
+                from chunkhound.core.utils import format_chunk_for_embedding
                 from chunkhound.utils.normalization import normalize_content
 
-                text = normalize_content(chunk.get("code", ""))
-                if text:  # Only include chunks with actual content
+                code = normalize_content(chunk.get("code", ""))
+                if code:  # Only include chunks with actual content
+                    text = format_chunk_for_embedding(
+                        code=code,
+                        file_path=chunk.get("file_path"),
+                        language=chunk.get("language"),
+                    )
                     valid_chunk_data.append((chunk_id, chunk, text))
                 else:
                     empty_count += 1

@@ -231,6 +231,8 @@ class VoyageAIEmbeddingProvider:
             return []
 
         validated_texts = validate_text_input(texts)
+        if not validated_texts:
+            return []
 
         # Retry loop for transient network errors
         for attempt in range(self._retry_attempts):

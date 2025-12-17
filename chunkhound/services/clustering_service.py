@@ -171,6 +171,120 @@ class ClusteringService:
 
         return cluster_groups, metadata
 
+    async def cluster_files_kmeans(
+        self, files: dict[str, str], n_clusters: int
+    ) -> tuple[list[ClusterGroup], dict[str, int]]:
+        """Cluster files into exactly n_clusters using k-means.
+
+        Used as fallback when HDBSCAN stagnates during iterative compression.
+        K-means guarantees exactly n_clusters output, ensuring convergence.
+
+        Args:
+            files: Dictionary mapping file_path -> file_content
+            n_clusters: Exact number of clusters to produce
+
+        Returns:
+            Tuple of (cluster_groups, metadata) where metadata contains:
+                - num_clusters: Number of clusters (equals n_clusters)
+                - total_files: Total number of files
+                - total_tokens: Total tokens across all files
+                - avg_tokens_per_cluster: Average tokens per cluster
+
+        Raises:
+            ValueError: If files dict is empty or n_clusters < 1
+        """
+        from sklearn.cluster import KMeans
+
+        if not files:
+            raise ValueError("Cannot cluster empty files dictionary")
+        if n_clusters < 1:
+            raise ValueError("n_clusters must be at least 1")
+
+        # Clamp n_clusters to number of files
+        n_clusters = min(n_clusters, len(files))
+
+        # Calculate total tokens
+        total_tokens = sum(
+            self._llm_provider.estimate_tokens(content) for content in files.values()
+        )
+
+        logger.info(
+            f"K-means clustering {len(files)} files ({total_tokens:,} tokens) "
+            f"into {n_clusters} clusters (fallback mode)"
+        )
+
+        # Special case: single cluster requested or single file
+        if n_clusters == 1 or len(files) == 1:
+            logger.info("Single cluster requested - will produce single output")
+            cluster_group = ClusterGroup(
+                cluster_id=0,
+                file_paths=list(files.keys()),
+                files_content=files,
+                total_tokens=total_tokens,
+            )
+            metadata = {
+                "num_clusters": 1,
+                "total_files": len(files),
+                "total_tokens": total_tokens,
+                "avg_tokens_per_cluster": total_tokens,
+            }
+            return [cluster_group], metadata
+
+        # Generate embeddings for each file
+        file_paths = list(files.keys())
+        file_contents = [files[fp] for fp in file_paths]
+
+        logger.debug(f"Generating embeddings for {len(file_contents)} files")
+        embeddings = await self._embedding_provider.embed(file_contents)
+        embeddings_array = np.array(embeddings)
+
+        # K-means clustering
+        logger.debug(f"Running k-means with n_clusters={n_clusters}")
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        labels = kmeans.fit_predict(embeddings_array)
+
+        # Build cluster groups
+        cluster_to_files: dict[int, list[str]] = {}
+        for file_path, cluster_id in zip(file_paths, labels):
+            cluster_to_files.setdefault(int(cluster_id), []).append(file_path)
+
+        cluster_groups: list[ClusterGroup] = []
+        for cluster_id in sorted(cluster_to_files.keys()):
+            cluster_file_paths = cluster_to_files[cluster_id]
+            cluster_files_content = {fp: files[fp] for fp in cluster_file_paths}
+            cluster_tokens = sum(
+                self._llm_provider.estimate_tokens(content)
+                for content in cluster_files_content.values()
+            )
+
+            cluster_group = ClusterGroup(
+                cluster_id=cluster_id,
+                file_paths=cluster_file_paths,
+                files_content=cluster_files_content,
+                total_tokens=cluster_tokens,
+            )
+            cluster_groups.append(cluster_group)
+
+            logger.debug(
+                f"K-means cluster {cluster_id}: {len(cluster_file_paths)} files, "
+                f"{cluster_tokens:,} tokens"
+            )
+
+        avg_tokens = total_tokens / len(cluster_groups) if cluster_groups else 0
+        metadata = {
+            "num_clusters": len(cluster_groups),
+            "total_files": len(files),
+            "total_tokens": total_tokens,
+            "avg_tokens_per_cluster": int(avg_tokens),
+        }
+
+        logger.info(
+            f"K-means complete: {len(cluster_groups)} clusters, "
+            f"avg {int(avg_tokens):,} tokens/cluster"
+        )
+
+        return cluster_groups, metadata
+
     def _discover_natural_clusters(
         self, embeddings: np.ndarray
     ) -> tuple[np.ndarray, dict[str, int]]:
