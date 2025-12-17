@@ -18,6 +18,7 @@ The synthesis engine uses:
 """
 
 import asyncio
+import time
 from typing import Any
 
 from loguru import logger
@@ -306,8 +307,8 @@ class SynthesisEngine:
         Returns:
             Synthesized answer from single LLM call with appended sources footer
         """
-        # Use output token budget from dynamic calculation
-        max_output_tokens = synthesis_budgets["output_tokens"]
+        # Default output token budget from synthesis budget calculation
+        default_max_output_tokens = synthesis_budgets["output_tokens"]
 
         # Filter chunks to only include those from budgeted files
         # This ensures consistency between reference map, citations, and footer
@@ -317,7 +318,7 @@ class SynthesisEngine:
         logger.info(
             f"Starting single-pass synthesis with {len(files)} files, "
             f"{len(budgeted_chunks)} chunks (filtered from {original_chunk_count} total, "
-            f"output_limit={max_output_tokens:,})"
+            f"default_output_limit={default_max_output_tokens:,})"
         )
 
         llm = self._llm_manager.get_synthesis_provider()
@@ -380,12 +381,14 @@ class SynthesisEngine:
 
         code_context = "\n\n".join(code_sections)
 
+        input_context_tokens = llm.estimate_tokens(code_context)
+        max_output_tokens = default_max_output_tokens
+
         # Build file reference map for numbered citations
         file_reference_map = self._parent._build_file_reference_map(budgeted_chunks, files)
         reference_table = self._parent._format_reference_table(file_reference_map)
 
-        # Build output guidance with fixed 25k token budget
-        # Output budget is always 25k (includes reasoning + actual output)
+        # Output budget includes any reasoning tokens (provider-dependent).
         output_guidance = (
             f"**Target Output:** Provide a thorough and detailed analysis of approximately "
             f"{max_output_tokens:,} tokens (includes reasoning). Focus on all relevant "
@@ -407,11 +410,26 @@ class SynthesisEngine:
             f"timeout={SINGLE_PASS_TIMEOUT_SECONDS}s)"
         )
 
+        await self._parent._emit_event(
+            "llm_synthesis",
+            f"Calling {llm.name}:{llm.model} for synthesis",
+            tokens=input_context_tokens,
+            max_completion_tokens=max_output_tokens,
+        )
+
+        started = time.perf_counter()
         response = await llm.complete(
             prompt,
             system=system,
             max_completion_tokens=max_output_tokens,
             timeout=SINGLE_PASS_TIMEOUT_SECONDS,
+        )
+        duration_s = time.perf_counter() - started
+
+        await self._parent._emit_event(
+            "llm_synthesis_complete",
+            f"Synthesis LLM call completed in {duration_s:.1f}s",
+            duration=duration_s,
         )
 
         answer = response.content
@@ -562,11 +580,14 @@ class SynthesisEngine:
         file_reference_map = self._parent._build_file_reference_map(cluster_chunks, cluster_files)
         reference_table = self._parent._format_reference_table(file_reference_map)
 
-        # Build cluster-specific synthesis prompt
-        # Use smaller output budget per cluster (will be combined in reduce step)
-        cluster_output_tokens = min(
+        # Build cluster-specific synthesis prompt.
+        # Start from a smaller output budget per cluster (will be combined in reduce step),
+        # then apply adaptive caps for tiny contexts.
+        default_cluster_output_tokens = min(
             CLUSTER_OUTPUT_TOKEN_BUDGET, synthesis_budgets["output_tokens"] // 2
         )
+        cluster_input_tokens = llm.estimate_tokens(code_context)
+        cluster_output_tokens = default_cluster_output_tokens
 
         system = f"""You are analyzing a subset of code files as part of a larger codebase analysis.
 
@@ -578,7 +599,7 @@ Focus on:
 {prompts.CITATION_REQUIREMENTS}
 
 Be thorough but concise - your analysis will be combined with other clusters.
-Target output: ~{cluster_output_tokens:,} tokens (includes reasoning)."""
+Target output: up to {cluster_output_tokens:,} tokens (do not pad)."""
 
         prompt = f"""Query: {root_query}
 
@@ -596,11 +617,24 @@ Provide a comprehensive analysis focusing on the query."""
             f"timeout={SINGLE_PASS_TIMEOUT_SECONDS}s)"
         )
 
+        await self._parent._emit_event(
+            "llm_synthesis",
+            f"Calling {llm.name}:{llm.model} for cluster {cluster.cluster_id} synthesis",
+            tokens=cluster_input_tokens,
+            max_completion_tokens=cluster_output_tokens,
+        )
+        started = time.perf_counter()
         response = await llm.complete(
             prompt,
             system=system,
             max_completion_tokens=cluster_output_tokens,
             timeout=SINGLE_PASS_TIMEOUT_SECONDS,
+        )
+        duration_s = time.perf_counter() - started
+        await self._parent._emit_event(
+            "llm_synthesis_complete",
+            f"Cluster {cluster.cluster_id} synthesis completed in {duration_s:.1f}s",
+            duration=duration_s,
         )
 
         # Build sources list for this cluster
@@ -724,11 +758,23 @@ Provide a complete, integrated analysis that addresses the original query."""
             f"(max_completion_tokens={max_output_tokens:,})"
         )
 
+        await self._parent._emit_event(
+            "llm_synthesis",
+            f"Calling {llm.name}:{llm.model} for reduce synthesis",
+            max_completion_tokens=max_output_tokens,
+        )
+        started = time.perf_counter()
         response = await llm.complete(
             prompt,
             system=system,
             max_completion_tokens=max_output_tokens,
             timeout=SINGLE_PASS_TIMEOUT_SECONDS,  # type: ignore[call-arg]
+        )
+        duration_s = time.perf_counter() - started
+        await self._parent._emit_event(
+            "llm_synthesis_complete",
+            f"Reduce synthesis completed in {duration_s:.1f}s",
+            duration=duration_s,
         )
 
         answer = response.content

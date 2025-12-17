@@ -480,8 +480,13 @@ class DeepResearchService:
             # Map step: Synthesize each cluster in parallel
             await self._emit_event(
                 "synthesis_map",
-                f"Synthesizing {cluster_metadata['num_clusters']} clusters in parallel "
-                f"(concurrency={max_concurrency})",
+                (
+                    f"Synthesizing {cluster_metadata['num_clusters']} clusters "
+                    f"(concurrency={max_concurrency})"
+                    if max_concurrency <= 1
+                    else f"Synthesizing {cluster_metadata['num_clusters']} clusters in parallel "
+                    f"(concurrency={max_concurrency})"
+                ),
             )
 
             semaphore = asyncio.Semaphore(max_concurrency)
