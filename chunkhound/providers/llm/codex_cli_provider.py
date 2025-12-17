@@ -678,9 +678,12 @@ class CodexCLIProvider(LLMProvider):
         }
 
     def get_synthesis_concurrency(self) -> int:
-        """Codex CLI is a local wrapper around an agentic CLI; keep concurrency low by default."""
+        """Get recommended concurrency for parallel synthesis operations.
+
+        Default aligns with Anthropic (5), but remains configurable via env var.
+        """
         try:
-            v = int(os.getenv("CHUNKHOUND_CODEX_SYNTHESIS_CONCURRENCY", "1"))
+            v = int(os.getenv("CHUNKHOUND_CODEX_SYNTHESIS_CONCURRENCY", "5"))
         except Exception:
-            return 1
-        return max(1, min(4, v))
+            return 5
+        return max(1, min(5, v))
