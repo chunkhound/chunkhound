@@ -98,6 +98,8 @@ class TreeProgressDisplay:
             "read_files_complete": "📄",
             "llm_followup": "🤖",
             "llm_followup_complete": "💡",
+            "llm_synthesis": "🧠",
+            "llm_synthesis_complete": "✅",
             "node_complete": "✅",
             "node_terminated": "⏹️",
             "synthesis_start": "🧩",
