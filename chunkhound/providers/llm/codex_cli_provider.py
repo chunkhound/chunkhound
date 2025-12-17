@@ -122,7 +122,8 @@ class CodexCLIProvider(LLMProvider):
         allowed = {"untrusted", "on-failure", "on-request", "never"}
         if candidate not in allowed:
             logger.warning(
-                "Unknown Codex approval policy '%s'; falling back to 'never'", candidate
+                "Unknown Codex approval policy '%s'; falling back to 'on-request'",
+                candidate,
             )
             return "on-request"
         return candidate
@@ -410,14 +411,28 @@ class CodexCLIProvider(LLMProvider):
                     if proc.returncode != 0:
                         raw_err = stderr.decode("utf-8", errors="ignore")
                         err = self._sanitize_text(raw_err)
+                        err_lower = err.lower()
+
                         # Skip-git repo check negotiation for newer Codex builds
                         if "skip-git-repo-check" in err and not add_skip_git:
                             add_skip_git = True
                             logger.warning("codex exec requires --skip-git-repo-check; retrying with flag")
                             continue
+                        # Some older Codex builds may reject the flag; fall back by removing it.
+                        if add_skip_git and "skip-git-repo-check" in err_lower and (
+                            "unknown option" in err_lower
+                            or "unrecognized option" in err_lower
+                            or "unknown flag" in err_lower
+                            or "unexpected argument" in err_lower
+                        ):
+                            add_skip_git = False
+                            logger.warning(
+                                "codex exec does not support --skip-git-repo-check; retrying without flag"
+                            )
+                            continue
 
                         # If stdin failed (e.g., BrokenPipe or codex not reading stdin), fall back to argv with truncation.
-                        if use_stdin and ("broken pipe" in err.lower() or "stdin" in err.lower()):
+                        if use_stdin and ("broken pipe" in err_lower or "stdin" in err_lower):
                             use_stdin = False
                             logger.warning("codex exec stdin not supported; retrying with argv mode")
                             continue
