@@ -104,10 +104,11 @@ async def test_scoped_deep_research_uses_path_filter(tmp_path: Path) -> None:
     # Helper to run deep research with optional scope
     async def run_research(scope: str | None) -> dict:
         # Lower relevance threshold to ensure our tiny test corpus returns results
-        import chunkhound.services.deep_research_service as dr_mod
+        # Must patch the actual module that defines the constant
+        import chunkhound.services.research.shared.models as models_mod
 
-        original_threshold = dr_mod.RELEVANCE_THRESHOLD
-        dr_mod.RELEVANCE_THRESHOLD = None  # Disable similarity cutoff for tests
+        original_threshold = models_mod.RELEVANCE_THRESHOLD
+        models_mod.RELEVANCE_THRESHOLD = None  # Disable similarity cutoff for tests
         try:
             return await deep_research_impl(
                 services=services,
@@ -118,7 +119,7 @@ async def test_scoped_deep_research_uses_path_filter(tmp_path: Path) -> None:
                 path=scope,
             )
         finally:
-            dr_mod.RELEVANCE_THRESHOLD = original_threshold
+            models_mod.RELEVANCE_THRESHOLD = original_threshold
 
     # 1) Unscoped research should be able to see both repos in metadata
     unscoped = await run_research(scope=None)
@@ -237,10 +238,11 @@ async def test_deep_research_propagates_path_filter_to_search_service(
     search_service.search_regex_async = wrapped_search_regex_async  # type: ignore[assignment]
 
     # Run deep research with an explicit scope and relaxed threshold
-    import chunkhound.services.deep_research_service as dr_mod
+    # Must patch the actual module that defines the constant
+    import chunkhound.services.research.shared.models as models_mod
 
-    original_threshold = dr_mod.RELEVANCE_THRESHOLD
-    dr_mod.RELEVANCE_THRESHOLD = None
+    original_threshold = models_mod.RELEVANCE_THRESHOLD
+    models_mod.RELEVANCE_THRESHOLD = None
     try:
         await deep_research_impl(
             services=services,
@@ -251,7 +253,7 @@ async def test_deep_research_propagates_path_filter_to_search_service(
             path="repo-a",
         )
     finally:
-        dr_mod.RELEVANCE_THRESHOLD = original_threshold
+        models_mod.RELEVANCE_THRESHOLD = original_threshold
 
     # At least one semantic search must have been performed with the scoped path
     assert semantic_path_filters, "Expected search_semantic to be called at least once"
