@@ -564,7 +564,7 @@ class EmbeddingService(BaseService):
 
         async def process_batch(
             batch: list[tuple[ChunkId, str]], batch_num: int, retry_depth: int = 0
-        ) -> int:
+        ) -> list[dict[str, Any]]:
             """Process a single batch of embeddings."""
             async with semaphore:
                 try:
@@ -578,14 +578,14 @@ class EmbeddingService(BaseService):
 
                     # Generate embeddings
                     if not self._embedding_provider:
-                        return 0
+                        return []
                     embedding_results = await self._embedding_provider.embed(texts)
 
                     if len(embedding_results) != len(chunk_ids):
                         logger.warning(
                             f"Batch {batch_num}: Expected {len(chunk_ids)} embeddings, got {len(embedding_results)}"
                         )
-                        return 0
+                        return []
 
                     # Prepare embedding data for database
                     embeddings_data = []
@@ -604,15 +604,11 @@ class EmbeddingService(BaseService):
                             }
                         )
 
-                    # Store in database with configurable batch size
-                    stored_count = self._db.insert_embeddings_batch(
-                        embeddings_data, self._db_batch_size
-                    )
                     logger.debug(
-                        f"Batch {batch_num + 1} completed: {stored_count} embeddings stored"
+                        f"Batch {batch_num + 1} completed: {len(embeddings_data)} embeddings generated"
                     )
 
-                    return stored_count
+                    return embeddings_data
 
                 except Exception as e:
                     # Check if this is a token limit error that can be retried
@@ -665,7 +661,7 @@ class EmbeddingService(BaseService):
                     logger.error(
                         f"[EmbSvc-BatchProcess] Batch {batch_num + 1} failed (chunks: {len(batch)}, max_chars: {max_size}): {e}"
                     )
-                    return 0
+                    return []
 
         # Create progress task for embedding generation if requested
         embed_task: TaskID | None = None
@@ -682,7 +678,7 @@ class EmbeddingService(BaseService):
 
         async def process_batch_with_optional_progress(
             batch: list[tuple[ChunkId, str]], batch_num: int
-        ) -> int:
+        ) -> list[dict[str, Any]]:
             nonlocal processed_count
             result = await process_batch(batch, batch_num)
 
@@ -710,13 +706,13 @@ class EmbeddingService(BaseService):
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Count successful embeddings and track completed batches
-        total_generated = 0
+        # Collect all embeddings data and handle errors
+        all_embeddings_data = []
         successful_batches = 0
         for i, result in enumerate(results):
-            if isinstance(result, int):
-                total_generated += result
-                if result > 0:
+            if isinstance(result, list):
+                all_embeddings_data.extend(result)
+                if result:  # Non-empty list means successful
                     successful_batches += 1
             else:
                 # Find the failed batch and extract chunk details
@@ -753,6 +749,15 @@ class EmbeddingService(BaseService):
                     f"[EmbSvc-AsyncBatch] Batch {i + 1} failed "
                     f"(chunks: {len(batch_sizes)}, total_chars: {total_chars:,}, max_chars: {max_chars:,}): {result}"
                 )
+
+        # Insert all embeddings in one big batch
+        total_generated = 0
+        if all_embeddings_data:
+            logger.debug(f"Inserting {len(all_embeddings_data)} embeddings in one batch")
+            total_generated = self._db.insert_embeddings_batch(
+                all_embeddings_data, self._db_batch_size
+            )
+            logger.debug(f"Successfully inserted {total_generated} embeddings")
 
         # Update completed batch count and run optimization if needed
         if should_optimize and successful_batches > 0:
