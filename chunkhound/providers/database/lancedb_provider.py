@@ -847,6 +847,77 @@ class LanceDBProvider(SerialDatabaseProvider):
             logger.error(f"Error getting chunks by file ID: {e}")
             return []
 
+    def get_chunks_in_range(
+        self, file_id: int, start_line: int, end_line: int
+    ) -> list[dict]:
+        """Get all chunks overlapping a line range (pattern from context_retriever.py)."""
+        return self._execute_in_db_thread_sync(
+            "get_chunks_in_range", file_id, start_line, end_line
+        )
+
+    def _executor_get_chunks_in_range(
+        self, conn: Any, state: dict[str, Any], file_id: int, start_line: int, end_line: int
+    ) -> list[dict]:
+        """Executor method for get_chunks_in_range - runs in DB thread.
+
+        Args:
+            file_id: ID of the file to search within
+            start_line: Start line of the range
+            end_line: End line of the range
+
+        Returns:
+            List of chunk dictionaries overlapping the range, ordered by start_line
+        """
+        if not self._chunks_table:
+            return []
+
+        try:
+            # Overlap condition: chunk overlaps if any of:
+            # - chunk start_line is within range
+            # - chunk end_line is within range
+            # - chunk spans the entire range
+            # Using LanceDB's SQL-like where clause with logical OR
+            where_clause = (
+                f"file_id = {file_id} AND ("
+                f"(start_line >= {start_line} AND start_line <= {end_line}) OR "
+                f"(end_line >= {start_line} AND end_line <= {end_line}) OR "
+                f"(start_line <= {start_line} AND end_line >= {end_line})"
+                f")"
+            )
+
+            results = self._chunks_table.search().where(where_clause).to_list()
+
+            # Deduplicate across fragments (critical for multi-result queries)
+            results = _deduplicate_by_id(results)
+
+            # Sort by start_line (LanceDB doesn't guarantee order from where clause)
+            results.sort(key=lambda x: x.get("start_line", 0))
+
+            # Convert to expected format with consistent field names
+            chunks = []
+            for result in results:
+                chunk_dict = {
+                    "id": result["id"],
+                    "file_id": result["file_id"],
+                    "chunk_type": result.get("chunk_type", ""),
+                    "symbol": result.get("name", ""),
+                    "code": result.get("content", ""),
+                    "start_line": result.get("start_line", 0),
+                    "end_line": result.get("end_line", 0),
+                    "start_byte": None,  # LanceDB chunks table doesn't store byte offsets
+                    "end_byte": None,
+                    "language": result.get("language", ""),
+                    "created_at": result.get("created_time"),
+                    "updated_at": None,  # LanceDB chunks table doesn't track updates
+                }
+                chunks.append(chunk_dict)
+
+            return chunks
+
+        except Exception as e:
+            logger.error(f"Error getting chunks in range for file {file_id}: {e}")
+            return []
+
     def delete_file_chunks(self, file_id: int) -> None:
         """Delete all chunks for a file."""
         return self._execute_in_db_thread_sync("delete_file_chunks", file_id)

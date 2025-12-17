@@ -1308,6 +1308,12 @@ class DuckDBProvider(SerialDatabaseProvider):
             "get_chunks_by_file_id", file_id, as_model
         )
 
+    def get_chunks_in_range(
+        self, file_id: int, start_line: int, end_line: int
+    ) -> list[dict]:
+        """Get all chunks overlapping a line range - delegate to chunk repository."""
+        return self._chunk_repository.get_chunks_in_range(file_id, start_line, end_line)
+
     def _executor_get_chunks_by_file_id(
         self, conn: Any, state: dict[str, Any], file_id: int, as_model: bool
     ) -> list[dict[str, Any] | Chunk]:
@@ -1482,6 +1488,24 @@ class DuckDBProvider(SerialDatabaseProvider):
             ORDER BY start_line
         """,
             [file_id],
+        ).fetchall()
+
+    def _executor_get_chunks_in_range_query(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        file_id: int,
+        start_line: int,
+        end_line: int,
+        query: str,
+    ) -> list:
+        """Executor method for get_chunks_in_range query - runs in DB thread.
+
+        Executes the overlap query to find chunks that intersect with a line range.
+        """
+        return conn.execute(
+            query,
+            [file_id, start_line, end_line, start_line, end_line, start_line, end_line],
         ).fetchall()
 
     def _executor_update_chunk_query(
