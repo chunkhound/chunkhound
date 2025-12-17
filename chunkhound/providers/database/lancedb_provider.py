@@ -861,6 +861,12 @@ class LanceDBProvider(SerialDatabaseProvider):
 
         return result
 
+    def get_chunks_by_ids(
+        self, chunk_ids: list[int], as_model: bool = False
+    ) -> list[dict[str, Any] | Chunk]:
+        """Get chunk records for multiple chunk IDs."""
+        return self._execute_in_db_thread_sync("get_chunks_by_ids", chunk_ids, as_model)
+
     def _executor_get_chunk_by_id(
         self, conn: Any, state: dict[str, Any], chunk_id: int, as_model: bool = False
     ) -> dict[str, Any] | Chunk | None:
@@ -889,6 +895,50 @@ class LanceDBProvider(SerialDatabaseProvider):
         except Exception as e:
             logger.error(f"Error getting chunk by ID: {e}")
             return None
+
+    def _executor_get_chunks_by_ids(
+        self, conn: Any, state: dict[str, Any], chunk_ids: list[int], as_model: bool = False
+    ) -> list[dict[str, Any] | Chunk]:
+        """Executor method for get_chunks_by_ids - runs in DB thread."""
+        if not self._chunks_table or not chunk_ids:
+            return []
+
+        try:
+            # For smaller lists, use direct IN query
+            if len(chunk_ids) <= 1000:
+                chunk_ids_str = ','.join(map(str, chunk_ids))
+                results = self._chunks_table.search().where(f"id IN ({chunk_ids_str})").to_list()
+            else:
+                # For larger lists, batch the queries
+                results = []
+                batch_size = 500
+                for i in range(0, len(chunk_ids), batch_size):
+                    batch_ids = chunk_ids[i:i + batch_size]
+                    batch_ids_str = ','.join(map(str, batch_ids))
+                    batch_results = self._chunks_table.search().where(f"id IN ({batch_ids_str})").to_list()
+                    results.extend(batch_results)
+
+            # Deduplicate results (fragments may cause duplicates)
+            results = _deduplicate_by_id(results)
+
+            if as_model:
+                return [
+                    Chunk(
+                        id=result["id"],
+                        file_id=result["file_id"],
+                        code=result["content"],
+                        start_line=result["start_line"],
+                        end_line=result["end_line"],
+                        chunk_type=ChunkType(result["chunk_type"]),
+                        language=Language(result["language"]),
+                        symbol=result["name"],
+                    )
+                    for result in results
+                ]
+            return results
+        except Exception as e:
+            logger.error(f"Error getting chunks by IDs: {e}")
+            return []
 
     def get_chunks_by_file_id(
         self, file_id: int, as_model: bool = False

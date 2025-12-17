@@ -881,22 +881,23 @@ class EmbeddingService(BaseService):
             logger.debug("_get_chunks_by_ids: no chunk_ids provided, returning empty list")
             return []
 
+        # Use batch query for better performance
+        chunks = self._db.get_chunks_by_ids(chunk_ids)
+
+        # Normalize field names for compatibility between providers
         filtered_chunks = []
-        for chunk_id in chunk_ids:
-            chunk = self._db.get_chunk_by_id(chunk_id)
-            if chunk:
-                # Ensure we have the expected fields
-                filtered_chunk = {
-                    "id": chunk_id,
-                    "code": chunk.get(
-                        "content", chunk.get("code", "")
-                    ),  # LanceDB uses 'content'
-                    "symbol": chunk.get(
-                        "name", chunk.get("symbol", "")
-                    ),  # LanceDB uses 'name'
-                    "path": chunk.get("file_path", ""),
-                }
-                filtered_chunks.append(filtered_chunk)
+        for chunk in chunks:
+            filtered_chunk = {
+                "id": chunk["id"],
+                "code": chunk.get(
+                    "content", chunk.get("code", "")
+                ),  # LanceDB uses 'content'
+                "symbol": chunk.get(
+                    "name", chunk.get("symbol", "")
+                ),  # LanceDB uses 'name'
+                "path": chunk.get("file_path", ""),
+            }
+            filtered_chunks.append(filtered_chunk)
 
         logger.debug(f"_get_chunks_by_ids: found {len(filtered_chunks)} chunks out of {len(chunk_ids)} requested")
         return filtered_chunks

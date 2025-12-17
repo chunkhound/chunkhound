@@ -93,6 +93,12 @@ class DatabaseProvider(Protocol):
         """Get chunk record by ID."""
         ...
 
+    def get_chunks_by_ids(
+        self, chunk_ids: list[int], as_model: bool = False
+    ) -> list[dict[str, Any] | Chunk]:
+        """Get chunk records for multiple chunk IDs."""
+        ...
+
     def get_chunks_by_file_id(
         self, file_id: int, as_model: bool = False
     ) -> list[dict[str, Any] | Chunk]:

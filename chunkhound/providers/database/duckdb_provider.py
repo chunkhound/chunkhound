@@ -1300,6 +1300,14 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Get chunk record by ID - delegate to chunk repository."""
         return self._chunk_repository.get_chunk_by_id(chunk_id, as_model)
 
+    def get_chunks_by_ids(
+        self, chunk_ids: list[int], as_model: bool = False
+    ) -> list[dict[str, Any] | Chunk]:
+        """Get chunk records for multiple chunk IDs - delegate to chunk repository."""
+        return self._execute_in_db_thread_sync(
+            "get_chunks_by_ids", chunk_ids, as_model
+        )
+
     def get_chunks_by_file_id(
         self, file_id: int, as_model: bool = False
     ) -> list[dict[str, Any] | Chunk]:
@@ -1469,6 +1477,62 @@ class DuckDBProvider(SerialDatabaseProvider):
         """,
             [chunk_id],
         ).fetchone()
+
+    def _executor_get_chunks_by_ids(
+        self, conn: Any, state: dict[str, Any], chunk_ids: list[int], as_model: bool
+    ) -> list[dict[str, Any] | Chunk]:
+        """Executor method for get_chunks_by_ids - runs in DB thread."""
+        if not chunk_ids:
+            return []
+
+        placeholders = ", ".join(["?" for _ in chunk_ids])
+        results = conn.execute(
+            f"""
+            SELECT id, file_id, chunk_type, symbol, code, start_line, end_line,
+                   start_byte, end_byte, language, created_at, updated_at
+            FROM chunks WHERE id IN ({placeholders})
+            ORDER BY id
+        """,
+            chunk_ids,
+        ).fetchall()
+
+        chunks = []
+        for row in results:
+            chunk_dict = {
+                "id": row[0],
+                "file_id": row[1],
+                "chunk_type": row[2],
+                "symbol": row[3],
+                "code": row[4],
+                "start_line": row[5],
+                "end_line": row[6],
+                "start_byte": row[7],
+                "end_byte": row[8],
+                "language": row[9],
+                "created_at": row[10],
+                "updated_at": row[11],
+            }
+
+            if as_model:
+                chunk = Chunk(
+                    id=chunk_dict["id"],
+                    file_id=chunk_dict["file_id"],
+                    chunk_type=ChunkType(chunk_dict["chunk_type"]),
+                    symbol=chunk_dict["symbol"],
+                    code=chunk_dict["code"],
+                    start_line=chunk_dict["start_line"],
+                    end_line=chunk_dict["end_line"],
+                    start_byte=chunk_dict["start_byte"],
+                    end_byte=chunk_dict["end_byte"],
+                    language=Language(chunk_dict["language"])
+                    if chunk_dict["language"]
+                    else None,
+                )
+                chunks.append(chunk)
+            else:
+                chunks.append(chunk_dict)
+
+        return chunks
 
     def _executor_get_chunks_by_file_id_query(
         self, conn: Any, state: dict[str, Any], file_id: int
