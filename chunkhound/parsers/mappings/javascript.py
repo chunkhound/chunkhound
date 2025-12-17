@@ -5,21 +5,13 @@ for semantic code analysis. It handles JavaScript-specific language features lik
 arrow functions, ES6 classes, JSDoc comments, and modern module syntax.
 """
 
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-from chunkhound.parsers.mappings._shared.js_family_extraction import (
-    JSFamilyExtraction,
-)
-from chunkhound.parsers.mappings._shared.js_query_patterns import (
-    TOP_LEVEL_LEXICAL_CONFIG,
-    TOP_LEVEL_VAR_CONFIG,
-    COMMONJS_MODULE_EXPORTS,
-    COMMONJS_NESTED_EXPORTS,
-    COMMONJS_EXPORTS_SHORTHAND,
-)
 from chunkhound.parsers.mappings._shared.js_family_extraction import (
     JSFamilyExtraction,
 )
@@ -561,3 +553,73 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
                     tags[tag_name].append("")
 
         return tags
+
+    def resolve_import_path(
+        self,
+        import_text: str,
+        base_dir: Path,
+        source_file: Path
+    ) -> Path | None:
+        """Resolve JavaScript import to file path.
+
+        Handles ES6 imports and CommonJS require statements, resolving them to
+        actual file paths in the filesystem.
+
+        Args:
+            import_text: Raw import statement text (e.g., "import X from './path'")
+            base_dir: Base directory of the project
+            source_file: Path to the file containing the import
+
+        Returns:
+            Resolved file path if found, None if not resolvable (e.g., external package)
+
+        Examples:
+            >>> # ES6 import
+            >>> resolve_import_path("import X from './utils'", base, source)
+            Path("/project/src/utils.js")
+
+            >>> # CommonJS require
+            >>> resolve_import_path("const x = require('../lib')", base, source)
+            Path("/project/lib/index.js")
+
+            >>> # External package
+            >>> resolve_import_path("import React from 'react'", base, source)
+            None
+        """
+        # Extract import path from: import X from 'path' OR require('path')
+        match = re.search(
+            r'''(?:from\s+['"](.+?)['"]|require\s*\(\s*['"](.+?)['"]\s*\))''',
+            import_text
+        )
+        if not match:
+            return None
+
+        import_path = match.group(1) or match.group(2)
+        if not import_path:
+            return None
+
+        # Skip non-relative imports (external packages)
+        if not import_path.startswith('.'):
+            return None
+
+        # Resolve relative to source file's directory
+        source_dir = source_file.parent
+        resolved = (source_dir / import_path).resolve()
+
+        # Try direct path
+        if resolved.exists() and resolved.is_file():
+            return resolved
+
+        # Try with extensions
+        for ext in ['.js', '.jsx', '.mjs', '.ts', '.tsx']:
+            with_ext = resolved.with_suffix(ext)
+            if with_ext.exists():
+                return with_ext
+
+        # Try index file
+        for index in ['index.js', 'index.jsx', 'index.ts', 'index.tsx']:
+            index_path = resolved / index
+            if index_path.exists():
+                return index_path
+
+        return None

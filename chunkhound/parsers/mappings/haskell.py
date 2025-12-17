@@ -8,6 +8,7 @@ fed into the universal ConceptExtractor.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from chunkhound.core.types.common import Language
@@ -394,3 +395,21 @@ class HaskellMapping(BaseMapping):
         if " where" in rest:
             rest = rest.split(" where", 1)[0]
         return rest.strip() or "module_unknown"
+
+    def resolve_import_path(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> Path | None:
+        """Resolve import path for Haskell.
+
+        Haskell module resolution is complex and typically handled by the build system.
+
+        Args:
+            import_text: The import statement text
+            base_dir: Base directory of the project
+            source_file: Path to the file containing the import
+
+        Returns:
+            None (Haskell module resolution is complex, not file-based)
+        """
+        # Haskell module resolution is complex, return None
+        return None

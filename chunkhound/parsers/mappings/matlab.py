@@ -4,6 +4,8 @@ This module provides MATLAB-specific tree-sitter queries and extraction logic
 for mapping MATLAB AST nodes to semantic chunks.
 """
 
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from chunkhound.core.types.common import Language
@@ -452,3 +454,75 @@ class MatlabMapping(BaseMapping):
                 return False
 
         return True
+
+    def resolve_import_path(
+        self,
+        import_text: str,
+        base_dir: Path,
+        source_file: Path,
+    ) -> Path | None:
+        """Resolve MATLAB import to file path.
+
+        MATLAB imports map to +package directories:
+        - import pkg.Class -> +pkg/Class.m
+        - import pkg.subpkg.* -> +pkg/+subpkg/ (directory)
+
+        Args:
+            import_text: The raw import statement text
+            base_dir: Project root directory
+            source_file: File containing the import
+
+        Returns:
+            Resolved file path or None if external/unresolvable
+        """
+        # Match import statement
+        match = re.search(r"import\s+([\w.]+)", import_text)
+        if not match:
+            return None
+
+        import_path = match.group(1)
+        parts = import_path.split(".")
+
+        # Handle wildcard imports (pkg.*)
+        if parts[-1] == "*":
+            parts = parts[:-1]
+            if not parts:
+                return None
+            # Convert to +pkg/+subpkg directory path
+            dir_parts = [f"+{p}" for p in parts]
+            rel_path = "/".join(dir_parts)
+            full_path = base_dir / rel_path
+            if full_path.is_dir():
+                return full_path
+            return None
+
+        # Regular import (pkg.Class or pkg.func)
+        # Last part is the class/function, rest are packages
+        if len(parts) >= 1:
+            class_or_func = parts[-1]
+            pkg_parts = parts[:-1]
+
+            # Build path: +pkg/+subpkg/Class.m
+            dir_parts = [f"+{p}" for p in pkg_parts]
+            if dir_parts:
+                rel_path = "/".join(dir_parts) + f"/{class_or_func}.m"
+            else:
+                rel_path = f"{class_or_func}.m"
+
+            full_path = base_dir / rel_path
+            if full_path.exists():
+                return full_path
+
+            # Try as @ class directory
+            if dir_parts:
+                class_dir = "/".join(dir_parts) + f"/@{class_or_func}"
+            else:
+                class_dir = f"@{class_or_func}"
+            class_path = base_dir / class_dir
+            if class_path.is_dir():
+                # Look for class file
+                class_file = class_path / f"{class_or_func}.m"
+                if class_file.exists():
+                    return class_file
+
+        return None

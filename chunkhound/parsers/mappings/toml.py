@@ -6,6 +6,7 @@ it uses Python's built-in tomllib/toml module with custom structure detection.
 """
 
 import sys
+from pathlib import Path
 from typing import Any
 
 from tree_sitter import Node
@@ -320,3 +321,12 @@ class TomlMapping(BaseMapping):
                 )
 
         return comments
+
+    def resolve_import_path(
+        self,
+        import_text: str,
+        base_dir: Path,
+        source_file: Path
+    ) -> Path | None:
+        """Data formats don't have imports."""
+        return None

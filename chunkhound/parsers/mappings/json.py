@@ -6,6 +6,7 @@ it uses Python's built-in json module with custom structure detection.
 """
 
 import json
+from pathlib import Path
 from typing import Any
 
 from tree_sitter import Node
@@ -282,3 +283,12 @@ class JsonMapping(BaseMapping):
             return 1 + sum(self._count_json_elements(item) for item in data)
         else:
             return 1
+
+    def resolve_import_path(
+        self,
+        import_text: str,
+        base_dir: Path,
+        source_file: Path
+    ) -> Path | None:
+        """Data formats don't have imports."""
+        return None

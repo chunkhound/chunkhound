@@ -5,6 +5,8 @@ for the universal concept system. It maps Rust's AST nodes to universal
 semantic concepts used by the unified parser.
 """
 
+import re
+from pathlib import Path
 from typing import Any
 
 from tree_sitter import Node
@@ -637,3 +639,59 @@ class RustMapping(BaseMapping):
             if child and self.get_node_text(child, source).strip() == "mut":
                 return True
         return False
+
+    def resolve_import_path(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> Path | None:
+        """Resolve Rust use/mod statement to file path."""
+
+        # Handle mod declarations: mod foo;
+        mod_match = re.search(r"mod\s+(\w+)\s*;", import_text)
+        if mod_match:
+            mod_name = mod_match.group(1)
+            source_dir = source_file.parent
+
+            # Try mod_name.rs
+            mod_file = source_dir / f"{mod_name}.rs"
+            if mod_file.exists():
+                return mod_file
+
+            # Try mod_name/mod.rs
+            mod_file = source_dir / mod_name / "mod.rs"
+            if mod_file.exists():
+                return mod_file
+
+            return None
+
+        # Handle use statements: use crate::foo::bar;
+        use_match = re.search(
+            r"use\s+(?:crate|self|super)::(\w+(?:::\w+)*)", import_text
+        )
+        if use_match:
+            path_parts = use_match.group(1).split("::")
+
+            # Start from src/ for crate:: imports
+            search_dir = base_dir / "src"
+            if not search_dir.exists():
+                search_dir = base_dir
+
+            # Walk the module path
+            # All but last (which might be item, not module)
+            for part in path_parts[:-1]:
+                mod_file = search_dir / f"{part}.rs"
+                if mod_file.exists():
+                    return mod_file
+                mod_dir = search_dir / part
+                if mod_dir.is_dir():
+                    search_dir = mod_dir
+
+            # Try the last part
+            last = path_parts[-1]
+            mod_file = search_dir / f"{last}.rs"
+            if mod_file.exists():
+                return mod_file
+            mod_file = search_dir / last / "mod.rs"
+            if mod_file.exists():
+                return mod_file
+
+        return None

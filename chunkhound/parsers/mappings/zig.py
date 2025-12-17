@@ -5,6 +5,8 @@ for the universal concept system. It maps Zig's AST nodes to universal
 semantic concepts used by the unified parser.
 """
 
+import re
+from pathlib import Path
 from typing import Any
 
 from tree_sitter import Node
@@ -344,3 +346,39 @@ class ZigMapping(BaseMapping):
             ):
                 return True
         return False
+
+    def resolve_import_path(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> Path | None:
+        """Resolve import path from Zig @import() builtin.
+
+        Args:
+            import_text: The text of the import statement
+            base_dir: Base directory of the indexed codebase
+            source_file: Path to the file containing the import
+
+        Returns:
+            Resolved absolute path if found, None otherwise
+        """
+        # @import("file.zig")
+        match = re.search(r'@import\s*\(\s*"(.+?)"\s*\)', import_text)
+        if not match:
+            return None
+
+        path = match.group(1)
+
+        # Skip standard library and builtin imports
+        if path in ("std", "builtin"):
+            return None
+
+        # Try relative to source file first
+        resolved = (source_file.parent / path).resolve()
+        if resolved.exists():
+            return resolved
+
+        # Try relative to base directory
+        full_path = base_dir / path
+        if full_path.exists():
+            return full_path
+
+        return None

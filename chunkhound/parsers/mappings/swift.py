@@ -11,6 +11,7 @@ for the unified parser system. It handles Swift's unique features including:
 - Enums with associated values
 """
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -766,3 +767,21 @@ class SwiftMapping(BaseMapping):
                     metadata["module"] = module_name
 
         return metadata
+
+    def resolve_import_path(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> Path | None:
+        """Resolve import path for Swift.
+
+        Swift imports are typically framework imports, not file paths.
+
+        Args:
+            import_text: The import statement text
+            base_dir: Base directory of the project
+            source_file: Path to the file containing the import
+
+        Returns:
+            None (Swift imports are framework-based, not file-based)
+        """
+        # Swift imports are typically framework imports, return None
+        return None

@@ -4,6 +4,8 @@ This module provides Python-specific tree-sitter queries and extraction logic
 for mapping Python AST nodes to semantic chunks.
 """
 
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from chunkhound.core.types.common import Language
@@ -791,3 +793,42 @@ class PythonMapping(BaseMapping):
                     metadata["raw_content"] = clean_text.strip()
 
         return metadata
+
+    def resolve_import_path(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> Path | None:
+        """Resolve Python import to file path.
+
+        Args:
+            import_text: The import statement text
+                (e.g., "import x.y.z" or "from x.y import z")
+            base_dir: The base directory of the codebase
+            source_file: The file containing the import statement
+
+        Returns:
+            Path to the imported module file, or None if not found or
+            is external package
+        """
+        # Handle "from x.y.z import W" or "import x.y.z"
+        match = re.search(r"from\s+([\w.]+)\s+import|import\s+([\w.]+)", import_text)
+        if not match:
+            return None
+
+        module = match.group(1) or match.group(2)
+        if not module:
+            return None
+
+        # Convert module.path to module/path.py
+        rel_path = module.replace(".", "/") + ".py"
+        full_path = base_dir / rel_path
+        if full_path.exists():
+            return full_path
+
+        # Try as package __init__.py
+        pkg_path = module.replace(".", "/") + "/__init__.py"
+        full_path = base_dir / pkg_path
+        if full_path.exists():
+            return full_path
+
+        # External package - return None
+        return None

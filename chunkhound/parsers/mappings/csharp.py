@@ -6,6 +6,7 @@ including classes, interfaces, methods, properties, namespaces, attributes,
 and XML documentation comments.
 """
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -655,3 +656,21 @@ class CSharpMapping(BaseMapping):
         except Exception as e:
             logger.error(f"Failed to get C# qualified name: {e}")
             return self.get_fallback_name(node, "symbol")
+
+    def resolve_import_path(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> Path | None:
+        """Resolve import path for C#.
+
+        C# using directives map to assemblies, not files.
+
+        Args:
+            import_text: The import statement text
+            base_dir: Base directory of the project
+            source_file: Path to the file containing the import
+
+        Returns:
+            None (C# using directives are namespace-based, not file-based)
+        """
+        # C# using directives map to assemblies, not files
+        return None

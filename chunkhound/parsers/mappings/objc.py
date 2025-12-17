@@ -9,6 +9,8 @@ for the unified parser system. It handles Objective-C's unique features includin
 - Categories and extensions
 """
 
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -598,3 +600,35 @@ class ObjCMapping(BaseMapping):
         # IMPORT concept not supported (get_query_for_concept returns None)
 
         return metadata
+
+    def resolve_import_path(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> Path | None:
+        """Resolve Objective-C include to file path.
+
+        Args:
+            import_text: The import statement text (e.g., '#include "file.h"' or '#import "file.h"')
+            base_dir: Base directory of the codebase
+            source_file: Path to the file containing the import
+
+        Returns:
+            Resolved absolute path if found, None otherwise (system includes)
+        """
+        # Local includes: #include "file.h" or #import "file.h"
+        local_match = re.search(r'#(?:include|import)\s*"(.+?)"', import_text)
+        if local_match:
+            include_path = local_match.group(1)
+
+            # Try relative to source file
+            resolved = (source_file.parent / include_path).resolve()
+            if resolved.exists():
+                return resolved
+
+            # Try relative to base_dir and common include paths
+            for prefix in ["", "include/", "src/", "inc/"]:
+                full_path = base_dir / prefix / include_path
+                if full_path.exists():
+                    return full_path
+
+        # System includes (#include <...> or #import <...>) - external, return None
+        return None

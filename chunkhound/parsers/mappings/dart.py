@@ -4,6 +4,8 @@ This module provides Dart-specific tree-sitter queries and extraction logic
 for mapping Dart AST nodes to semantic chunks.
 """
 
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from chunkhound.core.types.common import Language
@@ -507,3 +509,36 @@ class DartMapping(BaseMapping):
         if type_node:
             return self.get_node_text(type_node, source)
         return ""
+
+    def resolve_import_path(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> Path | None:
+        """Resolve import path for Dart.
+
+        Attempts to resolve relative imports and local file imports.
+
+        Args:
+            import_text: The import statement text
+            base_dir: Base directory of the project
+            source_file: Path to the file containing the import
+
+        Returns:
+            Path to the imported file if resolvable, None otherwise
+        """
+        match = re.search(r"import\s+['\"](.+?)['\"]", import_text)
+        if not match:
+            return None
+
+        path = match.group(1)
+
+        # External package imports start with 'package:'
+        if path.startswith("package:"):
+            return None
+
+        # Relative imports
+        if path.startswith("./") or path.startswith("../"):
+            resolved = (source_file.parent / path).resolve()
+            if resolved.exists():
+                return resolved
+
+        return None

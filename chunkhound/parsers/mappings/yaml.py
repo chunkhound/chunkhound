@@ -5,6 +5,7 @@ for the universal concept system. It handles YAML documents, mappings, sequences
 and other structural elements using tree-sitter-yaml.
 """
 
+from pathlib import Path
 from typing import Any
 
 from tree_sitter import Node
@@ -392,3 +393,12 @@ class YamlMapping(BaseMapping):
                 max_depth = max(max_depth, child_depth)
 
         return max_depth
+
+    def resolve_import_path(
+        self,
+        import_text: str,
+        base_dir: Path,
+        source_file: Path
+    ) -> Path | None:
+        """Data formats don't have imports."""
+        return None

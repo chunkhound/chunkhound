@@ -6,6 +6,8 @@ classes, traits, methods, closures, dynamic typing, GStrings, and Groovy-specifi
 syntax while building on the Java foundation.
 """
 
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -578,3 +580,39 @@ class GroovyMapping(BaseMapping):
             logger.error(f"Failed to extract Groovy field declarations: {e}")
 
         return fields
+
+    def resolve_import_path(
+        self,
+        import_text: str,
+        base_dir: Path,
+        source_file: Path,
+    ) -> Path | None:
+        """Resolve Groovy import to file path.
+
+        Args:
+            import_text: Import statement text (e.g., "import com.example.Foo;")
+            base_dir: Base directory of the project
+            source_file: Path to the file containing the import
+
+        Returns:
+            Path to the imported file, or None if not found
+        """
+        # Extract class path: import com.example.Foo; or import static com.example.Foo.bar;
+        match = re.search(r"import\s+(?:static\s+)?([\w.]+);?", import_text)
+        if not match:
+            return None
+
+        class_path = match.group(1)
+        if not class_path:
+            return None
+
+        # Convert to file path (last part is class name)
+        rel_path = class_path.replace(".", "/") + ".groovy"
+
+        # Try common source directories
+        for prefix in ["", "src/main/groovy/", "src/", "app/src/main/groovy/"]:
+            full_path = base_dir / prefix / rel_path
+            if full_path.exists():
+                return full_path
+
+        return None

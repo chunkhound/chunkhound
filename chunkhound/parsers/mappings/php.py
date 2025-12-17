@@ -41,6 +41,8 @@ class_declaration
 ```
 """
 
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from chunkhound.core.types.common import Language
@@ -627,3 +629,32 @@ class PHPMapping(BaseMapping):
         except Exception:
             return False
         return False
+
+    def resolve_import_path(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> Path | None:
+        """Resolve import path for PHP.
+
+        Attempts to resolve relative require/include statements.
+
+        Args:
+            import_text: The import statement text
+            base_dir: Base directory of the project
+            source_file: Path to the file containing the import
+
+        Returns:
+            Path to the imported file if resolvable, None otherwise
+        """
+        match = re.search(
+            r'(?:require|include)(?:_once)?\s*\(\s*[\'"](.+?)[\'"]\s*\)', import_text
+        )
+        if not match:
+            return None
+
+        path = match.group(1)
+        if path.startswith("./") or path.startswith("../"):
+            resolved = (source_file.parent / path).resolve()
+            if resolved.exists():
+                return resolved
+
+        return None

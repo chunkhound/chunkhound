@@ -451,3 +451,24 @@ class BaseMapping(ABC):
             True if node should be included, False otherwise
         """
         return True
+
+    def resolve_import_path(
+        self,
+        import_text: str,
+        base_dir: Path,
+        source_file: Path,
+    ) -> Path | None:
+        """Resolve import statement to file path.
+
+        Default implementation returns None (no import resolution).
+        Override in language-specific subclasses.
+
+        Args:
+            import_text: The raw import statement text
+            base_dir: Project root directory
+            source_file: File containing the import
+
+        Returns:
+            Resolved file path or None if external/unresolvable
+        """
+        return None

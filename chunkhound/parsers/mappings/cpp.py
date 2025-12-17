@@ -4,6 +4,8 @@ This module provides C++-specific tree-sitter queries and extraction logic
 for mapping C++ AST nodes to semantic chunks.
 """
 
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from chunkhound.core.types.common import Language
@@ -858,3 +860,35 @@ class CppMapping(BaseMapping):
         # For class definitions, include even if they're just declarations
         # since they provide valuable type information
         return True
+
+    def resolve_import_path(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> Path | None:
+        """Resolve C++ include to file path.
+
+        Args:
+            import_text: The import statement text (e.g., '#include "file.h"')
+            base_dir: Base directory of the codebase
+            source_file: Path to the file containing the import
+
+        Returns:
+            Resolved absolute path if found, None otherwise (system includes)
+        """
+        # Local includes: #include "file.h"
+        local_match = re.search(r'#include\s*"(.+?)"', import_text)
+        if local_match:
+            include_path = local_match.group(1)
+
+            # Try relative to source file
+            resolved = (source_file.parent / include_path).resolve()
+            if resolved.exists():
+                return resolved
+
+            # Try relative to base_dir and common include paths
+            for prefix in ["", "include/", "src/", "inc/"]:
+                full_path = base_dir / prefix / include_path
+                if full_path.exists():
+                    return full_path
+
+        # System includes (#include <...>) - external, return None
+        return None

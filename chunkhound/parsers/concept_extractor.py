@@ -1,5 +1,6 @@
 """Universal concept extraction using language-specific mappings."""
 
+from pathlib import Path
 from typing import Any, Protocol
 
 from tree_sitter import Node, QueryCursor
@@ -37,6 +38,27 @@ class LanguageMapping(Protocol):
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
     ) -> dict[str, Any]:
         """Extract language-specific metadata."""
+        ...
+
+    def resolve_import_path(
+        self,
+        import_text: str,
+        base_dir: Path,
+        source_file: Path,
+    ) -> Path | None:
+        """Resolve import statement to file path.
+
+        Each language implements its own import resolution logic.
+        Returns None for external/unresolvable imports.
+
+        Args:
+            import_text: The raw import statement text
+            base_dir: Project root directory
+            source_file: File containing the import
+
+        Returns:
+            Resolved file path or None if external/unresolvable
+        """
         ...
 
 
