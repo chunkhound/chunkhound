@@ -116,14 +116,6 @@ class LLMManager:
                     if (keep := config.get("clear_tool_uses_keep")) is not None:
                         provider_kwargs["clear_tool_uses_keep"] = keep
 
-            # Optional Codex CLI overlay behavior: allow certain callers
-            # (for example, deep-doc HyDE assembly) to request a full copy of
-            # the user's CODEX_HOME config instead of the minimal overlay.
-            if provider_name == "codex-cli" and config.get(
-                "use_base_codex_config"
-            ):
-                provider_kwargs["use_base_codex_config"] = True
-
             provider = provider_class(**provider_kwargs)
             return provider
         except Exception as e:
