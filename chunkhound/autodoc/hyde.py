@@ -198,28 +198,10 @@ def build_hyde_scope_prompt(
                         pieces.append(text[start:end])
                 snippet = "\n...\n".join(pieces)
 
-            ext = path.suffix.lstrip(".").lower()
-            lang = (
-                ext
-                if ext
-                in {
-                    "py",
-                    "rs",
-                    "ts",
-                    "tsx",
-                    "js",
-                    "jsx",
-                    "go",
-                    "rb",
-                    "java",
-                    "kt",
-                    "c",
-                    "h",
-                    "cpp",
-                    "md",
-                }
-                else ""
-            )
+            from chunkhound.core.types.common import Language
+
+            language = Language.from_file_extension(path)
+            lang = "" if language == Language.UNKNOWN else language.value
             fence = f"```{lang}" if lang else "```"
             code_snippets.append(f"File: {rel_path}\n{fence}\n{snippet}\n```")
 
