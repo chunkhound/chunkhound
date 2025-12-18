@@ -171,9 +171,6 @@ class LanceDBProvider(SerialDatabaseProvider):
         self._file_path_cache = {}
         self._chunk_id_cache = {}
 
-        # Cache for missing embeddings pagination (lazy loading)
-        self._missing_embeddings_cache: dict[str, dict] = {}
-
         # Performance monitoring
         self._query_performance = {}
 
@@ -1305,11 +1302,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                 f"Successfully updated {total_updated} embeddings using merge_insert"
             )
 
-            # Invalidate cache for this provider:model combination
-            cache_key = f"{provider}:{model}"
-            if cache_key in self._missing_embeddings_cache:
-                logger.debug(f"Invalidating cache for {cache_key} due to embedding insertions")
-                del self._missing_embeddings_cache[cache_key]
+
 
             return total_updated
 
@@ -2381,98 +2374,46 @@ class LanceDBProvider(SerialDatabaseProvider):
         """Executor method for get_chunks_without_embeddings_paginated - runs in DB thread.
 
         Returns full chunk data instead of just IDs to avoid duplicate queries.
+        Uses direct database query with LIMIT/OFFSET for proper pagination.
         """
         if not self._chunks_table:
             return []
 
         try:
-            # Lazy loading implementation for simple case (no path filtering)
-            cache_key = f"{provider}:{model}"
+            # Query for chunks needing embeddings with direct pagination
+            # Use WHERE clause to filter chunks that need embeddings
+            results = self._chunks_table.search().where(
+                f"(embedding IS NULL OR provider != '{provider}' OR model != '{model}')"
+            ).limit(limit).offset(offset).to_list()
 
-            # Initialize cache entry if not exists
-            if cache_key not in self._missing_embeddings_cache:
-                self._missing_embeddings_cache[cache_key] = {
-                    "loaded_pages": set(),
-                    "sorted_chunks": [],
-                    "total_estimated": 0,
-                }
+            # Filter results to only include chunks that actually need embeddings
+            # (double-check the filtering since LanceDB might not handle complex WHERE perfectly)
+            filtered_results = []
+            for result in results:
+                embedding = result.get("embedding")
+                current_provider = result.get("provider")
+                current_model = result.get("model")
 
-            cache = self._missing_embeddings_cache[cache_key]
+                # Check if this chunk actually needs embedding
+                needs_embedding = False
+                if embedding is None:
+                    needs_embedding = True
+                elif not _has_valid_embedding(embedding):
+                    needs_embedding = True
+                elif current_provider != provider or current_model != model:
+                    needs_embedding = True
 
-            # Check if we need to load more pages
-            required_end = offset + limit
-            current_cached = len(cache["sorted_chunks"])
+                if needs_embedding:
+                    filtered_results.append(result)
 
-            if required_end > current_cached:
-                # Calculate which page to load next
-                page_size = 10000  # 10k rows per page
-                next_page = len(cache["loaded_pages"])
+            # Sort by ID for deterministic ordering
+            filtered_results.sort(key=lambda x: x["id"])
 
-                logger.debug(f"Loading page {next_page} for {cache_key} (cached: {current_cached}, needed: {required_end})")
-
-                # Load next page
-                try:
-                    # Query for chunks needing embeddings in this page range
-                    page_offset = next_page * page_size
-                    page_results = self._chunks_table.search().where(
-                        f"(embedding IS NULL OR provider != '{provider}' OR model != '{model}')"
-                    ).limit(page_size).to_list()
-
-                    if not page_results:
-                        # No more data available
-                        cache["total_estimated"] = len(cache["sorted_chunks"])
-                        logger.debug(f"No more data for {cache_key}, total estimated: {cache['total_estimated']}")
-                    else:
-                        # Filter and collect chunks from this page
-                        page_chunks = []
-                        for result in page_results:
-                            embedding = result.get("embedding")
-                            current_provider = result.get("provider")
-                            current_model = result.get("model")
-
-                            # Check if this chunk actually needs embedding
-                            needs_embedding = False
-                            if embedding is None:
-                                needs_embedding = True
-                            elif not _has_valid_embedding(embedding):
-                                needs_embedding = True
-                            elif current_provider != provider or current_model != model:
-                                needs_embedding = True
-
-                            if needs_embedding:
-                                page_chunks.append(result)
-
-                        # Sort page chunks for deterministic ordering by ID
-                        page_chunks.sort(key=lambda x: x["id"])
-
-                        # Merge into cached sorted list
-                        cache["sorted_chunks"].extend(page_chunks)
-                        cache["sorted_chunks"].sort(key=lambda x: x["id"])  # Maintain global sorted order
-                        cache["loaded_pages"].add(next_page)
-
-                        logger.debug(f"Loaded page {next_page}: {len(page_chunks)} chunks, total cached: {len(cache['sorted_chunks'])}")
-
-                        # Continue loading if we still need more data
-                        if required_end > len(cache["sorted_chunks"]):
-                            # Recursively load next page
-                            return self._executor_get_chunks_without_embeddings_paginated(
-                                conn, state, provider, model, limit, offset
-                            )
-
-                except Exception as page_error:
-                    logger.warning(f"Failed to load page {next_page} for {cache_key}: {page_error}")
-                    # Return what we have
-                    pass
-
-            # Return paginated results from cache
-            end_idx = min(offset + limit, len(cache["sorted_chunks"]))
-            result = cache["sorted_chunks"][offset:end_idx]
-
-            logger.debug(f"Returning {len(result)} chunks from cache (offset={offset}, limit={limit}, cached={len(cache['sorted_chunks'])})")
+            logger.debug(f"Retrieved {len(filtered_results)} chunks without embeddings (limit={limit}, offset={offset})")
 
             # Convert LanceDB results to expected format
             formatted_results = []
-            for chunk in result:
+            for chunk in filtered_results:
                 formatted_result = {
                     "id": chunk["id"],
                     "file_id": chunk["file_id"],
