@@ -1150,7 +1150,7 @@ class LanceDBProvider(SerialDatabaseProvider):
             # Determine optimal batch size if not provided
             if batch_size is None:
                 # Use smaller batches to reduce reading overhead and prevent timeouts
-                batch_size = min(2000, len(embeddings_data))
+                batch_size = min(500, len(embeddings_data))
 
             total_updated = 0
 
@@ -1185,6 +1185,9 @@ class LanceDBProvider(SerialDatabaseProvider):
                 existing_rows = []
                 chunk_ids_set = set(chunk_ids)
 
+                # todo robert: the embedding flow currently queries db for chunks table, add embedding to chunks and then uses this method to insert to db. 
+                # why wouldn't the provided data be the most up to date one? assuming no external access to db. with that in mind, it seems redundant to query again.
+                # should also check if this is used in other flows which may behave differently but due to its name, seems that it should be limited to embedding flow. 
                 # For smaller batches, use direct queries
                 if len(chunk_ids) <= 1000:
                     try:
@@ -1220,6 +1223,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                                     continue
 
                 # Deduplicate results (fragments can cause duplicates)
+                # # todo robert: maybe a bug here if this doesn't take the most recent version but if query above is removed, can also remove this call.
                 existing_rows = _deduplicate_by_id(existing_rows)
 
                 # Convert to DataFrame for consistent downstream handling
