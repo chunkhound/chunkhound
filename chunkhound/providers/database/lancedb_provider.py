@@ -1222,6 +1222,9 @@ class LanceDBProvider(SerialDatabaseProvider):
                                 except Exception:
                                     continue
 
+                # Deduplicate results (fragments can cause duplicates)
+                existing_rows = _deduplicate_by_id(existing_rows)
+
                 # Convert to DataFrame for consistent downstream handling
                 existing_df = pd.DataFrame(existing_rows) if existing_rows else pd.DataFrame()
 
@@ -1264,11 +1267,16 @@ class LanceDBProvider(SerialDatabaseProvider):
                     merge_table = pa.Table.from_pylist(
                         merge_data, schema=get_chunks_schema(embedding_dims)
                     )
-                    (
-                        self._chunks_table.merge_insert("id")
-                        .when_matched_update_all()
-                        .execute(merge_table)
-                    )
+                    try:
+                        (
+                            self._chunks_table.merge_insert("id")
+                            .when_matched_update_all()
+                            .execute(merge_table)
+                        )
+                    except Exception as merge_error:
+                        logger.error(f"merge_insert failed for {len(merge_data)} embeddings: {merge_error}")
+                        # Fail fast to surface the issue immediately
+                        raise RuntimeError(f"Embedding insertion failed: {merge_error}") from merge_error
 
                 total_updated += len(merge_data)
 

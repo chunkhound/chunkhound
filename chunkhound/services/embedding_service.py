@@ -302,6 +302,15 @@ class EmbeddingService(BaseService):
 
                 logger.info(f"Batch {batch_count} completed: generated={batch_generated}, total_processed={total_processed}, total_generated={total_generated}, current_batch_size={current_batch_size}")
 
+                # Check for fragmentation optimization after each page
+                if self._db.should_optimize_fragments(operation="during-embedding-page"):
+                    logger.info("Running fragmentation optimization during embedding generation...")
+                    try:
+                        self._db.optimize_tables()
+                        logger.info("Fragmentation optimization completed")
+                    except Exception as opt_error:
+                        logger.warning(f"Fragmentation optimization failed: {opt_error}")
+
             # Optimize if fragmentation high after embedding generation
             optimize_tables = getattr(self._db, "optimize_tables", None)
             if total_generated > 0 and optimize_tables and self._db.should_optimize_fragments(operation="post-embedding"):
