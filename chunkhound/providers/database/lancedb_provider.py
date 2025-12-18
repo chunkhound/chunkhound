@@ -1,5 +1,9 @@
 """LanceDB provider implementation for ChunkHound - concrete database provider using LanceDB."""
 
+# IMPORTANT: lancedb must support working with very large amount of data. 
+# Its not allowed to load entire tables for in memory processing. 
+# Native lancedb APIs must be used for implementing functionality.
+
 import os
 import time
 from datetime import datetime
@@ -404,9 +408,8 @@ class LanceDBProvider(SerialDatabaseProvider):
                 pass
 
             # Verify sufficient data exists for IVF PQ training
-            total_embeddings = len(
-                self._executor_get_existing_embeddings(conn, state, [], provider, model)
-            )
+            provider_stats = self._executor_get_embeddings_count(conn, state, provider, model)
+            total_embeddings = provider_stats.get("embedding_count", 0)
             if total_embeddings < 1000:
                 logger.debug(
                     f"Skipping index creation for {provider}/{model}: insufficient data ({total_embeddings} < 1000)"
@@ -1984,14 +1987,22 @@ class LanceDBProvider(SerialDatabaseProvider):
 
     # Statistics and Monitoring
     def get_stats(self) -> dict[str, int]:
-        """Get database statistics (file count, chunk count, etc.)."""
-        return self._execute_in_db_thread_sync("get_stats")
+        """Get database statistics (file count, chunk count, etc.) for the default provider/model."""
+        # Get default provider/model for stats
+        provider = ""
+        model = ""
+        if self.embedding_manager:
+            default_provider = self.embedding_manager.get_default_provider()
+            if default_provider:
+                provider = default_provider.name
+                model = default_provider.model
 
-    def _executor_get_stats(self, conn: Any, state: dict[str, Any]) -> dict[str, int]:
+        return self._execute_in_db_thread_sync("get_stats", provider, model)
+
+    def _executor_get_stats(self, conn: Any, state: dict[str, Any], provider: str, model: str) -> dict[str, int]:
         """Executor method for get_stats - runs in DB thread.
 
-        Optimized to avoid loading entire tables into memory for large datasets.
-        Uses native LanceDB queries instead of pandas DataFrames for better performance.
+        Returns overall statistics
         """
         stats = {"files": 0, "chunks": 0, "embeddings": 0, "size_mb": 0}
 
@@ -2011,25 +2022,9 @@ class LanceDBProvider(SerialDatabaseProvider):
                     # Use native LanceDB count_rows() for total chunks
                     stats["chunks"] = self._chunks_table.count_rows()
 
-                    # Count embeddings using native count_rows for optimal performance
-                    # This avoids loading the entire chunks table into memory
-                    try:
-                        # Use LanceDB's count_rows with filter to count non-NULL embeddings
-                        # This is much faster than loading all results and filtering in Python
-                        stats["embeddings"] = self._chunks_table.count_rows(
-                            filter="embedding IS NOT NULL"
-                        )
+                    provider_stats = self._executor_get_embeddings_count(conn, state, provider, model)
+                    stats["embeddings"] = provider_stats.get("embedding_count", 0)
 
-                    except Exception as embedding_error:
-                        logger.warning(f"Failed to count embeddings with count_rows: {embedding_error}")
-                        # Fallback to pandas approach if count_rows fails
-                        try:
-                            chunks_df = self._chunks_table.to_pandas()
-                            embeddings_mask = chunks_df["embedding"].apply(_has_valid_embedding)
-                            stats["embeddings"] = len(chunks_df[embeddings_mask])
-                        except Exception as fallback_error:
-                            logger.warning(f"Pandas fallback also failed: {fallback_error}")
-                            stats["embeddings"] = 0
 
                 except Exception as data_error:
                     logger.warning(
@@ -2075,33 +2070,33 @@ class LanceDBProvider(SerialDatabaseProvider):
             ),
         }
 
-    def get_provider_stats(self, provider: str, model: str) -> dict[str, Any]:
+    def get_embeddings_count(self, provider: str, model: str) -> dict[str, Any]:
         """Get statistics for a specific embedding provider/model."""
-        return self._execute_in_db_thread_sync("get_provider_stats", provider, model)
+        return self._execute_in_db_thread_sync("get_embeddings_count", provider, model)
 
-    def _executor_get_provider_stats(
+    def _executor_get_embeddings_count(
         self, conn: Any, state: dict[str, Any], provider: str, model: str
     ) -> dict[str, Any]:
-        """Executor method for get_provider_stats - runs in DB thread."""
+        """Executor method for get_embeddings_count - runs in DB thread."""
         if not self._chunks_table:
             return {"provider": provider, "model": model, "embedding_count": 0}
 
         try:
-            # Use native LanceDB queries to count embeddings
-            results = self._chunks_table.search().where(
-                f"provider = '{provider}' AND model = '{model}' AND embedding IS NOT NULL"
-            ).to_list()
+            # Build filter based on provided parameters
+            # If provider or model is empty, count all embeddings
+            if not provider or not model:
+                filter_condition = "embedding IS NOT NULL"
+            else:
+                filter_condition = f"provider = '{provider}' AND model = '{model}' AND embedding IS NOT NULL"
 
-            # Filter for valid embeddings (zero-vector check)
-            valid_embeddings = [
-                result for result in results
-                if _has_valid_embedding(result.get("embedding"))
-            ]
+            # Use efficient count_rows with filter like get_stats method
+            # This avoids loading entire table into memory for large datasets
+            embedding_count = self._chunks_table.count_rows(filter=filter_condition)
 
             return {
                 "provider": provider,
                 "model": model,
-                "embedding_count": len(valid_embeddings),
+                "embedding_count": embedding_count,
             }
         except Exception as e:
             logger.error(f"Error getting provider stats: {e}")

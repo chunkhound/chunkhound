@@ -281,14 +281,14 @@ class DatabaseProvider(Protocol):
 
     # Statistics and Monitoring
     def get_stats(self) -> dict[str, int]:
-        """Get database statistics (file count, chunk count, etc.)."""
+        """Get database statistics (file count, chunk count, etc.) for the default provider/model."""
         ...
 
     def get_file_stats(self, file_id: int) -> dict[str, Any]:
         """Get statistics for a specific file."""
         ...
 
-    def get_provider_stats(self, provider: str, model: str) -> dict[str, Any]:
+    def get_embeddings_count(self, provider: str, model: str) -> dict[str, Any]:
         """Get statistics for a specific embedding provider/model."""
         ...
 

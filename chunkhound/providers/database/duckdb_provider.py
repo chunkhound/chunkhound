@@ -2382,64 +2382,64 @@ class DuckDBProvider(SerialDatabaseProvider):
             return []
 
     def get_stats(self) -> dict[str, int]:
-        """Get database statistics (file count, chunk count, etc.)."""
-        return self._execute_in_db_thread_sync("get_stats")
+        """Get database statistics (file count, chunk count, etc.) for the default provider/model."""
+        # Get default provider/model for stats
+        provider = ""
+        model = ""
+        if self.embedding_manager:
+            default_provider = self.embedding_manager.get_default_provider()
+            if default_provider:
+                provider = default_provider.name
+                model = default_provider.model
 
-    def _executor_get_stats(self, conn: Any, state: dict[str, Any]) -> dict[str, int]:
-        """Executor method for get_stats - runs in DB thread."""
+        return self._execute_in_db_thread_sync("get_stats", provider, model)
+
+    def _executor_get_stats(self, conn: Any, state: dict[str, Any], provider: str, model: str) -> dict[str, int]:
+        """Executor method for get_stats - runs in DB thread.
+        Returns overall statistics
+        """
         try:
             # Get counts from each table
             file_count = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
             chunk_count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
 
-            # Count embeddings across all dimension-specific tables
-            embedding_count = 0
-            embedding_tables = self._executor_get_all_embedding_tables(conn, state)
-            for table_name in embedding_tables:
-                count = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
-                embedding_count += count
+            provider_stats = self._executor_get_embeddings_count(conn, state, provider, model)
+            embedding_count = provider_stats.get("embedding_count", 0)
 
-            # Get unique providers/models across all embedding tables
-            provider_results = []
-            for table_name in embedding_tables:
-                results = conn.execute(f"""
-                    SELECT DISTINCT provider, model, COUNT(*) as count
-                    FROM {table_name}
-                    GROUP BY provider, model
-                """).fetchall()
-                provider_results.extend(results)
 
-            providers = {}
-            for result in provider_results:
-                key = f"{result[0]}/{result[1]}"
-                providers[key] = result[2]
 
-            # Convert providers dict to count for interface compliance
-            provider_count = len(providers)
             return {
                 "files": file_count,
                 "chunks": chunk_count,
                 "embeddings": embedding_count,
-                "providers": provider_count,
             }
 
         except Exception as e:
             logger.error(f"Failed to get database stats: {e}")
-            return {"files": 0, "chunks": 0, "embeddings": 0, "providers": 0}
+            return {"files": 0, "chunks": 0, "embeddings": 0}
 
     def get_file_stats(self, file_id: int) -> dict[str, Any]:
         """Get statistics for a specific file - delegate to file repository."""
         return self._file_repository.get_file_stats(file_id)
 
-    def get_provider_stats(self, provider: str, model: str) -> dict[str, Any]:
+    def get_embeddings_count(self, provider: str, model: str) -> dict[str, Any]:
         """Get statistics for a specific embedding provider/model."""
-        return self._execute_in_db_thread_sync("get_provider_stats", provider, model)
+        return self._execute_in_db_thread_sync("get_embeddings_count", provider, model)
 
-    def _executor_get_provider_stats(
+    def _executor_get_embeddings_count(
         self, conn: Any, state: dict[str, Any], provider: str, model: str
     ) -> dict[str, Any]:
-        """Executor method for get_provider_stats - runs in DB thread."""
+        """Executor method for get_embeddings_count - runs in DB thread."""
         try:
+            # Build WHERE clause based on provided parameters
+            # If provider or model is empty, count all embeddings
+            if not provider or not model:
+                where_clause = ""
+                params = []
+            else:
+                where_clause = "WHERE provider = ? AND model = ?"
+                params = [provider, model]
+
             # Get embedding count across all embedding tables
             embedding_count = 0
             file_ids = set()
@@ -2448,46 +2448,42 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             for table_name in embedding_tables:
                 # Count embeddings for this provider/model in this table
-                count = conn.execute(
-                    f"""
-                    SELECT COUNT(*) FROM {table_name}
-                    WHERE provider = ? AND model = ?
-                """,
-                    [provider, model],
-                ).fetchone()[0]
+                count_query = f"SELECT COUNT(*) FROM {table_name} {where_clause}"
+                count = conn.execute(count_query, params).fetchone()[0]
                 embedding_count += count
 
                 # Get unique file IDs for this provider/model in this table
-                file_results = conn.execute(
-                    f"""
-                    SELECT DISTINCT c.file_id
-                    FROM {table_name} e
-                    JOIN chunks c ON e.chunk_id = c.id
-                    WHERE e.provider = ? AND e.model = ?
-                """,
-                    [provider, model],
-                ).fetchall()
-                file_ids.update(result[0] for result in file_results)
-
-                # Get dimensions (should be consistent across all tables for same provider/model)
-                if count > 0 and dims == 0:
-                    dims_result = conn.execute(
+                if provider and model:  # Only get file IDs if we have specific provider/model
+                    file_results = conn.execute(
                         f"""
-                        SELECT DISTINCT dims FROM {table_name}
-                        WHERE provider = ? AND model = ?
-                        LIMIT 1
+                        SELECT DISTINCT c.file_id
+                        FROM {table_name} e
+                        JOIN chunks c ON e.chunk_id = c.id
+                        WHERE e.provider = ? AND e.model = ?
                     """,
                         [provider, model],
-                    ).fetchone()
-                    if dims_result:
-                        dims = dims_result[0]
+                    ).fetchall()
+                    file_ids.update(result[0] for result in file_results)
+
+                    # Get dimensions (should be consistent across all tables for same provider/model)
+                    if count > 0 and dims == 0:
+                        dims_result = conn.execute(
+                            f"""
+                            SELECT DISTINCT dims FROM {table_name}
+                            WHERE provider = ? AND model = ?
+                            LIMIT 1
+                        """,
+                            [provider, model],
+                        ).fetchone()
+                        if dims_result:
+                            dims = dims_result[0]
 
             file_count = len(file_ids)
 
             return {
                 "provider": provider,
                 "model": model,
-                "embeddings": embedding_count,
+                "embedding_count": embedding_count,
                 "files": file_count,
                 "dimensions": dims,
             }
@@ -2497,7 +2493,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             return {
                 "provider": provider,
                 "model": model,
-                "embeddings": 0,
+                "embedding_count": 0,
                 "files": 0,
                 "dimensions": 0,
             }
