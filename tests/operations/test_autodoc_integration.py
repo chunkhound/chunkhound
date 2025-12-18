@@ -191,7 +191,9 @@ async def test_autodoc_end_to_end_writes_index_and_topics(
     index_files = list(out_dir.glob("*_autodoc_index.md"))
     assert index_files, "Expected an autodoc index file to be written"
     index_content = index_files[0].read_text(encoding="utf-8")
-    assert "scope_unreferenced_files_count: 1" in index_content
+    assert "unreferenced_in_scope: 1" in index_content
+    assert "total_indexed: 3" in index_content
+    assert "coverage: 66.67%" in index_content
     assert "scope_scope_unreferenced_files.txt" in index_content
 
     topic_files = list(out_dir.glob("*_topic_*.md"))

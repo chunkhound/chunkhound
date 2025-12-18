@@ -565,6 +565,8 @@ class CodexCLIProvider(LLMProvider):
         self._estimated_completion_tokens += c_tokens
         self._estimated_tokens_used += total
 
+        debug_structured = os.getenv("CHUNKHOUND_CODEX_DEBUG_STRUCTURED_OUTPUT", "0") == "1"
+        json_str: str | None = None
         try:
             json_str = extract_json_from_response(output)
             parsed = json.loads(json_str)
@@ -578,6 +580,23 @@ class CodexCLIProvider(LLMProvider):
             return parsed
         except Exception as e:  # noqa: BLE001
             logger.error(f"Codex CLI structured output parse failed: {e}")
+            if debug_structured:
+                try:
+                    max_len = int(os.getenv("CHUNKHOUND_CODEX_LOG_MAX_STRUCTURED", "4000"))
+                except Exception:
+                    max_len = 4000
+                raw_preview = self._sanitize_text(output, max_len=max_len)
+                logger.debug("Codex CLI structured raw output (sanitized): %s", raw_preview)
+                if json_str is not None:
+                    json_preview = self._sanitize_text(json_str, max_len=max_len)
+                    logger.debug(
+                        "Codex CLI structured extracted JSON candidate (sanitized): %s",
+                        json_preview,
+                    )
+                raise RuntimeError(
+                    f"Invalid JSON in structured output: {e}. "
+                    f"Sanitized output preview: {raw_preview}"
+                ) from e
             raise RuntimeError(f"Invalid JSON in structured output: {e}") from e
 
     async def batch_complete(

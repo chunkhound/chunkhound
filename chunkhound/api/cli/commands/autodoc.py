@@ -835,36 +835,74 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
         services, scope_label
     )
 
-    total_research_calls = len(poi_sections)
-    generation_stats = build_generation_stats(
-        generator_mode="code_research",
-        total_research_calls=total_research_calls,
-        unified_source_files=unified_source_files,
-        unified_chunks_dedup=unified_chunks_dedup,
-        services=services,
-        scope_label=scope_label,
-    )
-
-    # Attach generation statistics so the metadata header reflects coverage and
-    # records the CLI-level comprehensiveness knob that shaped this run.
-    generation_stats["autodoc_comprehensiveness"] = comprehensiveness
-    meta.generation_stats = generation_stats
-
-    # Render metadata header once we have all stats, then the document body.
-    metadata_block = format_metadata_block(meta)
-    print(metadata_block, end="")
-
-    # Prefer scope-level totals; fall back to global aggregation stats when
-    # scope stats are unavailable.
     referenced_files = len(unified_source_files)
     referenced_chunks = len(unified_chunks_dedup)
 
+    # Prefer scope-level totals; fall back to global aggregation stats when
+    # scope stats are unavailable.
     files_denominator: int | None = scope_total_files or None
     chunks_denominator: int | None = scope_total_chunks or None
     if files_denominator is None and isinstance(total_files_global, int):
         files_denominator = total_files_global
     if chunks_denominator is None and isinstance(total_chunks_global, int):
         chunks_denominator = total_chunks_global
+
+    files_basis = (
+        "scope" if scope_total_files else ("database" if files_denominator else "unknown")
+    )
+    chunks_basis = (
+        "scope" if scope_total_chunks else ("database" if chunks_denominator else "unknown")
+    )
+
+    prefix = None if scope_label == "/" else scope_label.rstrip("/") + "/"
+    referenced_files_in_scope = 0
+    for path in unified_source_files:
+        norm = str(path).replace("\\", "/")
+        if not norm:
+            continue
+        if prefix and not norm.startswith(prefix):
+            continue
+        referenced_files_in_scope += 1
+    unreferenced_files_in_scope = (
+        max(0, scope_total_files - referenced_files_in_scope) if scope_total_files else None
+    )
+
+    total_research_calls = len(poi_sections)
+    generation_stats: dict[str, Any] = {
+        "generator_mode": "code_research",
+        "total_research_calls": str(total_research_calls),
+        "autodoc_comprehensiveness": comprehensiveness,
+        "files": {
+            "referenced": referenced_files,
+            "total_indexed": files_denominator or 0,
+            "basis": files_basis,
+            "coverage": (
+                f"{(referenced_files / files_denominator) * 100.0:.2f}%"
+                if files_denominator
+                else None
+            ),
+            "referenced_in_scope": referenced_files_in_scope,
+            "unreferenced_in_scope": unreferenced_files_in_scope,
+        },
+        "chunks": {
+            "referenced": referenced_chunks,
+            "total_indexed": chunks_denominator or 0,
+            "basis": chunks_basis,
+            "coverage": (
+                f"{(referenced_chunks / chunks_denominator) * 100.0:.2f}%"
+                if chunks_denominator
+                else None
+            ),
+        },
+    }
+
+    # Attach generation statistics so the metadata header reflects coverage and
+    # records the CLI-level comprehensiveness knob that shaped this run.
+    meta.generation_stats = generation_stats
+
+    # Render metadata header once we have all stats, then the document body.
+    metadata_block = format_metadata_block(meta)
+    print(metadata_block, end="")
 
     print(f"# AutoDoc for {scope_label}")
     print("")
@@ -967,7 +1005,12 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
                     "\n".join(unreferenced) + ("\n" if unreferenced else ""),
                     encoding="utf-8",
                 )
-                meta.generation_stats["scope_unreferenced_files_file"] = unref_filename
+                try:
+                    files_stats = meta.generation_stats.get("files")
+                    if isinstance(files_stats, dict):
+                        files_stats["unreferenced_list_file"] = unref_filename
+                except Exception:
+                    pass
         except Exception:
             unref_filename = None
 

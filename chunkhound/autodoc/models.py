@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -13,7 +14,7 @@ class AgentDocMetadata:
     target_sha: str
     generated_at: str
     llm_config: dict[str, str] = field(default_factory=dict)
-    generation_stats: dict[str, str] = field(default_factory=dict)
+    generation_stats: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -74,4 +75,3 @@ class HydeConfig:
             max_completion_tokens=max_tokens,
             max_snippet_tokens=max_snippet_tokens,
         )
-

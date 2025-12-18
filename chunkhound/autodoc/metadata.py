@@ -8,6 +8,26 @@ from chunkhound.autodoc.models import AgentDocMetadata
 
 def format_metadata_block(meta: AgentDocMetadata) -> str:
     """Render the metadata comment block."""
+
+    def _emit_value(lines: list[str], key: str, value: Any, indent: int) -> None:
+        pad = " " * indent
+        if isinstance(value, dict):
+            lines.append(f"{pad}{key}:")
+            for sub_k, sub_v in value.items():
+                _emit_value(lines, str(sub_k), sub_v, indent + 2)
+            return
+        if isinstance(value, list):
+            lines.append(f"{pad}{key}:")
+            for item in value:
+                if isinstance(item, dict):
+                    lines.append(f"{pad}  -")
+                    for sub_k, sub_v in item.items():
+                        _emit_value(lines, str(sub_k), sub_v, indent + 4)
+                else:
+                    lines.append(f"{pad}  - {item}")
+            return
+        lines.append(f"{pad}{key}: {value}")
+
     lines = [
         "<!--",
         "agent_doc_metadata:",
@@ -24,7 +44,7 @@ def format_metadata_block(meta: AgentDocMetadata) -> str:
     if meta.generation_stats:
         lines.append("  generation_stats:")
         for key, value in meta.generation_stats.items():
-            lines.append(f"    {key}: {value}")
+            _emit_value(lines, str(key), value, indent=4)
     lines.append("-->")
     return "\n".join(lines) + "\n\n"
 
@@ -37,9 +57,9 @@ def build_generation_stats(
     unified_chunks_dedup: list[dict[str, Any]],
     services: Any,
     scope_label: str,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Build minimal generation stats for autodoc metadata."""
-    stats: dict[str, str] = {
+    stats: dict[str, Any] = {
         "generator_mode": generator_mode,
         "total_research_calls": str(total_research_calls),
         "referenced_files": str(len(unified_source_files)),
