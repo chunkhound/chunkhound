@@ -110,12 +110,18 @@ class LLMConfig(BaseSettings):
         "codex-cli",
     ] | None = Field(
         default=None,
-        description="Override provider for agent-doc final assembly (HyDE + map-only merge)",
+        description=(
+            "Override provider for agent-doc HyDE planning (points-of-interest overview). "
+            "Does not affect per-point deep research or the final merge."
+        ),
     )
 
     assembly_model: str | None = Field(
         default=None,
-        description="Override model for agent-doc final assembly (HyDE + map-only merge).",
+        description=(
+            "Override model for agent-doc HyDE planning (points-of-interest overview). "
+            "Does not affect per-point deep research or the final merge."
+        ),
     )
 
     # Backwards-compatible alias for assembly_model used in some configs.
@@ -126,7 +132,11 @@ class LLMConfig(BaseSettings):
 
     assembly_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = Field(
         default=None,
-        description="Codex/OpenAI reasoning effort override for agent-doc final assembly.",
+        description=(
+            "Codex/OpenAI reasoning effort override for agent-doc HyDE planning "
+            "(points-of-interest overview). Does not affect per-point deep research "
+            "or the final merge."
+        ),
     )
 
     # Anthropic Extended Thinking Configuration
