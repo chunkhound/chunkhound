@@ -116,13 +116,12 @@ version-file = "chunkhound/_version.py"
 include = [
     "chunkhound/**/*.py",
     "chunkhound/py.typed",
-    "operations/**/*.py",
-    "operations/deep_doc/prompts/*.md",
+    "chunkhound/autodoc/prompts/*.md",
     "tests/fixtures/yaml/**/*",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["chunkhound", "operations"]
+packages = ["chunkhound"]
 
 [tool.black]
 line-length = 88

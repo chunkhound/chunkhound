@@ -101,7 +101,6 @@ chunkhound index
 ## License
 
 MIT
-<<<<<<< HEAD
 
 ## Startup profile (discovery diagnostics)
 
@@ -358,5 +357,3 @@ Outputs:
 - In full mode (default):
   - `<scope>_autodoc_index.md` listing all topics.
   - One `<scope>_topic_NN_<slug>.md` file per non-empty topic.
-=======
->>>>>>> e7f0e6a0c9646b508f0210e51a26dd2164ef15b3

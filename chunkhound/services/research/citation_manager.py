@@ -379,10 +379,11 @@ class CitationManager:
                             end = chunk.get("end_line", "?")
                             ranges.append(f"L{start}-{end}")
 
-                        # For debugging and transparency, always show all
-                        # chunk ranges instead of compacting with a
-                        # '+N more' suffix.
-                        range_str = ", ".join(ranges)
+                        # Compact format: show first 3 ranges + count if more
+                        if len(ranges) <= 3:
+                            range_str = ", ".join(ranges)
+                        else:
+                            range_str = f"{', '.join(ranges[:3])}, +{len(ranges) - 3} more"
 
                         line += f" ({chunk_count} chunks: {range_str})"
                     else:

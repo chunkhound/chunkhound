@@ -21,8 +21,9 @@ def add_autodoc_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help="Generate auto documentation for a scoped folder",
         description=(
             "Generate agent-facing documentation for a scoped folder using a two-phase "
-            "pipeline: first identify 5-10 points of interest, then run deep "
-            "code research for each point and assemble a unified document."
+            "pipeline: first identify points of interest (count depends on "
+            "--comprehensiveness), then run deep code research for each point and "
+            "assemble a unified document."
         ),
     )
 
@@ -49,8 +50,9 @@ def add_autodoc_subparser(subparsers: Any) -> argparse.ArgumentParser:
         "--overview-only",
         action="store_true",
         help=(
-            "Only run the initial overview pass and print the 5-10 points of "
-            "interest, skipping per-point deep research and final assembly."
+            "Only run the initial overview pass and print the planned points of "
+            "interest (count depends on --comprehensiveness), skipping per-point deep "
+            "research and final assembly."
         ),
     )
 

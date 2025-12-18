@@ -1,4 +1,3 @@
-import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +62,11 @@ async def test_autodoc_end_to_end_writes_index_and_topics(
     config = Config(
         target_dir=project_root,
         database={"path": project_root / ".chunkhound" / "db", "provider": "duckdb"},
-        embedding={"provider": "openai", "api_key": "test", "model": "text-embedding-3-small"},
+        embedding={
+            "provider": "openai",
+            "api_key": "test",
+            "model": "text-embedding-3-small",
+        },
         llm={"provider": "openai", "api_key": "test"},
     )
 
@@ -131,7 +134,9 @@ async def test_autodoc_end_to_end_writes_index_and_topics(
         autodoc_mod, "verify_database_exists", lambda cfg: cfg.database.get_db_path()
     )
     monkeypatch.setattr(
-        autodoc_mod, "create_services", lambda db_path, config, embedding_manager: DummyServices()
+        autodoc_mod,
+        "create_services",
+        lambda db_path, config, embedding_manager: DummyServices(),
     )
     monkeypatch.setattr(
         autodoc_mod, "LLMManager", DummyLLMManager

@@ -68,7 +68,10 @@ def test_merge_sources_metadata_deduplicates_files_and_chunks() -> None:
 def test_is_empty_research_result_detects_skipped_synthesis() -> None:
     """_is_empty_research_result should detect DeepResearch 'no context' responses."""
     result = {
-        "answer": "No relevant code context found for: 'foo'.\n\nTry a more code-specific question.",
+        "answer": (
+            "No relevant code context found for: 'foo'.\n\n"
+            "Try a more code-specific question."
+        ),
         "metadata": {
             "skipped_synthesis": True,
             "depth_reached": 0,

@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+from typing import Any
+
+from chunkhound.autodoc.coverage import compute_db_scope_stats
+from chunkhound.autodoc.models import AgentDocMetadata
+
+
+def format_metadata_block(meta: AgentDocMetadata) -> str:
+    """Render the metadata comment block."""
+    lines = [
+        "<!--",
+        "agent_doc_metadata:",
+    ]
+
+    if meta.created_from_sha != "NO_GIT_HEAD":
+        lines.append(f"  created_from_sha: {meta.created_from_sha}")
+
+    lines.append(f"  generated_at: {meta.generated_at}")
+    if meta.llm_config:
+        lines.append("  llm_config:")
+        for key, value in meta.llm_config.items():
+            lines.append(f"    {key}: {value}")
+    if meta.generation_stats:
+        lines.append("  generation_stats:")
+        for key, value in meta.generation_stats.items():
+            lines.append(f"    {key}: {value}")
+    lines.append("-->")
+    return "\n".join(lines) + "\n\n"
+
+
+def build_generation_stats(
+    *,
+    generator_mode: str,
+    total_research_calls: int,
+    unified_source_files: dict[str, str],
+    unified_chunks_dedup: list[dict[str, Any]],
+    services: Any,
+    scope_label: str,
+) -> dict[str, str]:
+    """Build minimal generation stats for autodoc metadata."""
+    stats: dict[str, str] = {
+        "generator_mode": generator_mode,
+        "total_research_calls": str(total_research_calls),
+        "referenced_files": str(len(unified_source_files)),
+        "referenced_chunks": str(len(unified_chunks_dedup)),
+    }
+
+    scope_total_files, scope_total_chunks, _scoped_files = compute_db_scope_stats(
+        services, scope_label
+    )
+    if scope_total_files:
+        stats["scope_total_files_indexed"] = str(scope_total_files)
+    if scope_total_chunks:
+        stats["scope_total_chunks_indexed"] = str(scope_total_chunks)
+
+    return stats
+

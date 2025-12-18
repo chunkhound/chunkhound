@@ -1,8 +1,9 @@
 """Autodoc command module - generates scoped architecture/operations docs.
 
 This command uses a two-phase pipeline:
-1. Run a shallow deep-research call to identify 5-10 points of interest for the
-   requested scope (overview plan).
+1. Run a shallow deep-research call to identify points of interest for the
+   requested scope (overview plan). The count depends on the chosen
+   comprehensiveness setting.
 2. For each point of interest, run a dedicated deep-research pass and assemble
    the results into a single flowing document, along with a simple coverage
    summary based on referenced files and chunks.
@@ -21,23 +22,18 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.api.cli.utils import verify_database_exists
+from chunkhound.autodoc.coverage import compute_db_scope_stats
+from chunkhound.autodoc.hyde import build_hyde_scope_prompt, run_hyde_only_query
+from chunkhound.autodoc.llm import build_llm_metadata_and_assembly
+from chunkhound.autodoc.metadata import build_generation_stats, format_metadata_block
+from chunkhound.autodoc.models import AgentDocMetadata, HydeConfig
+from chunkhound.autodoc.scope import collect_scope_files
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.database_factory import create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
 from chunkhound.mcp_server.tools import deep_research_impl
-from operations.deep_doc.deep_doc import (
-    AgentDocMetadata,
-    HydeConfig,
-    _build_generation_stats,
-    _build_hyde_scope_prompt,
-    _build_llm_metadata_and_assembly,
-    _collect_scope_files,
-    _compute_db_scope_stats,
-    _format_metadata_block,
-    _run_hyde_only_query,
-)
 
 from ..utils.rich_output import RichOutputFormatter
 from ..utils.tree_progress import TreeProgressDisplay
@@ -97,7 +93,7 @@ def _compute_path_filter(target_dir: Path, scope_path: Path) -> str | None:
 
 
 def _extract_points_of_interest(text: str, max_points: int = 10) -> list[str]:
-    """Extract 5-10 discrete points of interest from a markdown list.
+    """Extract up to max_points points of interest from a markdown list.
 
     The overview deep-research call is instructed to return a numbered list,
     but this helper is defensive and also handles bullet lists.
@@ -196,7 +192,7 @@ async def _run_autodoc_overview_hyde(
     if hyde_cfg.max_scope_files > 0:
         hyde_cfg.max_scope_files = max(hyde_cfg.max_scope_files, 100_000)
 
-    file_paths = _collect_scope_files(
+    file_paths = collect_scope_files(
         scope_path=scope_path,
         project_root=target_dir,
         hyde_cfg=hyde_cfg,
@@ -211,7 +207,7 @@ async def _run_autodoc_overview_hyde(
         generation_stats={"overview_mode": "hyde_scope_only"},
     )
 
-    hyde_scope_prompt = _build_hyde_scope_prompt(
+    hyde_scope_prompt = build_hyde_scope_prompt(
         meta=meta,
         scope_label=scope_label,
         file_paths=file_paths,
@@ -233,7 +229,8 @@ async def _run_autodoc_overview_hyde(
     overview_prompt = (
         f"{hyde_scope_prompt}\n\n"
         "HyDE objective (override for autodoc):\n"
-        "- Instead of writing a full deep-wiki style documentation, focus on a concise\n"
+        "- Instead of writing a full deep-wiki style documentation, focus on a "
+        "concise\n"
         "  planning pass for deep code research.\n"
         f"{poi_target_line}\n"
         "Output format:\n"
@@ -257,7 +254,7 @@ async def _run_autodoc_overview_hyde(
             # Prompt persistence is best-effort; never break main generation.
             pass
 
-    overview_answer = await _run_hyde_only_query(
+    overview_answer = await run_hyde_only_query(
         llm_manager=llm_manager,
         prompt=overview_prompt,
         provider_override=assembly_provider,
@@ -276,7 +273,9 @@ async def _run_autodoc_overview_hyde(
             # Plan persistence is also best-effort.
             pass
 
-    points_of_interest = _extract_points_of_interest(overview_answer, max_points=max_points)
+    points_of_interest = _extract_points_of_interest(
+        overview_answer, max_points=max_points
+    )
     return overview_answer, points_of_interest
 
 
@@ -386,7 +385,12 @@ def _merge_sources_metadata(
         if isinstance(chunks_total, int) and chunks_total > 0:
             total_chunks_indexed = chunks_total
 
-    return unified_source_files, unified_chunks_dedup, total_files_indexed, total_chunks_indexed
+    return (
+        unified_source_files,
+        unified_chunks_dedup,
+        total_files_indexed,
+        total_chunks_indexed,
+    )
 
 
 def _is_empty_research_result(result: dict[str, Any]) -> bool:
@@ -534,7 +538,7 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
     created_from_sha = _get_head_sha(scope_path)
     if created_from_sha == "NO_GIT_HEAD" and scope_path != target_dir:
         created_from_sha = _get_head_sha(target_dir)
-    llm_meta, assembly_provider = _build_llm_metadata_and_assembly(
+    llm_meta, assembly_provider = build_llm_metadata_and_assembly(
         config=config,
         llm_manager=llm_manager,
     )
@@ -547,7 +551,8 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
         generation_stats={},
     )
 
-    # Phase 1 + 2: run overview (HyDE-based) and per-point deep research with a shared TUI.
+    # Phase 1 + 2: run overview (HyDE-based) and per-point deep research with a shared
+    # TUI.
     overview_result: dict[str, Any]
     poi_results: list[dict[str, Any]] = []
     points_of_interest: list[str] = []
@@ -558,7 +563,10 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
     # environment override is provided so coverage remains focused on breadth.
     original_depth_env = os.getenv("CH_CODE_RESEARCH_MAX_DEPTH")
     depth_overridden = False
-    if comprehensiveness == "ultra" and os.getenv("CH_AUTODOC_ULTRA_USE_DEPTH", "0") == "1":
+    if (
+        comprehensiveness == "ultra"
+        and os.getenv("CH_AUTODOC_ULTRA_USE_DEPTH", "0") == "1"
+    ):
         os.environ["CH_CODE_RESEARCH_MAX_DEPTH"] = "2"
         depth_overridden = True
 
@@ -597,7 +605,8 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
 
             if not points_of_interest:
                 formatter.error(
-                    "Autodoc could not extract any points of interest from the overview."
+                    "Autodoc could not extract any points of interest from the "
+                    "overview."
                 )
                 print("\n--- Overview answer ---\n")
                 print(overview_answer)
@@ -608,18 +617,21 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
                 for idx, poi in enumerate(points_of_interest, start=1):
                     heading = _derive_heading_from_point(poi)
                     formatter.info(
-                        f"[Autodoc] Processing point of interest {idx}/{len(points_of_interest)}: {heading}"
+                        f"[Autodoc] Processing point of interest {idx}/"
+                        f"{len(points_of_interest)}: {heading}"
                     )
                     section_query = (
                         "Expand the following point of interest into a detailed, "
                         "agent-facing documentation section for the scoped folder "
-                        f"'{scope_label}'. Explain how the relevant code and configuration "
-                        "implement this behavior, including responsibilities, key types, "
+                        f"'{scope_label}'. Explain how the relevant code and "
+                        "configuration implement this behavior, including "
+                        "responsibilities, key types, "
                         "important flows, and operational constraints.\n\n"
                         "Point of interest:\n"
                         f"{poi}\n\n"
-                        "Use markdown headings and bullet lists as needed. It is acceptable "
-                        "for this section to be long and detailed as long as it remains "
+                        "Use markdown headings and bullet lists as needed. It is "
+                        "acceptable for this section to be long and detailed as "
+                        "long as it remains "
                         "grounded in the code."
                     )
                     try:
@@ -643,7 +655,8 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
                             f"Autodoc deep research failed for point {idx}: {e}"
                         )
                         logger.exception("Full error details:")
-                        # Continue with remaining points to salvage partial documentation
+                        # Continue with remaining points to salvage partial
+                        # documentation.
     finally:
         # Restore original depth override so other commands/tests are not
         # affected by the ultra-mode setting.
@@ -663,18 +676,13 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
     ) = _merge_sources_metadata(all_results)
 
     # Compute scope-level database stats for coverage and generation metadata.
-    scope_total_files, scope_total_chunks, _scoped_files = _compute_db_scope_stats(
-        services=services,
-        scope_label=scope_label,
+    scope_total_files, scope_total_chunks, _scoped_files = compute_db_scope_stats(
+        services, scope_label
     )
 
     total_research_calls = len(poi_results)
-    generation_stats = _build_generation_stats(
+    generation_stats = build_generation_stats(
         generator_mode="code_research",
-        hyde_map_enabled=False,
-        code_research_map_only=False,
-        structure_mode="fluid",
-        hyde_only=False,
         total_research_calls=total_research_calls,
         unified_source_files=unified_source_files,
         unified_chunks_dedup=unified_chunks_dedup,
@@ -688,7 +696,7 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
     meta.generation_stats = generation_stats
 
     # Render metadata header once we have all stats, then the document body.
-    metadata_block = _format_metadata_block(meta)
+    metadata_block = format_metadata_block(meta)
     print(metadata_block, end="")
 
     # Prefer scope-level totals; fall back to global aggregation stats when
@@ -737,7 +745,9 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
 
     # Emit detailed sections after the overview, one per point of interest.
     if not getattr(args, "overview_only", False):
-        for idx, (poi, result) in enumerate(zip(points_of_interest, poi_results), start=1):
+        for idx, (poi, result) in enumerate(
+            zip(points_of_interest, poi_results), start=1
+        ):
             heading = _derive_heading_from_point(poi)
             print(f"## {idx}. {heading}")
             print("")
@@ -780,7 +790,7 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
 
         # Build index content with the same metadata header for traceability.
         index_lines: list[str] = []
-        index_lines.append(_format_metadata_block(meta).rstrip("\n"))
+        index_lines.append(format_metadata_block(meta).rstrip("\n"))
         index_lines.append(f"# AutoDoc Topics for {scope_label}")
         index_lines.append("")
         index_lines.append(
@@ -790,7 +800,9 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
         index_lines.append("## Topics")
         index_lines.append("")
 
-        for idx, (poi, result) in enumerate(zip(points_of_interest, poi_results), start=1):
+        for idx, (poi, result) in enumerate(
+            zip(points_of_interest, poi_results), start=1
+        ):
             heading = _derive_heading_from_point(poi)
             slug = _slugify_heading(heading)
             topic_filename = f"{safe_scope}_topic_{idx:02d}_{slug}.md"

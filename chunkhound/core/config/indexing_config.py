@@ -113,8 +113,6 @@ class IndexingConfig(BaseModel):
             "**/.chunkhound/**",
             "**/.chunkhound.json",
             ".chunkhound.json",
-            # ChunkHound internal agent documentation (never index)
-            "**/operations/chunkhound_agent_doc.md",
             "**/.mypy_cache/**",
             # Build artifacts and distributions
             "**/dist/**",

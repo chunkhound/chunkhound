@@ -5,7 +5,7 @@
 # Optional: override config file via CONFIG, e.g.:
 #   make bench-lang CONFIG=.chunkhound.json
 
-.PHONY: bench-lang bench-cluster agent-doc
+.PHONY: bench-lang bench-cluster
 
 bench-lang:
 	uv run python -m chunkhound.tools.eval_search \
@@ -22,10 +22,3 @@ bench-cluster:
 		--bench-id cluster-stress-dev \
 		$(if $(CONFIG),--config $(CONFIG),) \
 		--output .chunkhound/benches/cluster-stress-dev/cluster_eval.json
-
-agent-doc:
-	uv run python operations/deep_doc/deep_doc.py \
-		$(if $(WORKSPACE),--path $(WORKSPACE),) \
-		$(if $(SCOPE),--scope $(SCOPE),) \
-		$(if $(HYDE_ONLY),--hyde-only,) \
-		$(if $(OUT_DIR),--out-dir $(OUT_DIR),)

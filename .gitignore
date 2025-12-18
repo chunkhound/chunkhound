@@ -287,10 +287,3 @@ chunkhound/_version.py
 
 # metrics
 cluster_eval.json
-operations/tree-sitter*
-operations/docs*
-operations/chunkhound_agent_doc*
-operations/agent_docs/
-
-# Temporary documentation
-.tmp-docs/

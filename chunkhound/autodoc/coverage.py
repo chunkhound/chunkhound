@@ -1,0 +1,31 @@
+from __future__ import annotations
+
+from typing import Any
+
+
+def compute_db_scope_stats(
+    services: Any, scope_label: str
+) -> tuple[int, int, set[str]]:
+    """Compute indexed file/chunk totals and scoped file set for the folder."""
+    scope_total_files = 0
+    scope_total_chunks = 0
+    scoped_files: set[str] = set()
+    try:
+        provider = getattr(services, "provider", None)
+        if provider is None:
+            return 0, 0, scoped_files
+        chunks_meta = provider.get_all_chunks_with_metadata()
+        prefix = None if scope_label == "/" else scope_label.rstrip("/") + "/"
+        for chunk in chunks_meta:
+            path = (chunk.get("file_path") or "").replace("\\", "/")
+            if not path:
+                continue
+            if prefix and not path.startswith(prefix):
+                continue
+            scoped_files.add(path)
+            scope_total_chunks += 1
+        scope_total_files = len(scoped_files)
+    except Exception:
+        return 0, 0, set()
+
+    return scope_total_files, scope_total_chunks, scoped_files
