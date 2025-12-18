@@ -63,8 +63,7 @@ def add_autodoc_subparser(subparsers: Any) -> argparse.ArgumentParser:
         required=True,
         help=(
             "Directory where an index file and one markdown file per point of "
-            "interest will be written, in addition to streaming the combined "
-            "document to stdout."
+            "interest will be written (plus a combined autodoc markdown file)."
         ),
     )
 

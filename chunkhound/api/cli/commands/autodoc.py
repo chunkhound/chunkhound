@@ -25,7 +25,7 @@ from chunkhound.api.cli.utils import verify_database_exists
 from chunkhound.autodoc.coverage import compute_db_scope_stats
 from chunkhound.autodoc.hyde import build_hyde_scope_prompt, run_hyde_only_query
 from chunkhound.autodoc.llm import build_llm_metadata_and_assembly
-from chunkhound.autodoc.metadata import build_generation_stats, format_metadata_block
+from chunkhound.autodoc.metadata import format_metadata_block
 from chunkhound.autodoc.models import AgentDocMetadata, HydeConfig
 from chunkhound.autodoc.scope import collect_scope_files
 from chunkhound.core.config.config import Config
@@ -92,6 +92,26 @@ def _compute_path_filter(target_dir: Path, scope_path: Path) -> str | None:
     return rel_str
 
 
+def _max_points_for_comprehensiveness(comprehensiveness: str) -> int:
+    if comprehensiveness == "minimal":
+        return 1
+    if comprehensiveness == "low":
+        return 5
+    if comprehensiveness == "medium":
+        return 10
+    if comprehensiveness == "high":
+        return 15
+    if comprehensiveness == "ultra":
+        return 20
+    return 10
+
+
+def _resolve_scope_path(target_dir: Path, raw_scope: Path) -> Path:
+    if raw_scope.is_absolute():
+        return raw_scope.resolve()
+    return (target_dir / raw_scope).resolve()
+
+
 def _extract_points_of_interest(text: str, max_points: int = 10) -> list[str]:
     """Extract up to max_points points of interest from a markdown list.
 
@@ -135,6 +155,64 @@ def _extract_points_of_interest(text: str, max_points: int = 10) -> list[str]:
 
     # Ensure we have at most max_points
     return unique_points[:max_points]
+
+
+def _print_coverage_summary(
+    *,
+    referenced_files: int,
+    referenced_chunks: int,
+    files_denominator: int | None,
+    chunks_denominator: int | None,
+    scope_total_files: int,
+    scope_total_chunks: int,
+) -> None:
+    for line in _coverage_summary_lines(
+        referenced_files=referenced_files,
+        referenced_chunks=referenced_chunks,
+        files_denominator=files_denominator,
+        chunks_denominator=chunks_denominator,
+        scope_total_files=scope_total_files,
+        scope_total_chunks=scope_total_chunks,
+    ):
+        print(line)
+
+
+def _coverage_summary_lines(
+    *,
+    referenced_files: int,
+    referenced_chunks: int,
+    files_denominator: int | None,
+    chunks_denominator: int | None,
+    scope_total_files: int,
+    scope_total_chunks: int,
+) -> list[str]:
+    lines: list[str] = ["## Coverage Summary", ""]
+
+    if files_denominator and files_denominator > 0:
+        file_cov = (referenced_files / files_denominator) * 100.0
+        scope_label_display = "this scope" if scope_total_files else "this database"
+        lines.append(
+            f"- Referenced files: {referenced_files} / {files_denominator} "
+            f"({file_cov:.2f}% of indexed files in {scope_label_display})."
+        )
+    else:
+        lines.append(
+            f"- Referenced files: {referenced_files} (database totals unavailable)."
+        )
+
+    if chunks_denominator and chunks_denominator > 0:
+        chunk_cov = (referenced_chunks / chunks_denominator) * 100.0
+        scope_label_display = "this scope" if scope_total_chunks else "this database"
+        lines.append(
+            f"- Referenced chunks: {referenced_chunks} / {chunks_denominator} "
+            f"({chunk_cov:.2f}% of indexed chunks in {scope_label_display})."
+        )
+    else:
+        lines.append(
+            f"- Referenced chunks: {referenced_chunks} (database totals unavailable)."
+        )
+
+    return lines
 
 
 async def _run_autodoc_overview_hyde(
@@ -543,11 +621,7 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
 
         target_dir = config.target_dir or Path(".").resolve()
         raw_scope = Path(args.path)
-        scope_path = (
-            raw_scope.resolve()
-            if raw_scope.is_absolute()
-            else (target_dir / raw_scope).resolve()
-        )
+        scope_path = _resolve_scope_path(target_dir, raw_scope)
         scope_label = _compute_scope_label(target_dir, scope_path)
 
         llm_meta, assembly_provider = build_llm_metadata_and_assembly(
@@ -564,18 +638,7 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
         )
 
         comprehensiveness = getattr(args, "comprehensiveness", "medium")
-        if comprehensiveness == "minimal":
-            max_points = 1
-        elif comprehensiveness == "low":
-            max_points = 5
-        elif comprehensiveness == "medium":
-            max_points = 10
-        elif comprehensiveness == "high":
-            max_points = 15
-        elif comprehensiveness == "ultra":
-            max_points = 20
-        else:
-            max_points = 10
+        max_points = _max_points_for_comprehensiveness(comprehensiveness)
 
         overview_answer, points_of_interest = await _run_autodoc_overview_hyde(
             llm_manager=llm_manager,
@@ -660,28 +723,14 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
 
     target_dir = config.target_dir or Path(".").resolve()
     raw_scope = Path(args.path)
-    if raw_scope.is_absolute():
-        scope_path = raw_scope.resolve()
-    else:
-        # Interpret relative scopes (e.g., "arguseek") as folders under the
-        # workspace root so that path filters line up with the shared DB.
-        scope_path = (target_dir / raw_scope).resolve()
+    # Interpret relative scopes (e.g., "arguseek") as folders under the
+    # workspace root so that path filters line up with the shared DB.
+    scope_path = _resolve_scope_path(target_dir, raw_scope)
     scope_label = _compute_scope_label(target_dir, scope_path)
     path_filter = _compute_path_filter(target_dir, scope_path)
 
     comprehensiveness = getattr(args, "comprehensiveness", "medium")
-    if comprehensiveness == "minimal":
-        max_points = 1
-    elif comprehensiveness == "low":
-        max_points = 5
-    elif comprehensiveness == "medium":
-        max_points = 10
-    elif comprehensiveness == "high":
-        max_points = 15
-    elif comprehensiveness == "ultra":
-        max_points = 20
-    else:
-        max_points = 10
+    max_points = _max_points_for_comprehensiveness(comprehensiveness)
 
     # Capture Git and LLM configuration metadata for the run so the output
     # document can be treated as a proper agent doc. Prefer the Git HEAD for
@@ -847,12 +896,13 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
     if chunks_denominator is None and isinstance(total_chunks_global, int):
         chunks_denominator = total_chunks_global
 
-    files_basis = (
-        "scope" if scope_total_files else ("database" if files_denominator else "unknown")
-    )
-    chunks_basis = (
-        "scope" if scope_total_chunks else ("database" if chunks_denominator else "unknown")
-    )
+    files_basis = "scope" if scope_total_files else "unknown"
+    if not scope_total_files and files_denominator:
+        files_basis = "database"
+
+    chunks_basis = "scope" if scope_total_chunks else "unknown"
+    if not scope_total_chunks and chunks_denominator:
+        chunks_basis = "database"
 
     prefix = None if scope_label == "/" else scope_label.rstrip("/") + "/"
     referenced_files_in_scope = 0
@@ -863,9 +913,11 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
         if prefix and not norm.startswith(prefix):
             continue
         referenced_files_in_scope += 1
-    unreferenced_files_in_scope = (
-        max(0, scope_total_files - referenced_files_in_scope) if scope_total_files else None
-    )
+    unreferenced_files_in_scope = None
+    if scope_total_files:
+        unreferenced_files_in_scope = max(
+            0, scope_total_files - referenced_files_in_scope
+        )
 
     total_research_calls = len(poi_sections)
     generation_stats: dict[str, Any] = {
@@ -900,86 +952,16 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
     # records the CLI-level comprehensiveness knob that shaped this run.
     meta.generation_stats = generation_stats
 
-    # Render metadata header once we have all stats, then the document body.
-    metadata_block = format_metadata_block(meta)
-    print(metadata_block, end="")
+    out_dir = Path(out_dir_arg).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"# AutoDoc for {scope_label}")
-    print("")
-    print("## Coverage Summary")
-    print("")
-    if files_denominator and files_denominator > 0:
-        file_cov = (referenced_files / files_denominator) * 100.0
-        scope_label_display = "this scope" if scope_total_files else "this database"
-        print(
-            f"- Referenced files: {referenced_files} / {files_denominator} "
-            f"({file_cov:.2f}% of indexed files in {scope_label_display})."
-        )
-    else:
-        print(f"- Referenced files: {referenced_files} (database totals unavailable).")
-
-    if chunks_denominator and chunks_denominator > 0:
-        chunk_cov = (referenced_chunks / chunks_denominator) * 100.0
-        scope_label_display = "this scope" if scope_total_chunks else "this database"
-        print(
-            f"- Referenced chunks: {referenced_chunks} / {chunks_denominator} "
-            f"({chunk_cov:.2f}% of indexed chunks in {scope_label_display})."
-        )
-    else:
-        print(
-            f"- Referenced chunks: {referenced_chunks} (database totals unavailable)."
-        )
-
-    print("")
-    print("## Points of Interest Overview")
-    print("")
-    print(overview_result.get("answer", "").strip())
-    print("")
-
-    # Emit detailed sections after the overview, one per point of interest.
-    if not getattr(args, "overview_only", False):
-        for idx, (poi, result) in enumerate(poi_sections, start=1):
-            heading = _derive_heading_from_point(poi)
-            print(f"## {idx}. {heading}")
-            print("")
-            section_body = result.get("answer", "").strip()
-            print(section_body)
-            print("")
-
-    # Final coverage summary (identical counts to the header section for
-    # ease of visual inspection at the end of the document).
-    print("## Coverage Summary")
-    print("")
-    if files_denominator and files_denominator > 0:
-        file_cov = (referenced_files / files_denominator) * 100.0
-        scope_label_display = "this scope" if scope_total_files else "this database"
-        print(
-            f"- Referenced files: {referenced_files} / {files_denominator} "
-            f"({file_cov:.2f}% of indexed files in {scope_label_display})."
-        )
-    else:
-        print(f"- Referenced files: {referenced_files} (database totals unavailable).")
-
-    if chunks_denominator and chunks_denominator > 0:
-        chunk_cov = (referenced_chunks / chunks_denominator) * 100.0
-        scope_label_display = "this scope" if scope_total_chunks else "this database"
-        print(
-            f"- Referenced chunks: {referenced_chunks} / {chunks_denominator} "
-            f"({chunk_cov:.2f}% of indexed chunks in {scope_label_display})."
-        )
-    else:
-        print(
-            f"- Referenced chunks: {referenced_chunks} (database totals unavailable)."
-        )
+    safe_scope = scope_label.replace("/", "_") or "root"
+    index_path = out_dir / f"{safe_scope}_autodoc_index.md"
+    doc_path = out_dir / f"{safe_scope}_autodoc.md"
 
     # Optional disk outputs: when out-dir is provided and full deep research
     # was performed, emit an index file plus one markdown file per topic.
-    if out_dir_arg is not None and not getattr(args, "overview_only", False):
-        out_dir = Path(out_dir_arg).resolve()
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        safe_scope = scope_label.replace("/", "_") or "root"
-        index_path = out_dir / f"{safe_scope}_autodoc_index.md"
+    if not getattr(args, "overview_only", False):
 
         # Optional: compute unreferenced file list for the scope and write it to
         # a separate artifact (can be large).
@@ -993,7 +975,11 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
                 referenced_set = {
                     str(p).replace("\\", "/")
                     for p in unified_source_files
-                    if p and (not prefix or str(p).replace("\\", "/").startswith(prefix))
+                    if p
+                    and (
+                        not prefix
+                        or str(p).replace("\\", "/").startswith(prefix)
+                    )
                 }
                 unreferenced = [
                     str(p).replace("\\", "/")
@@ -1041,5 +1027,52 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
             topic_lines = [f"# {heading}", "", section_body, ""]
             topic_path.write_text("\n".join(topic_lines), encoding="utf-8")
 
+        index_path.write_text("\n".join(index_lines) + "\n", encoding="utf-8")
+
+    # Always write a combined document to out-dir so stdout can stay concise.
+    doc_lines: list[str] = []
+    doc_lines.append(format_metadata_block(meta).rstrip("\n"))
+    doc_lines.append(f"# AutoDoc for {scope_label}")
+    doc_lines.append("")
+    doc_lines.extend(
+        _coverage_summary_lines(
+            referenced_files=referenced_files,
+            referenced_chunks=referenced_chunks,
+            files_denominator=files_denominator,
+            chunks_denominator=chunks_denominator,
+            scope_total_files=scope_total_files,
+            scope_total_chunks=scope_total_chunks,
+        )
+    )
+    doc_lines.append("")
+    doc_lines.append("## Points of Interest Overview")
+    doc_lines.append("")
+    doc_lines.append(overview_result.get("answer", "").strip())
+    doc_lines.append("")
+
+    for idx, (poi, result) in enumerate(poi_sections, start=1):
+        heading = _derive_heading_from_point(poi)
+        doc_lines.append(f"## {idx}. {heading}")
+        doc_lines.append("")
+        doc_lines.append(result.get("answer", "").strip())
+        doc_lines.append("")
+
+    doc_lines.extend(
+        _coverage_summary_lines(
+            referenced_files=referenced_files,
+            referenced_chunks=referenced_chunks,
+            files_denominator=files_denominator,
+            chunks_denominator=chunks_denominator,
+            scope_total_files=scope_total_files,
+            scope_total_chunks=scope_total_chunks,
+        )
+    )
+    doc_lines.append("")
+    doc_path.write_text("\n".join(doc_lines), encoding="utf-8")
+
+    formatter.success("Autodoc complete.")
+    formatter.info(f"Wrote combined doc: {doc_path}")
+    if not getattr(args, "overview_only", False):
+        formatter.info(f"Wrote topics index: {index_path}")
         index_lines.append("")
         index_path.write_text("\n".join(index_lines), encoding="utf-8")

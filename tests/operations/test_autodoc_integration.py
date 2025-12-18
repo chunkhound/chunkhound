@@ -177,17 +177,24 @@ async def test_autodoc_end_to_end_writes_index_and_topics(
     await autodoc_mod.autodoc_command(args, config)
     captured = capsys.readouterr().out
 
-    # Main document should include the metadata header and top-level heading.
-    assert "agent_doc_metadata:" in captured
-    assert "autodoc_comprehensiveness: low" in captured
-    assert "# AutoDoc for" in captured
-    assert "## Coverage Summary" in captured
-    # Skipping the first POI should renumber topics contiguously and keep
-    # headings aligned with the surviving result.
-    assert "## 1. Error Handling" in captured
+    # Default behavior: avoid printing the full document to stdout.
+    assert "# AutoDoc for" not in captured
+    assert "## Coverage Summary" not in captured
 
     # Out-dir should contain an index and topic files.
     out_dir = args.out_dir
+
+    combined_docs = list(out_dir.glob("*_autodoc.md"))
+    assert combined_docs, "Expected a combined autodoc document to be written"
+    combined_content = combined_docs[0].read_text(encoding="utf-8")
+    assert "agent_doc_metadata:" in combined_content
+    assert "autodoc_comprehensiveness: low" in combined_content
+    assert "# AutoDoc for" in combined_content
+    assert "## Coverage Summary" in combined_content
+    # Skipping the first POI should renumber topics contiguously and keep
+    # headings aligned with the surviving result.
+    assert "## 1. Error Handling" in combined_content
+
     index_files = list(out_dir.glob("*_autodoc_index.md"))
     assert index_files, "Expected an autodoc index file to be written"
     index_content = index_files[0].read_text(encoding="utf-8")
