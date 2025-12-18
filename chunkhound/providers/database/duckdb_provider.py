@@ -2672,6 +2672,22 @@ class DuckDBProvider(SerialDatabaseProvider):
         state["transaction_active"] = False
         state["deferred_checkpoint"] = False
 
+    def should_optimize_fragments(
+        self, threshold: int | None = None, operation: str = ""
+    ) -> bool:
+        """Check if fragment-based optimization is warranted.
+
+        DuckDB doesn't have fragmentation issues like LanceDB, so this always returns False.
+
+        Args:
+            threshold: Fragment count threshold (ignored for DuckDB).
+            operation: Optional operation name for logging (ignored for DuckDB).
+
+        Returns:
+            False - DuckDB doesn't support fragment-based optimization at this time.
+        """
+        return False
+
     def optimize_tables(self) -> None:
         """Optimize tables by compacting fragments and rebuilding indexes (provider-specific).
 

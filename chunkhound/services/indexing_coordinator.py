@@ -1217,7 +1217,7 @@ class IndexingCoordinator(BaseService):
 
                 # PRE-BATCH: Optimize proactively to prevent fragmentation
                 optimization_ran = False
-                if hasattr(self._db, 'should_optimize_during_indexing') and self._db.should_optimize_during_indexing():
+                if self._db.should_optimize_fragments(threshold=25, operation="during-indexing"):
                     logger.info("Running proactive optimization during indexing to maintain performance...")
                     try:
                         self._db.optimize_tables()
@@ -1239,7 +1239,7 @@ class IndexingCoordinator(BaseService):
 
                 # POST-BATCH: Check if optimization is needed after storage
                 post_batch_optimization_ran = False
-                if hasattr(self._db, 'should_optimize_during_indexing') and self._db.should_optimize_during_indexing():
+                if self._db.should_optimize_fragments(threshold=25, operation="during-indexing"):
                     logger.info("Running post-batch optimization during indexing to prevent fragmentation...")
                     try:
                         self._db.optimize_tables()
@@ -1287,7 +1287,7 @@ class IndexingCoordinator(BaseService):
 
             # Optimize tables after parsing/chunking if fragmentation high
             if agg_total_chunks > 0 and hasattr(self._db, "optimize_tables"):
-                if hasattr(self._db, "should_optimize") and self._db.should_optimize("post-chunking"):
+                if self._db.should_optimize_fragments(operation="post-chunking"):
                     logger.debug("Optimizing database after chunking phase...")
                     self._db.optimize_tables()
 
@@ -1337,7 +1337,7 @@ class IndexingCoordinator(BaseService):
 
             # Optimize tables after bulk operations (provider-specific)
             if total_chunks > 0 and hasattr(self._db, "optimize_tables"):
-                if hasattr(self._db, "should_optimize") and self._db.should_optimize("post-bulk"):
+                if self._db.should_optimize_fragments(operation="post-bulk"):
                     logger.debug("Optimizing database tables after bulk operations...")
                     self._db.optimize_tables()
 

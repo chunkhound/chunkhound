@@ -2270,23 +2270,37 @@ class LanceDBProvider(SerialDatabaseProvider):
 
         return result
 
-    def should_optimize(self, operation: str = "") -> bool:
-        """Check if optimization is warranted based on fragment count vs threshold.
+    def _get_chunks_fragment_count(self) -> int:
+        """Get the current chunks fragment count.
+
+        Returns:
+            Number of chunks fragments.
+        """
+        counts = self.get_fragment_count()
+        return counts.get("chunks", 0)
+
+    def should_optimize_fragments(
+        self, threshold: int | None = None, operation: str = ""
+    ) -> bool:
+        """Check if fragment-based optimization is warranted.
 
         Args:
+            threshold: Fragment count threshold. If None, uses provider's default.
             operation: Optional operation name for logging (e.g., "post-chunking")
 
         Returns:
-            True if fragment count exceeds threshold, False otherwise
+            True if fragment count exceeds threshold and optimization is needed.
         """
         try:
-            counts = self.get_fragment_count()
-            chunks_fragments = counts.get("chunks", 0)
-            if chunks_fragments < self._fragment_threshold:
+            # Use provided threshold or default
+            effective_threshold = threshold if threshold is not None else self._fragment_threshold
+
+            chunks_fragments = self._get_chunks_fragment_count()
+            if chunks_fragments < effective_threshold:
                 op_desc = f" {operation}" if operation else ""
                 logger.debug(
                     f"Skipping{op_desc} optimization: {chunks_fragments} fragments "
-                    f"< threshold {self._fragment_threshold}"
+                    f"< threshold {effective_threshold}"
                 )
                 return False
             return True
@@ -2294,23 +2308,7 @@ class LanceDBProvider(SerialDatabaseProvider):
             logger.debug(f"Could not check fragment count, will optimize: {e}")
             return True
 
-    def should_optimize_during_indexing(self) -> bool:
-        """Check if optimization should run during indexing to prevent fragmentation.
 
-        LanceDB optimization during indexing is now always enabled for optimal performance.
-
-        Returns:
-            True - optimization always runs during indexing for LanceDB
-        """
-        try:
-            counts = self.get_fragment_count()
-            chunks_fragments = counts.get("chunks", 0)
-            should_optimize = chunks_fragments >= 25  # Default threshold for optimization
-            logger.debug(f"Fragment check: chunks={chunks_fragments}, threshold=25, should_optimize={should_optimize}")
-            return should_optimize
-        except Exception as e:
-            logger.debug(f"Could not check fragment count for indexing optimization: {e}")
-            return False
 
     def optimize_tables(self) -> None:
         """Optimize tables by compacting fragments and rebuilding indexes."""

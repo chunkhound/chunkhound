@@ -198,8 +198,7 @@ class EmbeddingService(BaseService):
                 }
 
             # Optimize database before starting if fragmentation is high
-            should_optimize = getattr(self._db, "should_optimize", None)
-            if should_optimize and should_optimize("pre-embedding"):
+            if self._db.should_optimize_fragments(operation="pre-embedding"):
                 logger.info("Optimizing database before embedding generation to prevent fragmentation issues...")
                 self._db.optimize_tables()
 
@@ -305,8 +304,7 @@ class EmbeddingService(BaseService):
 
             # Optimize if fragmentation high after embedding generation
             optimize_tables = getattr(self._db, "optimize_tables", None)
-            should_optimize_func = getattr(self._db, "should_optimize", None)
-            if total_generated > 0 and optimize_tables and should_optimize_func and should_optimize_func("post-embedding"):
+            if total_generated > 0 and optimize_tables and self._db.should_optimize_fragments(operation="post-embedding"):
                 logger.debug("Optimizing database after embedding generation...")
                 optimize_tables()
 

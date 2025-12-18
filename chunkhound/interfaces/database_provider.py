@@ -328,6 +328,20 @@ class DatabaseProvider(Protocol):
         ...
 
     # Health and Diagnostics
+    def should_optimize_fragments(
+        self, threshold: int | None = None, operation: str = ""
+    ) -> bool:
+        """Check if fragment-based optimization is warranted.
+
+        Args:
+            threshold: Fragment count threshold. If None, uses provider's default.
+            operation: Optional operation name for logging (e.g., "post-chunking")
+
+        Returns:
+            True if fragment count exceeds threshold and optimization is needed.
+        """
+        ...
+
     def optimize_tables(self) -> None:
         """Optimize tables by compacting fragments and rebuilding indexes (provider-specific)."""
         ...
