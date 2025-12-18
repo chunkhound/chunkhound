@@ -71,13 +71,15 @@ def add_autodoc_subparser(subparsers: Any) -> argparse.ArgumentParser:
     # Optional comprehensiveness level controlling HyDE PoI count and snippet budget
     autodoc_parser.add_argument(
         "--comprehensiveness",
-        choices=["low", "medium", "high", "ultra"],
+        choices=["minimal", "low", "medium", "high", "ultra"],
         default="medium",
         help=(
             "Control how many HyDE points of interest are generated and how "
             "much code is sampled for the overview: low=5 PoIs and smaller "
             "snippet budget, medium=10, high=15 with a larger snippet budget, "
-            "ultra=20 PoIs with the largest snippet budget."
+            "ultra=20 PoIs with the largest snippet budget. Use minimal=1 PoI "
+            "for fast iteration on small scopes. (HyDE file list cap scales: "
+            "minimal=200, low=500, medium=2000, high=3000, ultra=5000.)"
         ),
     )
 

@@ -246,6 +246,24 @@ class DatabaseProvider(Protocol):
         """
         ...
 
+    # ---------------------------------------------------------------------
+    # Optional scope aggregation helpers (used by autodoc coverage)
+    # ---------------------------------------------------------------------
+    def get_scope_stats(self, scope_prefix: str | None) -> tuple[int, int]:
+        """Return (total_files, total_chunks) under an optional scope prefix.
+
+        Implementations should avoid loading full chunk code payloads.
+        """
+        ...
+
+    def get_scope_file_paths(self, scope_prefix: str | None) -> list[str]:
+        """Return file paths under an optional scope prefix.
+
+        Returned paths should be normalized to forward slashes and be comparable
+        to `metadata.sources.files` entries.
+        """
+        ...
+
     def search_text(
         self, query: str, page_size: int = 10, offset: int = 0
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:

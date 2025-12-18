@@ -5,100 +5,66 @@ from pathlib import Path
 from chunkhound.autodoc.models import HydeConfig
 
 
-def iter_scope_files(scope_path: Path, project_root: Path) -> list[str]:
-    """Return normalized relative file paths within scope, skipping noise dirs."""
-    ignore_dirs = {
-        ".git",
-        ".chunkhound",
-        ".venv",
-        "venv",
-        "__pycache__",
-        ".mypy_cache",
-    }
-    file_paths: list[str] = []
-    for path in scope_path.rglob("*"):
-        if not path.is_file():
-            continue
-        if any(part in ignore_dirs for part in path.parts):
-            continue
-        try:
-            rel = path.relative_to(project_root)
-        except ValueError:
-            continue
-        file_paths.append(str(rel).replace("\\", "/"))
-    return file_paths
-
-
 def collect_scope_files(
     *,
     scope_path: Path,
     project_root: Path,
     hyde_cfg: HydeConfig,
+    include_patterns: list[str] | None = None,
+    indexing_excludes: list[str] | None = None,
+    ignore_sources: list[str] | None = None,
+    gitignore_backend: str = "python",
+    workspace_root_only_gitignore: bool | None = None,
 ) -> list[str]:
     """Collect file paths within the scope, relative to project_root.
 
     This is filesystem-only and intentionally lightweight.
     """
-    file_paths = iter_scope_files(scope_path, project_root)
-
     try:
-        if file_paths:
-            from subprocess import run
+        from chunkhound.core.config.indexing_config import IndexingConfig
+        from chunkhound.utils.file_patterns import (
+            normalize_include_patterns,
+            walk_directory_tree,
+        )
+        from chunkhound.utils.ignore_engine import build_repo_aware_ignore_engine
 
-            git_root: Path | None = None
-            for candidate in (scope_path, project_root):
-                proc_root = run(
-                    ["git", "rev-parse", "--show-toplevel"],
-                    cwd=str(candidate),
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                )
-                if proc_root.returncode == 0 and proc_root.stdout.strip():
-                    git_root = Path(proc_root.stdout.strip()).resolve()
-                    break
+        if include_patterns is None:
+            include_patterns = list(IndexingConfig().include)
+        patterns = normalize_include_patterns(list(include_patterns))
 
-            if git_root is not None:
-                rel_for_git: list[str] = []
-                rel_to_original: dict[str, str] = {}
+        if indexing_excludes is None:
+            indexing_excludes = IndexingConfig().get_effective_config_excludes()
 
-                for rel in file_paths:
-                    abs_path = (project_root / rel).resolve()
-                    try:
-                        git_rel = abs_path.relative_to(git_root).as_posix()
-                    except ValueError:
-                        continue
-                    rel_for_git.append(git_rel)
-                    rel_to_original[git_rel] = rel
+        if ignore_sources is None:
+            ignore_sources = ["gitignore"]
 
-                if rel_for_git:
-                    proc = run(
-                        ["git", "check-ignore", "--stdin"],
-                        cwd=str(git_root),
-                        input="\n".join(rel_for_git),
-                        text=True,
-                        capture_output=True,
-                        check=False,
-                    )
-                    if proc.returncode in (0, 1):
-                        ignored_git_rel = {
-                            line.strip()
-                            for line in proc.stdout.splitlines()
-                            if line.strip()
-                        }
-                        if ignored_git_rel:
-                            ignored_original = {
-                                rel_to_original[p]
-                                for p in ignored_git_rel
-                                if p in rel_to_original
-                            }
-                            file_paths = [
-                                p for p in file_paths if p not in ignored_original
-                            ]
+        ignore_engine = build_repo_aware_ignore_engine(
+            root=project_root,
+            sources=list(ignore_sources),
+            chignore_file=".chignore",
+            config_exclude=list(indexing_excludes),
+            backend=gitignore_backend,
+            workspace_root_only_gitignore=workspace_root_only_gitignore,
+        )
+
+        max_files = hyde_cfg.max_scope_files if hyde_cfg.max_scope_files > 0 else None
+        files, _ = walk_directory_tree(
+            scope_path,
+            project_root,
+            patterns,
+            [],
+            {project_root: []},
+            ignore_engine=ignore_engine,
+            max_files=max_files,
+        )
+        file_paths = []
+        for path in files:
+            try:
+                rel = path.relative_to(project_root)
+            except Exception:
+                continue
+            file_paths.append(rel.as_posix())
     except Exception:
-        pass
-
-    if len(file_paths) > hyde_cfg.max_scope_files:
-        file_paths = file_paths[: hyde_cfg.max_scope_files]
+        file_paths = []
 
     return file_paths

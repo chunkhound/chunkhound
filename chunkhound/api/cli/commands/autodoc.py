@@ -146,12 +146,13 @@ async def _run_autodoc_overview_hyde(
     comprehensiveness: str = "medium",
     out_dir: Path | None = None,
     assembly_provider: Any | None = None,
+    indexing_cfg: Any | None = None,
 ) -> tuple[str, list[str]]:
     """Run a HyDE-style overview pass to identify points of interest.
 
     This reuses the same HyDE scope prompt machinery as the standalone
     deep_doc pipeline but narrows the objective to a numbered list of
-    5–10 points of interest instead of a full documentation draft.
+    points of interest instead of a full documentation draft.
     """
     hyde_cfg = HydeConfig.from_env()
 
@@ -172,7 +173,9 @@ async def _run_autodoc_overview_hyde(
         # Map comprehensiveness to a proportion of the underlying HyDE snippet
         # budget. This only affects how much *code* is sampled for planning,
         # not which files are considered in scope.
-        if comprehensiveness == "low":
+        if comprehensiveness == "minimal":
+            target_tokens = 2_000
+        elif comprehensiveness == "low":
             target_tokens = 10_000
         elif comprehensiveness == "medium":
             target_tokens = 20_000
@@ -186,16 +189,65 @@ async def _run_autodoc_overview_hyde(
         if hyde_cfg.max_snippet_tokens > target_tokens:
             hyde_cfg.max_snippet_tokens = target_tokens
 
-    # For autodoc, always allow the HyDE scope file list to see the entire
-    # scoped tree; comprehensiveness only affects how much *code* is
-    # sampled into the snippet context.
-    if hyde_cfg.max_scope_files > 0:
-        hyde_cfg.max_scope_files = max(hyde_cfg.max_scope_files, 100_000)
+    # Hard cap the HyDE file list. This keeps the scope prompt readable and
+    # prevents huge repos from spending most of the context window on file paths.
+    if comprehensiveness == "minimal":
+        scope_file_cap = 200
+    elif comprehensiveness == "low":
+        scope_file_cap = 500
+    elif comprehensiveness == "medium":
+        scope_file_cap = 2000
+    elif comprehensiveness == "high":
+        scope_file_cap = 3000
+    elif comprehensiveness == "ultra":
+        scope_file_cap = 5000
+    else:
+        scope_file_cap = 2000
+
+    # Respect an explicit env override for CH_AGENT_DOC_HYDE_MAX_SCOPE_FILES,
+    # but still enforce the hard cap.
+    if os.getenv("CH_AGENT_DOC_HYDE_MAX_SCOPE_FILES"):
+        if hyde_cfg.max_scope_files > scope_file_cap:
+            hyde_cfg.max_scope_files = scope_file_cap
+    else:
+        hyde_cfg.max_scope_files = scope_file_cap
+
+    include_patterns = None
+    indexing_excludes = None
+    ignore_sources = None
+    gitignore_backend = "python"
+    workspace_root_only_gitignore: bool | None = None
+    try:
+        if indexing_cfg is not None:
+            include_patterns = list(getattr(indexing_cfg, "include", None) or [])
+            get_exc = getattr(indexing_cfg, "get_effective_config_excludes", None)
+            if callable(get_exc):
+                indexing_excludes = list(get_exc())
+            get_sources = getattr(indexing_cfg, "resolve_ignore_sources", None)
+            if callable(get_sources):
+                ignore_sources = list(get_sources())
+            gitignore_backend = str(
+                getattr(indexing_cfg, "gitignore_backend", "python")
+            )
+            workspace_root_only_gitignore = getattr(
+                indexing_cfg, "workspace_gitignore_nonrepo", None
+            )
+    except Exception:
+        include_patterns = None
+        indexing_excludes = None
+        ignore_sources = None
+        gitignore_backend = "python"
+        workspace_root_only_gitignore = None
 
     file_paths = collect_scope_files(
         scope_path=scope_path,
         project_root=target_dir,
         hyde_cfg=hyde_cfg,
+        include_patterns=include_patterns,
+        indexing_excludes=indexing_excludes,
+        ignore_sources=ignore_sources,
+        gitignore_backend=gitignore_backend,
+        workspace_root_only_gitignore=workspace_root_only_gitignore,
     )
 
     meta = AgentDocMetadata(
@@ -424,18 +476,126 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
     # /workspaces/.chunkhound.json and /workspaces/.chunkhound/db index
     # serve multiple subprojects (e.g., /workspaces/arguseek) while
     # autodoc scopes a specific folder.
-    config_file_env = os.getenv("CHUNKHOUND_CONFIG_FILE")
-    if config_file_env:
-        cfg_path = Path(config_file_env).expanduser().resolve()
-        workspace_root = cfg_path.parent
+    cfg_override: Path | None = None
+    if getattr(args, "config", None):
+        try:
+            cfg_override = Path(args.config).expanduser().resolve()
+        except Exception:
+            cfg_override = None
+    if cfg_override is None:
+        config_file_env = os.getenv("CHUNKHOUND_CONFIG_FILE")
+        if config_file_env:
+            try:
+                cfg_override = Path(config_file_env).expanduser().resolve()
+            except Exception:
+                cfg_override = None
+
+    if cfg_override is not None:
+        workspace_root = cfg_override.parent
         if workspace_root.exists():
-            # For autodoc, treat the workspace root as target_dir so that
-            # HyDE planning and database path filters are relative to the
-            # shared workspace instead of the current repo folder.
+            # For autodoc, treat the directory containing the config as the
+            # workspace root so that scopes like "arguseek" line up with a shared
+            # workspace index.
             config.target_dir = workspace_root
-            # For workspace-level autodoc, always use the workspace DB so that
-            # scopes like "arguseek" line up with the shared index.
-            config.database.path = workspace_root / ".chunkhound" / "db"
+
+            # Do NOT override an explicitly configured database path.
+            # Only fall back to the conventional workspace DB if the config file
+            # didn't specify one and the CLI didn't override it.
+            explicit_db_cli = bool(
+                getattr(args, "db", None) or getattr(args, "database_path", None)
+            )
+            explicit_db_in_file = False
+            try:
+                import json
+
+                raw = json.loads(cfg_override.read_text(encoding="utf-8"))
+                db = raw.get("database") if isinstance(raw, dict) else None
+                explicit_db_in_file = isinstance(db, dict) and bool(db.get("path"))
+            except Exception:
+                explicit_db_in_file = False
+
+            if not explicit_db_cli and not explicit_db_in_file:
+                config.database.path = workspace_root / ".chunkhound" / "db"
+
+    # Autodoc always writes artifacts; keep the CLI contract explicit.
+    out_dir_arg = getattr(args, "out_dir", None)
+    if out_dir_arg is None:
+        formatter.error(
+            "Autodoc requires --out-dir so it can write an index and per-topic files."
+        )
+        sys.exit(2)
+
+    # Overview-only mode should be lightweight: only HyDE planning + stdout,
+    # plus best-effort prompt persistence under --out-dir.
+    if getattr(args, "overview_only", False):
+        try:
+            out_dir = Path(out_dir_arg).resolve()
+        except Exception:
+            out_dir = None
+
+        llm_manager: LLMManager | None = None
+        try:
+            if config.llm:
+                utility_config, synthesis_config = config.llm.get_provider_configs()
+                llm_manager = LLMManager(utility_config, synthesis_config)
+        except Exception:
+            llm_manager = None
+
+        target_dir = config.target_dir or Path(".").resolve()
+        raw_scope = Path(args.path)
+        scope_path = (
+            raw_scope.resolve()
+            if raw_scope.is_absolute()
+            else (target_dir / raw_scope).resolve()
+        )
+        scope_label = _compute_scope_label(target_dir, scope_path)
+
+        llm_meta, assembly_provider = build_llm_metadata_and_assembly(
+            config=config,
+            llm_manager=llm_manager,
+        )
+        meta = AgentDocMetadata(
+            created_from_sha=_get_head_sha(scope_path),
+            previous_target_sha=_get_head_sha(scope_path),
+            target_sha=_get_head_sha(scope_path),
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            llm_config=llm_meta,
+            generation_stats={"overview_only": "true"},
+        )
+
+        comprehensiveness = getattr(args, "comprehensiveness", "medium")
+        if comprehensiveness == "minimal":
+            max_points = 1
+        elif comprehensiveness == "low":
+            max_points = 5
+        elif comprehensiveness == "medium":
+            max_points = 10
+        elif comprehensiveness == "high":
+            max_points = 15
+        elif comprehensiveness == "ultra":
+            max_points = 20
+        else:
+            max_points = 10
+
+        overview_answer, points_of_interest = await _run_autodoc_overview_hyde(
+            llm_manager=llm_manager,
+            target_dir=target_dir,
+            scope_path=scope_path,
+            scope_label=scope_label,
+            max_points=max_points,
+            comprehensiveness=comprehensiveness,
+            out_dir=out_dir,
+            assembly_provider=assembly_provider,
+            indexing_cfg=getattr(config, "indexing", None),
+        )
+
+        meta.generation_stats["autodoc_comprehensiveness"] = comprehensiveness
+        print(format_metadata_block(meta).rstrip("\n"))
+        print(f"# AutoDoc Overview for {scope_label}")
+        print("")
+        print(overview_answer.strip())
+        print("")
+        return
 
     # Verify database exists and get paths
     try:
@@ -509,17 +669,10 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
     scope_label = _compute_scope_label(target_dir, scope_path)
     path_filter = _compute_path_filter(target_dir, scope_path)
 
-    # Autodoc always writes per-topic files and an index; require an out-dir
-    # to keep the CLI contract explicit even for programmatic callers.
-    out_dir_arg = getattr(args, "out_dir", None)
-    if out_dir_arg is None:
-        formatter.error(
-            "Autodoc requires --out-dir so it can write an index and per-topic files."
-        )
-        sys.exit(2)
-
     comprehensiveness = getattr(args, "comprehensiveness", "medium")
-    if comprehensiveness == "low":
+    if comprehensiveness == "minimal":
+        max_points = 1
+    elif comprehensiveness == "low":
         max_points = 5
     elif comprehensiveness == "medium":
         max_points = 10
@@ -554,7 +707,7 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
     # Phase 1 + 2: run overview (HyDE-based) and per-point deep research with a shared
     # TUI.
     overview_result: dict[str, Any]
-    poi_results: list[dict[str, Any]] = []
+    poi_sections: list[tuple[str, dict[str, Any]]] = []
     points_of_interest: list[str] = []
 
     # Optional depth override (currently disabled by default): wiring for
@@ -583,6 +736,7 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
                     comprehensiveness=comprehensiveness,
                     out_dir=Path(out_dir_arg),
                     assembly_provider=assembly_provider,
+                    indexing_cfg=getattr(config, "indexing", None),
                 )
 
                 overview_result = {
@@ -649,7 +803,7 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
                                 "deep research returned no usable content."
                             )
                             continue
-                        poi_results.append(result)
+                        poi_sections.append((poi, result))
                     except Exception as e:
                         formatter.error(
                             f"Autodoc deep research failed for point {idx}: {e}"
@@ -667,6 +821,7 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
                 os.environ["CH_CODE_RESEARCH_MAX_DEPTH"] = original_depth_env
 
     # Phase 3 (part 2): compute coverage and render the final document with metadata.
+    poi_results = [r for _, r in poi_sections]
     all_results: list[dict[str, Any]] = [overview_result] + poi_results
     (
         unified_source_files,
@@ -680,7 +835,7 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
         services, scope_label
     )
 
-    total_research_calls = len(poi_results)
+    total_research_calls = len(poi_sections)
     generation_stats = build_generation_stats(
         generator_mode="code_research",
         total_research_calls=total_research_calls,
@@ -745,9 +900,7 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
 
     # Emit detailed sections after the overview, one per point of interest.
     if not getattr(args, "overview_only", False):
-        for idx, (poi, result) in enumerate(
-            zip(points_of_interest, poi_results), start=1
-        ):
+        for idx, (poi, result) in enumerate(poi_sections, start=1):
             heading = _derive_heading_from_point(poi)
             print(f"## {idx}. {heading}")
             print("")
@@ -761,18 +914,20 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
     print("")
     if files_denominator and files_denominator > 0:
         file_cov = (referenced_files / files_denominator) * 100.0
+        scope_label_display = "this scope" if scope_total_files else "this database"
         print(
             f"- Referenced files: {referenced_files} / {files_denominator} "
-            f"({file_cov:.2f}% of indexed files in this scope)."
+            f"({file_cov:.2f}% of indexed files in {scope_label_display})."
         )
     else:
         print(f"- Referenced files: {referenced_files} (database totals unavailable).")
 
     if chunks_denominator and chunks_denominator > 0:
         chunk_cov = (referenced_chunks / chunks_denominator) * 100.0
+        scope_label_display = "this scope" if scope_total_chunks else "this database"
         print(
             f"- Referenced chunks: {referenced_chunks} / {chunks_denominator} "
-            f"({chunk_cov:.2f}% of indexed chunks in this scope)."
+            f"({chunk_cov:.2f}% of indexed chunks in {scope_label_display})."
         )
     else:
         print(
@@ -788,6 +943,34 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
         safe_scope = scope_label.replace("/", "_") or "root"
         index_path = out_dir / f"{safe_scope}_autodoc_index.md"
 
+        # Optional: compute unreferenced file list for the scope and write it to
+        # a separate artifact (can be large).
+        unref_filename: str | None = None
+        try:
+            provider = getattr(services, "provider", None)
+            get_scope_file_paths = getattr(provider, "get_scope_file_paths", None)
+            if callable(get_scope_file_paths):
+                prefix = None if scope_label == "/" else scope_label.rstrip("/") + "/"
+                all_files = get_scope_file_paths(prefix)
+                referenced_set = {
+                    str(p).replace("\\", "/")
+                    for p in unified_source_files
+                    if p and (not prefix or str(p).replace("\\", "/").startswith(prefix))
+                }
+                unreferenced = [
+                    str(p).replace("\\", "/")
+                    for p in all_files
+                    if p and str(p).replace("\\", "/") not in referenced_set
+                ]
+                unref_filename = f"{safe_scope}_scope_unreferenced_files.txt"
+                (out_dir / unref_filename).write_text(
+                    "\n".join(unreferenced) + ("\n" if unreferenced else ""),
+                    encoding="utf-8",
+                )
+                meta.generation_stats["scope_unreferenced_files_file"] = unref_filename
+        except Exception:
+            unref_filename = None
+
         # Build index content with the same metadata header for traceability.
         index_lines: list[str] = []
         index_lines.append(format_metadata_block(meta).rstrip("\n"))
@@ -796,20 +979,20 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
         index_lines.append(
             "This index lists the per-topic autodoc sections generated for this scope."
         )
+        if unref_filename is not None:
+            index_lines.append(
+                f"- Unreferenced files in scope: [{unref_filename}]({unref_filename})"
+            )
         index_lines.append("")
         index_lines.append("## Topics")
         index_lines.append("")
 
-        for idx, (poi, result) in enumerate(
-            zip(points_of_interest, poi_results), start=1
-        ):
+        for idx, (poi, result) in enumerate(poi_sections, start=1):
             heading = _derive_heading_from_point(poi)
             slug = _slugify_heading(heading)
             topic_filename = f"{safe_scope}_topic_{idx:02d}_{slug}.md"
             topic_path = out_dir / topic_filename
-            index_lines.append(
-                f"{idx}. [{heading}]({topic_filename}) — **{heading}**"
-            )
+            index_lines.append(f"{idx}. [{heading}]({topic_filename})")
 
             section_body = result.get("answer", "").strip()
             topic_lines = [f"# {heading}", "", section_body, ""]

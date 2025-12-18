@@ -16,6 +16,7 @@ def load_hyde_scope_template() -> str:
     ) as f:
         return f.read().strip()
 
+
 async def run_hyde_only_query(
     *,
     llm_manager: LLMManager | None,

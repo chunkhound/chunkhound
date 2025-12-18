@@ -54,5 +54,19 @@ def build_generation_stats(
     if scope_total_chunks:
         stats["scope_total_chunks_indexed"] = str(scope_total_chunks)
 
-    return stats
+    prefix = None if scope_label == "/" else scope_label.rstrip("/") + "/"
+    referenced_in_scope = 0
+    for path in unified_source_files:
+        norm = str(path).replace("\\", "/")
+        if not norm:
+            continue
+        if prefix and not norm.startswith(prefix):
+            continue
+        referenced_in_scope += 1
+    stats["referenced_files_in_scope"] = str(referenced_in_scope)
+    if scope_total_files:
+        stats["scope_unreferenced_files_count"] = str(
+            max(0, scope_total_files - referenced_in_scope)
+        )
 
+    return stats

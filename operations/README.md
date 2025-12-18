@@ -67,9 +67,10 @@ Path resolution semantics:
   it, regardless of your current working directory.
 
 Comprehensiveness:
-- `--comprehensiveness {low,medium,high,ultra}` (default: `medium`)
-  - Controls how many HyDE points of interest are planned (≈5/10/15/20).
+- `--comprehensiveness {minimal,low,medium,high,ultra}` (default: `medium`)
+  - Controls how many HyDE points of interest are planned (≈1/5/10/15/20).
   - Adjusts how much code is sampled for planning; file coverage uses the full index.
+  - HyDE scope file list cap scales with comprehensiveness (≈200/500/2000/3000/5000).
 
 Assembly LLM configuration (optional):
 - Autodoc’s HyDE planning and Agent Doc assembly can use a dedicated “assembly” model:

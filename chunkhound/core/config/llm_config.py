@@ -128,7 +128,7 @@ class LLMConfig(BaseSettings):
         default=None,
         description="Codex/OpenAI reasoning effort override for agent-doc final assembly.",
     )
-    
+
     # Anthropic Extended Thinking Configuration
     anthropic_thinking_enabled: bool = Field(
         default=False,

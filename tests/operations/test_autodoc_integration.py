@@ -16,6 +16,18 @@ class DummyProvider:
             {"file_path": "scope/b.py", "start_line": 5, "end_line": 15},
         ]
 
+    def get_scope_stats(self, scope_prefix: str | None) -> tuple[int, int]:
+        # Include one extra indexed file that is never referenced in the fake
+        # deep-research results so autodoc can emit an "unreferenced files" artifact.
+        if scope_prefix == "scope/":
+            return 3, 2
+        return 0, 0
+
+    def get_scope_file_paths(self, scope_prefix: str | None) -> list[str]:
+        if scope_prefix == "scope/":
+            return ["scope/a.py", "scope/b.py", "scope/c.py"]
+        return []
+
     def get_all_chunks_with_metadata(self) -> list[dict[str, Any]]:
         return list(self._chunks)
 
@@ -57,6 +69,7 @@ async def test_autodoc_end_to_end_writes_index_and_topics(
     scope_path.mkdir(parents=True, exist_ok=True)
     (scope_path / "a.py").write_text("print('a')\n", encoding="utf-8")
     (scope_path / "b.py").write_text("print('b')\n", encoding="utf-8")
+    (scope_path / "c.py").write_text("print('c')\n", encoding="utf-8")
 
     # Use a minimal config; database/embedding/llm implementations are stubbed.
     config = Config(
@@ -82,6 +95,7 @@ async def test_autodoc_end_to_end_writes_index_and_topics(
         comprehensiveness: str = "medium",
         out_dir: Path | None = None,
         assembly_provider: Any | None = None,
+        indexing_cfg: Any | None = None,
     ) -> tuple[str, list[str]]:
         # Record the requested max_points so we can assert comprehensiveness mapping.
         seen_max_points.append(max_points)
@@ -104,7 +118,9 @@ async def test_autodoc_end_to_end_writes_index_and_topics(
     ) -> dict[str, Any]:
         # Return a minimal answer and sources metadata for coverage.
         # For one of the bullets, simulate an empty answer so it is skipped.
-        if "Error Handling" in query:
+        # This specifically skips the FIRST POI to regression-test that topic
+        # headings and content remain aligned (no zip-based mispairing).
+        if "Core Flow" in query:
             return {
                 "answer": "",
                 "metadata": {
@@ -166,15 +182,30 @@ async def test_autodoc_end_to_end_writes_index_and_topics(
     assert "autodoc_comprehensiveness: low" in captured
     assert "# AutoDoc for" in captured
     assert "## Coverage Summary" in captured
+    # Skipping the first POI should renumber topics contiguously and keep
+    # headings aligned with the surviving result.
+    assert "## 1. Error Handling" in captured
 
     # Out-dir should contain an index and topic files.
     out_dir = args.out_dir
     index_files = list(out_dir.glob("*_autodoc_index.md"))
     assert index_files, "Expected an autodoc index file to be written"
+    index_content = index_files[0].read_text(encoding="utf-8")
+    assert "scope_unreferenced_files_count: 1" in index_content
+    assert "scope_scope_unreferenced_files.txt" in index_content
 
     topic_files = list(out_dir.glob("*_topic_*.md"))
     # One of the deep research calls returns an empty answer and should be skipped.
     assert len(topic_files) == 1, "Expected only non-empty topics to be written"
+    topic_content = topic_files[0].read_text(encoding="utf-8")
+    assert (
+        topic_content.startswith("# Error Handling")
+        or "\n# Error Handling\n" in topic_content
+    )
+    unref_files = list(out_dir.glob("*_scope_unreferenced_files.txt"))
+    assert unref_files, "Expected unreferenced files artifact to be written"
+    unref_content = unref_files[0].read_text(encoding="utf-8")
+    assert "scope/c.py" in unref_content
 
     # Comprehensiveness=low should map to fewer max_points for the overview.
     assert seen_max_points, "Expected fake_overview to be called"

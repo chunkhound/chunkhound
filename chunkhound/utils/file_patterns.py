@@ -413,6 +413,7 @@ def walk_directory_tree(
     parent_gitignores: dict[Path, list[str]],
     use_inode_ordering: bool = False,
     ignore_engine: Optional[object] = None,
+    max_files: int | None = None,
 ) -> tuple[list[Path], dict[Path, list[str]]]:
     """Core directory traversal logic shared by sequential and parallel discovery.
 
@@ -557,6 +558,8 @@ def walk_directory_tree(
 
             if should_include_file(file_path, root_directory, patterns, pattern_cache):
                 files.append(file_path)
+                if max_files is not None and len(files) >= max_files:
+                    return files, gitignore_patterns
 
     return files, gitignore_patterns
 

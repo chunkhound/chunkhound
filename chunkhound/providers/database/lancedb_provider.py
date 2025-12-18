@@ -1273,6 +1273,114 @@ class LanceDBProvider(SerialDatabaseProvider):
         """Get all chunks with their metadata including file paths (provider-agnostic)."""
         return self._execute_in_db_thread_sync("get_all_chunks_with_metadata")
 
+    def get_scope_stats(self, scope_prefix: str | None) -> tuple[int, int]:
+        """Return (total_files, total_chunks) under an optional scope prefix.
+
+        Best-effort implementation for LanceDB. This should avoid loading full
+        chunk content when possible, but LanceDB table APIs may vary across
+        versions; callers should treat failures as non-fatal.
+        """
+        return self._execute_in_db_thread_sync("get_scope_stats", scope_prefix)
+
+    def _executor_get_scope_stats(
+        self, conn: Any, state: dict[str, Any], scope_prefix: str | None
+    ) -> tuple[int, int]:
+        if not self._files_table or not self._chunks_table:
+            return 0, 0
+
+        try:
+            if scope_prefix:
+                normalized = scope_prefix.replace("\\", "/")
+                like = f"{normalized}%"
+                files = self._files_table.search().where(
+                    f"path LIKE '{like}'"
+                ).to_list()
+                file_ids: set[int] = set()
+                for row in files:
+                    try:
+                        fid = row.get("id")
+                        if fid is not None:
+                            file_ids.add(int(fid))
+                    except Exception:
+                        continue
+
+                total_files = len(file_ids)
+                if not file_ids:
+                    return 0, 0
+
+                # Slow fallback: scan the chunks table and count rows whose
+                # file_id is in the scoped file_id set.
+                #
+                # This avoids schema changes while still producing correct scoped
+                # chunk totals, but may be memory-heavy for very large databases.
+                total_chunks = 0
+                try:
+                    chunks_count = int(self._chunks_table.count_rows())
+                except Exception:
+                    chunks_count = 0
+
+                if chunks_count <= 0:
+                    return total_files, 0
+
+                try:
+                    chunks_df = self._chunks_table.head(chunks_count).to_pandas()
+                except Exception:
+                    try:
+                        self._chunks_table.optimize()
+                        chunks_df = self._chunks_table.head(chunks_count).to_pandas()
+                    except Exception:
+                        return total_files, 0
+
+                if "file_id" not in chunks_df.columns:
+                    return total_files, 0
+
+                try:
+                    total_chunks = int(chunks_df["file_id"].isin(list(file_ids)).sum())
+                except Exception:
+                    total_chunks = 0
+                return total_files, total_chunks
+
+            # Root scope: counts over full tables.
+            total_files = int(self._files_table.count_rows())
+            total_chunks = int(self._chunks_table.count_rows())
+            return total_files, total_chunks
+        except Exception:
+            return 0, 0
+
+    def get_scope_file_paths(self, scope_prefix: str | None) -> list[str]:
+        """Return file paths under an optional scope prefix."""
+        return self._execute_in_db_thread_sync("get_scope_file_paths", scope_prefix)
+
+    def _executor_get_scope_file_paths(
+        self, conn: Any, state: dict[str, Any], scope_prefix: str | None
+    ) -> list[str]:
+        if not self._files_table:
+            return []
+
+        try:
+            if scope_prefix:
+                normalized = scope_prefix.replace("\\", "/")
+                like = f"{normalized}%"
+                rows = self._files_table.search().where(
+                    f"path LIKE '{like}'"
+                ).to_list()
+            else:
+                total = int(self._files_table.count_rows())
+                rows = self._files_table.head(total).to_list()
+        except Exception:
+            return []
+
+        out: list[str] = []
+        for row in rows:
+            try:
+                path = str(row.get("path") or "").replace("\\", "/")
+            except Exception:
+                path = ""
+            if path:
+                out.append(path)
+        out.sort()
+        return out
+
     def _executor_get_all_chunks_with_metadata(
         self, conn: Any, state: dict[str, Any]
     ) -> list[dict[str, Any]]:

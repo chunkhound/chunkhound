@@ -14,8 +14,16 @@ def compute_db_scope_stats(
         provider = getattr(services, "provider", None)
         if provider is None:
             return 0, 0, scoped_files
-        chunks_meta = provider.get_all_chunks_with_metadata()
         prefix = None if scope_label == "/" else scope_label.rstrip("/") + "/"
+
+        # Preferred: use provider-level aggregation to avoid loading full chunk code.
+        get_scope_stats = getattr(provider, "get_scope_stats", None)
+        if callable(get_scope_stats):
+            total_files, total_chunks = get_scope_stats(prefix)
+            return int(total_files), int(total_chunks), set()
+
+        # Fallback: scan all chunk metadata (legacy providers/stubs).
+        chunks_meta = provider.get_all_chunks_with_metadata()
         for chunk in chunks_meta:
             path = (chunk.get("file_path") or "").replace("\\", "/")
             if not path:
