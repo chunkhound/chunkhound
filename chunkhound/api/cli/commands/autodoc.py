@@ -15,6 +15,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -22,16 +23,13 @@ from chunkhound.api.cli.utils import (
     apply_autodoc_workspace_overrides,
     verify_database_exists,
 )
+from chunkhound.autodoc import llm as autodoc_llm
 from chunkhound.autodoc import pipeline as autodoc_pipeline
 from chunkhound.autodoc.coverage import compute_unreferenced_scope_files
 from chunkhound.autodoc.metadata import build_generation_stats_with_coverage
 from chunkhound.autodoc.orchestrator import AutodocOrchestrator
 from chunkhound.autodoc.render import render_overview_document
-from chunkhound.autodoc.service import (
-    AutodocNoPointsError,
-    run_autodoc_overview_only,
-    run_autodoc_pipeline,
-)
+from chunkhound.autodoc.service import AutodocNoPointsError, run_autodoc_pipeline
 from chunkhound.autodoc.writer import write_autodoc_outputs
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
@@ -41,6 +39,14 @@ from chunkhound.llm_manager import LLMManager
 
 from ..utils.rich_output import RichOutputFormatter
 from ..utils.tree_progress import TreeProgressDisplay
+
+async def _run_autodoc_overview_hyde(*args: Any, **kwargs: Any) -> tuple[str, list[str]]:
+    """Delegate to pipeline helper (wrapper for test monkeypatching)."""
+    return await autodoc_pipeline._run_autodoc_overview_hyde(*args, **kwargs)
+
+
+# Re-export for tests that monkeypatch assembly metadata wiring.
+build_llm_metadata_and_assembly = autodoc_llm.build_llm_metadata_and_assembly
 
 
 
@@ -89,19 +95,19 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
             overview_only=True,
         )
 
-        try:
-            overview_answer, points_of_interest = await run_autodoc_overview_only(
-                llm_manager=llm_manager,
-                target_dir=scope.target_dir,
-                scope_path=scope.scope_path,
-                scope_label=scope.scope_label,
-                max_points=run_context.max_points,
-                comprehensiveness=run_context.comprehensiveness,
-                out_dir=out_dir,
-                assembly_provider=meta_bundle.assembly_provider,
-                indexing_cfg=getattr(config, "indexing", None),
-            )
-        except AutodocNoPointsError as exc:
+        overview_answer, points_of_interest = await _run_autodoc_overview_hyde(
+            llm_manager=llm_manager,
+            target_dir=scope.target_dir,
+            scope_path=scope.scope_path,
+            scope_label=scope.scope_label,
+            max_points=run_context.max_points,
+            comprehensiveness=run_context.comprehensiveness,
+            out_dir=out_dir,
+            assembly_provider=meta_bundle.assembly_provider,
+            indexing_cfg=getattr(config, "indexing", None),
+        )
+        if not points_of_interest:
+            exc = AutodocNoPointsError(overview_answer)
             formatter.error(
                 "Autodoc could not extract any points of interest from the overview."
             )
