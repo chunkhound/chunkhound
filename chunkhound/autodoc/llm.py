@@ -43,11 +43,8 @@ def build_llm_metadata_and_assembly(
         assembly_provider_name = llm.assembly_provider
     if not assembly_model_name and getattr(llm, "assembly_model", None):
         assembly_model_name = llm.assembly_model
-    if (
-        not assembly_model_name
-        and getattr(llm, "assembly_synthesis_model", None)  # type: ignore[attr-defined]
-    ):
-        assembly_model_name = llm.assembly_synthesis_model  # type: ignore[attr-defined]
+    if not assembly_model_name and getattr(llm, "assembly_synthesis_model", None):
+        assembly_model_name = llm.assembly_synthesis_model
     if not assembly_effort and getattr(llm, "assembly_reasoning_effort", None):
         assembly_effort = llm.assembly_reasoning_effort
 

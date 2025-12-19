@@ -12,6 +12,7 @@ from chunkhound.autodoc.pipeline import (
     _merge_sources_metadata,
     _run_autodoc_overview_hyde,
 )
+from chunkhound.llm_manager import LLMManager
 from chunkhound.mcp_server.tools import deep_research_impl
 
 

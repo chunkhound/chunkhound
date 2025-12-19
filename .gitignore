@@ -288,3 +288,6 @@ cluster_eval.json
 
 # Temporary documentation
 .tmp-docs/
+
+# AI review artifacts
+.gitignored/

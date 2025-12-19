@@ -59,6 +59,8 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
         )
         sys.exit(2)
 
+    llm_manager: LLMManager | None = None
+
     # Overview-only mode should be lightweight: only HyDE planning + stdout,
     # plus best-effort prompt persistence under --out-dir.
     if getattr(args, "overview_only", False):
@@ -67,7 +69,6 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
         except Exception:
             out_dir = None
 
-        llm_manager: LLMManager | None = None
         try:
             if config.llm:
                 utility_config, synthesis_config = config.llm.get_provider_configs()
@@ -122,8 +123,7 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
 
     # Verify database exists and get paths
     try:
-        verify_database_exists(config)
-        db_path = config.database.path
+        db_path = verify_database_exists(config)
     except (ValueError, FileNotFoundError) as e:
         formatter.error(str(e))
         sys.exit(1)
@@ -150,7 +150,6 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
         sys.exit(1)
 
     # Initialize LLM manager (required for deep research)
-    llm_manager: LLMManager | None = None
     try:
         if config.llm:
             utility_config, synthesis_config = config.llm.get_provider_configs()

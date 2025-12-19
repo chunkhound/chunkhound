@@ -1291,7 +1291,8 @@ class LanceDBProvider(SerialDatabaseProvider):
         try:
             if scope_prefix:
                 normalized = scope_prefix.replace("\\", "/")
-                like = f"{normalized}%"
+                escaped = normalized.replace("'", "''")
+                like = f"{escaped}%"
                 files = self._files_table.search().where(
                     f"path LIKE '{like}'"
                 ).to_list()
@@ -1314,6 +1315,25 @@ class LanceDBProvider(SerialDatabaseProvider):
                 # This avoids schema changes while still producing correct scoped
                 # chunk totals, but may be memory-heavy for very large databases.
                 total_chunks = 0
+
+                # Fast path: use Lance SQL filter for small scoped file sets.
+                try:
+                    file_ids_list = sorted(file_ids)
+                    if file_ids_list and len(file_ids_list) <= 1000:
+                        file_ids_str = ",".join(map(str, file_ids_list))
+                        table = (
+                            self._chunks_table.to_lance()
+                            .to_table(filter=f"file_id IN ({file_ids_str})")
+                        )
+                        total_chunks = int(
+                            getattr(table, "num_rows", 0) or len(table)
+                        )
+                        return total_files, total_chunks
+                except Exception:
+                    pass
+
+                # Fallback: scan the chunks table in pages to avoid loading the
+                # entire dataset at once when pagination is supported.
                 try:
                     chunks_count = int(self._chunks_table.count_rows())
                 except Exception:
@@ -1322,22 +1342,45 @@ class LanceDBProvider(SerialDatabaseProvider):
                 if chunks_count <= 0:
                     return total_files, 0
 
-                try:
-                    chunks_df = self._chunks_table.head(chunks_count).to_pandas()
-                except Exception:
+                page_size = 10_000
+                file_ids_set = set(file_ids)
+
+                for offset in range(0, chunks_count, page_size):
                     try:
-                        self._chunks_table.optimize()
-                        chunks_df = self._chunks_table.head(chunks_count).to_pandas()
-                    except Exception:
+                        batch_df = self._chunks_table.to_pandas(
+                            offset=offset, limit=page_size
+                        )
+                    except TypeError:
+                        # LanceDB may not support offset/limit; fall back to a full load.
+                        if offset == 0:
+                            try:
+                                chunks_df = self._chunks_table.to_pandas()
+                            except Exception:
+                                try:
+                                    self._chunks_table.optimize()
+                                    chunks_df = self._chunks_table.to_pandas()
+                                except Exception:
+                                    return total_files, 0
+                            if "file_id" not in chunks_df.columns:
+                                return total_files, 0
+                            try:
+                                total_chunks = int(
+                                    chunks_df["file_id"].isin(list(file_ids_set)).sum()
+                                )
+                            except Exception:
+                                total_chunks = 0
+                        break
+
+                    if "file_id" not in batch_df.columns:
                         return total_files, 0
 
-                if "file_id" not in chunks_df.columns:
-                    return total_files, 0
+                    try:
+                        total_chunks += int(
+                            batch_df["file_id"].isin(list(file_ids_set)).sum()
+                        )
+                    except Exception:
+                        continue
 
-                try:
-                    total_chunks = int(chunks_df["file_id"].isin(list(file_ids)).sum())
-                except Exception:
-                    total_chunks = 0
                 return total_files, total_chunks
 
             # Root scope: counts over full tables.
@@ -1360,7 +1403,8 @@ class LanceDBProvider(SerialDatabaseProvider):
         try:
             if scope_prefix:
                 normalized = scope_prefix.replace("\\", "/")
-                like = f"{normalized}%"
+                escaped = normalized.replace("'", "''")
+                like = f"{escaped}%"
                 rows = self._files_table.search().where(
                     f"path LIKE '{like}'"
                 ).to_list()

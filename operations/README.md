@@ -73,7 +73,7 @@ Comprehensiveness:
   - HyDE scope file list cap scales with comprehensiveness (≈200/500/2000/3000/5000).
 
 Assembly LLM configuration (optional):
-- Autodoc’s HyDE planning and Agent Doc assembly can use a dedicated “assembly” model:
+- Autodoc’s HyDE planning (overview/PoI generation) can use a dedicated “assembly” model:
   - In `.chunkhound.json` under `llm`:
     - `assembly_provider` (e.g. `"codex-cli"` or `"openai"`)
     - `assembly_model` (or legacy `assembly_synthesis_model`)
@@ -82,8 +82,8 @@ Assembly LLM configuration (optional):
     - `CH_AGENT_DOC_ASSEMBLY_PROVIDER`
     - `CH_AGENT_DOC_ASSEMBLY_MODEL`
     - `CH_AGENT_DOC_ASSEMBLY_REASONING_EFFORT`
-- If none of these are set, autodoc and Agent Doc fall back to the synthesis
-  provider/model, and those values are recorded as the effective assembly
+- If none of these are set, autodoc falls back to the synthesis provider/model,
+  and those values are recorded as the effective assembly
   configuration.
 - In all cases, the effective assembly provider/model/effort are recorded in
   `agent_doc_metadata.llm_config` as `assembly_synthesis_provider`,
