@@ -279,6 +279,8 @@ def added_during_edit():
             Language.KOTLIN: ".kt",
             Language.MAKEFILE: "Makefile",  # Special case
             Language.MATLAB: ".m",
+            Language.VUE: ".vue",
+            Language.SVELTE: ".svelte",
         }
         
         created_files = []
