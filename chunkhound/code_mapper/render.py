@@ -5,6 +5,7 @@ from typing import Any
 from chunkhound.code_mapper.metadata import format_metadata_block
 from chunkhound.code_mapper.models import AgentDocMetadata
 from chunkhound.code_mapper.pipeline import _derive_heading_from_point, _slugify_heading
+from chunkhound.code_mapper.utils import safe_scope_label
 
 
 def render_overview_document(
@@ -63,7 +64,7 @@ def build_topic_artifacts(
     poi_sections: list[tuple[str, dict[str, Any]]],
 ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
     """Return topic file contents plus index entries for each topic."""
-    safe_scope = scope_label.replace("/", "_") or "root"
+    safe_scope = safe_scope_label(scope_label)
     topic_files: list[tuple[str, str]] = []
     index_entries: list[tuple[str, str]] = []
 

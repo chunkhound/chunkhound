@@ -8,6 +8,7 @@ from typing import Any
 from chunkhound.code_mapper.hyde import build_hyde_scope_prompt, run_hyde_only_query
 from chunkhound.code_mapper.models import AgentDocMetadata, HydeConfig
 from chunkhound.code_mapper.scope import collect_scope_files
+from chunkhound.code_mapper.utils import safe_scope_label
 from chunkhound.llm_manager import LLMManager
 
 
@@ -312,9 +313,9 @@ async def _run_code_mapper_overview_hyde(
     )
 
     meta = AgentDocMetadata(
-        created_from_sha="AUTODOC",
-        previous_target_sha="AUTODOC",
-        target_sha="AUTODOC",
+        created_from_sha="CODE_MAPPER",
+        previous_target_sha="CODE_MAPPER",
+        target_sha="CODE_MAPPER",
         generated_at=datetime.now(timezone.utc).isoformat(),
         llm_config={},
         generation_stats={"overview_mode": "hyde_scope_only"},
@@ -364,7 +365,7 @@ async def _run_code_mapper_overview_hyde(
     )
     if out_dir is not None and write_prompt:
         try:
-            safe_scope = scope_label.replace("/", "_") or "root"
+            safe_scope = safe_scope_label(scope_label)
             prompt_path = out_dir / f"hyde_scope_prompt_{safe_scope}.md"
             prompt_path.parent.mkdir(parents=True, exist_ok=True)
             prompt_path.write_text(overview_prompt, encoding="utf-8")
@@ -382,7 +383,7 @@ async def _run_code_mapper_overview_hyde(
     # context) alongside the prompt when an output directory is available.
     if out_dir is not None and overview_answer and overview_answer.strip():
         try:
-            safe_scope = scope_label.replace("/", "_") or "root"
+            safe_scope = safe_scope_label(scope_label)
             plan_path = out_dir / f"hyde_plan_{safe_scope}.md"
             plan_path.parent.mkdir(parents=True, exist_ok=True)
             plan_path.write_text(overview_answer, encoding="utf-8")

@@ -334,6 +334,12 @@ class CodexCLIProvider(LLMProvider):
                                 use_stdin,
                                 err,
                             )
+                        if add_skip_git and self._skip_git_flag_unsupported(err):
+                            add_skip_git = False
+                            logger.warning(
+                                "codex exec does not support --skip-git-repo-check; retrying without flag"
+                            )
+                            continue
                         # Skip-git repo check negotiation for newer Codex builds
                         if "skip-git-repo-check" in err and not add_skip_git:
                             add_skip_git = True
@@ -457,6 +463,19 @@ class CodexCLIProvider(LLMProvider):
         if system and system.strip():
             return f"System Instructions:\n{system.strip()}\n\nUser Request:\n{prompt}"
         return prompt
+
+    def _skip_git_flag_unsupported(self, err: str) -> bool:
+        lowered = err.lower()
+        if "--skip-git-repo-check" not in lowered:
+            return False
+        unsupported_markers = (
+            "unexpected argument",
+            "unknown option",
+            "unrecognized option",
+            "no such option",
+            "invalid option",
+        )
+        return any(marker in lowered for marker in unsupported_markers)
 
     # ----- LLMProvider interface -----
 

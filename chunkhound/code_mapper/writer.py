@@ -10,6 +10,7 @@ from chunkhound.code_mapper.render import (
     render_index_document,
 )
 from chunkhound.code_mapper.models import AgentDocMetadata
+from chunkhound.code_mapper.utils import safe_scope_label
 
 
 @dataclass
@@ -35,7 +36,7 @@ def write_code_mapper_outputs(
     """Write Code Mapper artifacts to disk and return their paths."""
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    safe_scope = scope_label.replace("/", "_") or "root"
+    safe_scope = safe_scope_label(scope_label)
     doc_path: Path | None = None
     index_path: Path | None = None
     topic_paths: list[Path] = []
