@@ -66,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Haskell language support for functions, types, classes, and modules (`.hs`, `.lhs`, `.hs-boot`, `.hsig`, `.hsc`)
 - HCL (HashiCorp Configuration Language) support for Terraform with nested object parsing (`.hcl`, `.tf`, `.tfvars`)
 - Vue.js Single File Component (SFC) support with specialized parsing for template, script, and style sections
+- Svelte Single File Component support with specialized parsing for template, script, and style sections (`.svelte`)
 - Vue cross-reference tracking between template elements and script definitions for enhanced semantic understanding
 - PHP language support with comprehensive parsing for classes, interfaces, traits, functions, methods, namespaces, and PHPDoc comments
 - RapidYAML parser using native bindings (10-100x faster than tree-sitter for large YAML files)
