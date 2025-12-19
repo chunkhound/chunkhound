@@ -18,7 +18,6 @@ The synthesis engine uses:
 """
 
 import asyncio
-import os
 from typing import Any
 
 from loguru import logger
@@ -398,30 +397,12 @@ class SynthesisEngine:
         file_reference_map = self._parent._build_file_reference_map(budgeted_chunks, files)
         reference_table = self._parent._format_reference_table(file_reference_map)
 
-        # Build output guidance. By default we ask for a thorough but curated
-        # analysis. When CH_CODE_RESEARCH_ELABORATE=1 (or
-        # CH_AGENT_DOC_CODE_RESEARCH_ELABORATE=1) is set in the environment,
-        # we instead bias strongly toward exhaustive, long-form documentation
-        # up to the full token budget so agent-doc style callers can generate
-        # richer material for downstream summarization.
-        elaborate_env = os.getenv("CH_CODE_RESEARCH_ELABORATE", "0") == "1" or (
-            os.getenv("CH_AGENT_DOC_CODE_RESEARCH_ELABORATE", "0") == "1"
+        # Default: curated but still detailed analysis.
+        output_guidance = (
+            f"**Target Output:** Provide a thorough and detailed analysis of approximately "
+            f"{max_output_tokens:,} tokens (includes reasoning). Focus on all relevant "
+            f"architectural layers, patterns, and implementation details with technical accuracy."
         )
-        if elaborate_env:
-            output_guidance = (
-                f"**Target Output (Elaborate Mode):** Produce an extremely detailed, long-form analysis "
-                f"that uses as much of the available {max_output_tokens:,} token budget as possible "
-                f"(including reasoning). Prefer breadth and depth over brevity: cover all major services, "
-                f"entrypoints, data models, algorithms, and operational considerations you can infer from "
-                f"the provided code and references, while keeping every technical claim grounded in citations."
-            )
-        else:
-            # Default: curated but still detailed analysis.
-            output_guidance = (
-                f"**Target Output:** Provide a thorough and detailed analysis of approximately "
-                f"{max_output_tokens:,} tokens (includes reasoning). Focus on all relevant "
-                f"architectural layers, patterns, and implementation details with technical accuracy."
-            )
 
         # Build comprehensive synthesis prompt (adapted from Code Expert methodology)
         system = prompts.SYNTHESIS_SYSTEM_BUILDER(output_guidance)
