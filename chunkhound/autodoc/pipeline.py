@@ -1,0 +1,387 @@
+from __future__ import annotations
+
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from chunkhound.autodoc.hyde import build_hyde_scope_prompt, run_hyde_only_query
+from chunkhound.autodoc.models import AgentDocMetadata, HydeConfig
+from chunkhound.autodoc.scope import collect_scope_files
+from chunkhound.llm_manager import LLMManager
+
+
+def _extract_points_of_interest(text: str, max_points: int = 10) -> list[str]:
+    """Extract up to max_points points of interest from a markdown list."""
+    seen: set[str] = set()
+    unique_points: list[str] = []
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        candidate = ""
+        # Numbered list: "1. heading ..." or "1) heading ..."
+        if stripped[0].isdigit():
+            idx = stripped.find(".")
+            if idx == -1:
+                idx = stripped.find(")")
+            if idx != -1:
+                candidate = stripped[idx + 1 :].strip()
+
+        # Bullet list: "- text" or "* text"
+        if not candidate and (stripped.startswith("- ") or stripped.startswith("* ")):
+            candidate = stripped[2:].strip()
+
+        if not candidate:
+            continue
+
+        if candidate not in seen:
+            seen.add(candidate)
+            unique_points.append(candidate)
+
+        if len(unique_points) >= max_points:
+            break
+
+    return unique_points[:max_points]
+
+
+def _derive_heading_from_point(point: str) -> str:
+    """Derive a short section heading from a point-of-interest bullet."""
+    text = point.strip()
+
+    # Strip leading markdown emphasis markers
+    if text.startswith("**") and "**" in text[2:]:
+        end = text.find("**", 2)
+        if end != -1:
+            text = text[2:end].strip()
+
+    # Split on colon or dash if present
+    for sep in (":", " - ", " — "):
+        if sep in text:
+            text = text.split(sep, 1)[0].strip()
+            break
+
+    # Fallback: truncate long headings
+    if len(text) > 80:
+        text = text[:77].rstrip() + "..."
+    return text or "Point of Interest"
+
+
+def _slugify_heading(heading: str) -> str:
+    """Convert a heading into a filesystem-friendly slug."""
+    text = heading.strip().lower()
+    # Replace non-alphanumeric characters with dashes
+    slug_chars: list[str] = []
+    prev_dash = False
+    for ch in text:
+        if ch.isalnum():
+            slug_chars.append(ch)
+            prev_dash = False
+        else:
+            if not prev_dash:
+                slug_chars.append("-")
+                prev_dash = True
+    slug = "".join(slug_chars).strip("-")
+    if not slug:
+        slug = "topic"
+    if len(slug) > 60:
+        slug = slug[:60].rstrip("-")
+    return slug
+
+
+def _merge_sources_metadata(
+    results: list[dict[str, Any]],
+) -> tuple[dict[str, str], list[dict[str, Any]], int | None, int | None]:
+    """Merge sources metadata from multiple deep-research calls."""
+    unified_source_files: dict[str, str] = {}
+    chunk_keys: set[tuple[str, int | None, int | None]] = set()
+    unified_chunks_dedup: list[dict[str, Any]] = []
+
+    # Track best-effort database totals (we use the last non-zero stats)
+    total_files_indexed: int | None = None
+    total_chunks_indexed: int | None = None
+
+    for result in results:
+        metadata = result.get("metadata") or {}
+        sources = metadata.get("sources") or {}
+
+        for file_path in sources.get("files") or []:
+            if file_path:
+                unified_source_files.setdefault(str(file_path), "")
+
+        for chunk in sources.get("chunks") or []:
+            file_path = chunk.get("file_path")
+            if not file_path:
+                continue
+            start_line = chunk.get("start_line")
+            end_line = chunk.get("end_line")
+            key = (
+                str(file_path),
+                int(start_line) if isinstance(start_line, int) else None,
+                int(end_line) if isinstance(end_line, int) else None,
+            )
+            if key not in chunk_keys:
+                chunk_keys.add(key)
+                unified_chunks_dedup.append(
+                    {
+                        "file_path": str(file_path),
+                        "start_line": key[1],
+                        "end_line": key[2],
+                    }
+                )
+
+        stats = metadata.get("aggregation_stats") or {}
+        files_total = stats.get("files_total")
+        chunks_total = stats.get("chunks_total")
+        if isinstance(files_total, int) and files_total > 0:
+            total_files_indexed = files_total
+        if isinstance(chunks_total, int) and chunks_total > 0:
+            total_chunks_indexed = chunks_total
+
+    return (
+        unified_source_files,
+        unified_chunks_dedup,
+        total_files_indexed,
+        total_chunks_indexed,
+    )
+
+
+def _is_empty_research_result(result: dict[str, Any]) -> bool:
+    """Return True when a deep-research result carries no useful content."""
+    answer = str(result.get("answer") or "").strip()
+    if not answer:
+        return True
+
+    metadata = result.get("metadata") or {}
+    if metadata.get("skipped_synthesis"):
+        return True
+
+    first_line = answer.splitlines()[0].strip()
+    if first_line.startswith("No relevant code context found for:"):
+        return True
+
+    return False
+
+
+def _coverage_summary_lines(
+    *,
+    referenced_files: int,
+    referenced_chunks: int,
+    files_denominator: int | None,
+    chunks_denominator: int | None,
+    scope_total_files: int,
+    scope_total_chunks: int,
+) -> list[str]:
+    lines: list[str] = ["## Coverage Summary", ""]
+
+    if files_denominator and files_denominator > 0:
+        file_cov = (referenced_files / files_denominator) * 100.0
+        scope_label_display = "this scope" if scope_total_files else "this database"
+        lines.append(
+            f"- Referenced files: {referenced_files} / {files_denominator} "
+            f"({file_cov:.2f}% of indexed files in {scope_label_display})."
+        )
+    else:
+        lines.append(
+            f"- Referenced files: {referenced_files} (database totals unavailable)."
+        )
+
+    if chunks_denominator and chunks_denominator > 0:
+        chunk_cov = (referenced_chunks / chunks_denominator) * 100.0
+        scope_label_display = "this scope" if scope_total_chunks else "this database"
+        lines.append(
+            f"- Referenced chunks: {referenced_chunks} / {chunks_denominator} "
+            f"({chunk_cov:.2f}% of indexed chunks in {scope_label_display})."
+        )
+    else:
+        lines.append(
+            f"- Referenced chunks: {referenced_chunks} (database totals unavailable)."
+        )
+
+    return lines
+
+
+async def _run_autodoc_overview_hyde(
+    llm_manager: LLMManager | None,
+    target_dir: Path,
+    scope_path: Path,
+    scope_label: str,
+    max_points: int = 10,
+    comprehensiveness: str = "medium",
+    out_dir: Path | None = None,
+    assembly_provider: Any | None = None,
+    indexing_cfg: Any | None = None,
+) -> tuple[str, list[str]]:
+    """Run a HyDE-style overview pass to identify points of interest."""
+    hyde_cfg = HydeConfig.from_env()
+
+    # Autodoc overview should stay well below Codex CLI argv/stdin limits.
+    # Callers can override the snippet token budget explicitly via
+    # CH_AUTODOC_HYDE_SNIPPET_TOKENS; otherwise, we map the CLI
+    # comprehensiveness level to a budget that controls how much of the
+    # *code* is sampled while keeping the file list at full scope.
+    override_tokens = os.getenv("CH_AUTODOC_HYDE_SNIPPET_TOKENS")
+    if override_tokens:
+        try:
+            parsed = int(override_tokens)
+            if parsed > 0:
+                hyde_cfg.max_snippet_tokens = parsed
+        except ValueError:
+            pass
+    else:
+        # Map comprehensiveness to a proportion of the underlying HyDE snippet
+        # budget. This only affects how much *code* is sampled for planning,
+        # not which files are considered in scope.
+        if comprehensiveness == "minimal":
+            target_tokens = 2_000
+        elif comprehensiveness == "low":
+            target_tokens = 10_000
+        elif comprehensiveness == "medium":
+            target_tokens = 20_000
+        elif comprehensiveness == "high":
+            target_tokens = 35_000
+        elif comprehensiveness == "ultra":
+            target_tokens = 50_000
+        else:
+            target_tokens = 20_000
+
+        if hyde_cfg.max_snippet_tokens > target_tokens:
+            hyde_cfg.max_snippet_tokens = target_tokens
+
+    # Hard cap the HyDE file list. This keeps the scope prompt readable and
+    # prevents huge repos from spending most of the context window on file paths.
+    if comprehensiveness == "minimal":
+        scope_file_cap = 200
+    elif comprehensiveness == "low":
+        scope_file_cap = 500
+    elif comprehensiveness == "medium":
+        scope_file_cap = 2000
+    elif comprehensiveness == "high":
+        scope_file_cap = 3000
+    elif comprehensiveness == "ultra":
+        scope_file_cap = 5000
+    else:
+        scope_file_cap = 2000
+
+    # Respect an explicit env override for CH_AGENT_DOC_HYDE_MAX_SCOPE_FILES,
+    # but still enforce the hard cap.
+    if os.getenv("CH_AGENT_DOC_HYDE_MAX_SCOPE_FILES"):
+        if hyde_cfg.max_scope_files > scope_file_cap:
+            hyde_cfg.max_scope_files = scope_file_cap
+    else:
+        hyde_cfg.max_scope_files = scope_file_cap
+
+    include_patterns = None
+    indexing_excludes = None
+    ignore_sources = None
+    gitignore_backend = "python"
+    workspace_root_only_gitignore: bool | None = None
+    try:
+        if indexing_cfg is not None:
+            include_patterns = list(getattr(indexing_cfg, "include", None) or [])
+            get_exc = getattr(indexing_cfg, "get_effective_config_excludes", None)
+            if callable(get_exc):
+                indexing_excludes = list(get_exc())
+            get_sources = getattr(indexing_cfg, "resolve_ignore_sources", None)
+            if callable(get_sources):
+                ignore_sources = list(get_sources())
+            gitignore_backend = str(
+                getattr(indexing_cfg, "gitignore_backend", "python")
+            )
+            workspace_root_only_gitignore = getattr(
+                indexing_cfg, "workspace_gitignore_nonrepo", None
+            )
+    except Exception:
+        include_patterns = None
+        indexing_excludes = None
+        ignore_sources = None
+        gitignore_backend = "python"
+        workspace_root_only_gitignore = None
+
+    file_paths = collect_scope_files(
+        scope_path=scope_path,
+        project_root=target_dir,
+        hyde_cfg=hyde_cfg,
+        include_patterns=include_patterns,
+        indexing_excludes=indexing_excludes,
+        ignore_sources=ignore_sources,
+        gitignore_backend=gitignore_backend,
+        workspace_root_only_gitignore=workspace_root_only_gitignore,
+    )
+
+    meta = AgentDocMetadata(
+        created_from_sha="AUTODOC",
+        previous_target_sha="AUTODOC",
+        target_sha="AUTODOC",
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        llm_config={},
+        generation_stats={"overview_mode": "hyde_scope_only"},
+    )
+
+    hyde_scope_prompt = build_hyde_scope_prompt(
+        meta=meta,
+        scope_label=scope_label,
+        file_paths=file_paths,
+        hyde_cfg=hyde_cfg,
+        project_root=target_dir,
+    )
+
+    # Provide an explicit, comprehensiveness-aware target for the number of
+    # points of interest so HyDE can bias its list length accordingly.
+    poi_target_line = (
+        f"- Identify up to {max_points} points of interest for this scoped project. "
+        "Prioritize the most important architectural or operational areas first, "
+        "but you may include slightly less critical topics to use the full budget "
+        "when appropriate.\n"
+    )
+
+    overview_prompt = (
+        f"{hyde_scope_prompt}\n\n"
+        "HyDE objective (override for autodoc):\n"
+        "- Instead of writing a full deep-wiki style documentation, focus on a "
+        "concise\n"
+        "  planning pass for deep code research.\n"
+        f"{poi_target_line}\n"
+        "Output format:\n"
+        "- Produce ONLY a numbered markdown list (1., 2., 3., ...).\n"
+        "- For each item, include:\n"
+        "  - A short heading (you may use bold), and\n"
+        "  - 1–2 sentences summarizing why this area is important.\n"
+        "- Do not include any other sections or prose; just the numbered list.\n"
+    )
+
+    # Optional debugging/traceability: when out_dir is provided, persist the
+    # exact PoI-generation prompt (scope + HyDE objective).
+    if out_dir is not None:
+        try:
+            safe_scope = scope_label.replace("/", "_") or "root"
+            prompt_path = out_dir / f"hyde_scope_prompt_{safe_scope}.md"
+            prompt_path.parent.mkdir(parents=True, exist_ok=True)
+            prompt_path.write_text(overview_prompt, encoding="utf-8")
+        except Exception:
+            pass
+
+    overview_answer = await run_hyde_only_query(
+        llm_manager=llm_manager,
+        prompt=overview_prompt,
+        provider_override=assembly_provider,
+        hyde_cfg=hyde_cfg,
+    )
+
+    # Persist the HyDE overview plan itself (the PoI list and any surrounding
+    # context) alongside the prompt when an output directory is available.
+    if out_dir is not None and overview_answer and overview_answer.strip():
+        try:
+            safe_scope = scope_label.replace("/", "_") or "root"
+            plan_path = out_dir / f"hyde_plan_{safe_scope}.md"
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            plan_path.write_text(overview_answer, encoding="utf-8")
+        except Exception:
+            pass
+
+    points_of_interest = _extract_points_of_interest(
+        overview_answer, max_points=max_points
+    )
+    return overview_answer, points_of_interest

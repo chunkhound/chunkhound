@@ -4,6 +4,7 @@ from typing import Any
 import pytest
 
 import chunkhound.api.cli.commands.autodoc as autodoc_mod
+from chunkhound.autodoc import service as autodoc_service
 from chunkhound.core.config.config import Config
 
 
@@ -158,10 +159,10 @@ async def test_autodoc_end_to_end_writes_index_and_topics(
         autodoc_mod, "LLMManager", DummyLLMManager
     )
     monkeypatch.setattr(
-        autodoc_mod, "_run_autodoc_overview_hyde", fake_overview, raising=True
+        autodoc_service, "_run_autodoc_overview_hyde", fake_overview, raising=True
     )
     monkeypatch.setattr(
-        autodoc_mod, "deep_research_impl", fake_deep_research_impl, raising=True
+        autodoc_service, "deep_research_impl", fake_deep_research_impl, raising=True
     )
 
     class Args:

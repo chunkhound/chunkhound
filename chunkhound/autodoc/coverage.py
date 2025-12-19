@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Iterable
 
 
 def compute_db_scope_stats(
@@ -37,3 +37,36 @@ def compute_db_scope_stats(
         return 0, 0, set()
 
     return scope_total_files, scope_total_chunks, scoped_files
+
+
+def compute_unreferenced_scope_files(
+    services: Any,
+    scope_label: str,
+    referenced_files: Iterable[str],
+) -> list[str] | None:
+    """Return list of unreferenced files for the scope, or None if unavailable."""
+    try:
+        provider = getattr(services, "provider", None)
+        get_scope_file_paths = getattr(provider, "get_scope_file_paths", None)
+        if not callable(get_scope_file_paths):
+            return None
+
+        prefix = None if scope_label == "/" else scope_label.rstrip("/") + "/"
+        all_files = get_scope_file_paths(prefix)
+        referenced_set = {
+            str(p).replace("\\", "/")
+            for p in referenced_files
+            if p
+            and (
+                not prefix
+                or str(p).replace("\\", "/").startswith(prefix)
+            )
+        }
+        unreferenced = [
+            str(p).replace("\\", "/")
+            for p in all_files
+            if p and str(p).replace("\\", "/") not in referenced_set
+        ]
+        return unreferenced
+    except Exception:
+        return None

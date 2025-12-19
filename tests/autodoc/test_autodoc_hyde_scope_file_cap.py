@@ -3,7 +3,7 @@ from typing import Any
 
 import pytest
 
-import chunkhound.api.cli.commands.autodoc as autodoc_mod
+from chunkhound.autodoc import pipeline as autodoc_pipeline
 
 
 @pytest.mark.asyncio
@@ -22,11 +22,17 @@ async def test_autodoc_hyde_scope_file_cap_scales_with_comprehensiveness(
     async def fake_run_hyde_only_query(*_: Any, **__: Any) -> str:
         return "1. Example\n"
 
-    monkeypatch.setattr(autodoc_mod, "collect_scope_files", fake_collect_scope_files)
-    monkeypatch.setattr(autodoc_mod, "build_hyde_scope_prompt", fake_build_hyde_scope_prompt)
-    monkeypatch.setattr(autodoc_mod, "run_hyde_only_query", fake_run_hyde_only_query)
+    monkeypatch.setattr(
+        autodoc_pipeline, "collect_scope_files", fake_collect_scope_files
+    )
+    monkeypatch.setattr(
+        autodoc_pipeline, "build_hyde_scope_prompt", fake_build_hyde_scope_prompt
+    )
+    monkeypatch.setattr(
+        autodoc_pipeline, "run_hyde_only_query", fake_run_hyde_only_query
+    )
 
-    await autodoc_mod._run_autodoc_overview_hyde(
+    await autodoc_pipeline._run_autodoc_overview_hyde(
         llm_manager=None,
         target_dir=tmp_path,
         scope_path=tmp_path,
@@ -37,7 +43,7 @@ async def test_autodoc_hyde_scope_file_cap_scales_with_comprehensiveness(
         assembly_provider=None,
         indexing_cfg=None,
     )
-    await autodoc_mod._run_autodoc_overview_hyde(
+    await autodoc_pipeline._run_autodoc_overview_hyde(
         llm_manager=None,
         target_dir=tmp_path,
         scope_path=tmp_path,
@@ -50,4 +56,3 @@ async def test_autodoc_hyde_scope_file_cap_scales_with_comprehensiveness(
     )
 
     assert seen_caps == [200, 5000]
-

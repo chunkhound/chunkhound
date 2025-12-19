@@ -1,4 +1,4 @@
-from chunkhound.api.cli.commands.autodoc import (
+from chunkhound.autodoc.pipeline import (
     _is_empty_research_result,
     _merge_sources_metadata,
 )

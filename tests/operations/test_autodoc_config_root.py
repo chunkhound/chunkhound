@@ -4,6 +4,7 @@ from typing import Any
 import pytest
 
 import chunkhound.api.cli.commands.autodoc as autodoc_mod
+from chunkhound.autodoc import pipeline as autodoc_pipeline
 from chunkhound.core.config.config import Config
 
 
@@ -35,9 +36,8 @@ async def test_autodoc_overview_only_uses_config_dir_as_root_and_sets_default_db
     async def fake_overview(*_: Any, **__: Any) -> tuple[str, list[str]]:
         return "1. Example\n", ["Example"]
 
-    monkeypatch.setattr(autodoc_mod, "_run_autodoc_overview_hyde", fake_overview)
+    monkeypatch.setattr(autodoc_pipeline, "_run_autodoc_overview_hyde", fake_overview)
     monkeypatch.setattr(autodoc_mod, "verify_database_exists", lambda *_: (_ for _ in ()).throw(AssertionError("verify_database_exists should not run in overview-only")))
-    monkeypatch.setattr(autodoc_mod, "build_llm_metadata_and_assembly", lambda **_: ({}, None))
 
     class Args:
         def __init__(self) -> None:
@@ -80,9 +80,8 @@ async def test_autodoc_does_not_override_explicit_db_path_from_config_file(
     async def fake_overview(*_: Any, **__: Any) -> tuple[str, list[str]]:
         return "1. Example\n", ["Example"]
 
-    monkeypatch.setattr(autodoc_mod, "_run_autodoc_overview_hyde", fake_overview)
+    monkeypatch.setattr(autodoc_pipeline, "_run_autodoc_overview_hyde", fake_overview)
     monkeypatch.setattr(autodoc_mod, "verify_database_exists", lambda *_: (_ for _ in ()).throw(AssertionError("verify_database_exists should not run in overview-only")))
-    monkeypatch.setattr(autodoc_mod, "build_llm_metadata_and_assembly", lambda **_: ({}, None))
 
     class Args:
         def __init__(self) -> None:

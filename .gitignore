@@ -1,6 +1,4 @@
 .DS_Store
-.tmp-docs/
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -287,3 +285,6 @@ chunkhound/_version.py
 
 # metrics
 cluster_eval.json
+
+# Temporary documentation
+.tmp-docs/
