@@ -135,7 +135,7 @@ class BudgetCalculator:
 
         # Optional hard cap for synthesis input tokens, primarily to keep
         # external LLM transports like codex exec within argv/stdin limits
-        # when used in higher-level tools (e.g., autodoc).
+        # when used in higher-level tools (e.g., code_mapper).
         env_cap = os.getenv("CHUNKHOUND_SYNTHESIS_INPUT_TOKENS_MAX")
         if env_cap:
             try:

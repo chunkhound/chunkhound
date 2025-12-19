@@ -247,7 +247,7 @@ class DatabaseProvider(Protocol):
         ...
 
     # ---------------------------------------------------------------------
-    # Optional scope aggregation helpers (used by autodoc coverage)
+    # Optional scope aggregation helpers (used by code_mapper coverage)
     # ---------------------------------------------------------------------
     def get_scope_stats(self, scope_prefix: str | None) -> tuple[int, int]:
         """Return (total_files, total_chunks) under an optional scope prefix.

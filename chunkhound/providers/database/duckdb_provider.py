@@ -1685,7 +1685,7 @@ class DuckDBProvider(SerialDatabaseProvider):
     def get_scope_stats(self, scope_prefix: str | None) -> tuple[int, int]:
         """Return (total_files, total_chunks) under an optional scope prefix.
 
-        This is used by autodoc coverage and must avoid loading full chunk code.
+        This is used by code_mapper coverage and must avoid loading full chunk code.
         """
         return self._execute_in_db_thread_sync("get_scope_stats", scope_prefix)
 

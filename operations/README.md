@@ -16,7 +16,7 @@ These scripts are intended for local investigation and validation of
 operational assumptions; they should not be imported by production code.
 
 
-## Autodoc (agent-facing docs)
+## Code Mapper (agent-facing docs)
 
 Generate HyDE-planned, deep-research-based documentation for a scoped folder.
 
@@ -28,21 +28,21 @@ Basic usage (single project, auto config detection):
 
 ```bash
 # From project root that already has .chunkhound.json and a ChunkHound DB
-chunkhound autodoc . --out-dir .autodoc
+chunkhound code_mapper . --out-dir .code_mapper
 ```
 
 Explicit config override:
 
 ```bash
 # Agent doc for current folder, using an explicit config file
-chunkhound autodoc . \
+chunkhound code_mapper . \
   --config .chunkhound.json \
-  --out-dir .autodoc
+  --out-dir .code_mapper
 
-# Plan-only: print HyDE points of interest, write HyDE prompt/plan to .autodoc/
-chunkhound autodoc . \
+# Plan-only: print HyDE points of interest, write HyDE prompt/plan to .code_mapper/
+chunkhound code_mapper . \
   --config .chunkhound.json \
-  --out-dir .autodoc \
+  --out-dir .code_mapper \
   --overview-only
 ```
 
@@ -50,9 +50,9 @@ Workspace example (shared index across multiple projects):
 
 ```bash
 # Workspace-level config and DB under /workspaces
-chunkhound autodoc arguseek \
+chunkhound code_mapper arguseek \
   --config /workspaces/.chunkhound.json \
-  --out-dir /workspaces/arguseek/.autodoc
+  --out-dir /workspaces/arguseek/.code_mapper
 ```
 
 Path resolution semantics:
@@ -60,9 +60,9 @@ Path resolution semantics:
   project root (where it finds `.chunkhound.json`) based on your current
   directory; the `path` positional argument is resolved relative to that root.
 - If you pass `--config /path/to/.chunkhound.json`, the directory containing
-  that file acts as the logical root for autodoc; `path` is interpreted
+  that file acts as the logical root for Code Mapper; `path` is interpreted
   relative to that root (e.g. `arguseek`, `arguseek/backend`).
-- If you set `CHUNKHOUND_CONFIG_FILE` to a workspace-level config, autodoc
+- If you set `CHUNKHOUND_CONFIG_FILE` to a workspace-level config, Code Mapper
   treats that workspace directory as the root and resolves `path` relative to
   it, regardless of your current working directory.
 
@@ -73,7 +73,7 @@ Comprehensiveness:
   - HyDE scope file list cap scales with comprehensiveness (≈200/500/2000/3000/5000).
 
 Assembly LLM configuration (optional):
-- Autodoc’s HyDE planning (overview/PoI generation) can use a dedicated “assembly” model:
+- Code Mapper's HyDE planning (overview/PoI generation) can use a dedicated “assembly” model:
   - In `.chunkhound.json` under `llm`:
     - `assembly_provider` (e.g. `"codex-cli"` or `"openai"`)
     - `assembly_model` (or legacy `assembly_synthesis_model`)
@@ -82,7 +82,7 @@ Assembly LLM configuration (optional):
     - `CH_AGENT_DOC_ASSEMBLY_PROVIDER`
     - `CH_AGENT_DOC_ASSEMBLY_MODEL`
     - `CH_AGENT_DOC_ASSEMBLY_REASONING_EFFORT`
-- If none of these are set, autodoc falls back to the synthesis provider/model,
+- If none of these are set, Code Mapper falls back to the synthesis provider/model,
   and those values are recorded as the effective assembly
   configuration.
 - In all cases, the effective assembly provider/model/effort are recorded in
@@ -94,5 +94,5 @@ Outputs:
 - In `--overview-only` mode:
   - HyDE scope prompt + PoI plan written under `--out-dir`.
 - In full mode (default):
-  - `<scope>_autodoc_index.md` listing all topics.
+  - `<scope>_code_mapper_index.md` listing all topics.
   - One `<scope>_topic_NN_<slug>.md` file per non-empty topic.

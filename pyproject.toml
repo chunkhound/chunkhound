@@ -116,7 +116,7 @@ version-file = "chunkhound/_version.py"
 include = [
     "chunkhound/**/*.py",
     "chunkhound/py.typed",
-    "chunkhound/autodoc/prompts/*.md",
+    "chunkhound/code_mapper/prompts/*.md",
     "tests/fixtures/yaml/**/*",
 ]
 
