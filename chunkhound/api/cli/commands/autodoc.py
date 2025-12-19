@@ -294,6 +294,13 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
         )
 
     out_dir = Path(out_dir_arg).resolve()
+    include_combined = os.getenv("CH_AUTODOC_WRITE_COMBINED", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    )
     write_result = write_autodoc_outputs(
         out_dir=out_dir,
         scope_label=scope.scope_label,
@@ -302,10 +309,12 @@ async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
         poi_sections=poi_sections,
         coverage_lines=coverage_lines,
         include_topics=not getattr(args, "overview_only", False),
+        include_combined=include_combined,
         unreferenced_files=unreferenced,
     )
 
     formatter.success("Autodoc complete.")
-    formatter.info(f"Wrote combined doc: {write_result.doc_path}")
+    if write_result.doc_path is not None:
+        formatter.info(f"Wrote combined doc: {write_result.doc_path}")
     if write_result.index_path is not None:
         formatter.info(f"Wrote topics index: {write_result.index_path}")

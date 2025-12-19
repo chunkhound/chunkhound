@@ -352,9 +352,17 @@ async def _run_autodoc_overview_hyde(
         "- Do not include any other sections or prose; just the numbered list.\n"
     )
 
-    # Optional debugging/traceability: when out_dir is provided, persist the
-    # exact PoI-generation prompt (scope + HyDE objective).
-    if out_dir is not None:
+    # Optional debugging/traceability: when out_dir is provided and explicitly
+    # enabled via CH_AUTODOC_WRITE_HYDE_PROMPT, persist the exact PoI-generation
+    # prompt (scope + HyDE objective).
+    write_prompt = os.getenv("CH_AUTODOC_WRITE_HYDE_PROMPT", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    )
+    if out_dir is not None and write_prompt:
         try:
             safe_scope = scope_label.replace("/", "_") or "root"
             prompt_path = out_dir / f"hyde_scope_prompt_{safe_scope}.md"

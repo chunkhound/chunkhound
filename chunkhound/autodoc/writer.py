@@ -14,7 +14,7 @@ from chunkhound.autodoc.models import AgentDocMetadata
 
 @dataclass
 class AutodocWriteResult:
-    doc_path: Path
+    doc_path: Path | None
     index_path: Path | None
     topic_paths: list[Path]
     unref_path: Path | None
@@ -29,13 +29,14 @@ def write_autodoc_outputs(
     poi_sections: list[tuple[str, dict[str, Any]]],
     coverage_lines: list[str],
     include_topics: bool,
+    include_combined: bool,
     unreferenced_files: list[str] | None = None,
 ) -> AutodocWriteResult:
     """Write autodoc artifacts to disk and return their paths."""
     out_dir.mkdir(parents=True, exist_ok=True)
 
     safe_scope = scope_label.replace("/", "_") or "root"
-    doc_path = out_dir / f"{safe_scope}_autodoc.md"
+    doc_path: Path | None = None
     index_path: Path | None = None
     topic_paths: list[Path] = []
     unref_path: Path | None = None
@@ -74,14 +75,16 @@ def write_autodoc_outputs(
         index_path = out_dir / f"{safe_scope}_autodoc_index.md"
         index_path.write_text(index_doc, encoding="utf-8")
 
-    doc_content = render_combined_document(
-        meta=meta,
-        scope_label=scope_label,
-        overview_answer=overview_answer,
-        poi_sections=poi_sections,
-        coverage_lines=coverage_lines,
-    )
-    doc_path.write_text(doc_content, encoding="utf-8")
+    if include_combined:
+        doc_path = out_dir / f"{safe_scope}_autodoc.md"
+        doc_content = render_combined_document(
+            meta=meta,
+            scope_label=scope_label,
+            overview_answer=overview_answer,
+            poi_sections=poi_sections,
+            coverage_lines=coverage_lines,
+        )
+        doc_path.write_text(doc_content, encoding="utf-8")
 
     return AutodocWriteResult(
         doc_path=doc_path,

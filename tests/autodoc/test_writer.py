@@ -24,6 +24,7 @@ def test_write_autodoc_outputs_without_topics(tmp_path: Path) -> None:
         poi_sections=[],
         coverage_lines=["## Coverage Summary", ""],
         include_topics=False,
+        include_combined=True,
         unreferenced_files=None,
     )
 
@@ -43,6 +44,7 @@ def test_write_autodoc_outputs_with_topics_and_unreferenced(tmp_path: Path) -> N
         poi_sections=[("Core Flow", {"answer": "Section body"})],
         coverage_lines=["## Coverage Summary", ""],
         include_topics=True,
+        include_combined=True,
         unreferenced_files=["scope/a.py", "scope/b.py"],
     )
 

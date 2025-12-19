@@ -164,6 +164,7 @@ async def test_autodoc_end_to_end_writes_index_and_topics(
     monkeypatch.setattr(
         autodoc_service, "deep_research_impl", fake_deep_research_impl, raising=True
     )
+    monkeypatch.setenv("CH_AUTODOC_WRITE_COMBINED", "1")
 
     class Args:
         def __init__(self) -> None:
