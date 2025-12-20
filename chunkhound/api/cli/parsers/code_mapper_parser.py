@@ -63,7 +63,8 @@ def add_code_mapper_subparser(subparsers: Any) -> argparse.ArgumentParser:
         required=True,
         help=(
             "Directory where an index file and one markdown file per point of "
-            "interest will be written (plus a combined Code Mapper markdown file)."
+            "interest will be written. Set CH_CODE_MAPPER_WRITE_COMBINED=1 to also "
+            "write a combined Code Mapper markdown file."
         ),
     )
 

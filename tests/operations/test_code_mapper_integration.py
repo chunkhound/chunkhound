@@ -50,21 +50,13 @@ class DummyLLMManager:
         return self._configured
 
 
-@pytest.mark.asyncio
-async def test_code_mapper_end_to_end_writes_index_and_topics(
+async def _run_code_mapper_with_stubs(
+    *,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Code Mapper should emit a combined doc and per-topic files when out-dir is set.
-
-    This is a lightweight integration test that exercises the code_mapper command
-    with stubbed services and deep-research behavior. It verifies that:
-    - the main document is printed to stdout with a metadata header,
-    - coverage stats are computed without crashing, and
-    - an index file plus one markdown file per point-of-interest are written.
-    """
-
+    set_combined: bool,
+) -> tuple[Path, str, list[int]]:
     project_root = tmp_path / "repo"
     scope_path = project_root / "scope"
     scope_path.mkdir(parents=True, exist_ok=True)
@@ -155,16 +147,18 @@ async def test_code_mapper_end_to_end_writes_index_and_topics(
         "create_services",
         lambda db_path, config, embedding_manager: DummyServices(),
     )
-    monkeypatch.setattr(
-        code_mapper_mod, "LLMManager", DummyLLMManager
-    )
+    monkeypatch.setattr(code_mapper_mod, "LLMManager", DummyLLMManager)
     monkeypatch.setattr(
         code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview, raising=True
     )
     monkeypatch.setattr(
         code_mapper_service, "deep_research_impl", fake_deep_research_impl, raising=True
     )
-    monkeypatch.setenv("CH_CODE_MAPPER_WRITE_COMBINED", "1")
+
+    if set_combined:
+        monkeypatch.setenv("CH_CODE_MAPPER_WRITE_COMBINED", "1")
+    else:
+        monkeypatch.delenv("CH_CODE_MAPPER_WRITE_COMBINED", raising=False)
 
     class Args:
         def __init__(self) -> None:
@@ -178,24 +172,37 @@ async def test_code_mapper_end_to_end_writes_index_and_topics(
 
     await code_mapper_mod.code_mapper_command(args, config)
     captured = capsys.readouterr().out
+    return args.out_dir, captured, seen_max_points
 
+
+@pytest.mark.asyncio
+async def test_code_mapper_end_to_end_default_omits_combined_doc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Code Mapper should skip the combined doc by default and still write topics.
+
+    This is a lightweight integration test that exercises the code_mapper command
+    with stubbed services and deep-research behavior. It verifies that:
+    - the main document is not printed to stdout,
+    - coverage stats are computed without crashing,
+    - an index file plus one markdown file per point-of-interest are written, and
+    - the combined doc is omitted unless explicitly enabled.
+    """
+
+    out_dir, captured, seen_max_points = await _run_code_mapper_with_stubs(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        capsys=capsys,
+        set_combined=False,
+    )
     # Default behavior: avoid printing the full document to stdout.
     assert "# Code Mapper for" not in captured
     assert "## Coverage Summary" not in captured
 
-    # Out-dir should contain an index and topic files.
-    out_dir = args.out_dir
-
     combined_docs = list(out_dir.glob("*_code_mapper.md"))
-    assert combined_docs, "Expected a combined Code Mapper document to be written"
-    combined_content = combined_docs[0].read_text(encoding="utf-8")
-    assert "agent_doc_metadata:" in combined_content
-    assert "code_mapper_comprehensiveness: low" in combined_content
-    assert "# Code Mapper for" in combined_content
-    assert "## Coverage Summary" in combined_content
-    # Skipping the first POI should renumber topics contiguously and keep
-    # headings aligned with the surviving result.
-    assert "## 1. Error Handling" in combined_content
+    assert not combined_docs, "Combined Code Mapper doc should be disabled by default"
 
     index_files = list(out_dir.glob("*_code_mapper_index.md"))
     assert index_files, "Expected a Code Mapper index file to be written"
@@ -221,3 +228,34 @@ async def test_code_mapper_end_to_end_writes_index_and_topics(
     # Comprehensiveness=low should map to fewer max_points for the overview.
     assert seen_max_points, "Expected fake_overview to be called"
     assert seen_max_points[0] == 5
+
+
+@pytest.mark.asyncio
+async def test_code_mapper_end_to_end_combined_doc_requires_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Combined Code Mapper doc should be written only when the env flag is set."""
+
+    out_dir, captured, _ = await _run_code_mapper_with_stubs(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        capsys=capsys,
+        set_combined=True,
+    )
+
+    # Default behavior: avoid printing the full document to stdout.
+    assert "# Code Mapper for" not in captured
+    assert "## Coverage Summary" not in captured
+
+    combined_docs = list(out_dir.glob("*_code_mapper.md"))
+    assert combined_docs, "Expected a combined Code Mapper document to be written"
+    combined_content = combined_docs[0].read_text(encoding="utf-8")
+    assert "agent_doc_metadata:" in combined_content
+    assert "code_mapper_comprehensiveness: low" in combined_content
+    assert "# Code Mapper for" in combined_content
+    assert "## Coverage Summary" in combined_content
+    # Skipping the first POI should renumber topics contiguously and keep
+    # headings aligned with the surviving result.
+    assert "## 1. Error Handling" in combined_content

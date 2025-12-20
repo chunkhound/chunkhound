@@ -91,7 +91,8 @@ Assembly LLM configuration (optional):
 
 Outputs:
 - Combined document written under `--out-dir` when `CH_CODE_MAPPER_WRITE_COMBINED=1`
-  (includes `agent_doc_metadata` header and coverage summary; stdout prints paths only).
+  (disabled by default; includes `agent_doc_metadata` header and coverage summary;
+  stdout prints paths only).
 - In `--overview-only` mode:
   - HyDE scope prompt + PoI plan written under `--out-dir`.
 - In full mode (default):
