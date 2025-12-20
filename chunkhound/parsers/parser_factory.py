@@ -660,6 +660,12 @@ class ParserFactory:
 
             return VueParser(cast_config)
 
+        # Special case: Svelte uses custom parser
+        if language == Language.SVELTE:
+            from chunkhound.parsers.svelte_parser import SvelteParser
+
+            return SvelteParser(cast_config)
+
         # Use cache to avoid recreating parsers
         cache_key = self._cache_key(language)
         if cache_key in self._parser_cache:

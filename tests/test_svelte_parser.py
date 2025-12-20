@@ -154,6 +154,8 @@ class TestSvelteEndToEnd:
 
     def test_parse_complete_component(self):
         """Test parsing a complete Svelte component."""
+        from chunkhound.core.types.common import FileId
+
         svelte_content = """
 <script lang="ts">
   export let name: string = 'World';
@@ -176,8 +178,34 @@ class TestSvelteEndToEnd:
         parser = create_parser_for_language(Language.SVELTE)
         assert parser is not None
 
-        # Parser should handle Svelte content without errors
-        # (Actual parsing will use TypeScript for script sections)
+        # Actually parse the content
+        chunks = parser.parse_content(svelte_content, Path("test.svelte"), FileId(1))
+
+        # Validate that we got chunks back
+        assert len(chunks) > 0, "Parser should return chunks"
+
+        # Validate script chunks exist
+        script_chunks = [
+            c for c in chunks if c.metadata.get("svelte_section") == "script"
+        ]
+        assert len(script_chunks) > 0, "Should have script chunks"
+
+        # Validate template chunks exist
+        template_chunks = [
+            c for c in chunks if c.metadata.get("svelte_section") == "template"
+        ]
+        assert len(template_chunks) > 0, "Should have template chunks"
+
+        # Validate style chunks exist
+        style_chunks = [
+            c for c in chunks if c.metadata.get("svelte_section") == "style"
+        ]
+        assert len(style_chunks) > 0, "Should have style chunks"
+
+        # Validate all chunks are marked as Svelte SFC
+        for chunk in chunks:
+            assert chunk.language == Language.SVELTE
+            assert chunk.metadata.get("is_svelte_sfc") is True
 
     def test_svelte_component_without_script(self):
         """Test parsing Svelte component without script section."""

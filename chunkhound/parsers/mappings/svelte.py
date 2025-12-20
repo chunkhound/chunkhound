@@ -22,13 +22,9 @@ structure of Svelte Single File Components (.svelte files).
 """
 
 import re
-from typing import TYPE_CHECKING
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.typescript import TypeScriptMapping
-
-if TYPE_CHECKING:
-    pass
 
 
 class SvelteMapping(TypeScriptMapping):
