@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import subprocess
 import sys
 import webbrowser
 from pathlib import Path
@@ -616,6 +617,17 @@ def _filter_reranking_models(models: list[str]) -> list[str]:
     return reranking_models
 
 
+def _detect_opencode() -> bool:
+    """Check if opencode CLI is installed"""
+    try:
+        result = subprocess.run(
+            ["opencode", "--version"], capture_output=True, text=True, timeout=5
+        )
+        return result.returncode == 0
+    except (subprocess.SubprocessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
 def _should_run_setup_wizard(validation_errors: list[str]) -> bool:
     """Check if we should offer interactive setup wizard"""
     # Only run in interactive terminal
@@ -673,7 +685,8 @@ def _display_detected_configs(
                 table.add_row(f"• {provider_name} configured via environment")
             else:
                 table.add_row(
-                    f"• {provider_name} server detected at {config.get('base_url', 'unknown')}"
+                        f"• {provider_name} server detected at "
+                        f"{config.get('base_url', 'unknown')}"
                 )
 
     if formatter.console is not None:
@@ -689,7 +702,8 @@ def _display_detected_configs(
                 elif provider == "local":
                     provider_name = config.get("provider_name", "Unknown")
                     print(
-                        f"• {provider_name} server detected at {config.get('base_url', 'unknown')}"
+                    f"• {provider_name} server detected at "
+                    f"{config.get('base_url', 'unknown')}"
                     )
 
 
@@ -801,6 +815,7 @@ async def _select_agent() -> str:
     choices = [
         ("Claude Code - Official Anthropic CLI", "claude_code"),
         ("VS Code - Microsoft Visual Studio Code", "vscode"),
+        ("OpenCode - Open source coding agent", "opencode"),
         ("Skip - Configure manually later", "skip"),
     ]
 
@@ -841,7 +856,8 @@ async def _setup_claude_code(target_path: Path, formatter: RichOutputFormatter) 
         formatter.success(f"✓ ChunkHound MCP server added to {mcp_path}")
         print("You can now use ChunkHound tools directly in Claude Code!")
         print(
-            "Claude Code will prompt you to approve this project-scoped server on first use."
+            "Claude Code will prompt you to approve this project-scoped "
+            "server on first use."
         )
         return True
     else:
@@ -955,6 +971,29 @@ def _write_claude_mcp_config(mcp_path: Path, config: dict[str, Any]) -> bool:
         return False
 
 
+def _read_opencode_config(opencode_path: Path) -> dict[str, Any]:
+    """Read existing opencode.json or return empty structure"""
+    if opencode_path.exists():
+        try:
+            with open(opencode_path, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            # If file is corrupted or unreadable, start fresh
+            pass
+
+    return {}  # Return empty dict, not {"mcp": {}} since file might not exist
+
+
+def _write_opencode_config(opencode_path: Path, config: dict[str, Any]) -> bool:
+    """Write opencode.json configuration"""
+    try:
+        with open(opencode_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+        return True
+    except OSError:
+        return False
+
+
 async def _setup_vscode(target_path: Path, formatter: RichOutputFormatter) -> bool:
     """Setup ChunkHound MCP integration with VS Code"""
     formatter.section_header("VS Code Setup")
@@ -1052,6 +1091,92 @@ def _show_manual_vscode_instructions(
         )
 
 
+def _show_manual_opencode_instructions(
+    formatter: RichOutputFormatter, opencode_path: Path | None = None
+) -> None:
+    """Show manual configuration instructions for OpenCode"""
+    print("\nTo manually configure ChunkHound in OpenCode:")
+
+    if opencode_path:
+        formatter.bullet_list(
+            [
+                f"Edit or create: {opencode_path}",
+                "Add/merge ChunkHound configuration:",
+                '  { "mcp": { "chunkhound": { "type": "local", "command": ["chunkhound", "mcp"] } }, "$schema": "https://opencode.ai/config.json" }',
+            ]
+        )
+    else:
+        formatter.bullet_list(
+            [
+                "Create opencode.json in your project root",
+                'Add: { "mcp": { "chunkhound": { "type": "local", "command": ["chunkhound", "mcp"] } }, "$schema": "https://opencode.ai/config.json" }',
+            ]
+        )
+
+
+async def _setup_opencode(target_path: Path, formatter: RichOutputFormatter) -> bool:
+    """Setup ChunkHound MCP integration with OpenCode"""
+    formatter.section_header("OpenCode Setup")
+
+    # Check if OpenCode CLI is installed
+    if not _detect_opencode():
+        formatter.warning("OpenCode CLI not found")
+        print("\nTo install OpenCode:")
+        formatter.bullet_list(
+            [
+                "Visit: https://opencode.ai",
+                "Download and install OpenCode CLI",
+                "Run: opencode --version to verify installation",
+            ]
+        )
+
+        # Offer to create configuration anyway
+        create_config = await rich_confirm(
+            "Create OpenCode configuration anyway?", default=False
+        )
+        if not create_config:
+            return False
+
+    # Path to opencode.json file in project root
+    opencode_path = target_path / "opencode.json"
+
+    # Read existing configuration
+    config = _read_opencode_config(opencode_path)
+
+    # Check if ChunkHound is already configured
+    mcp_config = config.setdefault("mcp", {})
+    if "chunkhound" in mcp_config:
+        formatter.warning("ChunkHound MCP server already configured in opencode.json")
+
+        overwrite = await rich_confirm(
+            "Overwrite existing ChunkHound configuration?", default=False
+        )
+        if not overwrite:
+            formatter.info("Skipping OpenCode configuration")
+            return True
+
+    # Add ChunkHound server configuration
+    mcp_config["chunkhound"] = {
+        "type": "local",
+        "command": ["chunkhound", "mcp"]
+    }
+
+    # Ensure schema is present
+    if "$schema" not in config:
+        config["$schema"] = "https://opencode.ai/config.json"
+
+    # Write updated configuration
+    if _write_opencode_config(opencode_path, config):
+        formatter.success(f"✓ ChunkHound MCP server added to {opencode_path}")
+        print("You can now use ChunkHound tools directly in OpenCode!")
+        print("OpenCode will automatically detect and load the MCP server.")
+        return True
+    else:
+        formatter.error(f"Failed to write configuration to {opencode_path}")
+        _show_manual_opencode_instructions(formatter, opencode_path)
+        return False
+
+
 async def _run_agent_setup(target_path: Path, formatter: RichOutputFormatter) -> None:
     """Run the agent setup step after successful configuration"""
     formatter.section_header("AI Agent Integration")
@@ -1069,6 +1194,8 @@ async def _run_agent_setup(target_path: Path, formatter: RichOutputFormatter) ->
         success = await _setup_claude_code(target_path, formatter)
     elif agent_choice == "vscode":
         success = await _setup_vscode(target_path, formatter)
+    elif agent_choice == "opencode":
+        success = await _setup_opencode(target_path, formatter)
 
     if not success:
         formatter.warning(

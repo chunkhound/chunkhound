@@ -6,10 +6,11 @@ from loguru import logger
 
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.providers.llm.anthropic_llm_provider import AnthropicLLMProvider
-from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider
-from chunkhound.providers.llm.openai_llm_provider import OpenAILLMProvider
+from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 from chunkhound.providers.llm.gemini_llm_provider import GeminiLLMProvider
+from chunkhound.providers.llm.openai_llm_provider import OpenAILLMProvider
+from chunkhound.providers.llm.opencode_cli_provider import OpenCodeCLIProvider
 
 
 class LLMManager:
@@ -27,6 +28,7 @@ class LLMManager:
         "claude-code-cli": ClaudeCodeCLIProvider,
         "codex-cli": CodexCLIProvider,
         "gemini": GeminiLLMProvider,
+        "opencode-cli": OpenCodeCLIProvider,
     }
 
     def __init__(
