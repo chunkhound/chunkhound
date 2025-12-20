@@ -57,6 +57,42 @@ def _compile_gitwildmatch(patterns: Iterable[str]) -> "PathSpec":
     return PathSpec.from_lines(GitWildMatchPattern, patterns)
 
 
+def _collect_global_gitignore_patterns() -> list[str]:
+    """Collect patterns from the global gitignore file.
+
+    Reads core.excludesFile from git config or checks default locations.
+    Global patterns apply at any directory level (no transformation needed).
+    """
+    from chunkhound.utils.git_safe import get_global_excludes_file
+
+    global_file = get_global_excludes_file()
+    if not global_file:
+        return []
+
+    try:
+        lines = global_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception as e:
+        logger.debug(f"Failed to read global gitignore {global_file}: {e}")
+        return []
+
+    patterns: list[str] = []
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Global patterns match anywhere, so prefix with **/ if not already anchored
+        if line.startswith("/"):
+            # Anchored to root - keep as is (rare in global gitignore)
+            patterns.append(line)
+        elif line.startswith("**/") or line.startswith("!"):
+            # Already has recursive prefix or is negation
+            patterns.append(line)
+        else:
+            # Make pattern match anywhere in tree
+            patterns.append(f"**/{line}")
+    return patterns
+
+
 def build_ignore_engine(
     root: Path,
     sources: list[str],
@@ -68,6 +104,10 @@ def build_ignore_engine(
     Currently supports:
     - gitignore: uses only the root-level .gitignore file
     - config: uses provided glob-like patterns (gitwildmatch semantics)
+
+    Note: Global gitignore (core.excludesFile) is NOT loaded here because the
+    IgnoreEngine cannot properly handle cross-file negations. Global patterns
+    are applied via git pathspec pushdown in IndexingCoordinator instead.
     """
     compiled: list[tuple[Path, PathSpec]] = []
     root = root.resolve()

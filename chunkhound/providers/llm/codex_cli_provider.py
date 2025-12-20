@@ -102,6 +102,67 @@ class CodexCLIProvider(LLMProvider):
             return "low"
         return effort
 
+    def _resolve_sandbox_mode(self, requested: str | None = None) -> str:
+        """Resolve sandbox mode for codex exec command execution."""
+        env_override = os.getenv("CHUNKHOUND_CODEX_SANDBOX_MODE")
+        candidate = (requested or env_override or "read-only").strip().lower()
+        allowed = {"read-only", "workspace-write", "danger-full-access"}
+        if candidate not in allowed:
+            logger.warning(
+                "Unknown Codex sandbox mode '%s'; falling back to 'read-only'", candidate
+            )
+            return "read-only"
+        return candidate
+
+    def _resolve_approval_policy(self, requested: str | None = None) -> str:
+        """Resolve approval policy for codex exec tool execution."""
+        env_override = os.getenv("CHUNKHOUND_CODEX_APPROVAL_POLICY")
+        # Default to on-request to discourage command execution in non-interactive runs.
+        candidate = (requested or env_override or "on-request").strip().lower()
+        allowed = {"untrusted", "on-failure", "on-request", "never"}
+        if candidate not in allowed:
+            logger.warning(
+                "Unknown Codex approval policy '%s'; falling back to 'on-request'",
+                candidate,
+            )
+            return "on-request"
+        return candidate
+
+    @staticmethod
+    def _toml_string(value: str) -> str:
+        # Codex parses `-c key=value` with TOML semantics. Use explicit strings to
+        # avoid ambiguity across CLI versions.
+        return '"' + value.replace('"', '\\"') + '"'
+
+    def _extract_agent_message_from_jsonl(self, stdout_text: str) -> tuple[str | None, dict[str, Any] | None]:
+        """Extract final agent message text and usage from `codex exec --json` output."""
+        import json
+
+        last_message: str | None = None
+        usage: dict[str, Any] | None = None
+
+        for line in stdout_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+
+            if obj.get("type") == "item.completed":
+                item = obj.get("item") or {}
+                if item.get("type") == "agent_message":
+                    text = item.get("text")
+                    if isinstance(text, str) and text.strip():
+                        last_message = text
+            elif obj.get("type") == "turn.completed":
+                u = obj.get("usage")
+                if isinstance(u, dict):
+                    usage = u
+
+        return last_message, usage
+
     def _copy_minimal_codex_state(self, base: Path, dest: Path) -> None:
         """Copy minimal auth/session state into destination CODEX_HOME."""
         copy_all = os.getenv("CHUNKHOUND_CODEX_COPY_ALL", "0") == "1"
@@ -204,8 +265,9 @@ class CodexCLIProvider(LLMProvider):
         effective_model = self._resolve_model_name(model or self._model)
         keep_overlay = os.getenv("CHUNKHOUND_CODEX_KEEP_OVERLAY", "0") == "1"
 
-         # Optional verbose diagnostics for large prompts / transport issues.
+        # Optional verbose diagnostics for large prompts / transport issues.
         debug_codex = os.getenv("CHUNKHOUND_CODEX_DEBUG", "0") == "1"
+        json_mode = os.getenv("CHUNKHOUND_CODEX_JSON", "0") == "1"
         content_chars = len(content)
         estimated_tokens = self.estimate_tokens(content)
         if debug_codex:
@@ -237,6 +299,30 @@ class CodexCLIProvider(LLMProvider):
         env["CODEX_HOME"] = overlay_home
         config_file_path = str(Path(overlay_home) / "config.toml")
 
+        # Reduce risk of slow/hanging command execution by forcing a strict sandbox
+        # and a non-interactive approval policy.
+        sandbox_mode = self._resolve_sandbox_mode()
+        approval_policy = self._resolve_approval_policy()
+
+        # CLI flag covers sandboxing; approval policy is only configurable via -c.
+        extra_args += ["--sandbox", sandbox_mode]
+        extra_args += [
+            "-c",
+            f"approval_policy={self._toml_string(approval_policy)}",
+        ]
+
+        # Make reasoning effort explicit per-call (helps when using base Codex config overlays).
+        extra_args += [
+            "-c",
+            f"model_reasoning_effort={self._toml_string(self._reasoning_effort)}",
+        ]
+
+        # Enforce per-call output cap. Codex CLI supports config overrides via `-c key=value`.
+        # Per docs, the key is `model_max_output_tokens` (caps completion length for Responses API).
+        # This keeps ChunkHound's `max_completion_tokens` meaningful for the CLI provider and helps
+        # prevent long "think+write" runs when the prompt requests overly-large outputs.
+        extra_args += ["-c", f"model_max_output_tokens={int(max_tokens)}"]
+
         override_mode = os.getenv("CHUNKHOUND_CODEX_CONFIG_OVERRIDE", "env").strip().lower()
         if config_file_path:
             if override_mode == "flag":
@@ -247,6 +333,14 @@ class CodexCLIProvider(LLMProvider):
                 env[cfg_key] = config_file_path
 
         _forward_env(auth_keys + passthrough_keys)
+
+        # Non-interactive defaults to avoid hangs in subprocess tools.
+        env.setdefault("CI", "1")
+        env.setdefault("GIT_TERMINAL_PROMPT", "0")
+        env.setdefault("PAGER", "cat")
+        env.setdefault("GIT_PAGER", "cat")
+        env.setdefault("TERM", "dumb")
+        env.setdefault("NO_COLOR", "1")
 
         request_timeout = timeout if timeout is not None else self._timeout
 
@@ -286,6 +380,7 @@ class CodexCLIProvider(LLMProvider):
                             binary,
                             "exec",
                             "-",
+                            *( ["--json"] if json_mode else [] ),
                             *extra_args,
                             *( ["--skip-git-repo-check"] if add_skip_git else [] ),
                             cwd=cwd,
@@ -313,6 +408,7 @@ class CodexCLIProvider(LLMProvider):
                             binary,
                             "exec",
                             content,
+                            *( ["--json"] if json_mode else [] ),
                             *extra_args,
                             *( ["--skip-git-repo-check"] if add_skip_git else [] ),
                             cwd=cwd,
@@ -340,14 +436,28 @@ class CodexCLIProvider(LLMProvider):
                                 "codex exec does not support --skip-git-repo-check; retrying without flag"
                             )
                             continue
+                        err_lower = err.lower()
+
                         # Skip-git repo check negotiation for newer Codex builds
                         if "skip-git-repo-check" in err and not add_skip_git:
                             add_skip_git = True
                             logger.warning("codex exec requires --skip-git-repo-check; retrying with flag")
                             continue
+                        # Some older Codex builds may reject the flag; fall back by removing it.
+                        if add_skip_git and "skip-git-repo-check" in err_lower and (
+                            "unknown option" in err_lower
+                            or "unrecognized option" in err_lower
+                            or "unknown flag" in err_lower
+                            or "unexpected argument" in err_lower
+                        ):
+                            add_skip_git = False
+                            logger.warning(
+                                "codex exec does not support --skip-git-repo-check; retrying without flag"
+                            )
+                            continue
 
                         # If stdin failed (e.g., BrokenPipe or codex not reading stdin), fall back to argv with truncation.
-                        if use_stdin and ("broken pipe" in err.lower() or "stdin" in err.lower()):
+                        if use_stdin and ("broken pipe" in err_lower or "stdin" in err_lower):
                             use_stdin = False
                             logger.warning("codex exec stdin not supported; retrying with argv mode")
                             continue
@@ -361,7 +471,15 @@ class CodexCLIProvider(LLMProvider):
                             continue
                         raise last_error
 
-                    return stdout.decode("utf-8", errors="ignore").strip()
+                    stdout_text = stdout.decode("utf-8", errors="ignore").strip()
+                    if json_mode:
+                        message, usage = self._extract_agent_message_from_jsonl(stdout_text)
+                        if debug_codex and usage:
+                            logger.debug("Codex CLI usage: %s", usage)
+                        if message and message.strip():
+                            return message.strip()
+                        # Fall back to raw output if we couldn't parse an agent message.
+                    return stdout_text
 
                 except asyncio.TimeoutError as e:
                     if proc and proc.returncode is None:
@@ -631,3 +749,14 @@ class CodexCLIProvider(LLMProvider):
             "prompt_tokens_estimated": self._estimated_prompt_tokens,
             "completion_tokens_estimated": self._estimated_completion_tokens,
         }
+
+    def get_synthesis_concurrency(self) -> int:
+        """Get recommended concurrency for parallel synthesis operations.
+
+        Default aligns with Anthropic (5), but remains configurable via env var.
+        """
+        try:
+            v = int(os.getenv("CHUNKHOUND_CODEX_SYNTHESIS_CONCURRENCY", "5"))
+        except Exception:
+            return 5
+        return max(1, min(5, v))
