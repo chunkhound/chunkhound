@@ -1,3 +1,6 @@
+import pytest
+
+from chunkhound.code_mapper import metadata as code_mapper_metadata
 from chunkhound.code_mapper.metadata import build_generation_stats_with_coverage
 
 
@@ -49,3 +52,30 @@ def test_build_generation_stats_with_coverage_uses_global_fallback() -> None:
     assert stats["chunks"]["total_indexed"] == 20
     assert coverage.files_denominator == 10
     assert coverage.chunks_denominator == 20
+
+
+def test_build_generation_stats_uses_scope_totals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        code_mapper_metadata,
+        "compute_db_scope_stats",
+        lambda *_: (5, 7, set()),
+    )
+
+    stats = code_mapper_metadata.build_generation_stats(
+        generator_mode="code_research",
+        total_research_calls=2,
+        unified_source_files={"scope/a.py": "", "scope/b.py": ""},
+        unified_chunks_dedup=[
+            {"file_path": "scope/a.py", "start_line": 1, "end_line": 2},
+            {"file_path": "scope/b.py", "start_line": 3, "end_line": 4},
+        ],
+        services=object(),
+        scope_label="scope",
+    )
+
+    assert stats["total_research_calls"] == "2"
+    assert stats["code_mapper_comprehensiveness"] == "unknown"
+    assert stats["files"]["total_indexed"] == 5
+    assert stats["chunks"]["total_indexed"] == 7
