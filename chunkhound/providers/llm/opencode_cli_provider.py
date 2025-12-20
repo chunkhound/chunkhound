@@ -1,13 +1,13 @@
-"""Claude Code CLI LLM provider implementation for ChunkHound deep research.
+"""OpenCode CLI LLM provider implementation for ChunkHound deep research.
 
-This provider wraps the Claude Code CLI (claude --print) to enable deep research
-using the user's existing Claude subscription instead of API credits.
+This provider wraps the OpenCode CLI (opencode run) to enable deep research
+using the user's existing OpenCode configuration and access to 75+ LLM providers.
 
 Note: This provider is configured for vanilla LLM behavior:
-- All tools disabled (Write, Edit, Bash, WebFetch, etc.)
-- MCP servers disabled via --strict-mcp-config
-- Workspace isolation (runs from temp directory to prevent context gathering)
-- Clean API access without workspace overhead
+- Uses default text format for simple, reliable output
+- Runs in non-interactive mode via opencode run
+- Leverages existing opencode auth login credentials
+- Supports all providers/models available via "opencode models"
 """
 
 import asyncio
@@ -20,47 +20,69 @@ from loguru import logger
 from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
 
 
-class ClaudeCodeCLIProvider(BaseCLIProvider):
-    """Claude Code CLI provider using subprocess calls to claude --print."""
+class OpenCodeCLIProvider(BaseCLIProvider):
+    """OpenCode CLI provider using subprocess calls to opencode run."""
 
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "claude-sonnet-4-5-20250929",
+        model: str = "opencode/grok-code",
         base_url: str | None = None,
         timeout: int = 60,
         max_retries: int = 3,
     ):
-        """Initialize Claude Code CLI provider.
+        """Initialize OpenCode CLI provider.
 
         Args:
-            api_key: Not used (subscription-based authentication)
-            model: Model name to use (e.g., "claude-sonnet-4-5-20250929")
+            api_key: Not used (credentials managed by opencode auth)
+            model: Model name to use in provider/model format
+                (e.g., "opencode/grok-code")
             base_url: Not used (CLI uses default endpoints)
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts for failed requests
         """
         super().__init__(api_key, model, base_url, timeout, max_retries)
 
+        # Check CLI availability
+        if not self._opencode_available():
+            logger.warning("OpenCode CLI not found in PATH")
+
     def _get_provider_name(self) -> str:
         """Get the provider name."""
-        return "claude-code-cli"
+        return "opencode-cli"
 
-    def _map_model_to_cli_arg(self, model: str) -> str:
-        """Map full model name to CLI model argument.
+    def _opencode_available(self) -> bool:
+        """Check if opencode CLI is available in PATH."""
+        try:
+            result = subprocess.run(
+                ["opencode", "--version"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+            return result.returncode == 0
+        except (subprocess.SubprocessError, FileNotFoundError):
+            return False
 
-        The Claude Code CLI accepts full model names directly
-        (e.g., "claude-sonnet-4-5-20250929"). Short names like "sonnet-4-5"
-        are NOT accepted and result in exit code 1.
+    def _validate_model_format(self, model: str) -> None:
+        """Validate that model follows provider/model format.
 
         Args:
-            model: Full model name (e.g., "claude-sonnet-4-5-20250929")
+            model: Model string to validate
 
-        Returns:
-            CLI model argument (same as input - full model name)
+        Raises:
+            ValueError: If model format is invalid
         """
-        # Pass through model name as-is - CLI requires full names
-        return model
+        if "/" not in model:
+            raise ValueError(
+                f"Model must be in 'provider/model' format, got: {model}. "
+                f"Run 'opencode models' to see available models."
+            )
+
+        provider, _ = model.split("/", 1)
+        if not provider:
+            raise ValueError(f"Provider cannot be empty in model: {model}")
 
     async def _run_cli_command(
         self,
@@ -69,11 +91,11 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
         max_completion_tokens: int | None = None,
         timeout: int | None = None,
     ) -> str:
-        """Run claude CLI command and return output.
+        """Run opencode CLI command and return output.
 
         Args:
             prompt: User prompt
-            system: Optional system prompt (appended to default)
+            system: Optional system prompt
             max_completion_tokens: Maximum tokens to generate
             timeout: Optional timeout override
 
@@ -83,45 +105,22 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
         Raises:
             RuntimeError: If CLI command fails
         """
+        # Validate model format
+        self._validate_model_format(self._model)
+
         # Build CLI command
-        model_arg = self._map_model_to_cli_arg(self._model)
-        cmd = ["claude", "--print", "--model", model_arg, "--output-format", "text"]
+        cmd = [
+            "opencode",
+            "run",
+            "--model",
+            self._model,
+        ]
 
-        # Disable all tools for vanilla LLM behavior (no workspace context needed)
-        cmd.extend(
-            [
-                "--disallowedTools",
-                "Write",
-                "Edit",
-                "Bash",
-                "SlashCommand",
-                "WebFetch",
-                "WebSearch",
-                "Agent",
-                "Glob",
-                "Grep",
-                "List",
-                "TodoWrite",
-                "Task",
-            ]
-        )
-
-        # Prevent MCP server loading for clean LLM access
-        cmd.extend(["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}'])
-
-        # Add system prompt if provided (appends to default)
+        # Add system prompt if provided
         if system:
-            cmd.extend(["--append-system-prompt", system])
-
-        # Add the user prompt (-- separator must come after all flags)
-        cmd.extend(["--", prompt])
-
-        # Set environment for subscription-based auth
-        env = os.environ.copy()
-        env["CLAUDE_USE_SUBSCRIPTION"] = "true"
-
-        # Remove ANTHROPIC_API_KEY if present to force subscription auth
-        env.pop("ANTHROPIC_API_KEY", None)
+            cmd.append(system + "\n" + prompt)
+        else:
+            cmd.append(prompt)
 
         # Use provided timeout or default
         request_timeout = timeout if timeout is not None else self._timeout
@@ -137,11 +136,11 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                     stdin=subprocess.DEVNULL,  # Prevent stdin inheritance
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    env=env,
+                    env=os.environ.copy(),  # Use copy of environment
                     cwd=tempfile.gettempdir(),  # Cross-platform temp directory
                 )
 
-                # Wrap communicate() with timeout (this is the long-running part)
+                # Wrap communicate() with timeout
                 stdout, stderr = await asyncio.wait_for(
                     process.communicate(),
                     timeout=request_timeout,
@@ -150,11 +149,13 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                 if process.returncode != 0:
                     error_msg = stderr.decode("utf-8") if stderr else "Unknown error"
                     last_error = RuntimeError(
-                        f"CLI command failed (exit {process.returncode}): {error_msg}"
+                        f"OpenCode CLI command failed (exit {process.returncode}): "
+                        f"{error_msg}"
                     )
                     if attempt < self._max_retries - 1:
                         logger.warning(
-                            f"CLI attempt {attempt + 1} failed, retrying: {error_msg}"
+                            f"OpenCode CLI attempt {attempt + 1} failed, "
+                            f"retrying: {error_msg}"
                         )
                         continue
                     raise last_error
@@ -168,10 +169,12 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                     await process.wait()
 
                 last_error = RuntimeError(
-                    f"CLI command timed out after {request_timeout}s"
+                    f"OpenCode CLI command timed out after {request_timeout}s"
                 )
                 if attempt < self._max_retries - 1:
-                    logger.warning(f"CLI attempt {attempt + 1} timed out, retrying")
+                    logger.warning(
+                        f"OpenCode CLI attempt {attempt + 1} timed out, retrying"
+                    )
                     continue
                 raise last_error from e
 
@@ -181,11 +184,13 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
                     process.kill()
                     await process.wait()
 
-                last_error = RuntimeError(f"CLI command failed: {e}")
+                last_error = RuntimeError(
+                    f"OpenCode CLI command failed: {e}, with command {cmd}"
+                )
                 if attempt < self._max_retries - 1:
-                    logger.warning(f"CLI attempt {attempt + 1} failed: {e}")
+                    logger.warning(f"OpenCode CLI attempt {attempt + 1} failed: {e}")
                     continue
                 raise last_error from e
 
         # Should not reach here, but just in case
-        raise last_error or RuntimeError("CLI command failed after retries")
+        raise last_error or RuntimeError("OpenCode CLI command failed after retries")

@@ -18,6 +18,7 @@ The synthesis engine uses:
 """
 
 import asyncio
+import time
 from typing import Any
 
 from loguru import logger
@@ -407,11 +408,23 @@ class SynthesisEngine:
             f"timeout={SINGLE_PASS_TIMEOUT_SECONDS}s)"
         )
 
+        await self._parent._emit_event(
+            "llm_synthesis",
+            f"Calling {llm.name}:{llm.model} for synthesis",
+            max_completion_tokens=max_output_tokens,
+        )
+        started = time.perf_counter()
         response = await llm.complete(
             prompt,
             system=system,
             max_completion_tokens=max_output_tokens,
             timeout=SINGLE_PASS_TIMEOUT_SECONDS,
+        )
+        duration_s = time.perf_counter() - started
+        await self._parent._emit_event(
+            "llm_synthesis_complete",
+            f"Synthesis LLM call completed in {duration_s:.1f}s",
+            duration=duration_s,
         )
 
         answer = response.content
@@ -596,11 +609,23 @@ Provide a comprehensive analysis focusing on the query."""
             f"timeout={SINGLE_PASS_TIMEOUT_SECONDS}s)"
         )
 
+        await self._parent._emit_event(
+            "llm_synthesis",
+            f"Calling {llm.name}:{llm.model} for cluster {cluster.cluster_id} synthesis",
+            max_completion_tokens=cluster_output_tokens,
+        )
+        started = time.perf_counter()
         response = await llm.complete(
             prompt,
             system=system,
             max_completion_tokens=cluster_output_tokens,
             timeout=SINGLE_PASS_TIMEOUT_SECONDS,
+        )
+        duration_s = time.perf_counter() - started
+        await self._parent._emit_event(
+            "llm_synthesis_complete",
+            f"Cluster {cluster.cluster_id} synthesis completed in {duration_s:.1f}s",
+            duration=duration_s,
         )
 
         # Build sources list for this cluster
@@ -724,11 +749,23 @@ Provide a complete, integrated analysis that addresses the original query."""
             f"(max_completion_tokens={max_output_tokens:,})"
         )
 
+        await self._parent._emit_event(
+            "llm_synthesis",
+            f"Calling {llm.name}:{llm.model} for reduce synthesis",
+            max_completion_tokens=max_output_tokens,
+        )
+        started = time.perf_counter()
         response = await llm.complete(
             prompt,
             system=system,
             max_completion_tokens=max_output_tokens,
             timeout=SINGLE_PASS_TIMEOUT_SECONDS,  # type: ignore[call-arg]
+        )
+        duration_s = time.perf_counter() - started
+        await self._parent._emit_event(
+            "llm_synthesis_complete",
+            f"Reduce synthesis completed in {duration_s:.1f}s",
+            duration=duration_s,
         )
 
         answer = response.content
