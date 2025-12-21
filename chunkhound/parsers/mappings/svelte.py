@@ -88,13 +88,11 @@ class SvelteMapping(TypeScriptMapping):
 
         # Extract template (everything outside script and style tags)
         # Use position-based extraction to avoid string replacement bugs
+        # Emit one template chunk per span to preserve accurate line numbers
         if excluded_ranges:
             # Sort ranges by start position
             excluded_ranges.sort()
 
-            # Build template content from non-excluded ranges
-            template_parts: list[str] = []
-            template_start_line = 1
             last_end = 0
 
             for start, end in excluded_ranges:
@@ -103,31 +101,24 @@ class SvelteMapping(TypeScriptMapping):
                     template_part = content[last_end:start]
                     if template_part.strip():
                         # Calculate line number for this template part
-                        if not template_parts:
-                            # First template part - calculate its actual line number
-                            template_start_line = content[:last_end].count("\n") + 1
-                        template_parts.append(template_part)
+                        template_start_line = content[:last_end].count("\n") + 1
+                        # Preserve raw content for accurate line offsets
+                        sections["template"].append(
+                            ("", template_part, template_start_line)
+                        )
                 last_end = end
 
             # Add remaining content after last excluded range
             if last_end < len(content):
                 template_part = content[last_end:]
                 if template_part.strip():
-                    if not template_parts:
-                        template_start_line = content[:last_end].count("\n") + 1
-                    template_parts.append(template_part)
-
-            # Combine template parts
-            if template_parts:
-                template_content = "".join(template_parts).strip()
-                if template_content:
+                    template_start_line = content[:last_end].count("\n") + 1
                     sections["template"].append(
-                        ("", template_content, template_start_line)
+                        ("", template_part, template_start_line)
                     )
         else:
             # No script or style sections, entire content is template
-            template_content = content.strip()
-            if template_content:
-                sections["template"].append(("", template_content, 1))
+            if content.strip():
+                sections["template"].append(("", content, 1))
 
         return sections

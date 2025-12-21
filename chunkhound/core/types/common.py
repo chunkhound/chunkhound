@@ -281,6 +281,7 @@ class Language(Enum):
             Language.OBJC,
             Language.PHP,
             Language.VUE,
+            Language.SVELTE,
             Language.SWIFT,
             Language.DART,
         }
@@ -302,6 +303,7 @@ class Language(Enum):
             Language.OBJC,
             Language.PHP,
             Language.VUE,
+            Language.SVELTE,
             Language.SWIFT,
             Language.DART,
         }
@@ -316,6 +318,7 @@ class Language(Enum):
             Language.TSX,
             Language.PHP,
             Language.VUE,
+            Language.SVELTE,
             Language.SWIFT,
         }
 

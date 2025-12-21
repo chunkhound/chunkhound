@@ -154,9 +154,20 @@ class SvelteParser:
                 chunks.append(adjusted_chunk)
 
         # Create chunks for template sections (as text blocks)
-        for attrs, template_content, start_line in sections["template"]:
+        for _, template_content, start_line in sections["template"]:
             if template_content.strip():
-                end_line = start_line + template_content.count("\n")
+                # Calculate end line: start_line is already positioned correctly
+                # by extract_sections(), and we need to count newlines in the content
+                # The end line is the last line that contains content
+                newline_count = template_content.count("\n")
+                # If content ends with newline, the last line is before that newline
+                if template_content.endswith("\n"):
+                    end_line = start_line + newline_count - 1
+                else:
+                    end_line = start_line + newline_count
+
+                # Ensure end_line is at least start_line
+                end_line = max(start_line, end_line)
 
                 template_chunk = Chunk(
                     symbol="svelte_template",
@@ -172,9 +183,17 @@ class SvelteParser:
                 chunks.append(template_chunk)
 
         # Create chunks for style sections (as text blocks)
-        for attrs, style_content, start_line in sections["style"]:
+        for _, style_content, start_line in sections["style"]:
             if style_content.strip():
-                end_line = start_line + style_content.count("\n")
+                # Calculate end line consistently with template logic
+                newline_count = style_content.count("\n")
+                if style_content.endswith("\n"):
+                    end_line = start_line + newline_count - 1
+                else:
+                    end_line = start_line + newline_count
+
+                # Ensure end_line is at least start_line
+                end_line = max(start_line, end_line)
 
                 style_chunk = Chunk(
                     symbol="svelte_style",
