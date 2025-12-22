@@ -98,3 +98,35 @@ Outputs:
 - In full mode (default):
   - `<scope>_code_mapper_index.md` listing all topics.
   - One `<scope>_topic_NN_<slug>.md` file per non-empty topic.
+
+
+## AutoDoc (docsite generation)
+
+Generate an Astro documentation site from existing AutoDoc / Code Mapper outputs.
+
+Basic usage:
+
+```bash
+# Generate an Astro site under <input-dir>/autodoc/
+chunkhound autodoc /path/to/output_dir
+```
+
+Optional overrides:
+
+```bash
+# Custom output directory + minimal cleanup
+chunkhound autodoc /path/to/output_dir \
+  --out-dir /path/to/output_dir/autodoc_site \
+  --cleanup-mode minimal
+
+# Override index file glob(s) (repeatable)
+chunkhound autodoc /path/to/output_dir \
+  --index-pattern "*_autodoc_index.md" \
+  --index-pattern "*_code_mapper_index.md"
+```
+
+Notes:
+- Default output directory is `<input-dir>/autodoc/`.
+- AutoDoc accepts both `*_autodoc_index.md` and `*_code_mapper_index.md` by default.
+- References are normalized from the original `## Sources` tree:
+  flattened into a deterministic `## References` list with `[N]` and chunk ranges.
