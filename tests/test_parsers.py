@@ -38,6 +38,7 @@ LANGUAGE_SAMPLES = {
     Language.PDF: "hello world",  # PDF parser handles text content
     Language.ZIG: "fn main() void { }",
     Language.VUE: '<template><div>{{ message }}</div></template>\n<script setup lang="ts">\nconst message = "hello"\n</script>',
+    Language.SVELTE: '<script lang="ts">\n  let message = "hello";\n</script>\n<div>{message}</div>',
     Language.PHP: '<?php\nfunction hello() {\n  return "world";\n}\n?>',
     Language.SWIFT: "class MyClass {\n    func hello() -> String {\n        return \"world\"\n    }\n}",
     Language.DART: "void main() { }",

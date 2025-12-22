@@ -27,6 +27,7 @@ from .pdf import PDFMapping
 from .php import PHPMapping
 from .python import PythonMapping
 from .rust import RustMapping
+from .svelte import SvelteMapping
 from .swift import SwiftMapping
 from .text import TextMapping
 from .toml import TomlMapping
@@ -61,6 +62,7 @@ __all__ = [
     "PHPMapping",
     "PythonMapping",
     "RustMapping",
+    "SvelteMapping",
     "SwiftMapping",
     "TextMapping",
     "TomlMapping",
