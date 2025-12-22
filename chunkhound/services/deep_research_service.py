@@ -1245,7 +1245,8 @@ class DeepResearchService:
             file_path: File path for language detection
 
         Returns:
-            Tuple of (expanded_start_line, expanded_end_line) in 1-indexed format
+            Tuple of (expanded_start_line, expanded_end_line) in 1-indexed format.
+            Returns (0, 0) when the requested range is invalid.
         """
         if not ENABLE_SMART_BOUNDARIES:
             # Fallback to legacy fixed-window behavior
@@ -1308,19 +1309,27 @@ class DeepResearchService:
         max_idx = len(lines) - 1
         start_idx = max(0, start_line - 1)
         if start_idx > max_idx:
-            logger.debug(
+            logger.warning(
                 f"Start line {start_line} for {file_path} exceeds file length "
-                f"{len(lines)}; clamping to last line."
+                f"{len(lines)}; skipping boundary expansion."
             )
-            start_idx = max_idx
+            return 0, 0
 
-        end_idx = min(max_idx, end_line - 1)
-        if end_idx < start_idx:
-            logger.debug(
-                f"End line {end_line} for {file_path} precedes start line "
-                f"{start_line}; normalizing to start."
+        end_idx = end_line - 1
+        if end_idx < 0:
+            logger.warning(
+                f"End line {end_line} for {file_path} is invalid; "
+                "skipping boundary expansion."
             )
-            end_idx = start_idx
+            return 0, 0
+        if end_idx > max_idx:
+            end_idx = max_idx
+        if end_idx < start_idx:
+            logger.warning(
+                f"End line {end_line} for {file_path} precedes start line "
+                f"{start_line}; skipping boundary expansion."
+            )
+            return 0, 0
 
         # Expand backward to find function/class start
         expanded_start = start_idx
@@ -1502,6 +1511,9 @@ class DeepResearchService:
                             )
                         )
 
+                        if expanded_start <= 0 or expanded_end <= 0:
+                            continue
+
                         # Store expanded range in chunk for later deduplication
                         chunk["expanded_start_line"] = expanded_start
                         chunk["expanded_end_line"] = expanded_end
@@ -1512,6 +1524,9 @@ class DeepResearchService:
 
                         chunk_with_context = "\n".join(lines[start_idx:end_idx])
                         chunk_contents.append(chunk_with_context)
+
+                    if not chunk_contents:
+                        continue
 
                     combined_chunks = "\n\n...\n\n".join(chunk_contents)
                     chunk_tokens = llm.estimate_tokens(combined_chunks)

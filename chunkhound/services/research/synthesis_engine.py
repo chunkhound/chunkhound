@@ -215,6 +215,15 @@ class SynthesisEngine:
                 f"Reranked {len(file_priorities)} files for synthesis budget allocation"
             )
 
+            if not file_priorities:
+                logger.warning(
+                    "All rerank results were out of range; falling back to chunk scores"
+                )
+                for file_path, file_chunks in file_to_chunks.items():
+                    file_priorities[file_path] = sum(
+                        c.get("score", 0.0) for c in file_chunks
+                    )
+
         # Sort files by priority score (highest first)
         # Works for both reranking and fallback paths
         sorted_files = sorted(file_priorities.items(), key=lambda x: x[1], reverse=True)

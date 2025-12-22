@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from chunkhound.database_factory import DatabaseServices
+
 from chunkhound.code_mapper.coverage import compute_db_scope_stats
 from chunkhound.code_mapper.models import AgentDocMetadata
 
@@ -158,7 +160,7 @@ def build_generation_stats(
     total_research_calls: int,
     unified_source_files: dict[str, str],
     unified_chunks_dedup: list[dict[str, Any]],
-    services: Any,
+    services: DatabaseServices,
     scope_label: str,
 ) -> dict[str, Any]:
     """Build minimal generation stats for Code Mapper metadata."""

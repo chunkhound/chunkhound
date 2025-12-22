@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Iterable
+
+from chunkhound.database_factory import DatabaseServices
 
 
 def compute_db_scope_stats(
-    services: Any, scope_label: str
+    services: DatabaseServices, scope_label: str
 ) -> tuple[int, int, set[str]]:
     """Compute indexed file/chunk totals and scoped file set for the folder."""
     scope_total_files = 0
@@ -40,7 +42,7 @@ def compute_db_scope_stats(
 
 
 def compute_unreferenced_scope_files(
-    services: Any,
+    services: DatabaseServices,
     scope_label: str,
     referenced_files: Iterable[str],
 ) -> list[str] | None:

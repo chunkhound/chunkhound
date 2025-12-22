@@ -1693,29 +1693,33 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], scope_prefix: str | None
     ) -> tuple[int, int]:
         """Executor method for get_scope_stats - runs in DB thread."""
-        if scope_prefix:
-            normalized = scope_prefix.replace("\\", "/")
-            like = f"{normalized}%"
-            files_row = conn.execute(
-                "SELECT COUNT(*) FROM files WHERE path LIKE ?",
-                [like],
-            ).fetchone()
-            chunks_row = conn.execute(
-                """
-                SELECT COUNT(*)
-                FROM chunks c
-                JOIN files f ON c.file_id = f.id
-                WHERE f.path LIKE ?
-                """,
-                [like],
-            ).fetchone()
-        else:
-            files_row = conn.execute("SELECT COUNT(*) FROM files").fetchone()
-            chunks_row = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
+        try:
+            if scope_prefix:
+                normalized = scope_prefix.replace("\\", "/")
+                like = f"{normalized}%"
+                files_row = conn.execute(
+                    "SELECT COUNT(*) FROM files WHERE path LIKE ?",
+                    [like],
+                ).fetchone()
+                chunks_row = conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM chunks c
+                    JOIN files f ON c.file_id = f.id
+                    WHERE f.path LIKE ?
+                    """,
+                    [like],
+                ).fetchone()
+            else:
+                files_row = conn.execute("SELECT COUNT(*) FROM files").fetchone()
+                chunks_row = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
 
-        total_files = int(files_row[0]) if files_row else 0
-        total_chunks = int(chunks_row[0]) if chunks_row else 0
-        return total_files, total_chunks
+            total_files = int(files_row[0]) if files_row else 0
+            total_chunks = int(chunks_row[0]) if chunks_row else 0
+            return total_files, total_chunks
+        except Exception as exc:
+            logger.debug(f"Failed to get scope stats: {exc}")
+            return 0, 0
 
     def get_scope_file_paths(self, scope_prefix: str | None) -> list[str]:
         """Return file paths under an optional scope prefix."""
@@ -1725,25 +1729,29 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], scope_prefix: str | None
     ) -> list[str]:
         """Executor method for get_scope_file_paths - runs in DB thread."""
-        if scope_prefix:
-            normalized = scope_prefix.replace("\\", "/")
-            like = f"{normalized}%"
-            rows = conn.execute(
-                "SELECT path FROM files WHERE path LIKE ? ORDER BY path",
-                [like],
-            ).fetchall()
-        else:
-            rows = conn.execute("SELECT path FROM files ORDER BY path").fetchall()
+        try:
+            if scope_prefix:
+                normalized = scope_prefix.replace("\\", "/")
+                like = f"{normalized}%"
+                rows = conn.execute(
+                    "SELECT path FROM files WHERE path LIKE ? ORDER BY path",
+                    [like],
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT path FROM files ORDER BY path").fetchall()
 
-        out: list[str] = []
-        for row in rows:
-            try:
-                path = str(row[0] or "").replace("\\", "/")
-            except Exception:
-                path = ""
-            if path:
-                out.append(path)
-        return out
+            out: list[str] = []
+            for row in rows:
+                try:
+                    path = str(row[0] or "").replace("\\", "/")
+                except Exception:
+                    path = ""
+                if path:
+                    out.append(path)
+            return out
+        except Exception as exc:
+            logger.debug(f"Failed to get scope file paths: {exc}")
+            return []
 
     def _executor_get_all_chunks_with_metadata(
         self, conn: Any, state: dict[str, Any]

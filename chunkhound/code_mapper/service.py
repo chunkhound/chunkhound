@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from loguru import logger
@@ -12,6 +13,10 @@ from chunkhound.code_mapper.pipeline import (
     _merge_sources_metadata,
     _run_code_mapper_overview_hyde,
 )
+from chunkhound.core.config.indexing_config import IndexingConfig
+from chunkhound.database_factory import DatabaseServices
+from chunkhound.embeddings import EmbeddingManager
+from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.llm_manager import LLMManager
 from chunkhound.mcp_server.tools import deep_research_impl
 
@@ -39,14 +44,14 @@ class CodeMapperPipelineResult:
 async def run_code_mapper_overview_only(
     *,
     llm_manager: LLMManager | None,
-    target_dir: Any,
-    scope_path: Any,
+    target_dir: Path,
+    scope_path: Path,
     scope_label: str,
     max_points: int,
     comprehensiveness: str,
-    out_dir: Any,
-    assembly_provider: Any | None,
-    indexing_cfg: Any | None,
+    out_dir: Path | None,
+    assembly_provider: LLMProvider | None,
+    indexing_cfg: IndexingConfig | None,
 ) -> tuple[str, list[str]]:
     """Run overview-only Code Mapper and return the answer + points."""
     overview_answer, points_of_interest = await _run_code_mapper_overview_hyde(
@@ -69,18 +74,18 @@ async def run_code_mapper_overview_only(
 
 async def run_code_mapper_pipeline(
     *,
-    services: Any,
-    embedding_manager: Any,
-    llm_manager: Any,
-    target_dir: Any,
-    scope_path: Any,
+    services: DatabaseServices,
+    embedding_manager: EmbeddingManager,
+    llm_manager: LLMManager,
+    target_dir: Path,
+    scope_path: Path,
     scope_label: str,
     path_filter: str | None,
     comprehensiveness: str,
     max_points: int,
-    out_dir: Any,
-    assembly_provider: Any | None,
-    indexing_cfg: Any | None,
+    out_dir: Path | None,
+    assembly_provider: LLMProvider | None,
+    indexing_cfg: IndexingConfig | None,
     progress: Any,
     log_info: Callable[[str], None] | None = None,
     log_warning: Callable[[str], None] | None = None,
