@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from shutil import rmtree
 from typing import Callable, Iterable
 
 from chunkhound.code_mapper.utils import safe_scope_label
@@ -84,7 +85,11 @@ class CleanupConfig:
     max_completion_tokens: int
 
 
-def find_index_file(input_dir: Path, patterns: Iterable[str] | None = None) -> Path:
+def find_index_file(
+    input_dir: Path,
+    patterns: Iterable[str] | None = None,
+    log_warning: Callable[[str], None] | None = None,
+) -> Path:
     pattern_list = list(patterns) if patterns else list(_INDEX_PATTERNS)
     candidates: list[Path] = []
     for pattern in pattern_list:
@@ -94,6 +99,11 @@ def find_index_file(input_dir: Path, patterns: Iterable[str] | None = None) -> P
             "No AutoDoc index file found (expected "
             + ", ".join(pattern_list)
             + ")."
+        )
+    if len(candidates) > 1 and log_warning:
+        log_warning(
+            "Multiple AutoDoc index files found; using first match: "
+            f"{candidates[0]}. Consider --index-pattern to disambiguate."
         )
     return candidates[0]
 
@@ -220,7 +230,11 @@ async def generate_docsite(
     log_info: Callable[[str], None] | None = None,
     log_warning: Callable[[str], None] | None = None,
 ) -> DocsiteResult:
-    index_path = find_index_file(input_dir, patterns=index_patterns)
+    index_path = find_index_file(
+        input_dir,
+        patterns=index_patterns,
+        log_warning=log_warning,
+    )
     index = parse_index_file(index_path)
 
     if log_info:
@@ -285,6 +299,9 @@ def write_astro_site(
     layouts_dir = src_dir / "layouts"
     styles_dir = src_dir / "styles"
     data_dir = src_dir / "data"
+
+    if topics_dir.exists():
+        rmtree(topics_dir)
 
     for path in (pages_dir, topics_dir, layouts_dir, styles_dir, data_dir):
         path.mkdir(parents=True, exist_ok=True)
