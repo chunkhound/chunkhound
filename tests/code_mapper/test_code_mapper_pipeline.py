@@ -161,7 +161,7 @@ async def test_code_mapper_coverage_uses_deep_research_sources(
         import chunkhound.services.deep_research_service as dr_mod
 
         original_threshold = dr_mod.RELEVANCE_THRESHOLD
-        dr_mod.RELEVANCE_THRESHOLD = None
+        dr_mod.RELEVANCE_THRESHOLD = 0.0
         try:
             result = await deep_research_impl(
                 services=services,
