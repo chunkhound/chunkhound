@@ -1700,7 +1700,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 escaped = escape_like_pattern(normalized)
                 like = f"{escaped}%"
                 files_row = conn.execute(
-                    "SELECT COUNT(*) FROM files WHERE path LIKE ? ESCAPE '\\\\'",
+                    "SELECT COUNT(*) FROM files WHERE path LIKE ? ESCAPE '\\'",
                     [like],
                 ).fetchone()
                 chunks_row = conn.execute(
@@ -1708,7 +1708,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     SELECT COUNT(*)
                     FROM chunks c
                     JOIN files f ON c.file_id = f.id
-                    WHERE f.path LIKE ? ESCAPE '\\\\'
+                    WHERE f.path LIKE ? ESCAPE '\\'
                     """,
                     [like],
                 ).fetchone()
@@ -1737,7 +1737,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 escaped = escape_like_pattern(normalized)
                 like = f"{escaped}%"
                 rows = conn.execute(
-                    "SELECT path FROM files WHERE path LIKE ? ESCAPE '\\\\' ORDER BY path",
+                    "SELECT path FROM files WHERE path LIKE ? ESCAPE '\\' ORDER BY path",
                     [like],
                 ).fetchall()
             else:
@@ -1934,7 +1934,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 params.append(threshold)
 
             if path_like is not None:
-                query += " AND f.path LIKE ? ESCAPE '\\\\'"
+                query += " AND f.path LIKE ? ESCAPE '\\'"
                 # Use substring match so callers can pass repo-relative paths
                 # even when the database base_directory is higher (e.g., monorepo root).
                 params.append(path_like)
@@ -1956,7 +1956,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 count_params.extend([query_embedding, threshold])
 
             if path_like is not None:
-                count_query += " AND f.path LIKE ? ESCAPE '\\\\'"
+                count_query += " AND f.path LIKE ? ESCAPE '\\'"
                 # Substring match for consistency with main query
                 count_params.append(path_like)
 
@@ -2046,7 +2046,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             if normalized_path is not None:
                 escaped_path = escape_like_pattern(normalized_path)
-                where_conditions.append("f.path LIKE ? ESCAPE '\\\\'")
+                where_conditions.append("f.path LIKE ? ESCAPE '\\'")
                 # Allow matching repo-relative segments inside stored paths
                 params.append(f"%{escaped_path}%")
 
@@ -2230,7 +2230,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             params: list[Any] = [target_embedding, provider, model, chunk_id]
             if normalized_path is not None:
                 escaped_path = escape_like_pattern(normalized_path)
-                path_condition = "AND f.path LIKE ? ESCAPE '\\\\'"
+                path_condition = "AND f.path LIKE ? ESCAPE '\\'"
                 # Substring match so repo-relative scopes still work when base_directory is higher
                 params.append(f"%{escaped_path}%")
 
@@ -2339,7 +2339,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 # Convert relative path to SQL pattern
                 escaped_path = escape_like_pattern(normalized_path)
                 path_pattern = f"%{escaped_path}%"
-                path_condition = "AND f.path LIKE ? ESCAPE '\\\\'"
+                path_condition = "AND f.path LIKE ? ESCAPE '\\'"
                 query_params.insert(-1, path_pattern)  # Insert before limit
 
             # Build threshold condition
