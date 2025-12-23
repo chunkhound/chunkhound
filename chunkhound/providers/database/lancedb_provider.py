@@ -16,6 +16,7 @@ from chunkhound.core.types.common import ChunkType, Language
 
 # Import existing components that will be used by the provider
 from chunkhound.embeddings import EmbeddingManager
+from chunkhound.providers.database.like_utils import escape_like_pattern
 from chunkhound.providers.database.serial_database_provider import (
     SerialDatabaseProvider,
 )
@@ -123,13 +124,7 @@ def _escape_like_pattern(value: str) -> str:
 
     Uses backslash as the escape character (paired with ESCAPE '\\').
     """
-    return (
-        value.replace("\\", "\\\\")
-        .replace("%", "\\%")
-        .replace("_", "\\_")
-        .replace("[", "\\[")
-        .replace("'", "''")
-    )
+    return escape_like_pattern(value, escape_quotes=True)
 
 
 def _iter_batches(values: list[int], batch_size: int) -> list[list[int]]:

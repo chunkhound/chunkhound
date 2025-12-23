@@ -208,6 +208,7 @@ async def test_code_mapper_end_to_end_default_omits_combined_doc(
     assert index_files, "Expected a Code Mapper index file to be written"
     index_content = index_files[0].read_text(encoding="utf-8")
     assert "unreferenced_in_scope: 1" in index_content
+    assert "total_research_calls: 2" in index_content
     assert "total_indexed: 3" in index_content
     assert "coverage: 66.67%" in index_content
     assert "scope_scope_unreferenced_files.txt" in index_content

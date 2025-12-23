@@ -266,7 +266,7 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
     scope_total_files = pipeline_result.scope_total_files
     scope_total_chunks = pipeline_result.scope_total_chunks
 
-    total_research_calls = len(poi_sections)
+    total_research_calls = pipeline_result.total_points_of_interest
     generation_stats, coverage = build_generation_stats_with_coverage(
         generator_mode="code_research",
         total_research_calls=total_research_calls,

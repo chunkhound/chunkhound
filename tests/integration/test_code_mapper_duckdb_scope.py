@@ -100,3 +100,42 @@ async def test_duckdb_scope_stats_sanity(tmp_path: Path) -> None:
             assert all(path.startswith("scope/") for path in scoped_set)
     finally:
         provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_duckdb_scope_like_escapes_metacharacters(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    scope_dir = repo_root / "scope_"
+    other_dir = repo_root / "scopeX"
+    scope_dir.mkdir(parents=True, exist_ok=True)
+    other_dir.mkdir(parents=True, exist_ok=True)
+
+    (scope_dir / "a.py").write_text("def alpha():\n    return 'a'\n", encoding="utf-8")
+    (other_dir / "b.py").write_text("def beta():\n    return 'b'\n", encoding="utf-8")
+
+    config = build_config(repo_root, provider="duckdb")
+    db_path = config.database.get_db_path()
+
+    embedding_provider = FakeEmbeddingProvider(batch_size=100)
+    provider = DuckDBProvider(db_path, base_directory=repo_root)
+    provider.connect()
+    try:
+        await index_repo(provider, repo_root, embedding_provider)
+
+        total_files, total_chunks = provider.get_scope_stats("scope_/")
+        assert total_files == 1
+        assert total_chunks > 0
+
+        scoped_paths = provider.get_scope_file_paths("scope_/")
+        assert scoped_paths == ["scope_/a.py"]
+
+        results, _ = provider.search_regex(
+            pattern="def",
+            page_size=50,
+            offset=0,
+            path_filter="scope_",
+        )
+        file_paths = {row["file_path"] for row in results}
+        assert file_paths == {"scope_/a.py"}
+    finally:
+        provider.disconnect()

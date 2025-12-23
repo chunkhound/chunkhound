@@ -33,6 +33,7 @@ class CodeMapperNoPointsError(RuntimeError):
 class CodeMapperPipelineResult:
     overview_result: dict[str, Any]
     poi_sections: list[tuple[str, dict[str, Any]]]
+    total_points_of_interest: int
     unified_source_files: dict[str, str]
     unified_chunks_dedup: list[dict[str, Any]]
     total_files_global: int | None
@@ -118,6 +119,7 @@ async def run_code_mapper_pipeline(
     if not points_of_interest:
         raise CodeMapperNoPointsError(overview_answer)
 
+    total_points_of_interest = len(points_of_interest)
     poi_sections: list[tuple[str, dict[str, Any]]] = []
     for idx, poi in enumerate(points_of_interest, start=1):
         heading = _derive_heading_from_point(poi)
@@ -181,6 +183,7 @@ async def run_code_mapper_pipeline(
     return CodeMapperPipelineResult(
         overview_result=overview_result,
         poi_sections=poi_sections,
+        total_points_of_interest=total_points_of_interest,
         unified_source_files=unified_source_files,
         unified_chunks_dedup=unified_chunks_dedup,
         total_files_global=total_files_global,
