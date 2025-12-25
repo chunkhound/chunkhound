@@ -135,6 +135,10 @@ class EmbeddingService(BaseService):
             total_chars = sum(chunk_sizes)
             logger.error(f"Failed to generate embeddings (chunks: {len(chunk_sizes)}, total_chars: {total_chars}, max_chars: {max_size}): {e}")
 
+            # Special handling for LanceDB resources exhausted error - fail fast
+            if "Resources exhausted" in str(e):
+                raise e
+
             return 0
 
     async def generate_missing_embeddings(
