@@ -1072,6 +1072,9 @@ class LanceDBProvider(SerialDatabaseProvider):
             provider = embeddings_data[0]["provider"]
             model = embeddings_data[0]["model"]
 
+            # PERFORMANCE PROFILING: Schema validation and setup
+            schema_setup_start = time.time()
+
             # Check if embedding columns exist in schema and if they have the correct type
             current_schema = self._chunks_table.schema
             embedding_field = None
@@ -1150,6 +1153,12 @@ class LanceDBProvider(SerialDatabaseProvider):
                         f"Restored {len(chunks_to_restore)} chunks to new table"
                     )
 
+                schema_setup_time = time.time() - schema_setup_start
+                logger.debug(
+                    f"Schema recreation and data restoration completed in {schema_setup_time:.3f}s "
+                    f"(provider={provider}, model={model}, chunks_restored={len(existing_data_df):,})"
+                )
+
             elif not embedding_field:
                 # Add embedding columns to the table if they don't exist
                 logger.debug("Adding embedding columns to chunks table")
@@ -1163,6 +1172,19 @@ class LanceDBProvider(SerialDatabaseProvider):
                     }
                 )
 
+                schema_setup_time = time.time() - schema_setup_start
+                logger.debug(
+                    f"Schema column addition completed in {schema_setup_time:.3f}s "
+                    f"(provider={provider}, model={model})"
+                )
+
+            else:
+                schema_setup_time = time.time() - schema_setup_start
+                logger.debug(
+                    f"Schema validation completed in {schema_setup_time:.3f}s "
+                    f"(provider={provider}, model={model})"
+                )
+
             # Determine optimal batch size if not provided
             if batch_size is None:
                 # Use smaller batches to reduce reading overhead and prevent timeouts
@@ -1170,11 +1192,17 @@ class LanceDBProvider(SerialDatabaseProvider):
 
             total_updated = 0
 
+            # PERFORMANCE PROFILING: Batch processing
+            batch_processing_start = time.time()
+
             # Process in batches for better memory management
             # Use read-modify-write pattern: LanceDB's when_matched_update_all()
             # requires ALL columns in source data to match target schema
             for i in range(0, len(embeddings_data), batch_size):
                 batch = embeddings_data[i : i + batch_size]
+
+                # PERFORMANCE PROFILING: Per-batch operations
+                batch_lookup_start = time.time()
 
                 # Build lookup of chunk_id -> embedding data
                 embedding_lookup = {}
@@ -1190,6 +1218,11 @@ class LanceDBProvider(SerialDatabaseProvider):
                         "provider": e["provider"],
                         "model": e["model"],
                     }
+
+                batch_lookup_time = time.time() - batch_lookup_start
+
+                # PERFORMANCE PROFILING: Read existing rows
+                batch_read_start = time.time()
 
                 # Read existing rows for these chunk IDs
                 # NOTE: Using Lance SQL filter instead of .search() because .search()
@@ -1255,6 +1288,11 @@ class LanceDBProvider(SerialDatabaseProvider):
                         f"Chunk IDs requested: {chunk_ids[:5]}{'...' if len(chunk_ids) > 5 else ''}"
                     )
 
+                batch_read_time = time.time() - batch_read_start
+
+                # PERFORMANCE PROFILING: Merge data preparation
+                batch_merge_prep_start = time.time()
+
                 # Merge embedding data into existing rows (full row data required)
                 merge_data = []
                 for _, row in existing_df.iterrows():
@@ -1285,15 +1323,37 @@ class LanceDBProvider(SerialDatabaseProvider):
                         merge_data, schema=get_chunks_schema(embedding_dims)
                     )
                     try:
+                        # PERFORMANCE PROFILING: merge_insert operation
+                        batch_merge_insert_start = time.time()
+
                         (
                             self._chunks_table.merge_insert("id")
                             .when_matched_update_all()
                             .execute(merge_table)
                         )
+
+                        batch_merge_insert_time = time.time() - batch_merge_insert_start
+                        batch_merge_prep_time = time.time() - batch_merge_prep_start
+
+                        logger.debug(
+                            f"Batch processed in {time.time() - batch_lookup_start:.3f}s "
+                            f"(lookup: {batch_lookup_time:.3f}s, read: {batch_read_time:.3f}s, "
+                            f"prep: {batch_merge_prep_time:.3f}s, insert: {batch_merge_insert_time:.3f}s, "
+                            f"batch_size={len(batch)}, provider={provider}, model={model})"
+                        )
                     except Exception as merge_error:
                         logger.error(f"merge_insert failed for {len(merge_data)} embeddings: {merge_error}")
                         # Fail fast to surface the issue immediately
                         raise RuntimeError(f"Embedding insertion failed: {merge_error}") from merge_error
+                else:
+                    batch_merge_prep_time = time.time() - batch_merge_prep_start
+
+                    logger.debug(
+                        f"Batch processed (no merge data) in {time.time() - batch_lookup_start:.3f}s "
+                        f"(lookup: {batch_lookup_time:.3f}s, read: {batch_read_time:.3f}s, "
+                        f"prep: {batch_merge_prep_time:.3f}s, batch_size={len(batch)}, "
+                        f"provider={provider}, model={model})"
+                    )
 
                 total_updated += len(merge_data)
 
@@ -1301,6 +1361,16 @@ class LanceDBProvider(SerialDatabaseProvider):
                     logger.debug(
                         f"Processed {total_updated}/{len(embeddings_data)} embeddings"
                     )
+
+            batch_processing_time = time.time() - batch_processing_start
+            logger.debug(
+                f"Batch processing completed in {batch_processing_time:.3f}s "
+                f"(total_embeddings={len(embeddings_data)}, batch_size={batch_size}, "
+                f"provider={provider}, model={model})"
+            )
+
+            # PERFORMANCE PROFILING: Vector index creation
+            index_creation_start = time.time()
 
             # Create vector index if we have enough embeddings
             total_rows = self._chunks_table.count_rows()
@@ -1311,12 +1381,26 @@ class LanceDBProvider(SerialDatabaseProvider):
                     self._executor_create_vector_index(
                         conn, state, provider, model, embedding_dims
                     )
+
+                    index_creation_time = time.time() - index_creation_start
+                    logger.debug(
+                        f"Vector index creation completed in {index_creation_time:.3f}s "
+                        f"(total_rows={total_rows}, provider={provider}, model={model})"
+                    )
                 except Exception as e:
                     # This is expected if the table was created with variable-size list schema
                     # The index will work once the table is recreated with fixed-size schema
+                    index_creation_time = time.time() - index_creation_start
                     logger.debug(
-                        f"Vector index creation deferred (expected with initial schema): {e}"
+                        f"Vector index creation failed in {index_creation_time:.3f}s "
+                        f"(total_rows={total_rows}, provider={provider}, model={model}): {e}"
                     )
+            else:
+                index_creation_time = time.time() - index_creation_start
+                logger.debug(
+                    f"Vector index creation skipped (insufficient data) in {index_creation_time:.3f}s "
+                    f"(total_rows={total_rows} < 256, provider={provider}, model={model})"
+                )
 
             logger.debug(
                 f"Successfully updated {total_updated} embeddings using merge_insert"
