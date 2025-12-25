@@ -159,9 +159,6 @@ class LanceDBProvider(SerialDatabaseProvider):
         self._fragment_threshold = (
             config.lancedb_optimize_fragment_threshold if config else 100
         )
-        self._arrow_memory_limit_mb = (
-            config.lancedb_arrow_memory_limit_mb if config else 512.0
-        )
         self.connection: Any | None = (
             None  # For backward compatibility only - do not use directly
         )
@@ -197,14 +194,6 @@ class LanceDBProvider(SerialDatabaseProvider):
         lance_logger = python_logging.getLogger('lance')
         lance_logger.setLevel(python_logging.DEBUG)
 
-        # Configure PyArrow memory pool limit to prevent out-of-memory errors
-        # Convert MB to bytes for ARROW_DEFAULT_MEMORY_POOL
-        memory_limit_bytes = int(self._arrow_memory_limit_mb * 1024 * 1024)
-        original_arrow_memory_pool = os.environ.get("ARROW_DEFAULT_MEMORY_POOL")
-        os.environ["ARROW_DEFAULT_MEMORY_POOL"] = str(memory_limit_bytes)
-
-        logger.debug(f"Set ARROW_DEFAULT_MEMORY_POOL to {memory_limit_bytes} bytes ({self._arrow_memory_limit_mb} MB)")
-
         abs_db_path = self._db_path
 
         # Save CWD (thread-safe in executor)
@@ -215,11 +204,6 @@ class LanceDBProvider(SerialDatabaseProvider):
             return conn
         finally:
             os.chdir(original_cwd)
-            # Restore original ARROW_DEFAULT_MEMORY_POOL if it was set
-            if original_arrow_memory_pool is not None:
-                os.environ["ARROW_DEFAULT_MEMORY_POOL"] = original_arrow_memory_pool
-            elif "ARROW_DEFAULT_MEMORY_POOL" in os.environ:
-                del os.environ["ARROW_DEFAULT_MEMORY_POOL"]
 
     def _get_schema_sql(self) -> list[str] | None:
         """LanceDB doesn't use SQL - return None."""

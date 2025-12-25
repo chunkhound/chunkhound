@@ -42,12 +42,6 @@ class DatabaseConfig(BaseModel):
         description="Minimum fragment count to trigger optimization (0 = always optimize, 50 = aggressive for large datasets, 100 = balanced, 500 = conservative)",
     )
 
-    lancedb_arrow_memory_limit_mb: float = Field(
-        default=512.0,
-        ge=0.0,
-        description="LanceDB Arrow memory pool limit in MB (default: 512MB = 0.5GB). Controls PyArrow memory allocation for LanceDB operations.",
-    )
-
     # Disk usage limits
     max_disk_usage_mb: float | None = Field(
         default=None,
@@ -144,12 +138,6 @@ class DatabaseConfig(BaseModel):
             help="Maximum database size in GB before indexing is stopped",
         )
 
-        parser.add_argument(
-            "--lancedb-arrow-memory-limit-mb",
-            type=float,
-            help="LanceDB Arrow memory pool limit in MB (default: 512MB = 0.5GB)",
-        )
-
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
         """Load database config from environment variables."""
@@ -165,12 +153,6 @@ class DatabaseConfig(BaseModel):
             config["lancedb_index_type"] = index_type
         if threshold := os.getenv("CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_FRAGMENT_THRESHOLD"):
             config["lancedb_optimize_fragment_threshold"] = int(threshold)
-        if arrow_memory := os.getenv("CHUNKHOUND_DATABASE__LANCEDB_ARROW_MEMORY_LIMIT_MB"):
-            try:
-                config["lancedb_arrow_memory_limit_mb"] = float(arrow_memory)
-            except ValueError:
-                # Invalid value - silently ignore
-                pass
         # Disk usage limit from environment
         if max_disk_gb := os.getenv("CHUNKHOUND_DATABASE__MAX_DISK_USAGE_GB"):
             try:
@@ -213,8 +195,6 @@ class DatabaseConfig(BaseModel):
             overrides["provider"] = args.database_provider
         if hasattr(args, "max_disk_usage_gb") and args.max_disk_usage_gb is not None:
             overrides["max_disk_usage_mb"] = args.max_disk_usage_gb * 1024.0
-        if hasattr(args, "lancedb_arrow_memory_limit_mb") and args.lancedb_arrow_memory_limit_mb is not None:
-            overrides["lancedb_arrow_memory_limit_mb"] = args.lancedb_arrow_memory_limit_mb
         return overrides
 
     def __repr__(self) -> str:
@@ -222,6 +202,4 @@ class DatabaseConfig(BaseModel):
         parts = [f"provider={self.provider}", f"path={self.path}"]
         if self.max_disk_usage_mb is not None:
             parts.append(f"max_disk_usage_mb={self.max_disk_usage_mb}")
-        if self.provider == "lancedb" and self.lancedb_arrow_memory_limit_mb != 512.0:
-            parts.append(f"lancedb_arrow_memory_limit_mb={self.lancedb_arrow_memory_limit_mb}")
         return f"DatabaseConfig({', '.join(parts)})"
