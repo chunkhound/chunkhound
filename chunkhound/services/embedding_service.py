@@ -109,21 +109,6 @@ class EmbeddingService(BaseService):
             raise ValueError("chunk_ids and chunk_texts must have the same length")
 
         try:
-            # Debug log entry point to confirm our code executes
-            import os
-            from datetime import datetime
-
-            debug_file = os.getenv("CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_debug.log")
-            timestamp = datetime.now().isoformat()
-            try:
-                with open(debug_file, "a") as f:
-                    f.write(
-                        f"[{timestamp}] [ENTRY] Starting embedding generation for {len(chunk_ids)} chunks\n"
-                    )
-                    f.flush()
-            except Exception:
-                pass
-
             logger.debug(f"Generating embeddings for {len(chunk_ids)} chunks")
 
             # Filter out chunks that already have embeddings
