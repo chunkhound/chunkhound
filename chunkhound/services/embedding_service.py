@@ -90,6 +90,7 @@ class EmbeddingService(BaseService):
         chunk_ids: list[ChunkId],
         chunk_texts: list[str],
         show_progress: bool = True,
+        embed_task: TaskID | None = None,
     ) -> int:
         """Generate embeddings for a list of chunks.
 
@@ -122,7 +123,7 @@ class EmbeddingService(BaseService):
 
             # Generate embeddings in batches
             total_generated = await self._generate_embeddings_in_batches(
-                filtered_chunks, show_progress
+                filtered_chunks, show_progress, embed_task
             )
 
             logger.debug(f"Successfully generated {total_generated} embeddings")
@@ -200,6 +201,17 @@ class EmbeddingService(BaseService):
             current_batch_size = initial_batch_size
             logger.info(f"Starting missing embeddings generation (initial_batch_size={current_batch_size})")
 
+            # Get initial stats for progress tracking
+            initial_stats = self._db.get_stats()
+            total_chunks = initial_stats.get('chunks', 0)
+
+            # Create progress task for embedding generation
+            embed_task: TaskID | None = None
+            if self.progress:
+                embed_task = self.progress.add_task(
+                    "Generating embeddings", total=total_chunks, speed="", info=""
+                )
+
             total_generated = 0
             total_processed = 0
             offset = 0
@@ -265,7 +277,7 @@ class EmbeddingService(BaseService):
                 # Generate embeddings for this batch
                 logger.debug(f"Calling generate_embeddings_for_chunks with {len(chunk_id_list)} chunks, provider={self._embedding_provider}")
                 batch_generated = await self.generate_embeddings_for_chunks(
-                    chunk_id_list, chunk_texts, show_progress=True
+                    chunk_id_list, chunk_texts, show_progress=True, embed_task=embed_task
                 )
                 logger.debug(f"generate_embeddings_for_chunks returned {batch_generated}")
 
@@ -507,7 +519,7 @@ class EmbeddingService(BaseService):
         return filtered_chunks
 
     async def _generate_embeddings_in_batches(
-        self, chunk_data: list[tuple[ChunkId, str]], show_progress: bool = True
+        self, chunk_data: list[tuple[ChunkId, str]], show_progress: bool = True, embed_task: TaskID | None = None
     ) -> int:
         """Generate embeddings for chunks in optimized batches.
 
@@ -625,12 +637,6 @@ class EmbeddingService(BaseService):
 
                     return []
 
-        # Create progress task for embedding generation if requested
-        embed_task: TaskID | None = None
-        if show_progress and self.progress:
-            embed_task = self.progress.add_task(
-                "    └─ Generating embeddings", total=len(chunk_data), speed="", info=""
-            )
 
         # Process batches with optional progress tracking
         import threading
