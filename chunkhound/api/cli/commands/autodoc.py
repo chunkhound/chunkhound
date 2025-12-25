@@ -14,6 +14,7 @@ from chunkhound.autodoc.docsite import CleanupConfig, generate_docsite
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.llm_config import LLMConfig
 from chunkhound.llm_manager import LLMManager
+from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 
 
 def _default_out_dir(input_dir: Path) -> Path:
@@ -111,7 +112,21 @@ def _resolve_llm_manager(
         if llm_config.assembly_reasoning_effort:
             override_notes.append("assembly reasoning effort")
         suffix = f" ({', '.join(override_notes)} override)" if override_notes else ""
-        if effort:
+        if isinstance(provider, str) and provider == "codex-cli":
+            resolved_model, _model_source = CodexCLIProvider.describe_model_resolution(
+                model if isinstance(model, str) else None
+            )
+            resolved_effort, _effort_source = (
+                CodexCLIProvider.describe_reasoning_effort_resolution(
+                    effort if isinstance(effort, str) else None
+                )
+            )
+            formatter.info(
+                "Cleanup model selection: "
+                f"provider={provider}, model={model} (resolved={resolved_model}), "
+                f"reasoning_effort={resolved_effort}{suffix}"
+            )
+        elif effort:
             formatter.info(
                 f"Cleanup model selection: provider={provider}, model={model}, "
                 f"reasoning_effort={effort}{suffix}"
