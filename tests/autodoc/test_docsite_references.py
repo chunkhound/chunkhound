@@ -79,8 +79,8 @@ def test_flatten_sources_block_builds_list_with_paths_and_chunks() -> None:
     flat = docsite.flatten_sources_block(_sources_block())
 
     assert flat == [
-        "- [1] repo/src/main.py (2 chunks: L1-10, L20-30)",
-        "- [2] repo/tests/test_main.py (1 chunks: L5-8)",
+        "- [1] `repo/src/main.py` (2 chunks: L1-10, L20-30)",
+        "- [2] `repo/tests/test_main.py` (1 chunks: L5-8)",
     ]
 
 
@@ -116,4 +116,4 @@ async def test_cleanup_topics_injects_flattened_references() -> None:
     output = pages[0].body_markdown
     assert "## Sources" not in output
     assert "## References" in output
-    assert "- [1] repo/src/main.py (2 chunks: L1-10, L20-30)" in output
+    assert "- [1] `repo/src/main.py` (2 chunks: L1-10, L20-30)" in output
