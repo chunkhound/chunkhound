@@ -14,6 +14,7 @@ from chunkhound.services.research.models import (
     QUERY_EXPANSION_TOKENS,
     ResearchContext,
 )
+from chunkhound.services.research.schemas import QueryExpansionResponse
 
 
 class QueryExpander:
@@ -88,20 +89,6 @@ class QueryExpander:
         """
         llm = self._llm_manager.get_utility_provider()
 
-        # Define JSON schema for structured output
-        schema = {
-            "type": "object",
-            "properties": {
-                "queries": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": f"Array of exactly {NUM_LLM_EXPANDED_QUERIES} expanded search queries (semantically complete sentences)",
-                }
-            },
-            "required": ["queries"],
-            "additionalProperties": False,
-        }
-
         # Simplified system prompt per GPT-5-Nano best practices
         system = prompts.QUERY_EXPANSION_SYSTEM
 
@@ -124,14 +111,15 @@ class QueryExpander:
         )
 
         try:
-            result = await llm.complete_structured(
+            # Use typed structured output with Pydantic model
+            result = await llm.complete_structured_typed(
                 prompt=prompt,
-                json_schema=schema,
+                response_model=QueryExpansionResponse,
                 system=system,
                 max_completion_tokens=QUERY_EXPANSION_TOKENS,
             )
 
-            expanded = result.get("queries", [])
+            expanded = result.queries  # Type-safe access
 
             # Validation: expect exactly 2 queries from LLM
             if not expanded or len(expanded) < NUM_LLM_EXPANDED_QUERIES:

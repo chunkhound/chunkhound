@@ -8,6 +8,8 @@ Supports Claude 4.5 generation models including Opus 4.5 with advanced features:
 """
 
 import asyncio
+import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 from loguru import logger
@@ -28,6 +30,7 @@ except ImportError:
 BETA_EFFORT = "effort-2025-11-24"
 BETA_CONTEXT_MANAGEMENT = "context-management-2025-06-27"
 BETA_INTERLEAVED_THINKING = "interleaved-thinking-2025-05-14"
+BETA_STRUCTURED_OUTPUTS = "structured-outputs-2025-11-13"
 
 # Models that support effort parameter
 EFFORT_SUPPORTED_MODELS = {"claude-opus-4-5-20251101"}
@@ -267,7 +270,7 @@ class AnthropicLLMProvider(LLMProvider):
         Args:
             thinking_active: Override for whether thinking is active in this request.
                 If None, uses self._thinking_enabled. Pass False for requests
-                where thinking is skipped (e.g., complete_structured with forced tool choice).
+                where thinking is explicitly disabled.
 
         Returns:
             Context management dict for API request, or None if disabled
@@ -491,8 +494,16 @@ class AnthropicLLMProvider(LLMProvider):
     ) -> dict[str, Any]:
         """Generate a structured JSON completion conforming to the given schema.
 
-        Uses tool use with schema validation for reliable structured output.
-        This is much more reliable than prompt engineering.
+        Uses Anthropic's native structured outputs with constrained decoding.
+        This guarantees schema-compliant JSON through grammar-level constraints.
+
+        Features:
+        - Guaranteed valid JSON via constrained decoding (no parsing errors)
+        - Compatible with extended thinking (grammar resets between sections)
+        - Compatible with effort parameter (Opus 4.5)
+        - Compatible with context management
+
+        Note: Incompatible with citations and message prefilling.
 
         Args:
             prompt: The user prompt
@@ -503,16 +514,10 @@ class AnthropicLLMProvider(LLMProvider):
 
         Returns:
             Parsed JSON object conforming to schema
-        """
-        # Define a tool with the JSON schema as input
-        tools = [
-            {
-                "name": "return_structured_data",
-                "description": "Return structured data matching the required schema",
-                "input_schema": json_schema,
-            }
-        ]
 
+        Raises:
+            RuntimeError: If response is refused, truncated, or contains invalid JSON
+        """
         # Build messages
         messages = [{"role": "user", "content": prompt}]
 
@@ -520,46 +525,64 @@ class AnthropicLLMProvider(LLMProvider):
         request_timeout = timeout if timeout is not None else self._timeout
 
         try:
-            # Build request kwargs
+            # Build request kwargs for native structured outputs
             request_kwargs: dict[str, Any] = {
                 "model": self._model,
                 "messages": messages,
                 "max_tokens": max_completion_tokens,
                 "timeout": request_timeout,
-                "tools": tools,
-                "tool_choice": {"type": "tool", "name": "return_structured_data"},
+                # Native structured outputs via output_format
+                "output_format": {
+                    "type": "json_schema",
+                    "schema": json_schema,
+                },
             }
 
             # Add system prompt if provided
             if system:
                 request_kwargs["system"] = system
 
-            # Note: Extended thinking is NOT compatible with forced tool choice
-            # (tool_choice: {"type": "tool", "name": "..."})
-            # We skip thinking config here since we force the tool
-            if self._thinking_enabled:
-                logger.debug(
-                    "Skipping extended thinking for complete_structured - "
-                    "forced tool choice is incompatible with thinking"
-                )
-
-            # Add beta headers for advanced features (excluding interleaved thinking)
-            beta_headers = []
+            # Build beta headers - structured outputs is always required
+            beta_headers = [BETA_STRUCTURED_OUTPUTS]
             if self._effort and self._model in EFFORT_SUPPORTED_MODELS:
                 beta_headers.append(BETA_EFFORT)
             if self._context_management_enabled:
                 beta_headers.append(BETA_CONTEXT_MANAGEMENT)
-            if beta_headers:
-                request_kwargs["betas"] = beta_headers
+            # Extended thinking is compatible with structured outputs
+            # (grammar resets between sections, allowing Claude to think freely)
+            if self._thinking_enabled and self._interleaved_thinking:
+                beta_headers.append(BETA_INTERLEAVED_THINKING)
+
+            request_kwargs["betas"] = beta_headers
+
+            # Add thinking configuration if enabled
+            thinking_active = False
+            if self._thinking_enabled:
+                # max_tokens must be greater than thinking.budget_tokens
+                min_max_tokens = self._thinking_budget_tokens + 1000
+                if max_completion_tokens < min_max_tokens:
+                    logger.warning(
+                        f"max_completion_tokens ({max_completion_tokens}) too small for "
+                        f"thinking budget ({self._thinking_budget_tokens}). "
+                        f"Increasing to {min_max_tokens}"
+                    )
+                    request_kwargs["max_tokens"] = min_max_tokens
+
+                request_kwargs["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": self._thinking_budget_tokens,
+                }
+                thinking_active = True
 
             # Add output config for effort parameter (Opus 4.5 only)
             output_config = self._build_output_config()
             if output_config:
                 request_kwargs["output_config"] = output_config
 
-            # Add context management if enabled (with thinking_active=False since
-            # forced tool choice is incompatible with thinking)
-            context_management = self._build_context_management(thinking_active=False)
+            # Add context management if enabled
+            context_management = self._build_context_management(
+                thinking_active=thinking_active
+            )
             if context_management:
                 request_kwargs["context_management"] = context_management
 
@@ -574,22 +597,48 @@ class AnthropicLLMProvider(LLMProvider):
                     response.usage.input_tokens + response.usage.output_tokens
                 )
 
-            # Extract tool use from content blocks
-            tool_use_block = None
+            # Check for refusal (safety-related)
+            if response.stop_reason == "refusal":
+                raise RuntimeError(
+                    "Model refused to generate structured output for safety reasons"
+                )
+
+            # Check for truncation
+            if response.stop_reason == "max_tokens":
+                usage_info = ""
+                if response.usage:
+                    usage_info = (
+                        f" (input={response.usage.input_tokens:,}, "
+                        f"output={response.usage.output_tokens:,})"
+                    )
+                raise RuntimeError(
+                    f"Structured output truncated - increase max_completion_tokens{usage_info}"
+                )
+
+            # Extract text content from response
+            # With structured outputs, the JSON is in the text block
+            text_content = None
             for block in response.content:
-                if getattr(block, "type", None) == "tool_use":
-                    tool_use_block = block
+                if getattr(block, "type", None) == "text":
+                    text_content = block.text
                     break
 
-            if not tool_use_block:
+            if not text_content:
                 raise RuntimeError(
-                    "Model did not return tool use for structured output. "
+                    "Model did not return text content for structured output. "
                     f"Stop reason: {response.stop_reason}"
                 )
 
-            # Return the tool input as structured data
-            return tool_use_block.input
+            # Parse and return JSON
+            result: dict[str, Any] = json.loads(text_content)
+            return result
 
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse structured output as JSON: {e}")
+            raise RuntimeError(f"Invalid JSON in structured output: {e}") from e
+        except RuntimeError:
+            # Re-raise RuntimeErrors from refusal, truncation, or missing content
+            raise
         except Exception as e:
             logger.error(f"Anthropic structured completion failed: {e}")
             raise RuntimeError(f"LLM structured completion failed: {e}") from e
@@ -609,6 +658,7 @@ class AnthropicLLMProvider(LLMProvider):
             prompt: The user prompt
             tools: List of tool definitions
                 Each tool should have: name, description, input_schema
+                Optional: strict=True for guaranteed schema validation on inputs
             system: Optional system prompt
             max_completion_tokens: Maximum tokens to generate
             tool_choice: Optional tool choice configuration
@@ -620,6 +670,10 @@ class AnthropicLLMProvider(LLMProvider):
         Returns:
             Tuple of (LLMResponse with text content, list of tool use requests)
             Tool use requests contain: id, name, input
+
+        Note:
+            When any tool has strict=True, the structured-outputs beta header
+            is automatically added to guarantee schema-compliant tool inputs.
         """
         # Build messages
         messages = [{"role": "user", "content": prompt}]
@@ -679,6 +733,10 @@ class AnthropicLLMProvider(LLMProvider):
 
             # Add beta headers for advanced features
             beta_headers = []
+            # Check if any tools have strict: true for guaranteed schema validation
+            has_strict_tools = any(tool.get("strict") for tool in tools)
+            if has_strict_tools:
+                beta_headers.append(BETA_STRUCTURED_OUTPUTS)
             if self._effort and self._model in EFFORT_SUPPORTED_MODELS:
                 beta_headers.append(BETA_EFFORT)
             if self._context_management_enabled:
@@ -828,7 +886,7 @@ class AnthropicLLMProvider(LLMProvider):
         system: str | None = None,
         max_completion_tokens: int = 4096,
         timeout: int | None = None,
-    ):
+    ) -> AsyncIterator[str]:
         """Generate a streaming completion for the given prompt.
 
         Yields text chunks as they arrive. Required for max_tokens > 21,333.

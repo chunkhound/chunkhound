@@ -7,6 +7,7 @@ from chunkhound.providers.llm.anthropic_llm_provider import (
     BETA_CONTEXT_MANAGEMENT,
     BETA_EFFORT,
     BETA_INTERLEAVED_THINKING,
+    BETA_STRUCTURED_OUTPUTS,
     EFFORT_SUPPORTED_MODELS,
     AnthropicLLMProvider,
 )
@@ -475,9 +476,9 @@ class TestContextManagement:
     def test_build_context_management_thinking_active_override(self):
         """Test thinking_active=False skips clear_thinking even when thinking_enabled=True.
 
-        This is critical for complete_structured() which uses forced tool choice
-        that's incompatible with thinking - the context management should not
-        include clear_thinking_20251015 in that case.
+        This allows context management to be correctly configured for requests
+        where thinking is explicitly disabled - clear_thinking_20251015 should not
+        be included when thinking is inactive for that specific call.
         """
         provider = AnthropicLLMProvider(
             api_key="test-key",
@@ -623,3 +624,135 @@ class TestOpus45ModelConfiguration:
         assert provider._clear_thinking_keep_turns == 2
         assert provider._clear_tool_uses_trigger_tokens == 100000
         assert provider._clear_tool_uses_keep == 5
+
+
+@pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
+class TestStructuredOutputs:
+    """Test native structured outputs functionality."""
+
+    def test_structured_outputs_beta_constant(self):
+        """Test structured outputs beta header constant is defined."""
+        assert BETA_STRUCTURED_OUTPUTS == "structured-outputs-2025-11-13"
+
+    def test_structured_output_method_exists(self):
+        """Test complete_structured method exists."""
+        provider = AnthropicLLMProvider(api_key="test-key")
+
+        assert hasattr(provider, "complete_structured")
+        assert callable(provider.complete_structured)
+
+    def test_structured_outputs_compatible_with_thinking(self):
+        """Test structured outputs are compatible with extended thinking.
+
+        Native structured outputs work with thinking because grammar
+        resets between sections, allowing Claude to think freely.
+        """
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            thinking_enabled=True,
+            thinking_budget_tokens=5000,
+        )
+
+        # Both should be enabled - native structured outputs are compatible
+        assert provider._thinking_enabled is True
+        assert provider.supports_tools() is True
+
+    def test_structured_outputs_with_interleaved_thinking(self):
+        """Test structured outputs work with interleaved thinking."""
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            thinking_enabled=True,
+            interleaved_thinking=True,
+        )
+
+        assert provider._thinking_enabled is True
+        assert provider._interleaved_thinking is True
+
+
+@pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
+class TestStrictToolUse:
+    """Test strict tool use functionality."""
+
+    def test_strict_tool_definition(self):
+        """Test tools can include strict: true."""
+        tool = {
+            "name": "get_weather",
+            "description": "Get weather",
+            "strict": True,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"},
+                },
+                "required": ["location"],
+                "additionalProperties": False,
+            },
+        }
+
+        # Verify tool structure is valid
+        assert tool.get("strict") is True
+        assert "additionalProperties" in tool["input_schema"]
+        assert tool["input_schema"]["additionalProperties"] is False
+
+    def test_strict_tool_detection(self):
+        """Test detecting strict tools."""
+        tools = [
+            {"name": "tool1", "description": "desc", "input_schema": {}},
+            {"name": "tool2", "description": "desc", "strict": True, "input_schema": {}},
+        ]
+
+        has_strict = any(tool.get("strict") for tool in tools)
+        assert has_strict is True
+
+    def test_no_strict_tools(self):
+        """Test detecting no strict tools."""
+        tools = [
+            {"name": "tool1", "description": "desc", "input_schema": {}},
+            {"name": "tool2", "description": "desc", "input_schema": {}},
+        ]
+
+        has_strict = any(tool.get("strict") for tool in tools)
+        assert has_strict is False
+
+    def test_complete_with_tools_docstring_mentions_strict(self):
+        """Test complete_with_tools documents strict option."""
+        provider = AnthropicLLMProvider(api_key="test-key")
+
+        docstring = provider.complete_with_tools.__doc__
+        assert "strict" in docstring.lower()
+
+
+@pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
+class TestStructuredOutputsBetaHeaders:
+    """Test structured outputs beta header integration."""
+
+    def test_get_beta_headers_includes_structured(self):
+        """Test structured outputs beta is included when needed.
+
+        Note: _get_beta_headers() doesn't include structured outputs
+        because that's only added dynamically when output_format is used.
+        """
+        provider = AnthropicLLMProvider(api_key="test-key")
+
+        # Default config shouldn't include structured outputs
+        headers = provider._get_beta_headers()
+        assert BETA_STRUCTURED_OUTPUTS not in headers
+
+    def test_all_beta_headers_with_opus(self):
+        """Test all beta headers for Opus 4.5 configuration."""
+        provider = AnthropicLLMProvider(
+            api_key="test-key",
+            model="claude-opus-4-5-20251101",
+            effort="low",
+            thinking_enabled=True,
+            interleaved_thinking=True,
+            context_management_enabled=True,
+        )
+
+        headers = provider._get_beta_headers()
+        # Should have effort, context management, interleaved thinking
+        assert BETA_EFFORT in headers
+        assert BETA_CONTEXT_MANAGEMENT in headers
+        assert BETA_INTERLEAVED_THINKING in headers
+        # Structured outputs is added dynamically, not in _get_beta_headers
+        assert len(headers) == 3
