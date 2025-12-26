@@ -1,0 +1,81 @@
+# ChunkHound gitattributes
+# Enforce LF line endings for all text files
+
+# Auto-detect text files and normalize to LF
+* text=auto eol=lf
+
+# Python
+*.py text eol=lf
+*.pyi text eol=lf
+*.pyx text eol=lf
+
+# Config files
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.ini text eol=lf
+*.cfg text eol=lf
+*.lock text eol=lf
+
+# Documentation
+*.md text eol=lf
+*.rst text eol=lf
+*.txt text eol=lf
+
+# Shell scripts
+*.sh text eol=lf
+Makefile text eol=lf
+
+# Web files
+*.html text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+*.ts text eol=lf
+*.svelte text eol=lf
+
+# SQL
+*.sql text eol=lf
+
+# Binary files
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.gz binary
+*.zip binary
+*.tar binary
+*.pyc binary
+*.pyo binary
+*.so binary
+*.dll binary
+*.dylib binary
+*.whl binary
+*.egg binary
+*.db binary
+*.sqlite binary
+*.pickle binary
+*.pkl binary
+
+# Export-ignore (exclude from distribution)
+.gitattributes export-ignore
+.gitignore export-ignore
+.github/ export-ignore
+tests/ export-ignore
+*.test.py export-ignore
+*_test.py export-ignore
+test_*.py export-ignore
+conftest.py export-ignore
+.pre-commit-config.yaml export-ignore
+.ruff.toml export-ignore
+mypy.ini export-ignore
+
+# Linguist overrides
+*.lock linguist-generated=true
+uv.lock linguist-generated=true
