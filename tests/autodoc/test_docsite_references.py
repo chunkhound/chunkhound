@@ -35,6 +35,20 @@ def _topic_body_with_sources() -> str:
         ]
     )
 
+def _topic_body_with_sources_and_citations() -> str:
+    return "\n".join(
+        [
+            "## Overview",
+            "",
+            "Overview text [1].",
+            "",
+            _sources_block(),
+            "",
+            "## Details",
+            "More info.",
+        ]
+    )
+
 
 def test_extract_sources_block_returns_section_body() -> None:
     markdown = _topic_body_with_sources()
@@ -117,3 +131,35 @@ async def test_cleanup_topics_injects_flattened_references() -> None:
     assert "## Sources" not in output
     assert "## References" in output
     assert "- [1] `repo/src/main.py` (2 chunks: L1-10, L20-30)" in output
+    assert "- [2] `repo/tests/test_main.py` (1 chunks: L5-8)" in output
+
+
+@pytest.mark.asyncio
+async def test_cleanup_topics_filters_uncited_references_when_citations_present() -> None:
+    body = _topic_body_with_sources_and_citations()
+    topic = docsite.CodeMapperTopic(
+        order=1,
+        title="Example",
+        source_path=Path("example.md"),
+        raw_markdown=body,
+        body_markdown=body,
+    )
+
+    pages = await docsite.cleanup_topics(
+        topics=[topic],
+        llm_manager=None,
+        config=docsite.CleanupConfig(
+            mode="minimal",
+            batch_size=1,
+            max_completion_tokens=512,
+        ),
+    )
+
+    assert pages
+    page = pages[0]
+    output = page.body_markdown
+    assert "## Sources" not in output
+    assert "Overview text [1]." in output
+    assert "- [1] `repo/src/main.py` (2 chunks: L1-10, L20-30)" in output
+    assert "- [2] `repo/tests/test_main.py` (1 chunks: L5-8)" not in output
+    assert page.references_count == 1

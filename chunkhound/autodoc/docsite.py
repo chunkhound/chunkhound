@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from shutil import rmtree
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable, TypedDict
 
 from chunkhound.code_mapper.utils import safe_scope_label
 from chunkhound.interfaces.llm_provider import LLMProvider
@@ -27,11 +27,17 @@ _TREE_LINE_RE = re.compile(r"^(?P<prefix>.*?)[├└]──\s+(?P<content>.+)$")
 _FILE_LINE_RE = re.compile(
     r"^\[(?P<ref>\d+)\]\s+(?P<name>.+?)(?:\s+\((?P<details>.+)\))?$"
 )
+_CITATION_RE = re.compile(r"\[(?P<ref>\d+)\]")
+_FLAT_REFERENCE_RE = re.compile(r"^\s*-\s*\[(?P<ref>\d+)\]\s+")
 
 _FAVICON_ICO_BASE64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNg"
     "YAAAAAMAASsJTYQAAAAASUVORK5CYII="
 )
+
+_PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+_CLEANUP_SYSTEM_PROMPT_FILE = "cleanup_system_v2.txt"
+_CLEANUP_USER_PROMPT_FILE = "cleanup_user_v2.txt"
 
 
 @dataclass
@@ -65,6 +71,9 @@ class DocsitePage:
     slug: str
     description: str
     body_markdown: str
+    source_path: str | None = None
+    scope_label: str | None = None
+    references_count: int | None = None
 
 
 @dataclass
@@ -90,6 +99,46 @@ class CleanupConfig:
     mode: str
     batch_size: int
     max_completion_tokens: int
+
+
+class NavGroup(TypedDict):
+    title: str
+    slugs: list[str]
+
+
+class GlossaryTerm(TypedDict):
+    term: str
+    definition: str
+    pages: list[str]
+
+
+def write_astro_assets_only(*, output_dir: Path) -> None:
+    """
+    Update only the Astro runtime assets in an already-generated docsite.
+
+    Intended for iterating on UI/layout without rewriting topic markdown pages.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    src_dir = output_dir / "src"
+    layouts_dir = src_dir / "layouts"
+    styles_dir = src_dir / "styles"
+    public_dir = output_dir / "public"
+
+    for path in (layouts_dir, styles_dir, public_dir):
+        path.mkdir(parents=True, exist_ok=True)
+
+    _write_text(output_dir / "astro.config.mjs", _render_astro_config())
+    _write_text(output_dir / "tsconfig.json", _render_tsconfig())
+
+    site = _load_site_from_existing(output_dir)
+    if site is not None:
+        _write_text(output_dir / "package.json", _render_package_json(site))
+        _write_text(output_dir / "README.md", _render_readme(site))
+
+    _write_text(layouts_dir / "DocLayout.astro", _render_doc_layout())
+    _write_text(styles_dir / "global.css", _render_global_css())
+    _write_bytes(public_dir / "favicon.ico", _render_favicon_bytes())
 
 
 def find_index_file(
@@ -183,6 +232,7 @@ async def cleanup_topics(
     topics: list[CodeMapperTopic],
     llm_manager: LLMManager | None,
     config: CleanupConfig,
+    scope_label: str | None = None,
     log_info: Callable[[str], None] | None = None,
     log_warning: Callable[[str], None] | None = None,
 ) -> list[DocsitePage]:
@@ -209,6 +259,12 @@ async def cleanup_topics(
     pages: list[DocsitePage] = []
     for topic, body in zip(topics, cleaned, strict=False):
         sources_block = extract_sources_block(topic.body_markdown)
+        cleaned_body = strip_references_section(body)
+        flat_references = (
+            _select_flat_references_for_cleaned_body(cleaned_body, sources_block)
+            if sources_block
+            else []
+        )
         normalized_body = _apply_reference_normalization(body, sources_block)
         description = _extract_description(normalized_body)
         slug = _slugify_title(topic.title, topic.order)
@@ -219,6 +275,11 @@ async def cleanup_topics(
                 slug=slug,
                 description=description,
                 body_markdown=normalized_body,
+                source_path=str(topic.source_path),
+                scope_label=scope_label,
+                references_count=(
+                    len(flat_references) if flat_references else None
+                ),
             )
         )
 
@@ -257,6 +318,7 @@ async def generate_docsite(
         topics=topics,
         llm_manager=llm_manager,
         config=cleanup_config,
+        scope_label=index.scope_label,
         log_info=log_info,
         log_warning=log_warning,
     )
@@ -271,11 +333,27 @@ async def generate_docsite(
         topic_count=len(pages),
     )
 
+    nav_groups: list[NavGroup] | None = None
+    glossary_terms: list[GlossaryTerm] | None = None
+    if cleanup_config.mode == "llm" and llm_manager is not None:
+        try:
+            nav_groups, glossary_terms = await _synthesize_site_ia(
+                pages=pages,
+                provider=llm_manager.get_synthesis_provider(),
+                log_info=log_info,
+                log_warning=log_warning,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if log_warning:
+                log_warning(f"Global IA synthesis failed; skipping. Error: {exc}")
+
     write_astro_site(
         output_dir=output_dir,
         site=site,
         pages=pages,
         index=index,
+        nav_groups=nav_groups,
+        glossary_terms=glossary_terms,
     )
 
     return DocsiteResult(
@@ -292,6 +370,8 @@ def write_astro_site(
     site: DocsiteSite,
     pages: list[DocsitePage],
     index: CodeMapperIndex,
+    nav_groups: list[NavGroup] | None = None,
+    glossary_terms: list[GlossaryTerm] | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -320,10 +400,25 @@ def write_astro_site(
     _write_text(styles_dir / "global.css", _render_global_css())
     _write_bytes(public_dir / "favicon.ico", _render_favicon_bytes())
 
+    nav_payload: list[NavGroup]
+    if nav_groups:
+        nav_payload = nav_groups
+    else:
+        nav_payload = [
+            {"title": "Topics", "slugs": [page.slug for page in pages]}
+        ]
+    _write_text(data_dir / "nav.json", _render_nav_json(nav_payload))
+
     _write_text(
         pages_dir / "index.md",
         _render_index_page(site=site, pages=pages, index=index),
     )
+
+    glossary_path = pages_dir / "glossary.md"
+    if glossary_terms:
+        _write_text(glossary_path, _render_glossary_page(glossary_terms))
+    elif glossary_path.exists():
+        glossary_path.unlink()
 
     for page in pages:
         _write_text(
@@ -440,6 +535,44 @@ def _render_site_json(site: DocsiteSite) -> str:
     )
 
 
+def _load_site_from_existing(output_dir: Path) -> DocsiteSite | None:
+    site_path = output_dir / "src" / "data" / "site.json"
+    try:
+        if not site_path.exists():
+            return None
+        payload = json.loads(site_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return None
+        title = payload.get("title")
+        tagline = payload.get("tagline")
+        scope_label = payload.get("scopeLabel")
+        generated_at = payload.get("generatedAt") or datetime.now(
+            timezone.utc
+        ).isoformat()
+        source_dir = payload.get("sourceDir") or str(output_dir)
+        topic_count = payload.get("topicCount") or 0
+        if (
+            not isinstance(title, str)
+            or not isinstance(tagline, str)
+            or not isinstance(scope_label, str)
+        ):
+            return None
+        if not isinstance(generated_at, str) or not isinstance(source_dir, str):
+            return None
+        if not isinstance(topic_count, int):
+            topic_count = 0
+        return DocsiteSite(
+            title=title,
+            tagline=tagline,
+            scope_label=scope_label,
+            generated_at=generated_at,
+            source_dir=source_dir,
+            topic_count=topic_count,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _render_search_index(pages: list[DocsitePage]) -> str:
     records: list[dict[str, str]] = []
     for page in pages:
@@ -457,6 +590,43 @@ def _render_search_index(pages: list[DocsitePage]) -> str:
     return json.dumps(records, ensure_ascii=True, indent=2)
 
 
+def _render_nav_json(groups: list[NavGroup]) -> str:
+    payload: dict[str, Any] = {"groups": groups}
+    return json.dumps(payload, ensure_ascii=True, indent=2)
+
+
+def _render_glossary_page(terms: list[GlossaryTerm]) -> str:
+    body_lines: list[str] = [
+        "This page defines canonical terms used throughout the documentation.",
+        "",
+    ]
+    for entry in terms:
+        term = entry.get("term", "").strip()
+        definition = entry.get("definition", "").strip()
+        pages = entry.get("pages", [])
+        if not term or not definition:
+            continue
+        body_lines.append(f"## {term}")
+        body_lines.append("")
+        body_lines.append(definition)
+        body_lines.append("")
+        if isinstance(pages, list) and pages:
+            links = ", ".join([f"[{slug}](/topics/{slug}/)" for slug in pages])
+            body_lines.append(f"- Pages: {links}")
+            body_lines.append("")
+    body = "\n".join(body_lines).strip() + "\n"
+    return _render_page_frontmatter(
+        layout="../layouts/DocLayout.astro",
+        title="Glossary",
+        description="Definitions of common terms used across the docs.",
+        order=None,
+        body=body,
+        source_path=None,
+        scope_label=None,
+        references_count=None,
+    )
+
+
 def _render_doc_layout() -> str:
     return "\n".join(
         [
@@ -464,15 +634,32 @@ def _render_doc_layout() -> str:
             "import '../styles/global.css';",
             "import site from '../data/site.json';",
             "import searchIndexData from '../data/search.json';",
+            "import navData from '../data/nav.json';",
             "const { title, description } = Astro.props;",
             "const pages = await Astro.glob('../pages/topics/*.md');",
-            "const nav = pages",
+            "const topics = pages",
             "  .map((page) => ({",
+            "    slug: page.url.split('/').filter(Boolean).pop(),",
             "    title: page.frontmatter.title ?? page.url.split('/').pop(),",
             "    order: page.frontmatter.order ?? 9999,",
             "    url: page.url,",
             "  }))",
             "  .sort((a, b) => a.order - b.order);",
+            "const topicsBySlug = new Map(topics.map((item) => [item.slug, item]));",
+            "let navGroups = null;",
+            "if (navData && Array.isArray(navData.groups)) {",
+            "  const groups = navData.groups",
+            "    .filter((group) => group && typeof group.title === 'string' && Array.isArray(group.slugs))",
+            "    .map((group) => ({",
+            "      title: group.title,",
+            "      items: group.slugs.map((slug) => topicsBySlug.get(slug)).filter(Boolean),",
+            "    }))",
+            "    .filter((group) => group.items.length);",
+            "  navGroups = groups.length ? groups : null;",
+            "}",
+            "const nav = navGroups ? navGroups.flatMap((group) => group.items) : topics;",
+            "const glossaryPages = await Astro.glob('../pages/glossary.md');",
+            "const hasGlossary = glossaryPages.length > 0;",
             "const pageTitle = title ? `${title} - ${site.title}` : site.title;",
             "const normalizePath = (value) => {",
             "  if (!value || value === '/') return '/';",
@@ -552,16 +739,43 @@ def _render_doc_layout() -> str:
             "            >",
             "              Overview",
             "            </a>",
-            "            {nav.map((item) => (",
+            "            {hasGlossary && (",
             "              <a",
-            "                href={item.url}",
-            "                class={isActive(item.url) ? 'active' : ''}",
-            "                aria-current={isActive(item.url) ? 'page' : undefined}",
-            "                data-topic",
+            "                href=\"/glossary/\"",
+            "                class={isActive('/glossary/') ? 'active' : ''}",
+            "                aria-current={isActive('/glossary/') ? 'page' : undefined}",
             "              >",
-            "                {item.title}",
+            "                Glossary",
             "              </a>",
-            "            ))}",
+            "            )}",
+            "            {navGroups ? (",
+            "              navGroups.map((group) => (",
+            "                <div class=\"nav-group\">",
+            "                  <div class=\"nav-group-title\">{group.title}</div>",
+            "                  {group.items.map((item) => (",
+            "                    <a",
+            "                      href={item.url}",
+            "                      class={isActive(item.url) ? 'active' : ''}",
+            "                      aria-current={isActive(item.url) ? 'page' : undefined}",
+            "                      data-topic",
+            "                    >",
+            "                      {item.title}",
+            "                    </a>",
+            "                  ))}",
+            "                </div>",
+            "              ))",
+            "            ) : (",
+            "              nav.map((item) => (",
+            "                <a",
+            "                  href={item.url}",
+            "                  class={isActive(item.url) ? 'active' : ''}",
+            "                  aria-current={isActive(item.url) ? 'page' : undefined}",
+            "                  data-topic",
+            "                >",
+            "                  {item.title}",
+            "                </a>",
+            "              ))",
+            "            )}",
             "          </nav>",
             "        </aside>",
             "        <main class=\"site-main\">",
@@ -649,6 +863,16 @@ def _render_doc_layout() -> str:
             "      const navLinks = Array.from(",
             "        document.querySelectorAll('.site-nav nav a[data-topic]')",
             "      );",
+            "      const navGroups = Array.from(",
+            "        document.querySelectorAll('.site-nav nav .nav-group')",
+            "      );",
+            "      const updateGroupVisibility = () => {",
+            "        navGroups.forEach((group) => {",
+            "          const links = Array.from(group.querySelectorAll('a[data-topic]'));",
+            "          const anyVisible = links.some((link) => !link.hidden);",
+            "          group.hidden = !anyVisible;",
+            "        });",
+            "      };",
             "      if (navFilter) {",
             "        navFilter.addEventListener('input', (event) => {",
             "          const query = event.target.value.trim().toLowerCase();",
@@ -656,6 +880,7 @@ def _render_doc_layout() -> str:
             "            const text = link.textContent?.toLowerCase() ?? '';",
             "            link.hidden = query.length > 0 && !text.includes(query);",
             "          });",
+            "          updateGroupVisibility();",
             "        });",
             "      }",
             "      const searchInput = document.querySelector('[data-search-input]');",
@@ -730,9 +955,10 @@ def _render_doc_layout() -> str:
             "          clearResults();",
             "        }",
             "      }",
+            "      updateGroupVisibility();",
             "      const tocContainer = document.querySelector('[data-toc]');",
             "      const tocNodes = Array.from(",
-            "        document.querySelectorAll('.page-content h2, .page-content h3, .page-content h4, .page-content p')",
+            "        document.querySelectorAll('.page-content h2')",
             "      );",
             "      const slugify = (text) =>",
             "        text",
@@ -754,30 +980,10 @@ def _render_doc_layout() -> str:
             "      if (tocContainer && tocNodes.length) {",
             "        tocNodes.forEach((node) => {",
             "          let text = '';",
-            "          let level = 'h2';",
             "          let allowCopy = false;",
-            "          let copyTarget = node;",
             "          if (node.tagName === 'H2' || node.tagName === 'H3') {",
             "            text = node.textContent?.trim() ?? '';",
-            "            level = node.tagName.toLowerCase();",
             "            allowCopy = true;",
-            "          } else if (node.tagName === 'H4') {",
-            "            text = node.textContent?.trim() ?? '';",
-            "            level = 'h4';",
-            "            allowCopy = true;",
-            "          } else if (node.tagName === 'P') {",
-            "            const strong = node.querySelector('strong');",
-            "            if (!strong || strong !== node.firstElementChild) {",
-            "              return;",
-            "            }",
-            "            text = strong.textContent?.trim() ?? '';",
-            "            if (!text) {",
-            "              return;",
-            "            }",
-            "            text = text.replace(/:$/, '').trim();",
-            "            level = 'h3';",
-            "            allowCopy = true;",
-            "            copyTarget = strong;",
             "          } else {",
             "            return;",
             "          }",
@@ -790,13 +996,7 @@ def _render_doc_layout() -> str:
             "          const tocLink = document.createElement('a');",
             "          tocLink.href = `#${id}`;",
             "          tocLink.textContent = text || 'Section';",
-            "          if (level === 'h3') {",
-            "            tocLink.className = 'toc-link toc-h3';",
-            "          } else if (level === 'h4') {",
-            "            tocLink.className = 'toc-link toc-h4';",
-            "          } else {",
-            "            tocLink.className = 'toc-link';",
-            "          }",
+            "          tocLink.className = 'toc-link';",
             "          tocContainer.appendChild(tocLink);",
             "          if (!allowCopy) {",
             "            return;",
@@ -818,7 +1018,7 @@ def _render_doc_layout() -> str:
             "              window.location.hash = id;",
             "            }",
             "          });",
-            "          copyTarget.appendChild(copyButton);",
+            "          node.appendChild(copyButton);",
             "        });",
             "      } else if (tocContainer) {",
             "        tocContainer.innerHTML = '<span class=\"toc-empty\">No sections</span>';",
@@ -1218,7 +1418,29 @@ def _render_global_css() -> str:
             "  gap: 0.6rem;",
             "}",
             "",
+            ".site-nav nav > .nav-group {",
+            "  margin-top: 0.85rem;",
+            "  padding-top: 0.85rem;",
+            "  border-top: 1px solid var(--border);",
+            "}",
+            "",
+            ".nav-group {",
+            "  display: flex;",
+            "  flex-direction: column;",
+            "  gap: 0.35rem;",
+            "}",
+            "",
+            ".nav-group-title {",
+            "  font-weight: 700;",
+            "  font-size: 0.75rem;",
+            "  text-transform: uppercase;",
+            "  letter-spacing: 0.12em;",
+            "  color: var(--muted);",
+            "  padding-left: 0.5rem;",
+            "}",
+            "",
             ".site-nav a {",
+            "  display: block;",
             "  color: var(--ink);",
             "  text-decoration: none;",
             "  font-size: 0.95rem;",
@@ -1643,6 +1865,9 @@ def _render_topic_page(page: DocsitePage) -> str:
         description=page.description,
         order=page.order,
         body=page.body_markdown.strip() + "\n",
+        source_path=page.source_path,
+        scope_label=page.scope_label,
+        references_count=page.references_count,
     )
 
 
@@ -1653,6 +1878,9 @@ def _render_page_frontmatter(
     description: str,
     order: int | None,
     body: str,
+    source_path: str | None = None,
+    scope_label: str | None = None,
+    references_count: int | None = None,
 ) -> str:
     lines = [
         "---",
@@ -1662,11 +1890,234 @@ def _render_page_frontmatter(
     ]
     if order is not None:
         lines.append(f"order: {order}")
+    if source_path:
+        lines.append(f"sourcePath: \"{_escape_yaml(source_path)}\"")
+    if scope_label:
+        lines.append(f"scope: \"{_escape_yaml(scope_label)}\"")
+    if references_count is not None:
+        lines.append(f"referencesCount: {references_count}")
     lines.append("---")
     lines.append("")
     lines.append(body.rstrip())
     lines.append("")
     return "\n".join(lines)
+
+
+async def _synthesize_site_ia(
+    *,
+    pages: list[DocsitePage],
+    provider: LLMProvider,
+    log_info: Callable[[str], None] | None,
+    log_warning: Callable[[str], None] | None,
+) -> tuple[list[NavGroup] | None, list[GlossaryTerm] | None]:
+    if not pages:
+        return None, None
+
+    slugs = {page.slug for page in pages}
+    context = _build_site_context(pages)
+
+    prompt = "\n".join(
+        [
+            "You are the information architect for an engineering docs site.",
+            "Input: a list of pages (title, slug, description, headings, overview snippet).",
+            "",
+            "Produce:",
+            "1) A navigation structure with 3–7 groups. Each group has a title and an ordered list of page slugs.",
+            "2) A glossary of 20–60 terms. Each term has:",
+            "   - term",
+            "   - definition (1–2 sentences, only supported by provided snippets/headings)",
+            "   - pages: list of slugs where it appears",
+            "",
+            "Output STRICT JSON with keys: nav, glossary.",
+            "",
+            "Pages JSON:",
+            json.dumps(context, ensure_ascii=True, indent=2),
+        ]
+    )
+
+    schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "nav": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "groups": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "title": {"type": "string"},
+                                "slugs": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                            },
+                            "required": ["title", "slugs"],
+                        },
+                    }
+                },
+                "required": ["groups"],
+            },
+            "glossary": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "term": {"type": "string"},
+                        "definition": {"type": "string"},
+                        "pages": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": ["term", "definition", "pages"],
+                },
+            },
+        },
+        "required": ["nav", "glossary"],
+    }
+
+    if log_info:
+        log_info("Synthesizing global navigation and glossary.")
+
+    response = await provider.complete_structured(
+        prompt,
+        json_schema=schema,
+        system=None,
+        max_completion_tokens=4096,
+    )
+
+    nav_groups = _validate_nav_groups(response.get("nav"), slugs, log_warning)
+    glossary_terms = _validate_glossary_terms(
+        response.get("glossary"), slugs, log_warning
+    )
+
+    if not nav_groups:
+        return None, glossary_terms or None
+    return nav_groups, glossary_terms or None
+
+
+def _build_site_context(pages: list[DocsitePage]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for page in pages:
+        headings = _extract_headings(page.body_markdown)
+        overview_snippet = _extract_overview_snippet(page.body_markdown, limit=400)
+        records.append(
+            {
+                "title": page.title,
+                "slug": page.slug,
+                "description": page.description,
+                "headings": headings,
+                "overviewSnippet": overview_snippet,
+            }
+        )
+    return records
+
+
+def _extract_headings(markdown: str) -> list[str]:
+    headings: list[str] = []
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            title = stripped[3:].strip()
+            if title.lower() in {"references", "sources"}:
+                continue
+            headings.append(title)
+        elif stripped.startswith("### "):
+            headings.append(stripped[4:].strip())
+    return headings
+
+
+def _extract_overview_snippet(markdown: str, *, limit: int) -> str:
+    lines = markdown.splitlines()
+    start: int | None = None
+    for idx, line in enumerate(lines):
+        if line.strip().lower() == "## overview":
+            start = idx + 1
+            break
+    if start is None:
+        return ""
+    collected: list[str] = []
+    for line in lines[start:]:
+        if line.strip().startswith("## "):
+            break
+        collected.append(line)
+    snippet = _strip_markdown_for_search("\n".join(collected)).strip()
+    if len(snippet) <= limit:
+        return snippet
+    return snippet[: limit - 3].rstrip() + "..."
+
+
+def _validate_nav_groups(
+    nav: object,
+    valid_slugs: set[str],
+    log_warning: Callable[[str], None] | None,
+) -> list[NavGroup]:
+    if not isinstance(nav, dict):
+        if log_warning:
+            log_warning("Global IA output missing 'nav' object; skipping nav.json.")
+        return []
+    groups = nav.get("groups")
+    if not isinstance(groups, list):
+        return []
+    output: list[NavGroup] = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        title = group.get("title")
+        slugs = group.get("slugs")
+        if not isinstance(title, str) or not isinstance(slugs, list):
+            continue
+        cleaned_slugs = [
+            slug for slug in slugs if isinstance(slug, str) and slug in valid_slugs
+        ]
+        if not cleaned_slugs:
+            continue
+        output.append({"title": title.strip() or "Group", "slugs": cleaned_slugs})
+    return output
+
+
+def _validate_glossary_terms(
+    glossary: object,
+    valid_slugs: set[str],
+    log_warning: Callable[[str], None] | None,
+) -> list[GlossaryTerm]:
+    if not isinstance(glossary, list):
+        if log_warning:
+            log_warning(
+                "Global IA output missing 'glossary' list; skipping glossary.md."
+            )
+        return []
+    output: list[GlossaryTerm] = []
+    for entry in glossary:
+        if not isinstance(entry, dict):
+            continue
+        term = entry.get("term")
+        definition = entry.get("definition")
+        pages = entry.get("pages")
+        if (
+            not isinstance(term, str)
+            or not isinstance(definition, str)
+            or not isinstance(pages, list)
+        ):
+            continue
+        cleaned_pages = [
+            slug
+            for slug in pages
+            if isinstance(slug, str) and slug in valid_slugs
+        ]
+        output.append(
+            {
+                "term": term.strip(),
+                "definition": definition.strip(),
+                "pages": cleaned_pages,
+            }
+        )
+    return [item for item in output if item["term"] and item["definition"]]
 
 
 def _parse_metadata_block(metadata: str) -> dict[str, object]:
@@ -1827,9 +2278,12 @@ async def _cleanup_with_llm(
     log_info: Callable[[str], None] | None,
     log_warning: Callable[[str], None] | None,
 ) -> list[str]:
-    system_prompt = (
-        "You are a senior technical writer polishing engineering documentation. "
-        "Make the writing approachable without losing precision."
+    system_prompt = _read_prompt_file(
+        _CLEANUP_SYSTEM_PROMPT_FILE,
+        fallback=(
+            "You are a senior technical writer polishing engineering documentation. "
+            "Make the writing approachable without losing precision."
+        ),
     )
 
     prompts = [
@@ -1867,7 +2321,7 @@ async def _cleanup_with_llm(
 
 
 def _build_cleanup_prompt(title: str, body: str) -> str:
-    return "\n".join(
+    fallback = "\n".join(
         [
             "Rewrite the documentation section below as a polished, friendly doc page.",
             "Requirements:",
@@ -1913,6 +2367,27 @@ def _build_cleanup_prompt(title: str, body: str) -> str:
             body.strip(),
         ]
     )
+
+    template = _read_prompt_file(_CLEANUP_USER_PROMPT_FILE, fallback=fallback)
+    hydrated = (
+        template.replace("<<TITLE>>", title)
+        .replace("<<BODY>>", body.strip())
+        .replace("{title}", title)
+        .replace("{body}", body.strip())
+    )
+    return hydrated.strip()
+
+
+def _read_prompt_file(filename: str, *, fallback: str) -> str:
+    path = _PROMPTS_DIR / filename
+    try:
+        if path.exists():
+            content = path.read_text(encoding="utf-8").strip()
+            if content:
+                return content
+    except Exception:  # noqa: BLE001
+        return fallback
+    return fallback
 
 
 def _normalize_llm_output(text: str) -> str:
@@ -2005,12 +2480,42 @@ def build_references_section(flat_items: list[str]) -> str:
     lines = ["## References", "", *flat_items]
     return "\n".join(lines).strip()
 
+def _select_flat_references_for_cleaned_body(
+    cleaned_body: str, sources_block: str
+) -> list[str]:
+    """Return flattened reference lines, filtered to those cited in cleaned_body.
+
+    If cleaned_body contains at least one [N] citation, only keep references that
+    match a cited N. If there are no citations, keep the full list (we cannot
+    reliably infer which sources were intended to be cited).
+    """
+    flat_items = flatten_sources_block(sources_block)
+    if not flat_items:
+        return []
+
+    cited = set(_CITATION_RE.findall(cleaned_body))
+    if not cited:
+        return flat_items
+
+    filtered: list[str] = []
+    for item in flat_items:
+        match = _FLAT_REFERENCE_RE.match(item)
+        if not match:
+            # Best-effort: keep malformed lines when filtering is enabled.
+            filtered.append(item)
+            continue
+        if match.group("ref") in cited:
+            filtered.append(item)
+
+    # If citations exist but nothing matched, avoid dropping everything.
+    return filtered if filtered else flat_items
+
 
 def _apply_reference_normalization(body: str, sources_block: str | None) -> str:
     cleaned = strip_references_section(body)
     if not sources_block:
         return cleaned.strip()
-    flat_items = flatten_sources_block(sources_block)
+    flat_items = _select_flat_references_for_cleaned_body(cleaned, sources_block)
     references_block = build_references_section(flat_items)
     if not references_block:
         return cleaned.strip()

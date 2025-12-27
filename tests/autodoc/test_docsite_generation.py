@@ -125,6 +125,8 @@ def test_render_doc_layout_includes_search_and_toc() -> None:
     assert "data-toc" in layout
     assert "aria-current" in layout
     assert "page-nav" in layout
+    assert "navGroups" in layout
+    assert "navData" in layout
 
 
 def test_render_search_index_includes_body_text() -> None:

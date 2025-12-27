@@ -10,7 +10,7 @@ from pathlib import Path
 from loguru import logger
 
 from chunkhound.api.cli.utils.rich_output import RichOutputFormatter
-from chunkhound.autodoc.docsite import CleanupConfig, generate_docsite
+from chunkhound.autodoc.docsite import CleanupConfig, generate_docsite, write_astro_assets_only
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.llm_config import LLMConfig
 from chunkhound.llm_manager import LLMManager
@@ -162,6 +162,18 @@ async def autodoc_command(args, config: Config) -> None:
             "Output directory is not inside .gitignored/. "
             "Generated docs may be picked up by git."
         )
+
+    if bool(getattr(args, "assets_only", False)):
+        if not output_dir.exists():
+            formatter.error(
+                "Output directory not found for --assets-only: "
+                f"{output_dir}. Run a full `chunkhound autodoc` first."
+            )
+            sys.exit(1)
+        write_astro_assets_only(output_dir=output_dir)
+        formatter.success("AutoDoc assets update complete.")
+        formatter.info(f"Output directory: {output_dir}")
+        return
 
     cleanup_mode = getattr(args, "cleanup_mode", "llm")
     llm_manager = _resolve_llm_manager(

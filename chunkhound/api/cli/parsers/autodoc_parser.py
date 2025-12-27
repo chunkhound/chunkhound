@@ -36,6 +36,16 @@ def add_autodoc_subparser(subparsers: Any) -> argparse.ArgumentParser:
     )
 
     site_parser.add_argument(
+        "--assets-only",
+        action="store_true",
+        help=(
+            "Update only the generated Astro assets (layout/styles/config) in "
+            "--out-dir without rewriting topic pages. Intended for iterating on "
+            "UI changes when content does not change."
+        ),
+    )
+
+    site_parser.add_argument(
         "--site-title",
         type=str,
         help="Override the generated site title.",

@@ -117,6 +117,7 @@ include = [
     "chunkhound/**/*.py",
     "chunkhound/py.typed",
     "chunkhound/code_mapper/prompts/*.md",
+    "chunkhound/autodoc/prompts/*.txt",
     "tests/fixtures/yaml/**/*",
 ]
 

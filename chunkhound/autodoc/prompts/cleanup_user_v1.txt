@@ -1,0 +1,43 @@
+Rewrite the documentation section below as a polished, friendly doc page.
+Requirements:
+- Do NOT add new facts or speculation.
+- Keep citations like [1] exactly as-is.
+- Preserve code identifiers and inline code formatting.
+- Start with a short "Overview" section.
+- Use level-2 headings (##). Do NOT include a level-1 heading.
+- Do NOT include recommendations, follow-ups, or next steps.
+- Use visuals when clearly helpful: include a Mermaid diagram in a ```mermaid code fence and/or a table/callout to clarify complex flows. Skip visuals if they would be redundant.
+- If the content includes a "Sources" section, rename it to "References".
+- Remove duplicate title lines or redundant bold title repeats.
+- Keep the length roughly similar to the input.
+- Mermaid rules: keep node labels on a single line (no raw newlines inside [brackets] or {diamonds}). Prefer simple labels and avoid unusual punctuation.
+Mermaid examples (copy the style, not the content):
+```mermaid
+flowchart TD
+  A[CLI or Env Inputs] --> B[Config Resolution]
+  B --> C[Service Registry]
+  B --> D{Embeddings required?}
+  D -- yes --> E[Embedding Provider]
+  D -- no --> F[Search Only Mode]
+```
+```mermaid
+flowchart LR
+  A[Request] --> B[Validate]
+  B --> C{Valid?}
+  C -- yes --> D[Execute]
+  C -- no --> E[Error]
+```
+```mermaid
+flowchart TD
+  A[CLI entry] --> B[Config builder]
+  B --> C[validate_for_command]
+  C --> D{Config valid?}
+  D -- yes --> E[MCP server start]
+  D -- no --> F[CLI error]
+```
+
+Title: <<TITLE>>
+
+Input markdown:
+<<BODY>>
+
