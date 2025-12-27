@@ -4,12 +4,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
+from chunkhound.code_mapper.models import AgentDocMetadata
 from chunkhound.code_mapper.render import (
     build_topic_artifacts,
     render_combined_document,
     render_index_document,
 )
-from chunkhound.code_mapper.models import AgentDocMetadata
 from chunkhound.code_mapper.utils import safe_scope_label
 
 
@@ -55,8 +57,10 @@ def write_code_mapper_outputs(
                 files_stats = meta.generation_stats.get("files")
                 if isinstance(files_stats, dict):
                     files_stats["unreferenced_list_file"] = unref_filename
-            except Exception:
-                pass
+            except (AttributeError, TypeError) as exc:
+                logger.debug(
+                    f"Code Mapper: failed to attach unreferenced file artifact: {exc}"
+                )
 
         topic_files, index_entries = build_topic_artifacts(
             scope_label=scope_label,

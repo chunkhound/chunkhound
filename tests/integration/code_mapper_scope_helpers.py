@@ -97,6 +97,7 @@ def patch_code_mapper_dependencies(
         query: str,
         progress: Any,
         path: str | None = None,
+        max_depth: int | None = None,
     ) -> dict[str, Any]:
         return {
             "answer": f"Section for query: {query[:40]}",

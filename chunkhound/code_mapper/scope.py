@@ -61,10 +61,10 @@ def collect_scope_files(
         for path in files:
             try:
                 rel = path.relative_to(project_root)
-            except Exception:
+            except ValueError:
                 continue
             file_paths.append(rel.as_posix())
-    except Exception:
+    except (ImportError, OSError):
         file_paths = []
 
     return file_paths

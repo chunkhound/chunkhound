@@ -16,8 +16,8 @@ async def test_hyde_prompt_persistence_is_opt_in(
     def fake_build_hyde_scope_prompt(*_: Any, **__: Any) -> str:
         return "scope prompt"
 
-    async def fake_run_hyde_only_query(*_: Any, **__: Any) -> str:
-        return "1. Example\n"
+    async def fake_run_hyde_only_query(*_: Any, **__: Any) -> tuple[str, bool]:
+        return "1. Example\n", True
 
     monkeypatch.setattr(
         code_mapper_pipeline, "collect_scope_files", fake_collect_scope_files

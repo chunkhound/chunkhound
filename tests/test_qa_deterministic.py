@@ -10,6 +10,7 @@ No mocks - tests the full integration path users experience.
 import asyncio
 import tempfile
 import time
+import os
 from pathlib import Path
 import pytest
 import shutil
@@ -42,9 +43,13 @@ class TestQADeterministic:
         # Standard API key discovery for multi-provider support
         api_key, provider = get_api_key_for_tests()
         
-        # Create embedding config if available
+        # Create embedding config only when explicitly enabled.
+        #
+        # This test suite is intended to be deterministic and fast. When real API
+        # keys are present, enabling embeddings can drastically increase runtime
+        # (network calls + embedding generation), often exceeding pytest-timeout.
         embedding_config = None
-        if api_key and provider:
+        if api_key and provider and (os.getenv("CH_TEST_QA_ENABLE_EMBEDDINGS") == "1"):
             model = "text-embedding-3-small" if provider == "openai" else "voyage-3.5"
             embedding_config = {
                 "provider": provider,

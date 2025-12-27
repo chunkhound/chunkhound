@@ -3,10 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from chunkhound.database_factory import DatabaseServices
-
 from chunkhound.code_mapper.coverage import compute_db_scope_stats
 from chunkhound.code_mapper.models import AgentDocMetadata
+from chunkhound.code_mapper.utils import compute_scope_prefix
+from chunkhound.database_factory import DatabaseServices
 
 
 def format_metadata_block(meta: AgentDocMetadata) -> str:
@@ -97,7 +97,7 @@ def build_generation_stats_with_coverage(
     if not scope_total_chunks and chunks_denominator:
         chunks_basis = "database"
 
-    prefix = None if scope_label == "/" else scope_label.rstrip("/") + "/"
+    prefix = compute_scope_prefix(scope_label)
     referenced_in_scope = 0
     for path in unified_source_files:
         norm = str(path).replace("\\", "/")

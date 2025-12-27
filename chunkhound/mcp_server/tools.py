@@ -567,6 +567,7 @@ async def deep_research_impl(
     query: str,
     progress: Any = None,
     path: str | None = None,
+    max_depth: int | None = None,
 ) -> dict[str, Any]:
     """Core deep research implementation.
 
@@ -621,7 +622,7 @@ async def deep_research_impl(
     )
 
     # Perform code research with fixed depth and dynamic budgets
-    result = await research_service.deep_research(query)
+    result = await research_service.deep_research(query, max_depth=max_depth)
 
     return result
 

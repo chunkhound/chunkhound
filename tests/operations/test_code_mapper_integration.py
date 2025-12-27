@@ -56,6 +56,8 @@ async def _run_code_mapper_with_stubs(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     set_combined: bool,
+    cli_combined: bool | None = None,
+    comprehensiveness: str = "low",
 ) -> tuple[Path, str, list[int]]:
     project_root = tmp_path / "repo"
     scope_path = project_root / "scope"
@@ -78,6 +80,8 @@ async def _run_code_mapper_with_stubs(
 
     # Stub out database, services, embeddings, LLM, and deep research.
     seen_max_points: list[int] = []
+    seen_max_depths: list[int | None] = []
+    seen_depth_env: list[str | None] = []
 
     async def fake_overview(
         llm_manager: Any,
@@ -108,7 +112,12 @@ async def _run_code_mapper_with_stubs(
         query: str,
         progress: Any,
         path: str | None = None,
+        max_depth: int | None = None,
     ) -> dict[str, Any]:
+        import os
+
+        seen_max_depths.append(max_depth)
+        seen_depth_env.append(os.getenv("CH_CODE_RESEARCH_MAX_DEPTH"))
         # Return a minimal answer and sources metadata for coverage.
         # For one of the bullets, simulate an empty answer so it is skipped.
         # This specifically skips the FIRST POI to regression-test that topic
@@ -166,13 +175,14 @@ async def _run_code_mapper_with_stubs(
             self.verbose = False
             self.overview_only = False
             self.out_dir = tmp_path / "out"
-            self.comprehensiveness = "low"
+            self.comprehensiveness = comprehensiveness
+            self.combined = cli_combined
 
     args = Args()
 
     await code_mapper_mod.code_mapper_command(args, config)
     captured = capsys.readouterr().out
-    return args.out_dir, captured, seen_max_points
+    return args.out_dir, captured, seen_max_points, seen_max_depths, seen_depth_env
 
 
 @pytest.mark.asyncio
@@ -191,11 +201,13 @@ async def test_code_mapper_end_to_end_default_omits_combined_doc(
     - the combined doc is omitted unless explicitly enabled.
     """
 
-    out_dir, captured, seen_max_points = await _run_code_mapper_with_stubs(
+    out_dir, captured, seen_max_points, _seen_max_depths, _seen_depth_env = (
+        await _run_code_mapper_with_stubs(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
         capsys=capsys,
         set_combined=False,
+        )
     )
     # Default behavior: avoid printing the full document to stdout.
     assert "# Code Mapper for" not in captured
@@ -239,11 +251,13 @@ async def test_code_mapper_end_to_end_combined_doc_requires_flag(
 ) -> None:
     """Combined Code Mapper doc should be written only when the env flag is set."""
 
-    out_dir, captured, _ = await _run_code_mapper_with_stubs(
+    out_dir, captured, _seen_max_points, _seen_max_depths, _seen_depth_env = (
+        await _run_code_mapper_with_stubs(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
         capsys=capsys,
         set_combined=True,
+        )
     )
 
     # Default behavior: avoid printing the full document to stdout.
@@ -260,3 +274,71 @@ async def test_code_mapper_end_to_end_combined_doc_requires_flag(
     # Skipping the first POI should renumber topics contiguously and keep
     # headings aligned with the surviving result.
     assert "## 1. Error Handling" in combined_content
+
+
+@pytest.mark.asyncio
+async def test_code_mapper_end_to_end_combined_cli_overrides_env_off(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--no-combined should disable combined output even if env is set."""
+    out_dir, _captured, _seen_max_points, _seen_max_depths, _seen_depth_env = (
+        await _run_code_mapper_with_stubs(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        capsys=capsys,
+        set_combined=True,
+        cli_combined=False,
+        )
+    )
+
+    combined_docs = list(out_dir.glob("*_code_mapper.md"))
+    assert not combined_docs
+
+
+@pytest.mark.asyncio
+async def test_code_mapper_end_to_end_combined_cli_overrides_env_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--combined should enable combined output even if env is unset."""
+    out_dir, _captured, _seen_max_points, _seen_max_depths, _seen_depth_env = (
+        await _run_code_mapper_with_stubs(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        capsys=capsys,
+        set_combined=False,
+        cli_combined=True,
+        )
+    )
+
+    combined_docs = list(out_dir.glob("*_code_mapper.md"))
+    assert combined_docs
+
+
+@pytest.mark.asyncio
+async def test_code_mapper_ultra_depth_override_does_not_mutate_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ultra depth override should be plumbed explicitly (no CH_CODE_RESEARCH_MAX_DEPTH mutation)."""
+    monkeypatch.setenv("CH_CODE_MAPPER_ULTRA_USE_DEPTH", "1")
+    monkeypatch.setenv("CH_CODE_RESEARCH_MAX_DEPTH", "7")
+
+    out_dir, _captured, _seen_max_points, seen_max_depths, seen_depth_env = (
+        await _run_code_mapper_with_stubs(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            capsys=capsys,
+            set_combined=False,
+            comprehensiveness="ultra",
+        )
+    )
+
+    assert out_dir.exists()
+    assert seen_max_depths, "Expected deep research to be called"
+    assert all(depth == 2 for depth in seen_max_depths)
+    assert all(value == "7" for value in seen_depth_env)

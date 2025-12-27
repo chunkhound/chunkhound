@@ -28,6 +28,7 @@ def test_code_mapper_parser_defaults_and_flags() -> None:
     assert args.comprehensiveness == "medium"
     assert args.path == Path(".")
     assert args.overview_only is False
+    assert args.combined is None
 
     args = parser.parse_args(
         ["code_mapper", "src", "--out-dir", "out", "--overview-only", "--verbose"]
@@ -36,3 +37,14 @@ def test_code_mapper_parser_defaults_and_flags() -> None:
     assert args.path == Path("src")
     assert args.overview_only is True
     assert args.verbose is True
+
+
+def test_code_mapper_parser_combined_flag() -> None:
+    parser = _build_parser()
+
+    args = parser.parse_args(["code_mapper", "--out-dir", "out", "--combined"])
+    assert args.combined is True
+
+    if hasattr(argparse, "BooleanOptionalAction"):
+        args = parser.parse_args(["code_mapper", "--out-dir", "out", "--no-combined"])
+        assert args.combined is False

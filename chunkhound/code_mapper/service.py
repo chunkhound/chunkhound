@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -19,6 +20,9 @@ from chunkhound.embeddings import EmbeddingManager
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.llm_manager import LLMManager
 from chunkhound.mcp_server.tools import deep_research_impl
+
+if TYPE_CHECKING:
+    from chunkhound.api.cli.utils.tree_progress import TreeProgressDisplay
 
 
 class CodeMapperNoPointsError(RuntimeError):
@@ -84,10 +88,11 @@ async def run_code_mapper_pipeline(
     path_filter: str | None,
     comprehensiveness: str,
     max_points: int,
+    max_depth: int | None = None,
     out_dir: Path | None,
     assembly_provider: LLMProvider | None,
     indexing_cfg: IndexingConfig | None,
-    progress: Any,
+    progress: TreeProgressDisplay | None,
     log_info: Callable[[str], None] | None = None,
     log_warning: Callable[[str], None] | None = None,
     log_error: Callable[[str], None] | None = None,
@@ -152,6 +157,7 @@ async def run_code_mapper_pipeline(
                 query=section_query,
                 progress=progress,
                 path=path_filter,
+                max_depth=max_depth,
             )
             if _is_empty_research_result(result):
                 if log_warning:
@@ -161,7 +167,7 @@ async def run_code_mapper_pipeline(
                     )
                 continue
             poi_sections.append((poi, result))
-        except Exception as exc:
+        except (OSError, RuntimeError, TimeoutError, TypeError, ValueError) as exc:
             if log_error:
                 log_error(f"Code Mapper deep research failed for point {idx}: {exc}")
             logger.exception(f"Code Mapper deep research failed for point {idx}.")

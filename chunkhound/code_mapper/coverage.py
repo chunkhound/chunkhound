@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
+from loguru import logger
+
+from chunkhound.code_mapper.utils import compute_scope_prefix
 from chunkhound.database_factory import DatabaseServices
 
 
@@ -16,7 +19,7 @@ def compute_db_scope_stats(
         provider = getattr(services, "provider", None)
         if provider is None:
             return 0, 0, scoped_files
-        prefix = None if scope_label == "/" else scope_label.rstrip("/") + "/"
+        prefix = compute_scope_prefix(scope_label)
 
         # Preferred: use provider-level aggregation to avoid loading full chunk code.
         get_scope_stats = getattr(provider, "get_scope_stats", None)
@@ -35,7 +38,8 @@ def compute_db_scope_stats(
             scoped_files.add(path)
             scope_total_chunks += 1
         scope_total_files = len(scoped_files)
-    except Exception:
+    except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+        logger.warning(f"Code Mapper: failed to compute scope stats: {exc}")
         return 0, 0, set()
 
     return scope_total_files, scope_total_chunks, scoped_files
@@ -53,16 +57,12 @@ def compute_unreferenced_scope_files(
         if not callable(get_scope_file_paths):
             return None
 
-        prefix = None if scope_label == "/" else scope_label.rstrip("/") + "/"
+        prefix = compute_scope_prefix(scope_label)
         all_files = get_scope_file_paths(prefix)
         referenced_set = {
             str(p).replace("\\", "/")
             for p in referenced_files
-            if p
-            and (
-                not prefix
-                or str(p).replace("\\", "/").startswith(prefix)
-            )
+            if p and (not prefix or str(p).replace("\\", "/").startswith(prefix))
         }
         unreferenced = [
             str(p).replace("\\", "/")
@@ -70,5 +70,6 @@ def compute_unreferenced_scope_files(
             if p and str(p).replace("\\", "/") not in referenced_set
         ]
         return unreferenced
-    except Exception:
+    except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+        logger.warning(f"Code Mapper: failed to compute unreferenced files: {exc}")
         return None

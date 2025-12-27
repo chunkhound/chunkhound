@@ -5,11 +5,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from chunkhound.code_mapper.hyde import build_hyde_scope_prompt, run_hyde_only_query
 from chunkhound.code_mapper.models import AgentDocMetadata, HydeConfig
 from chunkhound.code_mapper.scope import collect_scope_files
 from chunkhound.code_mapper.utils import safe_scope_label
+from chunkhound.core.config.indexing_config import IndexingConfig
+from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.llm_manager import LLMManager
+
+
+class CodeMapperHyDEError(RuntimeError):
+    """Raised when HyDE planning fails (distinct from empty PoI results)."""
+
+    def __init__(self, hyde_message: str) -> None:
+        super().__init__(hyde_message)
+        self.hyde_message = hyde_message
 
 
 def _extract_points_of_interest(text: str, max_points: int = 10) -> list[str]:
@@ -212,8 +224,8 @@ async def _run_code_mapper_overview_hyde(
     max_points: int = 10,
     comprehensiveness: str = "medium",
     out_dir: Path | None = None,
-    assembly_provider: Any | None = None,
-    indexing_cfg: Any | None = None,
+    assembly_provider: LLMProvider | None = None,
+    indexing_cfg: IndexingConfig | None = None,
 ) -> tuple[str, list[str]]:
     """Run a HyDE-style overview pass to identify points of interest."""
     hyde_cfg = HydeConfig.from_env()
@@ -294,7 +306,8 @@ async def _run_code_mapper_overview_hyde(
             workspace_root_only_gitignore = getattr(
                 indexing_cfg, "workspace_gitignore_nonrepo", None
             )
-    except Exception:
+    except (AttributeError, TypeError, ValueError) as exc:
+        logger.debug(f"Code Mapper: failed to read indexing config overrides: {exc}")
         include_patterns = None
         indexing_excludes = None
         ignore_sources = None
@@ -356,7 +369,9 @@ async def _run_code_mapper_overview_hyde(
     # Optional debugging/traceability: when out_dir is provided and explicitly
     # enabled via CH_CODE_MAPPER_WRITE_HYDE_PROMPT, persist the exact PoI-generation
     # prompt (scope + HyDE objective).
-    write_prompt = os.getenv("CH_CODE_MAPPER_WRITE_HYDE_PROMPT", "0").strip().lower() in (
+    write_prompt = os.getenv(
+        "CH_CODE_MAPPER_WRITE_HYDE_PROMPT", "0"
+    ).strip().lower() in (
         "1",
         "true",
         "yes",
@@ -369,15 +384,17 @@ async def _run_code_mapper_overview_hyde(
             prompt_path = out_dir / f"hyde_scope_prompt_{safe_scope}.md"
             prompt_path.parent.mkdir(parents=True, exist_ok=True)
             prompt_path.write_text(overview_prompt, encoding="utf-8")
-        except Exception:
-            pass
+        except OSError as exc:
+            logger.debug(f"Code Mapper: failed to persist HyDE prompt: {exc}")
 
-    overview_answer = await run_hyde_only_query(
+    overview_answer, ok = await run_hyde_only_query(
         llm_manager=llm_manager,
         prompt=overview_prompt,
         provider_override=assembly_provider,
         hyde_cfg=hyde_cfg,
     )
+    if not ok:
+        raise CodeMapperHyDEError(overview_answer)
 
     # Persist the HyDE overview plan itself (the PoI list and any surrounding
     # context) alongside the prompt when an output directory is available.
@@ -387,8 +404,8 @@ async def _run_code_mapper_overview_hyde(
             plan_path = out_dir / f"hyde_plan_{safe_scope}.md"
             plan_path.parent.mkdir(parents=True, exist_ok=True)
             plan_path.write_text(overview_answer, encoding="utf-8")
-        except Exception:
-            pass
+        except OSError as exc:
+            logger.debug(f"Code Mapper: failed to persist HyDE plan: {exc}")
 
     points_of_interest = _extract_points_of_interest(
         overview_answer, max_points=max_points

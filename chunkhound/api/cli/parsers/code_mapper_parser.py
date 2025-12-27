@@ -63,10 +63,38 @@ def add_code_mapper_subparser(subparsers: Any) -> argparse.ArgumentParser:
         required=True,
         help=(
             "Directory where an index file and one markdown file per point of "
-            "interest will be written. Set CH_CODE_MAPPER_WRITE_COMBINED=1 to also "
-            "write a combined Code Mapper markdown file."
+            "interest will be written. Use --combined to also write a combined "
+            "Code Mapper markdown file (or set CH_CODE_MAPPER_WRITE_COMBINED=1 for "
+            "backward compatibility)."
         ),
     )
+
+    # Optional: write a single combined markdown document (CLI overrides env when set)
+    try:
+        boolean_optional_action = argparse.BooleanOptionalAction
+    except AttributeError:  # pragma: no cover - older Python
+        boolean_optional_action = None
+
+    if boolean_optional_action is not None:
+        code_mapper_parser.add_argument(
+            "--combined",
+            action=boolean_optional_action,
+            default=None,
+            help=(
+                "Write a combined Code Mapper markdown file. If omitted, falls back "
+                "to CH_CODE_MAPPER_WRITE_COMBINED for backward compatibility."
+            ),
+        )
+    else:
+        code_mapper_parser.add_argument(
+            "--combined",
+            action="store_true",
+            default=None,
+            help=(
+                "Write a combined Code Mapper markdown file. If omitted, falls back "
+                "to CH_CODE_MAPPER_WRITE_COMBINED for backward compatibility."
+            ),
+        )
 
     # Optional comprehensiveness level controlling HyDE PoI count and snippet budget
     code_mapper_parser.add_argument(

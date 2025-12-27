@@ -15,7 +15,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import ParamSpec
 
 from loguru import logger
 
@@ -29,7 +29,11 @@ from chunkhound.code_mapper.coverage import compute_unreferenced_scope_files
 from chunkhound.code_mapper.metadata import build_generation_stats_with_coverage
 from chunkhound.code_mapper.orchestrator import CodeMapperOrchestrator
 from chunkhound.code_mapper.render import render_overview_document
-from chunkhound.code_mapper.service import CodeMapperNoPointsError, run_code_mapper_pipeline
+from chunkhound.code_mapper.service import (
+    CodeMapperNoPointsError,
+    run_code_mapper_pipeline,
+)
+from chunkhound.code_mapper.utils import safe_scope_label
 from chunkhound.code_mapper.writer import write_code_mapper_outputs
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
@@ -40,15 +44,18 @@ from chunkhound.llm_manager import LLMManager
 from ..utils.rich_output import RichOutputFormatter
 from ..utils.tree_progress import TreeProgressDisplay
 
-async def _run_code_mapper_overview_hyde(*args: Any, **kwargs: Any) -> tuple[str, list[str]]:
+P = ParamSpec("P")
+
+
+async def _run_code_mapper_overview_hyde(
+    *args: P.args, **kwargs: P.kwargs
+) -> tuple[str, list[str]]:
     """Delegate to pipeline helper (wrapper for test monkeypatching)."""
     return await code_mapper_pipeline._run_code_mapper_overview_hyde(*args, **kwargs)
 
 
 # Re-export for tests that monkeypatch assembly metadata wiring.
 build_llm_metadata_and_assembly = code_mapper_llm.build_llm_metadata_and_assembly
-
-
 
 async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
     """Execute the Code Mapper command using deep code research."""
@@ -61,7 +68,8 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
     out_dir_arg = getattr(args, "out_dir", None)
     if out_dir_arg is None:
         formatter.error(
-            "Code Mapper requires --out-dir so it can write an index and per-topic files."
+            "Code Mapper requires --out-dir so it can write an index and per-topic "
+            "files."
         )
         sys.exit(2)
 
@@ -72,14 +80,14 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
     if getattr(args, "overview_only", False):
         try:
             out_dir = Path(out_dir_arg).resolve()
-        except Exception:
+        except (OSError, RuntimeError):
             out_dir = None
 
         try:
             if config.llm:
                 utility_config, synthesis_config = config.llm.get_provider_configs()
                 llm_manager = LLMManager(utility_config, synthesis_config)
-        except Exception:
+        except (AttributeError, TypeError, ValueError):
             llm_manager = None
 
         orchestrator = CodeMapperOrchestrator(
@@ -95,21 +103,28 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
             overview_only=True,
         )
 
-        overview_answer, points_of_interest = await _run_code_mapper_overview_hyde(
-            llm_manager=llm_manager,
-            target_dir=scope.target_dir,
-            scope_path=scope.scope_path,
-            scope_label=scope.scope_label,
-            max_points=run_context.max_points,
-            comprehensiveness=run_context.comprehensiveness,
-            out_dir=out_dir,
-            assembly_provider=meta_bundle.assembly_provider,
-            indexing_cfg=getattr(config, "indexing", None),
-        )
+        try:
+            overview_answer, points_of_interest = await _run_code_mapper_overview_hyde(
+                llm_manager=llm_manager,
+                target_dir=scope.target_dir,
+                scope_path=scope.scope_path,
+                scope_label=scope.scope_label,
+                max_points=run_context.max_points,
+                comprehensiveness=run_context.comprehensiveness,
+                out_dir=out_dir,
+                assembly_provider=meta_bundle.assembly_provider,
+                indexing_cfg=getattr(config, "indexing", None),
+            )
+        except code_mapper_pipeline.CodeMapperHyDEError as exc:
+            formatter.error("Code Mapper HyDE planning failed.")
+            print("\n--- HyDE error ---\n")
+            print(exc.hyde_message)
+            sys.exit(1)
         if not points_of_interest:
             exc = CodeMapperNoPointsError(overview_answer)
             formatter.error(
-                "Code Mapper could not extract any points of interest from the overview."
+                "Code Mapper could not extract any points of interest from the "
+                "overview."
             )
             print("\n--- Overview answer ---\n")
             print(exc.overview_answer)
@@ -118,13 +133,20 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
         meta_bundle.meta.generation_stats["code_mapper_comprehensiveness"] = (
             run_context.comprehensiveness
         )
-        print(
-            render_overview_document(
-                meta=meta_bundle.meta,
-                scope_label=scope.scope_label,
-                overview_answer=overview_answer,
-            ).rstrip("\n")
-        )
+        overview_doc = render_overview_document(
+            meta=meta_bundle.meta,
+            scope_label=scope.scope_label,
+            overview_answer=overview_answer,
+        ).rstrip("\n")
+        print(overview_doc)
+        if out_dir is not None:
+            try:
+                safe_scope = safe_scope_label(scope.scope_label)
+                overview_path = out_dir / f"{safe_scope}_overview.md"
+                overview_path.parent.mkdir(parents=True, exist_ok=True)
+                overview_path.write_text(overview_doc + "\n", encoding="utf-8")
+            except OSError as exc:
+                logger.debug(f"Code Mapper: failed to write overview artifact: {exc}")
         return
 
     # Verify database exists and get paths
@@ -150,7 +172,7 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
             "2. Set CHUNKHOUND_EMBEDDING__API_KEY environment variable"
         )
         sys.exit(1)
-    except Exception as e:
+    except (OSError, RuntimeError, TypeError) as e:
         formatter.error(f"Unexpected error setting up embedding provider: {e}")
         logger.exception("Full error details:")
         sys.exit(1)
@@ -170,7 +192,7 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
             "2. Set CHUNKHOUND_LLM_API_KEY environment variable"
         )
         sys.exit(1)
-    except Exception as e:
+    except (OSError, RuntimeError, TypeError) as e:
         formatter.error(f"Unexpected error setting up LLM provider: {e}")
         logger.exception("Full error details:")
         sys.exit(1)
@@ -182,8 +204,9 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
             config=config,
             embedding_manager=embedding_manager,
         )
-    except Exception as e:
+    except (OSError, RuntimeError, TypeError, ValueError) as e:
         formatter.error(f"Failed to initialize services: {e}")
+        logger.exception("Full error details:")
         sys.exit(1)
 
     orchestrator = CodeMapperOrchestrator(
@@ -206,56 +229,51 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
     # experiments where ultra mode may increase BFS depth beyond the global
     # default. For now we keep depth at the standard value unless an explicit
     # environment override is provided so coverage remains focused on breadth.
-    original_depth_env = os.getenv("CH_CODE_RESEARCH_MAX_DEPTH")
-    depth_overridden = False
+    max_depth_override: int | None = None
     if (
         run_context.comprehensiveness == "ultra"
         and os.getenv("CH_CODE_MAPPER_ULTRA_USE_DEPTH", "0") == "1"
     ):
-        os.environ["CH_CODE_RESEARCH_MAX_DEPTH"] = "2"
-        depth_overridden = True
+        max_depth_override = 2
 
-    try:
-        with TreeProgressDisplay() as tree_progress:
-            try:
-                pipeline_result = await run_code_mapper_pipeline(
-                    services=services,
-                    embedding_manager=embedding_manager,
-                    llm_manager=llm_manager,
-                    target_dir=scope.target_dir,
-                    scope_path=scope.scope_path,
-                    scope_label=scope.scope_label,
-                    path_filter=scope.path_filter,
-                    comprehensiveness=run_context.comprehensiveness,
-                    max_points=run_context.max_points,
-                    out_dir=Path(out_dir_arg),
-                    assembly_provider=meta_bundle.assembly_provider,
-                    indexing_cfg=getattr(config, "indexing", None),
-                    progress=tree_progress,
-                    log_info=formatter.info,
-                    log_warning=formatter.warning,
-                    log_error=formatter.error,
-                )
-            except CodeMapperNoPointsError as exc:
-                formatter.error(
-                    "Code Mapper could not extract any points of interest from the "
-                    "overview."
-                )
-                print("\n--- Overview answer ---\n")
-                print(exc.overview_answer)
-                sys.exit(1)
-            except Exception as e:
-                formatter.error(f"Code Mapper research failed: {e}")
-                logger.exception("Full error details:")
-                sys.exit(1)
-    finally:
-        # Restore original depth override so other commands/tests are not
-        # affected by the ultra-mode setting.
-        if depth_overridden:
-            if original_depth_env is None:
-                os.environ.pop("CH_CODE_RESEARCH_MAX_DEPTH", None)
-            else:
-                os.environ["CH_CODE_RESEARCH_MAX_DEPTH"] = original_depth_env
+    with TreeProgressDisplay() as tree_progress:
+        try:
+            pipeline_result = await run_code_mapper_pipeline(
+                services=services,
+                embedding_manager=embedding_manager,
+                llm_manager=llm_manager,
+                target_dir=scope.target_dir,
+                scope_path=scope.scope_path,
+                scope_label=scope.scope_label,
+                path_filter=scope.path_filter,
+                comprehensiveness=run_context.comprehensiveness,
+                max_points=run_context.max_points,
+                max_depth=max_depth_override,
+                out_dir=Path(out_dir_arg),
+                assembly_provider=meta_bundle.assembly_provider,
+                indexing_cfg=getattr(config, "indexing", None),
+                progress=tree_progress,
+                log_info=formatter.info,
+                log_warning=formatter.warning,
+                log_error=formatter.error,
+            )
+        except CodeMapperNoPointsError as exc:
+            formatter.error(
+                "Code Mapper could not extract any points of interest from the "
+                "overview."
+            )
+            print("\n--- Overview answer ---\n")
+            print(exc.overview_answer)
+            sys.exit(1)
+        except code_mapper_pipeline.CodeMapperHyDEError as exc:
+            formatter.error("Code Mapper HyDE planning failed.")
+            print("\n--- HyDE error ---\n")
+            print(exc.hyde_message)
+            sys.exit(1)
+        except (OSError, RuntimeError, TypeError, ValueError) as e:
+            formatter.error(f"Code Mapper research failed: {e}")
+            logger.exception("Full error details:")
+            sys.exit(1)
 
     overview_result = pipeline_result.overview_result
     poi_sections = pipeline_result.poi_sections
@@ -299,13 +317,12 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
         )
 
     out_dir = Path(out_dir_arg).resolve()
-    include_combined = os.getenv("CH_CODE_MAPPER_WRITE_COMBINED", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "y",
-        "on",
-    )
+    combined_arg = getattr(args, "combined", None)
+    if isinstance(combined_arg, bool):
+        include_combined = combined_arg
+    else:
+        combined_env = os.getenv("CH_CODE_MAPPER_WRITE_COMBINED", "0").strip().lower()
+        include_combined = combined_env in ("1", "true", "yes", "y", "on")
     write_result = write_code_mapper_outputs(
         out_dir=out_dir,
         scope_label=scope.scope_label,

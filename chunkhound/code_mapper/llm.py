@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from loguru import logger
+
 from chunkhound.core.config.config import Config
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.llm_manager import LLMManager
@@ -76,7 +78,8 @@ def build_llm_metadata_and_assembly(
                 llm_meta["assembly_reasoning_effort"] = str(
                     assembly_cfg["reasoning_effort"]
                 )
-        except Exception:
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.debug(f"Code Mapper: failed to create assembly provider: {exc}")
             assembly_provider = None
 
     if assembly_provider is None:

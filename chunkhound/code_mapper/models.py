@@ -25,6 +25,31 @@ class HydeConfig:
     max_completion_tokens: int
     max_snippet_tokens: int
 
+    def __post_init__(self) -> None:
+        values: dict[str, int] = {
+            "max_scope_files": self.max_scope_files,
+            "max_snippet_files": self.max_snippet_files,
+            "max_snippet_chars": self.max_snippet_chars,
+            "max_completion_tokens": self.max_completion_tokens,
+            "max_snippet_tokens": self.max_snippet_tokens,
+        }
+
+        for name, value in values.items():
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(
+                    f"HydeConfig.{name} must be an int (got {type(value)})"
+                )
+
+        non_negative = ("max_scope_files", "max_snippet_files", "max_snippet_chars")
+        for name in non_negative:
+            if values[name] < 0:
+                raise ValueError(f"HydeConfig.{name} must be >= 0 (got {values[name]})")
+
+        positive = ("max_completion_tokens", "max_snippet_tokens")
+        for name in positive:
+            if values[name] <= 0:
+                raise ValueError(f"HydeConfig.{name} must be > 0 (got {values[name]})")
+
     @classmethod
     def from_env(cls) -> HydeConfig:
         max_scope = 200

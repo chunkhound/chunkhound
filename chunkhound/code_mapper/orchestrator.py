@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import argparse
 import os
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from chunkhound.code_mapper.llm import build_llm_metadata_and_assembly
 from chunkhound.code_mapper.models import AgentDocMetadata
 from chunkhound.core.config.config import Config
+from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.llm_manager import LLMManager
 
 
@@ -30,7 +31,7 @@ class CodeMapperRunContext:
 @dataclass
 class CodeMapperMetadataBundle:
     meta: AgentDocMetadata
-    assembly_provider: Any | None
+    assembly_provider: LLMProvider | None
 
 
 def _get_head_sha(project_root: Path) -> str:
@@ -44,7 +45,7 @@ def _get_head_sha(project_root: Path) -> str:
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
-    except Exception:
+    except (OSError, subprocess.SubprocessError, ValueError):
         pass
     return "NO_GIT_HEAD"
 
@@ -101,7 +102,7 @@ class CodeMapperOrchestrator:
         self,
         *,
         config: Config,
-        args: Any,
+        args: argparse.Namespace,
         llm_manager: LLMManager | None,
     ) -> None:
         self._config = config
@@ -142,7 +143,11 @@ class CodeMapperOrchestrator:
         )
 
         created_from_sha = _get_head_sha(scope_path)
-        if not overview_only and created_from_sha == "NO_GIT_HEAD" and scope_path != target_dir:
+        if (
+            not overview_only
+            and created_from_sha == "NO_GIT_HEAD"
+            and scope_path != target_dir
+        ):
             created_from_sha = _get_head_sha(target_dir)
 
         meta = AgentDocMetadata(
