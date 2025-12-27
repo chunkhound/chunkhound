@@ -242,7 +242,8 @@ def create_coverage_service_with_path_filter(
             pass
 
         async def detect_and_fill_gaps(
-            self, root_query, covered_chunks, phase1_threshold, path_filter=None
+            self, root_query, covered_chunks, phase1_threshold, path_filter=None,
+            constants_context=""
         ):
             """Return empty gap results when covered_chunks is empty."""
             return covered_chunks, {
@@ -265,7 +266,7 @@ def create_coverage_service_with_path_filter(
             pass
 
         async def synthesize(self, root_query, all_chunks, gap_queries, target_tokens,
-                             file_imports=None):
+                             file_imports=None, constants_context=""):
             """Raise ValueError when chunks are empty."""
             if not all_chunks:
                 raise ValueError(
@@ -452,7 +453,8 @@ class TestPathFilterMismatch:
                 pass
 
             async def detect_and_fill_gaps(
-                self, root_query, covered_chunks, phase1_threshold, path_filter=None
+                self, root_query, covered_chunks, phase1_threshold, path_filter=None,
+                constants_context=""
             ):
                 # Record path_filter received
                 path_filter_propagation["gap_detection"] = path_filter
@@ -471,7 +473,7 @@ class TestPathFilterMismatch:
                 pass
 
             async def synthesize(self, root_query, all_chunks, gap_queries, target_tokens,
-                                  file_imports=None):
+                                  file_imports=None, constants_context=""):
                 return "Synthesis", [], {"final_tokens": 100}
 
         class MockQueryExpander:
@@ -625,7 +627,8 @@ class TestPathFilterEmptyString:
             def __init__(self, llm_manager, embedding_manager, db_services, config):
                 pass
 
-            async def synthesize(self, root_query, all_chunks, gap_queries, target_tokens):
+            async def synthesize(self, root_query, all_chunks, gap_queries, target_tokens,
+                                 file_imports=None, constants_context=""):
                 return "Synthesis result", [], {"final_tokens": 100}
 
         monkeypatch.setattr(crs_module, "CoverageSynthesisEngine", MockSynthesisSuccess)
@@ -671,7 +674,8 @@ class TestPathFilterEmptyString:
             def __init__(self, llm_manager, embedding_manager, db_services, config):
                 pass
 
-            async def synthesize(self, root_query, all_chunks, gap_queries, target_tokens):
+            async def synthesize(self, root_query, all_chunks, gap_queries, target_tokens,
+                                 file_imports=None, constants_context=""):
                 return "Synthesis result", [], {"final_tokens": 100}
 
         monkeypatch.setattr(crs_module, "CoverageSynthesisEngine", MockSynthesisSuccess)
@@ -797,7 +801,8 @@ class TestPathFilterWithValidResults:
             def __init__(self, llm_manager, embedding_manager, db_services, config):
                 pass
 
-            async def synthesize(self, root_query, all_chunks, gap_queries, target_tokens):
+            async def synthesize(self, root_query, all_chunks, gap_queries, target_tokens,
+                                 file_imports=None, constants_context=""):
                 return "Synthesis result for lib/ files", [], {"final_tokens": 100}
 
         monkeypatch.setattr(crs_module, "CoverageSynthesisEngine", MockSynthesisSuccess)

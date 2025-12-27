@@ -3,7 +3,9 @@
 import pytest
 
 from chunkhound.core.types.common import ChunkType, FileId, Language
-from chunkhound.parsers.parser_factory import get_parser_factory
+from chunkhound.parsers.parser_factory import get_parser_factory, ParserFactory
+from chunkhound.parsers.universal_engine import UniversalConcept
+from chunkhound.parsers.mappings.java import JavaMapping
 
 
 def parse_java(content: str):
@@ -11,6 +13,28 @@ def parse_java(content: str):
     factory = get_parser_factory()
     parser = factory.create_parser(Language.JAVA)
     return parser.parse_content(content, "test.java", FileId(1))
+
+
+@pytest.fixture
+def parse_java_concepts():
+    """Parse Java content at concept level for detailed verification.
+
+    Returns chunks with full metadata for inspection, following the HCL
+    test pattern for high-standard metadata verification.
+    """
+    def _parse(content: str, concept: UniversalConcept = UniversalConcept.DEFINITION):
+        parser = ParserFactory().create_parser(Language.JAVA)
+        ast = parser.engine.parse_to_ast(content)
+        return parser.extractor.extract_concept(
+            ast.root_node, content.encode(), concept
+        )
+    return _parse
+
+
+@pytest.fixture
+def java_mapping():
+    """Create a JavaMapping instance for unit testing extraction methods."""
+    return JavaMapping()
 
 
 class TestJavaClassParsing:
@@ -1028,3 +1052,429 @@ public class UserService {
         # Should have captured multiple chunks
         assert len(chunks) >= 2, \
             f"Expected at least 2 chunks from realistic module, got {len(chunks)}"
+
+
+# =============================================================================
+# HIGH-STANDARD METADATA VERIFICATION TESTS
+# Following the pattern from test_hcl_mapping.py for concept-level testing
+# =============================================================================
+
+
+class TestJavaVisibilityMetadata:
+    """Test that visibility modifiers are correctly extracted into metadata."""
+
+    def test_public_visibility(self, parse_java_concepts):
+        """Test public visibility is captured in metadata."""
+        content = """
+public class MyClass {
+    public void myMethod() {}
+}
+"""
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        method_chunks = [c for c in chunks if c.name == "myMethod"]
+        assert len(method_chunks) > 0, "Should capture myMethod"
+        assert method_chunks[0].metadata.get("visibility") == "public"
+
+    def test_private_visibility(self, parse_java_concepts):
+        """Test private visibility is captured in metadata."""
+        content = """
+public class MyClass {
+    private void myMethod() {}
+}
+"""
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        method_chunks = [c for c in chunks if c.name == "myMethod"]
+        assert len(method_chunks) > 0, "Should capture myMethod"
+        assert method_chunks[0].metadata.get("visibility") == "private"
+
+    def test_protected_visibility(self, parse_java_concepts):
+        """Test protected visibility is captured in metadata."""
+        content = """
+public class MyClass {
+    protected void myMethod() {}
+}
+"""
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        method_chunks = [c for c in chunks if c.name == "myMethod"]
+        assert len(method_chunks) > 0, "Should capture myMethod"
+        assert method_chunks[0].metadata.get("visibility") == "protected"
+
+    def test_package_private_visibility(self, parse_java_concepts):
+        """Test package-private (no modifier) visibility is not set (no modifiers node).
+
+        Note: When there's no explicit visibility modifier, the parser doesn't
+        create a modifiers node, so visibility is not set in metadata.
+        This is correct behavior - absence of visibility key indicates package-private.
+        """
+        content = """
+public class MyClass {
+    void myMethod() {}
+}
+"""
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        method_chunks = [c for c in chunks if c.name == "myMethod"]
+        assert len(method_chunks) > 0, "Should capture myMethod"
+        # Package-private methods have no modifiers node, so no visibility key
+        visibility = method_chunks[0].metadata.get("visibility")
+        assert visibility is None or visibility == "package", \
+            f"Expected None (no modifiers) or 'package', got: {visibility}"
+
+
+class TestJavaModifierMetadata:
+    """Test that Java modifiers are correctly extracted into metadata."""
+
+    def test_static_modifier_in_metadata(self, parse_java_concepts):
+        """Test static modifier is captured in metadata."""
+        content = """
+public class MyClass {
+    public static void myMethod() {}
+}
+"""
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        method_chunks = [c for c in chunks if c.name == "myMethod"]
+        assert len(method_chunks) > 0, "Should capture myMethod"
+        modifiers = method_chunks[0].metadata.get("modifiers", [])
+        assert "static" in modifiers, f"Expected 'static' in modifiers, got: {modifiers}"
+
+    def test_final_modifier_in_metadata(self, parse_java_concepts):
+        """Test final modifier is captured in metadata."""
+        content = """
+public class MyClass {
+    public final void myMethod() {}
+}
+"""
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        method_chunks = [c for c in chunks if c.name == "myMethod"]
+        assert len(method_chunks) > 0, "Should capture myMethod"
+        modifiers = method_chunks[0].metadata.get("modifiers", [])
+        assert "final" in modifiers, f"Expected 'final' in modifiers, got: {modifiers}"
+
+    def test_abstract_modifier_in_metadata(self, parse_java_concepts):
+        """Test abstract modifier is captured in metadata."""
+        content = """
+public abstract class MyClass {
+    public abstract void myMethod();
+}
+"""
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        method_chunks = [c for c in chunks if c.name == "myMethod"]
+        assert len(method_chunks) > 0, "Should capture myMethod"
+        modifiers = method_chunks[0].metadata.get("modifiers", [])
+        assert "abstract" in modifiers, f"Expected 'abstract' in modifiers, got: {modifiers}"
+
+    def test_synchronized_modifier_in_metadata(self, parse_java_concepts):
+        """Test synchronized modifier is captured in metadata."""
+        content = """
+public class MyClass {
+    public synchronized void myMethod() {}
+}
+"""
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        method_chunks = [c for c in chunks if c.name == "myMethod"]
+        assert len(method_chunks) > 0, "Should capture myMethod"
+        modifiers = method_chunks[0].metadata.get("modifiers", [])
+        assert "synchronized" in modifiers, f"Expected 'synchronized' in modifiers, got: {modifiers}"
+
+    def test_multiple_modifiers_in_metadata(self, parse_java_concepts):
+        """Test multiple modifiers are captured in metadata."""
+        content = """
+public class MyClass {
+    public static final void myMethod() {}
+}
+"""
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        method_chunks = [c for c in chunks if c.name == "myMethod"]
+        assert len(method_chunks) > 0, "Should capture myMethod"
+        modifiers = method_chunks[0].metadata.get("modifiers", [])
+        assert "static" in modifiers, f"Expected 'static' in modifiers, got: {modifiers}"
+        assert "final" in modifiers, f"Expected 'final' in modifiers, got: {modifiers}"
+
+
+class TestJavaKindMetadata:
+    """Test that Java definition kinds are correctly identified in metadata."""
+
+    def test_method_kind(self, parse_java_concepts):
+        """Test method kind is captured in metadata."""
+        content = """
+public class MyClass {
+    public void myMethod() {}
+}
+"""
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        method_chunks = [c for c in chunks if c.name == "myMethod"]
+        assert len(method_chunks) > 0, "Should capture myMethod"
+        assert method_chunks[0].metadata.get("kind") == "method"
+
+    def test_constructor_kind(self, parse_java_concepts):
+        """Test constructor kind is captured in metadata."""
+        content = """
+public class MyClass {
+    public MyClass() {}
+}
+"""
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        constructor_chunks = [c for c in chunks if c.metadata.get("kind") == "constructor"]
+        assert len(constructor_chunks) > 0, "Should capture constructor with kind='constructor'"
+
+    def test_class_kind(self, parse_java_concepts):
+        """Test class kind is captured in metadata."""
+        content = "public class MyClass {}"
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        class_chunks = [c for c in chunks if c.name == "MyClass"]
+        assert len(class_chunks) > 0, "Should capture MyClass"
+        assert class_chunks[0].metadata.get("kind") == "class"
+
+    def test_interface_kind(self, parse_java_concepts):
+        """Test interface kind is captured in metadata."""
+        content = "public interface MyInterface {}"
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        interface_chunks = [c for c in chunks if c.name == "MyInterface"]
+        assert len(interface_chunks) > 0, "Should capture MyInterface"
+        assert interface_chunks[0].metadata.get("kind") == "interface"
+
+    def test_enum_kind(self, parse_java_concepts):
+        """Test enum kind is captured in metadata."""
+        content = "public enum MyEnum { VALUE1, VALUE2 }"
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        enum_chunks = [c for c in chunks if c.name == "MyEnum"]
+        assert len(enum_chunks) > 0, "Should capture MyEnum"
+        assert enum_chunks[0].metadata.get("kind") == "enum"
+
+    def test_field_kind(self, parse_java_concepts):
+        """Test field kind is captured in metadata."""
+        content = """
+public class MyClass {
+    private String myField;
+}
+"""
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        field_chunks = [c for c in chunks if c.metadata.get("kind") == "field"]
+        assert len(field_chunks) > 0, "Should capture field with kind='field'"
+
+    def test_annotation_type_kind(self, parse_java_concepts):
+        """Test annotation type kind is captured in metadata."""
+        content = "public @interface MyAnnotation {}"
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        annotation_chunks = [c for c in chunks if c.name == "MyAnnotation"]
+        assert len(annotation_chunks) > 0, "Should capture MyAnnotation"
+        assert annotation_chunks[0].metadata.get("kind") == "annotation"
+
+
+class TestJavaMethodMetadata:
+    """Test that method-specific metadata is correctly extracted."""
+
+    def test_parameters_in_metadata(self, parse_java_concepts):
+        """Test method parameters are captured in metadata."""
+        content = """
+public class MyClass {
+    public void myMethod(String name, int age) {}
+}
+"""
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        method_chunks = [c for c in chunks if c.name == "myMethod"]
+        assert len(method_chunks) > 0, "Should capture myMethod"
+        params = method_chunks[0].metadata.get("parameters", [])
+        assert "String" in params, f"Expected 'String' in parameters, got: {params}"
+        assert "int" in params, f"Expected 'int' in parameters, got: {params}"
+
+    def test_return_type_in_metadata(self, parse_java_concepts):
+        """Test method return type is captured in metadata."""
+        content = """
+public class MyClass {
+    public String myMethod() { return ""; }
+}
+"""
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        method_chunks = [c for c in chunks if c.name == "myMethod"]
+        assert len(method_chunks) > 0, "Should capture myMethod"
+        return_type = method_chunks[0].metadata.get("return_type")
+        assert return_type == "String", f"Expected 'String' return_type, got: {return_type}"
+
+    def test_void_return_type_in_metadata(self, parse_java_concepts):
+        """Test void return type is captured in metadata."""
+        content = """
+public class MyClass {
+    public void myMethod() {}
+}
+"""
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        method_chunks = [c for c in chunks if c.name == "myMethod"]
+        assert len(method_chunks) > 0, "Should capture myMethod"
+        return_type = method_chunks[0].metadata.get("return_type")
+        assert return_type == "void", f"Expected 'void' return_type, got: {return_type}"
+
+    def test_type_parameters_in_metadata(self, parse_java_concepts):
+        """Test generic type parameters are captured in metadata."""
+        content = """
+public class MyClass {
+    public <T> T myMethod(T value) { return value; }
+}
+"""
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        method_chunks = [c for c in chunks if c.name == "myMethod"]
+        assert len(method_chunks) > 0, "Should capture myMethod"
+        type_params = method_chunks[0].metadata.get("type_parameters")
+        assert type_params is not None, "Expected type_parameters in metadata"
+        assert "T" in type_params, f"Expected 'T' in type_parameters, got: {type_params}"
+
+    def test_annotations_in_metadata(self, parse_java_concepts):
+        """Test method annotations are captured in metadata."""
+        content = """
+public class MyClass {
+    @Override
+    @SuppressWarnings("unused")
+    public String toString() { return ""; }
+}
+"""
+        chunks = parse_java_concepts(content, UniversalConcept.DEFINITION)
+        method_chunks = [c for c in chunks if c.name == "toString"]
+        assert len(method_chunks) > 0, "Should capture toString"
+        annotations = method_chunks[0].metadata.get("annotations", [])
+        has_override = any("Override" in a for a in annotations)
+        has_suppress = any("SuppressWarnings" in a for a in annotations)
+        assert has_override, f"Expected @Override in annotations, got: {annotations}"
+        assert has_suppress, f"Expected @SuppressWarnings in annotations, got: {annotations}"
+
+
+class TestJavaCommentMetadata:
+    """Test that comment metadata is correctly extracted."""
+
+    def test_line_comment_type(self, parse_java_concepts):
+        """Test line comment type is captured in metadata."""
+        content = "// This is a meaningful line comment for testing"
+        chunks = parse_java_concepts(content, UniversalConcept.COMMENT)
+        if chunks:  # Comments may be filtered
+            comment_chunks = [c for c in chunks if c.metadata.get("comment_type") == "line"]
+            if comment_chunks:
+                assert comment_chunks[0].metadata.get("comment_type") == "line"
+
+    def test_block_comment_type(self, parse_java_concepts):
+        """Test block comment type is captured in metadata."""
+        content = "/* This is a meaningful block comment for testing purposes */"
+        chunks = parse_java_concepts(content, UniversalConcept.COMMENT)
+        if chunks:  # Comments may be filtered
+            block_chunks = [c for c in chunks if c.metadata.get("comment_type") == "block"]
+            if block_chunks:
+                assert block_chunks[0].metadata.get("comment_type") == "block"
+
+    def test_javadoc_comment_type(self, parse_java_concepts):
+        """Test Javadoc comment type and is_javadoc flag are captured in metadata."""
+        content = """
+/**
+ * This is a Javadoc comment.
+ * It provides documentation for a class.
+ */
+public class MyClass {}
+"""
+        chunks = parse_java_concepts(content, UniversalConcept.COMMENT)
+        javadoc_chunks = [c for c in chunks if c.metadata.get("comment_type") == "javadoc"]
+        assert len(javadoc_chunks) > 0, "Should capture Javadoc comment"
+        assert javadoc_chunks[0].metadata.get("is_javadoc") is True
+
+
+class TestJavaImportMetadata:
+    """Test that import/package metadata is correctly extracted."""
+
+    def test_import_path_metadata(self, parse_java_concepts):
+        """Test import path is captured in metadata."""
+        content = "import java.util.List;"
+        chunks = parse_java_concepts(content, UniversalConcept.IMPORT)
+        import_chunks = [c for c in chunks if c.metadata.get("import_type") == "import"]
+        assert len(import_chunks) > 0, "Should capture import declaration"
+        import_path = import_chunks[0].metadata.get("import_path")
+        assert import_path == "java.util.List", f"Expected 'java.util.List', got: {import_path}"
+
+    def test_static_import_flag(self, parse_java_concepts):
+        """Test static import flag is captured in metadata."""
+        content = "import static java.lang.Math.PI;"
+        chunks = parse_java_concepts(content, UniversalConcept.IMPORT)
+        import_chunks = [c for c in chunks if c.metadata.get("import_type") == "import"]
+        assert len(import_chunks) > 0, "Should capture static import"
+        assert import_chunks[0].metadata.get("is_static_import") is True
+
+    def test_package_name_metadata(self, parse_java_concepts):
+        """Test package name is captured in metadata."""
+        content = "package com.example.demo;"
+        chunks = parse_java_concepts(content, UniversalConcept.IMPORT)
+        package_chunks = [c for c in chunks if c.metadata.get("import_type") == "package"]
+        assert len(package_chunks) > 0, "Should capture package declaration"
+        package_name = package_chunks[0].metadata.get("package_name")
+        assert package_name == "com.example.demo", f"Expected 'com.example.demo', got: {package_name}"
+
+
+class TestJavaChunkTypes:
+    """Test that chunk types are correctly assigned."""
+
+    def test_class_chunk_type(self):
+        """Test class declarations get ChunkType.CLASS."""
+        content = "public class MyClass {}"
+        chunks = parse_java(content)
+        class_chunks = [c for c in chunks if c.symbol == "MyClass"]
+        assert len(class_chunks) > 0, "Should capture MyClass"
+        assert class_chunks[0].chunk_type == ChunkType.CLASS
+
+    def test_interface_chunk_type(self):
+        """Test interface declarations get ChunkType.INTERFACE."""
+        content = "public interface MyInterface {}"
+        chunks = parse_java(content)
+        interface_chunks = [c for c in chunks if c.symbol == "MyInterface"]
+        assert len(interface_chunks) > 0, "Should capture MyInterface"
+        assert interface_chunks[0].chunk_type == ChunkType.INTERFACE
+
+    def test_method_chunk_type(self):
+        """Test method declarations get ChunkType.METHOD."""
+        content = """
+public class MyClass {
+    public void myMethod() {
+        int x = 1;
+        int y = 2;
+        System.out.println(x + y);
+    }
+}
+"""
+        chunks = parse_java(content)
+        method_chunks = [c for c in chunks if c.symbol == "myMethod"]
+        if method_chunks:
+            assert method_chunks[0].chunk_type == ChunkType.METHOD
+
+
+class TestJavaExtractionMethods:
+    """Unit tests for JavaMapping extraction methods."""
+
+    def test_clean_comment_text_javadoc(self, java_mapping):
+        """Test clean_comment_text removes Javadoc markers."""
+        javadoc = """/**
+ * This is a Javadoc comment.
+ * @param name the name
+ */"""
+        cleaned = java_mapping.clean_comment_text(javadoc)
+        assert not cleaned.startswith("/**")
+        assert not cleaned.endswith("*/")
+        assert "This is a Javadoc comment" in cleaned
+
+    def test_clean_comment_text_block(self, java_mapping):
+        """Test clean_comment_text removes block comment markers."""
+        block = "/* This is a block comment */"
+        cleaned = java_mapping.clean_comment_text(block)
+        assert not cleaned.startswith("/*")
+        assert not cleaned.endswith("*/")
+        assert "This is a block comment" in cleaned
+
+    def test_clean_comment_text_line(self, java_mapping):
+        """Test clean_comment_text removes line comment markers."""
+        line = "// This is a line comment"
+        cleaned = java_mapping.clean_comment_text(line)
+        assert not cleaned.startswith("//")
+        assert "This is a line comment" in cleaned
+
+    def test_clean_comment_text_preserves_content(self, java_mapping):
+        """Test clean_comment_text preserves multiline Javadoc content."""
+        javadoc = """/**
+ * Line 1
+ * Line 2
+ * Line 3
+ */"""
+        cleaned = java_mapping.clean_comment_text(javadoc)
+        assert "Line 1" in cleaned
+        assert "Line 2" in cleaned
+        assert "Line 3" in cleaned

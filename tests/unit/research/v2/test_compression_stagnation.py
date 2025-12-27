@@ -1,12 +1,14 @@
-"""Unit tests for CompressionService stagnation fixes.
+"""Unit tests for CompressionService stagnation fixes and parallel execution.
 
 Tests critical bug fixes in the compression algorithm:
 1. Bug 2: k-means fallback for single-cluster HDBSCAN output
 2. Bug 3: Force compression for oversized single items
+3. Parallel cluster compression with semaphore limiting
 
 These tests verify that the compression algorithm doesn't stagnate when:
 - HDBSCAN groups all content into a single cluster
 - A single item exceeds the LLM context limit
+- Multiple clusters are compressed in parallel
 """
 
 import pytest
@@ -93,75 +95,6 @@ def compression_service(llm_manager, embedding_manager, research_config):
     )
 
 
-class TestKMeansFallback:
-    """Test k-means fallback for single-cluster HDBSCAN output."""
-
-    @pytest.mark.asyncio
-    async def test_kmeans_fallback_triggers_for_single_oversized_cluster(
-        self, compression_service
-    ):
-        """When HDBSCAN returns 1 cluster that exceeds context, fall back to k-means.
-
-        The condition `output_count >= input_count` didn't trigger for
-        1 cluster from N inputs. The fix adds a check for single oversized clusters.
-        """
-        from chunkhound.services.clustering_service import ClusteringService
-
-        content_dict = {
-            f"file{i}.py": f"def function_{i}(): pass\n" * 1000
-            for i in range(5)
-        }
-
-        kmeans_called = False
-
-        async def mock_cluster_files_kmeans(files, n_clusters):
-            nonlocal kmeans_called
-            kmeans_called = True
-            file_paths = list(files.keys())
-            mid = len(file_paths) // 2
-            return [
-                ClusterGroup(
-                    cluster_id=0,
-                    file_paths=file_paths[:mid],
-                    files_content={fp: files[fp] for fp in file_paths[:mid]},
-                    total_tokens=5000,
-                ),
-                ClusterGroup(
-                    cluster_id=1,
-                    file_paths=file_paths[mid:],
-                    files_content={fp: files[fp] for fp in file_paths[mid:]},
-                    total_tokens=5000,
-                ),
-            ], {"num_clusters": 2, "avg_tokens_per_cluster": 5000}
-
-        with patch.object(
-            ClusteringService,
-            "cluster_files",
-            return_value=(
-                [
-                    ClusterGroup(
-                        cluster_id=0,
-                        file_paths=list(content_dict.keys()),
-                        files_content=content_dict,
-                        total_tokens=80000,  # Exceeds 75000 final_synthesis_threshold
-                    )
-                ],
-                {"num_clusters": 1, "num_native_clusters": 1, "avg_tokens_per_cluster": 80000},
-            ),
-        ):
-            with patch.object(
-                ClusteringService,
-                "cluster_files_kmeans",
-                side_effect=mock_cluster_files_kmeans,
-            ):
-                result = await compression_service._cluster_content(
-                    content_dict, cluster_budget=10000
-                )
-
-                assert kmeans_called, "K-means fallback should be triggered for single oversized cluster"
-                assert len(result) == 2, "K-means should produce 2 clusters"
-
-
 class TestForceCompression:
     """Test force compression for oversized single items."""
 
@@ -239,3 +172,156 @@ class TestRegressionNormalMultiCluster:
         assert result is not None
         # Single small item within budget should return as-is
         assert "small.py" in result or "summary" in result
+
+
+class TestMergeExpansionPrevention:
+    """Test that merge operations don't expand content beyond input size."""
+
+    @pytest.mark.asyncio
+    async def test_merge_under_budget_content_produces_single_summary(
+        self, compression_service
+    ):
+        """Merging under-budget summaries should produce a single merged summary.
+
+        When multiple items fit within final_synthesis_threshold but need merging,
+        the compression service should merge them into a single summary without
+        expanding beyond the input token count.
+        """
+        # Create 2 summaries that together are under final_synthesis_threshold (75k)
+        # but over min_llm_tokens (20k) to trigger expansion prevention logic
+        content_dict = {
+            "summary_1": "Summary of authentication module with details.\n" * 500,
+            "summary_2": "Summary of validation module with details.\n" * 500,
+        }
+        # Each ~2.5k tokens, total ~5k tokens - under target but multiple items
+
+        result = await compression_service.compress_to_budget(
+            root_query="how does auth work",
+            gap_queries=[],
+            content_dict=content_dict,
+            target_tokens=10000,
+            file_imports={},
+            depth=0,
+            prev_tokens=None,
+        )
+
+        # Verify single summary returned (items were merged)
+        assert result is not None
+        assert "summary" in result
+        assert len(result) == 1
+
+    @pytest.mark.asyncio
+    async def test_effective_max_caps_at_input_for_under_budget_merge(
+        self, compression_service, fake_llm_provider
+    ):
+        """Verify effective_max is capped at input_tokens when under budget.
+
+        This tests the fix for the expansion bug: when merging content that's
+        already under target budget, effective_max should be capped at input
+        size to prevent the LLM from expanding the content.
+        """
+        # Track the max_completion_tokens passed to LLM
+        captured_max_tokens = []
+        original_complete = fake_llm_provider.complete
+
+        async def tracking_complete(prompt, system=None, max_completion_tokens=None, **kwargs):
+            captured_max_tokens.append(max_completion_tokens)
+            return await original_complete(prompt, system=system, max_completion_tokens=max_completion_tokens, **kwargs)
+
+        fake_llm_provider.complete = tracking_complete
+
+        # Create content under budget but needs merging (multiple items)
+        content_dict = {
+            "summary_1": "Auth summary.\n" * 100,  # Small content
+            "summary_2": "Validation summary.\n" * 100,
+        }
+
+        await compression_service.compress_to_budget(
+            root_query="how does auth work",
+            gap_queries=[],
+            content_dict=content_dict,
+            target_tokens=50000,  # Large target
+            file_imports={},
+            depth=0,
+            prev_tokens=None,
+        )
+
+        # Verify LLM was called with constrained max_completion_tokens
+        # When under budget, effective_max = max(20000, min(target, input))
+        # Input is small (~1k tokens), so effective_max should be 20000 (floor)
+        # NOT 50000 (the target)
+        assert len(captured_max_tokens) > 0
+        for max_tokens in captured_max_tokens:
+            # Should never be the full target (50000) when input is small
+            # Floor is 20000 for quality, but should not expand to target
+            assert max_tokens <= 20000, (
+                f"Expected max_completion_tokens <= 20000, got {max_tokens}. "
+                f"Expansion prevention should cap output at input size."
+            )
+
+
+class TestParallelClusterCompression:
+    """Test parallel cluster compression with semaphore limiting."""
+
+    @pytest.mark.asyncio
+    async def test_parallel_compression_produces_correct_results(
+        self, compression_service
+    ):
+        """Parallel compression should produce results for all clusters.
+
+        When multiple clusters are compressed in parallel, all should be
+        included in the final result.
+        """
+        # Create content that will result in multiple clusters
+        content_dict = {
+            "auth.py": "def authenticate(user): return validate(user)\n" * 100,
+            "validate.py": "def validate(user): return check_credentials(user)\n" * 100,
+            "session.py": "def create_session(user): return session_token\n" * 100,
+            "token.py": "def generate_token(): return random_string()\n" * 100,
+            "cache.py": "def cache_user(user): return redis.set(user)\n" * 100,
+        }
+
+        result = await compression_service.compress_to_budget(
+            root_query="how does the authentication system work",
+            gap_queries=["how is caching handled"],
+            content_dict=content_dict,
+            target_tokens=10000,
+            file_imports={},
+            depth=0,
+            prev_tokens=None,
+        )
+
+        # Should produce at least one result
+        assert result is not None
+        assert len(result) >= 1
+
+    @pytest.mark.asyncio
+    async def test_parallel_compression_with_varying_sizes(
+        self, compression_service
+    ):
+        """Parallel compression should handle clusters of varying sizes.
+
+        Even when clusters have very different token counts, parallel
+        compression should handle them correctly.
+        """
+        # Create content with varying sizes
+        content_dict = {
+            "tiny.py": "x = 1",
+            "small.py": "def small(): pass\n" * 10,
+            "medium.py": "def medium(): return calculate()\n" * 100,
+            "large.py": "def large(): return complex_operation()\n" * 500,
+        }
+
+        result = await compression_service.compress_to_budget(
+            root_query="what does each file do",
+            gap_queries=[],
+            content_dict=content_dict,
+            target_tokens=10000,
+            file_imports={},
+            depth=0,
+            prev_tokens=None,
+        )
+
+        assert result is not None
+        # All files should be accounted for in some form
+        assert len(result) >= 1

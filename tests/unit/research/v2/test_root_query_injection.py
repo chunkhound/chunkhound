@@ -4,7 +4,7 @@ This module validates a critical architectural invariant documented in
 docs/algorithm-coverage-first-research.md:L79:
 
     "ROOT Query Injection: Every LLM call includes `root_query` in prompt.
-     Check all prompts contain `RESEARCH QUERY:` or `PRIMARY QUERY:`"
+     Check all prompts contain `RESEARCH QUERY:` or `PRIMARY QUERY:` or `QUERY:`"
 
 This guarantee prevents semantic drift during multi-step processing by ensuring
 the original research intent is always present in LLM prompts.
@@ -13,7 +13,7 @@ Test Strategy:
     1. Create custom LLM provider that captures all prompts
     2. Run v2 research components (gap detection, query expansion, synthesis)
     3. Validate prompts contain ROOT query with expected headers
-    4. Verify gap queries are included in synthesis prompts
+    4. Verify gap queries are included ONLY in final synthesis prompts
 
 Components Tested:
     - Query expansion: RESEARCH QUERY header + root query text
@@ -21,6 +21,7 @@ Components Tested:
     - Gap unification: RESEARCH QUERY header + root query text
     - Synthesis (base): PRIMARY QUERY header + root query text
     - Synthesis (with gaps): PRIMARY QUERY + RELATED GAPS section
+    - Compression: QUERY header only (no gaps - injected in final synthesis)
 """
 
 import pytest
@@ -595,20 +596,17 @@ async def test_synthesis_with_gaps_includes_both_primary_and_gaps(
 
 # Test 6: Compression Loop (Cluster Compression)
 @pytest.mark.asyncio
-async def test_cluster_compression_includes_primary_query(
+async def test_cluster_compression_includes_query(
     coverage_synthesis_engine,
     prompt_capturing_provider,
 ):
-    """Test that cluster compression prompts contain PRIMARY QUERY.
+    """Test that cluster compression prompts contain root query.
 
-    Per the implementation in coverage_synthesis.py:L698-702, cluster
-    compression prompts build compound context with:
-        PRIMARY QUERY: {root_query}
+    Compression prompts use simplified format:
+        QUERY: {root_query}
 
-        RELATED GAPS IDENTIFIED:
-        - {gap_query}
-
-    This maintains query focus during compression iterations.
+    Gap queries are NOT included in compression (only in final synthesis).
+    This reduces prompt overhead during iterative compression.
     """
     root_query = "What are the key algorithms?"
     gap_queries = ["How is search optimized?"]
@@ -621,23 +619,23 @@ async def test_cluster_compression_includes_primary_query(
     prompt_capturing_provider.reset_captured_prompts()
 
     # Run cluster compression (via CompressionService)
+    # Note: gap_queries removed from _compress_cluster - gaps are only injected in final synthesis
     await coverage_synthesis_engine._compression_service._compress_cluster(
         root_query=root_query,
-        gap_queries=gap_queries,
         cluster_content=cluster_content,
         target_tokens=10000,
         file_imports={},
     )
 
-    # Validate: prompt must contain PRIMARY QUERY
+    # Validate: prompt must contain QUERY header
     prompts = prompt_capturing_provider.captured_prompts
     assert len(prompts) > 0, "Expected at least one LLM call for cluster compression"
 
     compression_prompt = prompts[0]["prompt"]
 
-    # Verify PRIMARY QUERY header
-    assert "PRIMARY QUERY:" in compression_prompt, (
-        f"Cluster compression prompt must contain 'PRIMARY QUERY:' header\n"
+    # Verify QUERY header (simplified format, no PRIMARY prefix)
+    assert "QUERY:" in compression_prompt, (
+        f"Cluster compression prompt must contain 'QUERY:' header\n"
         f"Prompt start: {compression_prompt[:200]}..."
     )
 
@@ -647,15 +645,10 @@ async def test_cluster_compression_includes_primary_query(
         f"Prompt: {compression_prompt[:500]}..."
     )
 
-    # Verify gap queries are included
-    if gap_queries:
-        assert "RELATED GAPS IDENTIFIED:" in compression_prompt, (
-            "Cluster compression with gaps must contain 'RELATED GAPS IDENTIFIED:' section"
-        )
-        for gap_query in gap_queries:
-            assert gap_query in compression_prompt, (
-                f"Gap query '{gap_query}' not found in cluster compression prompt"
-            )
+    # Verify gap queries are NOT included in compression (only in final synthesis)
+    assert "RELATED GAPS IDENTIFIED:" not in compression_prompt, (
+        "Compression prompts should NOT contain gap queries (injected only in final synthesis)"
+    )
 
 
 # Summary Test: Full Invariant Validation
@@ -690,7 +683,7 @@ async def test_all_llm_touchpoints_validated(
         test_gap_unification_includes_research_query_header,
         test_synthesis_base_includes_primary_query_header,
         test_synthesis_with_gaps_includes_both_primary_and_gaps,
-        test_cluster_compression_includes_primary_query,  # Bonus
+        test_cluster_compression_includes_query,  # Bonus
     ]
 
     # Verify all test functions are defined

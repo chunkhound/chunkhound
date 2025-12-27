@@ -11,6 +11,7 @@ from chunkhound.core.config.research_config import ResearchConfig
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
+from chunkhound.services.research.shared.constants_ledger import ConstantsLedger
 from chunkhound.services.research.v2.coverage_research_service import (
     CoverageResearchService,
     _Phase1Result,
@@ -359,7 +360,7 @@ class TestPhase3Synthesis:
         gap_queries = ["How is caching implemented?"]
 
         answer, citations, stats = await coverage_research_service._phase3_synthesis(
-            query, all_chunks, gap_queries, {}
+            query, all_chunks, gap_queries, {}, ConstantsLedger()
         )
 
         assert isinstance(answer, str)
@@ -383,7 +384,7 @@ class TestPhase3Synthesis:
         gap_queries = ["How does authentication work?"]
 
         answer, citations, stats = await coverage_research_service._phase3_synthesis(
-            query, all_chunks, gap_queries, {}
+            query, all_chunks, gap_queries, {}, ConstantsLedger()
         )
 
         # Stats should reflect token usage
