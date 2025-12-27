@@ -13,6 +13,12 @@ from chunkhound.services.research.shared.chunk_dedup import (
     get_chunk_id,
     merge_chunk_lists,
 )
+from chunkhound.services.research.shared.constants_ledger import (
+    CONSTANTS_INSTRUCTION_FULL,
+    CONSTANTS_INSTRUCTION_SHORT,
+    ConstantEntry,
+    ConstantsLedger,
+)
 from chunkhound.services.research.shared.citation_manager import CitationManager
 from chunkhound.services.research.shared.context_manager import ContextManager
 from chunkhound.services.research.shared.elbow_detection import find_elbow_kneedle
@@ -99,6 +105,11 @@ __all__ = [
     "get_chunk_id",
     "deduplicate_chunks",
     "merge_chunk_lists",
+    # Constants ledger
+    "ConstantsLedger",
+    "ConstantEntry",
+    "CONSTANTS_INSTRUCTION_FULL",
+    "CONSTANTS_INSTRUCTION_SHORT",
     # Constants - Search
     "RELEVANCE_THRESHOLD",
     "NODE_SIMILARITY_THRESHOLD",
