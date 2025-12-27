@@ -97,7 +97,6 @@ def patch_code_mapper_dependencies(
         query: str,
         progress: Any,
         path: str | None = None,
-        max_depth: int | None = None,
     ) -> dict[str, Any]:
         return {
             "answer": f"Section for query: {query[:40]}",
@@ -121,7 +120,10 @@ def patch_code_mapper_dependencies(
 
     monkeypatch.setattr(LLMManager, "_create_provider", _fake_create_provider)
     monkeypatch.setattr(
-        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview, raising=True
+        code_mapper_service,
+        "_run_code_mapper_overview_hyde",
+        fake_overview,
+        raising=True,
     )
     monkeypatch.setattr(
         code_mapper_service, "deep_research_impl", fake_deep_research_impl, raising=True

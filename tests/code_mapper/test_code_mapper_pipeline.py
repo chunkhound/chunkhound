@@ -56,9 +56,7 @@ async def test_run_code_mapper_pipeline_skips_empty_results(
     async def fake_overview(**_: Any) -> tuple[str, list[str]]:
         return "overview", ["Core Flow", "Error Handling"]
 
-    async def fake_deep_research_impl(
-        *, query: str, **__: Any
-    ) -> dict[str, Any]:
+    async def fake_deep_research_impl(*, query: str, **__: Any) -> dict[str, Any]:
         if "Core Flow" in query:
             return {"answer": "", "metadata": {"sources": {"files": [], "chunks": []}}}
         return {
@@ -148,7 +146,9 @@ async def test_code_mapper_coverage_uses_deep_research_sources(
         await coordinator.generate_missing_embeddings()
 
         search_service = SearchService(db, embedding_manager.get_default_provider())
-        embedding_service = EmbeddingService(db, embedding_manager.get_default_provider())
+        embedding_service = EmbeddingService(
+            db, embedding_manager.get_default_provider()
+        )
         services = DatabaseServices(
             provider=db,
             indexing_coordinator=coordinator,
@@ -156,9 +156,17 @@ async def test_code_mapper_coverage_uses_deep_research_sources(
             embedding_service=embedding_service,
         )
 
-        monkeypatch.setenv("CH_CODE_RESEARCH_MAX_DEPTH", "0")
-
         import chunkhound.services.deep_research_service as dr_mod
+
+        async def _no_followups(*_: Any, **__: Any) -> list[str]:
+            return []
+
+        monkeypatch.setattr(
+            dr_mod.DeepResearchService,
+            "_generate_follow_up_questions",
+            _no_followups,
+            raising=True,
+        )
 
         original_threshold = dr_mod.RELEVANCE_THRESHOLD
         dr_mod.RELEVANCE_THRESHOLD = 0.0

@@ -272,7 +272,7 @@ class DeepResearchService:
                 metadata=metadata,
             )
 
-    async def deep_research(self, query: str, *, max_depth: int | None = None) -> dict[str, Any]:
+    async def deep_research(self, query: str) -> dict[str, Any]:
         """Perform deep research on a query.
 
         Uses fixed BFS depth (max_depth=1) with dynamic synthesis budgets that scale
@@ -290,27 +290,9 @@ class DeepResearchService:
         # Emit main start event
         await self._emit_event("main_start", f"Starting deep research: {query[:60]}...")
 
-        # Fixed max depth (empirically proven optimal), with optional overrides:
-        # 1) Explicit per-call override (e.g., higher-level tools like code_mapper)
-        # 2) Environment variable for experimental use
-        # 3) Default (1)
-        resolved_max_depth = 1
-
-        if isinstance(max_depth, int) and max_depth >= 0:
-            resolved_max_depth = max_depth
-        else:
-            override = os.getenv("CH_CODE_RESEARCH_MAX_DEPTH")
-            if override is not None:
-                try:
-                    value = int(override)
-                    if value >= 0:
-                        resolved_max_depth = value
-                except ValueError:
-                    logger.warning(
-                        f"Invalid CH_CODE_RESEARCH_MAX_DEPTH={override!r}, "
-                        "falling back to default max_depth=1"
-                    )
-        logger.info(f"Using max_depth={resolved_max_depth}")
+        # Fixed max depth (empirically proven optimal)
+        max_depth = 1
+        logger.info(f"Using max_depth={max_depth} (fixed)")
 
         # Calculate dynamic synthesis budgets based on repository size
         stats = self._db_services.provider.get_stats()
@@ -322,7 +304,7 @@ class DeepResearchService:
         # Emit configuration info
         await self._emit_event(
             "main_info",
-            f"Max depth: {resolved_max_depth}, synthesis budget: {synthesis_budgets['total_tokens'] // 1000}k tokens",
+            f"Max depth: {max_depth}, synthesis budget: {synthesis_budgets['total_tokens'] // 1000}k tokens",
         )
 
         # Initialize BFS graph with root node
@@ -341,9 +323,9 @@ class DeepResearchService:
             "chunks": [],  # All chunks for building exploration gist
         }
 
-        # BFS traversal: Process depth 0 (root node) through resolved_max_depth
+        # BFS traversal: Process depth 0 (root node) through max_depth
         # Root node (depth 0) is already in current_level, so we start the loop at 0
-        for depth in range(0, resolved_max_depth + 1):
+        for depth in range(0, max_depth + 1):
             if not current_level:
                 break
 
@@ -352,10 +334,10 @@ class DeepResearchService:
             # Emit depth start event
             await self._emit_event(
                 "depth_start",
-                f"Processing depth {depth}/{resolved_max_depth}",
+                f"Processing depth {depth}/{max_depth}",
                 depth=depth,
                 nodes=len(current_level),
-                max_depth=resolved_max_depth,
+                max_depth=max_depth,
             )
 
             # Process all nodes at this level concurrently (as per algorithm spec)
@@ -375,7 +357,7 @@ class DeepResearchService:
             # Process all nodes concurrently
             node_tasks = [
                 self._process_bfs_node(
-                    node, node_ctx, depth, global_explored_data, resolved_max_depth
+                    node, node_ctx, depth, global_explored_data, max_depth
                 )
                 for node, node_ctx in node_contexts
             ]

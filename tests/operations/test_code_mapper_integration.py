@@ -59,7 +59,7 @@ async def _run_code_mapper_with_stubs(
     set_combined: bool,
     cli_combined: bool | None = None,
     comprehensiveness: str = "low",
-) -> tuple[Path, str, list[int], list[int | None], list[str | None]]:
+) -> tuple[Path, str, list[int]]:
     project_root = tmp_path / "repo"
     scope_path = project_root / "scope"
     scope_path.mkdir(parents=True, exist_ok=True)
@@ -81,8 +81,6 @@ async def _run_code_mapper_with_stubs(
 
     # Stub out database, services, embeddings, LLM, and deep research.
     seen_max_points: list[int] = []
-    seen_max_depths: list[int | None] = []
-    seen_depth_env: list[str | None] = []
 
     async def fake_overview(
         llm_manager: Any,
@@ -113,12 +111,7 @@ async def _run_code_mapper_with_stubs(
         query: str,
         progress: Any,
         path: str | None = None,
-        max_depth: int | None = None,
     ) -> dict[str, Any]:
-        import os
-
-        seen_max_depths.append(max_depth)
-        seen_depth_env.append(os.getenv("CH_CODE_RESEARCH_MAX_DEPTH"))
         # Return a minimal answer and sources metadata for coverage.
         # For one of the bullets, simulate an empty answer so it is skipped.
         # This specifically skips the FIRST POI to regression-test that topic
@@ -188,7 +181,7 @@ async def _run_code_mapper_with_stubs(
 
     await code_mapper_mod.code_mapper_command(args, config)
     captured = capsys.readouterr().out
-    return args.out_dir, captured, seen_max_points, seen_max_depths, seen_depth_env
+    return args.out_dir, captured, seen_max_points
 
 
 @pytest.mark.asyncio
@@ -211,8 +204,6 @@ async def test_code_mapper_end_to_end_default_omits_combined_doc(
         out_dir,
         captured,
         seen_max_points,
-        _seen_max_depths,
-        _seen_depth_env,
     ) = await _run_code_mapper_with_stubs(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
@@ -265,8 +256,6 @@ async def test_code_mapper_end_to_end_combined_doc_requires_flag(
         out_dir,
         captured,
         _seen_max_points,
-        _seen_max_depths,
-        _seen_depth_env,
     ) = await _run_code_mapper_with_stubs(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
@@ -301,8 +290,6 @@ async def test_code_mapper_end_to_end_combined_cli_overrides_env_off(
         out_dir,
         _captured,
         _seen_max_points,
-        _seen_max_depths,
-        _seen_depth_env,
     ) = await _run_code_mapper_with_stubs(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
@@ -326,8 +313,6 @@ async def test_code_mapper_end_to_end_combined_cli_overrides_env_on(
         out_dir,
         _captured,
         _seen_max_points,
-        _seen_max_depths,
-        _seen_depth_env,
     ) = await _run_code_mapper_with_stubs(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
@@ -341,20 +326,16 @@ async def test_code_mapper_end_to_end_combined_cli_overrides_env_on(
 
 
 @pytest.mark.asyncio
-async def test_code_mapper_ultra_depth_override_does_not_mutate_env(
+async def test_code_mapper_ultra_requests_max_points(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Code Mapper should not mutate `CH_CODE_RESEARCH_MAX_DEPTH`."""
-    monkeypatch.setenv("CH_CODE_RESEARCH_MAX_DEPTH", "7")
-
+    """Comprehensiveness=ultra should request more points-of-interest."""
     (
         out_dir,
         _captured,
-        _seen_max_points,
-        seen_max_depths,
-        seen_depth_env,
+        seen_max_points,
     ) = await _run_code_mapper_with_stubs(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
@@ -364,6 +345,5 @@ async def test_code_mapper_ultra_depth_override_does_not_mutate_env(
     )
 
     assert out_dir.exists()
-    assert seen_max_depths, "Expected deep research to be called"
-    assert all(depth is None for depth in seen_max_depths)
-    assert all(value == "7" for value in seen_depth_env)
+    assert seen_max_points, "Expected overview to be called"
+    assert seen_max_points[0] == 20

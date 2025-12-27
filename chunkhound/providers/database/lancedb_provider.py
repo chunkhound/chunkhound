@@ -1920,9 +1920,11 @@ class LanceDBProvider(SerialDatabaseProvider):
 
         try:
             # Use LanceDB's full-text search capabilities
+            escaped_query = _escape_like_pattern(query)
+            where_clause = f"content LIKE '%{escaped_query}%' ESCAPE '\\\\'"
             results = (
                 self._chunks_table.search()
-                .where(f"content LIKE '%{query}%'")
+                .where(where_clause)
                 .limit(page_size + offset)
                 .to_list()
             )

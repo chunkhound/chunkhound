@@ -90,9 +90,10 @@ Assembly LLM configuration (optional):
   `assembly_synthesis_model`, and `assembly_reasoning_effort`.
 
 Outputs:
-- Combined document written under `--out-dir` when `CH_CODE_MAPPER_WRITE_COMBINED=1`
-  (disabled by default; includes `agent_doc_metadata` header and coverage summary;
-  stdout prints paths only).
+- Combined document written under `--out-dir` when `--combined` is set.
+  If `--combined/--no-combined` is omitted, ChunkHound falls back to
+  `CH_CODE_MAPPER_WRITE_COMBINED=1` for backward compatibility (disabled by default).
+  Includes `agent_doc_metadata` header and coverage summary; stdout prints paths only.
 - In `--overview-only` mode:
   - HyDE scope prompt + PoI plan written under `--out-dir`.
 - In full mode (default):

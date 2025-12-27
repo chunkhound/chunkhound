@@ -672,7 +672,7 @@ async def execute_tool(
     arguments: dict[str, Any],
     scan_progress: dict | None = None,
     llm_manager: Any = None,
-) -> dict[str, Any]:
+) -> dict[str, Any] | str:
     """Execute a tool from the registry with proper argument handling.
 
     Args:
@@ -731,10 +731,7 @@ async def execute_tool(
                 "Try a more specific query or check that relevant code exists."
             )
             answer = result.get("answer", fallback)
-            return cast(
-                dict[str, Any],
-                answer,
-            )
+            return str(answer)
 
     # Convert result to dict if it's not already
     if hasattr(result, "__dict__"):

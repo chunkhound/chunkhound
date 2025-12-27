@@ -82,16 +82,6 @@ async def async_main() -> None:
     parser = create_parser()
     args = parser.parse_args()
 
-    # For the 'code_mapper' command, the positional path argument represents a
-    # documentation scope rather than the project root used for configuration
-    # discovery. To ensure we still pick up the project-level .chunkhound.json
-    # and default database path, temporarily clear args.path before config
-    # creation and restore it only for the code_mapper handler.
-    code_mapper_scope_path = None
-    if getattr(args, "command", None) == "code_mapper" and hasattr(args, "path"):
-        code_mapper_scope_path = args.path
-        setattr(args, "path", None)
-
     if not args.command:
         parser.print_help()
         sys.exit(1)
@@ -168,10 +158,6 @@ async def async_main() -> None:
 
             await research_command(args, config)
         elif args.command == "code_mapper":
-            # Restore scope path for code_mapper now that config/project root are resolved
-            if code_mapper_scope_path is not None:
-                setattr(args, "path", code_mapper_scope_path)
-
             # Dynamic import to avoid early chunkhound module loading
             from .commands.code_mapper import code_mapper_command
 

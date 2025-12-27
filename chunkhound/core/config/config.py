@@ -56,6 +56,8 @@ class Config(BaseModel):
 
         # 1. Smart config file resolution (before env vars)
         config_file = None
+        command = getattr(args, "command", None) if args else None
+        is_code_mapper = command == "code_mapper"
 
         # Extract target_dir from kwargs first (for testing)
         target_dir = kwargs.pop("target_dir", None)
@@ -68,9 +70,16 @@ class Config(BaseModel):
             if hasattr(args, "config") and args.config:
                 config_file = Path(args.config)
 
-            # Get target directory from args.path (overrides kwargs)
-            if hasattr(args, "path") and args.path:
-                target_dir = Path(args.path)
+            # For most commands, args.path represents the project root used for config
+            # discovery. For code_mapper, args.path is a documentation scope and must
+            # not change config discovery.
+            if not is_code_mapper:
+                # Get target directory from args.path (overrides kwargs)
+                if hasattr(args, "path") and args.path:
+                    target_dir = Path(args.path)
+            elif target_dir is None and config_file is not None:
+                # For code_mapper, treat explicit --config as the workspace root.
+                target_dir = config_file.parent
 
         # If no config file from args, check environment variable
         if not config_file:
@@ -78,12 +87,18 @@ class Config(BaseModel):
             if env_config_file:
                 config_file = Path(env_config_file)
 
+        if is_code_mapper and target_dir is None and config_file is not None:
+            # For code_mapper, treat CHUNKHOUND_CONFIG_FILE as the workspace root.
+            target_dir = config_file.parent
+
         # Only detect project root if target_dir not provided
         if target_dir is None:
             from chunkhound.utils.project_detection import find_project_root
 
             target_dir = find_project_root(
-                getattr(args, "path", None) if args else None
+                None
+                if is_code_mapper
+                else (getattr(args, "path", None) if args else None)
             )
 
         # 2. Load config file if found
