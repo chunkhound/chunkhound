@@ -66,10 +66,10 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
     apply_code_mapper_workspace_overrides(config=config, args=args)
 
     # Code Mapper always writes artifacts; keep the CLI contract explicit.
-    out_dir_arg = getattr(args, "out_dir", None)
+    out_dir_arg = getattr(args, "out", None)
     if out_dir_arg is None:
         formatter.error(
-            "Code Mapper requires --out-dir so it can write an index and per-topic "
+            "Map requires --out so it can write an index and per-topic "
             "files."
         )
         sys.exit(2)
@@ -77,7 +77,7 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
     llm_manager: LLMManager | None = None
 
     # Overview-only mode should be lightweight: only HyDE planning + stdout,
-    # plus best-effort prompt persistence under --out-dir.
+    # plus best-effort prompt persistence under --out.
     if getattr(args, "overview_only", False):
         try:
             out_dir = Path(out_dir_arg).resolve()

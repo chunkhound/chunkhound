@@ -52,7 +52,7 @@ async def test_code_mapper_overview_only_writes_overview_artifact(
             self.path = scope_path
             self.verbose = False
             self.overview_only = True
-            self.out_dir = out_dir
+            self.out = out_dir
             self.comprehensiveness = "minimal"
             self.combined = None
 
@@ -64,4 +64,3 @@ async def test_code_mapper_overview_only_writes_overview_artifact(
     content = overview_files[0].read_text(encoding="utf-8")
     assert "# Code Mapper Overview for scope" in content
     assert "Test overview" in content
-

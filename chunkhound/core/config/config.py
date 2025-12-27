@@ -57,7 +57,7 @@ class Config(BaseModel):
         # 1. Smart config file resolution (before env vars)
         config_file = None
         command = getattr(args, "command", None) if args else None
-        is_code_mapper = command == "code_mapper"
+        is_map = command == "map"
 
         # Extract target_dir from kwargs first (for testing)
         target_dir = kwargs.pop("target_dir", None)
@@ -71,14 +71,14 @@ class Config(BaseModel):
                 config_file = Path(args.config)
 
             # For most commands, args.path represents the project root used for config
-            # discovery. For code_mapper, args.path is a documentation scope and must
+            # discovery. For map, args.path is a documentation scope and must
             # not change config discovery.
-            if not is_code_mapper:
+            if not is_map:
                 # Get target directory from args.path (overrides kwargs)
                 if hasattr(args, "path") and args.path:
                     target_dir = Path(args.path)
             elif target_dir is None and config_file is not None:
-                # For code_mapper, treat explicit --config as the workspace root.
+                # For map, treat explicit --config as the workspace root.
                 target_dir = config_file.parent
 
         # If no config file from args, check environment variable
@@ -87,8 +87,8 @@ class Config(BaseModel):
             if env_config_file:
                 config_file = Path(env_config_file)
 
-        if is_code_mapper and target_dir is None and config_file is not None:
-            # For code_mapper, treat CHUNKHOUND_CONFIG_FILE as the workspace root.
+        if is_map and target_dir is None and config_file is not None:
+            # For map, treat CHUNKHOUND_CONFIG_FILE as the workspace root.
             target_dir = config_file.parent
 
         # Only detect project root if target_dir not provided
@@ -97,7 +97,7 @@ class Config(BaseModel):
 
             target_dir = find_project_root(
                 None
-                if is_code_mapper
+                if is_map
                 else (getattr(args, "path", None) if args else None)
             )
 

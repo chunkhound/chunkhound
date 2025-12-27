@@ -44,7 +44,7 @@ async def test_code_mapper_overview_only_uses_config_dir_as_root_and_sets_defaul
             self.path = Path("scope")
             self.verbose = False
             self.overview_only = True
-            self.out_dir = tmp_path / "out"
+            self.out = tmp_path / "out"
             self.comprehensiveness = "low"
             self.config = cfg_path
             self.db = None
@@ -88,7 +88,7 @@ async def test_code_mapper_does_not_override_explicit_db_path_from_config_file(
             self.path = Path("scope")
             self.verbose = False
             self.overview_only = True
-            self.out_dir = tmp_path / "out"
+            self.out = tmp_path / "out"
             self.comprehensiveness = "low"
             self.config = cfg_path
             self.db = None

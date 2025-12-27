@@ -21,7 +21,7 @@ def test_config_does_not_treat_code_mapper_scope_as_target_dir(
 
     class Args:
         def __init__(self) -> None:
-            self.command = "code_mapper"
+            self.command = "map"
             self.path = Path("scope")
             self.config = None
 
@@ -43,7 +43,7 @@ def test_config_uses_config_file_dir_as_code_mapper_root(
 
     class Args:
         def __init__(self) -> None:
-            self.command = "code_mapper"
+            self.command = "map"
             self.path = Path("scope")
             self.config = cfg_path
 

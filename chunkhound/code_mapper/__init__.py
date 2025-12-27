@@ -1,6 +1,6 @@
 """Code Mapper support library.
 
-This package contains the reusable building blocks for the `chunkhound code_mapper`
+This package contains the reusable building blocks for the `chunkhound map`
 CLI command (scope discovery, HyDE prompt construction, and metadata helpers).
 """
 

@@ -1,4 +1,4 @@
-"""Code Mapper command argument parser for ChunkHound CLI."""
+"""Map command argument parser for ChunkHound CLI."""
 
 import argparse
 from pathlib import Path
@@ -7,60 +7,61 @@ from typing import Any, cast
 from .common_arguments import add_common_arguments, add_config_arguments
 
 
-def add_code_mapper_subparser(subparsers: Any) -> argparse.ArgumentParser:
-    """Add Code Mapper command subparser to the main parser.
+def add_map_subparser(subparsers: Any) -> argparse.ArgumentParser:
+    """Add map command subparser to the main parser.
 
     Args:
         subparsers: Subparsers object from the main argument parser
 
     Returns:
-        The configured Code Mapper subparser
+        The configured map subparser
     """
-    code_mapper_parser = subparsers.add_parser(
-        "code_mapper",
-        help="Generate Code Mapper documentation for a scoped folder",
+    map_parser = subparsers.add_parser(
+        "map",
+        help="Generate agent-facing docs for a folder",
         description=(
-            "Generate agent-facing documentation for a scoped folder using a two-phase "
-            "pipeline: first identify points of interest (count depends on "
-            "--comprehensiveness), then run deep code research for each point and "
-            "assemble a unified document."
+            "Generate agent-facing documentation for a folder using a two-phase "
+            "pipeline: plan points of interest, then run deep research per point "
+            "and write topic artifacts plus an index."
         ),
     )
 
     # Optional positional argument with default to current directory
-    code_mapper_parser.add_argument(
+    map_parser.add_argument(
         "path",
         nargs="?",
         type=Path,
         default=Path("."),
         help=(
-            "Directory path to document (acts as scope, default: current directory). "
+            "Directory path to document (scope, default: current directory). "
             "Paths are resolved relative to the project root used for indexing."
         ),
     )
 
     # Add common arguments
-    add_common_arguments(code_mapper_parser)
+    add_common_arguments(map_parser)
 
     # Code Mapper requires database, embedding (for reranking), and llm configuration
-    add_config_arguments(code_mapper_parser, ["database", "embedding", "llm"])
+    add_config_arguments(map_parser, ["database", "embedding", "llm"])
 
     # Optional flag: stop after overview/points-of-interest phase
-    code_mapper_parser.add_argument(
+    map_parser.add_argument(
+        "--plan",
         "--overview-only",
+        dest="overview_only",
         action="store_true",
         help=(
-            "Only run the initial overview pass and print the planned points of "
-            "interest (count depends on --comprehensiveness), skipping per-point deep "
-            "research and final assembly."
+            "Only run the planning pass and print the planned points of interest, "
+            "skipping per-point deep research and final assembly."
         ),
     )
 
     # Mandatory output directory for per-topic documents and index
-    code_mapper_parser.add_argument(
-        "--out-dir",
+    map_parser.add_argument(
+        "--out",
         type=Path,
         required=True,
+        dest="out",
         help=(
             "Directory where an index file and one markdown file per point of "
             "interest will be written. Use --combined to also write a combined "
@@ -76,7 +77,7 @@ def add_code_mapper_subparser(subparsers: Any) -> argparse.ArgumentParser:
         boolean_optional_action = None
 
     if boolean_optional_action is not None:
-        code_mapper_parser.add_argument(
+        map_parser.add_argument(
             "--combined",
             action=boolean_optional_action,
             default=None,
@@ -86,7 +87,7 @@ def add_code_mapper_subparser(subparsers: Any) -> argparse.ArgumentParser:
             ),
         )
     else:
-        code_mapper_parser.add_argument(
+        map_parser.add_argument(
             "--combined",
             action="store_true",
             default=None,
@@ -96,22 +97,55 @@ def add_code_mapper_subparser(subparsers: Any) -> argparse.ArgumentParser:
             ),
         )
 
-    # Optional comprehensiveness level controlling HyDE PoI count and snippet budget
-    code_mapper_parser.add_argument(
+    map_parser.set_defaults(comprehensiveness="medium")
+    level_group = map_parser.add_mutually_exclusive_group()
+    level_group.add_argument(
+        "--minimal",
+        action="store_const",
+        const="minimal",
+        dest="comprehensiveness",
+        help="Alias for: --comprehensiveness minimal",
+    )
+    level_group.add_argument(
+        "--low",
+        action="store_const",
+        const="low",
+        dest="comprehensiveness",
+        help="Alias for: --comprehensiveness low",
+    )
+    level_group.add_argument(
+        "--medium",
+        action="store_const",
+        const="medium",
+        dest="comprehensiveness",
+        help="Alias for: --comprehensiveness medium",
+    )
+    level_group.add_argument(
+        "--high",
+        action="store_const",
+        const="high",
+        dest="comprehensiveness",
+        help="Alias for: --comprehensiveness high",
+    )
+    level_group.add_argument(
+        "--ultra",
+        action="store_const",
+        const="ultra",
+        dest="comprehensiveness",
+        help="Alias for: --comprehensiveness ultra",
+    )
+    level_group.add_argument(
         "--comprehensiveness",
         choices=["minimal", "low", "medium", "high", "ultra"],
-        default="medium",
         help=(
-            "Control how many HyDE points of interest are generated and how "
-            "much code is sampled for the overview: low=5 PoIs and smaller "
-            "snippet budget, medium=10, high=15 with a larger snippet budget, "
-            "ultra=20 PoIs with the largest snippet budget. Use minimal=1 PoI "
-            "for fast iteration on small scopes. (HyDE file list cap scales: "
-            "minimal=200, low=500, medium=2000, high=3000, ultra=5000.)"
+            "Control how many points of interest are generated and how much code is "
+            "sampled for planning: minimal=1, low=5, medium=10, high=15, ultra=20. "
+            "(HyDE file list cap scales: minimal=200, low=500, medium=2000, high=3000, "
+            "ultra=5000.)"
         ),
     )
 
-    return cast(argparse.ArgumentParser, code_mapper_parser)
+    return cast(argparse.ArgumentParser, map_parser)
 
 
-__all__: list[str] = ["add_code_mapper_subparser"]
+__all__: list[str] = ["add_map_subparser"]

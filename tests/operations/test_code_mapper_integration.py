@@ -173,7 +173,7 @@ async def _run_code_mapper_with_stubs(
             self.path = scope_path
             self.verbose = False
             self.overview_only = False
-            self.out_dir = tmp_path / "out"
+            self.out = tmp_path / "out"
             self.comprehensiveness = comprehensiveness
             self.combined = cli_combined
 
@@ -181,7 +181,7 @@ async def _run_code_mapper_with_stubs(
 
     await code_mapper_mod.code_mapper_command(args, config)
     captured = capsys.readouterr().out
-    return args.out_dir, captured, seen_max_points
+    return args.out, captured, seen_max_points
 
 
 @pytest.mark.asyncio

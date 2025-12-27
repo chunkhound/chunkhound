@@ -28,31 +28,31 @@ Basic usage (single project, auto config detection):
 
 ```bash
 # From project root that already has .chunkhound.json and a ChunkHound DB
-chunkhound code_mapper . --out-dir .code_mapper
+chunkhound map . --out .code_mapper
 ```
 
 Explicit config override:
 
 ```bash
 # Agent doc for current folder, using an explicit config file
-chunkhound code_mapper . \
+chunkhound map . \
   --config .chunkhound.json \
-  --out-dir .code_mapper
+  --out .code_mapper
 
 # Plan-only: print HyDE points of interest, write HyDE prompt/plan to .code_mapper/
-chunkhound code_mapper . \
+chunkhound map . \
   --config .chunkhound.json \
-  --out-dir .code_mapper \
-  --overview-only
+  --out .code_mapper \
+  --plan
 ```
 
 Workspace example (shared index across multiple projects):
 
 ```bash
 # Workspace-level config and DB under /workspaces
-chunkhound code_mapper arguseek \
+chunkhound map arguseek \
   --config /workspaces/.chunkhound.json \
-  --out-dir /workspaces/arguseek/.code_mapper
+  --out /workspaces/arguseek/.code_mapper
 ```
 
 Path resolution semantics:
