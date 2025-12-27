@@ -724,21 +724,15 @@ class RealtimeIndexingService:
                         logger.warning(f"Embedding generation failed in realtime (embed pass): {e}")
                     continue
 
-                # Skip embeddings for initial and change events to keep loop responsive.
-                # An explicit 'embed' follow-up event will generate embeddings.
-                skip_embeddings = True
-
-                # Use existing indexing coordinator
-                result = await self.services.indexing_coordinator.process_file(
-                    file_path, skip_embeddings=skip_embeddings
-                )
+                # Use existing indexing coordinator for parsing and chunking
+                result = await self.services.indexing_coordinator.process_file(file_path)
 
                 # Ensure database transaction is flushed for immediate visibility
                 if hasattr(self.services.provider, "flush"):
                     await self.services.provider.flush()
 
                 # If we skipped embeddings, queue for embedding generation only if we have an embedding provider
-                if skip_embeddings and self.services.embedding_service._embedding_provider is not None:
+                if self.services.embedding_service._embedding_provider is not None:
                     await self.add_file(file_path, priority="embed")
 
                 # Record processing summary into MCP debug log
@@ -746,14 +740,8 @@ class RealtimeIndexingService:
                     chunks = (
                         result.get("chunks", None) if isinstance(result, dict) else None
                     )
-                    embeds = (
-                        result.get("embeddings", None)
-                        if isinstance(result, dict)
-                        else None
-                    )
                     self._debug(
-                        f"processed {file_path} priority={priority} "
-                        f"skip_embeddings={skip_embeddings} chunks={chunks} embeddings={embeds}"
+                        f"processed {file_path} priority={priority} chunks={chunks}"
                     )
                 except Exception:
                     pass

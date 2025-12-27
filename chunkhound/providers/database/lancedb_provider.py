@@ -1024,12 +1024,11 @@ class LanceDBProvider(SerialDatabaseProvider):
     def insert_embeddings_batch(
         self,
         embeddings_data: list[dict],
-        batch_size: int | None = None,
-        connection=None,
+        chunks_data: list[dict],
     ) -> int:
         """Insert multiple embedding vectors efficiently using merge_insert."""
         return self._execute_in_db_thread_sync(
-            "insert_embeddings_batch", embeddings_data, batch_size
+            "insert_embeddings_batch", embeddings_data, chunks_data
         )
 
     def _executor_insert_embeddings_batch(
@@ -1037,13 +1036,16 @@ class LanceDBProvider(SerialDatabaseProvider):
         conn: Any,
         state: dict[str, Any],
         embeddings_data: list[dict],
-        batch_size: int | None = None,
+        chunks_data: list[dict],
     ) -> int:
         """Executor method for insert_embeddings_batch - runs in DB thread."""
         if not embeddings_data or not self._chunks_table:
             return 0
 
         try:
+            # PERFORMANCE PROFILING: Track total batch operation time
+            batch_processing_start = time.time()
+
             # Determine embedding dimensions from the first embedding
             first_embedding = embeddings_data[0].get(
                 "embedding", embeddings_data[0].get("vector")
@@ -1169,175 +1171,73 @@ class LanceDBProvider(SerialDatabaseProvider):
                     f"(provider={provider}, model={model})"
                 )
 
-            # Determine optimal batch size if not provided
-            if batch_size is None:
-                # Use smaller batches to reduce reading overhead and prevent timeouts
-                batch_size = min(500, len(embeddings_data))
+            # Determine optimal batch size for processing
+            batch_size = min(500, len(embeddings_data))
 
             total_updated = 0
 
-            # PERFORMANCE PROFILING: Batch processing
-            batch_processing_start = time.time()
+            # Build lookup of chunk_id -> embedding data
+            embedding_lookup = {}
+            for e in embeddings_data:
+                embedding = e.get("embedding", e.get("vector"))
+                # Ensure embedding is a list
+                if hasattr(embedding, "tolist"):
+                    embedding = embedding.tolist()
+                elif not isinstance(embedding, list):
+                    embedding = list(embedding)
+                embedding_lookup[e["chunk_id"]] = {
+                    "embedding": embedding,
+                    "provider": e["provider"],
+                    "model": e["model"],
+                }
+
+            # Build lookup of chunk_id -> chunk data for efficient access
+            chunks_lookup = {chunk["id"]: chunk for chunk in chunks_data}
 
             # Process in batches for better memory management
-            # Use read-modify-write pattern: LanceDB's when_matched_update_all()
-            # requires ALL columns in source data to match target schema
             for i in range(0, len(embeddings_data), batch_size):
                 batch = embeddings_data[i : i + batch_size]
 
-                # PERFORMANCE PROFILING: Per-batch operations
-                batch_lookup_start = time.time()
-
-                # Build lookup of chunk_id -> embedding data
-                embedding_lookup = {}
-                for e in batch:
-                    embedding = e.get("embedding", e.get("vector"))
-                    # Ensure embedding is a list
-                    if hasattr(embedding, "tolist"):
-                        embedding = embedding.tolist()
-                    elif not isinstance(embedding, list):
-                        embedding = list(embedding)
-                    embedding_lookup[e["chunk_id"]] = {
-                        "embedding": embedding,
-                        "provider": e["provider"],
-                        "model": e["model"],
-                    }
-
-                batch_lookup_time = time.time() - batch_lookup_start
-
-                # PERFORMANCE PROFILING: Read existing rows
-                batch_read_start = time.time()
-
-                # Read existing rows for these chunk IDs
-                # NOTE: Using Lance SQL filter instead of .search() because .search()
-                # may not reliably find rows with NULL embedding columns (vector search semantics)
-                chunk_ids = list(embedding_lookup.keys())
-                chunk_ids_str = ','.join(map(str, chunk_ids))
-
-                # Use native LanceDB search queries for efficient chunk lookup
-                existing_rows = []
-                chunk_ids_set = set(chunk_ids)
-
-                # todo robert: the embedding flow currently queries db for chunks table, add embedding to chunks and then uses this method to insert to db. 
-                # why wouldn't the provided data be the most up to date one? assuming no external access to db. with that in mind, it seems redundant to query again.
-                # should also check if this is used in other flows which may behave differently but due to its name, seems that it should be limited to embedding flow. 
-                # For smaller batches, use direct queries
-                if len(chunk_ids) <= 1000:
-                    try:
-                        # Use LanceDB's native search with IN clause
-                        results = self._chunks_table.search().where(f"id IN ({chunk_ids_str})").to_list()
-                        existing_rows = results
-                    except Exception:
-                        # Fallback to individual queries for very large IN clauses
-                        for chunk_id in chunk_ids:
-                            try:
-                                result = self._chunks_table.search().where(f"id = {chunk_id}").to_list()
-                                if result:
-                                    existing_rows.extend(result)
-                            except Exception:
-                                continue
-                else:
-                    # For larger sets, use streaming approach with smaller batches
-                    batch_size = 500
-                    for i in range(0, len(chunk_ids), batch_size):
-                        batch_chunk_ids = chunk_ids[i:i + batch_size]
-                        batch_ids_str = ','.join(map(str, batch_chunk_ids))
-                        try:
-                            batch_results = self._chunks_table.search().where(f"id IN ({batch_ids_str})").to_list()
-                            existing_rows.extend(batch_results)
-                        except Exception:
-                            # Individual queries as last resort
-                            for chunk_id in batch_chunk_ids:
-                                try:
-                                    result = self._chunks_table.search().where(f"id = {chunk_id}").to_list()
-                                    if result:
-                                        existing_rows.extend(result)
-                                except Exception:
-                                    continue
-
-                # Deduplicate results (fragments can cause duplicates)
-                # # todo robert: maybe a bug here if this doesn't take the most recent version but if query above is removed, can also remove this call.
-                existing_rows = _deduplicate_by_id(existing_rows)
-
-                # Convert to DataFrame for consistent downstream handling
-                existing_df = pd.DataFrame(existing_rows) if existing_rows else pd.DataFrame()
-
-                # Diagnostic logging
-                logger.debug(f"Looking for {len(chunk_ids)} chunk IDs, found {len(existing_df)} existing chunks")
-                if len(existing_df) == 0 and len(chunk_ids) > 0:
-                    total_rows = self._chunks_table.count_rows()
-                    logger.warning(
-                        f"Embedding update: search returned 0 results but table has {total_rows} rows. "
-                        f"This indicates a LanceDB query issue. Using paginated fallback. "
-                        f"Chunk IDs requested: {chunk_ids[:5]}{'...' if len(chunk_ids) > 5 else ''}"
-                    )
-
-                batch_read_time = time.time() - batch_read_start
-
-                # PERFORMANCE PROFILING: Merge data preparation
-                batch_merge_prep_start = time.time()
-
-                # Merge embedding data into existing rows (full row data required)
+                # Build merge data for this batch using provided chunks_data
                 merge_data = []
-                for _, row in existing_df.iterrows():
-                    chunk_id = row["id"]
-                    if chunk_id in embedding_lookup:
+                for e in batch:
+                    chunk_id = e["chunk_id"]
+                    chunk = chunks_lookup.get(chunk_id)
+                    if chunk and chunk_id in embedding_lookup:
                         emb_data = embedding_lookup[chunk_id]
                         merge_data.append(
                             {
-                                "id": row["id"],
-                                "file_id": row["file_id"],
-                                "content": row["content"],
-                                "start_line": row["start_line"],
-                                "end_line": row["end_line"],
-                                "chunk_type": row["chunk_type"],
-                                "language": row["language"],
-                                "name": row["name"],
+                                "id": chunk["id"],
+                                "file_id": chunk["file_id"],
+                                "content": chunk.get("content", chunk.get("code", "")),
+                                "start_line": chunk.get("start_line", 0),
+                                "end_line": chunk.get("end_line", 0),
+                                "chunk_type": chunk.get("chunk_type", ""),
+                                "language": chunk.get("language", ""),
+                                "name": chunk.get("name", chunk.get("symbol", "")),
                                 "embedding": emb_data["embedding"],
                                 "provider": emb_data["provider"],
                                 "model": emb_data["model"],
-                                "created_time": row["created_time"],
+                                "created_time": chunk.get("created_time", time.time()),
                             }
                         )
 
-                # merge_insert with PyArrow table to avoid nullable field mismatches
-                # (see LanceDB GitHub issue #2366)
+                # Insert batch data
                 if merge_data:
                     merge_table = pa.Table.from_pylist(
                         merge_data, schema=get_chunks_schema(embedding_dims)
                     )
                     try:
-                        # PERFORMANCE PROFILING: merge_insert operation
-                        batch_merge_insert_start = time.time()
-
                         (
                             self._chunks_table.merge_insert("id")
                             .when_matched_update_all()
+                            .when_not_matched_insert_all()
                             .execute(merge_table)
                         )
-
-                        batch_merge_insert_time = time.time() - batch_merge_insert_start
-                        batch_merge_prep_time = time.time() - batch_merge_prep_start
-
-                        logger.debug(
-                            f"Batch processed in {time.time() - batch_lookup_start:.3f}s "
-                            f"(lookup: {batch_lookup_time:.3f}s, read: {batch_read_time:.3f}s, "
-                            f"prep: {batch_merge_prep_time:.3f}s, insert: {batch_merge_insert_time:.3f}s, "
-                            f"batch_size={len(batch)}, provider={provider}, model={model})"
-                        )
+                        logger.debug(f"Successfully inserted batch of {len(merge_data)} embeddings")
                     except Exception as merge_error:
-                        logger.error(f"merge_insert failed for {len(merge_data)} embeddings: {merge_error}")
-                        # Fail fast to surface the issue immediately
+                        logger.error(f"merge_insert failed for batch of {len(merge_data)} embeddings: {merge_error}")
                         raise RuntimeError(f"Embedding insertion failed: {merge_error}") from merge_error
-                else:
-                    batch_merge_prep_time = time.time() - batch_merge_prep_start
-
-                    logger.debug(
-                        f"Batch processed (no merge data) in {time.time() - batch_lookup_start:.3f}s "
-                        f"(lookup: {batch_lookup_time:.3f}s, read: {batch_read_time:.3f}s, "
-                        f"prep: {batch_merge_prep_time:.3f}s, batch_size={len(batch)}, "
-                        f"provider={provider}, model={model})"
-                    )
 
                 total_updated += len(merge_data)
 
@@ -1349,7 +1249,7 @@ class LanceDBProvider(SerialDatabaseProvider):
             batch_processing_time = time.time() - batch_processing_start
             logger.debug(
                 f"Batch processing completed in {batch_processing_time:.3f}s "
-                f"(total_embeddings={len(embeddings_data)}, batch_size={batch_size}, "
+                f"(total_embeddings={len(embeddings_data)}, "
                 f"provider={provider}, model={model})"
             )
 
@@ -2295,16 +2195,6 @@ class LanceDBProvider(SerialDatabaseProvider):
             return []
 
     # File Processing Integration (inherited from base class)
-    async def process_file_incremental(self, file_path: Path) -> dict[str, Any]:
-        """Process a file with incremental parsing and differential chunking."""
-        if not self._services_initialized:
-            self._initialize_shared_instances()
-
-        # Call process_file with embeddings enabled for real-time indexing
-        # This ensures embeddings are generated immediately for modified files
-        return await self._indexing_coordinator.process_file(
-            file_path, skip_embeddings=False
-        )
 
     # Health and Diagnostics
     def get_fragment_count(self) -> dict[str, int]:

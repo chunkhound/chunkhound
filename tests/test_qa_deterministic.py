@@ -107,14 +107,31 @@ class ExistingClass:
         return "existing_method_result"
 """
         existing_file.write_text(existing_content)
-        await asyncio.sleep(3.0)  # Wait for processing (extended for Ollama)
-        
-        # Search for existing content
-        existing_regex = await execute_tool("search_regex", services, None, {
-            "pattern": "existing_function",
-            "page_size": 10,
-            "offset": 0
-        })
+
+        # Poll until content is searchable (deterministic approach)
+        max_wait = 10.0  # Maximum wait time for indexing
+        poll_interval = 0.2
+        elapsed = 0.0
+
+        while elapsed < max_wait:
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+
+            existing_regex = await execute_tool("search_regex", services, None, {
+                "pattern": "existing_function",
+                "page_size": 10,
+                "offset": 0
+            })
+
+            if len(existing_regex.get('results', [])) > 0:
+                break
+        else:
+            # Timeout - proceed with search anyway for assertion
+            existing_regex = await execute_tool("search_regex", services, None, {
+                "pattern": "existing_function",
+                "page_size": 10,
+                "offset": 0
+            })
         
         # Try semantic search if available, skip if not
         existing_semantic = None
@@ -143,14 +160,28 @@ class NewlyAddedClass:
         return "new_method_qa_test"
 """
         new_file.write_text(new_content)
-        await asyncio.sleep(3.5)  # Wait for debounce + processing
-        
-        # Search for new content
-        new_regex = await execute_tool("search_regex", services, None, {
-            "pattern": "newly_added_content_unique_string",
-            "page_size": 10,
-            "offset": 0
-        })
+
+        # Poll until new content is searchable
+        elapsed = 0.0
+        while elapsed < max_wait:
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+
+            new_regex = await execute_tool("search_regex", services, None, {
+                "pattern": "newly_added_content_unique_string",
+                "page_size": 10,
+                "offset": 0
+            })
+
+            if len(new_regex.get('results', [])) > 0:
+                break
+        else:
+            # Timeout - proceed with search anyway
+            new_regex = await execute_tool("search_regex", services, None, {
+                "pattern": "newly_added_content_unique_string",
+                "page_size": 10,
+                "offset": 0
+            })
         
         # Try semantic search if available
         try:
@@ -169,6 +200,8 @@ class NewlyAddedClass:
         # QA Item 3: Edit existing file - adding, deleting, and modifying content
 
         # 3a: Add content to existing file
+        # Wait longer to avoid event deduplication (2s window)
+        await asyncio.sleep(3.0)
         modified_content = existing_content + """
 
 def added_during_edit():
@@ -176,17 +209,34 @@ def added_during_edit():
     return "added_content_edit_qa"
 """
         existing_file.write_text(modified_content)
-        await asyncio.sleep(3.5)
 
-        added_regex = await execute_tool("search_regex", services, None, {
-            "pattern": "added_content_edit_qa",
-            "page_size": 10,
-            "offset": 0
-        })
+        # Poll until added content is searchable
+        elapsed = 0.0
+        while elapsed < max_wait:
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+
+            added_regex = await execute_tool("search_regex", services, None, {
+                "pattern": "added_content_edit_qa",
+                "page_size": 10,
+                "offset": 0
+            })
+
+            if len(added_regex.get('results', [])) > 0:
+                break
+        else:
+            # Timeout - proceed with search anyway
+            added_regex = await execute_tool("search_regex", services, None, {
+                "pattern": "added_content_edit_qa",
+                "page_size": 10,
+                "offset": 0
+            })
         assert len(added_regex.get('results', [])) > 0, "Should find content added during edit"
         print("Edit (add content): Found added content")
 
         # 3b: Delete some content and modify existing
+        # Wait longer to avoid event deduplication (2s window)
+        await asyncio.sleep(3.0)
         deleted_and_modified_content = """def existing_function():
     '''This function was MODIFIED during edit'''
     return "MODIFIED_existing_content"
@@ -198,36 +248,70 @@ def added_during_edit():
 # Note: ExistingClass was DELETED
 """
         existing_file.write_text(deleted_and_modified_content)
-        await asyncio.sleep(3.5)
 
-        # Check modification worked
-        modified_regex = await execute_tool("search_regex", services, None, {
-            "pattern": "MODIFIED_existing_content",
-            "page_size": 10,
-            "offset": 0
-        })
-        # Check deletion worked - search for the actual class definition
-        deleted_regex = await execute_tool("search_regex", services, None, {
-            "pattern": "class ExistingClass:",
-            "page_size": 10,
-            "offset": 0
-        })
+        # Poll until modified content is searchable and deleted content is gone
+        elapsed = 0.0
+        while elapsed < max_wait:
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+
+            modified_regex = await execute_tool("search_regex", services, None, {
+                "pattern": "MODIFIED_existing_content",
+                "page_size": 10,
+                "offset": 0
+            })
+            deleted_regex = await execute_tool("search_regex", services, None, {
+                "pattern": "class ExistingClass:",
+                "page_size": 10,
+                "offset": 0
+            })
+
+            if len(modified_regex.get('results', [])) > 0 and len(deleted_regex.get('results', [])) == 0:
+                break
+        else:
+            # Timeout - proceed with searches anyway
+            modified_regex = await execute_tool("search_regex", services, None, {
+                "pattern": "MODIFIED_existing_content",
+                "page_size": 10,
+                "offset": 0
+            })
+            deleted_regex = await execute_tool("search_regex", services, None, {
+                "pattern": "class ExistingClass:",
+                "page_size": 10,
+                "offset": 0
+            })
 
         assert len(modified_regex.get('results', [])) > 0, "Should find modified content"
         assert len(deleted_regex.get('results', [])) == 0, "Should not find deleted content"
         print("Edit (modify/delete): Found modified content, deleted content removed")
 
         # QA Item 4: Delete file and verify search results
+        # Wait longer to avoid event deduplication (2s window)
+        await asyncio.sleep(3.0)
         delete_target = new_file  # Delete the new file we created
         delete_target.unlink()
-        await asyncio.sleep(3.5)
 
-        # Search for deleted file content
-        deleted_file_regex = await execute_tool("search_regex", services, None, {
-            "pattern": "newly_added_content_unique_string",
-            "page_size": 10,
-            "offset": 0
-        })
+        # Poll until deleted content is no longer searchable
+        elapsed = 0.0
+        while elapsed < max_wait:
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+
+            deleted_file_regex = await execute_tool("search_regex", services, None, {
+                "pattern": "newly_added_content_unique_string",
+                "page_size": 10,
+                "offset": 0
+            })
+
+            if len(deleted_file_regex.get('results', [])) == 0:
+                break
+        else:
+            # Timeout - proceed with search anyway
+            deleted_file_regex = await execute_tool("search_regex", services, None, {
+                "pattern": "newly_added_content_unique_string",
+                "page_size": 10,
+                "offset": 0
+            })
 
         assert len(deleted_file_regex.get('results', [])) == 0, "Should not find content from deleted file"
         print("File deletion: Deleted file content not found in search")

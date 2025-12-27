@@ -5,6 +5,8 @@ chunks table was created with variable-size schema then recreated when first
 embeddings arrived, causing O(n) migration overhead.
 """
 
+import time
+
 import pyarrow as pa
 import pytest
 from pathlib import Path
@@ -148,6 +150,21 @@ def test_no_migration_when_schema_matches_dimensions(tmp_path):
         ]
         chunk_ids = provider.insert_chunks_batch(chunks)
 
+        # Prepare chunks_data for insert_embeddings_batch
+        chunks_data = []
+        for i, chunk in enumerate(chunks):
+            chunks_data.append({
+                "id": chunk_ids[i],
+                "file_id": chunk.file_id,
+                "content": chunk.code,
+                "start_line": chunk.start_line,
+                "end_line": chunk.end_line,
+                "chunk_type": str(chunk.chunk_type.value if hasattr(chunk.chunk_type, 'value') else chunk.chunk_type),
+                "language": str(chunk.language.value if hasattr(chunk.language, 'value') else chunk.language),
+                "name": chunk.symbol,
+                "created_time": time.time(),
+            })
+
         # Insert embeddings (should NOT trigger migration)
         embeddings = [{
             "chunk_id": chunk_ids[0],
@@ -157,7 +174,7 @@ def test_no_migration_when_schema_matches_dimensions(tmp_path):
             "dims": 768,
         }]
 
-        provider.insert_embeddings_batch(embeddings)
+        provider.insert_embeddings_batch(embeddings, chunks_data)
 
         # Verify schema unchanged (no migration occurred)
         final_schema = provider._chunks_table.schema
@@ -242,6 +259,21 @@ def test_migration_still_works_for_existing_databases(tmp_path):
     provider.connect()
 
     try:
+        # Prepare chunks_data for insert_embeddings_batch
+        chunks_data = []
+        for i, chunk in enumerate(chunks):
+            chunks_data.append({
+                "id": chunk_ids[i],
+                "file_id": chunk.file_id,
+                "content": chunk.code,
+                "start_line": chunk.start_line,
+                "end_line": chunk.end_line,
+                "chunk_type": str(chunk.chunk_type.value if hasattr(chunk.chunk_type, 'value') else chunk.chunk_type),
+                "language": str(chunk.language.value if hasattr(chunk.language, 'value') else chunk.language),
+                "name": chunk.symbol,
+                "created_time": time.time(),
+            })
+
         # Insert embeddings (SHOULD trigger migration due to variable-size schema)
         embeddings = [{
             "chunk_id": chunk_ids[0],
@@ -251,7 +283,7 @@ def test_migration_still_works_for_existing_databases(tmp_path):
             "dims": 768,
         }]
 
-        provider.insert_embeddings_batch(embeddings)
+        provider.insert_embeddings_batch(embeddings, chunks_data)
 
         # Verify migration occurred by checking schema is now fixed-size
         final_schema = provider._chunks_table.schema

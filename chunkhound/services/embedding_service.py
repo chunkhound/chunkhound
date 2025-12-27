@@ -91,6 +91,7 @@ class EmbeddingService(BaseService):
         chunk_texts: list[str],
         show_progress: bool = True,
         embed_task: TaskID | None = None,
+        chunks_data: list[dict[str, Any]] | None = None,
     ) -> int:
         """Generate embeddings for a list of chunks.
 
@@ -123,7 +124,7 @@ class EmbeddingService(BaseService):
 
             # Generate embeddings in batches
             total_generated = await self._generate_embeddings_in_batches(
-                filtered_chunks, show_progress, embed_task
+                filtered_chunks, show_progress, embed_task, chunks_data
             )
 
             logger.debug(f"Successfully generated {total_generated} embeddings")
@@ -277,7 +278,7 @@ class EmbeddingService(BaseService):
                 # Generate embeddings for this batch
                 logger.debug(f"Calling generate_embeddings_for_chunks with {len(chunk_id_list)} chunks, provider={self._embedding_provider}")
                 batch_generated = await self.generate_embeddings_for_chunks(
-                    chunk_id_list, chunk_texts, show_progress=True, embed_task=embed_task
+                    chunk_id_list, chunk_texts, show_progress=True, embed_task=embed_task, chunks_data=chunks_data
                 )
                 logger.debug(f"generate_embeddings_for_chunks returned {batch_generated}")
 
@@ -519,7 +520,7 @@ class EmbeddingService(BaseService):
         return filtered_chunks
 
     async def _generate_embeddings_in_batches(
-        self, chunk_data: list[tuple[ChunkId, str]], show_progress: bool = True, embed_task: TaskID | None = None
+        self, chunk_data: list[tuple[ChunkId, str]], show_progress: bool = True, embed_task: TaskID | None = None, chunks_data: list[dict[str, Any]] | None = None
     ) -> int:
         """Generate embeddings for chunks in optimized batches.
 
@@ -695,8 +696,15 @@ class EmbeddingService(BaseService):
         total_generated = 0
         if all_embeddings_data:
             logger.debug(f"Inserting {len(all_embeddings_data)} embeddings in one batch")
+            # Filter chunks_data to only include chunks we're actually inserting embeddings for
+            embedding_chunk_ids = set(e["chunk_id"] for e in all_embeddings_data)
+            relevant_chunks_data = [
+                chunk for chunk in (chunks_data or [])
+                if chunk.get("id") in embedding_chunk_ids
+            ]
+
             total_generated = self._db.insert_embeddings_batch(
-                all_embeddings_data, self._db_batch_size
+                all_embeddings_data, relevant_chunks_data
             )
             logger.debug(f"Successfully inserted {total_generated} embeddings")
 

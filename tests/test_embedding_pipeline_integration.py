@@ -84,13 +84,16 @@ async def async_pipeline_function():
     # Get initial state
     initial_stats = await services.indexing_coordinator.get_stats()
     
-    # Process file through complete pipeline
-    result = await services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
-    
+    # Process file through parsing and chunking
+    result = await services.indexing_coordinator.process_file(test_file)
+
     # Verify file processing succeeded
     assert result['status'] == 'success', f"Pipeline processing failed: {result.get('error')}"
     assert result['chunks'] > 0, "Should create chunks"
-    assert result.get('embeddings_skipped', True) == False, "Should not skip embeddings"
+
+    # Generate embeddings separately
+    embedding_result = await services.indexing_coordinator.generate_missing_embeddings()
+    assert embedding_result['status'] in ['success', 'complete'], f"Embedding generation failed: {embedding_result.get('error')}"
     
     # Wait for any async embedding processing
     await asyncio.sleep(3.0)
@@ -109,10 +112,10 @@ async def async_pipeline_function():
 
 
 @pytest.mark.asyncio
-async def test_pipeline_with_skip_then_generate(pipeline_services, tmp_path):
-    """Test two-phase pipeline: skip embeddings, then generate them."""
+async def test_pipeline_parsing_then_embeddings(pipeline_services, tmp_path):
+    """Test two-phase pipeline: parse and chunk, then generate embeddings."""
     services = pipeline_services
-    
+
     # Create test file
     test_file = tmp_path / "two_phase_test.py"
     test_file.write_text("""
@@ -124,38 +127,34 @@ class TwoPhaseClass:
     '''Class for two-phase testing.'''
     pass
 """)
-    
-    # Phase 1: Process with skip_embeddings=True
-    result1 = await services.indexing_coordinator.process_file(test_file, skip_embeddings=True)
+
+    # Phase 1: Process file (parsing and chunking only)
+    result1 = await services.indexing_coordinator.process_file(test_file)
     assert result1['status'] == 'success'
-    assert result1['embeddings_skipped'] == True
     assert result1['chunks'] > 0
-    
+
     # Verify only chunks exist, no embeddings yet
     stats_phase1 = await services.indexing_coordinator.get_stats()
     chunks_after_phase1 = stats_phase1['chunks']
     embeddings_after_phase1 = stats_phase1.get('embeddings', 0)
-    
-    # Verify embeddings were skipped in phase 1
-    assert embeddings_after_phase1 == 0, f"Expected 0 embeddings after skip_embeddings=True, got {embeddings_after_phase1}"
-    
+
     # Phase 2: Generate missing embeddings
     embedding_result = await services.indexing_coordinator.generate_missing_embeddings()
     assert embedding_result['status'] in ['success', 'complete'], f"Embedding generation failed: {embedding_result.get('error')}"
-    
+
     # If status is 'complete', it means all chunks already have embeddings (unexpected but handle gracefully)
     if embedding_result['status'] == 'success':
         assert embedding_result['generated'] > 0, "Should generate embeddings when status is success"
     elif embedding_result['status'] == 'complete':
         # This shouldn't happen given we verified no embeddings exist, but handle it
         assert embedding_result['generated'] == 0, "Should not generate embeddings when status is complete"
-    
+
     # Verify embeddings were created (only if we expected them to be generated)
     stats_phase2 = await services.indexing_coordinator.get_stats()
     embeddings_after_phase2 = stats_phase2.get('embeddings', 0)
-    
+
     embeddings_generated = embeddings_after_phase2 - embeddings_after_phase1
-    
+
     if embedding_result['status'] == 'success':
         assert embeddings_after_phase2 > embeddings_after_phase1, "Should have more embeddings after generation"
         assert embeddings_generated > 0, f"Expected embeddings to be generated, got {embeddings_generated}"
@@ -181,25 +180,31 @@ def valid_function():
 """)
     
     # Process normally first
-    result = await services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
+    result = await services.indexing_coordinator.process_file(test_file)
     assert result['status'] == 'success'
-    
+
+    # Generate embeddings
+    await services.indexing_coordinator.generate_missing_embeddings()
+
     # Wait for processing
     await asyncio.sleep(1.0)
-    
+
     # Verify system is still functional after any potential errors
     stats = await services.indexing_coordinator.get_stats()
     assert stats['chunks'] > 0
-    
+
     # Try processing another file to ensure system recovered
     test_file2 = tmp_path / "recovery_test2.py"
     test_file2.write_text("""
 def another_valid_function():
     return "also valid"
 """)
-    
-    result2 = await services.indexing_coordinator.process_file(test_file2, skip_embeddings=False)
+
+    result2 = await services.indexing_coordinator.process_file(test_file2)
     assert result2['status'] == 'success', "System should recover and continue processing"
+
+    # Generate embeddings for second file
+    await services.indexing_coordinator.generate_missing_embeddings()
 
 
 @pytest.mark.asyncio
@@ -215,8 +220,8 @@ def embedding_service_function():
     return "embedding service test"
 """)
     
-    # Process file to create chunks without embeddings
-    result = await services.indexing_coordinator.process_file(test_file, skip_embeddings=True)
+    # Process file to create chunks
+    result = await services.indexing_coordinator.process_file(test_file)
     assert result['status'] == 'success'
     assert result['chunks'] > 0
     
@@ -264,10 +269,10 @@ class BatchClass_{i}:
 """)
         test_files.append(test_file)
     
-    # Process all files in batch mode (skip embeddings initially)
+    # Process all files (parsing and chunking only)
     processed_chunks = 0
     for test_file in test_files:
-        result = await services.indexing_coordinator.process_file(test_file, skip_embeddings=True)
+        result = await services.indexing_coordinator.process_file(test_file)
         assert result['status'] == 'success'
         processed_chunks += result['chunks']
     
@@ -313,13 +318,16 @@ def original_function():
 """)
     
     # Process initial file
-    result1 = await services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
+    result1 = await services.indexing_coordinator.process_file(test_file)
     assert result1['status'] == 'success'
-    
+
+    # Generate embeddings for initial file
+    await services.indexing_coordinator.generate_missing_embeddings()
+
     # Wait for initial processing
     await asyncio.sleep(2.0)
     initial_stats = await services.indexing_coordinator.get_stats()
-    
+
     # Modify file by adding new function (truly additive)
     original_content = test_file.read_text()
     test_file.write_text(original_content + """
@@ -328,10 +336,13 @@ def new_function():
     '''Newly added function.'''
     return "new"
 """)
-    
+
     # Process modified file
-    result2 = await services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
+    result2 = await services.indexing_coordinator.process_file(test_file)
     assert result2['status'] == 'success'
+
+    # Generate embeddings for modified file
+    await services.indexing_coordinator.generate_missing_embeddings()
     
     # Wait for modification processing
     await asyncio.sleep(3.0)

@@ -1606,8 +1606,7 @@ class DuckDBProvider(SerialDatabaseProvider):
     def insert_embeddings_batch(
         self,
         embeddings_data: list[dict],
-        batch_size: int | None = None,
-        connection=None,
+        chunks_data: list[dict],
     ) -> int:
         """Insert multiple embedding vectors with HNSW index optimization - delegate to embedding repository.
 
@@ -1615,9 +1614,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         # PERFORMANCE: 60s → 5s for 10k embeddings (12x speedup)
         # RECOVERY: Indexes recreated after bulk insert
         """
-        # Note: connection parameter is ignored in executor pattern
         return self._execute_in_db_thread_sync(
-            "insert_embeddings_batch", embeddings_data, batch_size
+            "insert_embeddings_batch", embeddings_data, chunks_data
         )
 
     def _executor_insert_embeddings_batch(
@@ -1625,7 +1623,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         conn: Any,
         state: dict[str, Any],
         embeddings_data: list[dict],
-        batch_size: int | None,
+        chunks_data: list[dict],
     ) -> int:
         """Executor method for insert_embeddings_batch - runs in DB thread."""
         if not embeddings_data:
@@ -1662,28 +1660,15 @@ class DuckDBProvider(SerialDatabaseProvider):
                     )
                 )
 
-            # Insert in batches if specified
-            if batch_size:
-                for i in range(0, len(batch_data), batch_size):
-                    batch = batch_data[i : i + batch_size]
-                    conn.executemany(
-                        f"""
-                        INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims)
-                        VALUES (?, ?, ?, ?, ?)
-                    """,
-                        batch,
-                    )
-                    total_inserted += len(batch)
-            else:
-                # Insert all at once
-                conn.executemany(
-                    f"""
-                    INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims)
-                    VALUES (?, ?, ?, ?, ?)
-                """,
-                    batch_data,
-                )
-                total_inserted += len(batch_data)
+            # Insert all at once (batch_size parameter removed as chunks_data is provided directly)
+            conn.executemany(
+                f"""
+                INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims)
+                VALUES (?, ?, ?, ?, ?)
+            """,
+                batch_data,
+            )
+            total_inserted += len(batch_data)
 
         return total_inserted
 

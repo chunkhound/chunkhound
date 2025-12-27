@@ -98,6 +98,9 @@ async def test_scoped_deep_research_uses_path_filter(tmp_path: Path) -> None:
     await coordinator.process_file(a_file)
     await coordinator.process_file(b_file)
 
+    # Generate embeddings for the indexed chunks
+    await coordinator.generate_missing_embeddings()
+
     stats = services.provider.get_stats()
     assert stats["chunks"] > 0, "Expected chunks after indexing test files"
 
@@ -217,6 +220,9 @@ async def test_deep_research_propagates_path_filter_to_search_service(
     # Index both files
     await coordinator.process_file(a_file)
     await coordinator.process_file(b_file)
+
+    # Generate embeddings for the indexed chunks
+    await coordinator.generate_missing_embeddings()
 
     # Instrument SearchService to capture path_filter usage
     semantic_path_filters: list[str | None] = []

@@ -125,15 +125,13 @@ class DatabaseProvider(Protocol):
     def insert_embeddings_batch(
         self,
         embeddings_data: list[dict],
-        batch_size: int | None = None,
-        connection: Any = None,
+        chunks_data: list[dict],
     ) -> int:
         """Insert multiple embedding vectors with optimization.
 
         Args:
             embeddings_data: List of embedding data dictionaries
-            batch_size: Optional batch size for database operations (uses provider default if None)
-            connection: Optional database connection to use (for transaction contexts)
+            chunks_data: List of chunk data dictionaries (to avoid redundant DB queries)
         """
         ...
 
@@ -313,9 +311,9 @@ class DatabaseProvider(Protocol):
 
     # File Processing Integration
     async def process_file(
-        self, file_path: Path, skip_embeddings: bool = False
+        self, file_path: Path
     ) -> dict[str, Any]:
-        """Process a file end-to-end: parse, chunk, and store in database."""
+        """Process a file: parse, chunk, and store in database (embeddings handled separately)."""
         ...
 
     async def process_directory(

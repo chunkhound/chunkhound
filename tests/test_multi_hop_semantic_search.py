@@ -513,6 +513,9 @@ def shared_function_{repo}_three():
         file_path.write_text(content)
         await coordinator.process_file(file_path)
 
+    # Generate embeddings for all chunks
+    await coordinator.generate_missing_embeddings()
+
     search_service = SearchService(db, embedding_provider)
 
     results, _ = await search_service.search_semantic(
@@ -557,6 +560,9 @@ def repo_function_{idx}():
             file_path = repo_dir / f"module_{idx}.py"
             file_path.write_text(content)
             await coordinator.process_file(file_path)
+
+    # Generate embeddings for all chunks
+    await coordinator.generate_missing_embeddings()
 
     # Use regex search to get a chunk from repo_a
     regex_results, _ = db.search_regex(pattern="Repository-specific function", page_size=50)
