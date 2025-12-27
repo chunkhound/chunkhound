@@ -228,7 +228,7 @@ class EmbeddingService(BaseService):
                 start_time = time_module.time()
 
                 try:
-                    logger.debug(f"Retrieving chunks batch: provider={target_provider}, model={target_model}, limit={current_batch_size}, offset={offset}")
+                    logger.debug(f"Retrieving chunks batch: provider={target_provider}, model={target_model}, limit={current_batch_size}")
                     # Get next batch of chunks without embeddings
                     chunks_data = self._db.get_chunks_without_embeddings_paginated(
                         target_provider, target_model, limit=current_batch_size
@@ -719,26 +719,6 @@ class EmbeddingService(BaseService):
                     logger.warning(f"Periodic optimization compled in {time.time() - start_time} but failed: {e}")
             logger.debug(f"Successfully inserted {total_generated} embeddings")
 
-        # Update completed batch count and run optimization if needed
-        if should_optimize and successful_batches > 0:
-            completed_batch_count += successful_batches
-
-            # Check if we've reached the optimization threshold
-            batches_since_last_optimize = (
-                completed_batch_count % self._optimization_batch_frequency
-            )
-            if (
-                batches_since_last_optimize < successful_batches
-                or completed_batch_count == self._optimization_batch_frequency
-            ):
-                logger.debug(
-                    f"Running periodic DB optimization after {completed_batch_count} total batches"
-                )
-                try:
-                    optimize_tables()
-                    logger.debug("Periodic optimization completed")
-                except Exception as e:
-                    logger.warning(f"Periodic optimization failed: {e}")
 
         logger.debug(f"_generate_embeddings_in_batches: completed, total_generated={total_generated}")
         return total_generated
