@@ -2347,7 +2347,6 @@ class LanceDBProvider(SerialDatabaseProvider):
         provider: str,
         model: str,
         limit: int,
-        offset: int,
     ) -> list[dict[str, Any]]:
         """Executor method for get_chunks_without_embeddings_paginated - runs in DB thread.
 
@@ -2362,7 +2361,10 @@ class LanceDBProvider(SerialDatabaseProvider):
             # Use WHERE clause to filter chunks that need embeddings
             results = self._chunks_table.search().where(
                 f"(embedding IS NULL OR provider != '{provider}' OR model != '{model}')"
-            ).limit(limit).offset(offset).to_list()
+            ).limit(limit).to_list()
+
+            # Deduplicate to handle fragment-induced duplicates
+            results = _deduplicate_by_id(results)
 
             # Filter results to only include chunks that actually need embeddings
             # (double-check the filtering since LanceDB might not handle complex WHERE perfectly)
@@ -2387,7 +2389,7 @@ class LanceDBProvider(SerialDatabaseProvider):
             # Sort by ID for deterministic ordering
             filtered_results.sort(key=lambda x: x["id"])
 
-            logger.debug(f"Retrieved {len(filtered_results)} chunks without embeddings (limit={limit}, offset={offset})")
+            logger.debug(f"Retrieved {len(filtered_results)} chunks without embeddings (limit={limit})")
 
             # Convert LanceDB results to expected format
             formatted_results = []
@@ -2449,7 +2451,6 @@ class LanceDBProvider(SerialDatabaseProvider):
         provider: str,
         model: str,
         limit: int = 10000,
-        offset: int = 0,
     ) -> list[dict[str, Any]]:
         """Get chunk data that don't have embeddings for the specified provider/model with pagination."""
         return self._execute_in_db_thread_sync(
@@ -2457,7 +2458,6 @@ class LanceDBProvider(SerialDatabaseProvider):
             provider,
             model,
             limit,
-            offset,
         )
 
     def get_connection_info(self) -> dict[str, Any]:

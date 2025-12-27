@@ -218,7 +218,6 @@ class EmbeddingService(BaseService):
 
             total_generated = 0
             total_processed = 0
-            offset = 0
             batch_count = 0
 
             while True:
@@ -232,7 +231,7 @@ class EmbeddingService(BaseService):
                     logger.debug(f"Retrieving chunks batch: provider={target_provider}, model={target_model}, limit={current_batch_size}, offset={offset}")
                     # Get next batch of chunks without embeddings
                     chunks_data = self._db.get_chunks_without_embeddings_paginated(
-                        target_provider, target_model, limit=current_batch_size, offset=offset
+                        target_provider, target_model, limit=current_batch_size
                     )
                     logger.debug(f"Retrieved {len(chunks_data) if chunks_data else 0} chunks")
                 except Exception as e:
@@ -248,12 +247,12 @@ class EmbeddingService(BaseService):
 
                 retrieval_time = time_module.time() - start_time
 
-                if not chunks_data:
+                if not chunks_data: # temp remove for testing: or len(chunks_data) < current_batch_size:
                     # No more chunks to process
                     logger.info("No more chunks to process, exiting batch loop")
                     break
 
-                logger.debug(f"Batch {batch_count}: offset={offset}, size={len(chunks_data)}, retrieval_time={retrieval_time:.2f}s")
+                logger.debug(f"Batch {batch_count}: size={len(chunks_data)}, retrieval_time={retrieval_time:.2f}s")
 
                 # Adjust batch size based on retrieval time (only if dynamic sizing enabled)
                 if target_batch_time != float('inf'):
@@ -287,7 +286,6 @@ class EmbeddingService(BaseService):
 
                 total_generated += batch_generated
                 total_processed += len(chunks_data)
-                offset += len(chunks_data)  # Use actual batch size, not current_batch_size
 
                 logger.info(f"Batch {batch_count} completed: generated={batch_generated}, total_processed={total_processed}, total_generated={total_generated}, current_batch_size={current_batch_size}")
 
@@ -533,6 +531,7 @@ class EmbeddingService(BaseService):
         Returns:
             Number of embeddings successfully generated
         """
+        import time
         if not chunk_data:
             logger.debug("_generate_embeddings_in_batches: no chunk data provided, returning 0")
             return 0
@@ -706,9 +705,18 @@ class EmbeddingService(BaseService):
                 if chunk.get("id") in embedding_chunk_ids
             ]
 
-            total_generated = self._db.insert_embeddings_batch(
-                all_embeddings_data, relevant_chunks_data
-            )
+            try:
+                total_generated = self._db.insert_embeddings_batch(
+                    all_embeddings_data, relevant_chunks_data
+                )
+            finally:
+                try:
+                    start_time = time.time()
+                    self._db.optimize_tables()
+                    elapsed = time.time() - start_time
+                    logger.info(f"Post-batch optimization completed in {elapsed:.2f}s")
+                except Exception as e:
+                    logger.warning(f"Periodic optimization compled in {time.time() - start_time} but failed: {e}")
             logger.debug(f"Successfully inserted {total_generated} embeddings")
 
         # Update completed batch count and run optimization if needed

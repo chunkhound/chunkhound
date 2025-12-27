@@ -2488,7 +2488,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         provider: str,
         model: str,
         limit: int = 10000,
-        offset: int = 0,
     ) -> list[dict[str, Any]]:
         """Get chunk data that don't have embeddings for the specified provider/model with pagination."""
         return self._execute_in_db_thread_sync(
@@ -2496,7 +2495,6 @@ class DuckDBProvider(SerialDatabaseProvider):
             provider,
             model,
             limit,
-            offset,
         )
 
     def execute_query(
@@ -2512,7 +2510,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         provider: str,
         model: str,
         limit: int,
-        offset: int,
     ) -> list[dict[str, Any]]:
         """Executor method for get_chunks_without_embeddings_paginated - runs in DB thread."""
         try:
@@ -2530,8 +2527,8 @@ class DuckDBProvider(SerialDatabaseProvider):
                 """
                 params = []
 
-                query += " ORDER BY c.id LIMIT ? OFFSET ?"
-                params.extend([limit, offset])
+                query += " ORDER BY c.id LIMIT ?"
+                params.append(limit)
 
                 results = conn.execute(query, params).fetchall()
                 return [dict(row) for row in results]
@@ -2561,8 +2558,8 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Parameters need to be repeated for each table
             params = [provider, model] * len(embedding_tables)
 
-            query += " ORDER BY c.id LIMIT ? OFFSET ?"
-            params.extend([limit, offset])
+            query += " ORDER BY c.id LIMIT ?"
+            params.append(limit)
 
             results = conn.execute(query, params).fetchall()
             chunk_count = len(results)
@@ -2587,7 +2584,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 })
 
             # Return whatever amount was retrieved without retry logic
-            logger.debug(f"Retrieved {chunk_count} chunks without embeddings (limit={limit}, offset={offset})")
+            logger.debug(f"Retrieved {chunk_count} chunks without embeddings (limit={limit})")
             return chunks
 
         except Exception as e:
