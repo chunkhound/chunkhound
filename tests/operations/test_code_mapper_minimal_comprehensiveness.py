@@ -51,7 +51,7 @@ async def test_code_mapper_comprehensiveness_minimal_maps_to_one_poi(
             self.path = Path(".")
             self.verbose = False
             self.overview_only = True
-            self.out_dir = tmp_path / "out"
+            self.out = tmp_path / "out"
             self.comprehensiveness = "minimal"
             self.config = None
             self.db = None

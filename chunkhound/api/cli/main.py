@@ -58,8 +58,8 @@ def create_parser() -> argparse.ArgumentParser:
     from .parsers.calibrate_parser import add_calibrate_subparser
     from .parsers.mcp_parser import add_mcp_subparser
     from .parsers.research_parser import add_research_subparser
-    from .parsers.code_mapper_parser import add_code_mapper_subparser
     from .parsers.autodoc_parser import add_autodoc_subparser
+    from .parsers.code_mapper_parser import add_map_subparser
     from .parsers.run_parser import add_run_subparser
     from .parsers.search_parser import add_search_subparser
 
@@ -71,8 +71,8 @@ def create_parser() -> argparse.ArgumentParser:
     add_mcp_subparser(subparsers)
     add_search_subparser(subparsers)
     add_research_subparser(subparsers)
-    add_code_mapper_subparser(subparsers)
     add_autodoc_subparser(subparsers)
+    add_map_subparser(subparsers)
     # Diagnose command retired; functionality lives under: index --check-ignores
     add_calibrate_subparser(subparsers)
 
@@ -83,16 +83,6 @@ async def async_main() -> None:
     """Async main entry point for the CLI."""
     parser = create_parser()
     args = parser.parse_args()
-
-    # For the 'code_mapper' command, the positional path argument represents a
-    # documentation scope rather than the project root used for configuration
-    # discovery. To ensure we still pick up the project-level .chunkhound.json
-    # and default database path, temporarily clear args.path before config
-    # creation and restore it only for the code_mapper handler.
-    code_mapper_scope_path = None
-    if getattr(args, "command", None) == "code_mapper" and hasattr(args, "path"):
-        code_mapper_scope_path = args.path
-        setattr(args, "path", None)
 
     if not args.command:
         parser.print_help()
@@ -169,11 +159,7 @@ async def async_main() -> None:
             from .commands.research import research_command
 
             await research_command(args, config)
-        elif args.command == "code_mapper":
-            # Restore scope path for code_mapper now that config/project root are resolved
-            if code_mapper_scope_path is not None:
-                setattr(args, "path", code_mapper_scope_path)
-
+        elif args.command == "map":
             # Dynamic import to avoid early chunkhound module loading
             from .commands.code_mapper import code_mapper_command
 

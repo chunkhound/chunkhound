@@ -120,7 +120,10 @@ def patch_code_mapper_dependencies(
 
     monkeypatch.setattr(LLMManager, "_create_provider", _fake_create_provider)
     monkeypatch.setattr(
-        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview, raising=True
+        code_mapper_service,
+        "_run_code_mapper_overview_hyde",
+        fake_overview,
+        raising=True,
     )
     monkeypatch.setattr(
         code_mapper_service, "deep_research_impl", fake_deep_research_impl, raising=True
@@ -139,7 +142,8 @@ def run_code_mapper(
             self.path = scope_path
             self.verbose = False
             self.overview_only = False
-            self.out_dir = out_dir
+            self.out = out_dir
             self.comprehensiveness = "low"
+            self.combined = None
 
     return code_mapper_mod.code_mapper_command(Args(), config)

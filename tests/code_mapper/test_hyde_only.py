@@ -39,8 +39,9 @@ class _FakeLLMManager:
 
 @pytest.mark.asyncio
 async def test_run_hyde_only_query_requires_llm() -> None:
-    result = await run_hyde_only_query(llm_manager=None, prompt="prompt")
+    result, ok = await run_hyde_only_query(llm_manager=None, prompt="prompt")
 
+    assert ok is False
     assert "LLM not configured" in result
 
 
@@ -48,8 +49,9 @@ async def test_run_hyde_only_query_requires_llm() -> None:
 async def test_run_hyde_only_query_handles_missing_provider() -> None:
     manager = _FakeLLMManager(provider=None)
 
-    result = await run_hyde_only_query(llm_manager=manager, prompt="prompt")
+    result, ok = await run_hyde_only_query(llm_manager=manager, prompt="prompt")
 
+    assert ok is False
     assert "Synthesis provider unavailable" in result
 
 
@@ -64,13 +66,14 @@ async def test_run_hyde_only_query_returns_content() -> None:
         max_snippet_tokens=1,
     )
 
-    result = await run_hyde_only_query(
+    result, ok = await run_hyde_only_query(
         llm_manager=None,
         prompt="prompt",
         provider_override=provider,
         hyde_cfg=hyde_cfg,
     )
 
+    assert ok is True
     assert result == "answer"
     assert provider.calls == [("prompt", 5)]
 
@@ -86,11 +89,12 @@ async def test_run_hyde_only_query_handles_provider_error() -> None:
         max_snippet_tokens=1,
     )
 
-    result = await run_hyde_only_query(
+    result, ok = await run_hyde_only_query(
         llm_manager=None,
         prompt="prompt",
         provider_override=provider,
         hyde_cfg=hyde_cfg,
     )
 
+    assert ok is False
     assert result.startswith("HyDE-only synthesis failed:")

@@ -28,31 +28,31 @@ Basic usage (single project, auto config detection):
 
 ```bash
 # From project root that already has .chunkhound.json and a ChunkHound DB
-chunkhound code_mapper . --out-dir .code_mapper
+chunkhound map . --out .code_mapper
 ```
 
 Explicit config override:
 
 ```bash
 # Agent doc for current folder, using an explicit config file
-chunkhound code_mapper . \
+chunkhound map . \
   --config .chunkhound.json \
-  --out-dir .code_mapper
+  --out .code_mapper
 
 # Plan-only: print HyDE points of interest, write HyDE prompt/plan to .code_mapper/
-chunkhound code_mapper . \
+chunkhound map . \
   --config .chunkhound.json \
-  --out-dir .code_mapper \
-  --overview-only
+  --out .code_mapper \
+  --plan
 ```
 
 Workspace example (shared index across multiple projects):
 
 ```bash
 # Workspace-level config and DB under /workspaces
-chunkhound code_mapper arguseek \
+chunkhound map arguseek \
   --config /workspaces/.chunkhound.json \
-  --out-dir /workspaces/arguseek/.code_mapper
+  --out /workspaces/arguseek/.code_mapper
 ```
 
 Path resolution semantics:
@@ -90,9 +90,10 @@ Assembly LLM configuration (optional):
   `assembly_synthesis_model`, and `assembly_reasoning_effort`.
 
 Outputs:
-- Combined document written under `--out-dir` when `CH_CODE_MAPPER_WRITE_COMBINED=1`
-  (disabled by default; includes `agent_doc_metadata` header and coverage summary;
-  stdout prints paths only).
+- Combined document written under `--out-dir` when `--combined` is set.
+  If `--combined/--no-combined` is omitted, ChunkHound falls back to
+  `CH_CODE_MAPPER_WRITE_COMBINED=1` for backward compatibility (disabled by default).
+  Includes `agent_doc_metadata` header and coverage summary; stdout prints paths only.
 - In `--overview-only` mode:
   - HyDE scope prompt + PoI plan written under `--out-dir`.
 - In full mode (default):

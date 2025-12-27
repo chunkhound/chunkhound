@@ -19,7 +19,8 @@ class DummyProvider:
 
     def get_scope_stats(self, scope_prefix: str | None) -> tuple[int, int]:
         # Include one extra indexed file that is never referenced in the fake
-        # deep-research results so code_mapper can emit an "unreferenced files" artifact.
+        # deep-research results so code_mapper can emit an "unreferenced files"
+        # artifact.
         if scope_prefix == "scope/":
             return 3, 2
         return 0, 0
@@ -56,6 +57,8 @@ async def _run_code_mapper_with_stubs(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     set_combined: bool,
+    cli_combined: bool | None = None,
+    comprehensiveness: str = "low",
 ) -> tuple[Path, str, list[int]]:
     project_root = tmp_path / "repo"
     scope_path = project_root / "scope"
@@ -140,7 +143,9 @@ async def _run_code_mapper_with_stubs(
         }
 
     monkeypatch.setattr(
-        code_mapper_mod, "verify_database_exists", lambda cfg: cfg.database.get_db_path()
+        code_mapper_mod,
+        "verify_database_exists",
+        lambda cfg: cfg.database.get_db_path(),
     )
     monkeypatch.setattr(
         code_mapper_mod,
@@ -149,7 +154,10 @@ async def _run_code_mapper_with_stubs(
     )
     monkeypatch.setattr(code_mapper_mod, "LLMManager", DummyLLMManager)
     monkeypatch.setattr(
-        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview, raising=True
+        code_mapper_service,
+        "_run_code_mapper_overview_hyde",
+        fake_overview,
+        raising=True,
     )
     monkeypatch.setattr(
         code_mapper_service, "deep_research_impl", fake_deep_research_impl, raising=True
@@ -165,14 +173,15 @@ async def _run_code_mapper_with_stubs(
             self.path = scope_path
             self.verbose = False
             self.overview_only = False
-            self.out_dir = tmp_path / "out"
-            self.comprehensiveness = "low"
+            self.out = tmp_path / "out"
+            self.comprehensiveness = comprehensiveness
+            self.combined = cli_combined
 
     args = Args()
 
     await code_mapper_mod.code_mapper_command(args, config)
     captured = capsys.readouterr().out
-    return args.out_dir, captured, seen_max_points
+    return args.out, captured, seen_max_points
 
 
 @pytest.mark.asyncio
@@ -191,7 +200,11 @@ async def test_code_mapper_end_to_end_default_omits_combined_doc(
     - the combined doc is omitted unless explicitly enabled.
     """
 
-    out_dir, captured, seen_max_points = await _run_code_mapper_with_stubs(
+    (
+        out_dir,
+        captured,
+        seen_max_points,
+    ) = await _run_code_mapper_with_stubs(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
         capsys=capsys,
@@ -208,6 +221,7 @@ async def test_code_mapper_end_to_end_default_omits_combined_doc(
     assert index_files, "Expected a Code Mapper index file to be written"
     index_content = index_files[0].read_text(encoding="utf-8")
     assert "unreferenced_in_scope: 1" in index_content
+    assert "total_research_calls: 2" in index_content
     assert "total_indexed: 3" in index_content
     assert "coverage: 66.67%" in index_content
     assert "scope_scope_unreferenced_files.txt" in index_content
@@ -238,7 +252,11 @@ async def test_code_mapper_end_to_end_combined_doc_requires_flag(
 ) -> None:
     """Combined Code Mapper doc should be written only when the env flag is set."""
 
-    out_dir, captured, _ = await _run_code_mapper_with_stubs(
+    (
+        out_dir,
+        captured,
+        _seen_max_points,
+    ) = await _run_code_mapper_with_stubs(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
         capsys=capsys,
@@ -259,3 +277,73 @@ async def test_code_mapper_end_to_end_combined_doc_requires_flag(
     # Skipping the first POI should renumber topics contiguously and keep
     # headings aligned with the surviving result.
     assert "## 1. Error Handling" in combined_content
+
+
+@pytest.mark.asyncio
+async def test_code_mapper_end_to_end_combined_cli_overrides_env_off(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--no-combined should disable combined output even if env is set."""
+    (
+        out_dir,
+        _captured,
+        _seen_max_points,
+    ) = await _run_code_mapper_with_stubs(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        capsys=capsys,
+        set_combined=True,
+        cli_combined=False,
+    )
+
+    combined_docs = list(out_dir.glob("*_code_mapper.md"))
+    assert not combined_docs
+
+
+@pytest.mark.asyncio
+async def test_code_mapper_end_to_end_combined_cli_overrides_env_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--combined should enable combined output even if env is unset."""
+    (
+        out_dir,
+        _captured,
+        _seen_max_points,
+    ) = await _run_code_mapper_with_stubs(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        capsys=capsys,
+        set_combined=False,
+        cli_combined=True,
+    )
+
+    combined_docs = list(out_dir.glob("*_code_mapper.md"))
+    assert combined_docs
+
+
+@pytest.mark.asyncio
+async def test_code_mapper_ultra_requests_max_points(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Comprehensiveness=ultra should request more points-of-interest."""
+    (
+        out_dir,
+        _captured,
+        seen_max_points,
+    ) = await _run_code_mapper_with_stubs(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        capsys=capsys,
+        set_combined=False,
+        comprehensiveness="ultra",
+    )
+
+    assert out_dir.exists()
+    assert seen_max_points, "Expected overview to be called"
+    assert seen_max_points[0] == 20

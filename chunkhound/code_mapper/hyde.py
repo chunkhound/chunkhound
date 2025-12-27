@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.resources
 from pathlib import Path
 
+from loguru import logger
+
 from chunkhound.code_mapper.models import AgentDocMetadata, HydeConfig
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.llm_manager import LLMManager
@@ -11,9 +13,11 @@ from chunkhound.llm_manager import LLMManager
 def load_hyde_scope_template() -> str:
     """Load the packaged HyDE scope prompt template."""
     package = "chunkhound.code_mapper.prompts"
-    with importlib.resources.files(package).joinpath("hyde_scope_prompt.md").open(
-        "r", encoding="utf-8"
-    ) as f:
+    with (
+        importlib.resources.files(package)
+        .joinpath("hyde_scope_prompt.md")
+        .open("r", encoding="utf-8") as f
+    ):
         return f.read().strip()
 
 
@@ -23,21 +27,26 @@ async def run_hyde_only_query(
     prompt: str,
     provider_override: LLMProvider | None = None,
     hyde_cfg: HydeConfig | None = None,
-) -> str:
-    """Run a HyDE-only query (no DB / embeddings)."""
+) -> tuple[str, bool]:
+    """Run a HyDE-only query (no DB / embeddings).
+
+    Returns (content, success). On failure, content contains a short diagnostic
+    string suitable for CLI display.
+    """
     if provider_override is None and (
         not llm_manager or not llm_manager.is_configured()
     ):
-        return "LLM not configured for HyDE-only mode."
+        return "LLM not configured for HyDE-only mode.", False
 
     try:
         provider = provider_override or (
             llm_manager.get_synthesis_provider() if llm_manager else None
         )
         if provider is None:
-            return "Synthesis provider unavailable for HyDE-only mode."
-    except Exception:
-        return "Synthesis provider unavailable for HyDE-only mode."
+            return "Synthesis provider unavailable for HyDE-only mode.", False
+    except (AttributeError, ValueError, TypeError) as exc:
+        logger.debug(f"HyDE-only provider lookup failed: {exc}")
+        return "Synthesis provider unavailable for HyDE-only mode.", False
 
     if hyde_cfg is None:
         hyde_cfg = HydeConfig.from_env()
@@ -48,10 +57,11 @@ async def run_hyde_only_query(
             max_completion_tokens=hyde_cfg.max_completion_tokens,
         )
         if not response or not getattr(response, "content", None):
-            return "HyDE-only synthesis returned no content."
-        return response.content
-    except Exception as exc:
-        return f"HyDE-only synthesis failed: {exc}"
+            return "HyDE-only synthesis returned no content.", False
+        return response.content, True
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        logger.debug(f"HyDE-only synthesis failed: {exc}")
+        return f"HyDE-only synthesis failed: {exc}", False
 
 
 def build_hyde_scope_prompt(
@@ -72,8 +82,10 @@ def build_hyde_scope_prompt(
     if template is None:
         template = load_hyde_scope_template()
 
-    files_block = "\n".join(f"- {p}" for p in file_paths) if file_paths else (
-        "- (no files discovered)"
+    files_block = (
+        "\n".join(f"- {p}" for p in file_paths)
+        if file_paths
+        else ("- (no files discovered)")
     )
 
     snippet_char_budget = max(
@@ -137,7 +149,7 @@ def build_hyde_scope_prompt(
             if not path.is_file():
                 continue
             size = path.stat().st_size
-        except Exception:
+        except OSError:
             continue
         if path.suffix.lower() in binary_exts:
             continue
@@ -171,7 +183,7 @@ def build_hyde_scope_prompt(
                 if b"\x00" in raw_prefix:
                     continue
                 text = path.read_text(encoding="utf-8", errors="replace")
-            except Exception:
+            except (OSError, UnicodeDecodeError):
                 continue
             if not text.strip():
                 continue
@@ -211,13 +223,11 @@ def build_hyde_scope_prompt(
             else "(no sample code snippets available)"
         )
 
-    return (
-        template.format(
-            created=meta.created_from_sha,
-            previous=meta.previous_target_sha,
-            target=meta.target_sha,
-            scope_display=scope_display,
-            files_block=files_block,
-            code_context_block=code_context_block,
-        ).strip()
-    )
+    return template.format(
+        created=meta.created_from_sha,
+        previous=meta.previous_target_sha,
+        target=meta.target_sha,
+        scope_display=scope_display,
+        files_block=files_block,
+        code_context_block=code_context_block,
+    ).strip()

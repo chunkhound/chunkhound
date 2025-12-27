@@ -499,19 +499,19 @@ class LLMConfig(BaseSettings):
 
         parser.add_argument(
             "--llm-codex-reasoning-effort",
-            choices=["minimal", "low", "medium", "high"],
+            choices=["minimal", "low", "medium", "high", "xhigh"],
             help="Codex CLI reasoning effort (thinking depth) when using codex-cli provider",
         )
 
         parser.add_argument(
             "--llm-codex-reasoning-effort-utility",
-            choices=["minimal", "low", "medium", "high"],
+            choices=["minimal", "low", "medium", "high", "xhigh"],
             help="Utility-stage Codex reasoning effort override",
         )
 
         parser.add_argument(
             "--llm-codex-reasoning-effort-synthesis",
-            choices=["minimal", "low", "medium", "high"],
+            choices=["minimal", "low", "medium", "high", "xhigh"],
             help="Synthesis-stage Codex reasoning effort override",
         )
 
