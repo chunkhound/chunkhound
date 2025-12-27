@@ -12,7 +12,7 @@ from typing import Any
 from tree_sitter import Node
 
 from chunkhound.core.types.common import Language
-from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 
@@ -536,6 +536,50 @@ class MakefileMapping(BaseMapping):
         }
 
         return "builtin" if function_name in builtin_functions else "user_defined"
+
+    def extract_constants(
+        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constant definitions from Makefile.
+
+        Identifies variable assignments (VAR = value, VAR := value) as constants.
+
+        Args:
+            concept: The universal concept being extracted
+            captures: Dictionary of capture names to tree-sitter nodes
+            content: Source code as bytes
+
+        Returns:
+            List of constant dictionaries with 'name' and 'value' keys, or None
+        """
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        # Get the definition node
+        def_node = captures.get("definition")
+        if not def_node or def_node.type != "variable_assignment":
+            return None
+
+        source = content.decode("utf-8")
+
+        # Extract variable name
+        name_node = captures.get("name")
+        if not name_node:
+            return None
+
+        name = self.get_node_text(name_node, source).strip()
+
+        # Extract value
+        value_node = self._find_value_node(def_node)
+        value = ""
+        if value_node:
+            value = self.get_node_text(value_node, source).strip()
+
+        # Truncate long values
+        if len(value) > MAX_CONSTANT_VALUE_LENGTH:
+            value = value[:MAX_CONSTANT_VALUE_LENGTH] + "..."
+
+        return [{"name": name, "value": value}]
 
     def resolve_import_path(
         self, import_text: str, base_dir: Path, source_file: Path

@@ -12,16 +12,14 @@ for the unified parser system. It handles Swift's unique features including:
 """
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from loguru import logger
 
 from chunkhound.core.types.common import Language
+from chunkhound.parsers.universal_engine import UniversalConcept
 
-from .base import BaseMapping
-
-if TYPE_CHECKING:
-    from chunkhound.parsers.universal_engine import UniversalConcept
+from .base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 
 try:
     from tree_sitter import Node as TSNode
@@ -487,11 +485,6 @@ class SwiftMapping(BaseMapping):
         Returns:
             Tree-sitter query string or None if concept not supported
         """
-        try:
-            from chunkhound.parsers.universal_engine import UniversalConcept
-        except ImportError:
-            return None
-
         if concept == UniversalConcept.DEFINITION:
             return """
             (class_declaration) @definition
@@ -536,11 +529,6 @@ class SwiftMapping(BaseMapping):
         Returns:
             Extracted name string
         """
-        try:
-            from chunkhound.parsers.universal_engine import UniversalConcept
-        except ImportError:
-            return "unnamed"
-
         source = content.decode("utf-8")
 
         if concept == UniversalConcept.DEFINITION:
@@ -644,11 +632,6 @@ class SwiftMapping(BaseMapping):
         Returns:
             Dictionary of metadata
         """
-        try:
-            from chunkhound.parsers.universal_engine import UniversalConcept
-        except ImportError:
-            return {}
-
         source = content.decode("utf-8")
         metadata: dict[str, Any] = {}
 
@@ -767,6 +750,97 @@ class SwiftMapping(BaseMapping):
                     metadata["module"] = module_name
 
         return metadata
+
+    def extract_constants(
+        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constant definitions from Swift code.
+
+        Detects:
+        - let declarations at module/type level
+        - static let properties
+
+        Args:
+            concept: The universal concept being processed
+            captures: Tree-sitter query captures
+            content: Source file content as bytes
+
+        Returns:
+            List of dictionaries with "name", "value", and optionally "type" keys, or None
+        """
+        if not TREE_SITTER_AVAILABLE:
+            return None
+
+        source = content.decode("utf-8")
+        constants: list[dict[str, str]] = []
+
+        # Only process DEFINITION concept
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        def_node = captures.get("definition")
+        if not def_node:
+            return None
+
+        # Handle property declarations
+        if def_node.type == "property_declaration":
+            # Check if it's a let declaration (immutable) using AST node types
+            is_let = False
+
+            # Check for let keyword using AST structure (not text matching)
+            # Swift AST: property_declaration -> value_binding_pattern -> let|var
+            value_binding = self.find_child_by_type(def_node, "value_binding_pattern")
+            if value_binding:
+                let_node = self.find_child_by_type(value_binding, "let")
+                if let_node:
+                    is_let = True
+
+            # Extract all let bindings (Swift let is immutable)
+            # Includes module-level, static, and instance properties
+            if is_let:
+                # Extract from pattern node (contains property name)
+                pattern_node = self.find_child_by_type(def_node, "pattern")
+                if pattern_node:
+                    # Get the identifier (property name)
+                    identifier = self.find_child_by_type(pattern_node, "simple_identifier")
+                    if identifier:
+                        name = self.get_node_text(identifier, source).strip()
+
+                        # Get the value from property_declaration's children
+                        value_text = ""
+                        for value_child in self.walk_tree(def_node):
+                            if value_child and value_child.type in (
+                                "integer_literal",
+                                "real_literal",
+                                "string_literal",
+                                "boolean_literal",
+                                "nil",
+                            ):
+                                value_text = self.get_node_text(value_child, source).strip()
+                                break
+
+                        # Truncate to 50 chars if longer
+                        if len(value_text) > MAX_CONSTANT_VALUE_LENGTH:
+                            value_text = value_text[:MAX_CONSTANT_VALUE_LENGTH]
+
+                        # Extract type annotation from property_declaration
+                        type_text = ""
+                        type_annotation = self.find_child_by_type(
+                            def_node, "type_annotation"
+                        )
+                        if type_annotation:
+                            type_text = self.get_node_text(type_annotation, source).strip()
+                            # Remove leading colon
+                            if type_text.startswith(":"):
+                                type_text = type_text[1:].strip()
+
+                        const_info: dict[str, str] = {"name": name, "value": value_text}
+                        if type_text:
+                            const_info["type"] = type_text
+
+                        constants.append(const_info)
+
+        return constants if constants else None
 
     def resolve_import_path(
         self, import_text: str, base_dir: Path, source_file: Path

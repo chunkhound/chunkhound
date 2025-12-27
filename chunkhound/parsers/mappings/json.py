@@ -12,7 +12,7 @@ from typing import Any
 from tree_sitter import Node
 
 from chunkhound.core.types.common import Language
-from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 
@@ -292,3 +292,54 @@ class JsonMapping(BaseMapping):
     ) -> Path | None:
         """Data formats don't have imports."""
         return None
+
+    def extract_constants(
+        self,
+        concept: Any,
+        captures: dict[str, Any],
+        content: bytes,
+    ) -> list[dict[str, str]] | None:
+        """Extract top-level JSON object keys and their scalar values.
+
+        Returns constant definitions for:
+        - Top-level object keys with scalar values (string, number, boolean)
+        - Skips nested objects/arrays as values
+
+        Args:
+            concept: The UniversalConcept being extracted
+            captures: Tree-sitter query captures
+            content: Source file content as bytes
+
+        Returns:
+            List of dicts with 'name' and 'value' keys, or None if not applicable
+        """
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        source = content.decode("utf-8")
+
+        try:
+            data = json.loads(source)
+
+            # Only extract from top-level objects
+            if not isinstance(data, dict):
+                return None
+
+            constants = []
+            for key, value in data.items():
+                # Only include scalar values (skip None, objects, arrays)
+                if value is not None and isinstance(value, (str, int, float, bool)):
+                    # Convert value to string and truncate to 50 chars
+                    value_str = str(value)
+                    if len(value_str) > MAX_CONSTANT_VALUE_LENGTH:
+                        value_str = value_str[:MAX_CONSTANT_VALUE_LENGTH]
+
+                    constants.append({
+                        "name": key,
+                        "value": value_str
+                    })
+
+            return constants if constants else None
+
+        except json.JSONDecodeError:
+            return None

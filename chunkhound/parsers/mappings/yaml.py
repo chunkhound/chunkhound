@@ -11,7 +11,7 @@ from typing import Any
 from tree_sitter import Node
 
 from chunkhound.core.types.common import Language
-from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 
@@ -402,3 +402,74 @@ class YamlMapping(BaseMapping):
     ) -> Path | None:
         """Data formats don't have imports."""
         return None
+
+    def extract_constants(
+        self,
+        concept: Any,
+        captures: dict[str, Any],
+        content: bytes,
+    ) -> list[dict[str, str]] | None:
+        """Extract top-level YAML keys and their scalar values, plus anchors.
+
+        Returns constant definitions for:
+        - Top-level keys with scalar values
+        - Anchors as named values
+
+        Args:
+            concept: The UniversalConcept being extracted
+            captures: Tree-sitter query captures
+            content: Source file content as bytes
+
+        Returns:
+            List of dicts with 'name' and 'value' keys, or None if not applicable
+        """
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        import yaml
+
+        source = content.decode("utf-8")
+
+        try:
+            # Parse YAML to extract top-level key-value pairs from all documents
+            constants = []
+
+            for data in yaml.safe_load_all(source):
+                if not isinstance(data, dict):
+                    continue
+
+                # Extract top-level scalar values
+                for key, value in data.items():
+                    # Only include scalar values (skip None, objects, arrays)
+                    if value is not None and isinstance(value, (str, int, float, bool)):
+                        # Convert value to string and truncate to 50 chars
+                        value_str = str(value)
+                        if len(value_str) > MAX_CONSTANT_VALUE_LENGTH:
+                            value_str = value_str[:MAX_CONSTANT_VALUE_LENGTH]
+
+                        constants.append({
+                            "name": key,
+                            "value": value_str
+                        })
+
+            # Extract anchors from source text
+            # Anchors are defined as &anchor_name
+            import re
+            anchor_pattern = r'&([a-zA-Z_][a-zA-Z0-9_-]*)\s+(.*?)(?:\n|$)'
+            for match in re.finditer(anchor_pattern, source):
+                anchor_name = match.group(1)
+                anchor_value = match.group(2).strip()
+
+                # Truncate value to 50 chars
+                if len(anchor_value) > MAX_CONSTANT_VALUE_LENGTH:
+                    anchor_value = anchor_value[:MAX_CONSTANT_VALUE_LENGTH]
+
+                constants.append({
+                    "name": f"&{anchor_name}",
+                    "value": anchor_value
+                })
+
+            return constants if constants else None
+
+        except yaml.YAMLError:
+            return None

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from chunkhound.core.types.common import Language
-from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 
 if TYPE_CHECKING:
     from tree_sitter import Node as TSNode
@@ -417,6 +417,152 @@ class MatlabMapping(BaseMapping):
         else:
             return f"{name}({param_str})"
 
+    def get_query_for_concept(self, concept: "UniversalConcept") -> str | None:
+        """Get tree-sitter query for universal concept in MATLAB.
+
+        Extends default DEFINITION query to include properties blocks and
+        top-level assignments for constant extraction.
+
+        Args:
+            concept: The universal concept to query
+
+        Returns:
+            Tree-sitter query string or None if concept not supported
+        """
+        try:
+            from chunkhound.parsers.universal_engine import UniversalConcept
+        except ImportError:
+            return None
+
+        if concept == UniversalConcept.DEFINITION:
+            # Combine function, class, properties, and top-level assignment queries
+            # Note: Only capture top-level assignments (children of source_file),
+            # not assignments inside function bodies (those are extracted via function_definition)
+            return """
+                (function_definition
+                    (function_output)? @function_output
+                    (identifier) @function_name
+                    (function_arguments)? @function_arguments
+                ) @definition
+
+                (class_definition
+                    (identifier) @class_name
+                    (superclasses)? @superclasses
+                ) @definition
+
+                (properties) @definition
+
+                (source_file
+                    (assignment
+                        (identifier) @assignment_name
+                    ) @definition
+                )
+            """
+
+        return None
+
+    def extract_name(
+        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+    ) -> str:
+        """Extract name from captures for MATLAB nodes.
+
+        Handles properties blocks and top-level assignments for constant extraction.
+
+        Args:
+            concept: The universal concept being extracted
+            captures: Dictionary of capture names to tree-sitter nodes
+            content: Source code as bytes
+
+        Returns:
+            Extracted name string
+        """
+        try:
+            from chunkhound.parsers.universal_engine import UniversalConcept
+        except ImportError:
+            return "unnamed"
+
+        if concept != UniversalConcept.DEFINITION:
+            return "unnamed"
+
+        source = content.decode("utf-8")
+
+        def_node = captures.get("definition")
+        if not def_node:
+            return "unnamed"
+
+        # Handle top-level assignments (check node type)
+        if def_node.type == "assignment":
+            # Get the identifier from assignment
+            assignment_name = captures.get("assignment_name")
+            if assignment_name:
+                name = self.get_node_text(assignment_name, source).strip()
+                # Only include UPPER_CASE assignments
+                if re.match(r'^[A-Z][A-Z0-9_]*$', name):
+                    return name
+            # If not UPPER_CASE, skip by returning a dummy name
+            return f"_skip_assignment_{def_node.start_point[0] + 1}"
+
+        # Handle properties blocks
+        if def_node.type == "properties":
+            # Name based on line number
+            line = def_node.start_point[0] + 1
+            return f"properties_line_{line}"
+
+        # Fall back to standard extraction
+        if def_node.type == "function_definition":
+            return self.extract_function_name(def_node, source)
+        elif def_node.type == "class_definition":
+            return self.extract_class_name(def_node, source)
+
+        return self.get_fallback_name(def_node, "definition")
+
+    def extract_content(
+        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+    ) -> str:
+        """Extract content from captures for MATLAB nodes.
+
+        Filters out non-UPPER_CASE assignments to avoid creating unnecessary chunks.
+
+        Args:
+            concept: The universal concept being extracted
+            captures: Dictionary of capture names to tree-sitter nodes
+            content: Source code as bytes
+
+        Returns:
+            Extracted content string, or empty string for filtered assignments
+        """
+        def_node = captures.get("definition")
+        if not def_node:
+            return ""
+
+        source = content.decode("utf-8")
+
+        # Filter out non-UPPER_CASE assignments by returning empty content
+        if def_node.type == "assignment":
+            assignment_name = captures.get("assignment_name")
+            if assignment_name:
+                name = self.get_node_text(assignment_name, source).strip()
+                # Only include UPPER_CASE assignments
+                if not re.match(r'^[A-Z][A-Z0-9_]*$', name):
+                    return ""  # Empty content will filter out this chunk
+
+        return self.get_node_text(def_node, source)
+
+    def extract_metadata(
+        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+    ) -> dict[str, Any]:
+        """Extract metadata from captures for MATLAB nodes.
+
+        Args:
+            concept: The universal concept being extracted
+            captures: Dictionary of capture names to tree-sitter nodes
+            content: Source code as bytes
+
+        Returns:
+            Dictionary of metadata
+        """
+        return {}
+
     def should_include_node(self, node: "TSNode | None", source: str) -> bool:
         """Determine if a MATLAB node should be included as a chunk.
 
@@ -454,6 +600,137 @@ class MatlabMapping(BaseMapping):
                 return False
 
         return True
+
+    def extract_constants(
+        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constant definitions from MATLAB code.
+
+        Identifies UPPER_CASE variable assignments as constants (MATLAB convention)
+        from:
+        1. Top-level script assignments
+        2. Function body assignments
+        3. Properties (Constant) blocks
+
+        Args:
+            concept: The universal concept being extracted
+            captures: Dictionary of capture names to tree-sitter nodes
+            content: Source code as bytes
+
+        Returns:
+            List of constant dictionaries with 'name' and 'value' keys, or None
+        """
+        try:
+            from chunkhound.parsers.universal_engine import UniversalConcept
+        except ImportError:
+            return None
+
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        source = content.decode("utf-8")
+
+        # Get the definition node
+        def_node = captures.get("definition")
+        if not def_node:
+            return None
+
+        # Handle top-level assignments (captured as definition nodes)
+        if def_node.type == "assignment":
+            assignment_name = captures.get("assignment_name")
+            if not assignment_name:
+                return None
+
+            var_name = self.get_node_text(assignment_name, source).strip()
+
+            # Check UPPER_CASE convention
+            if not re.match(r'^[A-Z][A-Z0-9_]*$', var_name):
+                return None
+
+            # Extract value from assignment
+            assignment_text = self.get_node_text(def_node, source).strip()
+            value_match = re.search(rf'^{re.escape(var_name)}\s*=\s*(.+)', assignment_text)
+            if value_match:
+                value = value_match.group(1).strip().rstrip(";")
+                # Truncate long values
+                if len(value) > MAX_CONSTANT_VALUE_LENGTH:
+                    value = value[:MAX_CONSTANT_VALUE_LENGTH] + "..."
+                return [{"name": var_name, "value": value}]
+
+            return None
+
+        # Check if this is a properties block with (Constant) attribute
+        if def_node.type == "properties":
+            # Get the full properties block text
+            props_text = self.get_node_text(def_node, source).strip()
+
+            # Check if it has (Constant) attribute
+            if not re.search(r'properties\s*\([^)]*\bConstant\b', props_text):
+                return None
+
+            # Extract constant properties from this block
+            constants = []
+            for property_def in self.find_nodes_by_type(def_node, "property"):
+                # Extract property name
+                name_node = self.find_child_by_type(property_def, "identifier")
+                if not name_node:
+                    continue
+
+                prop_name = self.get_node_text(name_node, source).strip()
+                if not prop_name:
+                    continue
+
+                # Extract value if present
+                prop_text = self.get_node_text(property_def, source).strip()
+                value_match = re.search(rf'{re.escape(prop_name)}\s*=\s*(.+?)(?:\s*;|\s*$)', prop_text)
+
+                if value_match:
+                    value = value_match.group(1).strip()
+                    # Truncate long values
+                    if len(value) > MAX_CONSTANT_VALUE_LENGTH:
+                        value = value[:MAX_CONSTANT_VALUE_LENGTH] + "..."
+                    constants.append({"name": prop_name, "value": value})
+                else:
+                    # No value specified
+                    constants.append({"name": prop_name, "value": ""})
+
+            return constants if constants else None
+
+        # MATLAB uses UPPER_CASE convention for constants
+        # Look for variable assignments inside function bodies
+        if def_node.type == "function_definition":
+            if not TREE_SITTER_AVAILABLE:
+                return None
+
+            constants = []
+            # Find all assignment nodes in the function body
+            for assignment_node in self.find_nodes_by_type(def_node, "assignment"):
+                # Get the left-hand side (identifier)
+                identifier_node = self.find_child_by_type(assignment_node, "identifier")
+                if not identifier_node:
+                    continue
+
+                var_name = self.get_node_text(identifier_node, source).strip()
+
+                # Check if it matches UPPER_CASE convention
+                if not re.match(r'^[A-Z][A-Z0-9_]*$', var_name):
+                    continue
+
+                # Extract the full assignment text to get the value
+                assignment_text = self.get_node_text(assignment_node, source).strip()
+
+                # Pattern: CONSTANT_NAME = value
+                value_match = re.search(rf'^{re.escape(var_name)}\s*=\s*(.+)', assignment_text)
+                if value_match:
+                    value = value_match.group(1).strip().rstrip(";")
+                    # Truncate long values
+                    if len(value) > MAX_CONSTANT_VALUE_LENGTH:
+                        value = value[:MAX_CONSTANT_VALUE_LENGTH] + "..."
+                    constants.append({"name": var_name, "value": value})
+
+            return constants if constants else None
+
+        return None
 
     def resolve_import_path(
         self,

@@ -7,13 +7,13 @@ and XML documentation comments.
 """
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
 from chunkhound.core.types.common import Language
 
-from .base import BaseMapping
+from .base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 
 if TYPE_CHECKING:
     from tree_sitter import Node as TSNode
@@ -131,6 +131,179 @@ class CSharpMapping(BaseMapping):
         return """
         (comment) @xml_doc
         """
+
+    def get_query_for_concept(self, concept: "UniversalConcept") -> str | None:
+        """Get tree-sitter query for universal concept in C#."""
+        from chunkhound.parsers.universal_engine import UniversalConcept
+
+        if concept == UniversalConcept.DEFINITION:
+            return """
+            (method_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (constructor_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (class_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (interface_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (struct_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (enum_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (record_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (delegate_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (property_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (field_declaration) @definition
+
+            (local_declaration_statement) @definition
+            """
+
+        elif concept == UniversalConcept.COMMENT:
+            return """
+            (comment) @definition
+            """
+
+        elif concept == UniversalConcept.IMPORT:
+            return """
+            (using_directive) @definition
+            """
+
+        elif concept == UniversalConcept.STRUCTURE:
+            return """
+            (compilation_unit
+                (using_directive)* @imports
+                (namespace_declaration)? @namespace
+            ) @definition
+            """
+
+        else:
+            return None
+
+    def extract_name(
+        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+    ) -> str:
+        """Extract name from captures for this concept."""
+        from chunkhound.parsers.universal_engine import UniversalConcept
+
+        source = content.decode("utf-8")
+
+        if concept == UniversalConcept.DEFINITION:
+            # Use @name capture if available
+            if "name" in captures:
+                return self.get_node_text(captures["name"], source).strip()
+
+            # For field_declaration and local_declaration_statement,
+            # extract variable name
+            def_node = captures.get("definition")
+            if def_node and def_node.type in (
+                "field_declaration",
+                "local_declaration_statement",
+            ):
+                declarator = self.find_child_by_type(def_node, "variable_declarator")
+                if declarator:
+                    var_name_node = self.find_child_by_type(declarator, "identifier")
+                    if var_name_node:
+                        return self.get_node_text(var_name_node, source).strip()
+                line = def_node.start_point[0] + 1
+                node_prefix = (
+                    "local"
+                    if def_node.type == "local_declaration_statement"
+                    else "field"
+                )
+                return f"{node_prefix}_line_{line}"
+
+            return "unnamed_definition"
+
+        elif concept == UniversalConcept.COMMENT:
+            if "definition" in captures:
+                node = captures["definition"]
+                line = node.start_point[0] + 1
+                return f"comment_line_{line}"
+            return "unnamed_comment"
+
+        elif concept == UniversalConcept.IMPORT:
+            if "definition" in captures:
+                node = captures["definition"]
+                return self.get_node_text(node, source).strip()
+            return "unnamed_import"
+
+        elif concept == UniversalConcept.STRUCTURE:
+            return "file_structure"
+
+        return "unnamed"
+
+    def extract_content(
+        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+    ) -> str:
+        """Extract content from captures for this concept."""
+        source = content.decode("utf-8")
+
+        if "definition" in captures:
+            node = captures["definition"]
+            return self.get_node_text(node, source)
+        elif captures:
+            node = list(captures.values())[0]
+            return self.get_node_text(node, source)
+
+        return ""
+
+    def extract_metadata(
+        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+    ) -> dict[str, Any]:
+        """Extract C#-specific metadata."""
+        from chunkhound.parsers.universal_engine import UniversalConcept
+
+        source = content.decode("utf-8")
+        metadata: dict[str, Any] = {}
+
+        if concept == UniversalConcept.DEFINITION:
+            def_node = captures.get("definition")
+            if def_node:
+                metadata["node_type"] = def_node.type
+
+                # Determine kind
+                kind_map = {
+                    "method_declaration": "method",
+                    "constructor_declaration": "constructor",
+                    "class_declaration": "class",
+                    "interface_declaration": "interface",
+                    "struct_declaration": "struct",
+                    "enum_declaration": "enum",
+                    "record_declaration": "record",
+                    "delegate_declaration": "delegate",
+                    "property_declaration": "property",
+                    "field_declaration": "field",
+                    "local_declaration_statement": "local_constant",
+                }
+                metadata["kind"] = kind_map.get(def_node.type, "unknown")
+
+                # Extract modifiers
+                modifiers = self.extract_access_modifiers(def_node, source)
+                if modifiers:
+                    metadata["modifiers"] = modifiers
+
+        return metadata
 
     def extract_function_name(self, node: "TSNode | None", source: str) -> str:
         """Extract method name from a C# method definition node.
@@ -464,23 +637,26 @@ class CSharpMapping(BaseMapping):
         modifiers = []
         try:
             # Look for modifier tokens
+            # Tree-sitter C# grammar uses bare keyword names as node types
+            # (e.g., "static", "readonly")
+            # NOT suffixed with "_keyword" (e.g., NOT "static_keyword")
             for child in self.walk_tree(node):
                 if child and child.type in [
-                    "public_keyword",
-                    "private_keyword",
-                    "protected_keyword",
-                    "internal_keyword",
-                    "static_keyword",
-                    "readonly_keyword",
-                    "abstract_keyword",
-                    "virtual_keyword",
-                    "override_keyword",
-                    "sealed_keyword",
-                    "async_keyword",
-                    "extern_keyword",
-                    "partial_keyword",
-                    "unsafe_keyword",
-                    "const_keyword",
+                    "public",
+                    "private",
+                    "protected",
+                    "internal",
+                    "static",
+                    "readonly",
+                    "abstract",
+                    "virtual",
+                    "override",
+                    "sealed",
+                    "async",
+                    "extern",
+                    "partial",
+                    "unsafe",
+                    "const",
                 ]:
                     modifier_text = self.get_node_text(child, source).strip()
                     if modifier_text:
@@ -656,6 +832,174 @@ class CSharpMapping(BaseMapping):
         except Exception as e:
             logger.error(f"Failed to get C# qualified name: {e}")
             return self.get_fallback_name(node, "symbol")
+
+    def extract_constants(
+        self, concept: "Any", captures: dict[str, "TSNode"], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constant definitions from C# code.
+
+        Detects:
+        - const field declarations (class-level)
+        - readonly static fields (class-level)
+        - const local declarations (method-level)
+
+        Args:
+            concept: The universal concept being processed
+            captures: Tree-sitter query captures
+            content: Source file content as bytes
+
+        Returns:
+            List of dictionaries with "name", "value", and optionally "type"
+            keys, or None
+        """
+        try:
+            from chunkhound.parsers.universal_engine import UniversalConcept
+        except ImportError:
+            return None
+
+        source = content.decode("utf-8")
+        constants: list[dict[str, str]] = []
+
+        # Only process DEFINITION concept
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        def_node = captures.get("definition")
+        if not def_node:
+            return None
+
+        # Handle enum declarations
+        if def_node.type == "enum_declaration":
+            # Extract enum members
+            for child in self.walk_tree(def_node):
+                if child and child.type == "enum_member_declaration":
+                    # Get the identifier (enum member name)
+                    name_node = self.find_child_by_type(child, "identifier")
+                    if name_node:
+                        name = self.get_node_text(name_node, source).strip()
+                        constants.append({"name": name, "value": name})
+
+        # Handle field declarations with const or readonly static modifiers
+        if def_node.type == "field_declaration":
+            # Check for const or (readonly + static) modifiers
+            modifiers = self.extract_access_modifiers(def_node, source)
+            has_const = "const" in modifiers
+            has_readonly = "readonly" in modifiers
+            has_static = "static" in modifiers
+
+            if has_const or (has_readonly and has_static):
+                # Extract variable declarator
+                for child in self.walk_tree(def_node):
+                    if child and child.type == "variable_declarator":
+                        # Get the identifier (field name)
+                        name_node = self.find_child_by_type(child, "identifier")
+                        if name_node:
+                            name = self.get_node_text(name_node, source).strip()
+
+                            # Get the initializer value
+                            value_text = ""
+                            for init_child in self.walk_tree(child):
+                                if init_child and init_child.type in (
+                                    "integer_literal",
+                                    "real_literal",
+                                    "string_literal",
+                                    "character_literal",
+                                    "boolean_literal",
+                                    "null_literal",
+                                ):
+                                    value_text = self.get_node_text(
+                                        init_child, source
+                                    ).strip()
+                                    break
+
+                            # Truncate to 50 chars if longer
+                            if len(value_text) > MAX_CONSTANT_VALUE_LENGTH:
+                                value_text = value_text[:MAX_CONSTANT_VALUE_LENGTH]
+
+                            # Extract type
+                            type_text = ""
+                            for type_child in self.walk_tree(def_node):
+                                if type_child and type_child.type in (
+                                    "predefined_type",
+                                    "identifier_name",
+                                    "generic_name",
+                                    "array_type",
+                                    "nullable_type",
+                                ):
+                                    type_text = self.get_node_text(
+                                        type_child, source
+                                    ).strip()
+                                    break
+
+                            const_info: dict[str, str] = {
+                                "name": name,
+                                "value": value_text,
+                            }
+                            if type_text:
+                                const_info["type"] = type_text
+
+                            constants.append(const_info)
+
+        # Handle local const declarations (method-level)
+        if def_node.type == "local_declaration_statement":
+            # Check for const modifier
+            modifiers = self.extract_access_modifiers(def_node, source)
+            has_const = "const" in modifiers
+
+            if has_const:
+                # Extract variable declarator
+                for child in self.walk_tree(def_node):
+                    if child and child.type == "variable_declarator":
+                        # Get the identifier (local const name)
+                        name_node = self.find_child_by_type(child, "identifier")
+                        if name_node:
+                            name = self.get_node_text(name_node, source).strip()
+
+                            # Get the initializer value
+                            value_text = ""
+                            for init_child in self.walk_tree(child):
+                                if init_child and init_child.type in (
+                                    "integer_literal",
+                                    "real_literal",
+                                    "string_literal",
+                                    "character_literal",
+                                    "boolean_literal",
+                                    "null_literal",
+                                ):
+                                    value_text = self.get_node_text(
+                                        init_child, source
+                                    ).strip()
+                                    break
+
+                            # Truncate to 50 chars if longer
+                            if len(value_text) > MAX_CONSTANT_VALUE_LENGTH:
+                                value_text = value_text[:MAX_CONSTANT_VALUE_LENGTH]
+
+                            # Extract type
+                            type_text = ""
+                            for type_child in self.walk_tree(def_node):
+                                if type_child and type_child.type in (
+                                    "predefined_type",
+                                    "identifier_name",
+                                    "generic_name",
+                                    "array_type",
+                                    "nullable_type",
+                                ):
+                                    type_text = self.get_node_text(
+                                        type_child, source
+                                    ).strip()
+                                    break
+
+                            const_info: dict[str, str] = {
+                                "name": name,
+                                "value": value_text,
+                            }
+                            if type_text:
+                                const_info["type"] = type_text
+
+                            constants.append(const_info)
+
+        return constants if constants else None
 
     def resolve_import_path(
         self, import_text: str, base_dir: Path, source_file: Path

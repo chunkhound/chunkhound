@@ -17,7 +17,7 @@ from loguru import logger
 
 from chunkhound.core.types.common import Language
 
-from .base import BaseMapping
+from .base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 
 if TYPE_CHECKING:
     from chunkhound.parsers.universal_engine import UniversalConcept
@@ -393,6 +393,16 @@ class ObjCMapping(BaseMapping):
             (method_definition) @definition
 
             (property_declaration) @definition
+
+            ; Capture #define macros at any scope
+            ; Note: Tree-sitter queries search entire tree by default (top-level, function-scoped, nested blocks)
+            (preproc_def) @definition
+
+            ; Capture const declarations at any scope
+            ; This pattern matches declarations at ALL nesting levels (top-level, methods, nested blocks, etc.)
+            (declaration
+                (type_qualifier)
+            ) @definition
             """
 
         elif concept == UniversalConcept.COMMENT:
@@ -600,6 +610,92 @@ class ObjCMapping(BaseMapping):
         # IMPORT concept not supported (get_query_for_concept returns None)
 
         return metadata
+
+    def extract_constants(
+        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constant definitions from Objective-C code.
+
+        Identifies #define macros and const declarations as constants.
+
+        Args:
+            concept: The universal concept being extracted
+            captures: Dictionary of capture names to tree-sitter nodes
+            content: Source code as bytes
+
+        Returns:
+            List of constant dictionaries with 'name' and 'value' keys, or None
+        """
+        try:
+            from chunkhound.parsers.universal_engine import UniversalConcept
+        except ImportError:
+            return None
+
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        # Get the definition node
+        def_node = captures.get("definition")
+        if not def_node:
+            return None
+
+        source = content.decode("utf-8")
+
+        # Handle #define macros (preprocessor directives)
+        if def_node.type == "preproc_def":
+            # Extract #define NAME VALUE
+            node_text = self.get_node_text(def_node, source).strip()
+            match = re.match(r'#define\s+([A-Za-z_][A-Za-z0-9_]*)\s+(.+)', node_text)
+            if not match:
+                return None
+
+            name = match.group(1)
+            value = match.group(2).strip()
+
+            # Truncate long values
+            if len(value) > MAX_CONSTANT_VALUE_LENGTH:
+                value = value[:MAX_CONSTANT_VALUE_LENGTH] + "..."
+
+            return [{"name": name, "value": value}]
+
+        # Handle const declarations
+        if def_node.type == "declaration":
+            # Look for 'const' keyword in type specifier
+            has_const = False
+            for child in self.walk_tree(def_node):
+                if child and child.type == "type_qualifier":
+                    qualifier_text = self.get_node_text(child, source).strip()
+                    if qualifier_text == "const":
+                        has_const = True
+                        break
+
+            if not has_const:
+                return None
+
+            # Extract variable name and value
+            constants = []
+            for child in self.walk_tree(def_node):
+                if child and child.type == "init_declarator":
+                    # Find identifier and value
+                    name = ""
+                    value = ""
+
+                    for subchild in child.children:
+                        if subchild.type == "identifier":
+                            name = self.get_node_text(subchild, source).strip()
+                        elif subchild.type not in ["identifier", "="]:
+                            # This is the initializer
+                            value = self.get_node_text(subchild, source).strip()
+
+                    if name:
+                        # Truncate long values
+                        if len(value) > MAX_CONSTANT_VALUE_LENGTH:
+                            value = value[:MAX_CONSTANT_VALUE_LENGTH] + "..."
+                        constants.append({"name": name, "value": value})
+
+            return constants if constants else None
+
+        return None
 
     def resolve_import_path(
         self, import_text: str, base_dir: Path, source_file: Path

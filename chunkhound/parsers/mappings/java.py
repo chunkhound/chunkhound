@@ -7,13 +7,15 @@ including classes, interfaces, methods, constructors, annotations, and Javadoc.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
+from tree_sitter import Node
 
 from chunkhound.core.types.common import Language
+from chunkhound.parsers.universal_engine import UniversalConcept
 
-from .base import BaseMapping
+from .base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 
 if TYPE_CHECKING:
     from tree_sitter import Node as TSNode
@@ -67,32 +69,6 @@ class JavaMapping(BaseMapping):
         return """
         (line_comment) @comment
         (block_comment) @comment
-        """
-
-    def get_method_query(self) -> str:
-        """Get tree-sitter query pattern for Java method definitions.
-
-        Returns:
-            Tree-sitter query string for finding method definitions
-        """
-        return """
-        (method_declaration
-            name: (identifier) @method_name
-        ) @method_def
-
-        (constructor_declaration
-            name: (identifier) @constructor_name
-        ) @constructor_def
-        """
-
-    def get_docstring_query(self) -> str:
-        """Get tree-sitter query pattern for Javadoc comments.
-
-        Returns:
-            Tree-sitter query string for finding Javadoc comments
-        """
-        return """
-        (block_comment) @javadoc
         """
 
     def extract_function_name(self, node: "TSNode | None", source: str) -> str:
@@ -503,7 +479,8 @@ class JavaMapping(BaseMapping):
         Returns:
             Path to the imported file, or None if not found
         """
-        # Extract class path: import com.example.Foo; or import static com.example.Foo.bar;
+        # Extract class path: import com.example.Foo;
+        # or import static com.example.Foo.bar;
         match = re.search(r"import\s+(?:static\s+)?([\w.]+);", import_text)
         if not match:
             return None
@@ -522,3 +499,390 @@ class JavaMapping(BaseMapping):
                 return full_path
 
         return None
+
+    def extract_constants(
+        self,
+        concept: UniversalConcept,
+        captures: dict[str, Node],
+        content: bytes,
+    ) -> list[dict[str, str]] | None:
+        """Extract constant definitions from Java code.
+
+        Detects static final field declarations.
+
+        Args:
+            concept: The universal concept being processed
+            captures: Tree-sitter query captures
+            content: Source file content as bytes
+
+        Returns:
+            List of dictionaries with "name", "value", and "type" keys, or None
+        """
+        source = content.decode("utf-8")
+
+        # Only process DEFINITION concept
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        def_node = captures.get("definition")
+        if not def_node:
+            return None
+
+        # Handle enum declarations
+        if def_node.type == "enum_declaration":
+            enum_body = self.find_child_by_type(def_node, "enum_body")
+            if not enum_body:
+                return None
+
+            enum_constants = self.find_children_by_type(enum_body, "enum_constant")
+            if not enum_constants:
+                return None
+
+            results = []
+            for enum_const in enum_constants:
+                name_node = self.find_child_by_type(enum_const, "identifier")
+                if name_node:
+                    const_name = self.get_node_text(name_node, source).strip()
+                    results.append({"name": const_name, "value": const_name})
+
+            return results if results else None
+
+        # Handle local variable declarations with final modifier
+        if def_node.type == "local_variable_declaration":
+            # Check for final modifier
+            modifiers_node = self.find_child_by_type(def_node, "modifiers")
+            if not modifiers_node:
+                return None
+
+            modifiers_text = self.get_node_text(modifiers_node, source)
+            has_final = "final" in modifiers_text
+
+            if not has_final:
+                return None
+
+        # Handle static final field declarations
+        elif def_node.type == "field_declaration":
+            # Check for both static and final modifiers
+            modifiers_node = self.find_child_by_type(def_node, "modifiers")
+            if not modifiers_node:
+                return None
+
+            modifiers_text = self.get_node_text(modifiers_node, source)
+            has_static = "static" in modifiers_text
+            has_final = "final" in modifiers_text
+
+            if not (has_static and has_final):
+                return None
+
+        else:
+            # Not a node type we handle for constant extraction
+            return None
+
+        # Extract field name and value
+        # Look for variable_declarator which contains identifier and optional value
+        declarator = self.find_child_by_type(def_node, "variable_declarator")
+        if not declarator:
+            return None
+
+        # Get field name
+        name_node = self.find_child_by_type(declarator, "identifier")
+        if not name_node:
+            return None
+
+        const_name = self.get_node_text(name_node, source).strip()
+
+        # Extract type from the field declaration
+        type_node = None
+        for child in self.walk_tree(def_node):
+            if child and child.type in [
+                "type_identifier",
+                "integral_type",
+                "floating_point_type",
+                "boolean_type",
+                "generic_type",
+                "array_type",
+            ]:
+                type_node = child
+                break
+
+        const_type = (
+            self.get_node_text(type_node, source).strip() if type_node else None
+        )
+
+        # Extract value by finding the assignment after "="
+        const_value: str | None = None
+        found_equals = False
+        for i in range(declarator.child_count):
+            child_node = declarator.child(i)
+            if child_node is None:
+                continue
+
+            if self.get_node_text(child_node, source).strip() == "=":
+                found_equals = True
+            elif found_equals and child_node.type != ";":
+                # Extract the value, truncating to 50 chars if longer
+                value_text = self.get_node_text(child_node, source).strip()
+                if len(value_text) > MAX_CONSTANT_VALUE_LENGTH:
+                    const_value = value_text[:MAX_CONSTANT_VALUE_LENGTH]
+                else:
+                    const_value = value_text
+                break
+
+        # Build result dict
+        result: dict[str, str] = {"name": const_name}
+
+        if const_value is not None:
+            result["value"] = const_value
+
+        if const_type is not None:
+            result["type"] = const_type
+
+        return [result]
+
+    # LanguageMapping protocol methods
+    def get_query_for_concept(self, concept: UniversalConcept) -> str | None:
+        """Get tree-sitter query for universal concept in Java."""
+
+        if concept == UniversalConcept.DEFINITION:
+            return """
+            (method_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (constructor_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (class_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (interface_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (enum_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (annotation_type_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (field_declaration) @definition
+
+            (local_variable_declaration) @definition
+            """
+
+        elif concept == UniversalConcept.COMMENT:
+            return """
+            (line_comment) @definition
+            (block_comment) @definition
+            """
+
+        elif concept == UniversalConcept.IMPORT:
+            return """
+            (import_declaration) @definition
+            (package_declaration) @definition
+            """
+
+        elif concept == UniversalConcept.STRUCTURE:
+            return """
+            (program
+                (package_declaration)? @package
+                (import_declaration)* @imports
+            ) @definition
+            """
+
+        else:
+            # BLOCK concept not supported for Java
+            return None
+
+    def extract_name(
+        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+    ) -> str:
+        """Extract name from captures for this concept."""
+        source = content.decode("utf-8")
+
+        if concept == UniversalConcept.DEFINITION:
+            # Use @name capture if available
+            if "name" in captures:
+                return self.get_node_text(captures["name"], source).strip()
+
+            # For field_declaration and local_variable_declaration, extract variable name
+            def_node = captures.get("definition")
+            if def_node and def_node.type in ["field_declaration", "local_variable_declaration"]:
+                declarator = self.find_child_by_type(def_node, "variable_declarator")
+                if declarator:
+                    var_name_node = self.find_child_by_type(declarator, "identifier")
+                    if var_name_node:
+                        return self.get_node_text(var_name_node, source).strip()
+                line = def_node.start_point[0] + 1
+                node_type = "local" if def_node.type == "local_variable_declaration" else "field"
+                return f"{node_type}_line_{line}"
+
+            return "unnamed_definition"
+
+        elif concept == UniversalConcept.COMMENT:
+            if "definition" in captures:
+                node = captures["definition"]
+                line = node.start_point[0] + 1
+                comment_text = self.get_node_text(node, source)
+                if comment_text.strip().startswith("/**"):
+                    return f"javadoc_line_{line}"
+                return f"comment_line_{line}"
+            return "unnamed_comment"
+
+        elif concept == UniversalConcept.IMPORT:
+            if "definition" in captures:
+                node = captures["definition"]
+                import_text = self.get_node_text(node, source).strip()
+
+                # Package declaration
+                if node.type == "package_declaration":
+                    # Extract: package com.example.foo;
+                    if import_text.startswith("package ") and import_text.endswith(";"):
+                        pkg_name = import_text[8:-1].strip()
+                        return f"package_{pkg_name.replace('.', '_')}"
+                    return "package_unknown"
+
+                # Import declaration
+                if node.type == "import_declaration":
+                    # Extract: import com.example.Foo; or import static ...
+                    match = re.search(r"import\s+(?:static\s+)?([\w.]+);", import_text)
+                    if match:
+                        import_path = match.group(1)
+                        parts = import_path.split(".")
+                        return f"import_{parts[-1]}"
+                    return "import_unknown"
+
+            return "unnamed_import"
+
+        elif concept == UniversalConcept.STRUCTURE:
+            return "file_structure"
+
+        return "unnamed"
+
+    def extract_content(
+        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+    ) -> str:
+        """Extract content from captures for this concept."""
+        source = content.decode("utf-8")
+
+        if "definition" in captures:
+            node = captures["definition"]
+            return self.get_node_text(node, source)
+        elif captures:
+            node = list(captures.values())[0]
+            return self.get_node_text(node, source)
+
+        return ""
+
+    def extract_metadata(
+        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+    ) -> dict[str, Any]:
+        """Extract Java-specific metadata."""
+        source = content.decode("utf-8")
+        metadata: dict[str, Any] = {}
+
+        if concept == UniversalConcept.DEFINITION:
+            def_node = captures.get("definition")
+            if def_node:
+                metadata["node_type"] = def_node.type
+
+                # Determine kind
+                kind_map = {
+                    "method_declaration": "method",
+                    "constructor_declaration": "constructor",
+                    "class_declaration": "class",
+                    "interface_declaration": "interface",
+                    "enum_declaration": "enum",
+                    "annotation_type_declaration": "annotation",
+                    "field_declaration": "field",
+                    "local_variable_declaration": "local_variable",
+                }
+                metadata["kind"] = kind_map.get(def_node.type, "unknown")
+
+                # Extract modifiers and visibility
+                modifiers_node = self.find_child_by_type(def_node, "modifiers")
+                if modifiers_node:
+                    modifiers_text = self.get_node_text(modifiers_node, source)
+
+                    # Visibility
+                    if "public" in modifiers_text:
+                        metadata["visibility"] = "public"
+                    elif "private" in modifiers_text:
+                        metadata["visibility"] = "private"
+                    elif "protected" in modifiers_text:
+                        metadata["visibility"] = "protected"
+                    else:
+                        metadata["visibility"] = "package"
+
+                    # Other modifiers
+                    modifiers = []
+                    modifier_keywords = [
+                        "static", "final", "abstract", "synchronized",
+                        "native", "volatile", "transient",
+                    ]
+                    for mod in modifier_keywords:
+                        if mod in modifiers_text:
+                            modifiers.append(mod)
+                    if modifiers:
+                        metadata["modifiers"] = modifiers
+
+                # For methods and constructors
+                if def_node.type in ["method_declaration", "constructor_declaration"]:
+                    params = self.extract_parameters(def_node, source)
+                    if params:
+                        metadata["parameters"] = params
+
+                    if def_node.type == "method_declaration":
+                        return_type = self.extract_return_type(def_node, source)
+                        if return_type:
+                            metadata["return_type"] = return_type
+
+                # Extract annotations
+                annotations = self.extract_annotations(def_node, source)
+                if annotations:
+                    metadata["annotations"] = annotations
+
+                # Extract type parameters (generics)
+                type_params = self.extract_type_parameters(def_node, source)
+                if type_params:
+                    metadata["type_parameters"] = type_params
+
+        elif concept == UniversalConcept.IMPORT:
+            if "definition" in captures:
+                node = captures["definition"]
+                import_text = self.get_node_text(node, source).strip()
+
+                if node.type == "import_declaration":
+                    metadata["import_type"] = "import"
+                    if "static" in import_text:
+                        metadata["is_static_import"] = True
+
+                    # Extract full import path
+                    match = re.search(r"import\s+(?:static\s+)?([\w.]+);", import_text)
+                    if match:
+                        metadata["import_path"] = match.group(1)
+
+                elif node.type == "package_declaration":
+                    metadata["import_type"] = "package"
+                    if import_text.startswith("package ") and import_text.endswith(";"):
+                        metadata["package_name"] = import_text[8:-1].strip()
+
+        elif concept == UniversalConcept.COMMENT:
+            if "definition" in captures:
+                node = captures["definition"]
+                comment_text = self.get_node_text(node, source)
+
+                if node.type == "line_comment":
+                    metadata["comment_type"] = "line"
+                elif node.type == "block_comment":
+                    if comment_text.strip().startswith("/**"):
+                        metadata["comment_type"] = "javadoc"
+                        metadata["is_javadoc"] = True
+                    else:
+                        metadata["comment_type"] = "block"
+
+        return metadata

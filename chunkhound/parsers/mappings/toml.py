@@ -12,7 +12,7 @@ from typing import Any
 from tree_sitter import Node
 
 from chunkhound.core.types.common import Language
-from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 # Handle tomllib availability (Python 3.11+)
@@ -323,10 +323,82 @@ class TomlMapping(BaseMapping):
         return comments
 
     def resolve_import_path(
-        self,
-        import_text: str,
-        base_dir: Path,
-        source_file: Path
+        self, import_text: str, base_dir: Path, source_file: Path
     ) -> Path | None:
         """Data formats don't have imports."""
         return None
+
+    def extract_constants(
+        self,
+        concept: Any,
+        captures: dict[str, Any],
+        content: bytes,
+    ) -> list[dict[str, str]] | None:
+        """Extract TOML table names and key-value pairs with scalar values.
+
+        Returns constant definitions for:
+        - Table names as constants
+        - Key-value pairs with scalar values
+
+        Args:
+            concept: The UniversalConcept being extracted
+            captures: Tree-sitter query captures
+            content: Source file content as bytes
+
+        Returns:
+            List of dicts with 'name' and 'value' keys, or None if not applicable
+        """
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        source = content.decode("utf-8")
+
+        if not HAS_TOMLLIB:
+            return None
+
+        try:
+            data = tomllib.loads(source)
+
+            if not isinstance(data, dict):
+                return None
+
+            constants = []
+
+            def extract_from_dict(d: dict, prefix: str = "") -> None:
+                """Recursively extract constants from nested dict."""
+                for key, value in d.items():
+                    full_key = f"{prefix}.{key}" if prefix else key
+
+                    if isinstance(value, dict):
+                        # Add table name as constant
+                        constants.append({"name": full_key, "value": "[table]"})
+                        # Recurse into nested table
+                        extract_from_dict(value, full_key)
+                    elif isinstance(value, list):
+                        # Handle arrays of tables (list of dicts)
+                        if value and isinstance(value[0], dict):
+                            for idx, item in enumerate(value):
+                                if isinstance(item, dict):
+                                    # Add array element marker
+                                    indexed_key = f"{full_key}[{idx}]"
+                                    constants.append(
+                                        {"name": indexed_key, "value": "[array_table]"}
+                                    )
+                                    # Recurse into array element
+                                    extract_from_dict(item, indexed_key)
+                    elif value is not None and isinstance(
+                        value, (str, int, float, bool)
+                    ):
+                        # Add scalar value
+                        value_str = str(value)
+                        if len(value_str) > MAX_CONSTANT_VALUE_LENGTH:
+                            value_str = value_str[:MAX_CONSTANT_VALUE_LENGTH]
+
+                        constants.append({"name": full_key, "value": value_str})
+
+            extract_from_dict(data)
+
+            return constants if constants else None
+
+        except Exception:
+            return None

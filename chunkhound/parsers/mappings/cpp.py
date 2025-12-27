@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from chunkhound.core.types.common import Language
-from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 if TYPE_CHECKING:
@@ -537,6 +537,12 @@ class CppMapping(BaseMapping):
                     )
                 )
             ) @definition
+
+            ; Capture all declarations with const/constexpr at any scope
+            ; This includes top-level, function-scoped, and nested block declarations
+            (declaration
+                (type_qualifier)
+            ) @definition
             """
 
         elif concept == UniversalConcept.BLOCK:
@@ -860,6 +866,91 @@ class CppMapping(BaseMapping):
         # For class definitions, include even if they're just declarations
         # since they provide valuable type information
         return True
+
+    def extract_constants(
+        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constant definitions from C++ code.
+
+        Detects:
+        - const qualified variable declarations (at any scope)
+        - constexpr declarations (at any scope)
+
+        Args:
+            concept: The universal concept being processed
+            captures: Tree-sitter query captures
+            content: Source file content as bytes
+
+        Returns:
+            List of dictionaries with "name" and "value" keys, or None
+        """
+        if not TREE_SITTER_AVAILABLE:
+            return None
+
+        source = content.decode("utf-8")
+        constants: list[dict[str, str]] = []
+
+        # Only process DEFINITION concept
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        def_node = captures.get("definition")
+        if not def_node:
+            return None
+
+        # Only process declaration nodes
+        if def_node.type != "declaration":
+            return None
+
+        # Check if declaration has const or constexpr qualifier
+        has_const = False
+        has_constexpr = False
+        for child in self.walk_tree(def_node):
+            if child and child.type == "type_qualifier":
+                qualifier_text = self.get_node_text(child, source).strip()
+                if qualifier_text == "const":
+                    has_const = True
+                elif qualifier_text == "constexpr":
+                    has_constexpr = True
+
+        if not (has_const or has_constexpr):
+            return None
+
+        # Extract variable name and initializer value
+        for child in self.walk_tree(def_node):
+            if child and child.type == "init_declarator":
+                # Get the identifier (variable name) - may be nested in pointer_declarator
+                name = ""
+                for id_child in self.walk_tree(child):
+                    if id_child and id_child.type == "identifier":
+                        name = self.get_node_text(id_child, source).strip()
+                        break
+
+                if not name:
+                    continue
+
+                # Get the initializer value
+                value_text = ""
+                for init_child in self.walk_tree(child):
+                    if init_child and init_child.type in (
+                        "number_literal",
+                        "string_literal",
+                        "char_literal",
+                        "true",
+                        "false",
+                        "null",  # nullptr is wrapped in a 'null' node
+                    ):
+                        value_text = self.get_node_text(init_child, source).strip()
+                        break
+
+                # Truncate to 50 chars if longer
+                if len(value_text) > MAX_CONSTANT_VALUE_LENGTH:
+                    value_text = value_text[:MAX_CONSTANT_VALUE_LENGTH]
+
+                if value_text:
+                    constants.append({"name": name, "value": value_text})
+
+        return constants if constants else None
 
     def resolve_import_path(
         self, import_text: str, base_dir: Path, source_file: Path

@@ -7,21 +7,21 @@ arrow functions, ES6 classes, JSDoc comments, and modern module syntax.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from chunkhound.core.types.common import Language
-from chunkhound.parsers.mappings.base import BaseMapping
-from chunkhound.parsers.universal_engine import UniversalConcept
 from chunkhound.parsers.mappings._shared.js_family_extraction import (
     JSFamilyExtraction,
 )
 from chunkhound.parsers.mappings._shared.js_query_patterns import (
-    TOP_LEVEL_LEXICAL_CONFIG,
-    TOP_LEVEL_VAR_CONFIG,
+    COMMONJS_EXPORTS_SHORTHAND,
     COMMONJS_MODULE_EXPORTS,
     COMMONJS_NESTED_EXPORTS,
-    COMMONJS_EXPORTS_SHORTHAND,
+    LEXICAL_DECLARATION_CONFIG,
+    VAR_DECLARATION_CONFIG,
 )
+from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.universal_engine import UniversalConcept
 
 if TYPE_CHECKING:
     from tree_sitter import Node as TSNode
@@ -49,6 +49,19 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
     def __init__(self):
         """Initialize JavaScript mapping."""
         super().__init__(Language.JAVASCRIPT)
+
+    def extract_constants(
+        self,
+        concept: "UniversalConcept",
+        captures: dict[str, "TSNode"],
+        content: bytes,
+    ) -> list[dict[str, str]] | None:
+        """Extract constants using JSFamilyExtraction implementation.
+
+        This override is necessary due to Python MRO: BaseMapping.extract_constants
+        would shadow JSFamilyExtraction.extract_constants otherwise.
+        """
+        return JSFamilyExtraction.extract_constants(self, concept, captures, content)
 
     def get_function_query(self) -> str:
         """Get tree-sitter query for JavaScript function definitions.
@@ -166,8 +179,8 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
                         ; Top-level export (default or named)
                         (export_statement) @definition
                         """,
-                        TOP_LEVEL_LEXICAL_CONFIG,
-                        TOP_LEVEL_VAR_CONFIG,
+                        LEXICAL_DECLARATION_CONFIG,
+                        VAR_DECLARATION_CONFIG,
                         # Function/arrow declarators at top level
                         """
                         (program

@@ -12,7 +12,7 @@ from typing import Any
 from tree_sitter import Node
 
 from chunkhound.core.types.common import Language
-from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 
@@ -97,24 +97,20 @@ class ZigMapping(BaseMapping):
                 ]
             ) @definition
 
-            (source_file
-                (variable_declaration
-                    (identifier) @name
-                    "="
-                    [
-                        (struct_declaration)
-                        (enum_declaration)
-                        (union_declaration)
-                        (opaque_declaration)
-                    ]
-                ) @definition
-            )
+            (variable_declaration
+                (identifier) @name
+                "="
+                [
+                    (struct_declaration)
+                    (enum_declaration)
+                    (union_declaration)
+                    (opaque_declaration)
+                ]
+            ) @definition
 
-            (source_file
-                (variable_declaration
-                    (identifier) @name
-                ) @definition
-            )
+            (variable_declaration
+                (identifier) @name
+            ) @definition
             """
 
         elif concept == UniversalConcept.BLOCK:
@@ -260,7 +256,7 @@ class ZigMapping(BaseMapping):
                 elif def_node.type == "test_declaration":
                     metadata["kind"] = "test"
 
-                # For variable declarations, check if it's a type definition or regular variable
+                # For variable declarations, check if type or variable
                 elif def_node.type == "variable_declaration":
                     # Check if it's a container type definition
                     has_container = False
@@ -346,6 +342,71 @@ class ZigMapping(BaseMapping):
             ):
                 return True
         return False
+
+    def extract_constants(
+        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constant definitions from Zig code.
+
+        Identifies const declarations and comptime values as constants.
+
+        Args:
+            concept: The universal concept being extracted
+            captures: Dictionary of capture names to tree-sitter nodes
+            content: Source code as bytes
+
+        Returns:
+            List of constant dictionaries with 'name' and 'value' keys, or None
+        """
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        # Get the definition node
+        def_node = captures.get("definition")
+        if not def_node or def_node.type != "variable_declaration":
+            return None
+
+        source = content.decode("utf-8")
+
+        # Check if it's a const declaration
+        if not self._is_const(def_node, source):
+            return None
+
+        # Skip local constants - only extract module-level constants
+        # Walk up the tree to check if we're inside a function body
+        parent = def_node.parent
+        while parent is not None:
+            # If we find a block that's inside a function, this is a local constant
+            if parent.type == "block":
+                # Check if this block is part of a function
+                block_parent = parent.parent
+                if block_parent and block_parent.type == "function_declaration":
+                    return None
+            parent = parent.parent
+
+        # Extract variable name
+        name_node = captures.get("name")
+        if not name_node:
+            return None
+
+        name = self.get_node_text(name_node, source).strip()
+
+        # Extract value - look for initialization expression
+        value = ""
+        found_equals = False
+        skip_types = ["const", "var", "pub", "identifier"]
+        for child in def_node.children:
+            if child.type == "=":
+                found_equals = True
+            elif found_equals and child.type not in skip_types:
+                value = self.get_node_text(child, source).strip()
+                break
+
+        # Truncate long values
+        if len(value) > MAX_CONSTANT_VALUE_LENGTH:
+            value = value[:MAX_CONSTANT_VALUE_LENGTH] + "..."
+
+        return [{"name": name, "value": value}]
 
     def resolve_import_path(
         self, import_text: str, base_dir: Path, source_file: Path

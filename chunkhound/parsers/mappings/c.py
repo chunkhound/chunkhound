@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from chunkhound.core.types.common import Language
-from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 if TYPE_CHECKING:
@@ -345,6 +345,20 @@ class CMapping(BaseMapping):
             (type_definition
                 declarator: (type_identifier) @name
             ) @definition
+
+            (preproc_def
+                name: (identifier) @name
+            ) @definition
+
+            (declaration
+                declarator: (identifier) @name
+            ) @definition
+
+            (declaration
+                declarator: (init_declarator
+                    declarator: (identifier) @name
+                )
+            ) @definition
             """
 
         elif concept == UniversalConcept.BLOCK:
@@ -609,6 +623,119 @@ class CMapping(BaseMapping):
                 return False
 
         return True
+
+    def extract_constants(
+        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constant definitions from C code.
+
+        Detects:
+        - #define macros (preprocessor definitions)
+        - const qualified variable declarations
+
+        Args:
+            concept: The universal concept being processed
+            captures: Tree-sitter query captures
+            content: Source file content as bytes
+
+        Returns:
+            List of dictionaries with "name" and "value" keys, or None
+        """
+        if not TREE_SITTER_AVAILABLE:
+            return None
+
+        source = content.decode("utf-8")
+        constants: list[dict[str, str]] = []
+
+        # Only process DEFINITION concept
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        def_node = captures.get("definition")
+        if not def_node:
+            return None
+
+        # Handle #define macros (preproc_def)
+        if def_node.type == "preproc_def":
+            # Skip function-like macros (e.g., #define SQUARE(x) ((x) * (x)))
+            if self.find_child_by_type(def_node, "preproc_params"):
+                return None
+
+            # Extract the macro name
+            name_node = self.find_child_by_type(def_node, "identifier")
+            if name_node:
+                name = self.get_node_text(name_node, source).strip()
+
+                # Extract the macro value from preproc_arg
+                value_node = self.find_child_by_type(def_node, "preproc_arg")
+                if value_node:
+                    value = self.get_node_text(value_node, source).strip()
+                    # Truncate to 50 chars if longer
+                    if len(value) > MAX_CONSTANT_VALUE_LENGTH:
+                        value = value[:MAX_CONSTANT_VALUE_LENGTH]
+                    constants.append({"name": name, "value": value})
+                else:
+                    # Macro without value (e.g., #define FLAG)
+                    constants.append({"name": name, "value": ""})
+
+        # Handle const qualified declarations
+        elif def_node.type == "declaration":
+            # Check if declaration has const qualifier
+            has_const = False
+            for child in self.walk_tree(def_node):
+                if child and child.type == "type_qualifier":
+                    qualifier_text = self.get_node_text(child, source).strip()
+                    if qualifier_text == "const":
+                        has_const = True
+                        break
+
+            if has_const:
+                # Extract variable name and initializer value
+                for child in self.walk_tree(def_node):
+                    if child and child.type == "init_declarator":
+                        # Get the identifier (variable name)
+                        name_node = self.find_child_by_type(child, "identifier")
+                        if name_node:
+                            name = self.get_node_text(name_node, source).strip()
+
+                            # Get the initializer value
+                            value_text = ""
+                            for init_child in self.walk_tree(child):
+                                if init_child and init_child.type in (
+                                    "number_literal",
+                                    "string_literal",
+                                    "char_literal",
+                                    "true",
+                                    "false",
+                                ):
+                                    value_text = self.get_node_text(
+                                        init_child, source
+                                    ).strip()
+                                    break
+
+                            # Truncate to 50 chars if longer
+                            if len(value_text) > MAX_CONSTANT_VALUE_LENGTH:
+                                value_text = value_text[:MAX_CONSTANT_VALUE_LENGTH]
+
+                            if value_text:
+                                constants.append({"name": name, "value": value_text})
+
+        # Handle enum constants
+        elif def_node.type == "enum_specifier":
+            # Find the enumerator_list node
+            enum_list_node = self.find_child_by_type(def_node, "enumerator_list")
+            if enum_list_node:
+                # Extract each enumerator
+                for child in self.walk_tree(enum_list_node):
+                    if child and child.type == "enumerator":
+                        # Get the identifier (enum member name)
+                        name_node = self.find_child_by_type(child, "identifier")
+                        if name_node:
+                            name = self.get_node_text(name_node, source).strip()
+                            # Enum constants use their name as the value
+                            constants.append({"name": name, "value": name})
+
+        return constants if constants else None
 
     def resolve_import_path(
         self, import_text: str, base_dir: Path, source_file: Path

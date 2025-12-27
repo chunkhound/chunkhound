@@ -10,22 +10,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from chunkhound.core.types.common import Language
+from chunkhound.parsers.mappings._shared.js_query_patterns import (
+    COMMONJS_EXPORTS_SHORTHAND,
+    COMMONJS_MODULE_EXPORTS,
+    COMMONJS_NESTED_EXPORTS,
+    LEXICAL_DECLARATION_CONFIG,
+    VAR_DECLARATION_CONFIG,
+)
 from chunkhound.parsers.mappings.javascript import JavaScriptMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-from chunkhound.parsers.mappings._shared.js_query_patterns import (
-    TOP_LEVEL_LEXICAL_CONFIG,
-    TOP_LEVEL_VAR_CONFIG,
-    COMMONJS_MODULE_EXPORTS,
-    COMMONJS_NESTED_EXPORTS,
-    COMMONJS_EXPORTS_SHORTHAND,
-)
-from chunkhound.parsers.mappings._shared.js_query_patterns import (
-    TOP_LEVEL_LEXICAL_CONFIG,
-    TOP_LEVEL_VAR_CONFIG,
-    COMMONJS_MODULE_EXPORTS,
-    COMMONJS_NESTED_EXPORTS,
-    COMMONJS_EXPORTS_SHORTHAND,
-)
 
 if TYPE_CHECKING:
     from tree_sitter import Node as TSNode
@@ -207,8 +200,8 @@ class JSXMapping(JavaScriptMapping):
                 ; Exports
                 (export_statement) @definition
                 """,
-                TOP_LEVEL_LEXICAL_CONFIG,
-                TOP_LEVEL_VAR_CONFIG,
+                LEXICAL_DECLARATION_CONFIG,
+                VAR_DECLARATION_CONFIG,
                 # Top-level const/let function/arrow
                 """
                 (program

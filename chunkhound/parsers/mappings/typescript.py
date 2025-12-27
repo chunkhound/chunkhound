@@ -11,16 +11,16 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from chunkhound.core.types.common import ChunkType, Language
-from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.mappings._shared.js_family_extraction import (
     JSFamilyExtraction,
 )
 from chunkhound.parsers.mappings._shared.js_query_patterns import (
-    TOP_LEVEL_LEXICAL_CONFIG,
+    COMMONJS_EXPORTS_SHORTHAND,
     COMMONJS_MODULE_EXPORTS,
     COMMONJS_NESTED_EXPORTS,
-    COMMONJS_EXPORTS_SHORTHAND,
+    LEXICAL_DECLARATION_CONFIG,
 )
+from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 if TYPE_CHECKING:
@@ -52,6 +52,19 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
     def __init__(self) -> None:
         """Initialize TypeScript mapping."""
         super().__init__(Language.TYPESCRIPT)
+
+    def extract_constants(
+        self,
+        concept: "UniversalConcept",
+        captures: dict[str, "TSNode"],
+        content: bytes,
+    ) -> list[dict[str, str]] | None:
+        """Extract constants using JSFamilyExtraction implementation.
+
+        This override is necessary due to Python MRO: BaseMapping.extract_constants
+        would shadow JSFamilyExtraction.extract_constants otherwise.
+        """
+        return JSFamilyExtraction.extract_constants(self, concept, captures, content)
 
     def get_function_query(self) -> str:
         """Get tree-sitter query pattern for TypeScript function definitions.
@@ -124,10 +137,14 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
                     name: (type_identifier) @name
                 ) @definition
 
+                (enum_declaration
+                    name: (identifier) @name
+                ) @definition
+
                 ; Top-level export (default or named)
                 (export_statement) @definition
                 """,
-                TOP_LEVEL_LEXICAL_CONFIG,
+                LEXICAL_DECLARATION_CONFIG,
                 # Top-level function/arrow declarators
                 """
                 (program

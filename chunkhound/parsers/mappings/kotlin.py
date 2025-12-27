@@ -8,13 +8,14 @@ properties, coroutines, and KDoc comments.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
 from chunkhound.core.types.common import Language
+from chunkhound.parsers.universal_engine import UniversalConcept
 
-from .base import BaseMapping
+from .base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 
 if TYPE_CHECKING:
     from tree_sitter import Node as TSNode
@@ -601,3 +602,250 @@ class KotlinMapping(BaseMapping):
                 return full_path
 
         return None
+
+    def extract_constants(
+        self,
+        concept: UniversalConcept,
+        captures: dict[str, "TSNode"],
+        content: bytes,
+    ) -> list[dict[str, str]] | None:
+        """Extract constant definitions from Kotlin code.
+
+        Detects immutable val declarations at any scope (top-level, class-level,
+        or local function scope). This includes both const val and regular val
+        declarations. Note that var (mutable) declarations are excluded.
+
+        In Kotlin's tree-sitter grammar, all val/var declarations are represented
+        as property_declaration nodes, whether they are top-level, inside classes,
+        or inside function bodies.
+
+        Args:
+            concept: The universal concept being processed
+            captures: Tree-sitter query captures
+            content: Source file content as bytes
+
+        Returns:
+            List of dictionaries with "name" and "value" keys, or None
+        """
+        source = content.decode("utf-8")
+
+        # Only process DEFINITION concept
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        def_node = captures.get("definition")
+        if not def_node or def_node.type != "property_declaration":
+            return None
+
+        # Check if this is a val declaration (immutable)
+        # Note: Both "const val" and "val" have a val child node, while "var" has var
+        has_val = False
+        for child in def_node.children:
+            if child and child.type == "val":
+                has_val = True
+                break
+
+        # Accept val declarations (immutable), reject var declarations (mutable)
+        if not has_val:
+            return None
+
+        # Extract property name
+        # Look for variable_declaration which contains identifier
+        var_decl = self.find_child_by_type(def_node, "variable_declaration")
+        if not var_decl:
+            return None
+
+        name_node = self.find_child_by_type(var_decl, "identifier")
+        if not name_node:
+            return None
+
+        const_name = self.get_node_text(name_node, source).strip()
+
+        # Extract type (optional) from type_reference
+        const_type = None
+        type_ref_node = self.find_child_by_type(def_node, "type_reference")
+        if type_ref_node:
+            const_type = self.get_node_text(type_ref_node, source).strip()
+
+        # Extract value by finding the assignment after "="
+        const_value = None
+        found_equals = False
+        for i in range(def_node.child_count):
+            child = def_node.child(i)
+            if child is None:
+                continue
+
+            if self.get_node_text(child, source).strip() == "=":
+                found_equals = True
+            elif found_equals:
+                # Extract the value
+                value_text = self.get_node_text(child, source).strip()
+                const_value = value_text
+                break
+
+        # Build result dict
+        result: dict[str, str] = {"name": const_name}
+
+        if const_value is not None:
+            result["value"] = const_value[:MAX_CONSTANT_VALUE_LENGTH]
+        if const_type is not None:
+            result["type"] = const_type
+
+        return [result]
+
+    def get_query_for_concept(self, concept: UniversalConcept) -> str | None:
+        """Get tree-sitter query for universal concept in Kotlin."""
+        if concept == UniversalConcept.DEFINITION:
+            # Note: interfaces are represented as class_declaration in Kotlin's tree-sitter
+            return """
+            (function_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (class_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (object_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (property_declaration) @definition
+            """
+
+        elif concept == UniversalConcept.COMMENT:
+            return """
+            (line_comment) @definition
+            (block_comment) @definition
+            """
+
+        elif concept == UniversalConcept.IMPORT:
+            return """
+            (import) @definition
+            (package_header) @definition
+            """
+
+        elif concept == UniversalConcept.STRUCTURE:
+            return """
+            (source_file
+                (package_header)? @package
+                (import)* @imports
+            ) @definition
+            """
+
+        return None
+
+    def extract_name(
+        self, concept: UniversalConcept, captures: dict[str, Any], content: bytes
+    ) -> str:
+        """Extract name from captures for this concept."""
+        source = content.decode("utf-8")
+
+        if concept == UniversalConcept.DEFINITION:
+            # Use @name capture if available
+            if "name" in captures:
+                return self.get_node_text(captures["name"], source).strip()
+
+            # For property_declaration, extract variable name
+            def_node = captures.get("definition")
+            if def_node:
+                if def_node.type == "property_declaration":
+                    var_decl = self.find_child_by_type(def_node, "variable_declaration")
+                    if var_decl:
+                        name_node = self.find_child_by_type(var_decl, "identifier")
+                        if name_node:
+                            return self.get_node_text(name_node, source).strip()
+                    line = def_node.start_point[0] + 1
+                    return f"property_line_{line}"
+                elif def_node.type == "function_declaration":
+                    name_node = self.find_child_by_type(def_node, "identifier")
+                    if name_node:
+                        return self.get_node_text(name_node, source).strip()
+                elif def_node.type in ("class_declaration", "object_declaration"):
+                    name_node = self.find_child_by_type(def_node, "identifier")
+                    if name_node:
+                        return self.get_node_text(name_node, source).strip()
+
+            return "unnamed_definition"
+
+        elif concept == UniversalConcept.COMMENT:
+            if "definition" in captures:
+                node = captures["definition"]
+                line = node.start_point[0] + 1
+                comment_text = self.get_node_text(node, source)
+                if comment_text.strip().startswith("/**"):
+                    return f"kdoc_line_{line}"
+                return f"comment_line_{line}"
+            return "unnamed_comment"
+
+        elif concept == UniversalConcept.IMPORT:
+            if "definition" in captures:
+                node = captures["definition"]
+                import_text = self.get_node_text(node, source).strip()
+
+                # Package header
+                if node.type == "package_header":
+                    if import_text.startswith("package "):
+                        pkg_name = import_text[8:].strip()
+                        return f"package_{pkg_name.replace('.', '_')}"
+                    return "package_unknown"
+
+                # Import statement
+                if node.type == "import":
+                    match = re.search(r"import\s+([\w.]+)", import_text)
+                    if match:
+                        import_path = match.group(1)
+                        parts = import_path.split(".")
+                        return f"import_{parts[-1]}"
+                    return "import_unknown"
+
+            return "unnamed_import"
+
+        elif concept == UniversalConcept.STRUCTURE:
+            return "file_structure"
+
+        return "unnamed"
+
+    def extract_content(
+        self, concept: UniversalConcept, captures: dict[str, Any], content: bytes
+    ) -> str:
+        """Extract content from captures for this concept."""
+        source = content.decode("utf-8")
+
+        if "definition" in captures:
+            node = captures["definition"]
+            return self.get_node_text(node, source)
+        elif captures:
+            node = list(captures.values())[0]
+            return self.get_node_text(node, source)
+
+        return ""
+
+    def extract_metadata(
+        self, concept: UniversalConcept, captures: dict[str, Any], content: bytes
+    ) -> dict[str, Any]:
+        """Extract Kotlin-specific metadata."""
+        source = content.decode("utf-8")
+        metadata: dict[str, Any] = {}
+
+        if concept == UniversalConcept.DEFINITION:
+            def_node = captures.get("definition")
+            if def_node:
+                metadata["node_type"] = def_node.type
+
+                # Determine kind
+                kind_map = {
+                    "function_declaration": "function",
+                    "class_declaration": "class",
+                    "object_declaration": "object",
+                    "property_declaration": "property",
+                }
+                metadata["kind"] = kind_map.get(def_node.type, "unknown")
+
+                # Extract modifiers
+                modifiers_node = self.find_child_by_type(def_node, "modifiers")
+                if modifiers_node:
+                    modifiers_text = self.get_node_text(modifiers_node, source)
+                    metadata["modifiers"] = modifiers_text.strip()
+
+        return metadata

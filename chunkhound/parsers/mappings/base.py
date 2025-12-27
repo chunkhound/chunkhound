@@ -17,6 +17,8 @@ from chunkhound.core.types.common import ChunkType, Language
 if TYPE_CHECKING:
     from tree_sitter import Node as TSNode
 
+    from chunkhound.parsers.universal_engine import UniversalConcept
+
 try:
     from tree_sitter import Node as TSNode
 
@@ -24,6 +26,9 @@ try:
 except ImportError:
     TREE_SITTER_AVAILABLE = False
     TSNode = Any  # type: ignore
+
+# Maximum length for constant values in metadata (prevents bloat)
+MAX_CONSTANT_VALUE_LENGTH = 50
 
 
 class BaseMapping(ABC):
@@ -111,7 +116,8 @@ class BaseMapping(ABC):
         """
         if not TREE_SITTER_AVAILABLE or node is None:
             return ""
-        return source[node.start_byte : node.end_byte]
+        source_bytes = source.encode("utf-8")
+        return source_bytes[node.start_byte : node.end_byte].decode("utf-8")
 
     def find_child_by_type(self, node: TSNode | None, node_type: str) -> TSNode | None:
         """Find first child node of specified type.
@@ -470,5 +476,32 @@ class BaseMapping(ABC):
 
         Returns:
             Resolved file path or None if external/unresolvable
+        """
+        return None
+
+    def extract_constants(
+        self,
+        concept: "UniversalConcept",
+        captures: dict[str, "TSNode"],
+        content: bytes,
+    ) -> list[dict[str, str]] | None:
+        """Extract constants from captures.
+
+        Default implementation returns None (no constants).
+        Override in language-specific subclasses to extract:
+        - UPPER_SNAKE_CASE variables (Python)
+        - const declarations (JS/TS, Go, Rust)
+        - #define macros (C/C++)
+        - static final fields (Java)
+        - etc.
+
+        Args:
+            concept: The UniversalConcept being extracted
+            captures: Tree-sitter query captures
+            content: Source file content as bytes
+
+        Returns:
+            List of constant dicts with keys: name, value, type (optional)
+            Returns None if no constants found or not applicable.
         """
         return None

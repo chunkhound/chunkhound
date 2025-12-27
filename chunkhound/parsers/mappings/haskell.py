@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from chunkhound.core.types.common import Language
+from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-from chunkhound.parsers.mappings.base import BaseMapping
 
 if TYPE_CHECKING:
     from tree_sitter import Node as TSNode
@@ -212,6 +212,11 @@ class HaskellMapping(BaseMapping):
             (bind) @definition
 
             (pattern_synonym) @definition
+
+            ; Capture let bindings (inside expressions)
+            (local_binds
+                (bind) @definition
+            )
             """
 
         elif concept == UniversalConcept.BLOCK:
@@ -395,6 +400,110 @@ class HaskellMapping(BaseMapping):
         if " where" in rest:
             rest = rest.split(" where", 1)[0]
         return rest.strip() or "module_unknown"
+
+    def extract_constants(
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constant definitions from Haskell code.
+
+        Identifies bindings with simple constant patterns (literals, lists, etc.)
+        from multiple contexts:
+        - Top-level bindings: `maxValue = 100`
+        - Let bindings: `let localConst = 42 in ...`
+        - Where clauses: `... where x = 10`
+
+        Rejects function definitions (bindings with parameters) and complex
+        expressions (lambdas, case, let, do, etc.).
+
+        Args:
+            concept: The universal concept being extracted
+            captures: Dictionary of capture names to tree-sitter nodes
+            content: Source code as bytes
+
+        Returns:
+            List of constant dictionaries with 'name' and 'value' keys, or None
+        """
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        # Get the definition node
+        def_node = captures.get("definition")
+        if not def_node or def_node.type not in ["function", "bind"]:
+            return None
+
+        # Skip function definitions (they have patterns)
+        if def_node.type == "function":
+            return None
+
+        source = content.decode("utf-8")
+
+        # Extract name from variable node
+        name_node = def_node.child_by_field_name("name")
+        if not name_node:
+            return None
+
+        name = self.get_node_text(name_node, source).strip()
+
+        # Must start with lowercase (Haskell naming convention)
+        if not name or not name[0].islower():
+            return None
+
+        # Get the match node (contains = and RHS)
+        match_node = def_node.child_by_field_name("match")
+        if not match_node:
+            return None
+
+        # Find the RHS value node (skip the '=' token)
+        value_node = None
+        for child in match_node.children:
+            if child.type != "=":
+                value_node = child
+                break
+
+        if not value_node:
+            return None
+
+        # Check if the value is a simple constant
+        # Accept: literal, list, variable, record, tuple, string
+        # Reject: lambda, case, let, where, do, function application with complex args
+        simple_value_types = {
+            "literal", "list", "variable", "record", "tuple", "string",
+            "quoted_name", "con_unit", "integer", "float", "char",
+        }
+
+        # Reject complex expressions
+        if value_node.type in {"lambda", "case", "let_in", "do"}:
+            return None
+
+        # For other types, check if children are simple (heuristic)
+        # This handles constructors like "Just 42" or "Config {...}"
+        if value_node.type not in simple_value_types:
+            # Check if it contains lambda, case, let, etc. in subtree
+            if self._contains_complex_expression(value_node):
+                return None
+
+        # Extract value text
+        value = self.get_node_text(value_node, source).strip()
+
+        # Truncate long values
+        if len(value) > MAX_CONSTANT_VALUE_LENGTH:
+            value = value[:MAX_CONSTANT_VALUE_LENGTH] + "..."
+
+        return [{"name": name, "value": value}]
+
+    def _contains_complex_expression(self, node: TSNode) -> bool:
+        """Check if node contains complex expressions (lambda, case, let, etc.)."""
+        complex_types = {"lambda", "case", "let_in", "do", "where"}
+
+        if node.type in complex_types:
+            return True
+
+        # Recursively check children (limit depth to avoid performance issues)
+        for child in node.children:
+            if self._contains_complex_expression(child):
+                return True
+
+        return False
 
     def resolve_import_path(
         self, import_text: str, base_dir: Path, source_file: Path
