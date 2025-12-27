@@ -180,43 +180,35 @@ FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and 
 
 ## MIGRATION_NOTES
 
-### Clustering Algorithm: K-means → HDBSCAN (Two-Phase Approach)
+### Clustering Service: Dual-Algorithm Architecture
 
-**What Changed:**
-- **Old**: K-means clustering with predetermined k (calculated from token budget)
-- **New**: Two-phase HDBSCAN clustering:
-  - Phase 1: HDBSCAN discovers natural semantic clusters
-  - Phase 2: Greedy grouping merges clusters to approach token budget
+**Current Design:**
+ClusteringService provides two distinct methods for different use cases:
 
-**Impact on Users:**
-1. **Cluster Assignments**: Files may be grouped differently due to semantic clustering
-2. **Cluster Counts**: Number of clusters may vary (HDBSCAN finds natural groups vs. fixed k)
-3. **Outlier Detection**: HDBSCAN identifies semantically distant files as outliers, merging them into nearest clusters when possible
-4. **Metadata Schema**: New fields added to clustering metadata:
-   - `num_native_clusters`: Natural clusters discovered by HDBSCAN (Phase 1)
-   - `num_outliers`: Files detected as outliers (noise points)
-   - `num_clusters`: Final cluster count after merging (Phase 2) - **existing field**
+1. **`cluster_files(files, n_clusters)`** - K-means clustering
+   - Requires explicit `n_clusters` parameter
+   - Deterministic output for same input
+   - Use when you need a specific number of clusters
 
-**Benefits:**
-- More semantic clustering (files grouped by meaning, not arbitrary k)
-- Better handling of diverse codebases (natural cluster discovery)
-- Outlier detection identifies files that don't fit semantically
+2. **`cluster_files_hdbscan(files, min_cluster_size=2)`** - HDBSCAN clustering
+   - Discovers natural semantic groupings automatically
+   - Outliers reassigned to nearest cluster (no dropped files)
+   - Use for exploratory analysis or when cluster count is unknown
 
-**Performance Considerations:**
-- HDBSCAN has O(n²) complexity for baseline implementation (vs. K-means O(n·k·d·iterations))
-- For typical workloads (n<1000 files for synthesis), O(n²) is acceptable but untested
-- Greedy merge phase is O(k³) typical case, O(k⁴) worst-case where k = num_native_clusters (typically <100)
-- Performance testing recommended before production use at scale
+**API Signatures:**
+```python
+# K-means: Deterministic clustering into exactly n_clusters
+clusters, metadata = await service.cluster_files(files, n_clusters=5)
+# metadata: num_clusters, total_files, total_tokens, avg_tokens_per_cluster
 
-**Backward Compatibility:**
-- **API**: `ClusteringService.cluster_files()` signature unchanged
-- **Metadata**: Existing fields (`num_clusters`, `total_files`, etc.) remain unchanged
-- **Integration**: No changes required to synthesis_engine.py or other consumers
+# HDBSCAN: Natural cluster discovery
+clusters, metadata = await service.cluster_files_hdbscan(files, min_cluster_size=2)
+# metadata: num_clusters, num_native_clusters, num_outliers, total_files, total_tokens, avg_tokens_per_cluster
+```
 
-**Migration Path:**
-- No action required for most users
-- If you have custom code that inspects clustering metadata keys, update to handle new fields
-- If synthesis quality changes, file a bug report with comparison results
+**When to Use Which:**
+- **K-means**: Budget-constrained synthesis passes, reproducible results needed
+- **HDBSCAN**: First-pass analysis, understanding natural code groupings
 
 ## DIRECTORY_STRUCTURE
 ```
