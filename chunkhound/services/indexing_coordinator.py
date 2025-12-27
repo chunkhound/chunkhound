@@ -1517,10 +1517,14 @@ class IndexingCoordinator(BaseService):
 
                 code = normalize_content(chunk.get("code", ""))
                 if code:  # Only include chunks with actual content
+                    # Extract constants from metadata if available
+                    metadata = chunk.get("metadata") or {}
+                    constants = metadata.get("constants")
                     text = format_chunk_for_embedding(
                         code=code,
                         file_path=chunk.get("file_path"),
                         language=chunk.get("language"),
+                        constants=constants,
                     )
                     valid_chunk_data.append((chunk_id, chunk, text))
                 else:
