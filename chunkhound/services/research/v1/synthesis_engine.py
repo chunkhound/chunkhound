@@ -25,6 +25,10 @@ from chunkhound.database_factory import DatabaseServices
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services import prompts
 from chunkhound.services.clustering_service import ClusterGroup, ClusteringService
+from chunkhound.services.research.shared.constants_ledger import (
+    CONSTANTS_INSTRUCTION_FULL,
+    CONSTANTS_INSTRUCTION_SHORT,
+)
 from chunkhound.services.research.shared.models import (
     CLUSTER_OUTPUT_TOKEN_BUDGET,
     MAX_CHUNKS_PER_FILE_REPR,
@@ -282,6 +286,7 @@ class SynthesisEngine:
         files: dict[str, str],
         context: Any,
         synthesis_budgets: dict[str, int],
+        constants_context: str = "",
     ) -> str:
         """Perform single-pass synthesis with all aggregated data.
 
@@ -300,6 +305,7 @@ class SynthesisEngine:
             files: Budgeted file contents (subset within token limits)
             context: Research context
             synthesis_budgets: Dynamic budgets based on repository size
+            constants_context: Constants ledger context for LLM prompts
 
         Returns:
             Synthesized answer from single LLM call with appended sources footer
@@ -386,6 +392,11 @@ class SynthesisEngine:
         )
         reference_table = self._parent._format_reference_table(file_reference_map)
 
+        # Build constants context section
+        constants_section = ""
+        if constants_context:
+            constants_section = f"\n\n{constants_context}\n\n{CONSTANTS_INSTRUCTION_FULL}"
+
         # Build output guidance with fixed 25k token budget
         # Output budget is always 25k (includes reasoning + actual output)
         output_guidance = (
@@ -397,8 +408,11 @@ class SynthesisEngine:
         # Build comprehensive synthesis prompt (adapted from Code Expert methodology)
         system = prompts.SYNTHESIS_SYSTEM_BUILDER(output_guidance)
 
+        # Combine root_query with constants context
+        query_with_constants = root_query + constants_section
+
         prompt = prompts.SYNTHESIS_USER.format(
-            root_query=root_query,
+            root_query=query_with_constants,
             reference_table=reference_table,
             code_context=code_context,
         )
@@ -481,11 +495,12 @@ class SynthesisEngine:
         clustering_service = ClusteringService(
             embedding_provider=embedding_provider,  # type: ignore[arg-type]
             llm_provider=llm_provider,
-            max_tokens_per_cluster=MAX_TOKENS_PER_CLUSTER,
         )
 
-        # Cluster the files
-        cluster_groups, metadata = await clustering_service.cluster_files(files)
+        # Cluster the files using HDBSCAN for natural semantic grouping
+        cluster_groups, metadata = await clustering_service.cluster_files_hdbscan(
+            files, min_cluster_size=2
+        )
 
         logger.info(
             f"Clustered into {metadata['num_clusters']} groups, "
@@ -500,6 +515,7 @@ class SynthesisEngine:
         root_query: str,
         chunks: list[dict[str, Any]],
         synthesis_budgets: dict[str, int],
+        constants_context: str = "",
     ) -> dict[str, Any]:
         """Synthesize partial answer for one cluster of files.
 
@@ -508,6 +524,7 @@ class SynthesisEngine:
             root_query: Original research query
             chunks: All chunks (will be filtered to cluster files)
             synthesis_budgets: Dynamic budgets based on repository size
+            constants_context: Constants ledger context for LLM prompts
 
         Returns:
             Dictionary with:
@@ -576,6 +593,11 @@ class SynthesisEngine:
             CLUSTER_OUTPUT_TOKEN_BUDGET, synthesis_budgets["output_tokens"] // 2
         )
 
+        # Build constants section if available
+        constants_section = ""
+        if constants_context:
+            constants_section = f"\n{constants_context}\n\n{CONSTANTS_INSTRUCTION_SHORT}"
+
         system = f"""You are analyzing a subset of code files as part of a larger codebase analysis.
 
 Focus on:
@@ -589,7 +611,7 @@ Be thorough but concise - your analysis will be combined with other clusters.
 Target output: ~{cluster_output_tokens:,} tokens (includes reasoning)."""
 
         prompt = f"""Query: {root_query}
-
+{constants_section}
 {reference_table}
 
 Analyze the following code files and provide insights relevant to the query above:
@@ -642,6 +664,7 @@ Provide a comprehensive analysis focusing on the query."""
         all_chunks: list[dict[str, Any]],
         all_files: dict[str, str],
         synthesis_budgets: dict[str, int],
+        constants_context: str = "",
     ) -> str:
         """Combine cluster summaries into final answer.
 
@@ -651,6 +674,7 @@ Provide a comprehensive analysis focusing on the query."""
             all_chunks: All chunks from clusters (will be filtered to match synthesized files)
             all_files: All files that were synthesized across clusters
             synthesis_budgets: Dynamic budgets based on repository size
+            constants_context: Constants ledger context for LLM prompts
 
         Returns:
             Final synthesized answer with sources footer
@@ -702,6 +726,11 @@ Provide a comprehensive analysis focusing on the query."""
 
         combined_summaries = "\n\n" + "=" * 80 + "\n\n".join(cluster_summaries)
 
+        # Build constants section if available
+        constants_section = ""
+        if constants_context:
+            constants_section = f"\n\n{constants_context}\n\n{CONSTANTS_INSTRUCTION_FULL}"
+
         # Build reduce prompt
         system = f"""You are synthesizing multiple partial analyses into a comprehensive final answer.
 
@@ -719,7 +748,7 @@ Your task:
 Target output: ~{max_output_tokens:,} tokens (includes reasoning)."""
 
         prompt = f"""Query: {root_query}
-
+{constants_section}
 {reference_table}
 
 You have been provided with analyses of different code clusters.

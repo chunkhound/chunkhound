@@ -22,6 +22,7 @@ Key Features:
 - Stagnation detection: Falls back to force compression if no progress
 """
 
+import asyncio
 from typing import Any
 
 from loguru import logger
@@ -181,7 +182,6 @@ class CompressionService:
 
             compressed_single = await self._force_compress_single(
                 root_query,
-                gap_queries,
                 key,
                 content,
                 target_tokens,
@@ -196,12 +196,12 @@ class CompressionService:
                 f"({current_tokens:,} tokens fits in final synthesis call)"
             )
             merged = await self._merge_summaries(
-                root_query, gap_queries, content_dict, target_tokens
+                root_query, content_dict, target_tokens
             )
             return {"summary": merged}
 
-        # Cluster content using existing ClusteringService
-        clusters = await self._cluster_content(content_dict, cluster_budget_fixed)
+        # Cluster content: HDBSCAN at depth=0, k-means otherwise
+        clusters = await self._cluster_content(content_dict, cluster_budget_fixed, depth)
 
         # Fixed budget per cluster (half of final_synthesis_threshold)
         cluster_budget = cluster_budget_fixed
@@ -219,40 +219,33 @@ class CompressionService:
             clusters=len(clusters),
         )
 
-        compressed_results: dict[str, str] = {}
-        for i, cluster in enumerate(clusters):
-            cluster_tokens = sum(
-                llm.estimate_tokens(c) for c in cluster.files_content.values()
-            )
+        # Compress clusters in parallel with concurrency limit
+        # Use synthesis provider's recommended concurrency to avoid rate limiting
+        synthesis_provider = self._llm_manager.get_synthesis_provider()
+        max_concurrency = synthesis_provider.get_synthesis_concurrency()
+        semaphore = asyncio.Semaphore(max_concurrency)
 
-            if cluster_tokens > final_synthesis_threshold:
-                # RECURSIVE: this cluster is too large for final synthesis
-                logger.info(
-                    f"Cluster {i} at depth {depth} has {cluster_tokens:,} tokens > "
-                    f"{final_synthesis_threshold:,}, recursing..."
-                )
-                compressed = await self.compress_to_budget(
+        async def compress_with_limit(
+            i: int, cluster: ClusterGroup
+        ) -> tuple[str, str]:
+            async with semaphore:
+                return await self._compress_single_cluster(
+                    i,
+                    cluster,
+                    depth,
                     root_query,
                     gap_queries,
-                    cluster.files_content,
                     cluster_budget,
                     file_imports,
-                    depth + 1,
-                    prev_tokens=None,  # No stagnation check for cluster subdivision
+                    final_synthesis_threshold,
                 )
-                # Extract the single summary from recursive result
-                summary_key = f"cluster_{depth}_{i}"
-                compressed_results[summary_key] = list(compressed.values())[0]
-            else:
-                # Safe to compress in single call
-                summary = await self._compress_cluster(
-                    root_query,
-                    gap_queries,
-                    cluster.files_content,
-                    cluster_budget,
-                    file_imports,
-                )
-                compressed_results[f"cluster_{depth}_{i}"] = summary
+
+        tasks = [compress_with_limit(i, cluster) for i, cluster in enumerate(clusters)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        errors = [r for r in results if isinstance(r, Exception)]
+        if errors:
+            raise RuntimeError(f"Cluster compression failed: {errors[0]}")
+        compressed_results = dict(results)  # type: ignore[arg-type]
 
         # Check if we need another level of compression
         merged_tokens = sum(llm.estimate_tokens(c) for c in compressed_results.values())
@@ -287,73 +280,58 @@ class CompressionService:
         self,
         content_dict: dict[str, str],
         cluster_budget: int,
+        depth: int = 0,
     ) -> list[ClusterGroup]:
-        """Cluster content dict using ClusteringService.
+        """Cluster content dict using HDBSCAN (depth=0) or k-means (depth>0).
+
+        First pass (depth=0): HDBSCAN discovers natural semantic clusters
+        Subsequent passes (depth>0): k-means with budget-based target_k
 
         Args:
             content_dict: File path -> content mapping
-            cluster_budget: Fixed cluster budget (37,500 tokens)
+            cluster_budget: Target tokens per cluster
+            depth: Current recursion depth (0 for first pass)
 
         Returns:
             List of ClusterGroup objects
         """
-        # Must match compress_to_budget
-        final_synthesis_threshold = self._config.final_synthesis_threshold
-
         embedding_provider = self._embedding_manager.get_provider()
         synthesis_provider = self._llm_manager.get_synthesis_provider()
-
-        # Use fixed cluster budget directly
-        max_tokens_per_cluster = cluster_budget
 
         clustering_service = ClusteringService(
             embedding_provider=embedding_provider,
             llm_provider=synthesis_provider,
-            max_tokens_per_cluster=max_tokens_per_cluster,
-            min_cluster_size=self._config.min_cluster_size,
         )
 
-        cluster_groups, cluster_metadata = await clustering_service.cluster_files(
-            content_dict
-        )
-
-        logger.debug(
-            f"HDBSCAN: {cluster_metadata['num_clusters']} clusters, "
-            f"avg {cluster_metadata['avg_tokens_per_cluster']:,} tokens/cluster"
-        )
-
-        # Stagnation detection: HDBSCAN produced same or more clusters than input,
-        # OR returned a single oversized cluster that can't fit in final synthesis
-        input_count = len(content_dict)
-        output_count = len(cluster_groups)
-
-        # Check if single cluster is too large for final synthesis
-        single_cluster_too_large = (
-            output_count == 1
-            and input_count > 1
-            and cluster_groups[0].total_tokens > final_synthesis_threshold
-        )
-
-        if (
-            output_count >= input_count and input_count > 1
-        ) or single_cluster_too_large:
-            # Fallback to k-means with guaranteed reduction
-            # Ensure k < input_count: min(input_count - 1, ...) guarantees reduction
-            target_k = max(1, min(input_count - 1, input_count // 2))
-            reason = (
-                f"single cluster too large ({cluster_groups[0].total_tokens:,} tokens)"
-                if single_cluster_too_large
-                else f"{input_count} -> {output_count} clusters"
+        if depth == 0:
+            # HDBSCAN for natural semantic discovery (first pass)
+            cluster_groups, cluster_metadata = (
+                await clustering_service.cluster_files_hdbscan(
+                    content_dict,
+                    min_cluster_size=2,
+                )
             )
+
             logger.info(
-                f"HDBSCAN stagnated ({reason}), "
-                f"falling back to k-means with k={target_k}"
+                f"HDBSCAN: {cluster_metadata['num_native_clusters']} native clusters, "
+                f"{cluster_metadata['num_outliers']} outliers reassigned, "
+                f"{cluster_metadata['num_clusters']} final clusters"
+            )
+        else:
+            # k-means for subsequent passes (structure already known)
+            total_tokens = sum(
+                synthesis_provider.estimate_tokens(c) for c in content_dict.values()
             )
 
-            (
-                cluster_groups,
-                cluster_metadata,
-            ) = await clustering_service.cluster_files_kmeans(
+            # Smart k selection: aim for clusters that fit budget
+            # At least 2 to ensure reduction, at most half input count
+            target_k = max(2, total_tokens // cluster_budget)
+            target_k = min(target_k, len(content_dict) // 2)
+
+            # Clamp to valid range
+            target_k = max(1, min(target_k, len(content_dict)))
+
+            cluster_groups, cluster_metadata = await clustering_service.cluster_files(
                 content_dict, n_clusters=target_k
             )
 
@@ -362,31 +340,79 @@ class CompressionService:
                 f"avg {cluster_metadata['avg_tokens_per_cluster']:,} tokens/cluster"
             )
 
-            # Sanity check: k-means must reduce cluster count
-            if len(cluster_groups) >= input_count:
-                raise RuntimeError(
-                    f"K-means failed to reduce cluster count: "
-                    f"{input_count} -> {len(cluster_groups)} (target_k={target_k}). "
-                    f"This should never happen with k < input_count."
-                )
-
         return cluster_groups
+
+    async def _compress_single_cluster(
+        self,
+        i: int,
+        cluster: ClusterGroup,
+        depth: int,
+        root_query: str,
+        gap_queries: list[str],
+        cluster_budget: int,
+        file_imports: dict[str, list[str]],
+        final_synthesis_threshold: int,
+    ) -> tuple[str, str]:
+        """Compress a single cluster (helper for parallel processing).
+
+        Args:
+            i: Cluster index
+            cluster: ClusterGroup to compress
+            depth: Current recursion depth
+            root_query: Original research query
+            gap_queries: Gap queries for compound context
+            cluster_budget: Token budget per cluster
+            file_imports: Pre-extracted imports per file
+            final_synthesis_threshold: Threshold for single-pass compression
+
+        Returns:
+            Tuple of (key, compressed_content)
+        """
+        llm = self._llm_manager.get_utility_provider()
+        cluster_tokens = sum(
+            llm.estimate_tokens(c) for c in cluster.files_content.values()
+        )
+
+        summary_key = f"cluster_{depth}_{i}"
+
+        if cluster_tokens > final_synthesis_threshold:
+            # RECURSIVE: this cluster is too large for final synthesis
+            logger.info(
+                f"Cluster {i} at depth {depth} has {cluster_tokens:,} tokens > "
+                f"{final_synthesis_threshold:,}, recursing..."
+            )
+            compressed = await self.compress_to_budget(
+                root_query,
+                gap_queries,
+                cluster.files_content,
+                cluster_budget,
+                file_imports,
+                depth + 1,
+                prev_tokens=None,  # No stagnation check for cluster subdivision
+            )
+            # Extract the single summary from recursive result
+            return (summary_key, list(compressed.values())[0])
+        else:
+            # Safe to compress in single call
+            summary = await self._compress_cluster(
+                root_query,
+                cluster.files_content,
+                cluster_budget,
+                file_imports,
+            )
+            return (summary_key, summary)
 
     async def _compress_cluster(
         self,
         root_query: str,
-        gap_queries: list[str],
         cluster_content: dict[str, str],
         target_tokens: int,
         file_imports: dict[str, list[str]],
     ) -> str:
         """Compress a cluster of files using LLM (helper for compression loop).
 
-        Includes ROOT + gap queries in prompt to maintain query focus.
-
         Args:
             root_query: Original research query
-            gap_queries: Gap queries for compound context
             cluster_content: File path -> content mapping for this cluster
             target_tokens: Target output size in tokens
             file_imports: Pre-extracted imports per file (lookup, no re-parsing)
@@ -396,21 +422,23 @@ class CompressionService:
         """
         llm = self._llm_manager.get_synthesis_provider()
 
-        # Calculate compression ratio for prompt guidance
         input_tokens = sum(llm.estimate_tokens(c) for c in cluster_content.values())
-        target_ratio = target_tokens / max(input_tokens, 1)
+        needs_compression = input_tokens > target_tokens
 
-        logger.debug(
-            f"Compressing cluster: {len(cluster_content)} files, "
-            f"{input_tokens:,} -> {target_tokens:,} tokens ({target_ratio:.0%})"
-        )
+        if needs_compression:
+            target_ratio = target_tokens / max(input_tokens, 1)
+            logger.debug(
+                f"Compressing cluster: {len(cluster_content)} files, "
+                f"{input_tokens:,} -> {target_tokens:,} tokens ({target_ratio:.0%})"
+            )
+        else:
+            logger.debug(
+                f"Summarizing cluster (under budget): {len(cluster_content)} files, "
+                f"{input_tokens:,} tokens, max {target_tokens:,}"
+            )
 
-        # Build compound query context
-        compound_context = f"PRIMARY QUERY: {root_query}"
-        if gap_queries:
-            compound_context += "\n\nRELATED GAPS IDENTIFIED:\n"
-            for gap in gap_queries:
-                compound_context += f"- {gap}\n"
+        # Use root query only for compression (gaps are injected in final synthesis)
+        query_context = f"QUERY: {root_query}"
 
         # Inject imports header for each file (using pre-extracted file_imports)
         # Cluster summaries (e.g., "cluster_0_0") won't be in file_imports, so
@@ -429,33 +457,51 @@ class CompressionService:
 
         code_context = "\n\n".join(code_sections)
 
-        # Compress cluster with explicit budget guidance
-        system = f"""You are compressing code files for a research synthesis.
+        # Conditional prompts: compression guidance only when over budget
+        if needs_compression:
+            system = f"""You are compressing code files for a research synthesis.
 
-CRITICAL: You must compress to approximately {target_tokens:,} tokens.
-Input is {input_tokens:,} tokens - compress to {target_ratio:.0%} of original size.
+Compress to MAXIMUM {target_tokens:,} tokens (input: {input_tokens:,} tokens).
+Be concise—include only what's essential for the query.
 
 Focus on:
 - Key architectural patterns and relationships
-- Essential implementation details for the query
+- Essential implementation details
 - Remove redundant examples and boilerplate
 
 {CITATION_REQUIREMENTS}
 
 Maintain citation references to files."""
+            prompt_suffix = "Provide a concise summary."
+        else:
+            # Under budget: summarize concisely
+            system = f"""You are summarizing code files for a research synthesis.
 
-        prompt = f"""{compound_context}
+Be concise. Maximum {target_tokens:,} tokens.
 
-Analyze the following code files and provide a concise summary focusing on the query:
+Focus on:
+- Key architectural patterns and relationships
+- Essential implementation details
+
+{CITATION_REQUIREMENTS}
+
+Maintain citation references to files."""
+            prompt_suffix = "Provide a concise summary."
+
+        prompt = f"""{query_context}
+
+Summarize the following code files:
 
 {code_context}
 
-Provide a compressed summary of approximately {target_tokens:,} tokens."""
+{prompt_suffix}"""
 
-        # Bounded max_completion_tokens: 20k-50k range for quality
-        min_llm_tokens = 20000
-        max_llm_tokens = 50000
-        effective_max = max(min_llm_tokens, min(target_tokens * 2, max_llm_tokens))
+        # No artificial floor - let LLM choose natural length
+        if needs_compression:
+            effective_max = target_tokens
+        else:
+            # Under budget: cap at input to prevent expansion
+            effective_max = min(target_tokens, input_tokens)
 
         response = await llm.complete(
             prompt,
@@ -472,7 +518,6 @@ Provide a compressed summary of approximately {target_tokens:,} tokens."""
     async def _merge_summaries(
         self,
         root_query: str,
-        gap_queries: list[str],
         summaries: dict[str, str],
         target_tokens: int,
     ) -> str:
@@ -483,7 +528,6 @@ Provide a compressed summary of approximately {target_tokens:,} tokens."""
 
         Args:
             root_query: Original research query
-            gap_queries: Gap queries for compound context
             summaries: Key -> summary content mapping
             target_tokens: Target output size in tokens
 
@@ -492,21 +536,23 @@ Provide a compressed summary of approximately {target_tokens:,} tokens."""
         """
         llm = self._llm_manager.get_synthesis_provider()
 
-        # Calculate compression ratio for prompt guidance
         input_tokens = sum(llm.estimate_tokens(c) for c in summaries.values())
-        target_ratio = target_tokens / max(input_tokens, 1)
+        needs_compression = input_tokens > target_tokens
 
-        logger.debug(
-            f"Merging {len(summaries)} summaries: "
-            f"{input_tokens:,} -> {target_tokens:,} tokens ({target_ratio:.0%})"
-        )
+        if needs_compression:
+            target_ratio = target_tokens / max(input_tokens, 1)
+            logger.debug(
+                f"Merging {len(summaries)} summaries with compression: "
+                f"{input_tokens:,} -> {target_tokens:,} tokens ({target_ratio:.0%})"
+            )
+        else:
+            logger.debug(
+                f"Merging {len(summaries)} summaries (under budget): "
+                f"{input_tokens:,} tokens, max {target_tokens:,}"
+            )
 
-        # Build compound query context
-        compound_context = f"PRIMARY QUERY: {root_query}"
-        if gap_queries:
-            compound_context += "\n\nRELATED GAPS IDENTIFIED:\n"
-            for gap in gap_queries:
-                compound_context += f"- {gap}\n"
+        # Use root query only for merging (gaps are injected in final synthesis)
+        query_context = f"QUERY: {root_query}"
 
         # Build summaries context
         summary_sections = []
@@ -515,32 +561,46 @@ Provide a compressed summary of approximately {target_tokens:,} tokens."""
 
         summaries_context = "\n\n".join(summary_sections)
 
-        system = (
-            f"You are integrating multiple code analysis summaries into a "
-            f"unified response.\n\n"
-            f"CRITICAL: Compress to approximately {target_tokens:,} tokens.\n"
-            f"Input is {input_tokens:,} tokens - compress to {target_ratio:.0%}.\n\n"
-            f"Your task:\n"
-            f"1. Combine insights from all summaries coherently\n"
-            f"2. Eliminate redundancy while preserving important details\n"
-            f"3. Maintain focus on the original query\n"
-            f"4. PRESERVE ALL citation references [N] from the summaries\n\n"
-            f"{CITATION_REQUIREMENTS}\n\n"
-            f"Be thorough but concise - produce a well-integrated summary."
-        )
+        # Conditional prompts: compression guidance only when over budget
+        if needs_compression:
+            system = (
+                f"You are integrating multiple code analysis summaries.\n\n"
+                f"MAXIMUM {target_tokens:,} tokens (input: {input_tokens:,} tokens).\n"
+                f"Be concise—combine essentials only.\n\n"
+                f"Your task:\n"
+                f"1. Combine insights coherently\n"
+                f"2. Eliminate redundancy\n"
+                f"3. PRESERVE citation references [N]\n\n"
+                f"{CITATION_REQUIREMENTS}"
+            )
+            prompt_suffix = "Provide a concise integrated summary."
+        else:
+            # Under budget: let LLM choose natural length
+            system = (
+                f"You are integrating multiple code analysis summaries.\n\n"
+                f"Be concise. Maximum {target_tokens:,} tokens.\n\n"
+                f"Your task:\n"
+                f"1. Combine insights coherently\n"
+                f"2. Eliminate redundancy\n"
+                f"3. PRESERVE citation references [N]\n\n"
+                f"{CITATION_REQUIREMENTS}"
+            )
+            prompt_suffix = "Provide a concise integrated summary."
 
-        prompt = f"""{compound_context}
+        prompt = f"""{query_context}
 
-Integrate the following analysis summaries into a single, coherent response:
+Integrate the following summaries:
 
 {summaries_context}
 
-Provide an integrated summary of approximately {target_tokens:,} tokens."""
+{prompt_suffix}"""
 
-        # Bounded max_completion_tokens: 20k-50k range for quality
-        min_llm_tokens = 20000
-        max_llm_tokens = 50000
-        effective_max = max(min_llm_tokens, min(target_tokens * 2, max_llm_tokens))
+        # No artificial floor - let LLM choose natural length
+        if needs_compression:
+            effective_max = target_tokens
+        else:
+            # Under budget: cap at input to prevent expansion
+            effective_max = min(target_tokens, input_tokens)
 
         response = await llm.complete(
             prompt,
@@ -557,7 +617,6 @@ Provide an integrated summary of approximately {target_tokens:,} tokens."""
     async def _force_compress_single(
         self,
         root_query: str,
-        gap_queries: list[str],
         key: str,
         content: str,
         target_tokens: int,
@@ -571,7 +630,6 @@ Provide an integrated summary of approximately {target_tokens:,} tokens."""
 
         Args:
             root_query: Original research query
-            gap_queries: Gap queries for compound context
             key: Identifier for the content (file path or summary key)
             content: The oversized content to compress
             target_tokens: Target output size in tokens
@@ -609,40 +667,33 @@ Provide an integrated summary of approximately {target_tokens:,} tokens."""
         else:
             truncated_content = content
 
-        # Build compound query context
-        compound_context = f"PRIMARY QUERY: {root_query}"
-        if gap_queries:
-            compound_context += "\n\nRELATED GAPS IDENTIFIED:\n"
-            for gap in gap_queries:
-                compound_context += f"- {gap}\n"
+        # Use root query only (gaps are injected in final synthesis)
+        query_context = f"QUERY: {root_query}"
 
-        target_ratio = target_tokens / max(input_tokens, 1)
-        system = f"""You are compressing a large code file/summary for research synthesis.
+        system = f"""Compress a large code file for research synthesis.
 
-CRITICAL: The content was truncated to fit context. Compress to approximately {target_tokens:,} tokens.
-Original was {input_tokens:,} tokens - compress to {target_ratio:.0%} of original size.
+MAXIMUM {target_tokens:,} tokens. Be concise.
 
 Focus on:
-- Key architectural patterns and relationships
-- Essential implementation details for the query
-- Preserve important code references and citations
+- Key architectural patterns
+- Essential implementation details
+- Preserve citation references
 
 {CITATION_REQUIREMENTS}"""
 
-        prompt = f"""{compound_context}
+        prompt = f"""{query_context}
 
-Compress and summarize the following content from '{key}':
+Summarize '{key}':
 
 {"=" * 80}
 {truncated_content}
 {"=" * 80}
 
-Provide a compressed summary of approximately {target_tokens:,} tokens."""
+Provide a concise summary."""
 
-        # Use bounded max_completion_tokens
-        min_llm_tokens = 20000
-        max_llm_tokens = 50000
-        effective_max = max(min_llm_tokens, min(target_tokens * 2, max_llm_tokens))
+        # Force compression always targets reduction (input > context limit)
+        # No artificial floor - use target_tokens as ceiling
+        effective_max = target_tokens
 
         response = await llm.complete(
             prompt,

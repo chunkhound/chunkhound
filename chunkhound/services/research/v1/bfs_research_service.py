@@ -15,6 +15,7 @@ from chunkhound.llm_manager import LLMManager
 from chunkhound.services import prompts
 from chunkhound.services.clustering_service import ClusterGroup
 from chunkhound.services.research.shared.citation_manager import CitationManager
+from chunkhound.services.research.shared.constants_ledger import ConstantsLedger
 from chunkhound.services.research.shared.unified_search import UnifiedSearch
 from chunkhound.services.research.v1.quality_validator import QualityValidator
 from chunkhound.services.research.v1.question_generator import QuestionGenerator
@@ -405,6 +406,16 @@ class BFSResearchService:
 
         aggregated = self._aggregate_all_findings(root)
 
+        # Build constants ledger from all aggregated chunks
+        constants_ledger = ConstantsLedger.from_chunks(aggregated.get("chunks", []))
+        constants_context = constants_ledger.get_prompt_context()
+        if len(constants_ledger) > 0:
+            await self._emit_event(
+                "constants_ledger",
+                f"Built constants ledger with {len(constants_ledger)} entries",
+                constants_count=len(constants_ledger),
+            )
+
         # Early return: no context found (avoid scary synthesis error when empty)
         if not aggregated.get("chunks") and not aggregated.get("files"):
             logger.info(
@@ -466,6 +477,7 @@ class BFSResearchService:
                 files=budgeted_files,
                 context=context,
                 synthesis_budgets=synthesis_budgets,
+                constants_context=constants_context,
             )
         else:
             # Map-reduce synthesis with parallel execution
@@ -491,7 +503,8 @@ class BFSResearchService:
             async def map_with_semaphore(cluster: ClusterGroup) -> dict[str, Any]:
                 async with semaphore:
                     return await self._map_synthesis_on_cluster(
-                        cluster, query, prioritized_chunks, synthesis_budgets
+                        cluster, query, prioritized_chunks, synthesis_budgets,
+                        constants_context=constants_context,
                     )
 
             map_tasks = [map_with_semaphore(cluster) for cluster in cluster_groups]
@@ -513,7 +526,11 @@ class BFSResearchService:
                 prioritized_chunks,
                 budgeted_files,
                 synthesis_budgets,
+                constants_context=constants_context,
             )
+
+        # Append constants suffix (before Sources section)
+        answer = constants_ledger.insert_into_report(answer)
 
         # Emit validating event
         await self._emit_event("synthesis_validate", "Validating output quality")
@@ -598,6 +615,18 @@ class BFSResearchService:
             search_query, context, node_id=node.node_id, depth=depth
         )
         node.chunks = chunks
+
+        # Build constants ledger from node's chunks for follow-up generation
+        node_constants = ConstantsLedger.from_chunks(chunks)
+        node_constants_context = node_constants.get_prompt_context()
+        if len(node_constants) > 0:
+            await self._emit_event(
+                "constants_ledger",
+                f"Node constants: {len(node_constants)} entries",
+                node_id=node.node_id,
+                depth=depth,
+                constants_count=len(node_constants),
+            )
 
         if not chunks:
             logger.warning(f"No chunks found for query: '{node.query}'")
@@ -699,6 +728,7 @@ class BFSResearchService:
             max_input_tokens=node.token_budgets["llm_input_tokens"],
             depth=depth,
             max_depth=max_depth,
+            constants_context=node_constants_context,
         )
 
         # Emit follow-up generation results
@@ -1484,6 +1514,7 @@ class BFSResearchService:
         max_input_tokens: int | None = None,
         depth: int = 0,
         max_depth: int = 1,
+        constants_context: str = "",
     ) -> list[str]:
         """Generate follow-up questions using LLM.
 
@@ -1496,6 +1527,7 @@ class BFSResearchService:
             max_input_tokens: Maximum tokens for LLM input (uses adaptive budget if provided)
             depth: Current depth in BFS traversal
             max_depth: Maximum depth for this codebase
+            constants_context: Constants ledger context for follow-up generation
 
         Returns:
             List of follow-up questions
@@ -1517,6 +1549,7 @@ class BFSResearchService:
             max_input_tokens=max_input_tokens,
             depth=depth,
             max_depth=max_depth,
+            constants_context=constants_context,
         )
 
     async def _synthesize_questions(
@@ -1698,6 +1731,7 @@ class BFSResearchService:
         files: dict[str, str],
         context: ResearchContext,
         synthesis_budgets: dict[str, int],
+        constants_context: str = "",
     ) -> str:
         """Perform single-pass synthesis with all aggregated data.
 
@@ -1716,12 +1750,14 @@ class BFSResearchService:
             files: Budgeted file contents (subset within token limits)
             context: Research context
             synthesis_budgets: Dynamic budgets based on repository size
+            constants_context: Constants ledger context for LLM prompts
 
         Returns:
             Synthesized answer from single LLM call with appended sources footer
         """
         return await self._synthesis_engine._single_pass_synthesis(
-            root_query, chunks, files, context, synthesis_budgets
+            root_query, chunks, files, context, synthesis_budgets,
+            constants_context=constants_context,
         )
 
     async def _cluster_sources_for_synthesis(
@@ -1750,6 +1786,7 @@ class BFSResearchService:
         root_query: str,
         chunks: list[dict[str, Any]],
         synthesis_budgets: dict[str, int],
+        constants_context: str = "",
     ) -> dict[str, Any]:
         """Synthesize partial answer for one cluster of files.
 
@@ -1758,6 +1795,7 @@ class BFSResearchService:
             root_query: Original research query
             chunks: All chunks (will be filtered to cluster files)
             synthesis_budgets: Dynamic budgets based on repository size
+            constants_context: Constants ledger context for LLM prompts
 
         Returns:
             Dictionary with:
@@ -1766,7 +1804,8 @@ class BFSResearchService:
                 - sources: list[dict] (files and chunks used)
         """
         return await self._synthesis_engine._map_synthesis_on_cluster(
-            cluster, root_query, chunks, synthesis_budgets
+            cluster, root_query, chunks, synthesis_budgets,
+            constants_context=constants_context,
         )
 
     async def _reduce_synthesis(
@@ -1776,6 +1815,7 @@ class BFSResearchService:
         all_chunks: list[dict[str, Any]],
         all_files: dict[str, str],
         synthesis_budgets: dict[str, int],
+        constants_context: str = "",
     ) -> str:
         """Combine cluster summaries into final answer.
 
@@ -1785,12 +1825,14 @@ class BFSResearchService:
             all_chunks: All chunks from clusters (will be filtered to match synthesized files)
             all_files: All files that were synthesized across clusters
             synthesis_budgets: Dynamic budgets based on repository size
+            constants_context: Constants ledger context for LLM prompts
 
         Returns:
             Final synthesized answer with sources footer
         """
         return await self._synthesis_engine._reduce_synthesis(
-            root_query, cluster_results, all_chunks, all_files, synthesis_budgets
+            root_query, cluster_results, all_chunks, all_files, synthesis_budgets,
+            constants_context=constants_context,
         )
 
     def _filter_verbosity(self, text: str) -> str:

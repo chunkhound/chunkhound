@@ -41,6 +41,7 @@ from chunkhound.services.research.shared.models import (
     ResearchContext,
 )
 from chunkhound.services.research.shared.unified_search import UnifiedSearch
+from chunkhound.services.research.shared import CONSTANTS_INSTRUCTION_SHORT
 
 
 class DepthExplorationService:
@@ -85,6 +86,7 @@ class DepthExplorationService:
         covered_chunks: list[dict],
         phase1_threshold: float,
         path_filter: str | None = None,
+        constants_context: str = "",
     ) -> tuple[list[dict], dict]:
         """Explore existing coverage from multiple angles (Phase 1.5 main entry).
 
@@ -93,6 +95,7 @@ class DepthExplorationService:
             covered_chunks: Raw chunk dicts from Phase 1
             phase1_threshold: Quality threshold from Phase 1 (floor for results)
             path_filter: Path filter to pass through to searches
+            constants_context: Constants ledger context for LLM prompts
 
         Returns:
             Tuple of (expanded_chunks, stats) where:
@@ -130,7 +133,7 @@ class DepthExplorationService:
 
         # Step 2: Generate exploration queries for each file (parallel)
         exploration_queries = await self._generate_all_exploration_queries(
-            root_query, top_files, file_to_chunks
+            root_query, top_files, file_to_chunks, constants_context
         )
         total_queries = sum(len(queries) for queries in exploration_queries.values())
         logger.info(
@@ -253,6 +256,7 @@ class DepthExplorationService:
         root_query: str,
         top_files: list[str],
         file_to_chunks: dict[str, list[dict]],
+        constants_context: str = "",
     ) -> dict[str, list[str]]:
         """Generate exploration queries for all top files in parallel.
 
@@ -260,6 +264,7 @@ class DepthExplorationService:
             root_query: Original research query
             top_files: List of file paths to explore
             file_to_chunks: Mapping of file_path -> chunks
+            constants_context: Constants ledger context for LLM prompts
 
         Returns:
             Dictionary mapping file_path -> list of exploration queries
@@ -273,7 +278,7 @@ class DepthExplorationService:
             async with semaphore:
                 chunks = file_to_chunks.get(file_path, [])
                 queries = await self._generate_exploration_queries(
-                    root_query, chunks, file_path
+                    root_query, chunks, file_path, constants_context
                 )
                 return file_path, queries
 
@@ -297,6 +302,7 @@ class DepthExplorationService:
         root_query: str,
         file_chunks: list[dict],
         file_path: str,
+        constants_context: str = "",
     ) -> list[str]:
         """Generate exploration queries for a specific file.
 
@@ -306,6 +312,7 @@ class DepthExplorationService:
             root_query: Original research query
             file_chunks: Chunks found in this file
             file_path: Path to the file
+            constants_context: Constants ledger context for LLM prompts
 
         Returns:
             List of exploration queries (1-2 per file)
@@ -351,9 +358,15 @@ class DepthExplorationService:
             "required": ["queries"],
         }
 
+        # Build constants section if available
+        # Note: Depth exploration uses inline instruction in prompt, not separate section
+        constants_section = ""
+        if constants_context:
+            constants_section = f"\n{constants_context}\n"
+
         # Exploration query generation prompt
         prompt = f"""ROOT QUERY: {root_query}
-
+{constants_section}
 FILE: {file_path}
 {imports_context}CHUNKS FOUND ({len(file_chunks)} total):
 {chunk_context}
@@ -370,6 +383,7 @@ IMPORTANT:
 - Target aspects WITHIN THIS FILE, not external dependencies
 - Each query should explore a different angle
 - Queries should be specific enough to find new chunks
+- {CONSTANTS_INSTRUCTION_SHORT}
 
 Output JSON with queries array."""
 

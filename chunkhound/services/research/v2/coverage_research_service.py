@@ -52,6 +52,7 @@ from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
 from chunkhound.parsers.parser_factory import ParserFactory
+from chunkhound.services.research.shared.constants_ledger import ConstantsLedger
 from chunkhound.services.research.shared.elbow_detection import (
     compute_elbow_threshold,
 )
@@ -237,6 +238,15 @@ class CoverageResearchService:
             )
             logger.debug(f"Phase 1: Extracted imports for {len(file_imports)} files")
 
+            # Build constants ledger from Phase 1 chunks
+            constants_ledger = ConstantsLedger.from_chunks(coverage_result.chunks)
+            logger.debug(f"Phase 1: Built constants ledger with {len(constants_ledger)} entries")
+            await self._emit_event(
+                "constants_ledger",
+                f"Constants ledger: {len(constants_ledger)} entries",
+                constants_count=len(constants_ledger),
+            )
+
             phase_timings["phase1_ms"] = (time.time() - phase1_start) * 1000
             phase1_chunk_count = len(coverage_result.chunks)  # Store original count
             await self._emit_event(
@@ -259,6 +269,7 @@ class CoverageResearchService:
                     covered_chunks=coverage_result.chunks,
                     phase1_threshold=coverage_result.phase1_threshold,
                     path_filter=self._path_filter,
+                    constants_context=constants_ledger.get_prompt_context(),
                 )
 
                 # Update coverage_result for Phase 2
@@ -269,6 +280,17 @@ class CoverageResearchService:
                     expanded_chunks, file_imports
                 )
                 logger.debug(f"Phase 1.5: file_imports now has {len(file_imports)} files")
+
+                # Update constants ledger with new chunks from exploration
+                constants_ledger = constants_ledger.merge(
+                    ConstantsLedger.from_chunks(expanded_chunks)
+                )
+                logger.debug(f"Phase 1.5: constants ledger now has {len(constants_ledger)} entries")
+                await self._emit_event(
+                    "constants_ledger",
+                    f"Constants ledger: {len(constants_ledger)} entries",
+                    constants_count=len(constants_ledger),
+                )
 
                 phase_timings["phase15_ms"] = (time.time() - phase15_start) * 1000
                 chunks_added = depth_stats.get("chunks_added", 0)
@@ -292,7 +314,7 @@ class CoverageResearchService:
             await self._emit_event("phase2_start", "Phase 2: Gap detection")
 
             all_chunks, gap_stats = await self._phase2_gap_detection(
-                query, coverage_result
+                query, coverage_result, constants_ledger.get_prompt_context()
             )
 
             # Extract imports for NEW files from gap filling
@@ -300,6 +322,17 @@ class CoverageResearchService:
                 all_chunks, file_imports
             )
             logger.debug(f"Phase 2: file_imports now has {len(file_imports)} files")
+
+            # Update constants ledger with new chunks from gap filling
+            constants_ledger = constants_ledger.merge(
+                ConstantsLedger.from_chunks(all_chunks)
+            )
+            logger.debug(f"Phase 2: constants ledger now has {len(constants_ledger)} entries")
+            await self._emit_event(
+                "constants_ledger",
+                f"Constants ledger: {len(constants_ledger)} entries",
+                constants_count=len(constants_ledger),
+            )
 
             phase_timings["phase2_ms"] = (time.time() - phase2_start) * 1000
             await self._emit_event(
@@ -318,7 +351,11 @@ class CoverageResearchService:
             await self._emit_event("phase3_start", "Phase 3: Synthesis")
 
             answer, citations, synthesis_stats = await self._phase3_synthesis(
-                query, all_chunks, gap_queries, file_imports
+                query,
+                all_chunks,
+                gap_queries,
+                file_imports,
+                constants_ledger,
             )
 
             phase_timings["phase3_ms"] = (time.time() - phase3_start) * 1000
@@ -339,6 +376,7 @@ class CoverageResearchService:
 
             # Build comprehensive metadata
             metadata = {
+                "chunks_analyzed": len(all_chunks),  # v1 API compatibility
                 "phase1_chunks": phase1_chunk_count,
                 "phase15_chunks_added": depth_stats.get("chunks_added", 0),
                 "phase2_chunks": len(all_chunks) - len(coverage_result.chunks),
@@ -483,7 +521,10 @@ class CoverageResearchService:
         )
 
     async def _phase2_gap_detection(
-        self, query: str, coverage_result: _Phase1Result
+        self,
+        query: str,
+        coverage_result: _Phase1Result,
+        constants_context: str = "",
     ) -> tuple[list[dict], dict]:
         """Phase 2: Gap Detection and Filling.
 
@@ -492,6 +533,7 @@ class CoverageResearchService:
         Args:
             query: Original research query
             coverage_result: Results from Phase 1
+            constants_context: Constants ledger context for LLM prompts
 
         Returns:
             Tuple of (all_chunks, gap_stats) where:
@@ -507,6 +549,7 @@ class CoverageResearchService:
             covered_chunks=coverage_result.chunks,
             phase1_threshold=coverage_result.phase1_threshold,
             path_filter=self._path_filter,
+            constants_context=constants_context,
         )
 
         # gap_stats already contains gap_queries from gap_detection_service (line 172 in gap_detection.py)
@@ -523,6 +566,7 @@ class CoverageResearchService:
         all_chunks: list[dict],
         gap_queries: list[str],
         file_imports: dict[str, list[str]],
+        constants_ledger: ConstantsLedger,
     ) -> tuple[str, list[dict], dict]:
         """Phase 3: Synthesis.
 
@@ -533,6 +577,7 @@ class CoverageResearchService:
             all_chunks: All chunks from Phase 2
             gap_queries: Gap queries that were filled
             file_imports: Pre-extracted imports per file (avoids re-extraction)
+            constants_ledger: Constants ledger for context and report suffix
 
         Returns:
             Tuple of (answer, citations, stats)
@@ -547,7 +592,11 @@ class CoverageResearchService:
             gap_queries=gap_queries,
             target_tokens=self._config.target_tokens,
             file_imports=file_imports,
+            constants_context=constants_ledger.get_prompt_context(),
         )
+
+        # Append constants ledger suffix (before sources)
+        answer = constants_ledger.insert_into_report(answer)
 
         logger.info(
             f"Phase 3 complete: {stats.get('final_tokens', 0)} tokens generated"

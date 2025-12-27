@@ -48,6 +48,7 @@ from chunkhound.services.research.shared.models import (
     ResearchContext,
 )
 from chunkhound.services.research.shared.unified_search import UnifiedSearch
+from chunkhound.services.research.shared import CONSTANTS_INSTRUCTION_SHORT
 from chunkhound.services.research.v2.models import GapCandidate, UnifiedGap
 
 
@@ -87,6 +88,7 @@ class GapDetectionService:
         covered_chunks: list[dict],
         phase1_threshold: float,
         path_filter: str | None = None,
+        constants_context: str = "",
     ) -> tuple[list[dict], dict]:
         """Detect and fill semantic gaps in coverage (Phase 2 main entry point).
 
@@ -95,6 +97,7 @@ class GapDetectionService:
             covered_chunks: Raw chunk dicts from Phase 1
             phase1_threshold: Quality threshold from Phase 1 (floor for gap results)
             path_filter: Path filter to pass through to gap filling
+            constants_context: Constants ledger context for LLM prompts
 
         Returns:
             Tuple of (all_chunks, gap_stats) where:
@@ -122,7 +125,7 @@ class GapDetectionService:
         logger.info(f"Step 2.2: Created {len(shards)} shards from clusters")
 
         # Step 2.3: Detect gaps in parallel
-        raw_gaps = await self._detect_gaps_parallel(root_query, shards)
+        raw_gaps = await self._detect_gaps_parallel(root_query, shards, constants_context)
         logger.info(f"Step 2.3: Detected {len(raw_gaps)} raw gap candidates")
 
         if not raw_gaps:
@@ -315,7 +318,10 @@ class GapDetectionService:
         return shards
 
     async def _detect_gaps_parallel(
-        self, root_query: str, shards: list[list[dict]]
+        self,
+        root_query: str,
+        shards: list[list[dict]],
+        constants_context: str = "",
     ) -> list[GapCandidate]:
         """Step 2.3: Detect gaps in parallel across shards.
 
@@ -324,6 +330,7 @@ class GapDetectionService:
         Args:
             root_query: Original research query
             shards: List of chunk shards
+            constants_context: Constants ledger context for LLM prompts
 
         Returns:
             List of gap candidates from all shards
@@ -390,13 +397,21 @@ class GapDetectionService:
 
                 code_context = "\n".join(code_lines)
 
+                # Build constants section if available
+                # Note: Gap detection uses inline instruction in prompt, not separate section
+                constants_section = ""
+                if constants_context:
+                    constants_section = f"\n{constants_context}\n"
+
                 # Gap detection prompt with ROOT QUERY
                 prompt = f"""RESEARCH QUERY: {root_query}
-
+{constants_section}
 Given the research query above, identify semantic gaps in this code coverage.
 Gaps: missing dependencies, incomplete flows, referenced-but-unfound components
 that would help answer the RESEARCH QUERY.
 For each gap, assess confidence (0.0-1.0) based on relevance to the query.
+
+{CONSTANTS_INSTRUCTION_SHORT}
 
 CODE COVERAGE:
 {code_context}

@@ -66,6 +66,7 @@ class QuestionGenerator:
         max_input_tokens: int | None = None,
         depth: int = 0,
         max_depth: int = 1,
+        constants_context: str = "",
     ) -> list[str]:
         """Generate follow-up questions using LLM.
 
@@ -79,6 +80,7 @@ class QuestionGenerator:
             max_input_tokens: Maximum tokens for LLM input (uses adaptive budget if provided)
             depth: Current depth in BFS traversal
             max_depth: Maximum depth for this codebase
+            constants_context: Constants ledger context for follow-up generation
 
         Returns:
             List of follow-up questions
@@ -172,6 +174,13 @@ class QuestionGenerator:
             else "specific code elements found"
         )
 
+        # Build constants section if available
+        constants_section = (
+            f"\nConstants:\n{constants_context}\n"
+            if constants_context
+            else ""
+        )
+
         # Construct prompt with conditional gist section
         prompt = prompts.FOLLOWUP_GENERATION_USER.format(
             gist_section=gist_section,
@@ -180,6 +189,7 @@ class QuestionGenerator:
             ancestors=" -> ".join(context.ancestors),
             code_section=code_section,
             chunks_preview=chunks_preview,
+            constants_section=constants_section,
             max_questions=MAX_FOLLOWUP_QUESTIONS,
             target_instruction=target_instruction,
         )

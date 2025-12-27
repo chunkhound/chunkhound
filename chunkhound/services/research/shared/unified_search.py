@@ -97,26 +97,10 @@ class UnifiedSearch:
 
         # Step 2: Multi-hop semantic search with reranking (optionally with query expansion)
         if QUERY_EXPANSION_ENABLED and expanded_queries:
-            # Use provided expanded queries
+            # Use provided expanded queries (expansion events emitted by caller)
             logger.debug("Step 2a: Using expanded queries for diverse semantic search")
-            await emit_event(
-                "query_expand", "Expanding query", node_id=node_id, depth=depth
-            )
-
             logger.debug(
                 f"Query expansion: 1 original + {len(expanded_queries) - 1} LLM-generated = {len(expanded_queries)} total: {expanded_queries}"
-            )
-
-            # Emit expanded queries event
-            queries_preview = " | ".join(
-                q[:40] + "..." if len(q) > 40 else q for q in expanded_queries[:3]
-            )
-            await emit_event(
-                "query_expand_complete",
-                f"Expanded to {len(expanded_queries)} queries",
-                node_id=node_id,
-                depth=depth,
-                queries=len(expanded_queries),
             )
 
             # Run all semantic searches in parallel

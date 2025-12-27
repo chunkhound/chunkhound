@@ -48,6 +48,9 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.database_factory import DatabaseServices
+from chunkhound.services.research.shared.constants_ledger import (
+    CONSTANTS_INSTRUCTION_FULL,
+)
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services.prompts import (
     SYNTHESIS_SYSTEM_BUILDER,
@@ -142,6 +145,7 @@ class CoverageSynthesisEngine:
         gap_queries: list[str],
         target_tokens: int,
         file_imports: dict[str, list[str]] | None = None,
+        constants_context: str = "",
     ) -> tuple[str, list[dict], dict]:
         """Synthesize final answer from coverage + gap chunks.
 
@@ -163,6 +167,7 @@ class CoverageSynthesisEngine:
             target_tokens: Output token budget for final synthesis (not input filter)
             file_imports: Pre-extracted imports per file (avoids re-extraction
                 during compression). Keys are file paths, values are import lists.
+            constants_context: Constants ledger context for LLM prompts
 
         Returns:
             Tuple of (answer, citations, stats) where:
@@ -246,6 +251,7 @@ class CoverageSynthesisEngine:
             all_chunks,
             expanded_files,
             _file_imports,
+            constants_context,
         )
 
         # Build citations
@@ -617,6 +623,7 @@ class CoverageSynthesisEngine:
         all_chunks: list[dict],
         original_files: dict[str, str],
         file_imports: dict[str, list[str]],
+        constants_context: str = "",
     ) -> str:
         """Generate final answer with compound query context (step 3.6).
 
@@ -629,6 +636,7 @@ class CoverageSynthesisEngine:
             all_chunks: Original chunks for citation building
             original_files: Original files for citation building
             file_imports: Pre-extracted imports per file (lookup, no re-parsing)
+            constants_context: Constants ledger context for LLM prompts
 
         Returns:
             Final synthesized answer with sources footer
@@ -647,6 +655,8 @@ class CoverageSynthesisEngine:
                 "\nAddress the primary query while incorporating "
                 "insights from gap areas."
             )
+        if constants_context:
+            compound_context += f"\n\n{constants_context}\n\n{CONSTANTS_INSTRUCTION_FULL}"
 
         # Filter chunks to match files
         filtered_chunks = self._citation_manager.filter_chunks_to_files(
@@ -679,10 +689,9 @@ class CoverageSynthesisEngine:
 
         # Build synthesis prompt
         output_guidance = (
-            f"**Target Output:** Provide a thorough and detailed analysis "
-            f"of approximately {self._config.target_tokens:,} tokens. "
-            f"Focus on all relevant architectural layers, patterns, and "
-            f"implementation details with technical accuracy."
+            f"**Target Output:** Provide a thorough and detailed analysis of approximately "
+            f"{self._config.target_tokens:,} tokens (includes reasoning). Focus on all relevant "
+            f"architectural layers, patterns, and implementation details with technical accuracy."
         )
 
         system = SYNTHESIS_SYSTEM_BUILDER(output_guidance)
