@@ -1,5 +1,6 @@
 """LanceDB provider implementation for ChunkHound - concrete database provider using LanceDB."""
 
+import json
 import os
 import time
 from datetime import datetime
@@ -71,6 +72,7 @@ def get_chunks_schema(embedding_dims: int | None = None) -> pa.Schema:
             ("provider", pa.string()),
             ("model", pa.string()),
             ("created_time", pa.float64()),
+            ("metadata", pa.string()),  # JSON-serialized chunk metadata (constants, etc.)
         ]
     )
 
@@ -116,6 +118,16 @@ def _deduplicate_by_id(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
             unique.append(result)
 
     return unique
+
+
+def _serialize_metadata(metadata: dict | None) -> str | None:
+    """Serialize chunk metadata dict to JSON string for storage."""
+    return json.dumps(metadata) if metadata else None
+
+
+def _deserialize_metadata(metadata_json: str | None) -> dict:
+    """Deserialize chunk metadata from JSON string."""
+    return json.loads(metadata_json) if metadata_json else {}
 
 
 class LanceDBProvider(SerialDatabaseProvider):
@@ -679,6 +691,7 @@ class LanceDBProvider(SerialDatabaseProvider):
             "provider": "",
             "model": "",
             "created_time": time.time(),
+            "metadata": _serialize_metadata(chunk.metadata),
         }
 
         # Use PyArrow Table directly to avoid LanceDB DataFrame schema alignment bug
@@ -746,6 +759,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     "provider": "",
                     "model": "",
                     "created_time": time.time(),
+                    "metadata": _serialize_metadata(chunk.metadata),
                 }
                 chunk_data_list.append(chunk_data)
 
@@ -800,6 +814,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     chunk_type=ChunkType(result["chunk_type"]),
                     language=Language(result["language"]),
                     symbol=result["name"],
+                    metadata=_deserialize_metadata(result.get("metadata")),
                 )
             return result
         except Exception as e:
@@ -839,6 +854,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                         chunk_type=ChunkType(result["chunk_type"]),
                         language=Language(result["language"]),
                         symbol=result["name"],
+                        metadata=_deserialize_metadata(result.get("metadata")),
                     )
                     for result in results
                 ]
@@ -1057,6 +1073,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                             "provider": "",
                             "model": "",
                             "created_time": row.get("created_time", time.time()),
+                            "metadata": row.get("metadata"),  # Preserve existing metadata
                         }
                         chunks_to_restore.append(chunk_data)
 
@@ -1197,6 +1214,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                                 "provider": emb_data["provider"],
                                 "model": emb_data["model"],
                                 "created_time": row["created_time"],
+                                "metadata": row.get("metadata"),  # Preserve metadata
                             }
                         )
 
@@ -1402,6 +1420,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                         "chunk_type": chunk["chunk_type"],
                         "language": chunk["language"],
                         "name": chunk["name"],
+                        "metadata": _deserialize_metadata(chunk.get("metadata")),
                     }
                 )
 
@@ -1530,6 +1549,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     "file_path": file_path,  # Keep stored format
                     "language": result.get("language", ""),
                     "similarity": similarity,
+                    "metadata": _deserialize_metadata(result.get("metadata")),
                 }
                 formatted_results.append(formatted_result)
 
@@ -1694,6 +1714,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     "file_path": file_path,
                     "language": result.get("language", ""),
                     "score": similarity,  # Match DuckDB convention
+                    "metadata": _deserialize_metadata(result.get("metadata")),
                 })
 
                 # Stop once we have enough results that meet the threshold
@@ -1767,6 +1788,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     "end_line": result.get("end_line", 0),
                     "file_path": file_path,
                     "language": result.get("language", ""),
+                    "metadata": _deserialize_metadata(result.get("metadata")),
                 })
 
             pagination = {
