@@ -205,6 +205,7 @@ class EmbeddingService(BaseService):
             # Get initial stats for progress tracking
             initial_stats = self._db.get_stats()
             total_chunks = initial_stats.get('chunks', 0)
+            current_embeddings = initial_stats.get('embeddings', 0)
 
             # Create progress task for embedding generation
             embed_task: TaskID | None = None
@@ -212,6 +213,8 @@ class EmbeddingService(BaseService):
                 embed_task = self.progress.add_task(
                     "Generating embeddings", total=total_chunks, speed="", info=""
                 )
+                # Set initial progress to current embeddings count
+                self.progress.advance(embed_task, current_embeddings)
 
             total_generated = 0
             total_processed = 0
