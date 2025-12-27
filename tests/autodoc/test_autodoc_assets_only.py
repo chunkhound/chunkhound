@@ -17,6 +17,31 @@ def test_autodoc_parser_accepts_assets_only_flag() -> None:
     assert args.assets_only is True
 
 
+def test_autodoc_parser_defaults_taint_to_balanced() -> None:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    add_autodoc_subparser(subparsers)
+
+    args = parser.parse_args(["autodoc", "."])
+
+    assert args.command == "autodoc"
+    assert args.taint == "balanced"
+
+
+def test_autodoc_parser_accepts_taint_numeric_and_named_values() -> None:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    add_autodoc_subparser(subparsers)
+
+    assert parser.parse_args(["autodoc", ".", "--taint", "1"]).taint == "technical"
+    assert parser.parse_args(["autodoc", ".", "--taint", "technical"]).taint == "technical"
+    assert parser.parse_args(["autodoc", ".", "--taint", "2"]).taint == "balanced"
+    assert parser.parse_args(["autodoc", ".", "--taint", "balanced"]).taint == "balanced"
+    assert parser.parse_args(["autodoc", ".", "--taint", "3"]).taint == "end-user"
+    assert parser.parse_args(["autodoc", ".", "--taint", "end-user"]).taint == "end-user"
+    assert parser.parse_args(["autodoc", ".", "--taint", "end_user"]).taint == "end-user"
+
+
 def test_write_astro_assets_only_preserves_topic_pages(tmp_path: Path) -> None:
     output_dir = tmp_path / "site"
     topics_dir = output_dir / "src" / "pages" / "topics"
@@ -50,4 +75,3 @@ def test_write_astro_assets_only_preserves_topic_pages(tmp_path: Path) -> None:
     assert topic_path.read_text(encoding="utf-8") == "original topic content"
     assert layout_path.read_text(encoding="utf-8") != "old layout"
     assert "navData" in layout_path.read_text(encoding="utf-8")
-

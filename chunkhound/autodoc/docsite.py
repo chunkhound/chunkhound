@@ -38,6 +38,7 @@ _FAVICON_ICO_BASE64 = (
 _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 _CLEANUP_SYSTEM_PROMPT_FILE = "cleanup_system_v2.txt"
 _CLEANUP_USER_PROMPT_FILE = "cleanup_user_v2.txt"
+_CLEANUP_USER_PROMPT_FILE_END_USER = "cleanup_user_end_user_v1.txt"
 
 
 @dataclass
@@ -99,6 +100,7 @@ class CleanupConfig:
     mode: str
     batch_size: int
     max_completion_tokens: int
+    taint: str = "balanced"
 
 
 class NavGroup(TypedDict):
@@ -323,10 +325,15 @@ async def generate_docsite(
         log_warning=log_warning,
     )
 
+    llm_cleanup_active = cleanup_config.mode == "llm" and llm_manager is not None
+    tagline = site_tagline or _default_site_tagline(
+        taint=cleanup_config.taint,
+        llm_cleanup_active=llm_cleanup_active,
+    )
+
     site = DocsiteSite(
         title=site_title or _default_site_title(index.scope_label),
-        tagline=site_tagline
-        or "Approachable documentation generated from AutoDoc output.",
+        tagline=tagline,
         scope_label=index.scope_label,
         generated_at=datetime.now(timezone.utc).isoformat(),
         source_dir=str(input_dir),
@@ -335,11 +342,20 @@ async def generate_docsite(
 
     nav_groups: list[NavGroup] | None = None
     glossary_terms: list[GlossaryTerm] | None = None
-    if cleanup_config.mode == "llm" and llm_manager is not None:
+    homepage_overview: str | None = None
+    if llm_cleanup_active:
         try:
+            if _normalize_taint(cleanup_config.taint) == "end-user":
+                homepage_overview = await _synthesize_homepage_overview(
+                    pages=pages,
+                    provider=llm_manager.get_synthesis_provider(),
+                    log_info=log_info,
+                    log_warning=log_warning,
+                )
             nav_groups, glossary_terms = await _synthesize_site_ia(
                 pages=pages,
                 provider=llm_manager.get_synthesis_provider(),
+                taint=cleanup_config.taint,
                 log_info=log_info,
                 log_warning=log_warning,
             )
@@ -354,6 +370,7 @@ async def generate_docsite(
         index=index,
         nav_groups=nav_groups,
         glossary_terms=glossary_terms,
+        homepage_overview=homepage_overview,
     )
 
     return DocsiteResult(
@@ -364,6 +381,27 @@ async def generate_docsite(
     )
 
 
+def _normalize_taint(taint: str | None) -> str:
+    if not taint:
+        return "balanced"
+    cleaned = taint.strip().lower()
+    if cleaned in {"technical", "balanced", "end-user"}:
+        return cleaned
+    return "balanced"
+
+
+def _default_site_tagline(*, taint: str, llm_cleanup_active: bool) -> str:
+    base = "Approachable documentation generated from AutoDoc output."
+    if not llm_cleanup_active:
+        return base
+    normalized = _normalize_taint(taint)
+    if normalized == "technical":
+        return "Engineering-focused documentation generated from AutoDoc output."
+    if normalized == "end-user":
+        return "End-user-friendly documentation generated from AutoDoc output."
+    return base
+
+
 def write_astro_site(
     *,
     output_dir: Path,
@@ -372,6 +410,7 @@ def write_astro_site(
     index: CodeMapperIndex,
     nav_groups: list[NavGroup] | None = None,
     glossary_terms: list[GlossaryTerm] | None = None,
+    homepage_overview: str | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -411,7 +450,9 @@ def write_astro_site(
 
     _write_text(
         pages_dir / "index.md",
-        _render_index_page(site=site, pages=pages, index=index),
+        _render_index_page(
+            site=site, pages=pages, index=index, overview_markdown=homepage_overview
+        ),
     )
 
     glossary_path = pages_dir / "glossary.md"
@@ -1818,6 +1859,7 @@ def _render_index_page(
     site: DocsiteSite,
     pages: list[DocsitePage],
     index: CodeMapperIndex,
+    overview_markdown: str | None = None,
 ) -> str:
     topic_lines = [
         f"{page.order}. [{page.title}](topics/{page.slug}/)"
@@ -1826,8 +1868,14 @@ def _render_index_page(
 
     metadata_lines = _render_index_metadata(index)
 
+    overview = overview_markdown.strip() if overview_markdown else ""
+    if not overview:
+        overview = "Welcome to the generated AutoDoc documentation site."
+
     body_parts = [
-        "Welcome to the generated AutoDoc documentation site.",
+        "## Overview",
+        "",
+        overview,
         "",
         "## Topics",
         "",
@@ -1903,23 +1951,31 @@ def _render_page_frontmatter(
     return "\n".join(lines)
 
 
-async def _synthesize_site_ia(
-    *,
-    pages: list[DocsitePage],
-    provider: LLMProvider,
-    log_info: Callable[[str], None] | None,
-    log_warning: Callable[[str], None] | None,
-) -> tuple[list[NavGroup] | None, list[GlossaryTerm] | None]:
-    if not pages:
-        return None, None
+def _build_site_ia_prompt(*, context: list[dict[str, Any]], taint: str) -> str:
+    normalized = _normalize_taint(taint)
+    taint_lines: list[str] = []
+    if normalized == "technical":
+        taint_lines = [
+            "Audience: technical (software engineers).",
+            "Prefer architecture- and implementation-oriented groups/terms when supported by the provided headings/snippets.",
+            "Use precise technical language; keep it concrete and grounded in the input.",
+        ]
+    elif normalized == "end-user":
+        taint_lines = [
+            "Audience: end-user (less technical).",
+            "Prefer user goals: setup, configuration, usage, and integration workflows when supported by the provided headings/snippets.",
+            "Keep code identifiers, but explain them in plain language; keep definitions short and avoid jargon unless the input uses it prominently.",
+            "De-emphasize deep internal implementation details unless central in the provided snippets/headings.",
+        ]
 
-    slugs = {page.slug for page in pages}
-    context = _build_site_context(pages)
-
-    prompt = "\n".join(
+    parts = [
+        "You are the information architect for an engineering docs site.",
+        "Input: a list of pages (title, slug, description, headings, overview snippet).",
+    ]
+    if taint_lines:
+        parts.extend(["", *taint_lines])
+    parts.extend(
         [
-            "You are the information architect for an engineering docs site.",
-            "Input: a list of pages (title, slug, description, headings, overview snippet).",
             "",
             "Produce:",
             "1) A navigation structure with 3–7 groups. Each group has a title and an ordered list of page slugs.",
@@ -1934,6 +1990,24 @@ async def _synthesize_site_ia(
             json.dumps(context, ensure_ascii=True, indent=2),
         ]
     )
+    return "\n".join(parts)
+
+
+async def _synthesize_site_ia(
+    *,
+    pages: list[DocsitePage],
+    provider: LLMProvider,
+    taint: str = "balanced",
+    log_info: Callable[[str], None] | None,
+    log_warning: Callable[[str], None] | None,
+) -> tuple[list[NavGroup] | None, list[GlossaryTerm] | None]:
+    if not pages:
+        return None, None
+
+    slugs = {page.slug for page in pages}
+    context = _build_site_context(pages)
+
+    prompt = _build_site_ia_prompt(context=context, taint=taint)
 
     schema: dict[str, Any] = {
         "type": "object",
@@ -2016,6 +2090,61 @@ def _build_site_context(pages: list[DocsitePage]) -> list[dict[str, Any]]:
             }
         )
     return records
+
+
+def _normalize_homepage_overview(text: str) -> str:
+    cleaned = text.strip()
+    if not cleaned:
+        return ""
+    cleaned = _strip_first_heading(cleaned)
+    # Avoid duplicating headings already present on the index page.
+    cleaned = re.sub(r"^\s*##\s+Overview\s*$", "", cleaned, flags=re.IGNORECASE | re.MULTILINE).strip()
+    cleaned = re.sub(r"^\s*##\s+Topics\s*$", "", cleaned, flags=re.IGNORECASE | re.MULTILINE).strip()
+    return cleaned.strip()
+
+
+async def _synthesize_homepage_overview(
+    *,
+    pages: list[DocsitePage],
+    provider: LLMProvider,
+    log_info: Callable[[str], None] | None,
+    log_warning: Callable[[str], None] | None,
+) -> str | None:
+    if not pages:
+        return None
+
+    context = _build_site_context(pages)
+    prompt = "\n".join(
+        [
+            "You are writing a short, end-user-facing overview for a documentation site.",
+            "Input: a list of pages (title, slug, description, headings, overview snippet).",
+            "",
+            "Goal: briefly explain what the project is for and the main ways a user will interact with it.",
+            "Keep code identifiers (CLI commands, flags, env vars) if they are prominent in the input, but explain them in plain language.",
+            "Do NOT invent installation steps, commands, or configuration keys that are not supported by the input.",
+            "Do NOT mention internal implementation details unless the input emphasizes them.",
+            "Do NOT include YAML frontmatter. Do NOT include a level-1 heading.",
+            "Do NOT include a '## Topics' section or list topic filenames/titles.",
+            "",
+            "Output Markdown only. Prefer 1 short paragraph plus 3–6 bullet points.",
+            "",
+            "Pages JSON:",
+            json.dumps(context, ensure_ascii=True, indent=2),
+        ]
+    )
+
+    if log_info:
+        log_info("Synthesizing homepage overview.")
+
+    try:
+        response = await provider.complete(prompt, system=None, max_completion_tokens=600)
+    except Exception as exc:  # noqa: BLE001
+        if log_warning:
+            log_warning(f"Homepage overview synthesis failed; skipping. Error: {exc}")
+        return None
+
+    overview = _normalize_homepage_overview(response.content)
+    return overview or None
 
 
 def _extract_headings(markdown: str) -> list[str]:
@@ -2270,6 +2399,43 @@ def _render_index_metadata(index: CodeMapperIndex) -> list[str]:
     return lines
 
 
+def _taint_cleanup_system_guidance(taint: str) -> str:
+    normalized = _normalize_taint(taint)
+    if normalized == "technical":
+        return "\n".join(
+            [
+                "Audience: technical (software engineers).",
+                "- Prefer precise terminology and concrete implementation details present in the input.",
+                "- When helpful, call out key modules/classes/functions and their responsibilities.",
+                "- Avoid “product docs” tone; keep the writing crisp and technical.",
+            ]
+        )
+    if normalized == "end-user":
+        return "\n".join(
+            [
+                "Audience: end-user (less technical).",
+                "- Prefer plain-language descriptions of how to set up, configure, and use the project when the input contains that information.",
+                "- Keep code identifiers, but explain them in plain language and focus on user goals and workflows.",
+                "- De-emphasize internal implementation details unless they are central in the input.",
+            ]
+        )
+    return ""
+
+
+def _build_cleanup_system_prompt(config: CleanupConfig) -> str:
+    base = _read_prompt_file(
+        _CLEANUP_SYSTEM_PROMPT_FILE,
+        fallback=(
+            "You are a senior technical writer polishing engineering documentation. "
+            "Make the writing approachable without losing precision."
+        ),
+    )
+    guidance = _taint_cleanup_system_guidance(config.taint)
+    if not guidance:
+        return base.strip()
+    return (base.strip() + "\n\n" + guidance.strip()).strip()
+
+
 async def _cleanup_with_llm(
     *,
     topics: list[CodeMapperTopic],
@@ -2278,16 +2444,10 @@ async def _cleanup_with_llm(
     log_info: Callable[[str], None] | None,
     log_warning: Callable[[str], None] | None,
 ) -> list[str]:
-    system_prompt = _read_prompt_file(
-        _CLEANUP_SYSTEM_PROMPT_FILE,
-        fallback=(
-            "You are a senior technical writer polishing engineering documentation. "
-            "Make the writing approachable without losing precision."
-        ),
-    )
+    system_prompt = _build_cleanup_system_prompt(config)
 
     prompts = [
-        _build_cleanup_prompt(topic.title, topic.body_markdown)
+        _build_cleanup_prompt(topic.title, topic.body_markdown, taint=config.taint)
         for topic in topics
     ]
 
@@ -2320,7 +2480,7 @@ async def _cleanup_with_llm(
     return cleaned
 
 
-def _build_cleanup_prompt(title: str, body: str) -> str:
+def _build_cleanup_prompt(title: str, body: str, *, taint: str = "balanced") -> str:
     fallback = "\n".join(
         [
             "Rewrite the documentation section below as a polished, friendly doc page.",
@@ -2368,7 +2528,13 @@ def _build_cleanup_prompt(title: str, body: str) -> str:
         ]
     )
 
-    template = _read_prompt_file(_CLEANUP_USER_PROMPT_FILE, fallback=fallback)
+    normalized = _normalize_taint(taint)
+    template_file = (
+        _CLEANUP_USER_PROMPT_FILE_END_USER
+        if normalized == "end-user"
+        else _CLEANUP_USER_PROMPT_FILE
+    )
+    template = _read_prompt_file(template_file, fallback=fallback)
     hydrated = (
         template.replace("<<TITLE>>", title)
         .replace("<<BODY>>", body.strip())

@@ -7,6 +7,26 @@ from typing import Any, cast
 from .common_arguments import add_common_arguments, add_config_arguments
 
 
+def _parse_taint(value: str) -> str:
+    normalized = value.strip().lower()
+    mapping = {
+        "1": "technical",
+        "technical": "technical",
+        "2": "balanced",
+        "balanced": "balanced",
+        "3": "end-user",
+        "end-user": "end-user",
+        "end_user": "end-user",
+        "enduser": "end-user",
+    }
+    resolved = mapping.get(normalized)
+    if resolved is None:
+        raise argparse.ArgumentTypeError(
+            "Invalid --taint value. Use 1|2|3 or technical|balanced|end-user."
+        )
+    return resolved
+
+
 def add_autodoc_subparser(subparsers: Any) -> argparse.ArgumentParser:
     """Add AutoDoc site generator subparser to the main parser."""
     site_parser = subparsers.add_parser(
@@ -76,6 +96,16 @@ def add_autodoc_subparser(subparsers: Any) -> argparse.ArgumentParser:
         type=int,
         default=4096,
         help="Maximum completion tokens per cleanup response.",
+    )
+
+    site_parser.add_argument(
+        "--taint",
+        type=_parse_taint,
+        default="balanced",
+        help=(
+            "Controls how technical the generated docs are (LLM cleanup only). "
+            "Accepted: 1|technical, 2|balanced, 3|end-user."
+        ),
     )
 
     site_parser.add_argument(

@@ -186,6 +186,7 @@ async def autodoc_command(args, config: Config) -> None:
         mode=cleanup_mode,
         batch_size=max(1, int(getattr(args, "cleanup_batch_size", 4))),
         max_completion_tokens=max(512, int(getattr(args, "cleanup_max_tokens", 4096))),
+        taint=getattr(args, "taint", "balanced"),
     )
 
     index_patterns = getattr(args, "index_patterns", None)
