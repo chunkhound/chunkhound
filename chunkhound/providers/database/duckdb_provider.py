@@ -34,6 +34,7 @@ from chunkhound.providers.database.duckdb.embedding_repository import (
     DuckDBEmbeddingRepository,
 )
 from chunkhound.providers.database.duckdb.file_repository import DuckDBFileRepository
+from chunkhound.providers.database.like_utils import escape_like_pattern
 from chunkhound.providers.database.serial_database_provider import (
     SerialDatabaseProvider,
 )
@@ -1682,6 +1683,79 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Get all chunks with their metadata including file paths - delegate to chunk repository."""
         return self._execute_in_db_thread_sync("get_all_chunks_with_metadata")
 
+    def get_scope_stats(self, scope_prefix: str | None) -> tuple[int, int]:
+        """Return (total_files, total_chunks) under an optional scope prefix.
+
+        This is used by code_mapper coverage and must avoid loading full chunk code.
+        """
+        return self._execute_in_db_thread_sync("get_scope_stats", scope_prefix)
+
+    def _executor_get_scope_stats(
+        self, conn: Any, state: dict[str, Any], scope_prefix: str | None
+    ) -> tuple[int, int]:
+        """Executor method for get_scope_stats - runs in DB thread."""
+        try:
+            if scope_prefix:
+                normalized = scope_prefix.replace("\\", "/")
+                escaped = escape_like_pattern(normalized)
+                like = f"{escaped}%"
+                files_row = conn.execute(
+                    "SELECT COUNT(*) FROM files WHERE path LIKE ? ESCAPE '\\'",
+                    [like],
+                ).fetchone()
+                chunks_row = conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM chunks c
+                    JOIN files f ON c.file_id = f.id
+                    WHERE f.path LIKE ? ESCAPE '\\'
+                    """,
+                    [like],
+                ).fetchone()
+            else:
+                files_row = conn.execute("SELECT COUNT(*) FROM files").fetchone()
+                chunks_row = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
+
+            total_files = int(files_row[0]) if files_row else 0
+            total_chunks = int(chunks_row[0]) if chunks_row else 0
+            return total_files, total_chunks
+        except Exception as exc:
+            logger.debug(f"Failed to get scope stats: {exc}")
+            return 0, 0
+
+    def get_scope_file_paths(self, scope_prefix: str | None) -> list[str]:
+        """Return file paths under an optional scope prefix."""
+        return self._execute_in_db_thread_sync("get_scope_file_paths", scope_prefix)
+
+    def _executor_get_scope_file_paths(
+        self, conn: Any, state: dict[str, Any], scope_prefix: str | None
+    ) -> list[str]:
+        """Executor method for get_scope_file_paths - runs in DB thread."""
+        try:
+            if scope_prefix:
+                normalized = scope_prefix.replace("\\", "/")
+                escaped = escape_like_pattern(normalized)
+                like = f"{escaped}%"
+                rows = conn.execute(
+                    "SELECT path FROM files WHERE path LIKE ? ESCAPE '\\' ORDER BY path",
+                    [like],
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT path FROM files ORDER BY path").fetchall()
+
+            out: list[str] = []
+            for row in rows:
+                try:
+                    path = str(row[0] or "").replace("\\", "/")
+                except Exception:
+                    path = ""
+                if path:
+                    out.append(path)
+            return out
+        except Exception as exc:
+            logger.debug(f"Failed to get scope file paths: {exc}")
+            return []
+
     def _executor_get_all_chunks_with_metadata(
         self, conn: Any, state: dict[str, Any]
     ) -> list[dict[str, Any]]:
@@ -1849,16 +1923,21 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             params = [query_embedding, provider, model]
 
+            path_like: str | None = None
+            if normalized_path is not None:
+                escaped_path = escape_like_pattern(normalized_path)
+                path_like = f"%{escaped_path}%"
+
             if threshold is not None:
                 query += f" AND array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) >= ?"
                 params.append(query_embedding)
                 params.append(threshold)
 
-            if normalized_path is not None:
-                query += " AND f.path LIKE ?"
+            if path_like is not None:
+                query += " AND f.path LIKE ? ESCAPE '\\'"
                 # Use substring match so callers can pass repo-relative paths
                 # even when the database base_directory is higher (e.g., monorepo root).
-                params.append(f"%{normalized_path}%")
+                params.append(path_like)
 
             # Get total count for pagination
             # Build count query separately to avoid string replacement issues
@@ -1876,10 +1955,10 @@ class DuckDBProvider(SerialDatabaseProvider):
                 count_query += f" AND array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) >= ?"
                 count_params.extend([query_embedding, threshold])
 
-            if normalized_path is not None:
-                count_query += " AND f.path LIKE ?"
+            if path_like is not None:
+                count_query += " AND f.path LIKE ? ESCAPE '\\'"
                 # Substring match for consistency with main query
-                count_params.append(f"%{normalized_path}%")
+                count_params.append(path_like)
 
             total_count = conn.execute(count_query, count_params).fetchone()[0]
 
@@ -1966,9 +2045,10 @@ class DuckDBProvider(SerialDatabaseProvider):
             params = [pattern]
 
             if normalized_path is not None:
-                where_conditions.append("f.path LIKE ?")
+                escaped_path = escape_like_pattern(normalized_path)
+                where_conditions.append("f.path LIKE ? ESCAPE '\\'")
                 # Allow matching repo-relative segments inside stored paths
-                params.append(f"%{normalized_path}%")
+                params.append(f"%{escaped_path}%")
 
             where_clause = " AND ".join(where_conditions)
 
@@ -2149,9 +2229,10 @@ class DuckDBProvider(SerialDatabaseProvider):
             path_condition = ""
             params: list[Any] = [target_embedding, provider, model, chunk_id]
             if normalized_path is not None:
-                path_condition = "AND f.path LIKE ?"
+                escaped_path = escape_like_pattern(normalized_path)
+                path_condition = "AND f.path LIKE ? ESCAPE '\\'"
                 # Substring match so repo-relative scopes still work when base_directory is higher
-                params.append(f"%{normalized_path}%")
+                params.append(f"%{escaped_path}%")
 
             # Query for similar chunks (exclude the original chunk)
             # Cast the target embedding to match the table's embedding type
@@ -2250,13 +2331,15 @@ class DuckDBProvider(SerialDatabaseProvider):
                 return []
 
             # Build path filter condition
+            normalized_path = self._validate_and_normalize_path_filter(path_filter)
             path_condition = ""
             query_params = [query_embedding, provider, model, limit]
 
-            if path_filter:
+            if normalized_path is not None:
                 # Convert relative path to SQL pattern
-                path_pattern = f"%{path_filter}%"
-                path_condition = "AND f.path LIKE ?"
+                escaped_path = escape_like_pattern(normalized_path)
+                path_pattern = f"%{escaped_path}%"
+                path_condition = "AND f.path LIKE ? ESCAPE '\\'"
                 query_params.insert(-1, path_pattern)  # Insert before limit
 
             # Build threshold condition

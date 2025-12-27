@@ -192,15 +192,37 @@ class SynthesisEngine:
 
             logger.info(f"Using chunk score fallback for {len(file_priorities)} files")
         else:
-            # Build priority map from rerank scores
-            # Process results outside try block - let IndexError fail loudly if provider returns bad data
+            # Build priority map from rerank scores. Some providers may return
+            # result indexes that do not align with the documents array (for
+            # example, due to internal truncation). In that case we skip the
+            # out-of-range entries instead of raising IndexError so that
+            # deep-research callers (including MCP code_research) degrade
+            # gracefully instead of failing the entire run.
             for result in rerank_results:
-                file_path = file_paths[result.index]
-                file_priorities[file_path] = result.score
+                idx = result.index
+                if 0 <= idx < len(file_paths):
+                    file_path = file_paths[idx]
+                    file_priorities[file_path] = result.score
+                else:
+                    logger.warning(
+                        "Rerank result index %s out of range for %s files; "
+                        "skipping this entry",
+                        idx,
+                        len(file_paths),
+                    )
 
             logger.info(
                 f"Reranked {len(file_priorities)} files for synthesis budget allocation"
             )
+
+            if not file_priorities:
+                logger.warning(
+                    "All rerank results were out of range; falling back to chunk scores"
+                )
+                for file_path, file_chunks in file_to_chunks.items():
+                    file_priorities[file_path] = sum(
+                        c.get("score", 0.0) for c in file_chunks
+                    )
 
         # Sort files by priority score (highest first)
         # Works for both reranking and fallback paths
@@ -385,8 +407,7 @@ class SynthesisEngine:
         file_reference_map = self._parent._build_file_reference_map(budgeted_chunks, files)
         reference_table = self._parent._format_reference_table(file_reference_map)
 
-        # Build output guidance with fixed 25k token budget
-        # Output budget is always 25k (includes reasoning + actual output)
+        # Default: curated but still detailed analysis.
         output_guidance = (
             f"**Target Output:** Provide a thorough and detailed analysis of approximately "
             f"{max_output_tokens:,} tokens (includes reasoning). Focus on all relevant "

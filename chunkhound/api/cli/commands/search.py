@@ -37,8 +37,7 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
 
     # Verify database exists and get paths
     try:
-        verify_database_exists(config)  # Validates and raises if missing
-        db_path = config.database.path  # Raw path for provider
+        db_path = verify_database_exists(config)  # Raw path for provider
     except (ValueError, FileNotFoundError) as e:
         formatter.error(str(e))
         sys.exit(1)

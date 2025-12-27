@@ -14,7 +14,13 @@ def test_tool_registry_populated():
     assert len(TOOL_REGISTRY) > 0, "TOOL_REGISTRY should contain tools"
 
     # Check expected tools are present
-    expected_tools = ["get_stats", "health_check", "search_regex", "search_semantic", "code_research"]
+    expected_tools = [
+        "get_stats",
+        "health_check",
+        "search_regex",
+        "search_semantic",
+        "code_research",
+    ]
     for tool_name in expected_tools:
         assert tool_name in TOOL_REGISTRY, f"Tool '{tool_name}' should be in registry"
 
@@ -29,16 +35,23 @@ def test_tool_descriptions_not_empty():
 
         # Complex search/research tools should have comprehensive descriptions
         if tool_name not in simple_tools:
-            assert len(tool.description) > 50, \
+            assert len(tool.description) > 50, (
                 f"Tool '{tool_name}' description should be comprehensive (>50 chars)"
+            )
 
 
 def test_tool_parameters_structure():
     """Verify all tools have properly structured parameter schemas."""
     for tool_name, tool in TOOL_REGISTRY.items():
-        assert "type" in tool.parameters, f"Tool '{tool_name}' parameters should have 'type'"
-        assert tool.parameters["type"] == "object", f"Tool '{tool_name}' parameters type should be 'object'"
-        assert "properties" in tool.parameters, f"Tool '{tool_name}' should have 'properties'"
+        assert "type" in tool.parameters, (
+            f"Tool '{tool_name}' parameters should have 'type'"
+        )
+        assert tool.parameters["type"] == "object", (
+            f"Tool '{tool_name}' parameters type should be 'object'"
+        )
+        assert "properties" in tool.parameters, (
+            f"Tool '{tool_name}' should have 'properties'"
+        )
 
 
 def test_search_regex_schema():
@@ -54,7 +67,9 @@ def test_search_regex_schema():
     assert "pattern" in props, "search_regex should have 'pattern' parameter"
     assert "page_size" in props, "search_regex should have 'page_size' parameter"
     assert "offset" in props, "search_regex should have 'offset' parameter"
-    assert "max_response_tokens" in props, "search_regex should have 'max_response_tokens' parameter"
+    assert "max_response_tokens" in props, (
+        "search_regex should have 'max_response_tokens' parameter"
+    )
     assert "path" in props, "search_regex should have 'path' parameter"
 
     # Check required fields
@@ -67,14 +82,18 @@ def test_search_semantic_schema():
     tool = TOOL_REGISTRY["search_semantic"]
 
     # Check description
-    assert "semantic" in tool.description.lower() or "meaning" in tool.description.lower()
+    assert (
+        "semantic" in tool.description.lower() or "meaning" in tool.description.lower()
+    )
 
     # Check parameters
     props = tool.parameters["properties"]
     assert "query" in props, "search_semantic should have 'query' parameter"
     assert "page_size" in props, "search_semantic should have 'page_size' parameter"
     assert "offset" in props, "search_semantic should have 'offset' parameter"
-    assert "max_response_tokens" in props, "search_semantic should have 'max_response_tokens' parameter"
+    assert "max_response_tokens" in props, (
+        "search_semantic should have 'max_response_tokens' parameter"
+    )
     assert "path" in props, "search_semantic should have 'path' parameter"
     assert "provider" in props, "search_semantic should have 'provider' parameter"
     assert "model" in props, "search_semantic should have 'model' parameter"
@@ -90,12 +109,18 @@ def test_code_research_schema():
     tool = TOOL_REGISTRY["code_research"]
 
     # Check description
-    assert "research" in tool.description.lower() or "architecture" in tool.description.lower()
-    assert len(tool.description) > 100, "code_research should have comprehensive description"
+    assert (
+        "research" in tool.description.lower()
+        or "architecture" in tool.description.lower()
+    )
+    assert len(tool.description) > 100, (
+        "code_research should have comprehensive description"
+    )
 
     # Check parameters
     props = tool.parameters["properties"]
     assert "query" in props, "code_research should have 'query' parameter"
+    assert "max_depth" not in props, "code_research should not expose 'max_depth'"
 
     # Check required fields
     required = tool.parameters.get("required", [])
@@ -122,17 +147,21 @@ def test_stdio_server_uses_registry_descriptions():
     """
     from pathlib import Path
 
-    stdio_server_path = Path(__file__).parent.parent / "chunkhound" / "mcp_server" / "stdio.py"
+    stdio_server_path = (
+        Path(__file__).parent.parent / "chunkhound" / "mcp_server" / "stdio.py"
+    )
     content = stdio_server_path.read_text()
 
     # Check that TOOL_REGISTRY is imported
-    assert "from .tools import" in content and "TOOL_REGISTRY" in content, \
+    assert "from .tools import" in content and "TOOL_REGISTRY" in content, (
         "Stdio server should import TOOL_REGISTRY"
+    )
 
     # Check that tools are registered from TOOL_REGISTRY
     # The server should iterate over TOOL_REGISTRY to expose tools
-    assert "TOOL_REGISTRY" in content, \
+    assert "TOOL_REGISTRY" in content, (
         "Server should reference TOOL_REGISTRY for tool definitions"
+    )
 
 
 def test_default_values_in_schema():
@@ -150,10 +179,12 @@ def test_default_values_in_schema():
     assert semantic_props["max_response_tokens"].get("default") == 20000
     # provider and model should NOT have defaults - they should be None
     # to allow auto-detection from configured embedding provider
-    assert "default" not in semantic_props["provider"], \
+    assert "default" not in semantic_props["provider"], (
         "provider should not have default value (allows auto-detection)"
-    assert "default" not in semantic_props["model"], \
+    )
+    assert "default" not in semantic_props["model"], (
         "model should not have default value (allows auto-detection)"
+    )
 
 
 def test_no_duplicate_tool_dataclass():
@@ -169,7 +200,8 @@ def test_no_duplicate_tool_dataclass():
 
     # Count occurrences of "@dataclass\nclass Tool:"
     import re
-    matches = re.findall(r'@dataclass\s+class Tool:', content)
+
+    matches = re.findall(r"@dataclass\s+class Tool:", content)
     assert len(matches) == 1, "There should be exactly one Tool dataclass definition"
 
 
@@ -187,8 +219,10 @@ def test_no_tool_definitions_list():
     content = tools_path.read_text()
 
     # Check that TOOL_DEFINITIONS list doesn't exist
-    assert "TOOL_DEFINITIONS = [" not in content, \
-        "Old TOOL_DEFINITIONS list should be removed (registry now populated by decorators)"
+    assert "TOOL_DEFINITIONS = [" not in content, (
+        "Old TOOL_DEFINITIONS list should be removed "
+        "(registry now populated by decorators)"
+    )
 
 
 if __name__ == "__main__":
