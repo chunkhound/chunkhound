@@ -79,23 +79,22 @@ def _python_type_to_json_schema_type(type_hint: Any) -> dict[str, Any]:
             return _python_type_to_json_schema_type(non_none_types[0])
         else:
             # Multiple non-None types - use anyOf
-            return {"anyOf": [_python_type_to_json_schema_type(t) for t in non_none_types]}
+            return {
+                "anyOf": [_python_type_to_json_schema_type(t) for t in non_none_types]
+            }
 
     # Handle basic types
-    if type_hint == str or type_hint is str:
+    if type_hint is str:
         return {"type": "string"}
-    elif type_hint == int or type_hint is int:
+    elif type_hint is int:
         return {"type": "integer"}
-    elif type_hint == float or type_hint is float:
+    elif type_hint is float:
         return {"type": "number"}
-    elif type_hint == bool or type_hint is bool:
+    elif type_hint is bool:
         return {"type": "boolean"}
     elif origin is list:
         item_type = args[0] if args else Any
-        return {
-            "type": "array",
-            "items": _python_type_to_json_schema_type(item_type)
-        }
+        return {"type": "array", "items": _python_type_to_json_schema_type(item_type)}
     elif origin is dict:
         return {"type": "object"}
     else:
@@ -118,7 +117,7 @@ def _extract_param_descriptions_from_docstring(func: Callable) -> dict[str, str]
         return {}
 
     descriptions: dict[str, str] = {}
-    lines = func.__doc__.split('\n')
+    lines = func.__doc__.split("\n")
     in_args_section = False
 
     for line in lines:
@@ -130,13 +129,15 @@ def _extract_param_descriptions_from_docstring(func: Callable) -> dict[str, str]
             continue
 
         # Exit Args section when we hit another section or empty line after args
-        if in_args_section and (stripped.endswith(':') or (not stripped and descriptions)):
+        if in_args_section and (
+            stripped.endswith(":") or (not stripped and descriptions)
+        ):
             in_args_section = False
 
         # Parse parameter descriptions
-        if in_args_section and ':' in stripped:
+        if in_args_section and ":" in stripped:
             # Format: "param_name: description"
-            parts = stripped.split(':', 1)
+            parts = stripped.split(":", 1)
             if len(parts) == 2:
                 param_name = parts[0].strip()
                 description = parts[1].strip()
@@ -163,11 +164,19 @@ def _generate_json_schema_from_signature(func: Callable) -> dict[str, Any]:
 
     for param_name, param in sig.parameters.items():
         # Skip service/infrastructure parameters that aren't part of the tool API
-        if param_name in ('services', 'embedding_manager', 'llm_manager', 'scan_progress', 'progress'):
+        if param_name in (
+            "services",
+            "embedding_manager",
+            "llm_manager",
+            "scan_progress",
+            "progress",
+        ):
             continue
 
         # Get type hint
-        type_hint = param.annotation if param.annotation != inspect.Parameter.empty else Any
+        type_hint = (
+            param.annotation if param.annotation != inspect.Parameter.empty else Any
+        )
 
         # Convert to JSON Schema type
         schema = _python_type_to_json_schema_type(type_hint)
@@ -218,6 +227,7 @@ def register_tool(
         async def search_regex(pattern: str, page_size: int = 10) -> dict:
             ...
     """
+
     def decorator(func: Callable) -> Callable:
         tool_name = name or func.__name__
 
@@ -341,7 +351,12 @@ def limit_response_size(
 
 
 @register_tool(
-    description="Find exact code patterns using regular expressions. Use when searching for specific syntax (function definitions, variable names, import statements), exact text matches, or code structure patterns. Best for precise searches where you know the exact pattern.",
+    description=(
+        "Find exact code patterns using regular expressions. Use when searching for "
+        "specific syntax (function definitions, variable names, import statements), "
+        "exact text matches, or code structure patterns. Best for precise searches "
+        "where you know the exact pattern."
+    ),
     requires_embeddings=False,
     name="search_regex",
 )
@@ -386,12 +401,19 @@ async def search_regex_impl(
     native_results = _convert_paths_to_native(results)
 
     # Apply response size limiting
-    response = cast(SearchResponse, {"results": native_results, "pagination": pagination})
+    response = cast(
+        SearchResponse, {"results": native_results, "pagination": pagination}
+    )
     return limit_response_size(response, max_response_tokens)
 
 
 @register_tool(
-    description="Find code by meaning and concept rather than exact syntax. Use when searching by description (e.g., 'authentication logic', 'error handling'), looking for similar functionality, or when you're unsure of exact keywords. Understands intent and context beyond literal text matching.",
+    description=(
+        "Find code by meaning and concept rather than exact syntax. Use when "
+        "searching by description (e.g., 'authentication logic', 'error handling'), "
+        "looking for similar functionality, or when you're unsure of exact "
+        "keywords. Understands intent and context beyond literal text matching."
+    ),
     requires_embeddings=True,
     name="search_semantic",
 )
@@ -417,7 +439,8 @@ async def search_semantic_impl(
         offset: Starting offset for pagination
         max_response_tokens: Maximum response size in tokens (1000-25000)
         path: Optional path to limit search scope
-        provider: Embedding provider name (optional, uses configured provider if not specified)
+        provider: Embedding provider name (optional, uses configured provider if not
+            specified)
         model: Embedding model name (optional, uses configured model if not specified)
         threshold: Distance threshold for filtering (optional)
 
@@ -447,7 +470,8 @@ async def search_semantic_impl(
         except ValueError:
             raise Exception(
                 "No default embedding provider configured. "
-                "Either specify provider and model explicitly, or configure a default provider."
+                "Either specify provider and model explicitly, or configure a "
+                "default provider."
             )
 
     # Validate and constrain parameters
@@ -473,7 +497,9 @@ async def search_semantic_impl(
     native_results = _convert_paths_to_native(results)
 
     # Apply response size limiting
-    response = cast(SearchResponse, {"results": native_results, "pagination": pagination})
+    response = cast(
+        SearchResponse, {"results": native_results, "pagination": pagination}
+    )
     return limit_response_size(response, max_response_tokens)
 
 
@@ -499,7 +525,8 @@ async def get_stats_impl(
         if services and not services.provider.is_connected:
             services.provider.connect()
     except Exception:
-        # Best-effort: if connect fails, get_stats may still work for providers that lazy-init internally
+        # Best-effort: if connect fails, get_stats may still work for providers
+        # that lazy-init internally.
         pass
     stats: dict[str, Any] = services.provider.get_stats()
 
@@ -556,7 +583,13 @@ async def health_check_impl(
 
 
 @register_tool(
-    description="Perform deep code research to answer complex questions about your codebase. Use this tool when you need to understand architecture, discover existing implementations, trace relationships between components, or find patterns across multiple files. Returns comprehensive markdown analysis. Synthesis budgets scale automatically based on repository size.",
+    description=(
+        "Perform deep code research to answer complex questions about your codebase. "
+        "Use this tool when you need to understand architecture, discover existing "
+        "implementations, trace relationships between components, or find patterns "
+        "across multiple files. Returns comprehensive markdown analysis. Synthesis "
+        "budgets scale automatically based on repository size."
+    ),
     requires_embeddings=True,
     name="code_research",
 )
@@ -567,7 +600,6 @@ async def deep_research_impl(
     query: str,
     progress: Any = None,
     path: str | None = None,
-    max_depth: int | None = None,
 ) -> dict[str, Any]:
     """Core deep research implementation.
 
@@ -597,7 +629,8 @@ async def deep_research_impl(
     # Validate reranker is configured
     if not embedding_manager or not embedding_manager.list_providers():
         raise Exception(
-            "No embedding providers available. Code research requires reranking support."
+            "No embedding providers available. Code research requires reranking "
+            "support."
         )
 
     embedding_provider = embedding_manager.get_provider()
@@ -622,7 +655,7 @@ async def deep_research_impl(
     )
 
     # Perform code research with fixed depth and dynamic budgets
-    result = await research_service.deep_research(query, max_depth=max_depth)
+    result = await research_service.deep_research(query)
 
     return result
 
@@ -691,7 +724,17 @@ async def execute_tool(
     if tool_name == "code_research":
         # Code research returns dict with 'answer' key - return raw markdown string
         if isinstance(result, dict):
-            return cast(dict[str, Any], result.get("answer", f"Research incomplete: Unable to analyze '{arguments.get('query', 'unknown')}'. Try a more specific query or check that relevant code exists."))
+            query_arg = arguments.get("query", "unknown")
+            fallback = (
+                "Research incomplete: Unable to analyze "
+                f"'{query_arg}'. "
+                "Try a more specific query or check that relevant code exists."
+            )
+            answer = result.get("answer", fallback)
+            return cast(
+                dict[str, Any],
+                answer,
+            )
 
     # Convert result to dict if it's not already
     if hasattr(result, "__dict__"):

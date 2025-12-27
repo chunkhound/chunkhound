@@ -57,6 +57,7 @@ async def _run_code_mapper_overview_hyde(
 # Re-export for tests that monkeypatch assembly metadata wiring.
 build_llm_metadata_and_assembly = code_mapper_llm.build_llm_metadata_and_assembly
 
+
 async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
     """Execute the Code Mapper command using deep code research."""
     formatter = RichOutputFormatter(verbose=args.verbose)
@@ -225,17 +226,6 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
     # Phase 1 + 2: run overview (HyDE-based) and per-point deep research with a shared
     # TUI.
 
-    # Optional depth override (currently disabled by default): wiring for
-    # experiments where ultra mode may increase BFS depth beyond the global
-    # default. For now we keep depth at the standard value unless an explicit
-    # environment override is provided so coverage remains focused on breadth.
-    max_depth_override: int | None = None
-    if (
-        run_context.comprehensiveness == "ultra"
-        and os.getenv("CH_CODE_MAPPER_ULTRA_USE_DEPTH", "0") == "1"
-    ):
-        max_depth_override = 2
-
     with TreeProgressDisplay() as tree_progress:
         try:
             pipeline_result = await run_code_mapper_pipeline(
@@ -248,7 +238,6 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
                 path_filter=scope.path_filter,
                 comprehensiveness=run_context.comprehensiveness,
                 max_points=run_context.max_points,
-                max_depth=max_depth_override,
                 out_dir=Path(out_dir_arg),
                 assembly_provider=meta_bundle.assembly_provider,
                 indexing_cfg=getattr(config, "indexing", None),

@@ -88,7 +88,6 @@ async def run_code_mapper_pipeline(
     path_filter: str | None,
     comprehensiveness: str,
     max_points: int,
-    max_depth: int | None = None,
     out_dir: Path | None,
     assembly_provider: LLMProvider | None,
     indexing_cfg: IndexingConfig | None,
@@ -157,7 +156,6 @@ async def run_code_mapper_pipeline(
                 query=section_query,
                 progress=progress,
                 path=path_filter,
-                max_depth=max_depth,
             )
             if _is_empty_research_result(result):
                 if log_warning:
