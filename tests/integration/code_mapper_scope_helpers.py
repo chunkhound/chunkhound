@@ -142,7 +142,8 @@ def run_code_mapper(
             self.path = scope_path
             self.verbose = False
             self.overview_only = False
-            self.out_dir = out_dir
+            self.out = out_dir
             self.comprehensiveness = "low"
+            self.combined = None
 
     return code_mapper_mod.code_mapper_command(Args(), config)
