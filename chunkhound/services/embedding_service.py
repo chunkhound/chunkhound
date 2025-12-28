@@ -184,7 +184,7 @@ class EmbeddingService(BaseService):
             # Dynamic batch size configuration
             if batch_size is None:
                 # Start with conservative batch size for large databases
-                initial_batch_size = 100
+                initial_batch_size = 1000
                 min_batch_size = 50
                 max_batch_size = 50000
                 target_batch_time = 15.0  # Target 15 seconds per batch
