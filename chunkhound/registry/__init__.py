@@ -241,13 +241,22 @@ class ProviderRegistry:
             except ValueError:
                 logger.warning("No embedding provider configured for embedding service")
 
-        # Get batch configuration from config
+        # Get batch configuration from config (defaults are built into EmbeddingConfig)
         if self._config and self._config.embedding:
-            embedding_batch_size = self._config.embedding.batch_size
-            max_concurrent = self._config.embedding.max_concurrent_batches
+            embedding_config = self._config.embedding
         else:
-            embedding_batch_size = 1000
-            max_concurrent = None
+            # Create default embedding config if none provided
+            from chunkhound.core.config.embedding_config import EmbeddingConfig
+            embedding_config = EmbeddingConfig()
+
+        embedding_batch_size = embedding_config.batch_size
+        max_concurrent = embedding_config.max_concurrent_batches
+        missing_embeddings_initial_batch_size = embedding_config.missing_embeddings_initial_batch_size
+        missing_embeddings_min_batch_size = embedding_config.missing_embeddings_min_batch_size
+        missing_embeddings_max_batch_size = embedding_config.missing_embeddings_max_batch_size
+        missing_embeddings_target_batch_time = embedding_config.missing_embeddings_target_batch_time
+        missing_embeddings_slow_threshold = embedding_config.missing_embeddings_slow_threshold
+        missing_embeddings_fast_threshold = embedding_config.missing_embeddings_fast_threshold
 
         db_batch_size = 5000
         if self._config and self._config.indexing:
@@ -260,6 +269,12 @@ class ProviderRegistry:
             db_batch_size=db_batch_size,
             max_concurrent_batches=max_concurrent,
             optimization_batch_frequency=1000,
+            missing_embeddings_initial_batch_size=missing_embeddings_initial_batch_size,
+            missing_embeddings_min_batch_size=missing_embeddings_min_batch_size,
+            missing_embeddings_max_batch_size=missing_embeddings_max_batch_size,
+            missing_embeddings_target_batch_time=missing_embeddings_target_batch_time,
+            missing_embeddings_slow_threshold=missing_embeddings_slow_threshold,
+            missing_embeddings_fast_threshold=missing_embeddings_fast_threshold,
         )
 
     # Private setup methods - explicit provider creation

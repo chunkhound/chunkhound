@@ -26,6 +26,12 @@ class EmbeddingService(BaseService):
         max_concurrent_batches: int | None = None,
         optimization_batch_frequency: int = 100,
         progress: Progress | None = None,
+        missing_embeddings_initial_batch_size: int = 1000,
+        missing_embeddings_min_batch_size: int = 50,
+        missing_embeddings_max_batch_size: int = 30000,
+        missing_embeddings_target_batch_time: float = 15.0,
+        missing_embeddings_slow_threshold: float = 25.0,
+        missing_embeddings_fast_threshold: float = 5.0,
     ):
         """Initialize embedding service.
 
@@ -37,6 +43,12 @@ class EmbeddingService(BaseService):
             max_concurrent_batches: Maximum concurrent batches (None = auto-detect from provider)
             optimization_batch_frequency: Optimize DB every N batches (provider-aware)
             progress: Optional Rich Progress instance for hierarchical progress display
+            missing_embeddings_initial_batch_size: Initial batch size for missing embeddings generation
+            missing_embeddings_min_batch_size: Minimum batch size for missing embeddings generation
+            missing_embeddings_max_batch_size: Maximum batch size for missing embeddings generation
+            missing_embeddings_target_batch_time: Target time per batch in seconds for dynamic sizing
+            missing_embeddings_slow_threshold: Threshold above which batch is considered slow (seconds)
+            missing_embeddings_fast_threshold: Threshold below which batch is considered fast (seconds)
         """
         super().__init__(database_provider)
         self._embedding_provider = embedding_provider
@@ -76,6 +88,14 @@ class EmbeddingService(BaseService):
 
         self._optimization_batch_frequency = optimization_batch_frequency
         self.progress = progress
+
+        # Dynamic batch size configuration
+        self._missing_embeddings_initial_batch_size = missing_embeddings_initial_batch_size
+        self._missing_embeddings_min_batch_size = missing_embeddings_min_batch_size
+        self._missing_embeddings_max_batch_size = missing_embeddings_max_batch_size
+        self._missing_embeddings_target_batch_time = missing_embeddings_target_batch_time
+        self._missing_embeddings_slow_threshold = missing_embeddings_slow_threshold
+        self._missing_embeddings_fast_threshold = missing_embeddings_fast_threshold
 
     def set_embedding_provider(self, provider: EmbeddingProvider) -> None:
         """Set or update the embedding provider.
@@ -182,13 +202,13 @@ class EmbeddingService(BaseService):
 
             # Dynamic batch size configuration
             if batch_size is None:
-                # Start with conservative batch size for large databases
-                initial_batch_size = 1000
-                min_batch_size = 50
-                max_batch_size = 30000
-                target_batch_time = 15.0  # Target 15 seconds per batch
-                slow_threshold = 25.0     # Consider >30s as too slow
-                fast_threshold = 5.0      # Consider <5s as very fast
+                # Use configured values for dynamic batch sizing
+                initial_batch_size = self._missing_embeddings_initial_batch_size
+                min_batch_size = self._missing_embeddings_min_batch_size
+                max_batch_size = self._missing_embeddings_max_batch_size
+                target_batch_time = self._missing_embeddings_target_batch_time
+                slow_threshold = self._missing_embeddings_slow_threshold
+                fast_threshold = self._missing_embeddings_fast_threshold
             else:
                 # Use fixed batch size if explicitly provided
                 initial_batch_size = batch_size
