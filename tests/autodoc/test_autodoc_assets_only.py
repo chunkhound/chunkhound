@@ -11,7 +11,7 @@ def test_autodoc_parser_accepts_assets_only_flag() -> None:
     subparsers = parser.add_subparsers(dest="command")
     add_autodoc_subparser(subparsers)
 
-    args = parser.parse_args(["autodoc", ".", "--assets-only"])
+    args = parser.parse_args(["autodoc", ".", "--out-dir", "site", "--assets-only"])
 
     assert args.command == "autodoc"
     assert args.assets_only is True
@@ -22,7 +22,7 @@ def test_autodoc_parser_defaults_taint_to_balanced() -> None:
     subparsers = parser.add_subparsers(dest="command")
     add_autodoc_subparser(subparsers)
 
-    args = parser.parse_args(["autodoc", "."])
+    args = parser.parse_args(["autodoc", ".", "--out-dir", "site"])
 
     assert args.command == "autodoc"
     assert args.taint == "balanced"
@@ -33,13 +33,15 @@ def test_autodoc_parser_accepts_taint_numeric_and_named_values() -> None:
     subparsers = parser.add_subparsers(dest="command")
     add_autodoc_subparser(subparsers)
 
-    assert parser.parse_args(["autodoc", ".", "--taint", "1"]).taint == "technical"
-    assert parser.parse_args(["autodoc", ".", "--taint", "technical"]).taint == "technical"
-    assert parser.parse_args(["autodoc", ".", "--taint", "2"]).taint == "balanced"
-    assert parser.parse_args(["autodoc", ".", "--taint", "balanced"]).taint == "balanced"
-    assert parser.parse_args(["autodoc", ".", "--taint", "3"]).taint == "end-user"
-    assert parser.parse_args(["autodoc", ".", "--taint", "end-user"]).taint == "end-user"
-    assert parser.parse_args(["autodoc", ".", "--taint", "end_user"]).taint == "end-user"
+    base = ["autodoc", ".", "--out-dir", "site", "--taint"]
+
+    assert parser.parse_args([*base, "1"]).taint == "technical"
+    assert parser.parse_args([*base, "technical"]).taint == "technical"
+    assert parser.parse_args([*base, "2"]).taint == "balanced"
+    assert parser.parse_args([*base, "balanced"]).taint == "balanced"
+    assert parser.parse_args([*base, "3"]).taint == "end-user"
+    assert parser.parse_args([*base, "end-user"]).taint == "end-user"
+    assert parser.parse_args([*base, "end_user"]).taint == "end-user"
 
 
 def test_write_astro_assets_only_preserves_topic_pages(tmp_path: Path) -> None:

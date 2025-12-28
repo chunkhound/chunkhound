@@ -108,26 +108,39 @@ Generate an Astro documentation site from existing AutoDoc / Code Mapper outputs
 Basic usage:
 
 ```bash
-# Generate an Astro site under <input-dir>/autodoc/
-chunkhound autodoc /path/to/output_dir
+# Generate an Astro site under <map>/autodoc/
+chunkhound autodoc /path/to/map_output_dir --out-dir /path/to/map_output_dir/autodoc
+```
+
+Generate maps automatically (interactive):
+
+```bash
+# If you omit map-in, AutoDoc can prompt to run Code Mapper first.
+chunkhound autodoc --out-dir /path/to/output/autodoc
 ```
 
 Optional overrides:
 
 ```bash
 # Custom output directory + minimal cleanup
-chunkhound autodoc /path/to/output_dir \
+chunkhound autodoc /path/to/map_output_dir \
   --out-dir /path/to/output_dir/autodoc_site \
   --cleanup-mode minimal
 
 # Override index file glob(s) (repeatable)
-chunkhound autodoc /path/to/output_dir \
+chunkhound autodoc /path/to/map_output_dir \
   --index-pattern "*_autodoc_index.md" \
   --index-pattern "*_code_mapper_index.md"
 ```
 
 Notes:
-- Default output directory is `<input-dir>/autodoc/`.
+- `--out-dir` is required; a common convention is `<map-in>/autodoc/`.
 - AutoDoc accepts both `*_autodoc_index.md` and `*_code_mapper_index.md` by default.
 - References are normalized from the original `## Sources` tree:
   flattened into a deterministic `## References` list with `[N]` and chunk ranges.
+- If the provided `map-in` directory does not contain an index file, AutoDoc can
+  prompt to run Code Mapper and retry.
+  - It will prompt for the map output directory (default: `map_<out-dir-name>/`)
+    unless you pass `--map-out-dir`.
+  - It will prompt for Code Mapper comprehensiveness unless you pass
+    `--map-comprehensiveness {minimal,low,medium,high,ultra}`.

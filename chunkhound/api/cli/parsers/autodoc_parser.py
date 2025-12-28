@@ -39,20 +39,22 @@ def add_autodoc_subparser(subparsers: Any) -> argparse.ArgumentParser:
     )
 
     site_parser.add_argument(
-        "input_dir",
+        "map_in",
+        metavar="map-in",
         nargs="?",
         type=Path,
-        default=Path("."),
-        help="Directory containing AutoDoc outputs (index + topic files).",
+        default=None,
+        help=(
+            "Directory containing Code Mapper outputs (index + topic files). "
+            "If omitted, AutoDoc can prompt to generate maps first."
+        ),
     )
 
     site_parser.add_argument(
         "--out-dir",
         type=Path,
-        help=(
-            "Output directory for the generated Astro site. "
-            "Defaults to <input-dir>/autodoc/ when omitted."
-        ),
+        required=True,
+        help=("Output directory for the generated Astro site."),
     )
 
     site_parser.add_argument(
@@ -115,6 +117,26 @@ def add_autodoc_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help=(
             "Override index filename glob(s). Can be provided multiple times, "
             "e.g. --index-pattern '*_autodoc_index.md'."
+        ),
+    )
+
+    site_parser.add_argument(
+        "--map-out-dir",
+        type=Path,
+        help=(
+            "When AutoDoc offers to run Code Mapper automatically (because the "
+            "provided `map-in` directory does not contain an index), write the "
+            "generated map outputs to this directory. If omitted, AutoDoc will prompt "
+            "(TTY only)."
+        ),
+    )
+
+    site_parser.add_argument(
+        "--map-comprehensiveness",
+        choices=["minimal", "low", "medium", "high", "ultra"],
+        help=(
+            "When AutoDoc offers to run Code Mapper automatically, controls the "
+            "mapping depth. If omitted, AutoDoc will prompt (TTY only)."
         ),
     )
 
