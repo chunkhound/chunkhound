@@ -3,13 +3,14 @@ from typing import Any
 import pytest
 
 from chunkhound.code_mapper import service as code_mapper_service
+from chunkhound.code_mapper.models import CodeMapperPOI
 
 
 @pytest.mark.asyncio
 async def test_run_code_mapper_overview_only_raises_when_no_points(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_overview(**_: Any) -> tuple[str, list[str]]:
+    async def fake_overview(**_: Any) -> tuple[str, list[CodeMapperPOI]]:
         return "overview", []
 
     monkeypatch.setattr(
@@ -34,8 +35,8 @@ async def test_run_code_mapper_overview_only_raises_when_no_points(
 async def test_run_code_mapper_overview_only_returns_answer_and_points(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_overview(**_: Any) -> tuple[str, list[str]]:
-        return "overview", ["Point"]
+    async def fake_overview(**_: Any) -> tuple[str, list[CodeMapperPOI]]:
+        return "overview", [CodeMapperPOI(mode="architectural", text="Point")]
 
     monkeypatch.setattr(
         code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
@@ -53,4 +54,4 @@ async def test_run_code_mapper_overview_only_returns_answer_and_points(
         indexing_cfg=None,
     )
 
-    assert result == ("overview", ["Point"])
+    assert result == ("overview", [CodeMapperPOI(mode="architectural", text="Point")])

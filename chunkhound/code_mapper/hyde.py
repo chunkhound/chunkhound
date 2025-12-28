@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.resources
 from pathlib import Path
+from typing import Literal
 
 from loguru import logger
 
@@ -10,12 +11,19 @@ from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.llm_manager import LLMManager
 
 
-def load_hyde_scope_template() -> str:
+def load_hyde_scope_template(
+    *, mode: Literal["architectural", "operational"] = "architectural"
+) -> str:
     """Load the packaged HyDE scope prompt template."""
     package = "chunkhound.code_mapper.prompts"
+    filename = (
+        "hyde_scope_prompt.md"
+        if mode == "architectural"
+        else "hyde_scope_prompt_operational.md"
+    )
     with (
         importlib.resources.files(package)
-        .joinpath("hyde_scope_prompt.md")
+        .joinpath(filename)
         .open("r", encoding="utf-8") as f
     ):
         return f.read().strip()
@@ -70,6 +78,7 @@ def build_hyde_scope_prompt(
     scope_label: str,
     file_paths: list[str],
     hyde_cfg: HydeConfig,
+    mode: Literal["architectural", "operational"] = "architectural",
     template: str | None = None,
     project_root: Path | None = None,
 ) -> str:
@@ -80,7 +89,7 @@ def build_hyde_scope_prompt(
         project_root = Path.cwd()
 
     if template is None:
-        template = load_hyde_scope_template()
+        template = load_hyde_scope_template(mode=mode)
 
     files_block = (
         "\n".join(f"- {p}" for p in file_paths)

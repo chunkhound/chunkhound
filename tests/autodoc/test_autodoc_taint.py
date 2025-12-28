@@ -149,7 +149,10 @@ async def test_taint_is_noop_in_minimal_cleanup_mode_even_with_llm_manager(
     site_json = json.loads(
         (output_dir / "src" / "data" / "site.json").read_text(encoding="utf-8")
     )
-    assert site_json["tagline"] == "Approachable documentation generated from AutoDoc output."
+    assert (
+        site_json["tagline"]
+        == "Approachable documentation generated from AutoDoc output."
+    )
 
 
 @pytest.mark.asyncio
@@ -183,12 +186,16 @@ async def test_taint_influences_llm_cleanup_and_global_ia_prompts(
 
     assert provider.last_structured_prompt is not None
     assert "Audience: technical" in provider.last_structured_prompt
-    assert provider.last_complete_prompt is None
+    assert provider.last_complete_prompt is not None
+    assert "Audience: technical" in provider.last_complete_prompt
 
     site_json = json.loads(
         (output_dir / "src" / "data" / "site.json").read_text(encoding="utf-8")
     )
-    assert site_json["tagline"] == "Engineering-focused documentation generated from AutoDoc output."
+    assert (
+        site_json["tagline"]
+        == "Engineering-focused documentation generated from AutoDoc output."
+    )
 
 
 @pytest.mark.asyncio
@@ -218,7 +225,7 @@ async def test_end_user_taint_synthesizes_homepage_overview(
     )
 
     assert provider.last_complete_prompt is not None
-    assert "end-user-facing overview" in provider.last_complete_prompt
+    assert "Audience: end-user" in provider.last_complete_prompt
 
     index_md = (output_dir / "src" / "pages" / "index.md").read_text(encoding="utf-8")
     assert "## Overview" in index_md

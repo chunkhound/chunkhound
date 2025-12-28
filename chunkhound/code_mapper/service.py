@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from chunkhound.code_mapper.coverage import compute_db_scope_stats
+from chunkhound.code_mapper.models import CodeMapperPOI
 from chunkhound.code_mapper.pipeline import (
     _derive_heading_from_point,
     _is_empty_research_result,
@@ -36,7 +37,7 @@ class CodeMapperNoPointsError(RuntimeError):
 @dataclass
 class CodeMapperPipelineResult:
     overview_result: dict[str, Any]
-    poi_sections: list[tuple[str, dict[str, Any]]]
+    poi_sections: list[tuple[CodeMapperPOI, dict[str, Any]]]
     total_points_of_interest: int
     unified_source_files: dict[str, str]
     unified_chunks_dedup: list[dict[str, Any]]
@@ -44,6 +45,33 @@ class CodeMapperPipelineResult:
     total_chunks_global: int | None
     scope_total_files: int
     scope_total_chunks: int
+
+
+def _normalize_taint(taint: str | None) -> str:
+    normalized = (taint or "").strip().lower()
+    if normalized in ("1", "technical"):
+        return "technical"
+    if normalized in ("3", "end-user", "end_user", "enduser"):
+        return "end-user"
+    if normalized in ("2", "balanced", ""):
+        return "balanced"
+    return "balanced"
+
+
+def _taint_guidance_lines(*, taint: str) -> list[str]:
+    normalized = _normalize_taint(taint)
+    if normalized == "technical":
+        return [
+            "Audience: technical (software engineers).",
+            "Prefer implementation details, key types, and precise terminology.",
+        ]
+    if normalized == "end-user":
+        return [
+            "Audience: end-user (less technical).",
+            "Prefer practical workflows and plain language; explain code identifiers briefly when needed.",
+            "De-emphasize internal implementation details unless essential to user outcomes.",
+        ]
+    return []
 
 
 async def run_code_mapper_overview_only(
@@ -57,7 +85,7 @@ async def run_code_mapper_overview_only(
     out_dir: Path | None,
     assembly_provider: LLMProvider | None,
     indexing_cfg: IndexingConfig | None,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[CodeMapperPOI]]:
     """Run overview-only Code Mapper and return the answer + points."""
     overview_answer, points_of_interest = await _run_code_mapper_overview_hyde(
         llm_manager=llm_manager,
@@ -92,6 +120,7 @@ async def run_code_mapper_pipeline(
     assembly_provider: LLMProvider | None,
     indexing_cfg: IndexingConfig | None,
     progress: TreeProgressDisplay | None,
+    taint: str = "balanced",
     log_info: Callable[[str], None] | None = None,
     log_warning: Callable[[str], None] | None = None,
     log_error: Callable[[str], None] | None = None,
@@ -124,29 +153,52 @@ async def run_code_mapper_pipeline(
         raise CodeMapperNoPointsError(overview_answer)
 
     total_points_of_interest = len(points_of_interest)
-    poi_sections: list[tuple[str, dict[str, Any]]] = []
+    poi_sections: list[tuple[CodeMapperPOI, dict[str, Any]]] = []
+    taint_lines = _taint_guidance_lines(taint=taint)
+    taint_block = ("\n".join(f"- {line}" for line in taint_lines) + "\n\n") if taint_lines else ""
     for idx, poi in enumerate(points_of_interest, start=1):
-        heading = _derive_heading_from_point(poi)
+        poi_text = poi.text
+        heading = _derive_heading_from_point(poi_text)
         if log_info:
             log_info(
                 f"[Code Mapper] Processing point of interest {idx}/"
                 f"{len(points_of_interest)}: {heading}"
             )
 
-        section_query = (
-            "Expand the following point of interest into a detailed, "
-            "agent-facing documentation section for the scoped folder "
-            f"'{scope_label}'. Explain how the relevant code and "
-            "configuration implement this behavior, including "
-            "responsibilities, key types, "
-            "important flows, and operational constraints.\n\n"
-            "Point of interest:\n"
-            f"{poi}\n\n"
-            "Use markdown headings and bullet lists as needed. It is "
-            "acceptable for this section to be long and detailed as "
-            "long as it remains "
-            "grounded in the code."
-        )
+        if poi.mode == "operational":
+            section_query = (
+                "Expand the following OPERATIONAL point of interest into a "
+                "detailed, operator/runbook-style documentation section for the "
+                f"scoped folder '{scope_label}'.\n\n"
+                f"{taint_block}"
+                "Focus on step-by-step workflows and 'how to run this end-to-end' "
+                "guidance grounded in the code:\n"
+                "- Setup and local run path (commands only when supported by repo "
+                "evidence)\n"
+                "- Configuration (env vars, config files) only when supported by "
+                "repo evidence\n"
+                "- Common workflows/recipes\n"
+                "- Troubleshooting/common failure modes and fixes\n\n"
+                "Point of interest:\n"
+                f"{poi_text}\n\n"
+                "Use markdown headings and bullet lists as needed. It is acceptable "
+                "for this section to be long and detailed as long as it remains "
+                "grounded in the code."
+            )
+        else:
+            section_query = (
+                "Expand the following ARCHITECTURAL point of interest into a "
+                "detailed, agent-facing documentation section for the scoped folder "
+                f"'{scope_label}'. Explain how the relevant code and configuration "
+                "implement this behavior, including responsibilities, key types, "
+                "important flows, and operational constraints.\n\n"
+                f"{taint_block}"
+                "Point of interest:\n"
+                f"{poi_text}\n\n"
+                "Use markdown headings and bullet lists as needed. It is acceptable "
+                "for this section to be long and detailed as long as it remains "
+                "grounded in the code."
+            )
 
         try:
             result = await deep_research_impl(

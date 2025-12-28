@@ -1,6 +1,3 @@
-resume te current epic with
-codex resume 019b5e94-c01c-7d22-9a51-225b5b0a9e33
-
 <p align="center">
   <a href="https://chunkhound.github.io">
     <picture>

@@ -242,6 +242,7 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
                 assembly_provider=meta_bundle.assembly_provider,
                 indexing_cfg=getattr(config, "indexing", None),
                 progress=tree_progress,
+                taint=str(getattr(args, "taint", "balanced") or "balanced"),
                 log_info=formatter.info,
                 log_warning=formatter.warning,
                 log_error=formatter.error,
@@ -286,6 +287,7 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
         total_chunks_global=total_chunks_global,
     )
     generation_stats["code_mapper_comprehensiveness"] = run_context.comprehensiveness
+    generation_stats["code_mapper_taint"] = str(getattr(args, "taint", "balanced") or "balanced")
     meta_bundle.meta.generation_stats = generation_stats
 
     coverage_lines = code_mapper_pipeline._coverage_summary_lines(

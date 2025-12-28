@@ -140,6 +140,17 @@ def add_autodoc_subparser(subparsers: Any) -> argparse.ArgumentParser:
         ),
     )
 
+    site_parser.add_argument(
+        "--map-taint",
+        type=_parse_taint,
+        default=None,
+        help=(
+            "When AutoDoc offers to run Code Mapper automatically, controls how "
+            "technical the generated map topics are. If omitted, AutoDoc will prompt "
+            "(TTY only). Accepted: 1|technical, 2|balanced, 3|end-user."
+        ),
+    )
+
     add_common_arguments(site_parser)
     add_config_arguments(site_parser, ["llm"])
 

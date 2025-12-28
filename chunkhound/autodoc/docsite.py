@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+# ruff: noqa: E501
 import base64
 import json
 import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from shutil import rmtree
-from typing import Any, Callable, Iterable, TypedDict
+from typing import Any, TypedDict
 
 from chunkhound.code_mapper.utils import safe_scope_label
 from chunkhound.interfaces.llm_provider import LLMProvider
@@ -18,9 +20,7 @@ _INDEX_PATTERNS = (
     "*_autodoc_index.md",
 )
 
-_TOPIC_LINK_RE = re.compile(
-    r"^\s*\d+\.\s+\[(?P<title>.+?)\]\((?P<filename>.+?)\)\s*$"
-)
+_TOPIC_LINK_RE = re.compile(r"^\s*\d+\.\s+\[(?P<title>.+?)\]\((?P<filename>.+?)\)\s*$")
 _SOURCES_HEADING_RE = re.compile(r"^##\s+Sources\s*$", re.IGNORECASE)
 _REFERENCES_HEADING_RE = re.compile(r"^##\s+References\s*$", re.IGNORECASE)
 _TREE_LINE_RE = re.compile(r"^(?P<prefix>.*?)[├└]──\s+(?P<content>.+)$")
@@ -154,9 +154,7 @@ def find_index_file(
         candidates.extend(sorted(input_dir.glob(pattern)))
     if not candidates:
         raise FileNotFoundError(
-            "No AutoDoc index file found (expected "
-            + ", ".join(pattern_list)
-            + ")."
+            "No AutoDoc index file found (expected " + ", ".join(pattern_list) + ")."
         )
     if len(candidates) > 1 and log_warning:
         log_warning(
@@ -279,9 +277,7 @@ async def cleanup_topics(
                 body_markdown=normalized_body,
                 source_path=str(topic.source_path),
                 scope_label=scope_label,
-                references_count=(
-                    len(flat_references) if flat_references else None
-                ),
+                references_count=(len(flat_references) if flat_references else None),
             )
         )
 
@@ -345,13 +341,13 @@ async def generate_docsite(
     homepage_overview: str | None = None
     if llm_cleanup_active:
         try:
-            if _normalize_taint(cleanup_config.taint) == "end-user":
-                homepage_overview = await _synthesize_homepage_overview(
-                    pages=pages,
-                    provider=llm_manager.get_synthesis_provider(),
-                    log_info=log_info,
-                    log_warning=log_warning,
-                )
+            homepage_overview = await _synthesize_homepage_overview(
+                pages=pages,
+                provider=llm_manager.get_synthesis_provider(),
+                taint=cleanup_config.taint,
+                log_info=log_info,
+                log_warning=log_warning,
+            )
             nav_groups, glossary_terms = await _synthesize_site_ia(
                 pages=pages,
                 provider=llm_manager.get_synthesis_provider(),
@@ -443,9 +439,7 @@ def write_astro_site(
     if nav_groups:
         nav_payload = nav_groups
     else:
-        nav_payload = [
-            {"title": "Topics", "slugs": [page.slug for page in pages]}
-        ]
+        nav_payload = [{"title": "Topics", "slugs": [page.slug for page in pages]}]
     _write_text(data_dir / "nav.json", _render_nav_json(nav_payload))
 
     _write_text(
@@ -509,8 +503,8 @@ def _render_package_json(site: DocsiteSite) -> str:
 def _render_astro_config() -> str:
     return "\n".join(
         [
-            "import { defineConfig } from \"astro/config\";",
-            "import remarkGfm from \"remark-gfm\";",
+            'import { defineConfig } from "astro/config";',
+            'import remarkGfm from "remark-gfm";',
             "",
             "export default defineConfig({",
             "  site: 'http://localhost:4321',",
@@ -587,9 +581,9 @@ def _load_site_from_existing(output_dir: Path) -> DocsiteSite | None:
         title = payload.get("title")
         tagline = payload.get("tagline")
         scope_label = payload.get("scopeLabel")
-        generated_at = payload.get("generatedAt") or datetime.now(
-            timezone.utc
-        ).isoformat()
+        generated_at = (
+            payload.get("generatedAt") or datetime.now(timezone.utc).isoformat()
+        )
         source_dir = payload.get("sourceDir") or str(output_dir)
         topic_count = payload.get("topicCount") or 0
         if (
@@ -719,62 +713,62 @@ def _render_doc_layout() -> str:
             "---",
             "",
             "<!doctype html>",
-            "<html lang=\"en\">",
+            '<html lang="en">',
             "  <head>",
-            "    <meta charset=\"utf-8\" />",
-            "    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />",
-            "    <link rel=\"icon\" href=\"/favicon.ico\" />",
+            '    <meta charset="utf-8" />',
+            '    <meta name="viewport" content="width=device-width, initial-scale=1" />',
+            '    <link rel="icon" href="/favicon.ico" />',
             "    <title>{pageTitle}</title>",
             "  </head>",
             "  <body>",
-            "    <div class=\"shell\">",
-            "      <header class=\"site-header\">",
-            "        <div class=\"header-grid\">",
+            '    <div class="shell">',
+            '      <header class="site-header">',
+            '        <div class="header-grid">',
             "          <button",
-            "            class=\"nav-toggle\"",
-            "            type=\"button\"",
+            '            class="nav-toggle"',
+            '            type="button"',
             "            data-nav-toggle",
-            "            aria-controls=\"site-nav\"",
-            "            aria-expanded=\"false\"",
+            '            aria-controls="site-nav"',
+            '            aria-expanded="false"',
             "          >",
-            "            <span class=\"nav-toggle-icon\" aria-hidden=\"true\"></span>",
+            '            <span class="nav-toggle-icon" aria-hidden="true"></span>',
             "            Menu",
             "          </button>",
-            "          <div class=\"header-titles\">",
-            "            <span class=\"site-kicker\">AutoDoc Docs</span>",
-            "            <h1 class=\"site-title\">{site.title}</h1>",
-            "            <p class=\"site-tagline\">{site.tagline}</p>",
+            '          <div class="header-titles">',
+            '            <span class="site-kicker">AutoDoc Docs</span>',
+            '            <h1 class="site-title">{site.title}</h1>',
+            '            <p class="site-tagline">{site.tagline}</p>',
             "          </div>",
-            "          <div class=\"header-search\">",
-            "            <label class=\"sr-only\" for=\"global-search\">Search docs</label>",
+            '          <div class="header-search">',
+            '            <label class="sr-only" for="global-search">Search docs</label>',
             "            <input",
-            "              id=\"global-search\"",
-            "              class=\"search-input\"",
-            "              type=\"search\"",
-            "              placeholder=\"Search docs\"",
-            "              autocomplete=\"off\"",
+            '              id="global-search"',
+            '              class="search-input"',
+            '              type="search"',
+            '              placeholder="Search docs"',
+            '              autocomplete="off"',
             "              data-search-input",
             "            />",
-            "            <div class=\"search-results\" data-search-results hidden></div>",
+            '            <div class="search-results" data-search-results hidden></div>',
             "          </div>",
             "        </div>",
             "      </header>",
-            "      <div class=\"site-body\">",
-            "        <div class=\"nav-scrim\" data-nav-scrim></div>",
-            "        <aside class=\"site-nav\" id=\"site-nav\" aria-label=\"Topics\">",
-            "          <div class=\"nav-title\">Topics</div>",
-            "          <label class=\"sr-only\" for=\"nav-filter\">Filter topics</label>",
+            '      <div class="site-body">',
+            '        <div class="nav-scrim" data-nav-scrim></div>',
+            '        <aside class="site-nav" id="site-nav" aria-label="Topics">',
+            '          <div class="nav-title">Topics</div>',
+            '          <label class="sr-only" for="nav-filter">Filter topics</label>',
             "          <input",
-            "            id=\"nav-filter\"",
-            "            class=\"nav-filter\"",
-            "            type=\"search\"",
-            "            placeholder=\"Filter topics\"",
-            "            autocomplete=\"off\"",
+            '            id="nav-filter"',
+            '            class="nav-filter"',
+            '            type="search"',
+            '            placeholder="Filter topics"',
+            '            autocomplete="off"',
             "            data-nav-filter",
             "          />",
             "          <nav>",
             "            <a",
-            "              href=\"/\"",
+            '              href="/"',
             "              class={isActive('/') ? 'active' : ''}",
             "              aria-current={isActive('/') ? 'page' : undefined}",
             "            >",
@@ -782,7 +776,7 @@ def _render_doc_layout() -> str:
             "            </a>",
             "            {hasGlossary && (",
             "              <a",
-            "                href=\"/glossary/\"",
+            '                href="/glossary/"',
             "                class={isActive('/glossary/') ? 'active' : ''}",
             "                aria-current={isActive('/glossary/') ? 'page' : undefined}",
             "              >",
@@ -791,8 +785,8 @@ def _render_doc_layout() -> str:
             "            )}",
             "            {navGroups ? (",
             "              navGroups.map((group) => (",
-            "                <div class=\"nav-group\">",
-            "                  <div class=\"nav-group-title\">{group.title}</div>",
+            '                <div class="nav-group">',
+            '                  <div class="nav-group-title">{group.title}</div>',
             "                  {group.items.map((item) => (",
             "                    <a",
             "                      href={item.url}",
@@ -819,23 +813,23 @@ def _render_doc_layout() -> str:
             "            )}",
             "          </nav>",
             "        </aside>",
-            "        <main class=\"site-main\">",
-            "          <div class=\"breadcrumbs\">{breadcrumb}</div>",
-            "          <div class=\"page-header\">",
+            '        <main class="site-main">',
+            '          <div class="breadcrumbs">{breadcrumb}</div>',
+            '          <div class="page-header">',
             "            {title && <h2>{title}</h2>}",
             "            {description && <p>{description}</p>}",
             "          </div>",
             "          {(activeTopic && (prevTopic || nextTopic)) && (",
-            "            <div class=\"page-nav page-nav-top\">",
+            '            <div class="page-nav page-nav-top">',
             "              {prevTopic ? (",
-            "                <a class=\"nav-prev\" href={prevTopic.url}>",
+            '                <a class="nav-prev" href={prevTopic.url}>',
             "                  &larr; Previous: {prevTopic.title}",
             "                </a>",
             "              ) : (",
             "                <span></span>",
             "              )}",
             "              {nextTopic ? (",
-            "                <a class=\"nav-next\" href={nextTopic.url}>",
+            '                <a class="nav-next" href={nextTopic.url}>',
             "                  Next: {nextTopic.title} &rarr;",
             "                </a>",
             "              ) : (",
@@ -843,20 +837,20 @@ def _render_doc_layout() -> str:
             "              )}",
             "            </div>",
             "          )}",
-            "          <article class=\"page-content\">",
+            '          <article class="page-content">',
             "            <slot />",
             "          </article>",
             "          {(activeTopic && (prevTopic || nextTopic)) && (",
-            "            <div class=\"page-nav page-nav-bottom\">",
+            '            <div class="page-nav page-nav-bottom">',
             "              {prevTopic ? (",
-            "                <a class=\"nav-prev\" href={prevTopic.url}>",
+            '                <a class="nav-prev" href={prevTopic.url}>',
             "                  &larr; Previous: {prevTopic.title}",
             "                </a>",
             "              ) : (",
             "                <span></span>",
             "              )}",
             "              {nextTopic ? (",
-            "                <a class=\"nav-next\" href={nextTopic.url}>",
+            '                <a class="nav-next" href={nextTopic.url}>',
             "                  Next: {nextTopic.title} &rarr;",
             "                </a>",
             "              ) : (",
@@ -865,19 +859,19 @@ def _render_doc_layout() -> str:
             "            </div>",
             "          )}",
             "        </main>",
-            "        <aside class=\"page-toc\" aria-label=\"On this page\">",
-            "          <div class=\"toc-title\">On this page</div>",
-            "          <nav class=\"toc-list\" data-toc></nav>",
+            '        <aside class="page-toc" aria-label="On this page">',
+            '          <div class="toc-title">On this page</div>',
+            '          <nav class="toc-list" data-toc></nav>',
             "        </aside>",
             "      </div>",
-            "      <footer class=\"site-footer\">",
+            '      <footer class="site-footer">',
             "        <span>",
             "          Generated by{' '}",
             "          <a",
-            "            class=\"footer-link\"",
-            "            href=\"https://github.com/chunkhound/chunkhound\"",
-            "            target=\"_blank\"",
-            "            rel=\"noreferrer\"",
+            '            class="footer-link"',
+            '            href="https://github.com/chunkhound/chunkhound"',
+            '            target="_blank"',
+            '            rel="noreferrer"',
             "          >",
             "            ChunkHound",
             "          </a>",
@@ -886,11 +880,11 @@ def _render_doc_layout() -> str:
             "      </footer>",
             "    </div>",
             "    <script",
-            "      type=\"application/json\"",
-            "      id=\"search-index\"",
+            '      type="application/json"',
+            '      id="search-index"',
             "      set:html={JSON.stringify(searchIndexData)}",
             "    ></script>",
-            "    <script type=\"module\">",
+            '    <script type="module">',
             "      const searchIndex = (() => {",
             "        const raw = document.getElementById('search-index');",
             "        if (!raw) return [];",
@@ -938,7 +932,7 @@ def _render_doc_layout() -> str:
             "        if (!items.length) {",
             "          const empty = document.createElement('div');",
             "          empty.className = 'search-empty';",
-            "          empty.textContent = `No results for \"${query}\"`;",
+            '          empty.textContent = `No results for "${query}"`;',
             "          searchResults.appendChild(empty);",
             "          searchResults.hidden = false;",
             "          return;",
@@ -1862,8 +1856,7 @@ def _render_index_page(
     overview_markdown: str | None = None,
 ) -> str:
     topic_lines = [
-        f"{page.order}. [{page.title}](topics/{page.slug}/)"
-        for page in pages
+        f"{page.order}. [{page.title}](topics/{page.slug}/)" for page in pages
     ]
 
     metadata_lines = _render_index_metadata(index)
@@ -1886,7 +1879,7 @@ def _render_index_page(
         body_parts.extend(
             [
                 "",
-                "<details class=\"generation-details\">",
+                '<details class="generation-details">',
                 "<summary>Generation Details</summary>",
                 "",
                 *metadata_lines,
@@ -1933,15 +1926,15 @@ def _render_page_frontmatter(
     lines = [
         "---",
         f"layout: {layout}",
-        f"title: \"{_escape_yaml(title)}\"",
-        f"description: \"{_escape_yaml(description)}\"",
+        f'title: "{_escape_yaml(title)}"',
+        f'description: "{_escape_yaml(description)}"',
     ]
     if order is not None:
         lines.append(f"order: {order}")
     if source_path:
-        lines.append(f"sourcePath: \"{_escape_yaml(source_path)}\"")
+        lines.append(f'sourcePath: "{_escape_yaml(source_path)}"')
     if scope_label:
-        lines.append(f"scope: \"{_escape_yaml(scope_label)}\"")
+        lines.append(f'scope: "{_escape_yaml(scope_label)}"')
     if references_count is not None:
         lines.append(f"referencesCount: {references_count}")
     lines.append("---")
@@ -1978,7 +1971,10 @@ def _build_site_ia_prompt(*, context: list[dict[str, Any]], taint: str) -> str:
         [
             "",
             "Produce:",
-            "1) A navigation structure with 3–7 groups. Each group has a title and an ordered list of page slugs.",
+            "1) A navigation structure that groups pages where it helps discoverability.",
+            "   - Use as many or as few groups as fits the content (for a small site, a single group is fine).",
+            "   - Each group has a title and an ordered list of page slugs.",
+            "   - Each page slug should appear at most once across all groups.",
             "2) A glossary of 20–60 terms. Each term has:",
             "   - term",
             "   - definition (1–2 sentences, only supported by provided snippets/headings)",
@@ -2065,7 +2061,12 @@ async def _synthesize_site_ia(
         max_completion_tokens=4096,
     )
 
-    nav_groups = _validate_nav_groups(response.get("nav"), slugs, log_warning)
+    nav_groups = _validate_nav_groups(
+        response.get("nav"),
+        slugs,
+        [page.slug for page in pages],
+        log_warning,
+    )
     glossary_terms = _validate_glossary_terms(
         response.get("glossary"), slugs, log_warning
     )
@@ -2098,8 +2099,12 @@ def _normalize_homepage_overview(text: str) -> str:
         return ""
     cleaned = _strip_first_heading(cleaned)
     # Avoid duplicating headings already present on the index page.
-    cleaned = re.sub(r"^\s*##\s+Overview\s*$", "", cleaned, flags=re.IGNORECASE | re.MULTILINE).strip()
-    cleaned = re.sub(r"^\s*##\s+Topics\s*$", "", cleaned, flags=re.IGNORECASE | re.MULTILINE).strip()
+    cleaned = re.sub(
+        r"^\s*##\s+Overview\s*$", "", cleaned, flags=re.IGNORECASE | re.MULTILINE
+    ).strip()
+    cleaned = re.sub(
+        r"^\s*##\s+Topics\s*$", "", cleaned, flags=re.IGNORECASE | re.MULTILINE
+    ).strip()
     return cleaned.strip()
 
 
@@ -2107,6 +2112,7 @@ async def _synthesize_homepage_overview(
     *,
     pages: list[DocsitePage],
     provider: LLMProvider,
+    taint: str = "balanced",
     log_info: Callable[[str], None] | None,
     log_warning: Callable[[str], None] | None,
 ) -> str | None:
@@ -2114,15 +2120,34 @@ async def _synthesize_homepage_overview(
         return None
 
     context = _build_site_context(pages)
+    normalized = _normalize_taint(taint)
+
+    audience_line = "Audience: balanced."
+    goal_lines = [
+        "Goal: briefly explain what the project is for and how to navigate the docs.",
+        "Use only information supported by the provided snippets/headings.",
+    ]
+    if normalized == "technical":
+        audience_line = "Audience: technical (software engineers)."
+        goal_lines = [
+            "Goal: briefly explain what the project does and the major system boundaries and flows.",
+            "Prefer concrete technical terms present in the input (commands, modules, components).",
+        ]
+    elif normalized == "end-user":
+        audience_line = "Audience: end-user (less technical)."
+        goal_lines = [
+            "Goal: briefly explain what the project is for and the main ways a user will interact with it.",
+            "Keep code identifiers if prominent, but explain them in plain language.",
+        ]
+
     prompt = "\n".join(
         [
-            "You are writing a short, end-user-facing overview for a documentation site.",
+            "You are writing a short overview for a documentation site homepage.",
             "Input: a list of pages (title, slug, description, headings, overview snippet).",
             "",
-            "Goal: briefly explain what the project is for and the main ways a user will interact with it.",
-            "Keep code identifiers (CLI commands, flags, env vars) if they are prominent in the input, but explain them in plain language.",
+            audience_line,
+            *goal_lines,
             "Do NOT invent installation steps, commands, or configuration keys that are not supported by the input.",
-            "Do NOT mention internal implementation details unless the input emphasizes them.",
             "Do NOT include YAML frontmatter. Do NOT include a level-1 heading.",
             "Do NOT include a '## Topics' section or list topic filenames/titles.",
             "",
@@ -2137,7 +2162,9 @@ async def _synthesize_homepage_overview(
         log_info("Synthesizing homepage overview.")
 
     try:
-        response = await provider.complete(prompt, system=None, max_completion_tokens=600)
+        response = await provider.complete(
+            prompt, system=None, max_completion_tokens=600
+        )
     except Exception as exc:  # noqa: BLE001
         if log_warning:
             log_warning(f"Homepage overview synthesis failed; skipping. Error: {exc}")
@@ -2184,6 +2211,7 @@ def _extract_overview_snippet(markdown: str, *, limit: int) -> str:
 def _validate_nav_groups(
     nav: object,
     valid_slugs: set[str],
+    ordered_slugs: list[str],
     log_warning: Callable[[str], None] | None,
 ) -> list[NavGroup]:
     if not isinstance(nav, dict):
@@ -2194,6 +2222,7 @@ def _validate_nav_groups(
     if not isinstance(groups, list):
         return []
     output: list[NavGroup] = []
+    seen: set[str] = set()
     for group in groups:
         if not isinstance(group, dict):
             continue
@@ -2201,12 +2230,26 @@ def _validate_nav_groups(
         slugs = group.get("slugs")
         if not isinstance(title, str) or not isinstance(slugs, list):
             continue
-        cleaned_slugs = [
-            slug for slug in slugs if isinstance(slug, str) and slug in valid_slugs
-        ]
+        cleaned_slugs: list[str] = []
+        for slug in slugs:
+            if not isinstance(slug, str) or slug not in valid_slugs:
+                continue
+            if slug in seen:
+                continue
+            cleaned_slugs.append(slug)
+            seen.add(slug)
         if not cleaned_slugs:
             continue
         output.append({"title": title.strip() or "Group", "slugs": cleaned_slugs})
+
+    missing = [
+        slug for slug in ordered_slugs if slug in valid_slugs and slug not in seen
+    ]
+    if missing:
+        if output:
+            output.append({"title": "More", "slugs": missing})
+        else:
+            output.append({"title": "Topics", "slugs": missing})
     return output
 
 
@@ -2235,9 +2278,7 @@ def _validate_glossary_terms(
         ):
             continue
         cleaned_pages = [
-            slug
-            for slug in pages
-            if isinstance(slug, str) and slug in valid_slugs
+            slug for slug in pages if isinstance(slug, str) and slug in valid_slugs
         ]
         output.append(
             {
@@ -2488,11 +2529,11 @@ def _build_cleanup_prompt(title: str, body: str, *, taint: str = "balanced") -> 
             "- Do NOT add new facts or speculation.",
             "- Keep citations like [1] exactly as-is.",
             "- Preserve code identifiers and inline code formatting.",
-            "- Start with a short \"Overview\" section.",
+            '- Start with a short "Overview" section.',
             "- Use level-2 headings (##). Do NOT include a level-1 heading.",
             "- Do NOT include recommendations, follow-ups, or next steps.",
             "- Use visuals when clearly helpful: include a Mermaid diagram in a ```mermaid code fence and/or a table/callout to clarify complex flows. Skip visuals if they would be redundant.",
-            "- If the content includes a \"Sources\" section, rename it to \"References\".",
+            '- If the content includes a "Sources" section, rename it to "References".',
             "- Remove duplicate title lines or redundant bold title repeats.",
             "- Keep the length roughly similar to the input.",
             "- Mermaid rules: keep node labels on a single line (no raw newlines inside [brackets] or {diamonds}). Prefer simple labels and avoid unusual punctuation.",
@@ -2646,6 +2687,7 @@ def build_references_section(flat_items: list[str]) -> str:
     lines = ["## References", "", *flat_items]
     return "\n".join(lines).strip()
 
+
 def _select_flat_references_for_cleaned_body(
     cleaned_body: str, sources_block: str
 ) -> list[str]:
@@ -2762,8 +2804,6 @@ def _strip_first_heading(text: str) -> str:
     return text
 
 
-
-
 def _ensure_overview_heading(text: str) -> str:
     lines = text.splitlines()
     first_content_idx: int | None = None
@@ -2794,9 +2834,9 @@ def _ensure_overview_heading(text: str) -> str:
         break
     if first_content_idx is None:
         return text
-    new_lines = lines[:first_content_idx] + ["## Overview", ""] + lines[
-        first_content_idx:
-    ]
+    new_lines = (
+        lines[:first_content_idx] + ["## Overview", ""] + lines[first_content_idx:]
+    )
     return "\n".join(new_lines).lstrip()
 
 
@@ -2851,11 +2891,11 @@ def _slugify_title(title: str, order: int) -> str:
 
 
 def _escape_yaml(value: str) -> str:
-    return value.replace("\"", "\\\"")
+    return value.replace('"', '\\"')
 
 
 def _escape_json(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', "\\\"")
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _chunked(items: Iterable[str], size: int) -> list[list[str]]:

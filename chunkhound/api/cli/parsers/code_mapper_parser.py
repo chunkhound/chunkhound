@@ -7,6 +7,26 @@ from typing import Any, cast
 from .common_arguments import add_common_arguments, add_config_arguments
 
 
+def _parse_taint(value: str) -> str:
+    normalized = value.strip().lower()
+    mapping = {
+        "1": "technical",
+        "technical": "technical",
+        "2": "balanced",
+        "balanced": "balanced",
+        "3": "end-user",
+        "end-user": "end-user",
+        "end_user": "end-user",
+        "enduser": "end-user",
+    }
+    resolved = mapping.get(normalized)
+    if resolved is None:
+        raise argparse.ArgumentTypeError(
+            "Invalid --taint value. Use 1|2|3 or technical|balanced|end-user."
+        )
+    return resolved
+
+
 def add_map_subparser(subparsers: Any) -> argparse.ArgumentParser:
     """Add map command subparser to the main parser.
 
@@ -53,6 +73,16 @@ def add_map_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help=(
             "Only run the planning pass and print the planned points of interest, "
             "skipping per-point deep research and final assembly."
+        ),
+    )
+
+    map_parser.add_argument(
+        "--taint",
+        type=_parse_taint,
+        default="balanced",
+        help=(
+            "Controls how technical the generated map topics are. "
+            "Accepted: 1|technical, 2|balanced, 3|end-user."
         ),
     )
 

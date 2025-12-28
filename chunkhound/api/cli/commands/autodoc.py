@@ -176,6 +176,7 @@ class _AutoMapPlan:
     map_out_dir: Path
     map_scope: Path
     comprehensiveness: str
+    taint: str
 
 
 def _build_auto_map_plan(
@@ -183,6 +184,7 @@ def _build_auto_map_plan(
     output_dir: Path,
     map_out_dir: Path | None = None,
     comprehensiveness: str | None = None,
+    taint: str | None = None,
 ) -> _AutoMapPlan:
     default_map_out_dir = output_dir.with_name(f"map_{output_dir.name}")
     map_scope = Path.cwd().resolve()
@@ -190,6 +192,7 @@ def _build_auto_map_plan(
         map_out_dir=map_out_dir or default_map_out_dir,
         map_scope=map_scope,
         comprehensiveness=comprehensiveness or "medium",
+        taint=taint or "balanced",
     )
 
 
@@ -202,6 +205,7 @@ async def _run_code_mapper_for_autodoc(
     config_path: Path | None,
     map_out_dir: Path | None,
     comprehensiveness: str | None,
+    taint: str | None,
 ) -> _AutoMapPlan:
     from argparse import Namespace
 
@@ -211,6 +215,7 @@ async def _run_code_mapper_for_autodoc(
         output_dir=output_dir,
         map_out_dir=map_out_dir,
         comprehensiveness=comprehensiveness,
+        taint=taint,
     )
 
     map_args = Namespace(
@@ -223,6 +228,7 @@ async def _run_code_mapper_for_autodoc(
         overview_only=False,
         comprehensiveness=plan.comprehensiveness,
         combined=False,
+        taint=plan.taint,
     )
 
     try:
@@ -417,6 +423,16 @@ async def autodoc_command(args, config: Config) -> None:
                 default="medium",
             )
 
+        map_taint_arg = getattr(args, "map_taint", None)
+        map_taint = map_taint_arg if isinstance(map_taint_arg, str) else None
+        if map_taint is None:
+            default_taint = getattr(args, "taint", "balanced")
+            map_taint = _prompt_choice(
+                "Code Mapper taint (map generation)",
+                choices=("technical", "balanced", "end-user"),
+                default=default_taint,
+            )
+
         formatter.info(f"Generating maps via Code Mapper: {map_out_dir}")
         plan = await _run_code_mapper_for_autodoc(
             config=config,
@@ -426,6 +442,7 @@ async def autodoc_command(args, config: Config) -> None:
             config_path=getattr(args, "config", None),
             map_out_dir=map_out_dir,
             comprehensiveness=comprehensiveness,
+            taint=map_taint,
         )
         map_dir = plan.map_out_dir
 
@@ -500,6 +517,16 @@ async def autodoc_command(args, config: Config) -> None:
                 default="medium",
             )
 
+        map_taint_arg = getattr(args, "map_taint", None)
+        map_taint = map_taint_arg if isinstance(map_taint_arg, str) else None
+        if map_taint is None:
+            default_taint = getattr(args, "taint", "balanced")
+            map_taint = _prompt_choice(
+                "Code Mapper taint (map generation)",
+                choices=("technical", "balanced", "end-user"),
+                default=default_taint,
+            )
+
         formatter.info(f"Generating maps via Code Mapper: {map_out_dir}")
         plan = await _run_code_mapper_for_autodoc(
             config=config,
@@ -509,6 +536,7 @@ async def autodoc_command(args, config: Config) -> None:
             config_path=getattr(args, "config", None),
             map_out_dir=map_out_dir,
             comprehensiveness=comprehensiveness,
+            taint=map_taint,
         )
 
         try:

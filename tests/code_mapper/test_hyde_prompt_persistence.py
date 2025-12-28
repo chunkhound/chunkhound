@@ -30,7 +30,8 @@ async def test_hyde_prompt_persistence_is_opt_in(
     )
 
     scope_label = "scope"
-    prompt_path = tmp_path / f"hyde_scope_prompt_{scope_label}.md"
+    arch_prompt_path = tmp_path / f"hyde_scope_prompt_arch_{scope_label}.md"
+    ops_prompt_path = tmp_path / f"hyde_scope_prompt_ops_{scope_label}.md"
 
     await code_mapper_pipeline._run_code_mapper_overview_hyde(
         llm_manager=None,
@@ -44,7 +45,8 @@ async def test_hyde_prompt_persistence_is_opt_in(
         indexing_cfg=None,
     )
 
-    assert not prompt_path.exists()
+    assert not arch_prompt_path.exists()
+    assert not ops_prompt_path.exists()
 
     monkeypatch.setenv("CH_CODE_MAPPER_WRITE_HYDE_PROMPT", "1")
 
@@ -60,5 +62,7 @@ async def test_hyde_prompt_persistence_is_opt_in(
         indexing_cfg=None,
     )
 
-    assert prompt_path.exists()
-    assert "scope prompt" in prompt_path.read_text(encoding="utf-8")
+    assert arch_prompt_path.exists()
+    assert ops_prompt_path.exists()
+    assert "scope prompt" in arch_prompt_path.read_text(encoding="utf-8")
+    assert "scope prompt" in ops_prompt_path.read_text(encoding="utf-8")

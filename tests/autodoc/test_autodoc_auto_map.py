@@ -35,12 +35,14 @@ async def test_autodoc_offers_auto_map_when_map_dir_missing_index(
         output_dir: Path,
         map_out_dir: Path | None,
         comprehensiveness: str | None,
+        taint: str | None,
         **_kwargs,
     ):
         plan = autodoc_command._build_auto_map_plan(
             output_dir=output_dir,
             map_out_dir=map_out_dir,
             comprehensiveness=comprehensiveness,
+            taint=taint,
         )
         ran_map.append(plan.map_out_dir)
         plan.map_out_dir.mkdir(parents=True, exist_ok=True)
@@ -52,6 +54,7 @@ async def test_autodoc_offers_auto_map_when_map_dir_missing_index(
             "# Topic One\n", encoding="utf-8"
         )
         assert plan.comprehensiveness == "medium"
+        assert plan.taint == "balanced"
         return plan
 
     monkeypatch.setattr(autodoc_command, "generate_docsite", fake_generate_docsite)
@@ -61,7 +64,7 @@ async def test_autodoc_offers_auto_map_when_map_dir_missing_index(
         fake_run_code_mapper_for_autodoc,
     )
     monkeypatch.setattr(autodoc_command, "_is_interactive", lambda: True)
-    inputs = iter(["y", "", ""])
+    inputs = iter(["y", "", "", ""])
     monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
 
     args = SimpleNamespace(
@@ -76,6 +79,7 @@ async def test_autodoc_offers_auto_map_when_map_dir_missing_index(
         cleanup_batch_size=1,
         cleanup_max_tokens=512,
         taint="balanced",
+        map_taint=None,
         index_patterns=None,
         verbose=False,
         config=None,
@@ -116,6 +120,7 @@ async def test_autodoc_does_not_prompt_in_non_interactive_mode(
         cleanup_batch_size=1,
         cleanup_max_tokens=512,
         taint="balanced",
+        map_taint=None,
         index_patterns=None,
         verbose=False,
         config=None,
@@ -148,12 +153,14 @@ async def test_autodoc_generates_map_when_map_in_omitted(
         output_dir: Path,
         map_out_dir: Path | None,
         comprehensiveness: str | None,
+        taint: str | None,
         **_kwargs,
     ):
         plan = autodoc_command._build_auto_map_plan(
             output_dir=output_dir,
             map_out_dir=map_out_dir,
             comprehensiveness=comprehensiveness,
+            taint=taint,
         )
         ran_map.append(plan.map_out_dir)
         return plan
@@ -165,7 +172,7 @@ async def test_autodoc_generates_map_when_map_in_omitted(
         fake_run_code_mapper_for_autodoc,
     )
     monkeypatch.setattr(autodoc_command, "_is_interactive", lambda: True)
-    inputs = iter(["y", "", ""])
+    inputs = iter(["y", "", "", ""])
     monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
 
     args = SimpleNamespace(
@@ -180,6 +187,7 @@ async def test_autodoc_generates_map_when_map_in_omitted(
         cleanup_batch_size=1,
         cleanup_max_tokens=512,
         taint="balanced",
+        map_taint=None,
         index_patterns=None,
         verbose=False,
         config=None,

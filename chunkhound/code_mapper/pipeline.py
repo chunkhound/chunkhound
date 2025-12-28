@@ -8,7 +8,7 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.code_mapper.hyde import build_hyde_scope_prompt, run_hyde_only_query
-from chunkhound.code_mapper.models import AgentDocMetadata, HydeConfig
+from chunkhound.code_mapper.models import AgentDocMetadata, CodeMapperPOI, HydeConfig
 from chunkhound.code_mapper.scope import collect_scope_files
 from chunkhound.code_mapper.utils import safe_scope_label
 from chunkhound.core.config.indexing_config import IndexingConfig
@@ -216,6 +216,38 @@ def _coverage_summary_lines(
     return lines
 
 
+def _operational_poi_budget(comprehensiveness: str) -> int:
+    if comprehensiveness == "minimal":
+        return 1
+    if comprehensiveness == "low":
+        return 2
+    if comprehensiveness == "medium":
+        return 3
+    if comprehensiveness == "high":
+        return 4
+    if comprehensiveness == "ultra":
+        return 5
+    return 3
+
+
+def _ensure_operational_quickstart(points: list[str], max_points: int) -> list[str]:
+    normalized = [p.strip().lower() for p in points if p.strip()]
+    for item in normalized:
+        if (
+            "quickstart" in item
+            or "getting started" in item
+            or "local run" in item
+            or "run locally" in item
+        ):
+            return points[:max_points]
+
+    injected = (
+        "**Quickstart / Local run**: How to install, configure, and run this "
+        "project end-to-end in a local development environment."
+    )
+    return [injected, *points][:max_points]
+
+
 async def _run_code_mapper_overview_hyde(
     llm_manager: LLMManager | None,
     target_dir: Path,
@@ -226,7 +258,7 @@ async def _run_code_mapper_overview_hyde(
     out_dir: Path | None = None,
     assembly_provider: LLMProvider | None = None,
     indexing_cfg: IndexingConfig | None = None,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[CodeMapperPOI]]:
     """Run a HyDE-style overview pass to identify points of interest."""
     hyde_cfg = HydeConfig.from_env()
 
@@ -340,30 +372,55 @@ async def _run_code_mapper_overview_hyde(
         file_paths=file_paths,
         hyde_cfg=hyde_cfg,
         project_root=target_dir,
+        mode="architectural",
     )
 
-    # Provide an explicit, comprehensiveness-aware target for the number of
-    # points of interest so HyDE can bias its list length accordingly.
-    poi_target_line = (
-        f"- Identify up to {max_points} points of interest for this scoped project. "
-        "Prioritize the most important architectural or operational areas first, "
-        "but you may include slightly less critical topics to use the full budget "
-        "when appropriate.\n"
+    ops_hyde_scope_prompt = build_hyde_scope_prompt(
+        meta=meta,
+        scope_label=scope_label,
+        file_paths=file_paths,
+        hyde_cfg=hyde_cfg,
+        project_root=target_dir,
+        mode="operational",
     )
 
-    overview_prompt = (
-        f"{hyde_scope_prompt}\n\n"
-        "HyDE objective (override for Code Mapper):\n"
-        "- Instead of writing a full deep-wiki style documentation, focus on a "
-        "concise\n"
-        "  planning pass for deep code research.\n"
-        f"{poi_target_line}\n"
-        "Output format:\n"
-        "- Produce ONLY a numbered markdown list (1., 2., 3., ...).\n"
-        "- For each item, include:\n"
-        "  - A short heading (you may use bold), and\n"
-        "  - 1–2 sentences summarizing why this area is important.\n"
-        "- Do not include any other sections or prose; just the numbered list.\n"
+    ops_budget = _operational_poi_budget(comprehensiveness)
+
+    def _build_overview_prompt(*, scope_prompt: str, mode: str, budget: int) -> str:
+        focus = (
+            "architectural areas first"
+            if mode == "architectural"
+            else "operational workflows (setup, local run, troubleshooting) first"
+        )
+        poi_target_line = (
+            f"- Identify up to {budget} points of interest for this scoped project. "
+            f"Prioritize the most important {focus}, but you may include slightly "
+            "less critical topics to use the full budget when appropriate.\n"
+        )
+        return (
+            f"{scope_prompt}\n\n"
+            "HyDE objective (override for Code Mapper):\n"
+            "- Instead of writing a full deep-wiki style documentation, focus on a "
+            "concise\n"
+            "  planning pass for deep code research.\n"
+            f"{poi_target_line}\n"
+            "Output format:\n"
+            "- Produce ONLY a numbered markdown list (1., 2., 3., ...).\n"
+            "- For each item, include:\n"
+            "  - A short heading (you may use bold), and\n"
+            "  - 1–2 sentences summarizing why this area is important.\n"
+            "- Do not include any other sections or prose; just the numbered list.\n"
+        )
+
+    arch_overview_prompt = _build_overview_prompt(
+        scope_prompt=hyde_scope_prompt,
+        mode="architectural",
+        budget=max_points,
+    )
+    ops_overview_prompt = _build_overview_prompt(
+        scope_prompt=ops_hyde_scope_prompt,
+        mode="operational",
+        budget=ops_budget,
     )
 
     # Optional debugging/traceability: when out_dir is provided and explicitly
@@ -381,33 +438,75 @@ async def _run_code_mapper_overview_hyde(
     if out_dir is not None and write_prompt:
         try:
             safe_scope = safe_scope_label(scope_label)
-            prompt_path = out_dir / f"hyde_scope_prompt_{safe_scope}.md"
-            prompt_path.parent.mkdir(parents=True, exist_ok=True)
-            prompt_path.write_text(overview_prompt, encoding="utf-8")
+            arch_prompt_path = out_dir / f"hyde_scope_prompt_arch_{safe_scope}.md"
+            arch_prompt_path.parent.mkdir(parents=True, exist_ok=True)
+            arch_prompt_path.write_text(arch_overview_prompt, encoding="utf-8")
+
+            ops_prompt_path = out_dir / f"hyde_scope_prompt_ops_{safe_scope}.md"
+            ops_prompt_path.parent.mkdir(parents=True, exist_ok=True)
+            ops_prompt_path.write_text(ops_overview_prompt, encoding="utf-8")
         except OSError as exc:
             logger.debug(f"Code Mapper: failed to persist HyDE prompt: {exc}")
 
-    overview_answer, ok = await run_hyde_only_query(
+    arch_overview_answer, ok = await run_hyde_only_query(
         llm_manager=llm_manager,
-        prompt=overview_prompt,
+        prompt=arch_overview_prompt,
         provider_override=assembly_provider,
         hyde_cfg=hyde_cfg,
     )
     if not ok:
-        raise CodeMapperHyDEError(overview_answer)
+        raise CodeMapperHyDEError(arch_overview_answer)
+
+    ops_overview_answer, ok = await run_hyde_only_query(
+        llm_manager=llm_manager,
+        prompt=ops_overview_prompt,
+        provider_override=assembly_provider,
+        hyde_cfg=hyde_cfg,
+    )
+    if not ok:
+        raise CodeMapperHyDEError(ops_overview_answer)
 
     # Persist the HyDE overview plan itself (the PoI list and any surrounding
     # context) alongside the prompt when an output directory is available.
-    if out_dir is not None and overview_answer and overview_answer.strip():
+    if out_dir is not None and arch_overview_answer and arch_overview_answer.strip():
         try:
             safe_scope = safe_scope_label(scope_label)
-            plan_path = out_dir / f"hyde_plan_{safe_scope}.md"
-            plan_path.parent.mkdir(parents=True, exist_ok=True)
-            plan_path.write_text(overview_answer, encoding="utf-8")
+            arch_plan_path = out_dir / f"hyde_plan_arch_{safe_scope}.md"
+            arch_plan_path.parent.mkdir(parents=True, exist_ok=True)
+            arch_plan_path.write_text(arch_overview_answer, encoding="utf-8")
         except OSError as exc:
             logger.debug(f"Code Mapper: failed to persist HyDE plan: {exc}")
 
-    points_of_interest = _extract_points_of_interest(
-        overview_answer, max_points=max_points
+    if out_dir is not None and ops_overview_answer and ops_overview_answer.strip():
+        try:
+            safe_scope = safe_scope_label(scope_label)
+            ops_plan_path = out_dir / f"hyde_plan_ops_{safe_scope}.md"
+            ops_plan_path.parent.mkdir(parents=True, exist_ok=True)
+            ops_plan_path.write_text(ops_overview_answer, encoding="utf-8")
+        except OSError as exc:
+            logger.debug(f"Code Mapper: failed to persist HyDE plan: {exc}")
+
+    arch_points = _extract_points_of_interest(
+        arch_overview_answer, max_points=max_points
     )
-    return overview_answer, points_of_interest
+    ops_points = _extract_points_of_interest(ops_overview_answer, max_points=ops_budget)
+    ops_points = _ensure_operational_quickstart(ops_points, ops_budget)
+
+    combined_overview_answer = "\n".join(
+        [
+            "## Architectural Map (HyDE)",
+            "",
+            arch_overview_answer.strip(),
+            "",
+            "## Operational Map (HyDE)",
+            "",
+            ops_overview_answer.strip(),
+            "",
+        ]
+    ).strip() + "\n"
+
+    points_of_interest: list[CodeMapperPOI] = [
+        *[CodeMapperPOI(mode="architectural", text=p) for p in arch_points],
+        *[CodeMapperPOI(mode="operational", text=p) for p in ops_points],
+    ]
+    return combined_overview_answer, points_of_interest

@@ -44,6 +44,15 @@ def test_autodoc_parser_accepts_taint_numeric_and_named_values() -> None:
     assert parser.parse_args([*base, "end_user"]).taint == "end-user"
 
 
+def test_autodoc_parser_accepts_map_taint() -> None:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    add_autodoc_subparser(subparsers)
+
+    args = parser.parse_args(["autodoc", ".", "--out-dir", "site", "--map-taint", "3"])
+    assert args.map_taint == "end-user"
+
+
 def test_write_astro_assets_only_preserves_topic_pages(tmp_path: Path) -> None:
     output_dir = tmp_path / "site"
     topics_dir = output_dir / "src" / "pages" / "topics"
