@@ -172,10 +172,9 @@ class EmbeddingService(BaseService):
                     "generated": 0,
                 }
 
-            # Optimize database before starting if fragmentation is high
-            if self._db.should_optimize_fragments(operation="pre-embedding"):
-                logger.info("Optimizing database before embedding generation to prevent fragmentation issues...")
-                self._db.optimize_tables()
+            # Optimize database before starting, fragements causes duplications and errors
+            logger.info("Optimizing database before embedding generation to prevent fragmentation issues...")
+            self._db.optimize_tables()
 
             # Use provided provider/model or fall back to configured defaults
             target_provider = provider_name or self._embedding_provider.name
@@ -186,9 +185,9 @@ class EmbeddingService(BaseService):
                 # Start with conservative batch size for large databases
                 initial_batch_size = 1000
                 min_batch_size = 50
-                max_batch_size = 50000
+                max_batch_size = 30000
                 target_batch_time = 15.0  # Target 15 seconds per batch
-                slow_threshold = 30.0     # Consider >30s as too slow
+                slow_threshold = 25.0     # Consider >30s as too slow
                 fast_threshold = 5.0      # Consider <5s as very fast
             else:
                 # Use fixed batch size if explicitly provided
@@ -215,6 +214,8 @@ class EmbeddingService(BaseService):
                 )
                 # Set initial progress to current embeddings count
                 self.progress.advance(embed_task, current_embeddings)
+                # Store initial completed count on the task for speed calculation
+                self.progress.tasks[embed_task].initial_completed = current_embeddings
 
             total_generated = 0
             total_processed = 0
@@ -656,6 +657,16 @@ class EmbeddingService(BaseService):
                 with update_lock:
                     if embed_task and self.progress:
                         self.progress.advance(embed_task, len(batch))
+
+                        # Calculate and display speed based on current processing session
+                        task_obj = self.progress.tasks[embed_task]
+                        initial_completed = getattr(task_obj, 'initial_completed', 0)
+                        newly_processed = task_obj.completed - initial_completed
+                        if task_obj.elapsed > 0:
+                            speed = newly_processed / task_obj.elapsed
+                            self.progress.update(
+                                embed_task, speed=f"{speed:.1f} chunks/s"
+                            )
 
             return result
 
