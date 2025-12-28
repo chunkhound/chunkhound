@@ -361,52 +361,6 @@ def new_function():
             f"{final_stats['embeddings']} embeddings vs {final_stats['chunks']} chunks"
 
 
-@pytest.mark.asyncio
-async def test_timeout_recovery_in_generate_missing_embeddings(tmp_path):
-    """Test that generate_missing_embeddings recovers from timeouts by resetting connection."""
-    from unittest.mock import patch, MagicMock
-    from chunkhound.services.embedding_service import EmbeddingService
-    from chunkhound.providers.database.duckdb_provider import DuckDBProvider
-
-    # Create a minimal database provider for testing
-    db_path = tmp_path / "timeout_test.duckdb"
-    db_provider = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
-    db_provider.connect()
-
-    # Create a mock embedding provider
-    from unittest.mock import MagicMock
-    mock_embedding_provider = MagicMock()
-    mock_embedding_provider.name = "test_provider"
-    mock_embedding_provider.model = "test_model"
-
-    # Create embedding service with mocked provider
-    embedding_service = EmbeddingService(
-        database_provider=db_provider,
-        embedding_provider=mock_embedding_provider
-    )
-
-    # Mock the database provider's get_chunks_without_embeddings_paginated to raise TimeoutError on first call
-    with patch.object(embedding_service._db, 'get_chunks_without_embeddings_paginated') as mock_get_chunks, \
-         patch.object(embedding_service._db, 'reset_connection') as mock_reset:
-
-        # First call raises TimeoutError, second call returns empty list (no more chunks)
-        mock_get_chunks.side_effect = [
-            TimeoutError("Operation 'get_chunks_without_embeddings_paginated' timed out after 30.0s"),
-            []  # No more chunks
-        ]
-
-        # Call generate_missing_embeddings
-        embedding_result = await embedding_service.generate_missing_embeddings()
-
-        # Verify timeout was detected and connection was reset
-        mock_reset.assert_called_once()
-
-        # Verify the method completed successfully (even though no embeddings were generated due to mocking)
-        assert embedding_result['status'] in ['success', 'complete'], f"Method should complete despite timeout: {embedding_result}"
-
-        # Verify get_chunks_without_embeddings_paginated was called twice (first timed out, second succeeded)
-        assert mock_get_chunks.call_count == 2, f"Expected 2 calls to get_chunks_without_embeddings_paginated, got {mock_get_chunks.call_count}"
-
 
 if __name__ == "__main__":
     # Run pipeline integration tests

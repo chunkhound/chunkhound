@@ -75,6 +75,7 @@ def get_chunks_schema(embedding_dims: int | None = None) -> pa.Schema:
             ("embedding", embedding_field),
             ("provider", pa.string()),
             ("model", pa.string()),
+            ("embedding_signature", pa.string()),
             ("created_time", pa.float64()),
         ]
     )
@@ -306,6 +307,18 @@ class LanceDBProvider(SerialDatabaseProvider):
         try:
             self._chunks_table = conn.open_table("chunks")
             logger.debug("Opened existing chunks table")
+
+            # Try to add embedding_signature column to existing tables (migration)
+            try:
+                current_schema = self._chunks_table.schema
+                has_embedding_signature = any(field.name == "embedding_signature" for field in current_schema)
+                if not has_embedding_signature:
+                    logger.info("Adding embedding_signature column to existing chunks table for query optimization")
+                    self._chunks_table.add_columns([pa.field("embedding_signature", pa.string(), nullable=True)])
+                    logger.info("embedding_signature column added successfully")
+            except Exception as col_error:
+                logger.debug(f"Could not add embedding_signature column (may already exist or not supported): {col_error}")
+
         except Exception:
             # Table doesn't exist, create it
             # Try to get embedding dimensions to avoid migration later
@@ -362,6 +375,20 @@ class LanceDBProvider(SerialDatabaseProvider):
                     logger.info("Scalar index on chunks.id created successfully")
                 else:
                     logger.debug("Scalar index on chunks.id already exists")
+
+                # Create scalar index on embedding_signature for query optimization
+                indices = self._chunks_table.list_indices()
+                has_embedding_signature_index = any(
+                    idx.columns == ["embedding_signature"] or "embedding_signature" in idx.columns
+                    for idx in indices
+                )
+
+                if not has_embedding_signature_index:
+                    logger.info("Creating scalar index on chunks.embedding_signature for query optimization")
+                    self._chunks_table.create_scalar_index("embedding_signature")
+                    logger.info("Scalar index on chunks.embedding_signature created successfully")
+                else:
+                    logger.debug("Scalar index on chunks.embedding_signature already exists")
             except Exception as e:
                 # Non-fatal: merge_insert works without index, just slower
                 logger.warning(
@@ -726,6 +753,7 @@ class LanceDBProvider(SerialDatabaseProvider):
             "embedding": None,
             "provider": "",
             "model": "",
+            "embedding_signature": None,
             "created_time": time.time(),
         }
 
@@ -800,6 +828,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     "embedding": None,
                     "provider": "",
                     "model": "",
+                    "embedding_signature": None,
                     "created_time": time.time(),
                 }
                 chunk_data_list.append(chunk_data)
@@ -1218,6 +1247,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                                 "embedding": emb_data["embedding"],
                                 "provider": emb_data["provider"],
                                 "model": emb_data["model"],
+                                "embedding_signature": f"{emb_data['provider']}-{emb_data['model']}",
                                 "created_time": chunk.get("created_time", time.time()),
                             }
                         )
@@ -2358,10 +2388,20 @@ class LanceDBProvider(SerialDatabaseProvider):
 
         try:
             # Query for chunks needing embeddings with direct pagination
-            # Use WHERE clause to filter chunks that need embeddings
-            results = self._chunks_table.search().where(
-                f"(embedding IS NULL OR provider != '{provider}' OR model != '{model}')"
-            ).limit(limit).to_list()
+            # Use optimized embedding_signature filter if available, fallback to legacy filter
+            target_sig = f"{provider}-{model}"
+            try:
+                # Try optimized query using embedding_signature column
+                results = self._chunks_table.search().where(
+                    f"(embedding_signature IS NULL OR embedding_signature != '{target_sig}')"
+                ).limit(limit).to_list()
+                logger.debug(f"Using optimized embedding_signature query for provider={provider}, model={model}")
+            except Exception as sig_error:
+                # Fallback to legacy query if embedding_signature column doesn't exist
+                logger.debug(f"embedding_signature column not available ({sig_error}), using legacy query")
+                results = self._chunks_table.search().where(
+                    f"(embedding IS NULL OR provider != '{provider}' OR model != '{model}')"
+                ).limit(limit).to_list()
 
             # Deduplicate to handle fragment-induced duplicates
             results = _deduplicate_by_id(results)
