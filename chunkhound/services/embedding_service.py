@@ -186,7 +186,7 @@ class EmbeddingService(BaseService):
                 # Start with conservative batch size for large databases
                 initial_batch_size = 100
                 min_batch_size = 50
-                max_batch_size = 10000
+                max_batch_size = 50000
                 target_batch_time = 15.0  # Target 15 seconds per batch
                 slow_threshold = 30.0     # Consider >30s as too slow
                 fast_threshold = 5.0      # Consider <5s as very fast
