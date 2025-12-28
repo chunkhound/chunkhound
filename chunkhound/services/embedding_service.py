@@ -211,7 +211,7 @@ class EmbeddingService(BaseService):
             embed_task: TaskID | None = None
             if self.progress:
                 embed_task = self.progress.add_task(
-                    "Generating embeddings", total=total_chunks, speed="", info=""
+                    "Generating embeddings", total=total_chunks, info=""
                 )
                 # Set initial progress to current embeddings count
                 self.progress.advance(embed_task, current_embeddings)
