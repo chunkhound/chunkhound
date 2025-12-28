@@ -124,6 +124,15 @@ class LLMManager:
             logger.error(f"Failed to initialize LLM provider {provider_name}: {e}")
             raise
 
+    def create_provider_for_config(self, config: dict[str, Any]) -> LLMProvider:
+        """Public factory for constructing an LLM provider from a config dict.
+
+        This wraps the internal _create_provider helper so that callers outside
+        this module (for example, agent-doc assembly specialization) do not
+        need to rely on private APIs or provider-specific wiring details.
+        """
+        return self._create_provider(config)
+
     def _initialize_utility_provider(self) -> None:
         """Initialize the utility LLM provider."""
         self._utility_provider = self._create_provider(self._utility_config)

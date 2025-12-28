@@ -1,5 +1,4 @@
 .DS_Store
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -289,3 +288,6 @@ cluster_eval.json
 
 # Temporary documentation
 .tmp-docs/
+
+# AI review artifacts
+.gitignored/
