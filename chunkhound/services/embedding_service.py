@@ -645,28 +645,17 @@ class EmbeddingService(BaseService):
         import threading
 
         update_lock = threading.Lock()
-        processed_count = 0
 
         async def process_batch_with_optional_progress(
             batch: list[tuple[ChunkId, str]], batch_num: int
         ) -> list[dict[str, Any]]:
-            nonlocal processed_count
             result = await process_batch(batch, batch_num)
 
             # Thread-safe progress update if progress tracking is enabled
             if show_progress:
                 with update_lock:
-                    processed_count += len(batch)
                     if embed_task and self.progress:
                         self.progress.advance(embed_task, len(batch))
-
-                        # Calculate and display speed
-                        task_obj = self.progress.tasks[embed_task]
-                        if task_obj.elapsed and task_obj.elapsed > 0:
-                            speed = processed_count / task_obj.elapsed
-                            self.progress.update(
-                                embed_task, speed=f"{speed:.1f} chunks/s"
-                            )
 
             return result
 
