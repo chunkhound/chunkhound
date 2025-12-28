@@ -236,6 +236,15 @@ class EmbeddingService(BaseService):
                     )
                     logger.debug(f"Retrieved {len(chunks_data) if chunks_data else 0} chunks")
                 except Exception as e:
+                    # Check for timeout (covers both TimeoutError and string-based detection)
+                    if isinstance(e, TimeoutError) or "timeout" in str(e).lower():
+                        logger.warning(f"Timeout detected during retrieval ({e}), resetting connection...")
+                        self._db.reset_connection()
+                        # Force more aggressive batch reduction after timeout recovery
+                        current_batch_size = max(min_batch_size, current_batch_size // 4)
+                        logger.warning(f"Batch retrieval timed out, aggressively reduced to {current_batch_size} and reset connection")
+                        continue
+
                     # If batch fails, reduce batch size and retry once
                     if current_batch_size > min_batch_size:
                         old_batch_size = current_batch_size

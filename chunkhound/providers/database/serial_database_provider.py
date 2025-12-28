@@ -133,6 +133,23 @@ class SerialDatabaseProvider(ABC):
         """
         self.disconnect(skip_checkpoint=False)
 
+    def reset_connection(self, skip_checkpoint: bool = True) -> None:
+        """Forcefully reset connection and executor to recover from stuck operations.
+
+        This method disconnects, recreates the executor, and reconnects to clear
+        any stuck database operations (e.g., long-running queries that have timed out).
+
+        Args:
+            skip_checkpoint: Whether to skip checkpointing during disconnect
+        """
+        logger.warning("Resetting database connection to clear potential stuck operation...")
+        self.disconnect(skip_checkpoint=skip_checkpoint)
+        # Recreate executor (original created in __init__)
+        from chunkhound.providers.database.serial_executor import SerialDatabaseExecutor
+        self._executor = SerialDatabaseExecutor(self.config)
+        self.connect()
+        logger.info("Database connection reset complete")
+
     def disconnect(self, skip_checkpoint: bool = False) -> None:
         """Close database connection with optional checkpointing."""
         try:
