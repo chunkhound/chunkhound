@@ -204,6 +204,7 @@ async def _run_code_mapper_for_autodoc(
     verbose: bool,
     config_path: Path | None,
     map_out_dir: Path | None,
+    map_context: Path | None,
     comprehensiveness: str | None,
     taint: str | None,
 ) -> _AutoMapPlan:
@@ -225,6 +226,7 @@ async def _run_code_mapper_for_autodoc(
         config=config_path,
         path=plan.map_scope,
         out=plan.map_out_dir,
+        context=map_context,
         overview_only=False,
         comprehensiveness=plan.comprehensiveness,
         combined=False,
@@ -393,6 +395,7 @@ async def autodoc_command(args, config: Config) -> None:
 
         map_out_dir_arg = getattr(args, "map_out_dir", None)
         map_comprehensiveness_arg = getattr(args, "map_comprehensiveness", None)
+        map_context_arg = getattr(args, "map_context", None)
 
         default_plan = _build_auto_map_plan(output_dir=output_dir)
         map_out_dir_hint = (
@@ -433,6 +436,18 @@ async def autodoc_command(args, config: Config) -> None:
                 default=default_taint,
             )
 
+        map_context: Path | None = (
+            Path(map_context_arg).expanduser()
+            if map_context_arg is not None
+            else None
+        )
+        if map_context is None:
+            raw = _prompt_text(
+                "Optional Code Mapper context file (--map-context, leave blank for none)",
+                default=None,
+            )
+            map_context = Path(raw).expanduser() if raw else None
+
         formatter.info(f"Generating maps via Code Mapper: {map_out_dir}")
         plan = await _run_code_mapper_for_autodoc(
             config=config,
@@ -441,6 +456,7 @@ async def autodoc_command(args, config: Config) -> None:
             verbose=getattr(args, "verbose", False),
             config_path=getattr(args, "config", None),
             map_out_dir=map_out_dir,
+            map_context=map_context,
             comprehensiveness=comprehensiveness,
             taint=map_taint,
         )
@@ -487,6 +503,7 @@ async def autodoc_command(args, config: Config) -> None:
 
         map_out_dir_arg = getattr(args, "map_out_dir", None)
         map_comprehensiveness_arg = getattr(args, "map_comprehensiveness", None)
+        map_context_arg = getattr(args, "map_context", None)
 
         default_plan = _build_auto_map_plan(output_dir=output_dir)
         map_out_dir_hint = (
@@ -527,6 +544,18 @@ async def autodoc_command(args, config: Config) -> None:
                 default=default_taint,
             )
 
+        map_context: Path | None = (
+            Path(map_context_arg).expanduser()
+            if map_context_arg is not None
+            else None
+        )
+        if map_context is None:
+            raw = _prompt_text(
+                "Optional Code Mapper context file (--map-context, leave blank for none)",
+                default=None,
+            )
+            map_context = Path(raw).expanduser() if raw else None
+
         formatter.info(f"Generating maps via Code Mapper: {map_out_dir}")
         plan = await _run_code_mapper_for_autodoc(
             config=config,
@@ -535,6 +564,7 @@ async def autodoc_command(args, config: Config) -> None:
             verbose=getattr(args, "verbose", False),
             config_path=getattr(args, "config", None),
             map_out_dir=map_out_dir,
+            map_context=map_context,
             comprehensiveness=comprehensiveness,
             taint=map_taint,
         )

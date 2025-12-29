@@ -86,6 +86,18 @@ def add_map_subparser(subparsers: Any) -> argparse.ArgumentParser:
         ),
     )
 
+    map_parser.add_argument(
+        "--context",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a markdown/text file used as authoritative context for HyDE "
+            "planning. When set, this fully replaces repo-derived HyDE context "
+            "(file lists and sampled code snippets) for both architectural and "
+            "operational maps."
+        ),
+    )
+
     # Mandatory output directory for per-topic documents and index
     map_parser.add_argument(
         "--out",

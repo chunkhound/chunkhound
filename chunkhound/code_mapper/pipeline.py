@@ -253,9 +253,12 @@ async def _run_code_mapper_overview_hyde(
     target_dir: Path,
     scope_path: Path,
     scope_label: str,
+    meta: AgentDocMetadata | None = None,
+    context: str | None = None,
     max_points: int = 10,
     comprehensiveness: str = "medium",
     out_dir: Path | None = None,
+    persist_prompt: bool = False,
     assembly_provider: LLMProvider | None = None,
     indexing_cfg: IndexingConfig | None = None,
 ) -> tuple[str, list[CodeMapperPOI]]:
@@ -346,18 +349,22 @@ async def _run_code_mapper_overview_hyde(
         gitignore_backend = "python"
         workspace_root_only_gitignore = None
 
-    file_paths = collect_scope_files(
-        scope_path=scope_path,
-        project_root=target_dir,
-        hyde_cfg=hyde_cfg,
-        include_patterns=include_patterns,
-        indexing_excludes=indexing_excludes,
-        ignore_sources=ignore_sources,
-        gitignore_backend=gitignore_backend,
-        workspace_root_only_gitignore=workspace_root_only_gitignore,
-    )
+    context_text = context.strip() if context is not None else ""
 
-    meta = AgentDocMetadata(
+    file_paths: list[str] = []
+    if not context_text:
+        file_paths = collect_scope_files(
+            scope_path=scope_path,
+            project_root=target_dir,
+            hyde_cfg=hyde_cfg,
+            include_patterns=include_patterns,
+            indexing_excludes=indexing_excludes,
+            ignore_sources=ignore_sources,
+            gitignore_backend=gitignore_backend,
+            workspace_root_only_gitignore=workspace_root_only_gitignore,
+        )
+
+    prompt_meta = meta or AgentDocMetadata(
         created_from_sha="CODE_MAPPER",
         previous_target_sha="CODE_MAPPER",
         target_sha="CODE_MAPPER",
@@ -367,19 +374,21 @@ async def _run_code_mapper_overview_hyde(
     )
 
     hyde_scope_prompt = build_hyde_scope_prompt(
-        meta=meta,
+        meta=prompt_meta,
         scope_label=scope_label,
         file_paths=file_paths,
         hyde_cfg=hyde_cfg,
+        context=context_text or None,
         project_root=target_dir,
         mode="architectural",
     )
 
     ops_hyde_scope_prompt = build_hyde_scope_prompt(
-        meta=meta,
+        meta=prompt_meta,
         scope_label=scope_label,
         file_paths=file_paths,
         hyde_cfg=hyde_cfg,
+        context=context_text or None,
         project_root=target_dir,
         mode="operational",
     )
@@ -397,11 +406,18 @@ async def _run_code_mapper_overview_hyde(
             f"Prioritize the most important {focus}, but you may include slightly "
             "less critical topics to use the full budget when appropriate.\n"
         )
+        context_guard = ""
+        if context_text:
+            context_guard = (
+                "- Use ONLY the user-provided context above; do not infer or assume "
+                "details from repository code.\n"
+            )
         return (
             f"{scope_prompt}\n\n"
             "HyDE objective (override for Code Mapper):\n"
             "- Ignore any earlier 'HyDE objective' and 'Output format' instructions "
             "in the scope prompt.\n"
+            f"{context_guard}"
             "- Instead of writing a full documentation, do a concise planning pass "
             "for deep code research.\n"
             f"{poi_target_line}\n"
@@ -436,14 +452,15 @@ async def _run_code_mapper_overview_hyde(
     # Optional debugging/traceability: when out_dir is provided and explicitly
     # enabled via CH_CODE_MAPPER_WRITE_HYDE_PROMPT, persist the exact PoI-generation
     # prompt (scope + HyDE objective).
-    write_prompt = os.getenv(
-        "CH_CODE_MAPPER_WRITE_HYDE_PROMPT", "0"
-    ).strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "y",
-        "on",
+    write_prompt = persist_prompt or (
+        os.getenv("CH_CODE_MAPPER_WRITE_HYDE_PROMPT", "").strip().lower()
+        in (
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        )
     )
     if out_dir is not None and write_prompt:
         try:

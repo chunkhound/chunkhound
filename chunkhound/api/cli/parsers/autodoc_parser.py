@@ -131,9 +131,46 @@ def add_autodoc_subparser(subparsers: Any) -> argparse.ArgumentParser:
         ),
     )
 
-    site_parser.add_argument(
+    map_level_group = site_parser.add_mutually_exclusive_group()
+    map_level_group.add_argument(
+        "--map-minimal",
+        action="store_const",
+        const="minimal",
+        dest="map_comprehensiveness",
+        help="Alias for: --map-comprehensiveness minimal",
+    )
+    map_level_group.add_argument(
+        "--map-low",
+        action="store_const",
+        const="low",
+        dest="map_comprehensiveness",
+        help="Alias for: --map-comprehensiveness low",
+    )
+    map_level_group.add_argument(
+        "--map-medium",
+        action="store_const",
+        const="medium",
+        dest="map_comprehensiveness",
+        help="Alias for: --map-comprehensiveness medium",
+    )
+    map_level_group.add_argument(
+        "--map-high",
+        action="store_const",
+        const="high",
+        dest="map_comprehensiveness",
+        help="Alias for: --map-comprehensiveness high",
+    )
+    map_level_group.add_argument(
+        "--map-ultra",
+        action="store_const",
+        const="ultra",
+        dest="map_comprehensiveness",
+        help="Alias for: --map-comprehensiveness ultra",
+    )
+    map_level_group.add_argument(
         "--map-comprehensiveness",
         choices=["minimal", "low", "medium", "high", "ultra"],
+        dest="map_comprehensiveness",
         help=(
             "When AutoDoc offers to run Code Mapper automatically, controls the "
             "mapping depth. If omitted, AutoDoc will prompt (TTY only)."
@@ -148,6 +185,17 @@ def add_autodoc_subparser(subparsers: Any) -> argparse.ArgumentParser:
             "When AutoDoc offers to run Code Mapper automatically, controls how "
             "technical the generated map topics are. If omitted, AutoDoc will prompt "
             "(TTY only). Accepted: 1|technical, 2|balanced, 3|end-user."
+        ),
+    )
+
+    site_parser.add_argument(
+        "--map-context",
+        type=Path,
+        default=None,
+        help=(
+            "When AutoDoc offers to run Code Mapper automatically, pass a context "
+            "file through to Code Mapper planning as `chunkhound map --context ...`. "
+            "If omitted, AutoDoc will prompt (TTY only)."
         ),
     )
 

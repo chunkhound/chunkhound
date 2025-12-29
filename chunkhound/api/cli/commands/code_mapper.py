@@ -65,6 +65,24 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
     # Resolve workspace root from explicit config file when provided.
     apply_code_mapper_workspace_overrides(config=config, args=args)
 
+    context_text: str | None = None
+    context_arg = getattr(args, "context", None)
+    if context_arg is not None:
+        try:
+            context_path = Path(context_arg).expanduser()
+            if not context_path.is_absolute():
+                workspace_root = getattr(config, "target_dir", None)
+                if isinstance(workspace_root, Path):
+                    context_path = workspace_root / context_path
+            context_text = context_path.read_text(encoding="utf-8")
+        except (OSError, RuntimeError, ValueError) as exc:
+            formatter.error(f"Failed to read --context file: {exc}")
+            sys.exit(2)
+
+        if not context_text.strip():
+            formatter.error("--context file is empty.")
+            sys.exit(2)
+
     # Code Mapper always writes artifacts; keep the CLI contract explicit.
     out_dir_arg = getattr(args, "out", None)
     if out_dir_arg is None:
@@ -110,9 +128,12 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
                 target_dir=scope.target_dir,
                 scope_path=scope.scope_path,
                 scope_label=scope.scope_label,
+                meta=meta_bundle.meta,
+                context=context_text,
                 max_points=run_context.max_points,
                 comprehensiveness=run_context.comprehensiveness,
                 out_dir=out_dir,
+                persist_prompt=True,
                 assembly_provider=meta_bundle.assembly_provider,
                 indexing_cfg=getattr(config, "indexing", None),
             )
@@ -236,6 +257,8 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
                 scope_path=scope.scope_path,
                 scope_label=scope.scope_label,
                 path_filter=scope.path_filter,
+                meta=meta_bundle.meta,
+                context=context_text,
                 comprehensiveness=run_context.comprehensiveness,
                 max_points=run_context.max_points,
                 out_dir=Path(out_dir_arg),

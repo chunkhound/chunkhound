@@ -92,6 +92,14 @@ def _max_points_for_comprehensiveness(comprehensiveness: str) -> int:
 def _resolve_scope_path(target_dir: Path, raw_scope: Path) -> Path:
     if raw_scope.is_absolute():
         return raw_scope.resolve()
+    if raw_scope == Path("."):
+        try:
+            cwd = Path.cwd().resolve()
+            target = target_dir.resolve()
+            if cwd == target or cwd.is_relative_to(target):
+                return cwd
+        except (OSError, RuntimeError, ValueError):
+            pass
     return (target_dir / raw_scope).resolve()
 
 

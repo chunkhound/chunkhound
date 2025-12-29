@@ -62,6 +62,9 @@ Path resolution semantics:
 - If you pass `--config /path/to/.chunkhound.json`, the directory containing
   that file acts as the logical root for Code Mapper; `path` is interpreted
   relative to that root (e.g. `arguseek`, `arguseek/backend`).
+- `chunkhound map .` always uses the current working directory when it is under
+  the configured root; use an explicit relative path (e.g. `chunkhound`) to map
+  a different folder.
 - If you set `CHUNKHOUND_CONFIG_FILE` to a workspace-level config, Code Mapper
   treats that workspace directory as the root and resolves `path` relative to
   it, regardless of your current working directory.
@@ -71,6 +74,12 @@ Comprehensiveness:
   - Controls how many HyDE points of interest are planned (≈1/5/10/15/20).
   - Adjusts how much code is sampled for planning; file coverage uses the full index.
   - HyDE scope file list cap scales with comprehensiveness (≈200/500/2000/3000/5000).
+
+Custom planning context:
+- `--context /path/to/context.md`
+  - Uses the file contents as the authoritative input to HyDE planning.
+  - Fully replaces repo-derived HyDE context (file lists + sampled snippets) for both
+    architectural and operational maps.
 
 Assembly LLM configuration (optional):
 - Code Mapper's HyDE planning (overview/PoI generation) can use a dedicated “assembly” model:
@@ -95,7 +104,7 @@ Outputs:
   `CH_CODE_MAPPER_WRITE_COMBINED=1` for backward compatibility (disabled by default).
   Includes `agent_doc_metadata` header and coverage summary; stdout prints paths only.
 - In `--overview-only` mode:
-  - HyDE scope prompt + PoI plan written under `--out-dir`.
+  - HyDE scope prompt + PoI plan written under `--out-dir` (always).
 - In full mode (default):
   - `<scope>_code_mapper_index.md` listing all topics.
   - One `<scope>_topic_NN_<slug>.md` file per non-empty topic.
@@ -131,6 +140,10 @@ chunkhound autodoc /path/to/map_output_dir \
 chunkhound autodoc /path/to/map_output_dir \
   --index-pattern "*_autodoc_index.md" \
   --index-pattern "*_code_mapper_index.md"
+
+# If AutoDoc needs to auto-run Code Mapper, optionally provide steering context
+chunkhound autodoc --out-dir /path/to/output/autodoc \
+  --map-context /path/to/context.md
 ```
 
 Notes:
