@@ -118,6 +118,7 @@ include = [
     "chunkhound/py.typed",
     "chunkhound/code_mapper/prompts/*.md",
     "chunkhound/autodoc/prompts/*.txt",
+    "chunkhound/autodoc/assets/**/*",
     "tests/fixtures/yaml/**/*",
 ]
 

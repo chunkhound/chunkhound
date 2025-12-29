@@ -26,7 +26,7 @@ async def test_run_code_mapper_overview_only_raises_when_no_points(
             max_points=5,
             comprehensiveness="low",
             out_dir=None,
-            assembly_provider=None,
+            map_hyde_provider=None,
             indexing_cfg=None,
         )
 
@@ -50,7 +50,7 @@ async def test_run_code_mapper_overview_only_returns_answer_and_points(
         max_points=5,
         comprehensiveness="low",
         out_dir=None,
-        assembly_provider=None,
+        map_hyde_provider=None,
         indexing_cfg=None,
     )
 

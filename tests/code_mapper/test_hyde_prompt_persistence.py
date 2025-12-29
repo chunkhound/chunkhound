@@ -41,7 +41,7 @@ async def test_hyde_prompt_persistence_is_opt_in(
         max_points=1,
         comprehensiveness="minimal",
         out_dir=tmp_path,
-        assembly_provider=None,
+        map_hyde_provider=None,
         indexing_cfg=None,
     )
 
@@ -58,7 +58,7 @@ async def test_hyde_prompt_persistence_is_opt_in(
         max_points=1,
         comprehensiveness="minimal",
         out_dir=tmp_path,
-        assembly_provider=None,
+        map_hyde_provider=None,
         indexing_cfg=None,
     )
 
@@ -104,7 +104,7 @@ async def test_hyde_prompt_persistence_when_persist_prompt_enabled(
         comprehensiveness="minimal",
         out_dir=tmp_path,
         persist_prompt=True,
-        assembly_provider=None,
+        map_hyde_provider=None,
         indexing_cfg=None,
     )
 

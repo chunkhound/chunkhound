@@ -41,7 +41,7 @@ async def test_overview_hyde_skips_scope_collection_when_context_provided(
         max_points=1,
         comprehensiveness="minimal",
         out_dir=None,
-        assembly_provider=None,
+        map_hyde_provider=None,
         indexing_cfg=None,
     )
 
@@ -49,4 +49,3 @@ async def test_overview_hyde_skips_scope_collection_when_context_provided(
     assert "## Operational Map (HyDE)" in overview
     assert [p.mode for p in pois] == ["architectural", "operational"]
     assert captured_contexts == ["STEERING CONTEXT", "STEERING CONTEXT"]
-

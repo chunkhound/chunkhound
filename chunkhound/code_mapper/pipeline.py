@@ -259,7 +259,7 @@ async def _run_code_mapper_overview_hyde(
     comprehensiveness: str = "medium",
     out_dir: Path | None = None,
     persist_prompt: bool = False,
-    assembly_provider: LLMProvider | None = None,
+    map_hyde_provider: LLMProvider | None = None,
     indexing_cfg: IndexingConfig | None = None,
 ) -> tuple[str, list[CodeMapperPOI]]:
     """Run a HyDE-style overview pass to identify points of interest."""
@@ -478,7 +478,7 @@ async def _run_code_mapper_overview_hyde(
     arch_overview_answer, ok = await run_hyde_only_query(
         llm_manager=llm_manager,
         prompt=arch_overview_prompt,
-        provider_override=assembly_provider,
+        provider_override=map_hyde_provider,
         hyde_cfg=hyde_cfg,
     )
     if not ok:
@@ -487,7 +487,7 @@ async def _run_code_mapper_overview_hyde(
     ops_overview_answer, ok = await run_hyde_only_query(
         llm_manager=llm_manager,
         prompt=ops_overview_prompt,
-        provider_override=assembly_provider,
+        provider_override=map_hyde_provider,
         hyde_cfg=hyde_cfg,
     )
     if not ok:

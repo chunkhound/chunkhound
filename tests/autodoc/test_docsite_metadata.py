@@ -12,9 +12,9 @@ def test_render_index_metadata_includes_nested_details() -> None:
     utility_model: gpt-5-mini
     codex_reasoning_effort_synthesis: high
     codex_reasoning_effort_utility: low
-    assembly_synthesis_provider: codex-cli
-    assembly_synthesis_model: gpt-5
-    assembly_reasoning_effort: medium
+    map_hyde_provider: codex-cli
+    map_hyde_model: gpt-5
+    map_hyde_reasoning_effort: medium
   generation_stats:
     generator_mode: code_research
     total_research_calls: 10
@@ -50,9 +50,9 @@ def test_render_index_metadata_includes_nested_details() -> None:
     assert "- Utility model: gpt-5-mini" in lines
     assert "- Synthesis reasoning effort: high" in lines
     assert "- Utility reasoning effort: low" in lines
-    assert "- Assembly provider: codex-cli" in lines
-    assert "- Assembly model: gpt-5" in lines
-    assert "- Assembly reasoning effort: medium" in lines
+    assert "- HyDE planning provider: codex-cli" in lines
+    assert "- HyDE planning model: gpt-5" in lines
+    assert "- HyDE planning reasoning effort: medium" in lines
     assert "- Generator mode: code_research" in lines
     assert "- Comprehensiveness: medium" in lines
     assert "- Research calls: 10" in lines

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from chunkhound.code_mapper.llm import build_llm_metadata_and_assembly
+from chunkhound.code_mapper.llm import build_llm_metadata_and_map_hyde
 from chunkhound.code_mapper.models import AgentDocMetadata
 from chunkhound.core.config.config import Config
 from chunkhound.interfaces.llm_provider import LLMProvider
@@ -31,7 +31,7 @@ class CodeMapperRunContext:
 @dataclass
 class CodeMapperMetadataBundle:
     meta: AgentDocMetadata
-    assembly_provider: LLMProvider | None
+    map_hyde_provider: LLMProvider | None
 
 
 def _get_head_sha(project_root: Path) -> str:
@@ -145,7 +145,7 @@ class CodeMapperOrchestrator:
         target_dir: Path,
         overview_only: bool,
     ) -> CodeMapperMetadataBundle:
-        llm_meta, assembly_provider = build_llm_metadata_and_assembly(
+        llm_meta, map_hyde_provider = build_llm_metadata_and_map_hyde(
             config=self._config,
             llm_manager=self._llm_manager,
         )
@@ -166,4 +166,4 @@ class CodeMapperOrchestrator:
             llm_config=llm_meta,
             generation_stats={"overview_only": "true"} if overview_only else {},
         )
-        return CodeMapperMetadataBundle(meta=meta, assembly_provider=assembly_provider)
+        return CodeMapperMetadataBundle(meta=meta, map_hyde_provider=map_hyde_provider)

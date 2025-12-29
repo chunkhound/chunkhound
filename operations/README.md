@@ -81,33 +81,31 @@ Custom planning context:
   - Fully replaces repo-derived HyDE context (file lists + sampled snippets) for both
     architectural and operational maps.
 
-Assembly LLM configuration (optional):
-- Code Mapper's HyDE planning (overview/PoI generation) can use a dedicated “assembly” model:
+HyDE planning LLM configuration (optional):
+- Code Mapper's HyDE planning (overview/PoI generation) can use a dedicated provider/model:
   - In `.chunkhound.json` under `llm`:
-    - `assembly_provider` (e.g. `"codex-cli"` or `"openai"`)
-    - `assembly_model` (or legacy `assembly_synthesis_model`)
-    - `assembly_reasoning_effort` (`minimal|low|medium|high|xhigh`)
+    - `map_hyde_provider` (e.g. `"codex-cli"` or `"openai"`)
+    - `map_hyde_model`
+    - `map_hyde_reasoning_effort` (`minimal|low|medium|high|xhigh`)
   - Or via environment:
-    - `CH_AGENT_DOC_ASSEMBLY_PROVIDER`
-    - `CH_AGENT_DOC_ASSEMBLY_MODEL`
-    - `CH_AGENT_DOC_ASSEMBLY_REASONING_EFFORT`
-- If none of these are set, Code Mapper falls back to the synthesis provider/model,
-  and those values are recorded as the effective assembly
-  configuration.
-- In all cases, the effective assembly provider/model/effort are recorded in
-  `agent_doc_metadata.llm_config` as `assembly_synthesis_provider`,
-  `assembly_synthesis_model`, and `assembly_reasoning_effort`.
+    - `CHUNKHOUND_LLM_MAP_HYDE_PROVIDER`
+    - `CHUNKHOUND_LLM_MAP_HYDE_MODEL`
+    - `CHUNKHOUND_LLM_MAP_HYDE_REASONING_EFFORT`
+- If none of these are set, Code Mapper falls back to the synthesis provider/model/effort.
+- The effective HyDE planning provider/model/effort are recorded in
+  `agent_doc_metadata.llm_config` as `map_hyde_provider`, `map_hyde_model`,
+  and `map_hyde_reasoning_effort`.
 
 Outputs:
-- Combined document written under `--out-dir` when `--combined` is set.
+- Combined document written under `--out` when `--combined` is set.
   If `--combined/--no-combined` is omitted, ChunkHound falls back to
   `CH_CODE_MAPPER_WRITE_COMBINED=1` for backward compatibility (disabled by default).
   Includes `agent_doc_metadata` header and coverage summary; stdout prints paths only.
 - In `--overview-only` mode:
-  - HyDE scope prompt + PoI plan written under `--out-dir` (always).
+  - HyDE scope prompt + PoI plan written under `--out` (always).
 - In full mode (default):
   - `<scope>_code_mapper_index.md` listing all topics.
-  - One `<scope>_topic_NN_<slug>.md` file per non-empty topic.
+  - One `<scope>_arch_topic_NN_<slug>.md` / `<scope>_ops_topic_NN_<slug>.md` per non-empty topic.
 
 
 ## AutoDoc (docsite generation)

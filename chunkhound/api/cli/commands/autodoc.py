@@ -196,6 +196,113 @@ def _build_auto_map_plan(
     )
 
 
+def _effective_config_for_code_mapper_autorun(
+    *,
+    config: Config,
+    config_path: Path | None,
+) -> Config:
+    from argparse import Namespace
+
+    from chunkhound.api.cli.utils import apply_code_mapper_workspace_overrides
+
+    effective = config.model_copy(deep=True)
+    args = Namespace(
+        config=config_path,
+        db=None,
+        database_path=None,
+    )
+    apply_code_mapper_workspace_overrides(config=effective, args=args)
+    return effective
+
+
+def _code_mapper_autorun_prereq_summary(
+    *,
+    config: Config,
+    config_path: Path | None,
+) -> tuple[bool, list[str], list[str]]:
+    """Return (ok, missing_labels, detail_lines) for Code Mapper auto-run."""
+    from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+
+    effective = _effective_config_for_code_mapper_autorun(
+        config=config,
+        config_path=config_path,
+    )
+
+    missing: list[str] = []
+    details: list[str] = []
+
+    db_path: Path | None = None
+    try:
+        db_path = effective.database.get_db_path()
+    except ValueError:
+        missing.append("database")
+        details.append("- Database path is not configured.")
+    else:
+        if not db_path.exists():
+            missing.append("database")
+            details.append(f"- Database not found at: {db_path}")
+
+    if effective.embedding is None:
+        missing.append("embeddings")
+        details.append("- Embedding provider is not configured.")
+    else:
+        try:
+            provider = EmbeddingProviderFactory.create_provider(effective.embedding)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            missing.append("embeddings")
+            details.append(f"- Embedding provider setup failed: {exc}")
+        else:
+            supports_reranking = False
+            try:
+                if hasattr(provider, "supports_reranking") and callable(
+                    provider.supports_reranking
+                ):
+                    supports_reranking = bool(provider.supports_reranking())
+            except Exception:
+                supports_reranking = False
+            if not supports_reranking:
+                missing.append("reranking")
+                details.append(
+                    "- Embedding provider does not support reranking with current config "
+                    "(configure reranking; typically `embedding.rerank_model`)."
+                )
+
+    if effective.llm is None:
+        missing.append("llm")
+        details.append("- LLM provider is not configured.")
+    elif not effective.llm.is_provider_configured():
+        missing.append("llm")
+        details.append("- LLM provider is not fully configured.")
+
+    # De-dup while preserving order
+    missing_dedup: list[str] = []
+    for item in missing:
+        if item not in missing_dedup:
+            missing_dedup.append(item)
+
+    return not missing_dedup, missing_dedup, details
+
+
+def _exit_autodoc_autorun_prereq_failure(
+    *,
+    formatter: RichOutputFormatter,
+    details: list[str],
+    exit_code: int,
+) -> None:
+    formatter.error(
+        "AutoDoc can auto-run Code Mapper, but required prerequisites are missing."
+    )
+    for line in details:
+        formatter.error(line)
+    formatter.info("To fix:")
+    formatter.info("- Run `chunkhound index <directory>` to create the database.")
+    formatter.info(
+        "- Configure embeddings with reranking support (e.g. set `embedding.rerank_model`)."
+    )
+    formatter.info("- Configure an LLM provider (e.g. `CHUNKHOUND_LLM_API_KEY`).")
+    sys.exit(exit_code)
+
+
 async def _run_code_mapper_for_autodoc(
     *,
     config: Config,
@@ -248,26 +355,26 @@ def _build_cleanup_provider_configs(
 ) -> tuple[dict[str, object], dict[str, object]]:
     utility_config, synthesis_config = llm_config.get_provider_configs()
 
-    assembly_provider = llm_config.assembly_provider
-    assembly_model = llm_config.assembly_model or llm_config.assembly_synthesis_model
-    assembly_effort = llm_config.assembly_reasoning_effort
+    cleanup_provider = llm_config.autodoc_cleanup_provider
+    cleanup_model = llm_config.autodoc_cleanup_model
+    cleanup_effort = llm_config.autodoc_cleanup_reasoning_effort
 
-    if assembly_provider:
+    if cleanup_provider:
         synthesis_config = synthesis_config.copy()
-        synthesis_config["provider"] = assembly_provider
+        synthesis_config["provider"] = cleanup_provider
 
-    if assembly_model:
+    if cleanup_model:
         synthesis_config = synthesis_config.copy()
-        synthesis_config["model"] = assembly_model
+        synthesis_config["model"] = cleanup_model
 
     provider = synthesis_config.get("provider")
     if (
-        assembly_effort
+        cleanup_effort
         and isinstance(provider, str)
         and provider in ("codex-cli", "openai")
     ):
         synthesis_config = synthesis_config.copy()
-        synthesis_config["reasoning_effort"] = assembly_effort
+        synthesis_config["reasoning_effort"] = cleanup_effort
 
     return utility_config, synthesis_config
 
@@ -315,12 +422,12 @@ def _resolve_llm_manager(
         model = synthesis_config.get("model", "unknown")
         effort = synthesis_config.get("reasoning_effort")
         override_notes: list[str] = []
-        if llm_config.assembly_provider:
-            override_notes.append("assembly provider")
-        if llm_config.assembly_model or llm_config.assembly_synthesis_model:
-            override_notes.append("assembly model")
-        if llm_config.assembly_reasoning_effort:
-            override_notes.append("assembly reasoning effort")
+        if llm_config.autodoc_cleanup_provider:
+            override_notes.append("cleanup provider")
+        if llm_config.autodoc_cleanup_model:
+            override_notes.append("cleanup model")
+        if llm_config.autodoc_cleanup_reasoning_effort:
+            override_notes.append("cleanup reasoning effort")
         suffix = f" ({', '.join(override_notes)} override)" if override_notes else ""
         if isinstance(provider, str) and provider == "codex-cli":
             resolved_model, _model_source = CodexCLIProvider.describe_model_resolution(
@@ -383,15 +490,45 @@ async def autodoc_command(args, config: Config) -> None:
         return
 
     if map_dir is None:
+        if not _is_interactive():
+            formatter.error(
+                "Missing required input: map-in (Code Mapper outputs directory). "
+                "Non-interactive mode cannot prompt to auto-generate maps."
+            )
+            sys.exit(2)
+
+        preflight_ok, missing, _details = _code_mapper_autorun_prereq_summary(
+            config=config,
+            config_path=getattr(args, "config", None),
+        )
+        warning_suffix = ""
+        if not preflight_ok:
+            warning_suffix = (
+                "\n\n"
+                "Note: Code Mapper prerequisites appear missing "
+                f"({', '.join(missing)})."
+            )
+
         if not _prompt_yes_no(
             "No `map-in` provided. Generate the codemap first by running "
-            "`chunkhound map`, then continue with AutoDoc?",
+            f"`chunkhound map`, then continue with AutoDoc?{warning_suffix}",
             default=False,
         ):
             formatter.error(
                 "Missing required input: map-in (Code Mapper outputs directory)."
             )
             sys.exit(2)
+
+        preflight_ok, _missing, details = _code_mapper_autorun_prereq_summary(
+            config=config,
+            config_path=getattr(args, "config", None),
+        )
+        if not preflight_ok:
+            _exit_autodoc_autorun_prereq_failure(
+                formatter=formatter,
+                details=details,
+                exit_code=1,
+            )
 
         map_out_dir_arg = getattr(args, "map_out_dir", None)
         map_comprehensiveness_arg = getattr(args, "map_comprehensiveness", None)
@@ -493,13 +630,45 @@ async def autodoc_command(args, config: Config) -> None:
     except FileNotFoundError as exc:
         formatter.warning(str(exc))
 
+        if not _is_interactive():
+            formatter.error(
+                "AutoDoc index not found in map-in directory, and non-interactive "
+                "mode cannot prompt to auto-generate maps. Run `chunkhound map` "
+                "first (then re-run `chunkhound autodoc` with map-in), or ensure "
+                "the map-in folder contains a `*_code_mapper_index.md`."
+            )
+            sys.exit(1)
+
+        preflight_ok, missing, _details = _code_mapper_autorun_prereq_summary(
+            config=config,
+            config_path=getattr(args, "config", None),
+        )
+        warning_suffix = ""
+        if not preflight_ok:
+            warning_suffix = (
+                "\n\n"
+                "Note: Code Mapper prerequisites appear missing "
+                f"({', '.join(missing)})."
+            )
+
         if not _prompt_yes_no(
             "Generate the codemap first by running `chunkhound map`, "
-            "then retry AutoDoc?",
+            f"then retry AutoDoc?{warning_suffix}",
             default=False,
         ):
             formatter.error(str(exc))
             sys.exit(1)
+
+        preflight_ok, _missing, details = _code_mapper_autorun_prereq_summary(
+            config=config,
+            config_path=getattr(args, "config", None),
+        )
+        if not preflight_ok:
+            _exit_autodoc_autorun_prereq_failure(
+                formatter=formatter,
+                details=details,
+                exit_code=1,
+            )
 
         map_out_dir_arg = getattr(args, "map_out_dir", None)
         map_comprehensiveness_arg = getattr(args, "map_comprehensiveness", None)

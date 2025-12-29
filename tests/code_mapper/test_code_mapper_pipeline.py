@@ -44,7 +44,7 @@ async def test_run_code_mapper_pipeline_raises_when_no_points(
             comprehensiveness="low",
             max_points=5,
             out_dir=None,
-            assembly_provider=None,
+            map_hyde_provider=None,
             indexing_cfg=None,
             progress=None,
         )
@@ -80,7 +80,7 @@ async def test_run_code_mapper_pipeline_skips_empty_results(
         code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
     )
     monkeypatch.setattr(
-        code_mapper_service, "deep_research_impl", fake_deep_research_impl
+        code_mapper_service, "run_deep_research", fake_deep_research_impl
     )
     monkeypatch.setattr(
         code_mapper_service,
@@ -99,7 +99,7 @@ async def test_run_code_mapper_pipeline_skips_empty_results(
         comprehensiveness="low",
         max_points=5,
         out_dir=None,
-        assembly_provider=None,
+        map_hyde_provider=None,
         indexing_cfg=None,
         progress=None,
     )
@@ -134,7 +134,7 @@ async def test_run_code_mapper_pipeline_uses_mode_aware_queries(
         code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
     )
     monkeypatch.setattr(
-        code_mapper_service, "deep_research_impl", fake_deep_research_impl
+        code_mapper_service, "run_deep_research", fake_deep_research_impl
     )
     monkeypatch.setattr(
         code_mapper_service,
@@ -153,7 +153,7 @@ async def test_run_code_mapper_pipeline_uses_mode_aware_queries(
         comprehensiveness="low",
         max_points=5,
         out_dir=None,
-        assembly_provider=None,
+        map_hyde_provider=None,
         indexing_cfg=None,
         progress=None,
     )

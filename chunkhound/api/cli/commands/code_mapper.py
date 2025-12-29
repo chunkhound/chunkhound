@@ -54,8 +54,8 @@ async def _run_code_mapper_overview_hyde(
     return await code_mapper_pipeline._run_code_mapper_overview_hyde(*args, **kwargs)
 
 
-# Re-export for tests that monkeypatch assembly metadata wiring.
-build_llm_metadata_and_assembly = code_mapper_llm.build_llm_metadata_and_assembly
+# Re-export for tests that monkeypatch HyDE provider metadata wiring.
+build_llm_metadata_and_map_hyde = code_mapper_llm.build_llm_metadata_and_map_hyde
 
 
 async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
@@ -134,7 +134,7 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
                 comprehensiveness=run_context.comprehensiveness,
                 out_dir=out_dir,
                 persist_prompt=True,
-                assembly_provider=meta_bundle.assembly_provider,
+                map_hyde_provider=meta_bundle.map_hyde_provider,
                 indexing_cfg=getattr(config, "indexing", None),
             )
         except code_mapper_pipeline.CodeMapperHyDEError as exc:
@@ -262,7 +262,7 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
                 comprehensiveness=run_context.comprehensiveness,
                 max_points=run_context.max_points,
                 out_dir=Path(out_dir_arg),
-                assembly_provider=meta_bundle.assembly_provider,
+                map_hyde_provider=meta_bundle.map_hyde_provider,
                 indexing_cfg=getattr(config, "indexing", None),
                 progress=tree_progress,
                 taint=str(getattr(args, "taint", "balanced") or "balanced"),

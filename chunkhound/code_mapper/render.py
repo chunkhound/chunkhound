@@ -77,8 +77,6 @@ def render_combined_document(
             lines.append(str(result.get("answer", "")).strip())
             lines.append("")
 
-    lines.extend(coverage_lines)
-    lines.append("")
     return "\n".join(lines)
 
 

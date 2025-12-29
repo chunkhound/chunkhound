@@ -89,6 +89,28 @@ def test_strip_references_section_removes_sources_and_references() -> None:
     assert "## Outro" in stripped
 
 
+def test_strip_references_section_removes_separator_before_sources_footer() -> None:
+    markdown = "\n".join(
+        [
+            "## Overview",
+            "Overview text.",
+            "",
+            "---",
+            "## Sources",
+            "- [1] src/main.py",
+            "",
+            "## Details",
+            "Details text.",
+        ]
+    )
+
+    stripped = docsite.strip_references_section(markdown)
+
+    assert "## Sources" not in stripped
+    assert stripped.splitlines()[-1] == "Details text."
+    assert "---" not in stripped
+
+
 def test_flatten_sources_block_builds_list_with_paths_and_chunks() -> None:
     flat = docsite.flatten_sources_block(_sources_block())
 

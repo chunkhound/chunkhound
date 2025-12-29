@@ -65,6 +65,11 @@ async def test_autodoc_offers_auto_map_when_map_dir_missing_index(
         "_run_code_mapper_for_autodoc",
         fake_run_code_mapper_for_autodoc,
     )
+    monkeypatch.setattr(
+        autodoc_command,
+        "_code_mapper_autorun_prereq_summary",
+        lambda **_kwargs: (True, [], []),
+    )
     monkeypatch.setattr(autodoc_command, "_is_interactive", lambda: True)
     inputs = iter(["y", "", "", "", ""])
     monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
@@ -177,6 +182,11 @@ async def test_autodoc_generates_map_when_map_in_omitted(
         "_run_code_mapper_for_autodoc",
         fake_run_code_mapper_for_autodoc,
     )
+    monkeypatch.setattr(
+        autodoc_command,
+        "_code_mapper_autorun_prereq_summary",
+        lambda **_kwargs: (True, [], []),
+    )
     monkeypatch.setattr(autodoc_command, "_is_interactive", lambda: True)
     inputs = iter(["y", "", "", "", ""])
     monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
@@ -204,3 +214,69 @@ async def test_autodoc_generates_map_when_map_in_omitted(
 
     assert ran_map == [tmp_path / "map_autodoc"]
     assert calls == [(tmp_path / "map_autodoc", tmp_path / "autodoc")]
+
+
+@pytest.mark.asyncio
+async def test_autodoc_auto_map_prereq_failure_exits_before_prompting_map_params(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    # Force preflight failure
+    monkeypatch.setattr(
+        autodoc_command,
+        "_code_mapper_autorun_prereq_summary",
+        lambda **_kwargs: (
+            False,
+            ["database", "embeddings", "reranking", "llm"],
+            [
+                "- Database not found at: /missing/db",
+                "- Embedding provider is not configured.",
+                "- Embedding provider does not support reranking with current config (configure reranking; typically `embedding.rerank_model`).",
+                "- LLM provider is not configured.",
+            ],
+        ),
+    )
+
+    ran_map: list[Path] = []
+
+    async def fake_run_code_mapper_for_autodoc(**_kwargs):  # type: ignore[no-untyped-def]
+        ran_map.append(Path("should-not-run"))
+        return autodoc_command._build_auto_map_plan(output_dir=tmp_path / "autodoc")
+
+    monkeypatch.setattr(
+        autodoc_command,
+        "_run_code_mapper_for_autodoc",
+        fake_run_code_mapper_for_autodoc,
+    )
+
+    monkeypatch.setattr(autodoc_command, "_is_interactive", lambda: True)
+
+    # Only consent prompt should be consumed; map param prompts must not run.
+    inputs = iter(["y"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
+
+    args = SimpleNamespace(
+        map_in=None,
+        out_dir=tmp_path / "autodoc",
+        map_out_dir=None,
+        map_comprehensiveness=None,
+        map_context=None,
+        assets_only=False,
+        site_title=None,
+        site_tagline=None,
+        cleanup_mode="minimal",
+        cleanup_batch_size=1,
+        cleanup_max_tokens=512,
+        taint="balanced",
+        map_taint=None,
+        index_patterns=None,
+        verbose=False,
+        config=None,
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        await autodoc_command.autodoc_command(args, Config(target_dir=tmp_path))
+
+    assert excinfo.value.code == 1
+    assert ran_map == []

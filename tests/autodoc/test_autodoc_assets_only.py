@@ -86,3 +86,26 @@ def test_write_astro_assets_only_preserves_topic_pages(tmp_path: Path) -> None:
     assert topic_path.read_text(encoding="utf-8") == "original topic content"
     assert layout_path.read_text(encoding="utf-8") != "old layout"
     assert "navData" in layout_path.read_text(encoding="utf-8")
+    assert (output_dir / "astro.config.mjs").read_text(encoding="utf-8").strip()
+    assert (output_dir / "tsconfig.json").read_text(encoding="utf-8").strip()
+    assert (output_dir / "src" / "styles" / "global.css").read_text(
+        encoding="utf-8"
+    ).strip()
+    assert (output_dir / "public" / "favicon.ico").read_bytes()
+
+
+def test_write_astro_assets_only_does_not_overwrite_package_and_readme_without_site_json(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "site"
+    (output_dir / "src" / "pages" / "topics").mkdir(parents=True)
+
+    package_json_path = output_dir / "package.json"
+    readme_path = output_dir / "README.md"
+    package_json_path.write_text("sentinel package.json", encoding="utf-8")
+    readme_path.write_text("sentinel README", encoding="utf-8")
+
+    docsite.write_astro_assets_only(output_dir=output_dir)
+
+    assert package_json_path.read_text(encoding="utf-8") == "sentinel package.json"
+    assert readme_path.read_text(encoding="utf-8") == "sentinel README"

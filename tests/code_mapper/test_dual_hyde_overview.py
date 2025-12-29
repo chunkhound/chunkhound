@@ -39,7 +39,7 @@ async def test_dual_hyde_overview_returns_both_maps_and_injects_quickstart(
         max_points=1,
         comprehensiveness="low",
         out_dir=None,
-        assembly_provider=None,
+        map_hyde_provider=None,
         indexing_cfg=None,
     )
 
@@ -50,4 +50,3 @@ async def test_dual_hyde_overview_returns_both_maps_and_injects_quickstart(
     assert "Core Flow" in pois[0].text
     assert "Quickstart" in pois[1].text
     assert "Troubleshooting" in pois[2].text
-

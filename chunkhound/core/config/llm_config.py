@@ -112,39 +112,85 @@ class LLMConfig(BaseSettings):
         description="Codex CLI reasoning effort override for synthesis-stage operations",
     )
 
-    assembly_provider: Literal[
-        "openai",
-        "ollama",
-        "claude-code-cli",
-        "codex-cli",
+    map_hyde_provider: (
+        Literal[
+            "openai",
+            "ollama",
+            "claude-code-cli",
+            "codex-cli",
+            "gemini",
+            "anthropic",
+            "opencode-cli",
+        ]
+        | None
+    ) = Field(
+        default=None,
+        description=(
+            "Override provider for Code Mapper HyDE planning (points-of-interest overview). "
+            "Falls back to the synthesis provider when unset."
+        ),
+    )
+
+    map_hyde_model: str | None = Field(
+        default=None,
+        description=(
+            "Override model for Code Mapper HyDE planning (points-of-interest overview). "
+            "Falls back to the synthesis model when unset."
+        ),
+    )
+
+    map_hyde_reasoning_effort: Literal[
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
     ] | None = Field(
         default=None,
         description=(
-            "Override provider for agent-doc HyDE planning (points-of-interest overview). "
-            "Does not affect per-point deep research or the final merge."
+            "Codex/OpenAI reasoning effort override for Code Mapper HyDE planning. "
+            "Falls back to synthesis reasoning effort when unset."
         ),
     )
 
-    assembly_model: str | None = Field(
+    autodoc_cleanup_provider: (
+        Literal[
+            "openai",
+            "ollama",
+            "claude-code-cli",
+            "codex-cli",
+            "gemini",
+            "anthropic",
+            "opencode-cli",
+        ]
+        | None
+    ) = Field(
         default=None,
         description=(
-            "Override model for agent-doc HyDE planning (points-of-interest overview). "
-            "Does not affect per-point deep research or the final merge."
+            "Override provider for AutoDoc LLM cleanup. "
+            "Falls back to the synthesis provider when unset."
         ),
     )
 
-    # Backwards-compatible alias for assembly_model used in some configs.
-    assembly_synthesis_model: str | None = Field(
-        default=None,
-        description="Alias for assembly_model used by some configurations.",
-    )
-
-    assembly_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = Field(
+    autodoc_cleanup_model: str | None = Field(
         default=None,
         description=(
-            "Codex/OpenAI reasoning effort override for agent-doc HyDE planning "
-            "(points-of-interest overview). Does not affect per-point deep research "
-            "or the final merge."
+            "Override model for AutoDoc LLM cleanup. "
+            "Falls back to the synthesis model when unset."
+        ),
+    )
+
+    autodoc_cleanup_reasoning_effort: Literal[
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    ] | None = Field(
+        default=None,
+        description=(
+            "Codex/OpenAI reasoning effort override for AutoDoc LLM cleanup. "
+            "Falls back to synthesis reasoning effort when unset."
         ),
     )
 
@@ -240,7 +286,8 @@ class LLMConfig(BaseSettings):
         "codex_reasoning_effort",
         "codex_reasoning_effort_utility",
         "codex_reasoning_effort_synthesis",
-        "assembly_reasoning_effort",
+        "map_hyde_reasoning_effort",
+        "autodoc_cleanup_reasoning_effort",
         mode="before",
     )
     def normalize_codex_effort(cls, v: str | None) -> str | None:  # noqa: N805
@@ -515,6 +562,52 @@ class LLMConfig(BaseSettings):
             help="Synthesis-stage Codex reasoning effort override",
         )
 
+        parser.add_argument(
+            "--llm-map-hyde-provider",
+            choices=[
+                "openai",
+                "ollama",
+                "claude-code-cli",
+                "codex-cli",
+                "anthropic",
+                "gemini",
+                "opencode-cli",
+            ],
+            help="Override provider for Code Mapper HyDE planning (falls back to synthesis)",
+        )
+        parser.add_argument(
+            "--llm-map-hyde-model",
+            help="Override model for Code Mapper HyDE planning (falls back to synthesis)",
+        )
+        parser.add_argument(
+            "--llm-map-hyde-reasoning-effort",
+            choices=["minimal", "low", "medium", "high", "xhigh"],
+            help="Override Codex/OpenAI reasoning effort for Code Mapper HyDE planning",
+        )
+
+        parser.add_argument(
+            "--llm-autodoc-cleanup-provider",
+            choices=[
+                "openai",
+                "ollama",
+                "claude-code-cli",
+                "codex-cli",
+                "anthropic",
+                "gemini",
+                "opencode-cli",
+            ],
+            help="Override provider for AutoDoc LLM cleanup (falls back to synthesis)",
+        )
+        parser.add_argument(
+            "--llm-autodoc-cleanup-model",
+            help="Override model for AutoDoc LLM cleanup (falls back to synthesis)",
+        )
+        parser.add_argument(
+            "--llm-autodoc-cleanup-reasoning-effort",
+            choices=["minimal", "low", "medium", "high", "xhigh"],
+            help="Override Codex/OpenAI reasoning effort for AutoDoc LLM cleanup",
+        )
+
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
         """Load LLM config from environment variables."""
@@ -545,6 +638,24 @@ class LLMConfig(BaseSettings):
         ):
             config["codex_reasoning_effort_synthesis"] = (
                 codex_effort_syn.strip().lower()
+            )
+
+        if map_hyde_provider := os.getenv("CHUNKHOUND_LLM_MAP_HYDE_PROVIDER"):
+            config["map_hyde_provider"] = map_hyde_provider
+        if map_hyde_model := os.getenv("CHUNKHOUND_LLM_MAP_HYDE_MODEL"):
+            config["map_hyde_model"] = map_hyde_model
+        if map_hyde_effort := os.getenv("CHUNKHOUND_LLM_MAP_HYDE_REASONING_EFFORT"):
+            config["map_hyde_reasoning_effort"] = map_hyde_effort.strip().lower()
+
+        if cleanup_provider := os.getenv("CHUNKHOUND_LLM_AUTODOC_CLEANUP_PROVIDER"):
+            config["autodoc_cleanup_provider"] = cleanup_provider
+        if cleanup_model := os.getenv("CHUNKHOUND_LLM_AUTODOC_CLEANUP_MODEL"):
+            config["autodoc_cleanup_model"] = cleanup_model
+        if cleanup_effort := os.getenv(
+            "CHUNKHOUND_LLM_AUTODOC_CLEANUP_REASONING_EFFORT"
+        ):
+            config["autodoc_cleanup_reasoning_effort"] = (
+                cleanup_effort.strip().lower()
             )
 
         return config
@@ -586,6 +697,31 @@ class LLMConfig(BaseSettings):
         ):
             overrides["codex_reasoning_effort_synthesis"] = (
                 args.llm_codex_reasoning_effort_synthesis
+            )
+
+        if hasattr(args, "llm_map_hyde_provider") and args.llm_map_hyde_provider:
+            overrides["map_hyde_provider"] = args.llm_map_hyde_provider
+        if hasattr(args, "llm_map_hyde_model") and args.llm_map_hyde_model:
+            overrides["map_hyde_model"] = args.llm_map_hyde_model
+        if (
+            hasattr(args, "llm_map_hyde_reasoning_effort")
+            and args.llm_map_hyde_reasoning_effort
+        ):
+            overrides["map_hyde_reasoning_effort"] = args.llm_map_hyde_reasoning_effort
+
+        if (
+            hasattr(args, "llm_autodoc_cleanup_provider")
+            and args.llm_autodoc_cleanup_provider
+        ):
+            overrides["autodoc_cleanup_provider"] = args.llm_autodoc_cleanup_provider
+        if hasattr(args, "llm_autodoc_cleanup_model") and args.llm_autodoc_cleanup_model:
+            overrides["autodoc_cleanup_model"] = args.llm_autodoc_cleanup_model
+        if (
+            hasattr(args, "llm_autodoc_cleanup_reasoning_effort")
+            and args.llm_autodoc_cleanup_reasoning_effort
+        ):
+            overrides["autodoc_cleanup_reasoning_effort"] = (
+                args.llm_autodoc_cleanup_reasoning_effort
             )
 
         return overrides

@@ -20,7 +20,7 @@ from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.llm_manager import LLMManager
-from chunkhound.mcp_server.tools import deep_research_impl
+from chunkhound.services.deep_research_service import run_deep_research
 
 if TYPE_CHECKING:
     from chunkhound.api.cli.utils.tree_progress import TreeProgressDisplay
@@ -85,7 +85,7 @@ async def run_code_mapper_overview_only(
     max_points: int,
     comprehensiveness: str,
     out_dir: Path | None,
-    assembly_provider: LLMProvider | None,
+    map_hyde_provider: LLMProvider | None,
     indexing_cfg: IndexingConfig | None,
 ) -> tuple[str, list[CodeMapperPOI]]:
     """Run overview-only Code Mapper and return the answer + points."""
@@ -100,7 +100,7 @@ async def run_code_mapper_overview_only(
         comprehensiveness=comprehensiveness,
         out_dir=out_dir,
         persist_prompt=True,
-        assembly_provider=assembly_provider,
+        map_hyde_provider=map_hyde_provider,
         indexing_cfg=indexing_cfg,
     )
 
@@ -124,7 +124,7 @@ async def run_code_mapper_pipeline(
     comprehensiveness: str,
     max_points: int,
     out_dir: Path | None,
-    assembly_provider: LLMProvider | None,
+    map_hyde_provider: LLMProvider | None,
     indexing_cfg: IndexingConfig | None,
     progress: TreeProgressDisplay | None,
     taint: str = "balanced",
@@ -143,7 +143,7 @@ async def run_code_mapper_pipeline(
         max_points=max_points,
         comprehensiveness=comprehensiveness,
         out_dir=out_dir,
-        assembly_provider=assembly_provider,
+        map_hyde_provider=map_hyde_provider,
         indexing_cfg=indexing_cfg,
     )
 
@@ -210,11 +210,12 @@ async def run_code_mapper_pipeline(
             )
 
         try:
-            result = await deep_research_impl(
+            result = await run_deep_research(
                 services=services,
                 embedding_manager=embedding_manager,
                 llm_manager=llm_manager,
                 query=section_query,
+                tool_name="code_research",
                 progress=progress,
                 path=path_filter,
             )

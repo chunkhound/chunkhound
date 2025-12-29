@@ -48,7 +48,7 @@ def test_render_combined_document_includes_sections_and_coverage() -> None:
         coverage_lines=coverage_lines,
     )
 
-    assert doc.count("## Coverage Summary") == 2
+    assert doc.count("## Coverage Summary") == 1
     assert "# Code Mapper for scope" in doc
     assert "## HyDE Overview" in doc
     assert "## Architectural Map" in doc
