@@ -23,10 +23,6 @@ from chunkhound.llm_manager import LLMManager
 from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 
 
-def _default_out_dir(input_dir: Path) -> Path:
-    return input_dir / "autodoc"
-
-
 def _nearest_existing_dir(path: Path) -> Path | None:
     current = path
     try:
@@ -179,6 +175,56 @@ class _AutoMapPlan:
     taint: str
 
 
+@dataclass(frozen=True)
+class _AutoMapOptions:
+    map_out_dir: Path
+    comprehensiveness: str
+    taint: str
+    map_context: Path | None
+
+
+def _confirm_autorun_and_validate_prereqs(
+    *,
+    config: Config,
+    config_path: Path | None,
+    formatter: RichOutputFormatter,
+    question: str,
+    decline_error: str,
+    decline_exit_code: int,
+    prereq_failure_exit_code: int = 1,
+    default: bool = False,
+) -> None:
+    preflight_ok, missing, _details = _code_mapper_autorun_prereq_summary(
+        config=config,
+        config_path=config_path,
+    )
+    warning_suffix = ""
+    if not preflight_ok:
+        warning_suffix = (
+            "\n\n"
+            "Note: Code Mapper prerequisites appear missing "
+            f"({', '.join(missing)})."
+        )
+
+    if not _prompt_yes_no(
+        f"{question}{warning_suffix}",
+        default=default,
+    ):
+        formatter.error(decline_error)
+        sys.exit(decline_exit_code)
+
+    preflight_ok, _missing, details = _code_mapper_autorun_prereq_summary(
+        config=config,
+        config_path=config_path,
+    )
+    if not preflight_ok:
+        _exit_autodoc_autorun_prereq_failure(
+            formatter=formatter,
+            details=details,
+            exit_code=prereq_failure_exit_code,
+        )
+
+
 def _build_auto_map_plan(
     *,
     output_dir: Path,
@@ -193,6 +239,68 @@ def _build_auto_map_plan(
         map_scope=map_scope,
         comprehensiveness=comprehensiveness or "medium",
         taint=taint or "balanced",
+    )
+
+
+def _resolve_auto_map_options(*, args, output_dir: Path) -> _AutoMapOptions:
+    map_out_dir_arg = getattr(args, "map_out_dir", None)
+    map_comprehensiveness_arg = getattr(args, "map_comprehensiveness", None)
+    map_context_arg = getattr(args, "map_context", None)
+
+    default_plan = _build_auto_map_plan(output_dir=output_dir)
+    map_out_dir_hint = (
+        Path(map_out_dir_arg).expanduser()
+        if map_out_dir_arg is not None
+        else default_plan.map_out_dir
+    )
+
+    map_out_dir = Path(map_out_dir_arg).expanduser() if map_out_dir_arg else None
+    if map_out_dir is None:
+        raw = _prompt_text(
+            "Where should Code Mapper write its outputs",
+            default=str(map_out_dir_hint),
+        )
+        map_out_dir = Path(raw).expanduser() if raw else map_out_dir_hint
+    if not map_out_dir.is_absolute():
+        map_out_dir = (Path.cwd() / map_out_dir).resolve()
+
+    comprehensiveness = (
+        map_comprehensiveness_arg
+        if isinstance(map_comprehensiveness_arg, str)
+        else None
+    )
+    if comprehensiveness is None:
+        comprehensiveness = _prompt_choice(
+            "Code Mapper comprehensiveness",
+            choices=("minimal", "low", "medium", "high", "ultra"),
+            default="medium",
+        )
+
+    map_taint_arg = getattr(args, "map_taint", None)
+    map_taint = map_taint_arg if isinstance(map_taint_arg, str) else None
+    if map_taint is None:
+        default_taint = getattr(args, "taint", "balanced")
+        map_taint = _prompt_choice(
+            "Code Mapper taint (map generation)",
+            choices=("technical", "balanced", "end-user"),
+            default=default_taint,
+        )
+
+    map_context: Path | None = (
+        Path(map_context_arg).expanduser() if map_context_arg is not None else None
+    )
+    if map_context is None:
+        raw = _prompt_text(
+            "Optional Code Mapper context file (--map-context, leave blank for none)",
+            default=None,
+        )
+        map_context = Path(raw).expanduser() if raw else None
+
+    return _AutoMapOptions(
+        map_out_dir=map_out_dir,
+        comprehensiveness=comprehensiveness,
+        taint=map_taint,
+        map_context=map_context,
     )
 
 
@@ -263,8 +371,8 @@ def _code_mapper_autorun_prereq_summary(
             if not supports_reranking:
                 missing.append("reranking")
                 details.append(
-                    "- Embedding provider does not support reranking with current config "
-                    "(configure reranking; typically `embedding.rerank_model`)."
+                    "- Embedding provider does not support reranking with current "
+                    "config (configure reranking; typically `embedding.rerank_model`)."
                 )
 
     if effective.llm is None:
@@ -297,7 +405,8 @@ def _exit_autodoc_autorun_prereq_failure(
     formatter.info("To fix:")
     formatter.info("- Run `chunkhound index <directory>` to create the database.")
     formatter.info(
-        "- Configure embeddings with reranking support (e.g. set `embedding.rerank_model`)."
+        "- Configure embeddings with reranking support "
+        "(e.g. set `embedding.rerank_model`)."
     )
     formatter.info("- Configure an LLM provider (e.g. `CHUNKHOUND_LLM_API_KEY`).")
     sys.exit(exit_code)
@@ -459,6 +568,66 @@ def _resolve_llm_manager(
         return None
 
 
+async def _call_generate_docsite(
+    *,
+    formatter: RichOutputFormatter,
+    input_dir: Path,
+    output_dir: Path,
+    llm_manager: LLMManager | None,
+    cleanup_config: CleanupConfig,
+    index_patterns: list[str] | None,
+    site_title: str | None,
+    site_tagline: str | None,
+):
+    return await generate_docsite(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        llm_manager=llm_manager,
+        cleanup_config=cleanup_config,
+        site_title=site_title,
+        site_tagline=site_tagline,
+        index_patterns=index_patterns,
+        log_info=formatter.info,
+        log_warning=formatter.warning,
+    )
+
+
+async def _autorun_code_mapper_for_autodoc(
+    *,
+    args,
+    config: Config,
+    formatter: RichOutputFormatter,
+    output_dir: Path,
+    question: str,
+    decline_error: str,
+    decline_exit_code: int,
+) -> Path:
+    config_path = getattr(args, "config", None)
+    _confirm_autorun_and_validate_prereqs(
+        config=config,
+        config_path=config_path,
+        formatter=formatter,
+        question=question,
+        decline_error=decline_error,
+        decline_exit_code=decline_exit_code,
+    )
+
+    map_options = _resolve_auto_map_options(args=args, output_dir=output_dir)
+    formatter.info(f"Generating maps via Code Mapper: {map_options.map_out_dir}")
+    plan = await _run_code_mapper_for_autodoc(
+        config=config,
+        formatter=formatter,
+        output_dir=output_dir,
+        verbose=getattr(args, "verbose", False),
+        config_path=config_path,
+        map_out_dir=map_options.map_out_dir,
+        map_context=map_options.map_context,
+        comprehensiveness=map_options.comprehensiveness,
+        taint=map_options.taint,
+    )
+    return plan.map_out_dir
+
+
 async def autodoc_command(args, config: Config) -> None:
     """Generate an Astro docs site from AutoDoc outputs."""
     formatter = RichOutputFormatter(verbose=getattr(args, "verbose", False))
@@ -497,107 +666,20 @@ async def autodoc_command(args, config: Config) -> None:
             )
             sys.exit(2)
 
-        preflight_ok, missing, _details = _code_mapper_autorun_prereq_summary(
-            config=config,
-            config_path=getattr(args, "config", None),
-        )
-        warning_suffix = ""
-        if not preflight_ok:
-            warning_suffix = (
-                "\n\n"
-                "Note: Code Mapper prerequisites appear missing "
-                f"({', '.join(missing)})."
-            )
-
-        if not _prompt_yes_no(
-            "No `map-in` provided. Generate the codemap first by running "
-            f"`chunkhound map`, then continue with AutoDoc?{warning_suffix}",
-            default=False,
-        ):
-            formatter.error(
-                "Missing required input: map-in (Code Mapper outputs directory)."
-            )
-            sys.exit(2)
-
-        preflight_ok, _missing, details = _code_mapper_autorun_prereq_summary(
-            config=config,
-            config_path=getattr(args, "config", None),
-        )
-        if not preflight_ok:
-            _exit_autodoc_autorun_prereq_failure(
-                formatter=formatter,
-                details=details,
-                exit_code=1,
-            )
-
-        map_out_dir_arg = getattr(args, "map_out_dir", None)
-        map_comprehensiveness_arg = getattr(args, "map_comprehensiveness", None)
-        map_context_arg = getattr(args, "map_context", None)
-
-        default_plan = _build_auto_map_plan(output_dir=output_dir)
-        map_out_dir_hint = (
-            Path(map_out_dir_arg).expanduser()
-            if map_out_dir_arg is not None
-            else default_plan.map_out_dir
-        )
-
-        map_out_dir = Path(map_out_dir_arg).expanduser() if map_out_dir_arg else None
-        if map_out_dir is None:
-            raw = _prompt_text(
-                "Where should Code Mapper write its outputs",
-                default=str(map_out_dir_hint),
-            )
-            map_out_dir = Path(raw).expanduser() if raw else map_out_dir_hint
-        if not map_out_dir.is_absolute():
-            map_out_dir = (Path.cwd() / map_out_dir).resolve()
-
-        comprehensiveness = (
-            map_comprehensiveness_arg
-            if isinstance(map_comprehensiveness_arg, str)
-            else None
-        )
-        if comprehensiveness is None:
-            comprehensiveness = _prompt_choice(
-                "Code Mapper comprehensiveness",
-                choices=("minimal", "low", "medium", "high", "ultra"),
-                default="medium",
-            )
-
-        map_taint_arg = getattr(args, "map_taint", None)
-        map_taint = map_taint_arg if isinstance(map_taint_arg, str) else None
-        if map_taint is None:
-            default_taint = getattr(args, "taint", "balanced")
-            map_taint = _prompt_choice(
-                "Code Mapper taint (map generation)",
-                choices=("technical", "balanced", "end-user"),
-                default=default_taint,
-            )
-
-        map_context: Path | None = (
-            Path(map_context_arg).expanduser()
-            if map_context_arg is not None
-            else None
-        )
-        if map_context is None:
-            raw = _prompt_text(
-                "Optional Code Mapper context file (--map-context, leave blank for none)",
-                default=None,
-            )
-            map_context = Path(raw).expanduser() if raw else None
-
-        formatter.info(f"Generating maps via Code Mapper: {map_out_dir}")
-        plan = await _run_code_mapper_for_autodoc(
+        map_dir = await _autorun_code_mapper_for_autodoc(
+            args=args,
             config=config,
             formatter=formatter,
             output_dir=output_dir,
-            verbose=getattr(args, "verbose", False),
-            config_path=getattr(args, "config", None),
-            map_out_dir=map_out_dir,
-            map_context=map_context,
-            comprehensiveness=comprehensiveness,
-            taint=map_taint,
+            question=(
+                "No `map-in` provided. Generate the codemap first by running "
+                "`chunkhound map`, then continue with AutoDoc?"
+            ),
+            decline_error=(
+                "Missing required input: map-in (Code Mapper outputs directory)."
+            ),
+            decline_exit_code=2,
         )
-        map_dir = plan.map_out_dir
 
     cleanup_mode = getattr(args, "cleanup_mode", "llm")
     llm_manager = _resolve_llm_manager(
@@ -614,18 +696,19 @@ async def autodoc_command(args, config: Config) -> None:
     )
 
     index_patterns = getattr(args, "index_patterns", None)
+    site_title = getattr(args, "site_title", None)
+    site_tagline = getattr(args, "site_tagline", None)
 
     try:
-        result = await generate_docsite(
+        result = await _call_generate_docsite(
+            formatter=formatter,
             input_dir=map_dir,
             output_dir=output_dir,
             llm_manager=llm_manager,
             cleanup_config=cleanup_config,
-            site_title=getattr(args, "site_title", None),
-            site_tagline=getattr(args, "site_tagline", None),
             index_patterns=index_patterns,
-            log_info=formatter.info,
-            log_warning=formatter.warning,
+            site_title=site_title,
+            site_tagline=site_tagline,
         )
     except FileNotFoundError as exc:
         formatter.warning(str(exc))
@@ -639,116 +722,29 @@ async def autodoc_command(args, config: Config) -> None:
             )
             sys.exit(1)
 
-        preflight_ok, missing, _details = _code_mapper_autorun_prereq_summary(
-            config=config,
-            config_path=getattr(args, "config", None),
-        )
-        warning_suffix = ""
-        if not preflight_ok:
-            warning_suffix = (
-                "\n\n"
-                "Note: Code Mapper prerequisites appear missing "
-                f"({', '.join(missing)})."
-            )
-
-        if not _prompt_yes_no(
-            "Generate the codemap first by running `chunkhound map`, "
-            f"then retry AutoDoc?{warning_suffix}",
-            default=False,
-        ):
-            formatter.error(str(exc))
-            sys.exit(1)
-
-        preflight_ok, _missing, details = _code_mapper_autorun_prereq_summary(
-            config=config,
-            config_path=getattr(args, "config", None),
-        )
-        if not preflight_ok:
-            _exit_autodoc_autorun_prereq_failure(
-                formatter=formatter,
-                details=details,
-                exit_code=1,
-            )
-
-        map_out_dir_arg = getattr(args, "map_out_dir", None)
-        map_comprehensiveness_arg = getattr(args, "map_comprehensiveness", None)
-        map_context_arg = getattr(args, "map_context", None)
-
-        default_plan = _build_auto_map_plan(output_dir=output_dir)
-        map_out_dir_hint = (
-            Path(map_out_dir_arg).expanduser()
-            if map_out_dir_arg is not None
-            else default_plan.map_out_dir
-        )
-
-        map_out_dir = Path(map_out_dir_arg).expanduser() if map_out_dir_arg else None
-        if map_out_dir is None:
-            raw = _prompt_text(
-                "Where should Code Mapper write its outputs",
-                default=str(map_out_dir_hint),
-            )
-            map_out_dir = Path(raw).expanduser() if raw else map_out_dir_hint
-        if not map_out_dir.is_absolute():
-            map_out_dir = (Path.cwd() / map_out_dir).resolve()
-
-        comprehensiveness = (
-            map_comprehensiveness_arg
-            if isinstance(map_comprehensiveness_arg, str)
-            else None
-        )
-        if comprehensiveness is None:
-            comprehensiveness = _prompt_choice(
-                "Code Mapper comprehensiveness",
-                choices=("minimal", "low", "medium", "high", "ultra"),
-                default="medium",
-            )
-
-        map_taint_arg = getattr(args, "map_taint", None)
-        map_taint = map_taint_arg if isinstance(map_taint_arg, str) else None
-        if map_taint is None:
-            default_taint = getattr(args, "taint", "balanced")
-            map_taint = _prompt_choice(
-                "Code Mapper taint (map generation)",
-                choices=("technical", "balanced", "end-user"),
-                default=default_taint,
-            )
-
-        map_context: Path | None = (
-            Path(map_context_arg).expanduser()
-            if map_context_arg is not None
-            else None
-        )
-        if map_context is None:
-            raw = _prompt_text(
-                "Optional Code Mapper context file (--map-context, leave blank for none)",
-                default=None,
-            )
-            map_context = Path(raw).expanduser() if raw else None
-
-        formatter.info(f"Generating maps via Code Mapper: {map_out_dir}")
-        plan = await _run_code_mapper_for_autodoc(
+        map_dir = await _autorun_code_mapper_for_autodoc(
+            args=args,
             config=config,
             formatter=formatter,
             output_dir=output_dir,
-            verbose=getattr(args, "verbose", False),
-            config_path=getattr(args, "config", None),
-            map_out_dir=map_out_dir,
-            map_context=map_context,
-            comprehensiveness=comprehensiveness,
-            taint=map_taint,
+            question=(
+                "Generate the codemap first by running `chunkhound map`, then retry "
+                "AutoDoc?"
+            ),
+            decline_error=str(exc),
+            decline_exit_code=1,
         )
 
         try:
-            result = await generate_docsite(
-                input_dir=plan.map_out_dir,
+            result = await _call_generate_docsite(
+                formatter=formatter,
+                input_dir=map_dir,
                 output_dir=output_dir,
                 llm_manager=llm_manager,
                 cleanup_config=cleanup_config,
-                site_title=getattr(args, "site_title", None),
-                site_tagline=getattr(args, "site_tagline", None),
                 index_patterns=index_patterns,
-                log_info=formatter.info,
-                log_warning=formatter.warning,
+                site_title=site_title,
+                site_tagline=site_tagline,
             )
         except FileNotFoundError as exc2:
             formatter.error(str(exc2))

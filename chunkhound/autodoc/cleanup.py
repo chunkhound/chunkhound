@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from chunkhound.autodoc.markdown_utils import (
@@ -16,6 +17,13 @@ _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 _CLEANUP_SYSTEM_PROMPT_FILE = "cleanup_system_v2.txt"
 _CLEANUP_USER_PROMPT_FILE = "cleanup_user_v2.txt"
 _CLEANUP_USER_PROMPT_FILE_END_USER = "cleanup_user_end_user_v1.txt"
+
+
+@dataclass(frozen=True)
+class _IndexedCleanupInput:
+    idx: int
+    topic: CodeMapperTopic
+    prompt: str
 
 
 def _taint_cleanup_system_guidance(taint: str) -> str:
@@ -71,14 +79,15 @@ async def _cleanup_with_llm(
 
     cleaned: list[str | None] = [None] * len(topics)
 
-    indexed: list[tuple[int, CodeMapperTopic, str]] = list(
-        zip(range(len(topics)), topics, prompts, strict=True)
-    )
+    indexed: list[_IndexedCleanupInput] = [
+        _IndexedCleanupInput(idx=idx, topic=topic, prompt=prompt)
+        for idx, topic, prompt in zip(range(len(topics)), topics, prompts, strict=True)
+    ]
 
     for batch in _chunked(indexed, config.batch_size):
-        batch_prompts = [prompt for _idx, _topic, prompt in batch]
-        batch_topics = [topic for _idx, topic, _prompt in batch]
-        batch_indices = [idx for idx, _topic, _prompt in batch]
+        batch_prompts = [item.prompt for item in batch]
+        batch_topics = [item.topic for item in batch]
+        batch_indices = [item.idx for item in batch]
 
         if log_info:
             log_info(f"Running cleanup batch with {len(batch_prompts)} topic(s).")
@@ -134,10 +143,7 @@ async def _cleanup_with_llm(
             batch_outputs,
             strict=True,
         ):
-            if not response:
-                cleaned[idx] = _minimal_cleanup(topic)
-            else:
-                cleaned[idx] = _normalize_llm_output(response)
+            cleaned[idx] = _finalize_cleanup_output(topic=topic, response=response)
 
     return [
         item if item is not None else _minimal_cleanup(topic)
@@ -185,3 +191,9 @@ def _normalize_llm_output(text: str) -> str:
 
 def _minimal_cleanup(topic: CodeMapperTopic) -> str:
     return _ensure_overview_heading(topic.body_markdown.strip())
+
+
+def _finalize_cleanup_output(*, topic: CodeMapperTopic, response: str | None) -> str:
+    if not response:
+        return _minimal_cleanup(topic)
+    return _normalize_llm_output(response)

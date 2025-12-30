@@ -18,6 +18,7 @@ from chunkhound.autodoc.markdown_utils import (
 )
 from chunkhound.autodoc.models import (
     CleanupConfig,
+    CodeMapperIndex,
     CodeMapperTopic,
     DocsitePage,
     DocsiteResult,
@@ -36,6 +37,10 @@ from chunkhound.autodoc.taint import _normalize_taint
 from chunkhound.llm_manager import LLMManager
 
 
+def _now_isoformat() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 async def cleanup_topics(
     topics: list[CodeMapperTopic],
     llm_manager: LLMManager | None,
@@ -47,22 +52,13 @@ async def cleanup_topics(
     if not topics:
         return []
 
-    if config.mode == "llm" and llm_manager is not None:
-        provider = llm_manager.get_synthesis_provider()
-        cleaned = await _cleanup_with_llm(
-            topics=topics,
-            provider=provider,
-            config=config,
-            log_info=log_info,
-            log_warning=log_warning,
-        )
-    else:
-        if config.mode == "llm" and log_warning:
-            log_warning(
-                "LLM cleanup requested but no LLM provider configured; "
-                "falling back to minimal cleanup."
-            )
-        cleaned = [_minimal_cleanup(topic) for topic in topics]
+    cleaned = await _cleanup_topic_bodies(
+        topics=topics,
+        llm_manager=llm_manager,
+        config=config,
+        log_info=log_info,
+        log_warning=log_warning,
+    )
 
     pages: list[DocsitePage] = []
     for topic, body in zip(topics, cleaned, strict=False):
@@ -92,6 +88,32 @@ async def cleanup_topics(
     return pages
 
 
+async def _cleanup_topic_bodies(
+    *,
+    topics: list[CodeMapperTopic],
+    llm_manager: LLMManager | None,
+    config: CleanupConfig,
+    log_info: Callable[[str], None] | None,
+    log_warning: Callable[[str], None] | None,
+) -> list[str]:
+    if config.mode == "llm" and llm_manager is not None:
+        provider = llm_manager.get_synthesis_provider()
+        return await _cleanup_with_llm(
+            topics=topics,
+            provider=provider,
+            config=config,
+            log_info=log_info,
+            log_warning=log_warning,
+        )
+
+    if config.mode == "llm" and log_warning:
+        log_warning(
+            "LLM cleanup requested but no LLM provider configured; "
+            "falling back to minimal cleanup."
+        )
+    return [_minimal_cleanup(topic) for topic in topics]
+
+
 def _default_site_tagline(*, taint: str, llm_cleanup_active: bool) -> str:
     base = "Approachable documentation generated from AutoDoc output."
     if not llm_cleanup_active:
@@ -102,6 +124,64 @@ def _default_site_tagline(*, taint: str, llm_cleanup_active: bool) -> str:
     if normalized == "end-user":
         return "End-user-friendly documentation generated from AutoDoc output."
     return base
+
+
+def _build_site(
+    *,
+    index: CodeMapperIndex,
+    input_dir: Path,
+    pages: list[DocsitePage],
+    cleanup_config: CleanupConfig,
+    llm_cleanup_active: bool,
+    site_title: str | None,
+    site_tagline: str | None,
+) -> DocsiteSite:
+    tagline = site_tagline or _default_site_tagline(
+        taint=cleanup_config.taint,
+        llm_cleanup_active=llm_cleanup_active,
+    )
+    return DocsiteSite(
+        title=site_title or _default_site_title(index.scope_label),
+        tagline=tagline,
+        scope_label=index.scope_label,
+        generated_at=_now_isoformat(),
+        source_dir=str(input_dir),
+        topic_count=len(pages),
+    )
+
+
+async def _maybe_synthesize_global_ia(
+    *,
+    llm_manager: LLMManager | None,
+    pages: list[DocsitePage],
+    taint: str,
+    log_info: Callable[[str], None] | None,
+    log_warning: Callable[[str], None] | None,
+) -> tuple[list[NavGroup] | None, list[GlossaryTerm] | None, str | None]:
+    if llm_manager is None:
+        return None, None, None
+
+    try:
+        provider = llm_manager.get_synthesis_provider()
+        homepage_overview = await _synthesize_homepage_overview(
+            pages=pages,
+            provider=provider,
+            taint=taint,
+            log_info=log_info,
+            log_warning=log_warning,
+        )
+        nav_groups, glossary_terms = await _synthesize_site_ia(
+            pages=pages,
+            provider=provider,
+            taint=taint,
+            log_info=log_info,
+            log_warning=log_warning,
+        )
+        return nav_groups, glossary_terms, homepage_overview
+    except Exception as exc:  # noqa: BLE001
+        if log_warning:
+            log_warning(f"Global IA synthesis failed; skipping. Error: {exc}")
+        return None, None, None
 
 
 async def generate_docsite(
@@ -142,44 +222,31 @@ async def generate_docsite(
     )
 
     llm_cleanup_active = cleanup_config.mode == "llm" and llm_manager is not None
-    tagline = site_tagline or _default_site_tagline(
-        taint=cleanup_config.taint,
+    site = _build_site(
+        index=index,
+        input_dir=input_dir,
+        pages=pages,
+        cleanup_config=cleanup_config,
         llm_cleanup_active=llm_cleanup_active,
-    )
-
-    site = DocsiteSite(
-        title=site_title or _default_site_title(index.scope_label),
-        tagline=tagline,
-        scope_label=index.scope_label,
-        generated_at=datetime.now(timezone.utc).isoformat(),
-        source_dir=str(input_dir),
-        topic_count=len(pages),
+        site_title=site_title,
+        site_tagline=site_tagline,
     )
 
     nav_groups: list[NavGroup] | None = None
     glossary_terms: list[GlossaryTerm] | None = None
     homepage_overview: str | None = None
     if llm_cleanup_active:
-        try:
-            assert llm_manager is not None
-            provider = llm_manager.get_synthesis_provider()
-            homepage_overview = await _synthesize_homepage_overview(
-                pages=pages,
-                provider=provider,
-                taint=cleanup_config.taint,
-                log_info=log_info,
-                log_warning=log_warning,
-            )
-            nav_groups, glossary_terms = await _synthesize_site_ia(
-                pages=pages,
-                provider=provider,
-                taint=cleanup_config.taint,
-                log_info=log_info,
-                log_warning=log_warning,
-            )
-        except Exception as exc:  # noqa: BLE001
-            if log_warning:
-                log_warning(f"Global IA synthesis failed; skipping. Error: {exc}")
+        (
+            nav_groups,
+            glossary_terms,
+            homepage_overview,
+        ) = await _maybe_synthesize_global_ia(
+            llm_manager=llm_manager,
+            pages=pages,
+            taint=cleanup_config.taint,
+            log_info=log_info,
+            log_warning=log_warning,
+        )
 
     write_astro_site(
         output_dir=output_dir,

@@ -12,6 +12,7 @@ from chunkhound.interfaces.llm_provider import LLMResponse
 class _MismatchProvider:
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
+        self.systems: list[str | None] = []
 
     async def batch_complete(  # type: ignore[no-untyped-def]
         self,
@@ -20,6 +21,7 @@ class _MismatchProvider:
         max_completion_tokens: int = 4096,
     ) -> list[LLMResponse]:
         self.calls.append(list(prompts))
+        self.systems.append(system)
         if len(prompts) == 2 and len(self.calls) == 1:
             # Return fewer responses than prompts.
             return [
@@ -78,6 +80,7 @@ async def test_cleanup_with_llm_retries_batch_size_one_on_count_mismatch() -> No
     assert provider.calls[0] and len(provider.calls[0]) == 2
     # After mismatch, retry with batch_size=1 for each prompt.
     assert len(provider.calls) == 3
+    assert provider.systems and len(set(provider.systems)) == 1
     assert any("retrying with batch_size=1" in w for w in warnings)
 
 
