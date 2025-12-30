@@ -128,10 +128,13 @@ def very_long_function_that_might_not_be_chunked_properly():
         print(f"Content size: {len(oversized_content):,} characters")
         
         # Create mock embedding provider to avoid API calls
-        mock_provider = Mock(spec=OpenAIEmbeddingProvider)
+        mock_provider = Mock()
         mock_provider.name = "mock-openai"
         mock_provider.model = "text-embedding-3-small"
         mock_provider.dims = 1536
+        mock_provider.get_max_tokens_per_batch = Mock(return_value=300000)
+        mock_provider.get_max_documents_per_batch = Mock(return_value=100)
+        mock_provider.get_recommended_concurrency = Mock(return_value=8)
         
         # Mock the embed method to simulate the token limit error
         async def mock_embed(texts):
@@ -244,10 +247,13 @@ def very_long_function_that_might_not_be_chunked_properly():
             services.provider.execute_query("DELETE FROM chunks")
             
             # Create simple mock provider for this test
-            mock_provider = Mock(spec=OpenAIEmbeddingProvider)
+            mock_provider = Mock()
             mock_provider.name = "analysis-mock"
             mock_provider.model = "text-embedding-3-small"
             mock_provider.dims = 1536
+            mock_provider.get_max_tokens_per_batch = Mock(return_value=300000)
+            mock_provider.get_max_documents_per_batch = Mock(return_value=100)
+            mock_provider.get_recommended_concurrency = Mock(return_value=8)
             mock_provider.embed = AsyncMock(return_value=[[0.1] * 1536])
             
             # Index and analyze

@@ -1,11 +1,13 @@
 """Modern Rich-based output formatting utilities for ChunkHound CLI commands."""
 
 import sys
+from collections import deque
 from typing import Any, Literal
 
 import rich.box
 from loguru import logger
 from rich.console import Console
+from rich.layout import Layout
 from rich.live import Live
 from rich.markup import escape
 from rich.panel import Panel
@@ -265,8 +267,12 @@ class RichOutputFormatter:
                 model = getattr(config.embedding, "model", "default")
                 print(f"Provider: {provider} ({model})")
 
-    def create_progress_display(self) -> "ProgressManager":
-        """Create a modern progress display with multiple bars."""
+    def create_progress_display(self, max_log_messages: int | None = None) -> "ProgressManager":
+        """Create a modern progress display with multiple bars.
+
+        Args:
+            max_log_messages: Maximum number of log messages to buffer. If None, uses default.
+        """
 
         # Fallback: no Rich/TTY support → return a no-op manager
         if not self._terminal_compatible or self.console is None:
@@ -324,7 +330,7 @@ class RichOutputFormatter:
             transient=False,  # Don't make progress disappear when complete
         )
 
-        return ProgressManager(progress, self.console or Console())
+        return ProgressManager(progress, self.console or Console(), max_log_messages=max_log_messages)
 
     def completion_summary(self, stats: dict[str, Any], processing_time: float) -> None:
         """Display completion summary in a styled panel."""
@@ -434,36 +440,22 @@ class RichOutputFormatter:
 class ProgressManager:
     """Manages multiple progress bars with Rich."""
 
-    def __init__(self, progress: Progress, console: Console):
+    def __init__(self, progress: Progress, console: Console, max_log_messages: int = 1000):
         self.progress = progress
         self.console = console
         self._tasks: dict[str, TaskID] = {}
         self._live: Live | None = None
-        self._original_console_handlers: list = []
+        self.buffer = MessageBuffer(max_size=max_log_messages)
+        self.logs_renderable = LogsRenderable(self.buffer)
+        self.layout = DynamicLayout(console, self.logs_renderable, self.progress)
+        self.handler = RichLogHandler(self.buffer, self)
+        self._handler_id: int | None = None
 
     def __enter__(self) -> "ProgressManager":
-        # Store and remove only console handlers to preserve file logging
-        import sys
-        self._original_console_handlers = []
-
-        # Find and store console handlers (those writing to stderr)
-        for handler_id, handler in logger._core.handlers.items():
-            # Check if this is a console handler by examining its stream
-            if hasattr(handler, 'stream') and handler.stream == sys.stderr:
-                self._original_console_handlers.append((handler_id, handler))
-                # Remove console handler from logger
-                logger.remove(handler_id)
-
-        # If we removed console handlers, add a no-op handler to suppress any remaining console logging
-        if self._original_console_handlers:
-            logger.add(lambda message: None, level="CRITICAL")
-
-        # Also suppress logging in subprocesses by setting environment variable
-        import os
-        os.environ["CHUNKHOUND_SUPPRESS_CONSOLE_LOGGING"] = "1"
-
-        self._live = Live(self.progress, console=self.console, refresh_per_second=10)
+        self._handler_id = logger.add(self.handler)
+        self._live = Live(self.layout, console=self.console, refresh_per_second=10)
         self._live.start()
+        self.update_logs()  # Initial update
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -471,18 +463,12 @@ class ProgressManager:
             if self._live:
                 self._live.stop()
         finally:
-            # Always restore logger configuration, even if Live fails
-            # Remove the no-op handler if it was added
-            if self._original_console_handlers:
-                logger.remove()
+            if self._handler_id is not None:
+                logger.remove(self._handler_id)
 
-            # Restore original console handlers
-            for handler_id, handler in self._original_console_handlers:
-                logger._core.handlers[handler_id] = handler
-
-            # Clean up environment variable
-            import os
-            os.environ.pop("CHUNKHOUND_SUPPRESS_CONSOLE_LOGGING", None)
+    def update_logs(self):
+        if self._live:
+            self._live.refresh()
 
     def add_task(
         self,
@@ -521,6 +507,7 @@ class ProgressManager:
                 update_kwargs.update(fields)
 
             self.progress.update(self._tasks[name], **update_kwargs)
+            self.update_logs()
 
     def get_task_id(self, name: str) -> TaskID | None:
         """Get task ID by name."""
@@ -632,6 +619,100 @@ class _NoRichProgressManager:
                 return None
 
         return _Shim()
+
+
+class MessageBuffer:
+    """Manages log message storage with automatic truncation using deque."""
+
+    def __init__(self, max_size: int = 1000):
+        self.buffer = deque(maxlen=max_size)
+
+    def add_message(self, message: str) -> None:
+        """Add a message to the buffer."""
+        self.buffer.append(message)
+
+    def get_messages(self) -> list[str]:
+        """Get all messages in the buffer."""
+        return list(self.buffer)
+
+    def clear(self) -> None:
+        """Clear all messages from the buffer."""
+        self.buffer.clear()
+
+
+class LogsRenderable:
+    """Renderable that displays the current log messages from the buffer."""
+
+    def __init__(self, buffer: MessageBuffer):
+        self.buffer = buffer
+
+    def __rich_console__(self, console, options):
+        messages = self.buffer.get_messages()
+        content = "\n".join(messages) if messages else ""
+        yield Panel(content, title="Logs")
+
+
+class RichLogHandler:
+    """Custom loguru handler that captures messages and triggers display updates."""
+
+    def __init__(self, buffer: MessageBuffer, manager: "ProgressManager"):
+        self.buffer = buffer
+        self.manager = manager
+
+    def __call__(self, message):
+        """Handle a loguru message by adding it to the buffer and updating display."""
+        # Format the message similar to loguru's default
+        formatted = f"{message.record['level'].name}: {str(message)}"
+        self.buffer.add_message(formatted)
+        self.manager.update_logs()
+
+
+class DynamicLayout:
+    """Manages a Rich Layout with vertical split for logs and progress bars.
+
+    Provides dynamic sizing logic that calculates panel heights based on terminal
+    dimensions, number of progress tasks, and available space.
+    """
+
+    def __init__(self, console: Console, logs_renderable, progress, max_log_height: int = 20):
+        """Initialize the dynamic layout.
+
+        Args:
+            console: Rich console instance
+            logs_renderable: Renderable for logs
+            progress: Progress instance
+            max_log_height: Maximum height for the log panel
+        """
+        self.console = console
+        self.logs_renderable = logs_renderable
+        self.progress = progress
+        self.max_log_height = max_log_height
+
+    def update_sizes(self, terminal_height: int, progress_tasks_count: int) -> None:
+        """Update panel sizes based on terminal dimensions and progress tasks.
+
+        Args:
+            terminal_height: Current terminal height in lines
+            progress_tasks_count: Number of active progress tasks
+        """
+        # Not needed, sizes are calculated in __rich_console__
+        pass
+
+    def __rich_console__(self, console, options):
+        """Render the layout with logs at top and progress at bottom."""
+        layout = Layout()
+        logs_layout = Layout(renderable=self.logs_renderable)
+        progress_layout = Layout(renderable=self.progress)
+        layout.split_column(logs_layout, progress_layout)
+
+        height = options.height or console.size.height
+        progress_tasks_count = len(self.progress.tasks)
+        min_progress_height = max(3, progress_tasks_count * 2)
+        available_height = height - min_progress_height
+        log_height = max(0, min(available_height, self.max_log_height))
+        logs_layout.size = log_height
+
+        yield layout
 
 
 def format_stats(stats: Any) -> str:

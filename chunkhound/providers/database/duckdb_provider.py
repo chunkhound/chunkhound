@@ -2555,7 +2555,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 WHERE {" AND ".join(not_exists_clauses)}
             """
 
-            # Parameters need to be repeated for each table
+            # Parameters need to be repeated for each table (provider, model per table)
             params = [provider, model] * len(embedding_tables)
 
             query += " ORDER BY c.id LIMIT ?"

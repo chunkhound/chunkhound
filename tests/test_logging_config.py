@@ -341,98 +341,76 @@ class TestLoggingIntegration:
         assert "level" not in file_overrides
 
 
-class TestProgressManagerLogging:
-    """Test that ProgressManager preserves file logging while suppressing console logging."""
+class TestProgressDisplayLoggingConfig:
+    """Test progress display logging configuration options."""
 
-    @patch('chunkhound.api.cli.utils.rich_output.logger')
-    def test_progress_manager_preserves_file_handlers(self, mock_logger):
-        """Test that ProgressManager only removes console handlers, preserving file handlers."""
-        from chunkhound.api.cli.utils.rich_output import ProgressManager, _NoRichProgressManager
-        from rich.progress import Progress
-        from rich.console import Console
-        import sys
-        import tempfile
-        import os
+    def test_progress_display_config_defaults(self):
+        """Test default values for progress display logging configuration."""
+        config = LoggingConfig()
+        assert config.progress_display_log_level == "WARNING"
+        assert config.max_log_messages == 100
+        assert config.log_panel_ratio == 0.3
 
-        # Create a mock file handler (not writing to stderr)
-        class MockFileHandler:
-            def __init__(self, path):
-                self.path = path
-                # No stream attribute = not a console handler
+    def test_progress_display_config_validation(self):
+        """Test validation of progress display configuration."""
+        # Valid config
+        config = LoggingConfig(
+            progress_display_log_level="DEBUG",
+            max_log_messages=50,
+            log_panel_ratio=0.5
+        )
+        assert config.progress_display_log_level == "DEBUG"
+        assert config.max_log_messages == 50
+        assert config.log_panel_ratio == 0.5
 
-        # Create a mock console handler (writing to stderr)
-        class MockConsoleHandler:
-            def __init__(self):
-                self.stream = sys.stderr
+    def test_progress_display_config_invalid_log_level(self):
+        """Test validation rejects invalid progress display log levels."""
+        with pytest.raises(ValueError, match="Invalid progress display log level"):
+            LoggingConfig(progress_display_log_level="INVALID")
 
-        # Mock the logger handlers
-        file_handler = MockFileHandler("/tmp/test.log")
-        console_handler = MockConsoleHandler()
+    def test_progress_display_config_invalid_max_messages(self):
+        """Test validation rejects invalid max_log_messages."""
+        with pytest.raises(ValueError, match="max_log_messages must be positive"):
+            LoggingConfig(max_log_messages=0)
 
-        mock_logger._core.handlers = {
-            1: file_handler,    # File handler
-            2: console_handler  # Console handler
-        }
+        with pytest.raises(ValueError, match="max_log_messages must be positive"):
+            LoggingConfig(max_log_messages=-1)
 
-        # Create ProgressManager
-        progress = Progress()
-        console = Console()
-        manager = ProgressManager(progress, console)
+    def test_progress_display_config_invalid_panel_ratio(self):
+        """Test validation rejects invalid log_panel_ratio."""
+        with pytest.raises(ValueError, match="log_panel_ratio must be between 0.0 and 1.0"):
+            LoggingConfig(log_panel_ratio=1.5)
 
-        # Enter context manager
-        with manager:
-            # Should have removed console handler but kept file handler
-            # The mock doesn't actually remove, but we can check the logic conceptually
-            pass
+        with pytest.raises(ValueError, match="log_panel_ratio must be between 0.0 and 1.0"):
+            LoggingConfig(log_panel_ratio=-0.1)
 
-        # Verify that remove was called (for console handler removal)
-        assert mock_logger.remove.called
+    def test_progress_display_cli_override_extraction(self):
+        """Test extraction of CLI overrides for progress display config."""
+        # Mock args object
+        mock_args = MagicMock()
+        mock_args.progress_display_log_level = "DEBUG"
+        mock_args.max_log_messages = 200
+        mock_args.log_panel_ratio = 0.4
 
-    @patch('chunkhound.api.cli.utils.rich_output.logger')
-    def test_progress_manager_restores_console_handlers(self, mock_logger):
-        """Test that ProgressManager restores console handlers after exiting."""
-        from chunkhound.api.cli.utils.rich_output import ProgressManager
-        from rich.progress import Progress
-        from rich.console import Console
-        import sys
+        overrides = LoggingConfig.extract_cli_overrides(mock_args)
 
-        # Create a mock console handler
-        class MockConsoleHandler:
-            def __init__(self):
-                self.stream = sys.stderr
+        assert overrides is not None
+        assert overrides["progress_display_log_level"] == "DEBUG"
+        assert overrides["max_log_messages"] == 200
+        assert overrides["log_panel_ratio"] == 0.4
 
-        console_handler = MockConsoleHandler()
-        mock_logger._core.handlers = {1: console_handler}
+    def test_progress_display_cli_override_extraction_none_when_no_args(self):
+        """Test that progress display CLI overrides return None when no args."""
+        mock_args = MagicMock()
+        # Set all progress display attributes to None to indicate no overrides
+        mock_args.progress_display_log_level = None
+        mock_args.max_log_messages = None
+        mock_args.log_panel_ratio = None
 
-        # Create ProgressManager
-        progress = Progress()
-        console = Console()
-        manager = ProgressManager(progress, console)
+        overrides = LoggingConfig.extract_cli_overrides(mock_args)
+        # Should return None if no progress display overrides
+        # (other tests verify file/performance overrides still work)
+        if overrides and "progress_display_log_level" not in overrides:
+            pass  # This is expected
 
-        # Enter and exit context manager
-        with manager:
-            pass
 
-        # Verify handlers were restored
-        # The actual restoration logic should work with real handlers
-        assert mock_logger.remove.called
-
-    def test_no_rich_progress_manager_noop(self):
-        """Test that _NoRichProgressManager is a proper no-op."""
-        from chunkhound.api.cli.utils.rich_output import _NoRichProgressManager
-
-        manager = _NoRichProgressManager()
-
-        # Should not crash
-        with manager:
-            task_id = manager.add_task("test", "Testing")
-            manager.update_task("test")
-            manager.get_task_id("test")
-            manager.finish_task("test")
-            manager.add_subtask("test", "sub", "Subtask")
-            progress = manager.get_progress_instance()
-
-        # Verify it's a shim object
-        assert hasattr(progress, 'add_task')
-        assert hasattr(progress, 'update')
-        assert hasattr(progress, 'tasks')

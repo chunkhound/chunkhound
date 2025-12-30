@@ -88,8 +88,8 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
 
         formatter.success(f"Service layer initialized: {args.db}")
 
-        # Create progress manager for modern UI
-        with formatter.create_progress_display() as progress_manager:
+        # Create progress manager for modern UI (wraps entire indexing operation)
+        with formatter.create_progress_display(max_log_messages=config.logging.max_log_messages) as progress_manager:
             # Get the underlying Progress instance for service layers
             progress_instance = progress_manager.get_progress_instance()
 
@@ -123,6 +123,7 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
             )
 
             # Process directory - service layers will add subtasks to progress_instance
+            # This includes change scanning phase which now happens within ProgressManager context
             stats = await indexing_service.process_directory(
                 Path(args.path), no_embeddings=args.no_embeddings
             )

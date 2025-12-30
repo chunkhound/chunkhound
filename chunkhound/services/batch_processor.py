@@ -16,35 +16,30 @@ from chunkhound.core.types.common import FileId, Language
 from time import perf_counter
 
 def _dbg_log(msg: str, operation: str | None = None, duration_ms: float | None = None) -> None:
-    """Log debug/performance information.
+    """Log debug/performance information to files only (never to console).
 
-    Uses loguru if available (for performance logging), otherwise falls back to file logging.
+    Subprocesses must never log to console to avoid interfering with main process Rich display.
+    All logging goes to appropriate file handlers.
     """
-    import os
-    if os.environ.get("CHUNKHOUND_SUPPRESS_CONSOLE_LOGGING"):
-        return
-
     try:
         from loguru import logger
 
         # Check if we have a performance logger configured
         if operation and duration_ms is not None:
-            # This is a performance timing log
+            # This is a performance timing log - goes to performance file
             logger.bind(operation=operation, duration_ms=duration_ms).info(msg)
         else:
-            # Regular debug log
-            logger.debug(msg)
+            # Regular debug log - goes to debug file
+            logger.bind(subprocess_debug=True).debug(msg)
     except ImportError:
-        # Fallback to original file logging for compatibility
+        # Fallback to direct file logging for compatibility
         try:
             import os, datetime
-            path = os.getenv("CHUNKHOUND_DEBUG_FILE")
-            if not path:
-                return
+            path = os.getenv("CHUNKHOUND_DEBUG_FILE") or "chunkhound-debug.log"
             ts = datetime.datetime.now().isoformat()
             pid = os.getpid()
             with open(path, "a", encoding="utf-8", errors="ignore") as f:
-                f.write(f"[{ts}][PID {pid}] {msg}\n")
+                f.write(f"[{ts}][DEBUG][PID {pid}] {msg}\n")
         except Exception:
             pass
 from chunkhound.parsers.parser_factory import create_parser_for_language
@@ -185,10 +180,27 @@ def process_file_batch(
     """
     results = []
 
-    # Set up performance logging in worker process if configured
-    if "performance_log_path" in config_dict:
-        try:
-            from loguru import logger
+    # Set up file logging for subprocesses (never log to console)
+    try:
+        from loguru import logger
+
+        # Remove any default console handlers to ensure subprocesses never log to console
+        logger.remove()
+
+        # Add debug file handler for subprocess debug logs
+        debug_path = config_dict.get("debug_log_path") or "chunkhound-debug.log"
+        logger.add(
+            debug_path,
+            level="DEBUG",
+            rotation="10 MB",
+            retention="1 week",
+            format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | [PID {process}] | {message}",
+            filter=lambda record: record["extra"].get("subprocess_debug") is True,
+            encoding="utf-8",
+        )
+
+        # Set up performance logging in worker process if configured
+        if "performance_log_path" in config_dict:
             perf_path = config_dict["performance_log_path"]
             logger.add(
                 perf_path,
@@ -199,9 +211,9 @@ def process_file_batch(
                 filter=lambda record: record["extra"].get("operation") is not None,
                 encoding="utf-8",
             )
-        except Exception:
-            # If performance logging setup fails, continue without it
-            pass
+    except Exception:
+        # If logging setup fails, continue without it (subprocesses will use fallback file logging)
+        pass
 
     # Read timeout config once
     timeout_s = float(config_dict.get("per_file_timeout_seconds", 0.0) or 0.0)

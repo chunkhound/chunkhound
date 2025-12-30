@@ -664,9 +664,14 @@ class IndexingCoordinator(BaseService):
                 "max_concurrent_timeouts": min(num_workers * 2, 32),
             }
 
-            # Pass performance logging config to worker processes
-            if self.config and getattr(self.config, 'logging', None) and self.config.logging.performance.enabled:
-                config_dict["performance_log_path"] = self.config.logging.performance.path
+            # Pass logging config to worker processes
+            if self.config and getattr(self.config, 'logging', None):
+                # Performance logging
+                if self.config.logging.performance.enabled:
+                    config_dict["performance_log_path"] = self.config.logging.performance.path
+
+                # Debug logging for subprocesses (always enabled for file logging)
+                config_dict["debug_log_path"] = "chunkhound-debug.log"  # Could be made configurable later
             futures = [
                 loop.run_in_executor(executor, process_file_batch, batch, config_dict)
                 for batch in file_batches
@@ -1536,7 +1541,7 @@ class IndexingCoordinator(BaseService):
 
         except Exception as e:
             logger.error(f"[IndexCoord-Missing] Failed to generate missing embeddings: {e}")
-            
+
             return {"status": "error", "error": str(e), "generated": 0}
 
 

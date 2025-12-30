@@ -67,6 +67,9 @@ class LoggingConfig(BaseModel):
     file: FileLoggingConfig = Field(default_factory=FileLoggingConfig)
     performance: PerformanceLoggingConfig = Field(default_factory=PerformanceLoggingConfig)
     console_level: str = Field(default="WARNING", description="Console logging level (DEBUG, INFO, WARNING, ERROR)")
+    progress_display_log_level: str = Field(default="WARNING", description="Log level for progress display messages (DEBUG, INFO, WARNING, ERROR)")
+    max_log_messages: int = Field(default=100, description="Maximum number of log messages to buffer for progress display")
+    log_panel_ratio: float = Field(default=0.3, description="Ratio of terminal height allocated to log panel (0.0-1.0)")
 
     @field_validator("console_level")
     @classmethod
@@ -76,6 +79,31 @@ class LoggingConfig(BaseModel):
         if v.upper() not in valid_levels:
             raise ValueError(f"Invalid console log level '{v}'. Must be one of: {', '.join(valid_levels)}")
         return v.upper()
+
+    @field_validator("progress_display_log_level")
+    @classmethod
+    def validate_progress_display_log_level(cls, v: str) -> str:
+        """Validate progress display logging level."""
+        valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+        if v.upper() not in valid_levels:
+            raise ValueError(f"Invalid progress display log level '{v}'. Must be one of: {', '.join(valid_levels)}")
+        return v.upper()
+
+    @field_validator("max_log_messages")
+    @classmethod
+    def validate_max_log_messages(cls, v: int) -> int:
+        """Validate maximum log messages."""
+        if v <= 0:
+            raise ValueError(f"max_log_messages must be positive, got {v}")
+        return v
+
+    @field_validator("log_panel_ratio")
+    @classmethod
+    def validate_log_panel_ratio(cls, v: float) -> float:
+        """Validate log panel ratio."""
+        if not (0.0 <= v <= 1.0):
+            raise ValueError(f"log_panel_ratio must be between 0.0 and 1.0, got {v}")
+        return v
 
     def is_enabled(self) -> bool:
         """Check if any logging is enabled."""
@@ -110,5 +138,13 @@ class LoggingConfig(BaseModel):
                 "enabled": True,
                 "path": args.performance_log
             }
+
+        # Progress display logging overrides
+        if hasattr(args, "progress_display_log_level") and args.progress_display_log_level:
+            overrides["progress_display_log_level"] = args.progress_display_log_level
+        if hasattr(args, "max_log_messages") and args.max_log_messages is not None:
+            overrides["max_log_messages"] = args.max_log_messages
+        if hasattr(args, "log_panel_ratio") and args.log_panel_ratio is not None:
+            overrides["log_panel_ratio"] = args.log_panel_ratio
 
         return overrides if overrides else None

@@ -42,6 +42,22 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         type=str,
         help="Enable separate performance timing log to specified path",
     )
+    parser.add_argument(
+        "--progress-display-log-level",
+        type=str,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set log level for progress display messages (default: WARNING)",
+    )
+    parser.add_argument(
+        "--max-log-messages",
+        type=int,
+        help="Maximum number of log messages to buffer for progress display (default: 100)",
+    )
+    parser.add_argument(
+        "--log-panel-ratio",
+        type=float,
+        help="Ratio of terminal height for log panel in progress display (0.0-1.0, default: 0.3)",
+    )
 
 
 def add_config_arguments(parser: argparse.ArgumentParser, configs: list[str]) -> None:
