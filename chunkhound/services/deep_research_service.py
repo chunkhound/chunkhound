@@ -21,6 +21,7 @@ from chunkhound.services.research.context_manager import ContextManager
 from chunkhound.services.research.file_reader import FileReader
 from chunkhound.services.research.quality_validator import QualityValidator
 from chunkhound.services.research.query_expander import QueryExpander
+from chunkhound.services.research.schemas import QueryExpansionResponse
 from chunkhound.services.research.question_generator import QuestionGenerator
 from chunkhound.services.research.synthesis_engine import SynthesisEngine
 from chunkhound.services.research.unified_search import UnifiedSearch
@@ -825,20 +826,6 @@ class DeepResearchService:
         """
         llm = self._llm_manager.get_utility_provider()
 
-        # Define JSON schema for structured output
-        schema = {
-            "type": "object",
-            "properties": {
-                "queries": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": f"Array of exactly {NUM_LLM_EXPANDED_QUERIES} expanded search queries (semantically complete sentences)",
-                }
-            },
-            "required": ["queries"],
-            "additionalProperties": False,
-        }
-
         # Simplified system prompt per GPT-5-Nano best practices
         system = prompts.QUERY_EXPANSION_SYSTEM
 
@@ -861,14 +848,15 @@ class DeepResearchService:
         )
 
         try:
-            result = await llm.complete_structured(
+            # Use typed structured output with Pydantic model
+            result = await llm.complete_structured_typed(
                 prompt=prompt,
-                json_schema=schema,
+                response_model=QueryExpansionResponse,
                 system=system,
                 max_completion_tokens=QUERY_EXPANSION_TOKENS,
             )
 
-            expanded = result.get("queries", [])
+            expanded = result.queries  # Type-safe access
 
             # Validation: expect exactly 2 queries from LLM
             if not expanded or len(expanded) < NUM_LLM_EXPANDED_QUERIES:
