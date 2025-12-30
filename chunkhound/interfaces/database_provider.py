@@ -18,6 +18,14 @@ class DatabaseProvider(Protocol):
         """Database connection path or identifier."""
         ...
 
+    def get_base_directory(self) -> Path:
+        """Get the base directory for path normalization.
+
+        Returns:
+            Path to the base directory used for resolving relative file paths.
+        """
+        ...
+
     @property
     def is_connected(self) -> bool:
         """Check if database connection is active."""

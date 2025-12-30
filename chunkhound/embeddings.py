@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Protocol
 
 from loguru import logger
 
+from chunkhound.interfaces.embedding_provider import RerankResult
+
 if TYPE_CHECKING:
     from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
 
@@ -50,6 +52,25 @@ class EmbeddingProvider(Protocol):
 
         Returns:
             List of embedding vectors (one per input text)
+        """
+        ...
+
+    def supports_reranking(self) -> bool:
+        """Return True if this provider supports reranking."""
+        ...
+
+    async def rerank(
+        self, query: str, documents: list[str], top_k: int | None = None
+    ) -> list[RerankResult]:
+        """Rerank documents by relevance to query.
+
+        Args:
+            query: Query text to rank against
+            documents: List of document texts to rank
+            top_k: Optional limit on number of results
+
+        Returns:
+            List of RerankResult with original index and relevance score
         """
         ...
 

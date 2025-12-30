@@ -103,6 +103,10 @@ class ClaudeCodeCLIProvider(LLMProvider):
 
         # Prevent MCP server loading for clean LLM access
         cmd.extend(["--mcp-config", '{"mcpServers":{}}'])
+        cmd.append("--strict-mcp-config")  # Ignore user/project MCP configs
+
+        # Prevent session persistence (avoid bleed between calls)
+        cmd.append("--no-session-persistence")
 
         # Add system prompt if provided (appends to default)
         if system:
