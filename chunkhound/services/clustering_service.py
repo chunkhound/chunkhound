@@ -102,7 +102,7 @@ class ClusteringService:
         file_contents = [files[fp] for fp in file_paths]
 
         logger.debug(f"Generating embeddings for {len(file_contents)} files")
-        embeddings = await self._embedding_provider.embed(file_contents)
+        embeddings = await self._embedding_provider.embed_batch(file_contents)
         embeddings_array = np.array(embeddings)
 
         # K-means clustering
@@ -215,7 +215,7 @@ class ClusteringService:
         file_contents = [files[fp] for fp in file_paths]
 
         logger.debug(f"Generating embeddings for {len(file_contents)} files")
-        embeddings = await self._embedding_provider.embed(file_contents)
+        embeddings = await self._embedding_provider.embed_batch(file_contents)
         embeddings_array = np.array(embeddings)
 
         # HDBSCAN clustering
@@ -342,3 +342,320 @@ class ClusteringService:
         logger.debug(f"Reassigned {len(outlier_indices)} outliers to nearest clusters")
 
         return labels
+
+    async def cluster_files_hdbscan_bounded(
+        self,
+        files: dict[str, str],
+        min_cluster_size: int = 2,
+        min_tokens_per_cluster: int = 15_000,
+        max_tokens_per_cluster: int = 50_000,
+    ) -> tuple[list[ClusterGroup], dict[str, int]]:
+        """Cluster files using HDBSCAN with token bounds enforcement.
+
+        Performs HDBSCAN clustering then enforces token bounds by:
+        - Splitting clusters exceeding max_tokens_per_cluster using k-means
+        - Merging clusters below min_tokens_per_cluster into nearest neighbors
+
+        Args:
+            files: Dictionary mapping file_path -> file_content
+            min_cluster_size: Minimum size for HDBSCAN clusters (default: 2)
+            min_tokens_per_cluster: Minimum tokens per cluster (default: 15,000)
+            max_tokens_per_cluster: Maximum tokens per cluster (default: 50,000)
+
+        Returns:
+            Tuple of (cluster_groups, metadata) where metadata contains:
+                - num_clusters: Final cluster count after bounds enforcement
+                - num_native_clusters: HDBSCAN clusters before bounds enforcement
+                - num_outliers: Count of noise points from HDBSCAN
+                - num_splits: Number of split operations performed
+                - num_merges: Number of merge operations performed
+                - total_files: Total number of files
+                - total_tokens: Total tokens across all files
+                - avg_tokens_per_cluster: Average tokens per cluster
+
+        Raises:
+            ValueError: If files dict is empty
+        """
+        if not files:
+            raise ValueError("Cannot cluster empty files dictionary")
+
+        # Calculate total tokens and per-file tokens
+        file_tokens: dict[str, int] = {
+            fp: self._llm_provider.estimate_tokens(content)
+            for fp, content in files.items()
+        }
+        total_tokens = sum(file_tokens.values())
+
+        logger.info(
+            f"HDBSCAN bounded clustering {len(files)} files ({total_tokens:,} tokens), "
+            f"bounds: [{min_tokens_per_cluster:,}, {max_tokens_per_cluster:,}]"
+        )
+
+        # Special case: single file
+        if len(files) == 1:
+            logger.info("Single file - will produce single cluster")
+            cluster_group = ClusterGroup(
+                cluster_id=0,
+                file_paths=list(files.keys()),
+                files_content=files,
+                total_tokens=total_tokens,
+            )
+            metadata = {
+                "num_clusters": 1,
+                "num_native_clusters": 1,
+                "num_outliers": 0,
+                "num_splits": 0,
+                "num_merges": 0,
+                "total_files": 1,
+                "total_tokens": total_tokens,
+                "avg_tokens_per_cluster": total_tokens,
+            }
+            return [cluster_group], metadata
+
+        # Generate embeddings for each file (once, reused for all operations)
+        file_paths = list(files.keys())
+        file_contents = [files[fp] for fp in file_paths]
+
+        logger.debug(f"Generating embeddings for {len(file_contents)} files")
+        embeddings = await self._embedding_provider.embed_batch(file_contents)
+        embeddings_array = np.array(embeddings)
+
+        # Build file_path -> embedding mapping for later operations
+        file_embeddings: dict[str, np.ndarray] = {
+            fp: embeddings_array[i] for i, fp in enumerate(file_paths)
+        }
+
+        # HDBSCAN clustering
+        effective_min_cluster_size = min(min_cluster_size, len(embeddings_array) - 1)
+        effective_min_cluster_size = max(2, effective_min_cluster_size)
+
+        logger.debug(
+            f"Running HDBSCAN with min_cluster_size={effective_min_cluster_size}"
+        )
+
+        clusterer = hdbscan.HDBSCAN(
+            min_cluster_size=effective_min_cluster_size,
+            min_samples=1,
+            metric="euclidean",
+            cluster_selection_method="eom",
+            allow_single_cluster=True,
+        )
+
+        try:
+            labels = clusterer.fit_predict(embeddings_array)
+        except Exception as e:
+            logger.warning(f"HDBSCAN clustering failed: {e}, using single cluster")
+            labels = np.zeros(len(file_paths), dtype=int)
+
+        # Count native clusters and outliers before reassignment
+        unique_labels = set(labels)
+        num_native_clusters = len([label for label in unique_labels if label >= 0])
+        num_outliers = int(np.sum(labels == -1))
+
+        # Reassign outliers to nearest cluster
+        labels = self._reassign_outliers_to_nearest(labels, embeddings_array)
+
+        # Build initial cluster groups with file paths and tokens
+        cluster_to_files: dict[int, list[str]] = {}
+        for file_path, cluster_id in zip(file_paths, labels):
+            cluster_to_files.setdefault(int(cluster_id), []).append(file_path)
+
+        # Phase 1: SPLIT oversized clusters (recursive to guarantee bounds)
+        num_splits = 0
+
+        def split_cluster_recursively(
+            file_paths_to_split: list[str],
+        ) -> list[list[str]]:
+            """Split files into clusters respecting max_tokens recursively."""
+            cluster_tokens = sum(file_tokens[fp] for fp in file_paths_to_split)
+
+            # Base case: fits in budget or single file (can't split further)
+            fits_budget = cluster_tokens <= max_tokens_per_cluster
+            if fits_budget or len(file_paths_to_split) <= 1:
+                return [file_paths_to_split]
+
+            # K-means split into 2 clusters
+            embeddings = np.array(
+                [file_embeddings[fp] for fp in file_paths_to_split]
+            )
+            kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
+            split_labels = kmeans.fit_predict(embeddings)
+
+            cluster_0 = [
+                fp for fp, lbl in zip(file_paths_to_split, split_labels)
+                if lbl == 0
+            ]
+            cluster_1 = [
+                fp for fp, lbl in zip(file_paths_to_split, split_labels)
+                if lbl == 1
+            ]
+
+            # Guard: k-means may return all files in one cluster (identical embeddings)
+            # This prevents infinite recursion when splitting is impossible
+            if not cluster_0 or not cluster_1:
+                logger.debug(
+                    f"K-means could not split {len(file_paths_to_split)} files "
+                    "(identical embeddings?), returning as single cluster"
+                )
+                return [file_paths_to_split]
+
+            # Recursively split any oversized subclusters
+            result: list[list[str]] = []
+            for subcluster in [cluster_0, cluster_1]:
+                result.extend(split_cluster_recursively(subcluster))
+            return result
+
+        # Apply recursive splitting to all oversized clusters
+        new_cluster_to_files: dict[int, list[str]] = {}
+        next_cluster_id = 0
+
+        for cluster_id, cluster_file_paths in cluster_to_files.items():
+            cluster_tokens = sum(file_tokens[fp] for fp in cluster_file_paths)
+
+            if cluster_tokens > max_tokens_per_cluster and len(cluster_file_paths) > 1:
+                logger.debug(
+                    f"Splitting cluster {cluster_id} ({cluster_tokens:,} tokens, "
+                    f"{len(cluster_file_paths)} files) recursively"
+                )
+                subclusters = split_cluster_recursively(cluster_file_paths)
+                for subcluster in subclusters:
+                    new_cluster_to_files[next_cluster_id] = subcluster
+                    next_cluster_id += 1
+                num_splits += 1
+            else:
+                # Keep cluster as-is
+                new_cluster_to_files[next_cluster_id] = cluster_file_paths
+                next_cluster_id += 1
+
+        cluster_to_files = new_cluster_to_files
+
+        # Phase 2: MERGE undersized clusters
+        num_merges = 0
+        num_unmergeable = 0
+        unmergeable_clusters: set[int] = set()
+
+        def get_cluster_tokens(cluster_id: int) -> int:
+            return sum(file_tokens[fp] for fp in cluster_to_files[cluster_id])
+
+        def compute_centroid(cluster_id: int) -> np.ndarray:
+            cluster_embeddings = np.array(
+                [file_embeddings[fp] for fp in cluster_to_files[cluster_id]]
+            )
+            centroid: np.ndarray = cluster_embeddings.mean(axis=0)
+            return centroid
+
+        def find_valid_merge_target(
+            smallest_id: int,
+            smallest_tokens: int,
+            cluster_tokens_map: dict[int, int],
+        ) -> int | None:
+            """Find nearest cluster that won't exceed max_tokens after merge."""
+            smallest_centroid = compute_centroid(smallest_id)
+
+            # Find candidates that won't exceed max_tokens after merge
+            candidates: list[tuple[int, float]] = []
+            for cid in cluster_tokens_map:
+                if cid == smallest_id:
+                    continue
+                merged_tokens = smallest_tokens + cluster_tokens_map[cid]
+                if merged_tokens <= max_tokens_per_cluster:
+                    other_centroid = compute_centroid(cid)
+                    dist = float(np.linalg.norm(smallest_centroid - other_centroid))
+                    candidates.append((cid, dist))
+
+            if not candidates:
+                return None  # No valid target exists
+
+            # Return nearest valid target
+            candidates.sort(key=lambda x: x[1])
+            return candidates[0][0]
+
+        while len(cluster_to_files) > 1:
+            # Find smallest cluster (excluding already-marked unmergeable)
+            cluster_tokens_map = {
+                cid: get_cluster_tokens(cid)
+                for cid in cluster_to_files
+                if cid not in unmergeable_clusters
+            }
+
+            if not cluster_tokens_map:
+                break  # All remaining clusters are unmergeable
+
+            smallest_id = min(cluster_tokens_map, key=cluster_tokens_map.get)  # type: ignore[arg-type]
+            smallest_tokens = cluster_tokens_map[smallest_id]
+
+            if smallest_tokens >= min_tokens_per_cluster:
+                break  # All clusters meet minimum threshold
+
+            # Find nearest cluster that respects max_tokens_per_cluster
+            # Need full token map for merge validation
+            full_cluster_tokens_map = {
+                cid: get_cluster_tokens(cid) for cid in cluster_to_files
+            }
+            target_id = find_valid_merge_target(
+                smallest_id, smallest_tokens, full_cluster_tokens_map
+            )
+
+            if target_id is None:
+                # No valid target - keep cluster as-is
+                logger.warning(
+                    f"Cluster {smallest_id} ({smallest_tokens:,} tokens) cannot merge "
+                    f"without exceeding max ({max_tokens_per_cluster:,}). Keeping."
+                )
+                unmergeable_clusters.add(smallest_id)
+                num_unmergeable += 1
+                continue
+
+            logger.debug(
+                f"Merging cluster {smallest_id} ({smallest_tokens:,} tokens) "
+                f"into cluster {target_id}"
+            )
+
+            # Merge smallest into target
+            cluster_to_files[target_id].extend(cluster_to_files[smallest_id])
+            del cluster_to_files[smallest_id]
+            num_merges += 1
+
+        # Phase 3: Renumber clusters sequentially
+        final_cluster_groups: list[ClusterGroup] = []
+        for new_id, old_id in enumerate(sorted(cluster_to_files.keys())):
+            cluster_file_paths = cluster_to_files[old_id]
+            cluster_files_content = {fp: files[fp] for fp in cluster_file_paths}
+            cluster_tokens = sum(file_tokens[fp] for fp in cluster_file_paths)
+
+            cluster_group = ClusterGroup(
+                cluster_id=new_id,
+                file_paths=cluster_file_paths,
+                files_content=cluster_files_content,
+                total_tokens=cluster_tokens,
+            )
+            final_cluster_groups.append(cluster_group)
+
+            logger.debug(
+                f"Cluster {new_id}: {len(cluster_file_paths)} files, "
+                f"{cluster_tokens:,} tokens"
+            )
+
+        avg_tokens = (
+            total_tokens / len(final_cluster_groups) if final_cluster_groups else 0
+        )
+        metadata = {
+            "num_clusters": len(final_cluster_groups),
+            "num_native_clusters": num_native_clusters,
+            "num_outliers": num_outliers,
+            "num_splits": num_splits,
+            "num_merges": num_merges,
+            "num_unmergeable": num_unmergeable,
+            "total_files": len(files),
+            "total_tokens": total_tokens,
+            "avg_tokens_per_cluster": int(avg_tokens),
+        }
+
+        logger.info(
+            f"HDBSCAN bounded complete: {num_native_clusters} native clusters, "
+            f"{num_outliers} outliers reassigned, {num_splits} splits, "
+            f"{num_merges} merges, {num_unmergeable} unmergeable, "
+            f"{len(final_cluster_groups)} final clusters"
+        )
+
+        return final_cluster_groups, metadata
