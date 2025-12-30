@@ -19,6 +19,10 @@ from loguru import logger
 
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services import prompts
+from chunkhound.services.research.shared.chunk_context_builder import (
+    ChunkContextBuilder,
+)
+from chunkhound.services.research.shared.import_context import ImportContextService
 from chunkhound.services.research.shared.models import (
     FOLLOWUP_OUTPUT_TOKENS_MAX,
     FOLLOWUP_OUTPUT_TOKENS_MIN,
@@ -33,13 +37,20 @@ from chunkhound.services.research.shared.models import (
 class QuestionGenerator:
     """Generates and manages follow-up questions for deep research exploration."""
 
-    def __init__(self, llm_manager: LLMManager):
+    def __init__(
+        self,
+        llm_manager: LLMManager,
+        import_context_service: ImportContextService | None = None,
+    ):
         """Initialize question generator.
 
         Args:
             llm_manager: LLM manager for generating questions and synthesis
+            import_context_service: Optional service for extracting imports from chunks.
+                If None, chunk-based context building will skip import headers.
         """
         self._llm_manager = llm_manager
+        self._import_context_service = import_context_service
         self._node_counter = 0
 
     def set_node_counter(self, counter: int) -> None:
@@ -85,13 +96,12 @@ class QuestionGenerator:
         Returns:
             List of follow-up questions
         """
-        # Validate that file contents were provided (required by algorithm)
-        if not file_contents:
-            logger.error(
-                "Cannot generate follow-up questions: no file contents provided. "
-                f"Query: {query}, Chunks: {len(chunks)}"
+        # Validate that max_input_tokens was provided by caller
+        if max_input_tokens is None:
+            raise ValueError(
+                "max_input_tokens must be provided by caller. "
+                "Use adaptive budget system to calculate appropriate value."
             )
-            return []  # Return empty list instead of invalid questions
 
         llm = self._llm_manager.get_utility_provider()
 
@@ -112,43 +122,60 @@ class QuestionGenerator:
         # Simplified system prompt per GPT-5-Nano best practices
         system = prompts.FOLLOWUP_GENERATION_SYSTEM
 
-        # Build code context from file contents
-        # Note: files already limited by _read_files_with_budget
-        # This applies the total LLM input budget (query + ancestors + files)
-
-        # Validate that max_input_tokens was provided by caller
-        if max_input_tokens is None:
-            raise ValueError(
-                "max_input_tokens must be provided by caller. "
-                "Use adaptive budget system to calculate appropriate value."
-            )
-
-        code_context = []
-        total_tokens = 0
+        # Build code context - from file_contents if available, otherwise from chunks
         max_tokens_for_context = max_input_tokens
 
-        for path, content in file_contents.items():
-            content_tokens = llm.estimate_tokens(content)
-            if total_tokens + content_tokens <= max_tokens_for_context:
-                code_context.append(f"File: {path}\n{'=' * 60}\n{content}\n{'=' * 60}")
-                total_tokens += content_tokens
-            else:
-                # Truncate to fit within total budget
-                remaining_tokens = max_tokens_for_context - total_tokens
-                if remaining_tokens > 500:  # Only include if meaningful
-                    chars_to_include = remaining_tokens * 4  # ~4 chars per token
+        if file_contents:
+            # Use file-based context (backwards compatible path)
+            code_context = []
+            total_tokens = 0
+
+            for path, content in file_contents.items():
+                content_tokens = llm.estimate_tokens(content)
+                if total_tokens + content_tokens <= max_tokens_for_context:
                     code_context.append(
-                        f"File: {path}\n{'=' * 60}\n{content[:chars_to_include]}...\n{'=' * 60}"
+                        f"File: {path}\n{'=' * 60}\n{content}\n{'=' * 60}"
                     )
-                break
+                    total_tokens += content_tokens
+                else:
+                    # Truncate to fit within total budget
+                    remaining_tokens = max_tokens_for_context - total_tokens
+                    if remaining_tokens > 500:  # Only include if meaningful
+                        chars_to_include = remaining_tokens * 4  # ~4 chars per token
+                        code_context.append(
+                            f"File: {path}\n{'=' * 60}\n{content[:chars_to_include]}...\n{'=' * 60}"
+                        )
+                    break
 
-        logger.debug(
-            f"LLM input: {total_tokens} tokens from {len(code_context)} files (budget: {max_tokens_for_context})"
-        )
-
-        code_section = (
-            "\n\n".join(code_context) if code_context else "No code files loaded"
-        )
+            logger.debug(
+                f"LLM input: {total_tokens} tokens from {len(code_context)} files "
+                f"(budget: {max_tokens_for_context})"
+            )
+            code_section = (
+                "\n\n".join(code_context) if code_context else "No code files loaded"
+            )
+        elif chunks:
+            # Build context from chunks when file_contents not available
+            builder = ChunkContextBuilder(
+                import_context_service=self._import_context_service,
+                llm_manager=self._llm_manager,
+            )
+            code_section = builder.build_code_context_with_imports(
+                chunks, max_tokens_for_context
+            )
+            if not code_section:
+                code_section = "No code files loaded"
+            logger.debug(
+                f"LLM input: built from {len(chunks)} chunks "
+                f"(budget: {max_tokens_for_context})"
+            )
+        else:
+            # Neither file_contents nor chunks available
+            logger.warning(
+                f"Cannot generate follow-up questions: no file contents or chunks. "
+                f"Query: {query}"
+            )
+            return []
 
         # Also include chunk snippets for context
         chunks_preview = "\n".join(

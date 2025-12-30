@@ -110,24 +110,32 @@ SINGLE_PASS_TIMEOUT_SECONDS = 600  # 10 minutes timeout for large synthesis call
 # NOTE: Only INPUT budget scales dynamically based on repository size, output is fixed
 TARGET_OUTPUT_TOKENS = 15_000  # Default target for standard research outputs
 
-# Synthesis budget calculation (repository size scaling)
-CHUNKS_TO_LOC_ESTIMATE = 20  # Rough estimation: 1 chunk ≈ 20 lines of code
-LOC_THRESHOLD_TINY = 10_000  # Very small repos
-LOC_THRESHOLD_SMALL = 100_000  # Small repos
-LOC_THRESHOLD_MEDIUM = 1_000_000  # Medium repos
-# Large repos: >= 1M LOC
-
-SYNTHESIS_INPUT_TOKENS_TINY = 30_000  # Very small repos (< 10k LOC)
-SYNTHESIS_INPUT_TOKENS_SMALL = 50_000  # Small repos (< 100k LOC)
-SYNTHESIS_INPUT_TOKENS_MEDIUM = 80_000  # Medium repos (< 1M LOC)
-SYNTHESIS_INPUT_TOKENS_LARGE = 150_000  # Large repos (>= 1M LOC)
+# NOTE: Elbow Detection Replaces Repo-Size Scaling (2024-12)
+# The v1 synthesis engine now uses Kneedle algorithm elbow detection to determine
+# the relevance cutoff for chunks, rather than scaling input budgets based on
+# repository size (LOC). This provides data-driven cutoffs based on actual
+# score distributions rather than arbitrary size-based thresholds.
+# See: chunkhound/services/research/shared/elbow_detection.py
 
 # Output control
 REQUIRE_CITATIONS = True  # Validate file:line format
 
 # Map-reduce synthesis constants
 MAX_TOKENS_PER_CLUSTER = 30_000  # Token budget per cluster for parallel synthesis
-CLUSTER_OUTPUT_TOKEN_BUDGET = 15_000  # Max output tokens per cluster summary
+CLUSTER_OUTPUT_TOKEN_BUDGET = 15_000  # Fallback/minimum output budget per cluster (elbow detection may override)
+
+# Fact extraction
+FACT_EXTRACTION_TOKENS = 8_000  # Output budget per cluster
+MAX_FACTS_PER_CLUSTER = 30  # Limit per cluster
+FACTS_LEDGER_MAX_ENTRIES = 200  # Max in final ledger
+MAX_FACT_STATEMENT_CHARS = 100  # Hard limit enforced at extraction
+
+# Tiered formatting thresholds (fact count)
+# Controls progressive compression as fact count increases
+FACTS_TIER_VERBOSE = 20  # 0-20: Full verbose format
+FACTS_TIER_COMPACT = 50  # 21-50: Compact single-line
+FACTS_TIER_INDEXED = 100  # 51-100: Compact with file index
+# 101+: Summary by category only
 
 # Pre-compiled regex patterns for citation processing
 _CITATION_PATTERN = re.compile(r"\[\d+\]")  # Matches [N] citations
@@ -180,3 +188,15 @@ class ResearchContext:
     root_query: str
     ancestors: list[str] = field(default_factory=list)
     traversal_path: list[str] = field(default_factory=list)
+
+
+def build_output_guidance(target_tokens: int = TARGET_OUTPUT_TOKENS) -> str:
+    """Build consistent output guidance for synthesis prompts.
+
+    Args:
+        target_tokens: Target output token count (default: TARGET_OUTPUT_TOKENS)
+
+    Returns:
+        Output guidance string for LLM prompts
+    """
+    return f"Target output: ~{target_tokens:,} tokens (includes reasoning)."

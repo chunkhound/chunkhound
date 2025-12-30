@@ -20,6 +20,7 @@ from loguru import logger
 from chunkhound.core.config.research_config import ResearchConfig
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
+from chunkhound.services.research.shared.chunk_context_builder import get_chunk_text
 from chunkhound.services.research.shared.models import (
     MAX_SYMBOLS_TO_SEARCH,
     QUERY_EXPANSION_ENABLED,
@@ -303,7 +304,7 @@ class UnifiedSearch:
             and len(combined_pool) > 1
         ):
             try:
-                documents = [c.get("content", "") for c in combined_pool]
+                documents = [get_chunk_text(c) for c in combined_pool]
 
                 # Compound reranking: rerank against each query and average scores
                 if rerank_queries and len(rerank_queries) > 1:

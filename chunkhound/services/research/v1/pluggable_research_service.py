@@ -13,7 +13,6 @@ The service coordinates:
 
 import asyncio
 import re
-import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -30,7 +29,35 @@ from chunkhound.services.research.shared.evidence_ledger import (
     extract_facts_with_clustering,
 )
 from chunkhound.services.research.shared.exploration import ExplorationStrategy
-from chunkhound.services.research.shared.models import ResearchContext
+from chunkhound.services.research.shared.models import (
+    _CITATION_PATTERN,
+    _CITATION_SEQUENCE_PATTERN,
+    ENABLE_ADAPTIVE_BUDGETS,
+    ENABLE_SMART_BOUNDARIES,
+    EXTRA_CONTEXT_TOKENS,
+    FILE_CONTENT_TOKENS_MAX,
+    FILE_CONTENT_TOKENS_MIN,
+    FOLLOWUP_OUTPUT_TOKENS_MAX,
+    FOLLOWUP_OUTPUT_TOKENS_MIN,
+    INTERNAL_MAX_TOKENS,
+    INTERNAL_ROOT_TARGET,
+    LEAF_ANSWER_TOKENS_BASE,
+    LEAF_ANSWER_TOKENS_BONUS,
+    LLM_INPUT_TOKENS_MAX,
+    LLM_INPUT_TOKENS_MIN,
+    MAX_BOUNDARY_EXPANSION_LINES,
+    MAX_FILE_CONTENT_TOKENS,
+    MAX_LEAF_ANSWER_TOKENS,
+    MAX_LLM_INPUT_TOKENS,
+    MAX_SYNTHESIS_TOKENS,
+    NUM_LLM_EXPANDED_QUERIES,
+    OUTPUT_TOKENS_WITH_REASONING,
+    QUERY_EXPANSION_ENABLED,
+    QUERY_EXPANSION_TOKENS,
+    REQUIRE_CITATIONS,
+    TOKEN_BUDGET_PER_FILE,
+    ResearchContext,
+)
 from chunkhound.services.research.shared.unified_search import UnifiedSearch
 from chunkhound.services.research.v1.quality_validator import QualityValidator
 from chunkhound.services.research.v1.question_generator import QuestionGenerator
@@ -38,123 +65,6 @@ from chunkhound.services.research.v1.synthesis_engine import SynthesisEngine
 
 if TYPE_CHECKING:
     from chunkhound.api.cli.utils.tree_progress import TreeProgressDisplay
-
-# Constants
-NODE_SIMILARITY_THRESHOLD = (
-    0.2  # Reserved for future similarity-based deduplication (currently uses LLM)
-)
-MAX_FOLLOWUP_QUESTIONS = 3
-MAX_SYMBOLS_TO_SEARCH = 5  # Top N symbols to search via regex (from spec)
-QUERY_EXPANSION_ENABLED = True  # Enable LLM-powered query expansion for better recall
-NUM_LLM_EXPANDED_QUERIES = 2  # LLM generates 2 queries, we prepend original = 3 total
-
-# Adaptive token budgets (depth-dependent)
-ENABLE_ADAPTIVE_BUDGETS = True  # Enable depth-based adaptive budgets
-
-# File content budget range (input: what LLM sees for code)
-FILE_CONTENT_TOKENS_MIN = 10_000  # Root nodes (synthesizing, need less raw code)
-FILE_CONTENT_TOKENS_MAX = 50_000  # Leaf nodes (analyzing, need full implementations)
-
-# LLM total input budget range (query + context + code)
-LLM_INPUT_TOKENS_MIN = 15_000  # Root nodes
-LLM_INPUT_TOKENS_MAX = 60_000  # Leaf nodes
-
-# Leaf answer output budget (what LLM generates at leaves)
-# NOTE: Reduced from 30k to balance cost vs quality. If you observe:
-#   - Frequent "Missing: [detail]" statements
-#   - Theoretical placeholders ("provide exact values")
-#   - Incomplete analysis of complex components
-# Consider increasing these values. Quality validation warnings will indicate budget pressure.
-LEAF_ANSWER_TOKENS_BASE = (
-    18_000  # Base budget for leaf nodes (was 30k, reduced for cost)
-)
-LEAF_ANSWER_TOKENS_BONUS = (
-    3_000  # Additional tokens for deeper leaves (was 5k, reduced for cost)
-)
-
-# Internal synthesis output budget (what LLM generates at internal nodes)
-# NOTE: Reduced from 17.5k/32k to balance cost vs quality. If root synthesis appears rushed or
-# omits critical architectural details, consider increasing INTERNAL_ROOT_TARGET.
-INTERNAL_ROOT_TARGET = 11_000  # Root synthesis target (was 17.5k, reduced for cost)
-INTERNAL_MAX_TOKENS = (
-    19_000  # Maximum for deep internal nodes (was 32k, reduced for cost)
-)
-
-# Follow-up question generation output budget (what LLM generates for follow-up questions)
-# NOTE: High budgets needed for reasoning models (o1/o3/GPT-5) which use internal "thinking" tokens
-# WHY: Reasoning models consume 5-15k tokens for internal reasoning before producing 100-500 tokens of output
-# The actual generated questions are concise, but the model needs reasoning budget to evaluate relevance
-FOLLOWUP_OUTPUT_TOKENS_MIN = (
-    8_000  # Root/shallow nodes: simpler questions, less reasoning needed
-)
-FOLLOWUP_OUTPUT_TOKENS_MAX = (
-    15_000  # Deep nodes: complex synthesis requires more reasoning depth
-)
-
-# Utility operation output budgets (for reasoning models like o1/o3/GPT-5)
-# These operations use utility provider and don't vary by depth
-# WHY: Each utility operation produces small output but requires reasoning budget for quality
-QUERY_EXPANSION_TOKENS = (
-    10_000  # Generate 2 queries (~200 output + ~8k reasoning to ensure diversity)
-)
-QUESTION_SYNTHESIS_TOKENS = (
-    15_000  # Synthesize to 1-3 questions (~500 output + ~12k reasoning for quality)
-)
-QUESTION_FILTERING_TOKENS = (
-    5_000  # Filter by relevance (~50 output + ~4k reasoning for accuracy)
-)
-
-# Legacy constants (used when ENABLE_ADAPTIVE_BUDGETS = False)
-TOKEN_BUDGET_PER_FILE = 4000
-EXTRA_CONTEXT_TOKENS = 1000
-MAX_FILE_CONTENT_TOKENS = 3000
-MAX_LLM_INPUT_TOKENS = 5000
-MAX_LEAF_ANSWER_TOKENS = 400
-MAX_SYNTHESIS_TOKENS = 600
-
-# Single-pass synthesis constants (new architecture)
-SINGLE_PASS_MAX_TOKENS = (
-    150_000  # Total budget for single-pass synthesis (input + output)
-)
-OUTPUT_TOKENS_WITH_REASONING = 30_000  # Fixed output budget for reasoning models (18k output + 12k reasoning buffer)
-SINGLE_PASS_OVERHEAD_TOKENS = 5_000  # Prompt template and overhead
-SINGLE_PASS_TIMEOUT_SECONDS = 600  # 10 minutes timeout for large synthesis calls
-# Available for code/chunks: Scales dynamically with repo size (30k-150k input tokens)
-
-# Target output length (controlled via prompt instructions, not API token limits)
-# WHY: OUTPUT_TOKENS_WITH_REASONING is FIXED at 30k for all queries (reasoning models need this)
-# This allows reasoning models to use thinking tokens while producing appropriately sized output
-# NOTE: Only INPUT budget scales dynamically based on repository size, output is fixed
-TARGET_OUTPUT_TOKENS = 15_000  # Default target for standard research outputs
-
-# NOTE: Synthesis input budget scaling (CHUNKS_TO_LOC_ESTIMATE, LOC_THRESHOLD_*, SYNTHESIS_INPUT_TOKENS_*)
-# has been removed. Elbow detection now determines the relevance cutoff for chunks, providing
-# data-driven filtering based on actual score distributions rather than repository size heuristics.
-# See: chunkhound/services/research/shared/elbow_detection.py
-
-# Output control
-REQUIRE_CITATIONS = True  # Validate file:line format
-
-# Map-reduce synthesis constants
-MAX_TOKENS_PER_CLUSTER = 30_000  # Token budget per cluster for parallel synthesis
-CLUSTER_OUTPUT_TOKEN_BUDGET = 15_000  # Max output tokens per cluster summary
-
-# Pre-compiled regex patterns for citation processing
-_CITATION_PATTERN = re.compile(r"\[\d+\]")  # Matches [N] citations
-_CITATION_SEQUENCE_PATTERN = re.compile(
-    r"(?:\[\d+\])+"
-)  # Matches sequences like [1][2][3]
-
-# Smart boundary detection for context-aware file reading
-ENABLE_SMART_BOUNDARIES = True  # Expand to natural code boundaries (functions/classes)
-MAX_BOUNDARY_EXPANSION_LINES = 300  # Maximum lines to expand for complete functions
-
-# File-level reranking for synthesis budget allocation
-# Prevents file diversity collapse where deep BFS exploration causes score accumulation in few files
-MAX_CHUNKS_PER_FILE_REPR = (
-    5  # Top chunks to include in file representative document for reranking
-)
-MAX_TOKENS_PER_FILE_REPR = 2000  # Token limit for file representative document
 
 
 class PluggableResearchService:
@@ -193,12 +103,7 @@ class PluggableResearchService:
         self._tool_name = tool_name
         self._node_counter = 0
         self.progress = progress  # Store progress instance for event emission
-        self._progress_lock: asyncio.Lock | None = (
-            None  # Lazy init for concurrent progress updates
-        )
-        self._progress_lock_init = (
-            threading.Lock()
-        )  # Thread-safe guard for lock creation
+        self._progress_lock: asyncio.Lock = asyncio.Lock()
         self._synthesis_engine = SynthesisEngine(llm_manager, database_services, self)
         self._question_generator = QuestionGenerator(llm_manager)
         self._citation_manager = CitationManager()
@@ -212,20 +117,6 @@ class PluggableResearchService:
 
         # Store exploration strategy (required - pluggable algorithm for chunk discovery)
         self._exploration_strategy = exploration_strategy
-
-    async def _ensure_progress_lock(self) -> None:
-        """Ensure progress lock exists (must be called in async event loop context).
-
-        Lazy initialization pattern: Lock is created on first use to ensure it's created
-        in the event loop context, avoiding RuntimeError from asyncio.Lock() in __init__.
-
-        Uses double-checked locking to prevent race conditions where multiple concurrent
-        tasks could create separate locks.
-        """
-        if self.progress and self._progress_lock is None:
-            with self._progress_lock_init:  # Thread-safe initialization guard
-                if self._progress_lock is None:  # Double-check inside lock
-                    self._progress_lock = asyncio.Lock()
 
     async def _emit_event(
         self,
@@ -246,8 +137,6 @@ class PluggableResearchService:
         """
         if not self.progress:
             return
-        await self._ensure_progress_lock()
-        assert self._progress_lock is not None
         async with self._progress_lock:
             await self.progress.emit_event(
                 event_type=event_type,
@@ -395,7 +284,7 @@ class PluggableResearchService:
             prioritized_chunks,
             budgeted_files,
             selection_info,
-        ) = await self._manage_token_budget_for_synthesis(
+        ) = await self._synthesis_engine._manage_token_budget_for_synthesis(
             aggregated["chunks"], aggregated["files"], query, synthesis_budgets
         )
 
@@ -440,7 +329,7 @@ class PluggableResearchService:
         if cluster_metadata["num_clusters"] == 1:
             logger.info("Single cluster detected - using single-pass synthesis")
             facts_context = evidence_ledger.get_facts_reduce_prompt_context()
-            answer = await self._single_pass_synthesis(
+            answer = await self._synthesis_engine._single_pass_synthesis(
                 root_query=query,
                 chunks=prioritized_chunks,
                 files=budgeted_files,
@@ -480,7 +369,7 @@ class PluggableResearchService:
                     cluster_facts_context = evidence_ledger.get_facts_map_prompt_context(
                         cluster_files
                     )
-                    return await self._map_synthesis_on_cluster(
+                    return await self._synthesis_engine._map_synthesis_on_cluster(
                         cluster, query, prioritized_chunks, synthesis_budgets,
                         total_input_tokens,
                         constants_context=constants_context,
@@ -503,7 +392,7 @@ class PluggableResearchService:
             # Get global facts context for reduce phase
             reduce_facts_context = evidence_ledger.get_facts_reduce_prompt_context()
 
-            answer = await self._reduce_synthesis(
+            answer = await self._synthesis_engine._reduce_synthesis(
                 query,
                 cluster_results,
                 prioritized_chunks,
@@ -1129,135 +1018,6 @@ class PluggableResearchService:
             "stats": stats,
         }
 
-    async def _manage_token_budget_for_synthesis(
-        self,
-        chunks: list[dict[str, Any]],
-        files: dict[str, str],
-        root_query: str,
-        synthesis_budgets: dict[str, int],
-    ) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, Any]]:
-        """Manage token budget to fit within synthesis budget limit.
-
-        Prioritizes files using reranking when available to ensure diverse,
-        relevant file selection. Falls back to accumulated chunk scores if
-        reranking fails. This prevents file diversity collapse where deep
-        exploration causes score accumulation in few files.
-
-        Args:
-            chunks: All chunks from BFS traversal
-            files: All file contents from BFS traversal
-            root_query: Original research query (for reranking files)
-            synthesis_budgets: Dynamic budgets based on repository size
-
-        Returns:
-            Tuple of (prioritized_chunks, budgeted_files, budget_info)
-        """
-        return await self._synthesis_engine._manage_token_budget_for_synthesis(
-            chunks, files, root_query, synthesis_budgets
-        )
-
-    async def _single_pass_synthesis(
-        self,
-        root_query: str,
-        chunks: list[dict[str, Any]],
-        files: dict[str, str],
-        context: ResearchContext,
-        synthesis_budgets: dict[str, int],
-        constants_context: str = "",
-        facts_context: str = "",
-    ) -> str:
-        """Perform single-pass synthesis with all aggregated data.
-
-        Uses modern LLM large context windows to synthesize answer from complete
-        data in one pass, avoiding information loss from progressive compression.
-
-        Token Budget:
-            - The max_output_tokens limit applies only to the LLM-generated content
-            - A sources footer is appended AFTER synthesis (outside the token budget)
-            - Total output = LLM content + sources footer (~100-500 tokens)
-            - Footer size scales with number of files/chunks analyzed
-
-        Args:
-            root_query: Original research query
-            chunks: All chunks from BFS traversal (will be filtered to match budgeted files)
-            files: Budgeted file contents (subset within token limits)
-            context: Research context
-            synthesis_budgets: Dynamic budgets based on repository size
-            constants_context: Constants ledger context for LLM prompts
-            facts_context: Facts ledger context for LLM prompts
-
-        Returns:
-            Synthesized answer from single LLM call with appended sources footer
-        """
-        return await self._synthesis_engine._single_pass_synthesis(
-            root_query, chunks, files, context, synthesis_budgets,
-            constants_context=constants_context,
-            facts_context=facts_context,
-        )
-
-    async def _map_synthesis_on_cluster(
-        self,
-        cluster: ClusterGroup,
-        root_query: str,
-        chunks: list[dict[str, Any]],
-        synthesis_budgets: dict[str, int],
-        total_input_tokens: int,
-        constants_context: str = "",
-        facts_context: str = "",
-    ) -> dict[str, Any]:
-        """Synthesize partial answer for one cluster of files.
-
-        Args:
-            cluster: Cluster group with files to synthesize
-            root_query: Original research query
-            chunks: All chunks (will be filtered to cluster files)
-            synthesis_budgets: Dynamic budgets based on repository size
-            total_input_tokens: Sum of all cluster tokens (for proportional budget allocation)
-            constants_context: Constants ledger context for LLM prompts
-            facts_context: Facts ledger context for LLM prompts
-
-        Returns:
-            Dictionary with:
-                - cluster_id: int
-                - summary: str (synthesized content for this cluster)
-                - sources: list[dict] (files and chunks used)
-        """
-        return await self._synthesis_engine._map_synthesis_on_cluster(
-            cluster, root_query, chunks, synthesis_budgets, total_input_tokens,
-            constants_context=constants_context,
-            facts_context=facts_context,
-        )
-
-    async def _reduce_synthesis(
-        self,
-        root_query: str,
-        cluster_results: list[dict[str, Any]],
-        all_chunks: list[dict[str, Any]],
-        all_files: dict[str, str],
-        synthesis_budgets: dict[str, int],
-        constants_context: str = "",
-        facts_context: str = "",
-    ) -> str:
-        """Combine cluster summaries into final answer.
-
-        Args:
-            root_query: Original research query
-            cluster_results: Results from map step (cluster summaries)
-            all_chunks: All chunks from clusters (will be filtered to match synthesized files)
-            all_files: All files that were synthesized across clusters
-            synthesis_budgets: Dynamic budgets based on repository size
-            constants_context: Constants ledger context for LLM prompts
-            facts_context: Facts ledger context for LLM prompts
-
-        Returns:
-            Final synthesized answer with sources footer
-        """
-        return await self._synthesis_engine._reduce_synthesis(
-            root_query, cluster_results, all_chunks, all_files, synthesis_budgets,
-            constants_context=constants_context,
-            facts_context=facts_context,
-        )
-
     def _filter_verbosity(self, text: str) -> str:
         """Remove common LLM verbosity patterns from synthesis output.
 
@@ -1270,8 +1030,6 @@ class PluggableResearchService:
         Returns:
             Filtered text with verbose patterns removed
         """
-        import re
-
         # Patterns to remove (from research on LLM verbosity)
         patterns_to_remove = [
             r"It'?s important to note that\s+",
@@ -1820,32 +1578,6 @@ class PluggableResearchService:
         render_node(root)
 
         return "\n".join(footer_lines)
-
-    async def _filter_relevant_followups(
-        self,
-        questions: list[str],
-        root_query: str,
-        current_query: str,
-        context: ResearchContext,
-    ) -> list[str]:
-        """Filter follow-ups by relevance to root query and architectural value.
-
-        Args:
-            questions: Candidate follow-up questions
-            root_query: Original root query
-            current_query: Current question being explored
-            context: Research context
-
-        Returns:
-            Filtered list of most relevant follow-up questions
-        """
-        # Delegate to question generator
-        return await self._question_generator.filter_relevant_followups(
-            questions=questions,
-            root_query=root_query,
-            current_query=current_query,
-            context=context,
-        )
 
     def _calculate_synthesis_budgets(self) -> dict[str, int]:
         """Calculate synthesis token budgets.

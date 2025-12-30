@@ -37,18 +37,21 @@ class ResearchServiceFactory:
             path_filter: Optional relative path to limit research scope
 
         Returns:
-            Research service instance (v1 or v2 based on config.research.algorithm)
+            Research service instance (v1, v2, or v3 based on config.research.algorithm)
         """
         algorithm = config.research.algorithm
 
         if algorithm == "v2":
-            # Lazy import to avoid circular imports
+            # v2 = v1 synthesis + wide coverage exploration
             from chunkhound.parsers.parser_factory import ParserFactory
+            from chunkhound.services.research.shared.exploration import (
+                WideCoverageStrategy,
+            )
             from chunkhound.services.research.shared.import_resolver import (
                 ImportResolverService,
             )
-            from chunkhound.services.research.v2.coverage_research_service import (
-                CoverageResearchService,
+            from chunkhound.services.research.v1.pluggable_research_service import (
+                PluggableResearchService,
             )
 
             # Create import resolver if import resolution is enabled
@@ -57,26 +60,101 @@ class ResearchServiceFactory:
                 parser_factory = ParserFactory()
                 import_resolver = ImportResolverService(parser_factory)
 
-            return CoverageResearchService(
+            # Create wide coverage exploration strategy (v2 algorithm)
+            exploration_strategy = WideCoverageStrategy(
+                llm_manager=llm_manager,
+                embedding_manager=embedding_manager,
+                db_services=db_services,
+                config=config.research,
+                import_resolver=import_resolver,
+            )
+
+            return PluggableResearchService(
                 database_services=db_services,
                 embedding_manager=embedding_manager,
                 llm_manager=llm_manager,
-                config=config,
+                exploration_strategy=exploration_strategy,
                 tool_name=tool_name,
                 progress=progress,
                 path_filter=path_filter,
-                import_resolver=import_resolver,
             )
-        else:
-            # Default to v1 (BFS)
-            from chunkhound.services.research.v1.bfs_research_service import (
-                BFSResearchService,
+        elif algorithm == "v3":
+            # v3 = parallel BFS + WideCoverage with unified elbow detection
+            from chunkhound.parsers.parser_factory import ParserFactory
+            from chunkhound.services.research.shared.exploration import (
+                BFSExplorationStrategy,
+                ParallelExplorationStrategy,
+                WideCoverageStrategy,
+            )
+            from chunkhound.services.research.shared.file_reader import FileReader
+            from chunkhound.services.research.shared.import_resolver import (
+                ImportResolverService,
+            )
+            from chunkhound.services.research.v1.pluggable_research_service import (
+                PluggableResearchService,
             )
 
-            return BFSResearchService(
+            # Create import resolver if import resolution is enabled
+            import_resolver = None
+            if config.research.import_resolution_enabled:
+                parser_factory = ParserFactory()
+                import_resolver = ImportResolverService(parser_factory)
+
+            # Create BFS exploration strategy
+            bfs_strategy = BFSExplorationStrategy(
+                llm_manager=llm_manager,
+                embedding_manager=embedding_manager,
+                db_services=db_services,
+                config=config.research,
+            )
+
+            # Create wide coverage exploration strategy
+            wide_strategy = WideCoverageStrategy(
+                llm_manager=llm_manager,
+                embedding_manager=embedding_manager,
+                db_services=db_services,
+                config=config.research,
+                import_resolver=import_resolver,
+            )
+
+            # Create parallel strategy wrapping both
+            parallel_strategy = ParallelExplorationStrategy(
+                bfs_strategy=bfs_strategy,
+                wide_strategy=wide_strategy,
+                file_reader=FileReader(db_services),
+                llm_manager=llm_manager,
+            )
+
+            return PluggableResearchService(
                 database_services=db_services,
                 embedding_manager=embedding_manager,
                 llm_manager=llm_manager,
+                exploration_strategy=parallel_strategy,
+                tool_name=tool_name,
+                progress=progress,
+                path_filter=path_filter,
+            )
+        else:
+            # Default to v1 with BFS exploration strategy
+            from chunkhound.services.research.shared.exploration import (
+                BFSExplorationStrategy,
+            )
+            from chunkhound.services.research.v1.pluggable_research_service import (
+                PluggableResearchService,
+            )
+
+            # Create BFS exploration strategy
+            v1_exploration_strategy = BFSExplorationStrategy(
+                llm_manager=llm_manager,
+                embedding_manager=embedding_manager,
+                db_services=db_services,
+            )
+
+            return PluggableResearchService(
+                database_services=db_services,
+                embedding_manager=embedding_manager,
+                llm_manager=llm_manager,
+                exploration_strategy=v1_exploration_strategy,
                 tool_name=tool_name,
                 progress=progress,
                 path_filter=path_filter,

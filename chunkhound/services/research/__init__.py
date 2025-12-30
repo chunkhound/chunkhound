@@ -11,12 +11,15 @@ from chunkhound.services.research.protocol import (
 )
 
 # Re-export shared components for backwards compatibility
+# Re-export gap models from shared
 from chunkhound.services.research.shared import (
     BFSNode,
     BudgetCalculator,
     ContextManager,
+    GapCandidate,
     QueryExpander,
     ResearchContext,
+    UnifiedGap,
 )
 
 # Re-export constants from shared.models for backwards compatibility
@@ -38,15 +41,6 @@ from chunkhound.services.research.v1 import (
     QualityValidator,
     QuestionGenerator,
     SynthesisEngine,
-)
-
-# Re-export v2 implementation
-from chunkhound.services.research.v2 import (
-    CoverageResearchService,
-    CoverageSynthesisEngine,
-    GapCandidate,
-    GapDetectionService,
-    UnifiedGap,
 )
 
 __all__ = [
@@ -75,10 +69,7 @@ __all__ = [
     "QuestionGenerator",
     "QueryExpander",
     "SynthesisEngine",
-    # v2 implementation
-    "CoverageResearchService",
-    "GapDetectionService",
-    "CoverageSynthesisEngine",
+    # Gap models (from shared)
     "GapCandidate",
     "UnifiedGap",
 ]

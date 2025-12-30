@@ -12,6 +12,10 @@ from typing import TYPE_CHECKING, Any
 
 from chunkhound.services.research.shared.models import BFSNode
 
+# Threshold for considering a file "well covered" by explored chunks.
+# Files with more than this many covered lines are marked as fully read.
+WELL_COVERED_LINE_THRESHOLD = 50
+
 if TYPE_CHECKING:
     from chunkhound.services.deep_research_service import DeepResearchService
 
@@ -40,29 +44,41 @@ class ContextManager:
             Dictionary with:
                 - files_fully_read: set[str] - Paths of fully-read files
                 - chunk_ranges: dict[str, list[tuple[int, int]]] - file → [(start, end)]
+                - file_line_coverage: dict[str, set[int]] - file → set of covered lines
         """
         files_fully_read: set[str] = set()
         chunk_ranges: dict[str, list[tuple[int, int]]] = {}
+        file_line_coverage: dict[str, set[int]] = {}
 
         current = node.parent
         while current:
-            # Check which files were fully read
-            for file_path, content in current.file_contents.items():
-                if self._service._is_file_fully_read(content):
-                    files_fully_read.add(file_path)
-
-            # Collect expanded chunk ranges
+            # Track line coverage from chunks (replaces file content-based detection)
             for chunk in current.chunks:
                 file_path = chunk.get("file_path")
-                if file_path:
-                    expanded_range = self._service._get_chunk_expanded_range(chunk)
-                    chunk_ranges.setdefault(file_path, []).append(expanded_range)
+                if not file_path:
+                    continue
+                start_line = chunk.get("start_line", 1)
+                end_line = chunk.get("end_line", 1)
+
+                # Track line coverage per file
+                file_line_coverage.setdefault(file_path, set()).update(
+                    range(start_line, end_line + 1)
+                )
+
+                # Mark as "well covered" if substantial chunk coverage
+                if len(file_line_coverage[file_path]) > WELL_COVERED_LINE_THRESHOLD:
+                    files_fully_read.add(file_path)
+
+                # Collect expanded chunk ranges
+                expanded_range = self._service._get_chunk_expanded_range(chunk)
+                chunk_ranges.setdefault(file_path, []).append(expanded_range)
 
             current = current.parent
 
         return {
             "files_fully_read": files_fully_read,
             "chunk_ranges": chunk_ranges,
+            "file_line_coverage": file_line_coverage,
         }
 
     def update_global_explored_data(
@@ -74,12 +90,25 @@ class ContextManager:
         not just their ancestor chain. Critical for preventing redundant exploration.
 
         Args:
-            global_explored_data: Global state dict with files_fully_read, chunk_ranges, and chunks
+            global_explored_data: Global state dict with files_fully_read, chunk_ranges,
+                chunks, and file_line_coverage
             node: BFS node whose discoveries should be added to global state
         """
-        # Add fully-read files
-        for file_path, content in node.file_contents.items():
-            if self._service._is_file_fully_read(content):
+        # Track line coverage from chunks instead of file content length
+        for chunk in node.chunks:
+            file_path = chunk.get("file_path")
+            if not file_path:
+                continue
+            start_line = chunk.get("start_line", 1)
+            end_line = chunk.get("end_line", 1)
+
+            # Track line coverage per file
+            coverage = global_explored_data.setdefault("file_line_coverage", {})
+            lines = range(start_line, end_line + 1)
+            coverage.setdefault(file_path, set()).update(lines)
+
+            # Mark as "well covered" if substantial chunk coverage
+            if len(coverage[file_path]) > WELL_COVERED_LINE_THRESHOLD:
                 global_explored_data["files_fully_read"].add(file_path)
 
         # Add expanded chunk ranges and chunks
