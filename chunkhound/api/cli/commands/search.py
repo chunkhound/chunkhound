@@ -173,6 +173,7 @@ def _format_search_results(
 
     # Display header
     total = pagination.get("total", len(results))
+    total_is_estimate = bool(pagination.get("total_is_estimate"))
     offset = pagination.get("offset", 0)
     page_size = pagination.get("page_size", len(results))
 
@@ -180,8 +181,14 @@ def _format_search_results(
     formatter.info(f"Query: '{query}'")
     start_idx = offset + 1
     end_idx = offset + len(results)
+    if total is None:
+        total_display = "unknown"
+    elif total_is_estimate:
+        total_display = f"≈{total}"
+    else:
+        total_display = str(total)
     formatter.info(
-        f"Results: {len(results)} of {total} (showing {start_idx}-{end_idx})"
+        f"Results: {len(results)} of {total_display} (showing {start_idx}-{end_idx})"
     )
 
     # Display each result
@@ -225,7 +232,9 @@ def _format_search_results(
     # Display pagination info
     has_more = pagination.get("has_more", False)
     if has_more:
-        next_offset = pagination.get("next_offset", offset + page_size)
+        next_offset = pagination.get("next_offset")
+        if next_offset is None:
+            next_offset = offset + len(results)
         formatter.info(
             f"\nMore results available. Use --offset {next_offset} to see next page."
         )

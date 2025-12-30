@@ -273,6 +273,7 @@ class PaginationInfo(TypedDict):
     has_more: bool
     total: NotRequired[int | None]
     next_offset: NotRequired[int | None]
+    total_is_estimate: NotRequired[bool]
 
 
 class SearchResponse(TypedDict):
@@ -338,6 +339,7 @@ def limit_response_size(
         limited_results = limited_results[:-reduction_size]
 
     # If even empty results exceed token limit, return minimal response
+    total_is_estimate = response_data["pagination"].get("total_is_estimate")
     return {
         "results": [],
         "pagination": {
@@ -346,6 +348,7 @@ def limit_response_size(
             "has_more": len(response_data["results"]) > 0,
             "total": response_data["pagination"].get("total", 0),
             "next_offset": None,
+            **({"total_is_estimate": total_is_estimate} if total_is_estimate is not None else {}),
         },
     }
 

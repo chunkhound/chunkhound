@@ -155,3 +155,14 @@ Notes:
     unless you pass `--map-out-dir`.
   - It will prompt for Code Mapper comprehensiveness unless you pass
     `--map-comprehensiveness {minimal,low,medium,high,ultra}`.
+
+
+## Search (pagination + path filters)
+
+ChunkHound search APIs (CLI + MCP) return `results` plus a `pagination` object.
+
+- `path_filter` matches substrings within repo-relative paths (same semantics across
+  DuckDB and LanceDB providers).
+- Prefer `pagination.next_offset` when `pagination.has_more` is true.
+- `pagination.total` is exact for DuckDB-backed searches. For LanceDB-backed fuzzy/semantic
+  searches it may be a best-effort lower bound; those responses set `pagination.total_is_estimate=true`.
