@@ -1,4 +1,4 @@
-from chunkhound.autodoc import docsite
+from chunkhound.autodoc import cleanup, docsite
 
 
 def test_build_cleanup_prompt_v2_includes_schema_and_injects_inputs() -> None:
@@ -28,3 +28,18 @@ def test_build_cleanup_prompt_end_user_uses_end_user_template() -> None:
     assert "set up, configured, and used" in prompt
     assert "Keep code identifiers" in prompt
     assert "Do NOT invent recommendations" in prompt
+
+
+def test_cleanup_prompt_loading_fails_fast_when_prompt_files_missing(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(cleanup, "_PROMPTS_DIR", tmp_path)
+    try:
+        docsite._build_cleanup_prompt(
+            title="My Title",
+            body="## Overview\nBody line.",
+        )
+    except FileNotFoundError as exc:
+        assert "prompt file missing" in str(exc).lower()
+    else:
+        raise AssertionError("Expected FileNotFoundError when prompt files are missing")

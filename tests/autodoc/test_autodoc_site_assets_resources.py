@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from chunkhound.autodoc.models import DocsiteSite
 from chunkhound.autodoc.template_loader import load_bytes, load_text
 
 

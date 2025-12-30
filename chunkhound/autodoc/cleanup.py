@@ -42,13 +42,7 @@ def _taint_cleanup_system_guidance(taint: str) -> str:
 
 
 def _build_cleanup_system_prompt(config: CleanupConfig) -> str:
-    base = _read_prompt_file(
-        _CLEANUP_SYSTEM_PROMPT_FILE,
-        fallback=(
-            "You are a senior technical writer polishing engineering documentation. "
-            "Make the writing approachable without losing precision."
-        ),
-    )
+    base = _read_prompt_file(_CLEANUP_SYSTEM_PROMPT_FILE)
     guidance = _taint_cleanup_system_guidance(config.taint)
     if not guidance:
         return base.strip()
@@ -147,62 +141,13 @@ async def _cleanup_with_llm(
 
 
 def _build_cleanup_prompt(title: str, body: str, *, taint: str = "balanced") -> str:
-    fallback = "\n".join(
-        [
-            "Rewrite the documentation section below as a polished, friendly doc page.",
-            "Requirements:",
-            "- Do NOT add new facts or speculation.",
-            "- Keep citations like [1] exactly as-is.",
-            "- Preserve code identifiers and inline code formatting.",
-            '- Start with a short "Overview" section.',
-            "- Use level-2 headings (##). Do NOT include a level-1 heading.",
-            "- Do NOT include recommendations, follow-ups, or next steps.",
-            "- Use visuals when clearly helpful: include a Mermaid diagram in a ```mermaid code fence",
-            "  and/or a table/callout to clarify complex flows. Skip visuals if they would be redundant.",
-            '- If the content includes a "Sources" section, rename it to "References".',
-            "- Remove duplicate title lines or redundant bold title repeats.",
-            "- Keep the length roughly similar to the input.",
-            "- Mermaid rules: keep node labels on a single line (no raw newlines inside [brackets] or {diamonds}).",
-            "  Prefer simple labels and avoid unusual punctuation.",
-            "Mermaid examples (copy the style, not the content):",
-            "```mermaid",
-            "flowchart TD",
-            "  A[CLI or Env Inputs] --> B[Config Resolution]",
-            "  B --> C[Service Registry]",
-            "  B --> D{Embeddings required?}",
-            "  D -- yes --> E[Embedding Provider]",
-            "  D -- no --> F[Search Only Mode]",
-            "```",
-            "```mermaid",
-            "flowchart LR",
-            "  A[Request] --> B[Validate]",
-            "  B --> C{Valid?}",
-            "  C -- yes --> D[Execute]",
-            "  C -- no --> E[Error]",
-            "```",
-            "```mermaid",
-            "flowchart TD",
-            "  A[CLI entry] --> B[Config builder]",
-            "  B --> C[validate_for_command]",
-            "  C --> D{Config valid?}",
-            "  D -- yes --> E[MCP server start]",
-            "  D -- no --> F[CLI error]",
-            "```",
-            "",
-            f"Title: {title}",
-            "",
-            "Input markdown:",
-            body.strip(),
-        ]
-    )
-
     normalized = _normalize_taint(taint)
     template_file = (
         _CLEANUP_USER_PROMPT_FILE_END_USER
         if normalized == "end-user"
         else _CLEANUP_USER_PROMPT_FILE
     )
-    template = _read_prompt_file(template_file, fallback=fallback)
+    template = _read_prompt_file(template_file)
     hydrated = (
         template.replace("<<TITLE>>", title)
         .replace("<<BODY>>", body.strip())
@@ -212,16 +157,18 @@ def _build_cleanup_prompt(title: str, body: str, *, taint: str = "balanced") -> 
     return hydrated.strip()
 
 
-def _read_prompt_file(filename: str, *, fallback: str) -> str:
+def _read_prompt_file(filename: str) -> str:
     path = _PROMPTS_DIR / filename
     try:
-        if path.exists():
-            content = path.read_text(encoding="utf-8").strip()
-            if content:
-                return content
-    except Exception:  # noqa: BLE001
-        return fallback
-    return fallback
+        content = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"AutoDoc prompt file missing: {path}") from exc
+    except OSError as exc:
+        raise OSError(f"AutoDoc prompt file unreadable: {path}") from exc
+
+    if not content:
+        raise ValueError(f"AutoDoc prompt file empty: {path}")
+    return content
 
 
 def _normalize_llm_output(text: str) -> str:
@@ -233,4 +180,3 @@ def _normalize_llm_output(text: str) -> str:
 
 def _minimal_cleanup(topic: CodeMapperTopic) -> str:
     return _ensure_overview_heading(topic.body_markdown.strip())
-
