@@ -178,6 +178,28 @@ FutureWarning: 'force_all_finite' was renamed to 'ensure_all_finite' in 1.6 and 
 - Monitor HDBSCAN releases for sklearn 1.8 compatibility
 - Warning is non-breaking; safe to ignore until HDBSCAN upstream fix
 
+## RESEARCH_ALGORITHMS
+
+### ResearchServiceFactory
+
+The `code_research` tool supports multiple exploration algorithms selectable via `CHUNKHOUND_RESEARCH_ALGORITHM` or `--research-algorithm` CLI flag.
+
+| Version | Strategy | Description | Use Case |
+|---------|----------|-------------|----------|
+| v1 | BFSExplorationStrategy | Traditional BFS exploration with question-driven traversal | Debugging, targeted investigations |
+| v2 | WideCoverageStrategy | Hybrid v1 synthesis + wide coverage exploration with import resolution | Broad codebase understanding |
+| v3 (default) | ParallelExplorationStrategy | Parallel BFS + wide coverage with unified elbow detection | Production workloads, best quality |
+
+**Configuration:**
+```bash
+export CHUNKHOUND_RESEARCH_ALGORITHM=v3  # v1, v2, or v3
+```
+
+**Algorithm Details:**
+- **v1 (BFS)**: Question-driven breadth-first search, generates follow-up questions from discovered chunks
+- **v2 (Wide)**: Combines v1 synthesis pipeline with wide coverage exploration, includes optional import resolution
+- **v3 (Parallel)**: Runs BFS and wide coverage strategies in parallel, uses elbow detection to merge results
+
 ## MIGRATION_NOTES
 
 ### Clustering Service: Dual-Algorithm Architecture
@@ -195,6 +217,11 @@ ClusteringService provides two distinct methods for different use cases:
    - Outliers reassigned to nearest cluster (no dropped files)
    - Use for exploratory analysis or when cluster count is unknown
 
+3. **`cluster_files_hdbscan_bounded(files, min_tokens, max_tokens)`** - HDBSCAN with token bounds
+   - Starts with HDBSCAN, then enforces token bounds via split/merge
+   - Splits oversized clusters using k-means, merges undersized via centroid distance
+   - Use for budget-constrained synthesis requiring natural groupings
+
 **API Signatures:**
 ```python
 # K-means: Deterministic clustering into exactly n_clusters
@@ -204,11 +231,18 @@ clusters, metadata = await service.cluster_files(files, n_clusters=5)
 # HDBSCAN: Natural cluster discovery
 clusters, metadata = await service.cluster_files_hdbscan(files, min_cluster_size=2)
 # metadata: num_clusters, num_native_clusters, num_outliers, total_files, total_tokens, avg_tokens_per_cluster
+
+# HDBSCAN with bounds: Natural clustering with token constraints
+clusters, metadata = await service.cluster_files_hdbscan_bounded(
+    files, min_tokens_per_cluster=5000, max_tokens_per_cluster=50000
+)
+# metadata: num_clusters, num_native_clusters, num_outliers, num_splits, num_merges, num_unmergeable, total_files, total_tokens
 ```
 
 **When to Use Which:**
-- **K-means**: Budget-constrained synthesis passes, reproducible results needed
-- **HDBSCAN**: First-pass analysis, understanding natural code groupings
+- **K-means**: Reproducible results, known target cluster count
+- **HDBSCAN**: Exploratory analysis, understanding natural code groupings
+- **HDBSCAN Bounded**: Map-reduce synthesis passes with LLM token limits
 
 ## DIRECTORY_STRUCTURE
 ```
