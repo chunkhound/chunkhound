@@ -66,23 +66,21 @@ class TestModuleImports:
             except Exception as e:
                 pytest.fail(f"Failed to import {module_name}: {e}")
 
-    def test_v2_research_imports(self):
-        """Test v2 coverage-first research services can be imported."""
-        from chunkhound.services.research.v2 import (
-            CoverageResearchService,
-            GapDetectionService,
-            CoverageSynthesisEngine,
-            DepthExplorationService,
-            CompressionService,
+    def test_v3_research_imports(self):
+        """Test v3 parallel research services can be imported."""
+        from chunkhound.services.research.shared.exploration import (
+            ExplorationStrategy,
+            BFSExplorationStrategy,
+            WideCoverageStrategy,
+            ParallelExplorationStrategy,
         )
         from chunkhound.services.research.factory import ResearchServiceFactory
         from chunkhound.services.research.protocol import ResearchServiceProtocol
 
-        assert CoverageResearchService is not None
-        assert GapDetectionService is not None
-        assert CoverageSynthesisEngine is not None
-        assert DepthExplorationService is not None
-        assert CompressionService is not None
+        assert ExplorationStrategy is not None
+        assert BFSExplorationStrategy is not None
+        assert WideCoverageStrategy is not None
+        assert ParallelExplorationStrategy is not None
         assert ResearchServiceFactory is not None
         assert ResearchServiceProtocol is not None
 

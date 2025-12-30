@@ -40,9 +40,9 @@ class ResearchConfig(BaseSettings):
     )
 
     # Feature Flag
-    algorithm: Literal["v1", "v2"] = Field(
-        default="v1",
-        description="Research algorithm version (v1=legacy, v2=coverage-first)",
+    algorithm: Literal["v1", "v2", "v3"] = Field(
+        default="v3",
+        description="Research algorithm version (v1=BFS exploration, v2=hybrid v1 synthesis + wide coverage exploration, v3=parallel BFS + wide coverage)",
     )
 
     # Phase 1: Coverage Parameters
@@ -313,14 +313,14 @@ class ResearchConfig(BaseSettings):
         """Add research-related CLI arguments."""
         parser.add_argument(
             "--research-algorithm",
-            choices=["v1", "v2"],
-            help="Research algorithm version (v1=legacy, v2=coverage-first)",
+            choices=["v1", "v2", "v3"],
+            help="Research algorithm version (v1=BFS exploration, v2=hybrid v1 synthesis + wide coverage exploration, v3=parallel BFS + wide coverage)",
         )
 
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
         """Load research config from environment variables."""
-        config = {}
+        config: dict[str, Any] = {}
 
         if algorithm := os.getenv("CHUNKHOUND_RESEARCH_ALGORITHM"):
             config["algorithm"] = algorithm.strip().lower()
