@@ -1,4 +1,5 @@
-from chunkhound.autodoc import docsite
+from chunkhound.autodoc.models import CodeMapperIndex
+from chunkhound.autodoc.site_writer import _render_index_metadata
 
 
 def test_render_index_metadata_includes_nested_details() -> None:
@@ -34,14 +35,14 @@ def test_render_index_metadata_includes_nested_details() -> None:
       coverage: 15.0%
 """
 
-    index = docsite.CodeMapperIndex(
+    index = CodeMapperIndex(
         title="AutoDoc Topics",
         scope_label="/",
         metadata_block=metadata_block,
         topics=[],
     )
 
-    lines = docsite._render_index_metadata(index)
+    lines = _render_index_metadata(index)
 
     assert "- Generated at: 2025-01-01T00:00:00Z" in lines
     assert "- Source SHA: abc123" in lines

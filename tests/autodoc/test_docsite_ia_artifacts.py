@@ -3,7 +3,14 @@ from pathlib import Path
 
 import pytest
 
-from chunkhound.autodoc import docsite
+from chunkhound.autodoc.generator import generate_docsite
+from chunkhound.autodoc.models import (
+    CleanupConfig,
+    CodeMapperIndex,
+    DocsitePage,
+    DocsiteSite,
+)
+from chunkhound.autodoc.site_writer import write_astro_site
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 
 
@@ -113,7 +120,7 @@ def test_write_astro_site_writes_nav_and_glossary_when_present(
     tmp_path: Path,
 ) -> None:
     output_dir = tmp_path / "site"
-    site = docsite.DocsiteSite(
+    site = DocsiteSite(
         title="Test",
         tagline="Tag",
         scope_label="/",
@@ -122,7 +129,7 @@ def test_write_astro_site_writes_nav_and_glossary_when_present(
         topic_count=1,
     )
     pages = [
-        docsite.DocsitePage(
+        DocsitePage(
             order=1,
             title="Topic One",
             slug="topic-one",
@@ -132,14 +139,14 @@ def test_write_astro_site_writes_nav_and_glossary_when_present(
             ),
         )
     ]
-    index = docsite.CodeMapperIndex(
+    index = CodeMapperIndex(
         title="Index",
         scope_label="/",
         metadata_block=None,
         topics=[],
     )
 
-    docsite.write_astro_site(
+    write_astro_site(
         output_dir=output_dir,
         site=site,
         pages=pages,
@@ -170,7 +177,7 @@ def test_write_astro_site_removes_stale_nav_and_glossary(tmp_path: Path) -> None
     (output_dir / "src" / "data" / "nav.json").write_text("stale", encoding="utf-8")
     (output_dir / "src" / "pages" / "glossary.md").write_text("stale", encoding="utf-8")
 
-    site = docsite.DocsiteSite(
+    site = DocsiteSite(
         title="Test",
         tagline="Tag",
         scope_label="/",
@@ -178,14 +185,14 @@ def test_write_astro_site_removes_stale_nav_and_glossary(tmp_path: Path) -> None
         source_dir=str(tmp_path),
         topic_count=0,
     )
-    index = docsite.CodeMapperIndex(
+    index = CodeMapperIndex(
         title="Index",
         scope_label="/",
         metadata_block=None,
         topics=[],
     )
 
-    docsite.write_astro_site(
+    write_astro_site(
         output_dir=output_dir,
         site=site,
         pages=[],
@@ -238,11 +245,11 @@ async def test_generate_docsite_writes_nav_and_glossary_in_llm_mode(
     provider = _FakeLLMProvider()
     llm_manager = _FakeLLMManager(provider)
 
-    await docsite.generate_docsite(
+    await generate_docsite(
         input_dir=input_dir,
         output_dir=output_dir,
         llm_manager=llm_manager,  # type: ignore[arg-type]
-        cleanup_config=docsite.CleanupConfig(
+        cleanup_config=CleanupConfig(
             mode="llm",
             batch_size=1,
             max_completion_tokens=512,
@@ -291,11 +298,11 @@ async def test_generate_docsite_dedupes_duplicate_nav_slugs(tmp_path: Path) -> N
     provider = _DuplicateNavProvider()
     llm_manager = _FakeLLMManager(provider)
 
-    await docsite.generate_docsite(
+    await generate_docsite(
         input_dir=input_dir,
         output_dir=output_dir,
         llm_manager=llm_manager,  # type: ignore[arg-type]
-        cleanup_config=docsite.CleanupConfig(
+        cleanup_config=CleanupConfig(
             mode="llm",
             batch_size=1,
             max_completion_tokens=512,

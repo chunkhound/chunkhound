@@ -6,8 +6,16 @@ from pathlib import Path
 
 from chunkhound.autodoc.cleanup import _cleanup_with_llm, _minimal_cleanup
 from chunkhound.autodoc.ia import _synthesize_homepage_overview, _synthesize_site_ia
-from chunkhound.autodoc.index_loader import find_index_file, load_topics, parse_index_file
-from chunkhound.autodoc.markdown_utils import _default_site_title, _extract_description, _slugify_title
+from chunkhound.autodoc.index_loader import (
+    find_index_file,
+    load_topics,
+    parse_index_file,
+)
+from chunkhound.autodoc.markdown_utils import (
+    _default_site_title,
+    _extract_description,
+    _slugify_title,
+)
 from chunkhound.autodoc.models import (
     CleanupConfig,
     CodeMapperTopic,
@@ -23,8 +31,8 @@ from chunkhound.autodoc.references import (
     extract_sources_block,
     strip_references_section,
 )
-from chunkhound.autodoc.taint import _normalize_taint
 from chunkhound.autodoc.site_writer import write_astro_site
+from chunkhound.autodoc.taint import _normalize_taint
 from chunkhound.llm_manager import LLMManager
 
 
@@ -153,16 +161,18 @@ async def generate_docsite(
     homepage_overview: str | None = None
     if llm_cleanup_active:
         try:
+            assert llm_manager is not None
+            provider = llm_manager.get_synthesis_provider()
             homepage_overview = await _synthesize_homepage_overview(
                 pages=pages,
-                provider=llm_manager.get_synthesis_provider(),
+                provider=provider,
                 taint=cleanup_config.taint,
                 log_info=log_info,
                 log_warning=log_warning,
             )
             nav_groups, glossary_terms = await _synthesize_site_ia(
                 pages=pages,
-                provider=llm_manager.get_synthesis_provider(),
+                provider=provider,
                 taint=cleanup_config.taint,
                 log_info=log_info,
                 log_warning=log_warning,

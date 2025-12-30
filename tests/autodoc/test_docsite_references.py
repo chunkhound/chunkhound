@@ -2,7 +2,14 @@ from pathlib import Path
 
 import pytest
 
-from chunkhound.autodoc import docsite
+from chunkhound.autodoc.generator import cleanup_topics
+from chunkhound.autodoc.models import CleanupConfig, CodeMapperTopic
+from chunkhound.autodoc.references import (
+    _apply_reference_normalization,
+    extract_sources_block,
+    flatten_sources_block,
+    strip_references_section,
+)
 
 
 def _sources_block() -> str:
@@ -52,7 +59,7 @@ def _topic_body_with_sources_and_citations() -> str:
 
 def test_extract_sources_block_returns_section_body() -> None:
     markdown = _topic_body_with_sources()
-    block = docsite.extract_sources_block(markdown)
+    block = extract_sources_block(markdown)
 
     assert block is not None
     assert block.startswith("## Sources")
@@ -80,7 +87,7 @@ def test_strip_references_section_removes_sources_and_references() -> None:
         ]
     )
 
-    stripped = docsite.strip_references_section(markdown)
+    stripped = strip_references_section(markdown)
 
     assert "## Sources" not in stripped
     assert "## References" not in stripped
@@ -104,7 +111,7 @@ def test_strip_references_section_removes_separator_before_sources_footer() -> N
         ]
     )
 
-    stripped = docsite.strip_references_section(markdown)
+    stripped = strip_references_section(markdown)
 
     assert "## Sources" not in stripped
     assert stripped.splitlines()[-1] == "Details text."
@@ -112,7 +119,7 @@ def test_strip_references_section_removes_separator_before_sources_footer() -> N
 
 
 def test_flatten_sources_block_builds_list_with_paths_and_chunks() -> None:
-    flat = docsite.flatten_sources_block(_sources_block())
+    flat = flatten_sources_block(_sources_block())
 
     assert flat == [
         "- [1] `repo/src/main.py` (2 chunks: L1-10, L20-30)",
@@ -122,7 +129,7 @@ def test_flatten_sources_block_builds_list_with_paths_and_chunks() -> None:
 
 def test_build_references_section_omits_when_missing_sources() -> None:
     body = "\n".join(["## Overview", "", "Overview text."])
-    normalized = docsite._apply_reference_normalization(body, None)
+    normalized = _apply_reference_normalization(body, None)
 
     assert "## References" not in normalized
 
@@ -130,7 +137,7 @@ def test_build_references_section_omits_when_missing_sources() -> None:
 @pytest.mark.asyncio
 async def test_cleanup_topics_injects_flattened_references() -> None:
     body = _topic_body_with_sources()
-    topic = docsite.CodeMapperTopic(
+    topic = CodeMapperTopic(
         order=1,
         title="Example",
         source_path=Path("example.md"),
@@ -138,10 +145,10 @@ async def test_cleanup_topics_injects_flattened_references() -> None:
         body_markdown=body,
     )
 
-    pages = await docsite.cleanup_topics(
+    pages = await cleanup_topics(
         topics=[topic],
         llm_manager=None,
-        config=docsite.CleanupConfig(
+        config=CleanupConfig(
             mode="minimal",
             batch_size=1,
             max_completion_tokens=512,
@@ -157,9 +164,9 @@ async def test_cleanup_topics_injects_flattened_references() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cleanup_topics_filters_uncited_references_when_citations_present() -> None:
+async def test_cleanup_topics_filters_uncited_refs_with_citations() -> None:
     body = _topic_body_with_sources_and_citations()
-    topic = docsite.CodeMapperTopic(
+    topic = CodeMapperTopic(
         order=1,
         title="Example",
         source_path=Path("example.md"),
@@ -167,10 +174,10 @@ async def test_cleanup_topics_filters_uncited_references_when_citations_present(
         body_markdown=body,
     )
 
-    pages = await docsite.cleanup_topics(
+    pages = await cleanup_topics(
         topics=[topic],
         llm_manager=None,
-        config=docsite.CleanupConfig(
+        config=CleanupConfig(
             mode="minimal",
             batch_size=1,
             max_completion_tokens=512,

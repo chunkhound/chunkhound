@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from chunkhound.autodoc.site_writer import write_astro_assets_only
 from chunkhound.autodoc.template_loader import load_bytes, load_text
 
 
@@ -47,9 +48,7 @@ def test_write_astro_assets_only_writes_packaged_favicon_bytes(tmp_path: Path) -
         encoding="utf-8",
     )
 
-    from chunkhound.autodoc import docsite
-
-    docsite.write_astro_assets_only(output_dir=output_dir)
+    write_astro_assets_only(output_dir=output_dir)
 
     assert (output_dir / "public" / "favicon.ico").read_bytes() == load_bytes(
         "public/favicon.ico"

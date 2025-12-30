@@ -3,7 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from chunkhound.autodoc import docsite
+from chunkhound.autodoc.generator import generate_docsite
+from chunkhound.autodoc.models import CleanupConfig
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 
 
@@ -127,11 +128,11 @@ async def test_taint_is_noop_in_minimal_cleanup_mode_even_with_llm_manager(
     provider = _CapturingProvider()
     llm_manager = _FakeLLMManager(provider)
 
-    await docsite.generate_docsite(
+    await generate_docsite(
         input_dir=input_dir,
         output_dir=output_dir,
         llm_manager=llm_manager,  # type: ignore[arg-type]
-        cleanup_config=docsite.CleanupConfig(
+        cleanup_config=CleanupConfig(
             mode="minimal",
             batch_size=1,
             max_completion_tokens=512,
@@ -167,11 +168,11 @@ async def test_taint_influences_llm_cleanup_and_global_ia_prompts(
     provider = _CapturingProvider()
     llm_manager = _FakeLLMManager(provider)
 
-    await docsite.generate_docsite(
+    await generate_docsite(
         input_dir=input_dir,
         output_dir=output_dir,
         llm_manager=llm_manager,  # type: ignore[arg-type]
-        cleanup_config=docsite.CleanupConfig(
+        cleanup_config=CleanupConfig(
             mode="llm",
             batch_size=1,
             max_completion_tokens=512,
@@ -210,11 +211,11 @@ async def test_end_user_taint_synthesizes_homepage_overview(
     provider = _CapturingProvider()
     llm_manager = _FakeLLMManager(provider)
 
-    await docsite.generate_docsite(
+    await generate_docsite(
         input_dir=input_dir,
         output_dir=output_dir,
         llm_manager=llm_manager,  # type: ignore[arg-type]
-        cleanup_config=docsite.CleanupConfig(
+        cleanup_config=CleanupConfig(
             mode="llm",
             batch_size=1,
             max_completion_tokens=512,

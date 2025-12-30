@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from chunkhound.autodoc import docsite
+from chunkhound.autodoc.cleanup import _cleanup_with_llm
+from chunkhound.autodoc.models import CleanupConfig, CodeMapperTopic
 from chunkhound.interfaces.llm_provider import LLMResponse
 
 
@@ -13,7 +14,10 @@ class _MismatchProvider:
         self.calls: list[list[str]] = []
 
     async def batch_complete(  # type: ignore[no-untyped-def]
-        self, prompts: list[str], system: str | None = None, max_completion_tokens: int = 4096
+        self,
+        prompts: list[str],
+        system: str | None = None,
+        max_completion_tokens: int = 4096,
     ) -> list[LLMResponse]:
         self.calls.append(list(prompts))
         if len(prompts) == 2 and len(self.calls) == 1:
@@ -40,14 +44,14 @@ class _MismatchProvider:
 @pytest.mark.asyncio
 async def test_cleanup_with_llm_retries_batch_size_one_on_count_mismatch() -> None:
     topics = [
-        docsite.CodeMapperTopic(
+        CodeMapperTopic(
             order=1,
             title="Topic A",
             source_path=Path("a.md"),
             raw_markdown="## Overview\nA",
             body_markdown="## Overview\nA",
         ),
-        docsite.CodeMapperTopic(
+        CodeMapperTopic(
             order=2,
             title="Topic B",
             source_path=Path("b.md"),
@@ -58,10 +62,10 @@ async def test_cleanup_with_llm_retries_batch_size_one_on_count_mismatch() -> No
     provider = _MismatchProvider()
     warnings: list[str] = []
 
-    cleaned = await docsite._cleanup_with_llm(
+    cleaned = await _cleanup_with_llm(
         topics=topics,
         provider=provider,  # type: ignore[arg-type]
-        config=docsite.CleanupConfig(
+        config=CleanupConfig(
             mode="llm",
             batch_size=2,
             max_completion_tokens=512,
@@ -82,7 +86,10 @@ class _ExceptionProvider:
         self.calls: list[list[str]] = []
 
     async def batch_complete(  # type: ignore[no-untyped-def]
-        self, prompts: list[str], system: str | None = None, max_completion_tokens: int = 4096
+        self,
+        prompts: list[str],
+        system: str | None = None,
+        max_completion_tokens: int = 4096,
     ) -> list[LLMResponse]:
         self.calls.append(list(prompts))
         if len(prompts) > 1:
@@ -100,14 +107,14 @@ class _ExceptionProvider:
 @pytest.mark.asyncio
 async def test_cleanup_with_llm_falls_back_per_topic_when_retries_fail() -> None:
     topics = [
-        docsite.CodeMapperTopic(
+        CodeMapperTopic(
             order=1,
             title="Topic A",
             source_path=Path("a.md"),
             raw_markdown="## Overview\nA",
             body_markdown="## Overview\nA",
         ),
-        docsite.CodeMapperTopic(
+        CodeMapperTopic(
             order=2,
             title="Topic B",
             source_path=Path("b.md"),
@@ -117,10 +124,10 @@ async def test_cleanup_with_llm_falls_back_per_topic_when_retries_fail() -> None
     ]
     provider = _ExceptionProvider()
 
-    cleaned = await docsite._cleanup_with_llm(
+    cleaned = await _cleanup_with_llm(
         topics=topics,
         provider=provider,  # type: ignore[arg-type]
-        config=docsite.CleanupConfig(
+        config=CleanupConfig(
             mode="llm",
             batch_size=2,
             max_completion_tokens=512,

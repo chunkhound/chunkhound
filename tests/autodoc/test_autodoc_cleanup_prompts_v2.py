@@ -1,8 +1,9 @@
-from chunkhound.autodoc import cleanup, docsite
+from chunkhound.autodoc import cleanup
+from chunkhound.autodoc.cleanup import _build_cleanup_prompt
 
 
 def test_build_cleanup_prompt_v2_includes_schema_and_injects_inputs() -> None:
-    prompt = docsite._build_cleanup_prompt(
+    prompt = _build_cleanup_prompt(
         title="My Title",
         body="## Overview\nBody line.",
     )
@@ -18,7 +19,7 @@ def test_build_cleanup_prompt_v2_includes_schema_and_injects_inputs() -> None:
 
 
 def test_build_cleanup_prompt_end_user_uses_end_user_template() -> None:
-    prompt = docsite._build_cleanup_prompt(
+    prompt = _build_cleanup_prompt(
         title="My Title",
         body="## Overview\nBody line.",
         taint="end-user",
@@ -35,7 +36,7 @@ def test_cleanup_prompt_loading_fails_fast_when_prompt_files_missing(
 ) -> None:
     monkeypatch.setattr(cleanup, "_PROMPTS_DIR", tmp_path)
     try:
-        docsite._build_cleanup_prompt(
+        _build_cleanup_prompt(
             title="My Title",
             body="## Overview\nBody line.",
         )

@@ -24,8 +24,10 @@ def _taint_cleanup_system_guidance(taint: str) -> str:
         return "\n".join(
             [
                 "Audience: technical (software engineers).",
-                "- Prefer precise terminology and concrete implementation details present in the input.",
-                "- When helpful, call out key modules/classes/functions and their responsibilities.",
+                "- Prefer precise terminology and concrete implementation details "
+                "present in the input.",
+                "- When helpful, call out key modules/classes/functions and their "
+                "responsibilities.",
                 "- Avoid “product docs” tone; keep the writing crisp and technical.",
             ]
         )
@@ -33,9 +35,12 @@ def _taint_cleanup_system_guidance(taint: str) -> str:
         return "\n".join(
             [
                 "Audience: end-user (less technical).",
-                "- Prefer plain-language descriptions of how to set up, configure, and use the project when the input contains that information.",
-                "- Keep code identifiers, but explain them in plain language and focus on user goals and workflows.",
-                "- De-emphasize internal implementation details unless they are central in the input.",
+                "- Prefer plain-language descriptions of how to set up, configure, "
+                "and use the project when the input contains that information.",
+                "- Keep code identifiers, but explain them in plain language and "
+                "focus on user goals and workflows.",
+                "- De-emphasize internal implementation details unless they are "
+                "central in the input.",
             ]
         )
     return ""

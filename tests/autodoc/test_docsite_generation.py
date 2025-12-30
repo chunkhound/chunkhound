@@ -1,7 +1,22 @@
 import json
 from pathlib import Path
 
-from chunkhound.autodoc import docsite
+from chunkhound.autodoc.cleanup import _minimal_cleanup
+from chunkhound.autodoc.index_loader import find_index_file
+from chunkhound.autodoc.models import (
+    CodeMapperIndex,
+    CodeMapperTopic,
+    DocsitePage,
+    DocsiteSite,
+)
+from chunkhound.autodoc.references import flatten_sources_block
+from chunkhound.autodoc.site_writer import (
+    _render_astro_config,
+    _render_doc_layout,
+    _render_index_page,
+    _render_search_index,
+    write_astro_site,
+)
 
 
 def test_write_astro_site_removes_stale_topics(tmp_path: Path) -> None:
@@ -11,7 +26,7 @@ def test_write_astro_site_removes_stale_topics(tmp_path: Path) -> None:
     stale_path = topics_dir / "old-topic.md"
     stale_path.write_text("stale", encoding="utf-8")
 
-    site = docsite.DocsiteSite(
+    site = DocsiteSite(
         title="Test Site",
         tagline="Tagline",
         scope_label="/",
@@ -20,7 +35,7 @@ def test_write_astro_site_removes_stale_topics(tmp_path: Path) -> None:
         topic_count=1,
     )
     pages = [
-        docsite.DocsitePage(
+        DocsitePage(
             order=1,
             title="New Topic",
             slug="new-topic",
@@ -28,14 +43,14 @@ def test_write_astro_site_removes_stale_topics(tmp_path: Path) -> None:
             body_markdown="Body",
         )
     ]
-    index = docsite.CodeMapperIndex(
+    index = CodeMapperIndex(
         title="Index",
         scope_label="/",
         metadata_block=None,
         topics=[],
     )
 
-    docsite.write_astro_site(
+    write_astro_site(
         output_dir=output_dir,
         site=site,
         pages=pages,
@@ -57,7 +72,7 @@ def test_find_index_file_warns_on_multiple_candidates(tmp_path: Path) -> None:
     def log_warning(message: str) -> None:
         warnings.append(message)
 
-    selected = docsite.find_index_file(tmp_path, log_warning=log_warning)
+    selected = find_index_file(tmp_path, log_warning=log_warning)
 
     assert selected == code_mapper
     assert warnings
@@ -65,7 +80,7 @@ def test_find_index_file_warns_on_multiple_candidates(tmp_path: Path) -> None:
 
 
 def test_render_astro_config_disables_dev_toolbar() -> None:
-    config = docsite._render_astro_config()
+    config = _render_astro_config()
 
     assert "devToolbar" in config
     assert "enabled: false" in config
@@ -78,15 +93,15 @@ def test_render_index_page_wraps_generation_details() -> None:
             "  generated_at: 2025-01-01T00:00:00Z",
         ]
     )
-    index = docsite.CodeMapperIndex(
+    index = CodeMapperIndex(
         title="AutoDoc Topics",
         scope_label="/",
         metadata_block=metadata_block,
         topics=[],
     )
 
-    output = docsite._render_index_page(
-        site=docsite.DocsiteSite(
+    output = _render_index_page(
+        site=DocsiteSite(
             title="Test",
             tagline="Tag",
             scope_label="/",
@@ -112,13 +127,13 @@ def test_flatten_sources_block_wraps_paths_in_code() -> None:
         ]
     )
 
-    flattened = docsite.flatten_sources_block(sources_block)
+    flattened = flatten_sources_block(sources_block)
 
     assert flattened == ["- [1] `repo/__init__.py` (1 chunks: L1-2)"]
 
 
 def test_render_doc_layout_includes_search_and_toc() -> None:
-    layout = docsite._render_doc_layout()
+    layout = _render_doc_layout()
 
     assert "data-search-input" in layout
     assert "data-nav-filter" in layout
@@ -131,7 +146,7 @@ def test_render_doc_layout_includes_search_and_toc() -> None:
 
 def test_render_search_index_includes_body_text() -> None:
     pages = [
-        docsite.DocsitePage(
+        DocsitePage(
             order=1,
             title="Topic",
             slug="topic",
@@ -140,14 +155,14 @@ def test_render_search_index_includes_body_text() -> None:
         )
     ]
 
-    payload = json.loads(docsite._render_search_index(pages))
+    payload = json.loads(_render_search_index(pages))
 
     assert payload[0]["title"] == "Topic"
     assert "Hello world" in payload[0]["body"]
 
 
 def test_minimal_cleanup_inserts_overview_heading_when_missing() -> None:
-    topic = docsite.CodeMapperTopic(
+    topic = CodeMapperTopic(
         order=1,
         title="Topic",
         source_path=Path("topic.md"),
@@ -155,6 +170,6 @@ def test_minimal_cleanup_inserts_overview_heading_when_missing() -> None:
         body_markdown="First paragraph.\n\n- item one\n- item two",
     )
 
-    output = docsite._minimal_cleanup(topic)
+    output = _minimal_cleanup(topic)
 
     assert output.startswith("## Overview")

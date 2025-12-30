@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from typing import TypeVar
 
+T = TypeVar("T")
 
 def _strip_markdown_for_search(markdown: str) -> str:
     text = re.sub(r"```.*?```", " ", markdown, flags=re.DOTALL)
@@ -170,11 +172,11 @@ def _escape_json(value: str) -> str:
     return value.replace("\\", "\\\\").replace('\"', '\\\"')
 
 
-def _chunked(items: Iterable[str], size: int) -> list[list[str]]:
+def _chunked(items: Iterable[T], size: int) -> list[list[T]]:
     if size <= 0:
         return [list(items)]
-    batch: list[str] = []
-    batches: list[list[str]] = []
+    batch: list[T] = []
+    batches: list[list[T]] = []
     for item in items:
         batch.append(item)
         if len(batch) >= size:
@@ -183,4 +185,3 @@ def _chunked(items: Iterable[str], size: int) -> list[list[str]]:
     if batch:
         batches.append(batch)
     return batches
-
