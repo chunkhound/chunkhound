@@ -1,8 +1,81 @@
 """LLM Provider Interface for ChunkHound deep research."""
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
+
+from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T", bound=BaseModel)
+
+
+def _normalize_schema_for_structured_outputs(schema: dict[str, Any]) -> dict[str, Any]:
+    """Recursively normalize a JSON schema for structured outputs.
+
+    Forces 'additionalProperties: false' on all object types in the schema,
+    including nested objects and $defs. This is required by Anthropic's
+    structured outputs API - any other value will cause a 400 error.
+
+    Args:
+        schema: JSON schema dictionary to normalize
+
+    Returns:
+        Normalized schema with additionalProperties: false on all objects
+    """
+    if not isinstance(schema, dict):
+        return schema  # type: ignore[unreachable]  # Defensive guard for runtime
+
+    result = schema.copy()
+
+    # Force additionalProperties: false on all object types
+    # Anthropic's structured outputs API does not support any other value
+    if result.get("type") == "object":
+        existing = result.get("additionalProperties")
+        if existing is not None and existing is not False:
+            logger.warning(
+                "additionalProperties=%r not supported by structured outputs API, "
+                "forcing to false",
+                existing,
+            )
+        result["additionalProperties"] = False
+
+    # Recursively process $defs (Pydantic's way of defining nested models)
+    if "$defs" in result:
+        result["$defs"] = {
+            name: _normalize_schema_for_structured_outputs(def_schema)
+            for name, def_schema in result["$defs"].items()
+        }
+
+    # Recursively process properties
+    if "properties" in result:
+        result["properties"] = {
+            name: _normalize_schema_for_structured_outputs(prop_schema)
+            for name, prop_schema in result["properties"].items()
+        }
+
+    # Process array items
+    if "items" in result:
+        result["items"] = _normalize_schema_for_structured_outputs(result["items"])
+
+    # Process prefixItems (Pydantic tuples generate this)
+    if "prefixItems" in result:
+        result["prefixItems"] = [
+            _normalize_schema_for_structured_outputs(item_schema)
+            for item_schema in result["prefixItems"]
+        ]
+
+    # Process anyOf/oneOf/allOf
+    for key in ("anyOf", "oneOf", "allOf"):
+        if key in result:
+            result[key] = [
+                _normalize_schema_for_structured_outputs(sub_schema)
+                for sub_schema in result[key]
+            ]
+
+    return result
 
 
 @dataclass
@@ -62,8 +135,8 @@ class LLMProvider(ABC):
         """
         Generate a structured JSON completion conforming to the given schema.
 
-        Best practice for GPT-5-Nano and modern LLMs: Use response_format with
-        json_schema and strict: true to guarantee valid, parseable output.
+        Uses native structured outputs with constrained decoding for guaranteed
+        valid, parseable output.
 
         Args:
             prompt: User prompt
@@ -80,6 +153,53 @@ class LLMProvider(ABC):
         raise NotImplementedError(
             f"{self.name} provider does not support structured outputs"
         )
+
+    async def complete_structured_typed(
+        self,
+        prompt: str,
+        response_model: type[T],
+        system: str | None = None,
+        max_completion_tokens: int = 4096,
+    ) -> T:
+        """
+        Generate a typed structured completion using a Pydantic model.
+
+        This is the recommended way to use structured outputs - provides type
+        safety, IDE autocomplete, and automatic schema generation.
+
+        Automatically normalizes the schema by adding 'additionalProperties: false'
+        to all object types, as required by Anthropic's structured outputs API.
+
+        Args:
+            prompt: User prompt
+            response_model: Pydantic model class defining the response schema
+            system: Optional system message
+            max_completion_tokens: Maximum completion tokens to generate
+
+        Returns:
+            Validated Pydantic model instance
+
+        Raises:
+            NotImplementedError: If provider doesn't support structured outputs
+            ValidationError: If response doesn't match the schema
+        """
+        # Generate JSON schema from Pydantic model
+        schema = response_model.model_json_schema()
+
+        # Normalize schema: recursively add additionalProperties: false to all objects
+        # This is required by Anthropic's structured outputs API for strict validation
+        schema = _normalize_schema_for_structured_outputs(schema)
+
+        # Call the dict-based method
+        result = await self.complete_structured(
+            prompt=prompt,
+            json_schema=schema,
+            system=system,
+            max_completion_tokens=max_completion_tokens,
+        )
+
+        # Validate and return typed model
+        return response_model.model_validate(result)
 
     @abstractmethod
     async def batch_complete(

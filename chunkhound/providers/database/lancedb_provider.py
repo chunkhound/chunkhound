@@ -17,6 +17,7 @@ from chunkhound.core.types.common import ChunkType, Language
 
 # Import existing components that will be used by the provider
 from chunkhound.embeddings import EmbeddingManager
+from chunkhound.providers.database.like_utils import escape_like_pattern
 from chunkhound.providers.database.serial_database_provider import (
     SerialDatabaseProvider,
 )
@@ -130,6 +131,19 @@ def _deserialize_metadata(metadata_json: str | None) -> dict:
     return json.loads(metadata_json) if metadata_json else {}
 
 
+def _escape_like_pattern(value: str) -> str:
+    """Escape SQL LIKE metacharacters for prefix matching.
+
+    Uses backslash as the escape character (paired with ESCAPE '\\').
+    """
+    return escape_like_pattern(value, escape_quotes=True)
+
+
+def _iter_batches(values: list[int], batch_size: int) -> list[list[int]]:
+    """Split a list into fixed-size batches."""
+    return [values[idx : idx + batch_size] for idx in range(0, len(values), batch_size)]
+
+
 class LanceDBProvider(SerialDatabaseProvider):
     """LanceDB implementation using serial executor pattern."""
 
@@ -166,6 +180,57 @@ class LanceDBProvider(SerialDatabaseProvider):
         # Table references
         self._files_table = None
         self._chunks_table = None
+
+    def _build_path_like_clause(self, prefix: str) -> str:
+        escaped = _escape_like_pattern(prefix)
+        like = f"{escaped}%"
+        return f"path LIKE '{like}' ESCAPE '\\\\'"
+
+    def _fetch_file_paths_by_ids(self, file_ids: list[int]) -> dict[int, str]:
+        if not self._files_table or not file_ids:
+            return {}
+
+        unique_ids = sorted({int(fid) for fid in file_ids if fid is not None})
+        if not unique_ids:
+            return {}
+
+        ids_str = ",".join(map(str, unique_ids))
+        try:
+            rows = self._files_table.search().where(f"id IN ({ids_str})").to_list()
+        except Exception as exc:
+            logger.debug(f"Failed to batch fetch file paths: {exc}")
+            return {}
+
+        file_map: dict[int, str] = {}
+        for row in rows:
+            try:
+                fid = int(row.get("id"))
+                path = str(row.get("path") or "")
+            except Exception:
+                continue
+            if path:
+                file_map[fid] = path
+        return file_map
+
+    def _count_chunks_for_file_ids(
+        self, file_ids: list[int], batch_size: int = 1000
+    ) -> int | None:
+        if not self._chunks_table or not file_ids:
+            return 0
+
+        total = 0
+        try:
+            for batch in _iter_batches(file_ids, batch_size):
+                file_ids_str = ",".join(map(str, batch))
+                table = self._chunks_table.to_lance().to_table(
+                    filter=f"file_id IN ({file_ids_str})"
+                )
+                batch_count = int(getattr(table, "num_rows", 0) or len(table))
+                total += batch_count
+            return total
+        except Exception as exc:
+            logger.debug(f"Failed to count chunks with batched filters: {exc}")
+            return None
 
     def _create_connection(self) -> Any:
         """Create and return a LanceDB connection.
@@ -1362,6 +1427,144 @@ class LanceDBProvider(SerialDatabaseProvider):
         """Get all chunks with their metadata including file paths (provider-agnostic)."""
         return self._execute_in_db_thread_sync("get_all_chunks_with_metadata")
 
+    def get_scope_stats(self, scope_prefix: str | None) -> tuple[int, int]:
+        """Return (total_files, total_chunks) under an optional scope prefix.
+
+        Best-effort implementation for LanceDB. This should avoid loading full
+        chunk content when possible, but LanceDB table APIs may vary across
+        versions; callers should treat failures as non-fatal.
+        """
+        return self._execute_in_db_thread_sync("get_scope_stats", scope_prefix)
+
+    def _executor_get_scope_stats(
+        self, conn: Any, state: dict[str, Any], scope_prefix: str | None
+    ) -> tuple[int, int]:
+        if not self._files_table or not self._chunks_table:
+            return 0, 0
+
+        try:
+            if scope_prefix:
+                normalized = scope_prefix.replace("\\", "/")
+                clause = self._build_path_like_clause(normalized)
+                files = self._files_table.search().where(clause).to_list()
+                file_ids: set[int] = set()
+                for row in files:
+                    try:
+                        fid = row.get("id")
+                        if fid is not None:
+                            file_ids.add(int(fid))
+                    except Exception:
+                        continue
+
+                total_files = len(file_ids)
+                if not file_ids:
+                    return 0, 0
+
+                # Slow fallback: scan the chunks table and count rows whose
+                # file_id is in the scoped file_id set.
+                #
+                # This avoids schema changes while still producing correct scoped
+                # chunk totals, but may be memory-heavy for very large databases.
+                total_chunks = 0
+
+                try:
+                    file_ids_list = sorted(file_ids)
+                    batched_total = self._count_chunks_for_file_ids(file_ids_list)
+                    if batched_total is not None:
+                        return total_files, batched_total
+                except Exception:
+                    pass
+
+                # Fallback: scan the chunks table in pages to avoid loading the
+                # entire dataset at once when pagination is supported.
+                try:
+                    chunks_count = int(self._chunks_table.count_rows())
+                except Exception:
+                    chunks_count = 0
+
+                if chunks_count <= 0:
+                    return total_files, 0
+
+                page_size = 10_000
+                file_ids_set = set(file_ids)
+
+                for offset in range(0, chunks_count, page_size):
+                    try:
+                        batch_df = self._chunks_table.to_pandas(
+                            offset=offset, limit=page_size
+                        )
+                    except TypeError:
+                        # LanceDB may not support offset/limit; fall back to a full load.
+                        if offset == 0:
+                            try:
+                                chunks_df = self._chunks_table.to_pandas()
+                            except Exception:
+                                try:
+                                    self._chunks_table.optimize()
+                                    chunks_df = self._chunks_table.to_pandas()
+                                except Exception:
+                                    return total_files, 0
+                            if "file_id" not in chunks_df.columns:
+                                return total_files, 0
+                            try:
+                                total_chunks = int(
+                                    chunks_df["file_id"].isin(list(file_ids_set)).sum()
+                                )
+                            except Exception:
+                                total_chunks = 0
+                        break
+
+                    if "file_id" not in batch_df.columns:
+                        return total_files, 0
+
+                    try:
+                        total_chunks += int(
+                            batch_df["file_id"].isin(list(file_ids_set)).sum()
+                        )
+                    except Exception:
+                        continue
+
+                return total_files, total_chunks
+
+            # Root scope: counts over full tables.
+            total_files = int(self._files_table.count_rows())
+            total_chunks = int(self._chunks_table.count_rows())
+            return total_files, total_chunks
+        except Exception:
+            return 0, 0
+
+    def get_scope_file_paths(self, scope_prefix: str | None) -> list[str]:
+        """Return file paths under an optional scope prefix."""
+        return self._execute_in_db_thread_sync("get_scope_file_paths", scope_prefix)
+
+    def _executor_get_scope_file_paths(
+        self, conn: Any, state: dict[str, Any], scope_prefix: str | None
+    ) -> list[str]:
+        if not self._files_table:
+            return []
+
+        try:
+            if scope_prefix:
+                normalized = scope_prefix.replace("\\", "/")
+                clause = self._build_path_like_clause(normalized)
+                rows = self._files_table.search().where(clause).to_list()
+            else:
+                total = int(self._files_table.count_rows())
+                rows = self._files_table.head(total).to_list()
+        except Exception:
+            return []
+
+        out: list[str] = []
+        for row in rows:
+            try:
+                path = str(row.get("path") or "").replace("\\", "/")
+            except Exception:
+                path = ""
+            if path:
+                out.append(path)
+        out.sort()
+        return out
+
     def _executor_get_all_chunks_with_metadata(
         self, conn: Any, state: dict[str, Any]
     ) -> list[dict[str, Any]]:
@@ -1517,21 +1720,13 @@ class LanceDBProvider(SerialDatabaseProvider):
             paginated_results = results[offset : offset + page_size]
 
             # Format results to match DuckDB output and exclude raw embeddings
+            file_map = self._fetch_file_paths_by_ids(
+                [r.get("file_id") for r in paginated_results if "file_id" in r]
+            )
             formatted_results = []
             for result in paginated_results:
-                # Get file path from files table
-                file_path = ""
-                if self._files_table and "file_id" in result:
-                    try:
-                        file_results = (
-                            self._files_table.search()
-                            .where(f"id = {result['file_id']}")
-                            .to_list()
-                        )
-                        if file_results:
-                            file_path = file_results[0].get("path", "")
-                    except Exception:
-                        pass
+                # Get file path from cached batch lookup
+                file_path = file_map.get(result.get("file_id"), "")
 
                 # Convert _distance to similarity (1 - distance for cosine)
                 similarity = (
@@ -1679,7 +1874,7 @@ class LanceDBProvider(SerialDatabaseProvider):
             results = query.to_list()
 
             # PHASE 3: Format results with file paths and apply threshold
-            formatted_results = []
+            filtered_results: list[tuple[dict[str, Any], float]] = []
             for result in results:
                 # Convert distance to similarity score (cosine: similarity = 1 - distance)
                 distance = result.get("_distance", 0.0)
@@ -1688,22 +1883,17 @@ class LanceDBProvider(SerialDatabaseProvider):
                 # Apply threshold filter if specified
                 if threshold is not None and similarity < threshold:
                     continue
+                filtered_results.append((result, similarity))
+                if len(filtered_results) >= limit:
+                    break
 
-                # Get file path from files table (reuse pattern from search_semantic)
-                file_path = ""
-                if self._files_table and "file_id" in result:
-                    try:
-                        file_results = (
-                            self._files_table.search()
-                            .where(f"id = {result['file_id']}")
-                            .limit(1)
-                            .to_list()
-                        )
-                        if file_results:
-                            file_path = file_results[0].get("path", "")
-                    except Exception as e:
-                        logger.debug(f"Failed to fetch file path: {e}")
+            file_map = self._fetch_file_paths_by_ids(
+                [r.get("file_id") for r, _ in filtered_results if "file_id" in r]
+            )
 
+            formatted_results = []
+            for result, similarity in filtered_results:
+                file_path = file_map.get(result.get("file_id"), "")
                 formatted_results.append({
                     "chunk_id": result["id"],
                     "name": result.get("name", ""),
@@ -1716,10 +1906,6 @@ class LanceDBProvider(SerialDatabaseProvider):
                     "score": similarity,  # Match DuckDB convention
                     "metadata": _deserialize_metadata(result.get("metadata")),
                 })
-
-                # Stop once we have enough results that meet the threshold
-                if len(formatted_results) >= limit:
-                    break
 
             return formatted_results
 
@@ -1756,10 +1942,9 @@ class LanceDBProvider(SerialDatabaseProvider):
             # Apply path filter if provided
             if path_filter:
                 # Get file IDs matching path filter
-                escaped_path = path_filter.replace("'", "''")
-                file_results = self._files_table.search().where(
-                    f"path LIKE '{escaped_path}%'"
-                ).to_list()
+                normalized_path = path_filter.replace("\\", "/")
+                clause = self._build_path_like_clause(normalized_path)
+                file_results = self._files_table.search().where(clause).to_list()
                 valid_file_ids = {r["id"] for r in file_results}
                 results = [r for r in results if r["file_id"] in valid_file_ids]
 
@@ -1769,15 +1954,12 @@ class LanceDBProvider(SerialDatabaseProvider):
             paginated = results[offset : offset + page_size]
 
             # Format results with file paths
+            file_map = self._fetch_file_paths_by_ids(
+                [r.get("file_id") for r in paginated if "file_id" in r]
+            )
             formatted = []
             for result in paginated:
-                file_path = ""
-                if self._files_table:
-                    file_results = self._files_table.search().where(
-                        f"id = {result['file_id']}"
-                    ).to_list()
-                    if file_results:
-                        file_path = file_results[0].get("path", "")
+                file_path = file_map.get(result.get("file_id"), "")
 
                 formatted.append({
                     "chunk_id": result["id"],
@@ -1831,9 +2013,11 @@ class LanceDBProvider(SerialDatabaseProvider):
 
         try:
             # Use LanceDB's full-text search capabilities
+            escaped_query = _escape_like_pattern(query)
+            where_clause = f"content LIKE '%{escaped_query}%' ESCAPE '\\\\'"
             results = (
                 self._chunks_table.search()
-                .where(f"content LIKE '%{query}%'")
+                .where(where_clause)
                 .limit(page_size + offset)
                 .to_list()
             )
@@ -1842,21 +2026,13 @@ class LanceDBProvider(SerialDatabaseProvider):
             paginated_results = results[offset : offset + page_size]
 
             # Format results to match DuckDB output and exclude raw embeddings
+            file_map = self._fetch_file_paths_by_ids(
+                [r.get("file_id") for r in paginated_results if "file_id" in r]
+            )
             formatted_results = []
             for result in paginated_results:
-                # Get file path from files table
-                file_path = ""
-                if self._files_table and "file_id" in result:
-                    try:
-                        file_results = (
-                            self._files_table.search()
-                            .where(f"id = {result['file_id']}")
-                            .to_list()
-                        )
-                        if file_results:
-                            file_path = file_results[0].get("path", "")
-                    except Exception:
-                        pass
+                # Get file path from cached batch lookup
+                file_path = file_map.get(result.get("file_id"), "")
 
                 # Format the result to match DuckDB's output (no similarity for fuzzy search)
                 formatted_result = {

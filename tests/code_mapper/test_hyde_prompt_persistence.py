@@ -1,0 +1,64 @@
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from chunkhound.code_mapper import pipeline as code_mapper_pipeline
+
+
+@pytest.mark.asyncio
+async def test_hyde_prompt_persistence_is_opt_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_collect_scope_files(*_: Any, **__: Any) -> list[str]:
+        return []
+
+    def fake_build_hyde_scope_prompt(*_: Any, **__: Any) -> str:
+        return "scope prompt"
+
+    async def fake_run_hyde_only_query(*_: Any, **__: Any) -> tuple[str, bool]:
+        return "1. Example\n", True
+
+    monkeypatch.setattr(
+        code_mapper_pipeline, "collect_scope_files", fake_collect_scope_files
+    )
+    monkeypatch.setattr(
+        code_mapper_pipeline, "build_hyde_scope_prompt", fake_build_hyde_scope_prompt
+    )
+    monkeypatch.setattr(
+        code_mapper_pipeline, "run_hyde_only_query", fake_run_hyde_only_query
+    )
+
+    scope_label = "scope"
+    prompt_path = tmp_path / f"hyde_scope_prompt_{scope_label}.md"
+
+    await code_mapper_pipeline._run_code_mapper_overview_hyde(
+        llm_manager=None,
+        target_dir=tmp_path,
+        scope_path=tmp_path,
+        scope_label=scope_label,
+        max_points=1,
+        comprehensiveness="minimal",
+        out_dir=tmp_path,
+        assembly_provider=None,
+        indexing_cfg=None,
+    )
+
+    assert not prompt_path.exists()
+
+    monkeypatch.setenv("CH_CODE_MAPPER_WRITE_HYDE_PROMPT", "1")
+
+    await code_mapper_pipeline._run_code_mapper_overview_hyde(
+        llm_manager=None,
+        target_dir=tmp_path,
+        scope_path=tmp_path,
+        scope_label=scope_label,
+        max_points=1,
+        comprehensiveness="minimal",
+        out_dir=tmp_path,
+        assembly_provider=None,
+        indexing_cfg=None,
+    )
+
+    assert prompt_path.exists()
+    assert "scope prompt" in prompt_path.read_text(encoding="utf-8")

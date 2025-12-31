@@ -6,10 +6,11 @@ from loguru import logger
 
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.providers.llm.anthropic_llm_provider import AnthropicLLMProvider
-from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 from chunkhound.providers.llm.claude_code_cli_provider import ClaudeCodeCLIProvider
-from chunkhound.providers.llm.openai_llm_provider import OpenAILLMProvider
+from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 from chunkhound.providers.llm.gemini_llm_provider import GeminiLLMProvider
+from chunkhound.providers.llm.openai_llm_provider import OpenAILLMProvider
+from chunkhound.providers.llm.opencode_cli_provider import OpenCodeCLIProvider
 
 
 class LLMManager:
@@ -27,6 +28,7 @@ class LLMManager:
         "claude-code-cli": ClaudeCodeCLIProvider,
         "codex-cli": CodexCLIProvider,
         "gemini": GeminiLLMProvider,
+        "opencode-cli": OpenCodeCLIProvider,
     }
 
     def __init__(
@@ -121,6 +123,15 @@ class LLMManager:
         except Exception as e:
             logger.error(f"Failed to initialize LLM provider {provider_name}: {e}")
             raise
+
+    def create_provider_for_config(self, config: dict[str, Any]) -> LLMProvider:
+        """Public factory for constructing an LLM provider from a config dict.
+
+        This wraps the internal _create_provider helper so that callers outside
+        this module (for example, agent-doc assembly specialization) do not
+        need to rely on private APIs or provider-specific wiring details.
+        """
+        return self._create_provider(config)
 
     def _initialize_utility_provider(self) -> None:
         """Initialize the utility LLM provider."""

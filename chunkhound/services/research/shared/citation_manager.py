@@ -386,9 +386,7 @@ class CitationManager:
                         if len(ranges) <= 3:
                             range_str = ", ".join(ranges)
                         else:
-                            range_str = (
-                                f"{', '.join(ranges[:3])}, +{len(ranges) - 3} more"
-                            )
+                            range_str = f"{', '.join(ranges[:3])}, +{len(ranges) - 3} more"
 
                         line += f" ({chunk_count} chunks: {range_str})"
                     else:

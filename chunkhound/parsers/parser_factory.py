@@ -43,6 +43,7 @@ from chunkhound.parsers.mappings import (
     PHPMapping,
     PythonMapping,
     RustMapping,
+    SvelteMapping,
     SwiftMapping,
     TextMapping,
     TomlMapping,
@@ -431,6 +432,11 @@ class LanguageConfig:
             lang_func = self.tree_sitter_module.language_tsx
             result = lang_func() if callable(lang_func) else lang_func
             return self._handle_language_result(result)
+        elif self.language_name in ["vue", "svelte"]:
+            # Vue and Svelte use TypeScript parser for script sections
+            lang_func = self.tree_sitter_module.language_typescript
+            result = lang_func() if callable(lang_func) else lang_func
+            return self._handle_language_result(result)
         elif self.language_name == "javascript" and hasattr(
             self.tree_sitter_module, "language_javascript"
         ):
@@ -490,6 +496,9 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.VUE: LanguageConfig(
         ts_typescript, VueMapping, TYPESCRIPT_AVAILABLE, "vue"
     ),  # Vue uses TypeScript parser for script sections
+    Language.SVELTE: LanguageConfig(
+        ts_typescript, SvelteMapping, TYPESCRIPT_AVAILABLE, "svelte"
+    ),  # Svelte uses TypeScript parser for script sections
     Language.JSON: LanguageConfig(ts_json, JsonMapping, JSON_AVAILABLE, "json"),
     Language.YAML: LanguageConfig(ts_yaml, YamlMapping, YAML_AVAILABLE, "yaml"),
     Language.TOML: LanguageConfig(ts_toml, TomlMapping, TOML_AVAILABLE, "toml"),
@@ -579,6 +588,7 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     ".swift": Language.SWIFT,
     ".swiftinterface": Language.SWIFT,
     ".vue": Language.VUE,
+    ".svelte": Language.SVELTE,
     # Config & Data
     ".json": Language.JSON,
     ".yaml": Language.YAML,
@@ -650,6 +660,12 @@ class ParserFactory:
             from chunkhound.parsers.vue_parser import VueParser
 
             return VueParser(cast_config)
+
+        # Special case: Svelte uses custom parser
+        if language == Language.SVELTE:
+            from chunkhound.parsers.svelte_parser import SvelteParser
+
+            return SvelteParser(cast_config)
 
         # Use cache to avoid recreating parsers
         cache_key = self._cache_key(language)

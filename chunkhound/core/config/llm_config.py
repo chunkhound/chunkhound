@@ -51,29 +51,38 @@ class LLMConfig(BaseSettings):
         "codex-cli",
         "gemini",
         "anthropic",
+        "opencode-cli",
     ] = Field(
         default="openai",
         description="Default LLM provider for both roles (utility, synthesis)",
     )
 
     # Optional per-role overrides (utility vs synthesis)
-    utility_provider: Literal[
-        "openai",
-        "ollama",
-        "claude-code-cli",
-        "codex-cli",
-        "anthropic",
-        "gemini",
-    ] | None = Field(default=None, description="Override provider for utility ops")
+    utility_provider: (
+        Literal[
+            "openai",
+            "ollama",
+            "claude-code-cli",
+            "codex-cli",
+            "anthropic",
+            "gemini",
+            "opencode-cli",
+        ]
+        | None
+    ) = Field(default=None, description="Override provider for utility ops")
 
-    synthesis_provider: Literal[
-        "openai",
-        "ollama",
-        "claude-code-cli",
-        "codex-cli",
-        "anthropic",
-        "gemini",
-    ] | None = Field(default=None, description="Override provider for synthesis ops")
+    synthesis_provider: (
+        Literal[
+            "openai",
+            "ollama",
+            "claude-code-cli",
+            "codex-cli",
+            "anthropic",
+            "gemini",
+            "opencode-cli",
+        ]
+        | None
+    ) = Field(default=None, description="Override provider for synthesis ops")
 
     # Model Configuration (dual-model architecture)
     utility_model: str = Field(
@@ -86,21 +95,57 @@ class LLMConfig(BaseSettings):
         description="Model for final synthesis (large context analysis)",
     )
 
-    codex_reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = Field(
+    codex_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = Field(
         default=None,
         description="Default Codex CLI reasoning effort (Responses API thinking level)",
     )
     codex_reasoning_effort_utility: (
-        Literal["minimal", "low", "medium", "high"] | None
+        Literal["minimal", "low", "medium", "high", "xhigh"] | None
     ) = Field(
         default=None,
         description="Codex CLI reasoning effort override for utility-stage operations",
     )
     codex_reasoning_effort_synthesis: (
-        Literal["minimal", "low", "medium", "high"] | None
+        Literal["minimal", "low", "medium", "high", "xhigh"] | None
     ) = Field(
         default=None,
         description="Codex CLI reasoning effort override for synthesis-stage operations",
+    )
+
+    assembly_provider: Literal[
+        "openai",
+        "ollama",
+        "claude-code-cli",
+        "codex-cli",
+    ] | None = Field(
+        default=None,
+        description=(
+            "Override provider for agent-doc HyDE planning (points-of-interest overview). "
+            "Does not affect per-point deep research or the final merge."
+        ),
+    )
+
+    assembly_model: str | None = Field(
+        default=None,
+        description=(
+            "Override model for agent-doc HyDE planning (points-of-interest overview). "
+            "Does not affect per-point deep research or the final merge."
+        ),
+    )
+
+    # Backwards-compatible alias for assembly_model used in some configs.
+    assembly_synthesis_model: str | None = Field(
+        default=None,
+        description="Alias for assembly_model used by some configurations.",
+    )
+
+    assembly_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = Field(
+        default=None,
+        description=(
+            "Codex/OpenAI reasoning effort override for agent-doc HyDE planning "
+            "(points-of-interest overview). Does not affect per-point deep research "
+            "or the final merge."
+        ),
     )
 
     # Anthropic Extended Thinking Configuration
@@ -195,13 +240,18 @@ class LLMConfig(BaseSettings):
         "codex_reasoning_effort",
         "codex_reasoning_effort_utility",
         "codex_reasoning_effort_synthesis",
+        "assembly_reasoning_effort",
         mode="before",
     )
     def normalize_codex_effort(cls, v: str | None) -> str | None:  # noqa: N805
+        """Normalize Codex effort strings."""
         if v is None:
             return v
         if isinstance(v, str):
             return v.strip().lower()
+        # This branch is technically reachable if v is not None and not a str
+        # but pydantic should prevent that based on the type hint.
+        # However, for type safety we return v as is.
         return v
 
     def get_provider_configs(self) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -218,7 +268,7 @@ class LLMConfig(BaseSettings):
         resolved_utility_provider = self.utility_provider or self.provider
         resolved_synthesis_provider = self.synthesis_provider or self.provider
 
-        base_config = {
+        base_config: dict[str, Any] = {
             "timeout": self.timeout,
             "max_retries": self.max_retries,
         }
@@ -407,37 +457,61 @@ class LLMConfig(BaseSettings):
 
         parser.add_argument(
             "--llm-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic", "gemini"],
+            choices=[
+                "openai",
+                "ollama",
+                "claude-code-cli",
+                "codex-cli",
+                "anthropic",
+                "gemini",
+                "opencode-cli",
+            ],
             help="Default LLM provider for both roles",
         )
 
         parser.add_argument(
             "--llm-utility-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic", "gemini"],
+            choices=[
+                "openai",
+                "ollama",
+                "claude-code-cli",
+                "codex-cli",
+                "anthropic",
+                "gemini",
+                "opencode-cli",
+            ],
             help="Override LLM provider for utility operations",
         )
 
         parser.add_argument(
             "--llm-synthesis-provider",
-            choices=["openai", "ollama", "claude-code-cli", "codex-cli", "anthropic", "gemini"],
+            choices=[
+                "openai",
+                "ollama",
+                "claude-code-cli",
+                "codex-cli",
+                "anthropic",
+                "gemini",
+                "opencode-cli",
+            ],
             help="Override LLM provider for synthesis operations",
         )
 
         parser.add_argument(
             "--llm-codex-reasoning-effort",
-            choices=["minimal", "low", "medium", "high"],
+            choices=["minimal", "low", "medium", "high", "xhigh"],
             help="Codex CLI reasoning effort (thinking depth) when using codex-cli provider",
         )
 
         parser.add_argument(
             "--llm-codex-reasoning-effort-utility",
-            choices=["minimal", "low", "medium", "high"],
+            choices=["minimal", "low", "medium", "high", "xhigh"],
             help="Utility-stage Codex reasoning effort override",
         )
 
         parser.add_argument(
             "--llm-codex-reasoning-effort-synthesis",
-            choices=["minimal", "low", "medium", "high"],
+            choices=["minimal", "low", "medium", "high", "xhigh"],
             help="Synthesis-stage Codex reasoning effort override",
         )
 

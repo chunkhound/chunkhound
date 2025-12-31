@@ -193,6 +193,16 @@ def _build_language_sample_source(language: Language, token: str) -> str:
             "</script>\n"
         )
 
+    # Svelte single-file component
+    if language == Language.SVELTE:
+        return (
+            "<script>\n"
+            f"  let marker = '{token}';\n"
+            "  // Displays an evaluation marker used in QA examples.\n"
+            "</script>\n"
+            "<div>Evaluation marker: {marker}</div>\n"
+        )
+
     # Markdown-like text for PDF is handled separately as bytes.
 
     # Groovy style
@@ -606,6 +616,8 @@ def build_semantic_query(language: Language) -> str:
         return "infrastructure configuration resource that includes an evaluation marker"
     if language == Language.VUE:
         return "single-file component that renders an evaluation marker in the template"
+    if language == Language.SVELTE:
+        return "single-file component that displays an evaluation marker in the template"
     if language == Language.MATLAB:
         return (
             "MATLAB function named eval_search_language_sample that returns an "
