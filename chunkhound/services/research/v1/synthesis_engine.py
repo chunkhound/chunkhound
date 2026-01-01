@@ -552,7 +552,7 @@ Provide a comprehensive analysis focusing on the query."""
                 f"## Cluster {i} Analysis\n**Files**: {files}\n\n{summary}"
             )
 
-        combined_summaries = "\n\n" + "=" * 80 + "\n\n".join(cluster_summaries)
+        combined_summaries = "\n\n" + "=" * 80 + "\n\n" + "\n\n".join(cluster_summaries)
 
         # Build constants section if available
         constants_section = ""
