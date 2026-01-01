@@ -9,7 +9,58 @@ _FILE_LINE_RE = re.compile(
     r"^\[(?P<ref>\d+)\]\s+(?P<name>.+?)(?:\s+\((?P<details>.+)\))?$"
 )
 _CITATION_RE = re.compile(r"\[(?P<ref>\d+)\]")
+_PLAIN_CITATION_RE = re.compile(r"(?<!\[)\[(?P<ref>\d+)\](?!\])")
 _FLAT_REFERENCE_RE = re.compile(r"^\s*-\s*\[(?P<ref>\d+)\]\s+")
+_FLAT_REFERENCE_LINE_RE = re.compile(
+    r"^(?P<prefix>\s*-\s+)\[(?P<ref>\d+)\](?P<rest>.*)$"
+)
+
+
+def _linkify_citations(markdown: str) -> str:
+    output_lines: list[str] = []
+    in_fence = False
+    for line in markdown.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            output_lines.append(line)
+            continue
+        if in_fence:
+            output_lines.append(line)
+            continue
+
+        segments = line.split("`")
+        for idx in range(0, len(segments), 2):
+            segments[idx] = _PLAIN_CITATION_RE.sub(
+                lambda match: f"[[{match.group('ref')}]](#ref-{match.group('ref')})",
+                segments[idx],
+            )
+        output_lines.append("`".join(segments))
+    return "\n".join(output_lines)
+
+
+def _extract_cited_refs(markdown: str) -> set[str]:
+    cited: set[str] = set()
+    in_fence = False
+    for line in markdown.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        segments = line.split("`")
+        for idx in range(0, len(segments), 2):
+            cited.update(_PLAIN_CITATION_RE.findall(segments[idx]))
+    return cited
+
+
+def _anchor_reference_item(item: str) -> str:
+    match = _FLAT_REFERENCE_LINE_RE.match(item)
+    if not match:
+        return item
+    ref = match.group("ref")
+    return f'{match.group("prefix")}<a id="ref-{ref}"></a>[{ref}]{match.group("rest")}'
 
 
 def extract_sources_block(markdown: str) -> str | None:
@@ -92,7 +143,8 @@ def flatten_sources_block(sources_block: str) -> list[str]:
 def build_references_section(flat_items: list[str]) -> str:
     if not flat_items:
         return ""
-    lines = ["## References", "", *flat_items]
+    anchored_items = [_anchor_reference_item(item) for item in flat_items]
+    lines = ["## References", "", *anchored_items]
     return "\n".join(lines).strip()
 
 
@@ -108,7 +160,7 @@ def _select_flat_references_for_cleaned_body(
             "references."
         )
 
-    cited = set(_CITATION_RE.findall(cleaned_body))
+    cited = _extract_cited_refs(cleaned_body)
     if not cited:
         return flat_items
 
@@ -132,6 +184,7 @@ def _apply_reference_normalization(body: str, sources_block: str | None) -> str:
     references_block = build_references_section(flat_items)
     if not references_block:
         return cleaned.strip()
-    if cleaned.strip():
-        return cleaned.strip() + "\n\n" + references_block
+    linked_cleaned = _linkify_citations(cleaned)
+    if linked_cleaned.strip():
+        return linked_cleaned.strip() + "\n\n" + references_block
     return references_block

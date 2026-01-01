@@ -224,8 +224,8 @@ async def test_cleanup_topics_injects_flattened_references() -> None:
     output = pages[0].body_markdown
     assert "## Sources" not in output
     assert "## References" in output
-    assert "- [1] `repo/src/main.py` (2 chunks: L1-10, L20-30)" in output
-    assert "- [2] `repo/tests/test_main.py` (1 chunks: L5-8)" in output
+    assert '- <a id="ref-1"></a>[1] `repo/src/main.py` (2 chunks: L1-10, L20-30)' in output
+    assert '- <a id="ref-2"></a>[2] `repo/tests/test_main.py` (1 chunks: L5-8)' in output
 
 
 @pytest.mark.asyncio
@@ -255,10 +255,55 @@ async def test_cleanup_topics_filters_uncited_refs_with_citations() -> None:
     page = pages[0]
     output = page.body_markdown
     assert "## Sources" not in output
-    assert "Overview text [1]." in output
-    assert "- [1] `repo/src/main.py` (2 chunks: L1-10, L20-30)" in output
+    assert "Overview text [[1]](#ref-1)." in output
+    assert '- <a id="ref-1"></a>[1] `repo/src/main.py` (2 chunks: L1-10, L20-30)' in output
     assert "- [2] `repo/tests/test_main.py` (1 chunks: L5-8)" not in output
     assert page.references_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cleanup_topics_does_not_filter_on_code_block_brackets() -> None:
+    body = _topic_body_with_sources()
+    topic = CodeMapperTopic(
+        order=1,
+        title="Example",
+        source_path=Path("example.md"),
+        raw_markdown=body,
+        body_markdown=body,
+    )
+
+    cleaned = "\n".join(
+        [
+            "## Overview",
+            "Example with brackets in code (not citations).",
+            "",
+            "```python",
+            "arr[1]",
+            "```",
+            "",
+            "Inline code: `arr[2]`.",
+            "",
+            "## Details",
+            "More info.",
+        ]
+    )
+
+    pages = await cleanup_topics(
+        topics=[topic],
+        llm_manager=_FakeLLMManager(_FixedCleanupProvider(cleaned)),  # type: ignore[arg-type]
+        config=CleanupConfig(
+            mode="llm",
+            batch_size=1,
+            max_completion_tokens=512,
+        ),
+    )
+
+    assert pages
+    output = pages[0].body_markdown
+    assert "arr[1]" in output
+    assert "`arr[2]`" in output
+    assert '- <a id="ref-1"></a>[1] `repo/src/main.py` (2 chunks: L1-10, L20-30)' in output
+    assert '- <a id="ref-2"></a>[2] `repo/tests/test_main.py` (1 chunks: L5-8)' in output
 
 
 def test_reference_normalization_errors_when_sources_block_unparseable() -> None:

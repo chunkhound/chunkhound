@@ -147,7 +147,7 @@ _LLM_EXPECTED_MANIFEST: dict[str, str] = {
         "c711195af8be20151b8a0e9b64c35efbd5d3dc5b6da01afdbe700a7b37ed9087"
     ),
     "src/pages/topics/01-topic-one.md": (
-        "354dc58d49946889c1c4fd8d3e631671173ba60cbe04ab494de8cb0a1553cef9"
+        "84639b72b3b8d55111d100aebbe06323a8493771e77cf0d1b46c0ad6f206fa4f"
     ),
     "src/styles/global.css": (
         "cc160bacd9f2702fa7b305fe798f380f25135639426451bbd886e276220bc565"
