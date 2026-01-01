@@ -4,7 +4,16 @@ import argparse
 from pathlib import Path
 from typing import Any, cast
 
+from chunkhound.core.audience import parse_audience
+
 from .common_arguments import add_common_arguments, add_config_arguments
+
+
+def _parse_audience(value: str) -> str:
+    try:
+        return parse_audience(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def add_map_subparser(subparsers: Any) -> argparse.ArgumentParser:
@@ -53,6 +62,28 @@ def add_map_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help=(
             "Only run the planning pass and print the planned points of interest, "
             "skipping per-point deep research and final assembly."
+        ),
+    )
+
+    map_parser.add_argument(
+        "--audience",
+        type=_parse_audience,
+        default="balanced",
+        help=(
+            "Controls the intended audience for generated map topics. "
+            "Accepted: 1|technical, 2|balanced, 3|end-user."
+        ),
+    )
+
+    map_parser.add_argument(
+        "--context",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a markdown/text file used as authoritative context for HyDE "
+            "planning. When set, this fully replaces repo-derived HyDE context "
+            "(file lists and sampled code snippets) for both architectural and "
+            "operational maps."
         ),
     )
 

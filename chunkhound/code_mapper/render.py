@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from chunkhound.code_mapper.metadata import format_metadata_block
-from chunkhound.code_mapper.models import AgentDocMetadata
+from chunkhound.code_mapper.models import AgentDocMetadata, CodeMapperPOI
 from chunkhound.code_mapper.pipeline import _derive_heading_from_point, _slugify_heading
 from chunkhound.code_mapper.utils import safe_scope_label
 
@@ -30,7 +30,7 @@ def render_combined_document(
     meta: AgentDocMetadata,
     scope_label: str,
     overview_answer: str,
-    poi_sections: list[tuple[str, dict[str, Any]]],
+    poi_sections: list[tuple[CodeMapperPOI, dict[str, Any]]],
     coverage_lines: list[str],
 ) -> str:
     """Render the combined Code Mapper document for a scope."""
@@ -41,37 +41,69 @@ def render_combined_document(
     ]
     lines.extend(coverage_lines)
     lines.append("")
-    lines.append("## Points of Interest Overview")
+    lines.append("## HyDE Overview")
     lines.append("")
     lines.append(overview_answer.strip())
     lines.append("")
 
-    for idx, (poi, result) in enumerate(poi_sections, start=1):
-        heading = _derive_heading_from_point(poi)
-        lines.append(f"## {idx}. {heading}")
-        lines.append("")
-        lines.append(str(result.get("answer", "")).strip())
-        lines.append("")
+    arch_sections = [
+        (poi, result)
+        for poi, result in poi_sections
+        if poi.mode == "architectural"
+    ]
+    ops_sections = [
+        (poi, result)
+        for poi, result in poi_sections
+        if poi.mode == "operational"
+    ]
 
-    lines.extend(coverage_lines)
-    lines.append("")
+    if arch_sections:
+        lines.append("## Architectural Map")
+        lines.append("")
+        for idx, (poi, result) in enumerate(arch_sections, start=1):
+            heading = _derive_heading_from_point(poi.text)
+            lines.append(f"### {idx}. {heading}")
+            lines.append("")
+            lines.append(str(result.get("answer", "")).strip())
+            lines.append("")
+
+    if ops_sections:
+        lines.append("## Operational Map")
+        lines.append("")
+        for idx, (poi, result) in enumerate(ops_sections, start=1):
+            heading = _derive_heading_from_point(poi.text)
+            lines.append(f"### {idx}. {heading}")
+            lines.append("")
+            lines.append(str(result.get("answer", "")).strip())
+            lines.append("")
+
     return "\n".join(lines)
 
 
 def build_topic_artifacts(
     *,
     scope_label: str,
-    poi_sections: list[tuple[str, dict[str, Any]]],
-) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    poi_sections: list[tuple[CodeMapperPOI, dict[str, Any]]],
+) -> tuple[list[tuple[str, str]], dict[str, list[tuple[str, str]]]]:
     """Return topic file contents plus index entries for each topic."""
     safe_scope = safe_scope_label(scope_label)
     topic_files: list[tuple[str, str]] = []
-    index_entries: list[tuple[str, str]] = []
+    index_entries_by_mode: dict[str, list[tuple[str, str]]] = {
+        "architectural": [],
+        "operational": [],
+    }
+    arch_idx = 0
+    ops_idx = 0
 
-    for idx, (poi, result) in enumerate(poi_sections, start=1):
-        heading = _derive_heading_from_point(poi)
+    for poi, result in poi_sections:
+        heading = _derive_heading_from_point(poi.text)
         slug = _slugify_heading(heading)
-        filename = f"{safe_scope}_topic_{idx:02d}_{slug}.md"
+        if poi.mode == "operational":
+            ops_idx += 1
+            filename = f"{safe_scope}_ops_topic_{ops_idx:02d}_{slug}.md"
+        else:
+            arch_idx += 1
+            filename = f"{safe_scope}_arch_topic_{arch_idx:02d}_{slug}.md"
         content = "\n".join(
             [
                 f"# {heading}",
@@ -81,16 +113,16 @@ def build_topic_artifacts(
             ]
         )
         topic_files.append((filename, content))
-        index_entries.append((heading, filename))
+        index_entries_by_mode.setdefault(poi.mode, []).append((heading, filename))
 
-    return topic_files, index_entries
+    return topic_files, index_entries_by_mode
 
 
 def render_index_document(
     *,
     meta: AgentDocMetadata,
     scope_label: str,
-    index_entries: list[tuple[str, str]],
+    index_entries_by_mode: dict[str, list[tuple[str, str]]],
     unref_filename: str | None = None,
 ) -> str:
     """Render the per-scope index of Code Mapper topics."""
@@ -105,10 +137,21 @@ def render_index_document(
             f"- Unreferenced files in scope: [{unref_filename}]({unref_filename})"
         )
     lines.append("")
-    lines.append("## Topics")
+    lines.append("## Architectural Map")
     lines.append("")
 
-    for idx, (heading, filename) in enumerate(index_entries, start=1):
+    for idx, (heading, filename) in enumerate(
+        index_entries_by_mode.get("architectural") or [], start=1
+    ):
+        lines.append(f"{idx}. [{heading}]({filename})")
+
+    lines.append("")
+    lines.append("## Operational Map")
+    lines.append("")
+
+    for idx, (heading, filename) in enumerate(
+        index_entries_by_mode.get("operational") or [], start=1
+    ):
         lines.append(f"{idx}. [{heading}]({filename})")
 
     return "\n".join(lines) + "\n"

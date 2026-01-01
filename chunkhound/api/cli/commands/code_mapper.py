@@ -54,8 +54,8 @@ async def _run_code_mapper_overview_hyde(
     return await code_mapper_pipeline._run_code_mapper_overview_hyde(*args, **kwargs)
 
 
-# Re-export for tests that monkeypatch assembly metadata wiring.
-build_llm_metadata_and_assembly = code_mapper_llm.build_llm_metadata_and_assembly
+# Re-export for tests that monkeypatch HyDE provider metadata wiring.
+build_llm_metadata_and_map_hyde = code_mapper_llm.build_llm_metadata_and_map_hyde
 
 
 async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
@@ -64,6 +64,24 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
 
     # Resolve workspace root from explicit config file when provided.
     apply_code_mapper_workspace_overrides(config=config, args=args)
+
+    context_text: str | None = None
+    context_arg = getattr(args, "context", None)
+    if context_arg is not None:
+        try:
+            context_path = Path(context_arg).expanduser()
+            if not context_path.is_absolute():
+                workspace_root = getattr(config, "target_dir", None)
+                if isinstance(workspace_root, Path):
+                    context_path = workspace_root / context_path
+            context_text = context_path.read_text(encoding="utf-8")
+        except (OSError, RuntimeError, ValueError) as exc:
+            formatter.error(f"Failed to read --context file: {exc}")
+            sys.exit(2)
+
+        if not context_text.strip():
+            formatter.error("--context file is empty.")
+            sys.exit(2)
 
     # Code Mapper always writes artifacts; keep the CLI contract explicit.
     out_dir_arg = getattr(args, "out", None)
@@ -110,10 +128,13 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
                 target_dir=scope.target_dir,
                 scope_path=scope.scope_path,
                 scope_label=scope.scope_label,
+                meta=meta_bundle.meta,
+                context=context_text,
                 max_points=run_context.max_points,
                 comprehensiveness=run_context.comprehensiveness,
                 out_dir=out_dir,
-                assembly_provider=meta_bundle.assembly_provider,
+                persist_prompt=True,
+                map_hyde_provider=meta_bundle.map_hyde_provider,
                 indexing_cfg=getattr(config, "indexing", None),
             )
         except code_mapper_pipeline.CodeMapperHyDEError as exc:
@@ -228,6 +249,7 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
 
     with TreeProgressDisplay() as tree_progress:
         try:
+            audience = str(getattr(args, "audience", "balanced") or "balanced")
             pipeline_result = await run_code_mapper_pipeline(
                 services=services,
                 embedding_manager=embedding_manager,
@@ -236,12 +258,15 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
                 scope_path=scope.scope_path,
                 scope_label=scope.scope_label,
                 path_filter=scope.path_filter,
+                meta=meta_bundle.meta,
+                context=context_text,
                 comprehensiveness=run_context.comprehensiveness,
                 max_points=run_context.max_points,
                 out_dir=Path(out_dir_arg),
-                assembly_provider=meta_bundle.assembly_provider,
+                map_hyde_provider=meta_bundle.map_hyde_provider,
                 indexing_cfg=getattr(config, "indexing", None),
                 progress=tree_progress,
+                audience=audience,
                 log_info=formatter.info,
                 log_warning=formatter.warning,
                 log_error=formatter.error,
@@ -251,13 +276,11 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
                 "Code Mapper could not extract any points of interest from the "
                 "overview."
             )
-            print("\n--- Overview answer ---\n")
-            print(exc.overview_answer)
+            formatter.text_block(exc.overview_answer, title="Overview answer")
             sys.exit(1)
         except code_mapper_pipeline.CodeMapperHyDEError as exc:
             formatter.error("Code Mapper HyDE planning failed.")
-            print("\n--- HyDE error ---\n")
-            print(exc.hyde_message)
+            formatter.text_block(exc.hyde_message, title="HyDE error")
             sys.exit(1)
         except (OSError, RuntimeError, TypeError, ValueError) as e:
             formatter.error(f"Code Mapper research failed: {e}")
@@ -286,6 +309,8 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
         total_chunks_global=total_chunks_global,
     )
     generation_stats["code_mapper_comprehensiveness"] = run_context.comprehensiveness
+    audience = str(getattr(args, "audience", "balanced") or "balanced")
+    generation_stats["code_mapper_audience"] = audience
     meta_bundle.meta.generation_stats = generation_stats
 
     coverage_lines = code_mapper_pipeline._coverage_summary_lines(
