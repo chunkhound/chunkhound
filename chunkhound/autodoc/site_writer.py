@@ -111,7 +111,8 @@ def write_astro_site(
 
 
 def _write_text(path: Path, content: str) -> None:
-    path.write_text(content, encoding="utf-8")
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(content)
 
 
 def _write_bytes(path: Path, content: bytes) -> None:

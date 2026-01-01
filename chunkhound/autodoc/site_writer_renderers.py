@@ -189,6 +189,9 @@ def _render_page_frontmatter(
     scope_label: str | None = None,
     references_count: int | None = None,
 ) -> str:
+    def _posixify_path(value: str) -> str:
+        return value.replace("\\", "/")
+
     lines = [
         "---",
         f"layout: {layout}",
@@ -198,7 +201,7 @@ def _render_page_frontmatter(
     if order is not None:
         lines.append(f"order: {order}")
     if source_path:
-        lines.append(f'sourcePath: "{_escape_yaml(source_path)}"')
+        lines.append(f'sourcePath: "{_escape_yaml(_posixify_path(source_path))}"')
     if scope_label:
         lines.append(f'scope: "{_escape_yaml(scope_label)}"')
     if references_count is not None:
