@@ -10,6 +10,21 @@ if TYPE_CHECKING:
     from chunkhound.database_factory import DatabaseServices
     from chunkhound.embeddings import EmbeddingManager
     from chunkhound.llm_manager import LLMManager
+    from chunkhound.services.research.shared.import_resolver import (
+        ImportResolverService,
+    )
+
+
+def _create_import_resolver(config: Config) -> "ImportResolverService | None":
+    """Create import resolver if enabled in config."""
+    if not config.research.import_resolution_enabled:
+        return None
+    from chunkhound.parsers.parser_factory import ParserFactory
+    from chunkhound.services.research.shared.import_resolver import (
+        ImportResolverService,
+    )
+
+    return ImportResolverService(ParserFactory())
 
 
 class ResearchServiceFactory:
@@ -43,22 +58,14 @@ class ResearchServiceFactory:
 
         if algorithm == "v2":
             # v2 = v1 synthesis + wide coverage exploration
-            from chunkhound.parsers.parser_factory import ParserFactory
             from chunkhound.services.research.shared.exploration import (
                 WideCoverageStrategy,
-            )
-            from chunkhound.services.research.shared.import_resolver import (
-                ImportResolverService,
             )
             from chunkhound.services.research.v1.pluggable_research_service import (
                 PluggableResearchService,
             )
 
-            # Create import resolver if import resolution is enabled
-            import_resolver = None
-            if config.research.import_resolution_enabled:
-                parser_factory = ParserFactory()
-                import_resolver = ImportResolverService(parser_factory)
+            import_resolver = _create_import_resolver(config)
 
             # Create wide coverage exploration strategy (v2 algorithm)
             exploration_strategy = WideCoverageStrategy(
@@ -80,25 +87,17 @@ class ResearchServiceFactory:
             )
         elif algorithm == "v3":
             # v3 = parallel BFS + WideCoverage with unified elbow detection
-            from chunkhound.parsers.parser_factory import ParserFactory
             from chunkhound.services.research.shared.exploration import (
                 BFSExplorationStrategy,
                 ParallelExplorationStrategy,
                 WideCoverageStrategy,
             )
             from chunkhound.services.research.shared.file_reader import FileReader
-            from chunkhound.services.research.shared.import_resolver import (
-                ImportResolverService,
-            )
             from chunkhound.services.research.v1.pluggable_research_service import (
                 PluggableResearchService,
             )
 
-            # Create import resolver if import resolution is enabled
-            import_resolver = None
-            if config.research.import_resolution_enabled:
-                parser_factory = ParserFactory()
-                import_resolver = ImportResolverService(parser_factory)
+            import_resolver = _create_import_resolver(config)
 
             # Create BFS exploration strategy
             bfs_strategy = BFSExplorationStrategy(
