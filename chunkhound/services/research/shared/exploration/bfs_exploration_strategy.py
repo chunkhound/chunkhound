@@ -17,6 +17,9 @@ from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services.research.shared.elbow_detection import find_elbow_kneedle
+from chunkhound.services.research.shared.exploration.elbow_filter import (
+    get_unified_score,
+)
 from chunkhound.services.research.shared.models import (
     FILE_CONTENT_TOKENS_MAX,
     FILE_CONTENT_TOKENS_MIN,
@@ -632,12 +635,21 @@ class BFSExplorationStrategy:
     def _aggregate_chunks(
         self, all_nodes: list[BFSExplorationNode]
     ) -> list[dict[str, Any]]:
-        """Aggregate all chunks from BFS tree, deduplicated by chunk_id."""
+        """Aggregate all chunks from BFS tree, deduplicated by chunk_id.
+
+        Keeps the highest-scoring version when the same chunk appears multiple times,
+        consistent with v3 parallel strategy's merge behavior.
+        """
         chunks_map: dict[str, dict[str, Any]] = {}
         for node in all_nodes:
             for chunk in node.chunks:
                 chunk_id = chunk.get("chunk_id") or chunk.get("id")
-                if chunk_id and chunk_id not in chunks_map:
+                if not chunk_id:
+                    continue
+                existing = chunks_map.get(chunk_id)
+                if existing is None:
+                    chunks_map[chunk_id] = chunk
+                elif get_unified_score(chunk) > get_unified_score(existing):
                     chunks_map[chunk_id] = chunk
         return list(chunks_map.values())
 
