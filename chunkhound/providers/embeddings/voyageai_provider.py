@@ -359,6 +359,10 @@ class VoyageAIEmbeddingProvider:
         """Estimate token count for a text (rough approximation)."""
         return int(estimate_tokens_rough(text))
 
+    def validate_texts(self, texts: list[str]) -> list[str]:
+        """Validate and preprocess texts before embedding."""
+        return validate_text_input(texts)
+
     def chunk_text_by_tokens(self, text: str, max_tokens: int) -> list[str]:
         """Split text into chunks by token count."""
         return chunk_text_by_words(text, max_tokens)
