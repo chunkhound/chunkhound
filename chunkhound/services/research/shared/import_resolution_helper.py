@@ -58,10 +58,14 @@ async def resolve_and_fetch_imports(
         return []
 
     # Get base directory for import resolution
-    base_dir = db_services.provider.get_base_directory()  # type: ignore[attr-defined]
+    base_dir = db_services.provider.get_base_directory()
 
     # Get unique file paths from chunks
-    file_paths = {c.get("file_path") for c in chunks if c.get("file_path")}
+    file_paths: set[str] = set()
+    for c in chunks:
+        fp = c.get("file_path")
+        if fp is not None:
+            file_paths.add(fp)
 
     # Resolve imports for each file
     import_files: set[Path] = set()

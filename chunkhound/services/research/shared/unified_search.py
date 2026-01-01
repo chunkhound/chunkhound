@@ -147,8 +147,12 @@ class UnifiedSearch:
                         semantic_map[chunk_id] = chunk
 
             semantic_results = list(semantic_map.values())
+            total_chunks = 0
+            for r in search_results:
+                if not isinstance(r, BaseException):
+                    total_chunks += len(r[0])
             logger.debug(
-                f"Unified {sum(len(r[0]) if not isinstance(r, Exception) else 0 for r in search_results)} results from {len(expanded_queries)} searches -> {len(semantic_results)} unique chunks"
+                f"Unified {total_chunks} results from {len(expanded_queries)} searches -> {len(semantic_results)} unique chunks"
             )
 
             # Emit search results event
@@ -465,7 +469,7 @@ class UnifiedSearch:
                 pattern = rf"\b{escaped}\b"
 
                 # Internal pagination loop: keep fetching pages until we have enough undiscovered chunks
-                results = []
+                results: list[dict[str, Any]] = []
                 offset = 0
                 # Use config value if available, fall back to 100 (spec default)
                 scan_page_size = self._config.regex_scan_page_size if self._config else 100

@@ -16,7 +16,7 @@ Key Invariants:
 """
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
@@ -302,7 +302,7 @@ class DepthExplorationService:
                 generation_metrics.add_failure(file_path, result)
                 logger.warning(f"Query generation failed for {file_path}: {result}")
                 continue
-            file_path, queries = result
+            file_path, queries = cast(tuple[str, list[str]], result)
             exploration_queries[file_path] = queries
 
         return exploration_queries, generation_metrics
@@ -398,7 +398,7 @@ Output JSON with queries array."""
                 max_completion_tokens=512,
             )
 
-            queries = result.get("queries", [])
+            queries: list[str] = result.get("queries", [])
             logger.debug(
                 f"Generated {len(queries)} exploration queries for {file_path}"
             )

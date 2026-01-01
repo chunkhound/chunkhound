@@ -24,7 +24,7 @@ from typing import Any
 
 import numpy as np
 from loguru import logger
-from sklearn.cluster import (  # type: ignore[import-untyped]
+from sklearn.cluster import (
     AgglomerativeClustering,
     KMeans,
 )
