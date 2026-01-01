@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +22,11 @@ from chunkhound.llm_manager import LLMManager
 from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 
 
+def _exit_with_error(formatter: RichOutputFormatter, message: str, code: int) -> None:
+    formatter.error(message)
+    sys.exit(code)
+
+
 def _nearest_existing_dir(path: Path) -> Path | None:
     current = path
     try:
@@ -38,14 +42,14 @@ def _nearest_existing_dir(path: Path) -> Path | None:
 
 def _git_repo_root(start_dir: Path) -> Path | None:
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=str(start_dir),
-            text=True,
-            capture_output=True,
-            check=False,
+        from chunkhound.utils.git_safe import run_git
+
+        result = run_git(
+            ["rev-parse", "--show-toplevel"],
+            cwd=start_dir,
+            timeout_s=5.0,
         )
-    except OSError:
+    except Exception:
         return None
     if result.returncode != 0:
         return None
@@ -58,17 +62,17 @@ def _git_repo_root(start_dir: Path) -> Path | None:
 def _git_is_ignored(*, repo_root: Path, path: Path) -> bool:
     try:
         rel = path.resolve().relative_to(repo_root.resolve())
-    except ValueError:
+    except (OSError, RuntimeError, ValueError):
         return False
     try:
-        result = subprocess.run(
-            ["git", "check-ignore", "-q", str(rel)],
-            cwd=str(repo_root),
-            text=True,
-            capture_output=True,
-            check=False,
+        from chunkhound.utils.git_safe import run_git
+
+        result = run_git(
+            ["check-ignore", "-q", "--no-index", rel.as_posix()],
+            cwd=repo_root,
+            timeout_s=5.0,
         )
-    except OSError:
+    except Exception:
         return False
     return result.returncode == 0
 
@@ -114,22 +118,34 @@ def _is_interactive() -> bool:
         return False
 
 
+def _read_input(prompt: str) -> str | None:
+    try:
+        return input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+
 def _prompt_yes_no(question: str, *, default: bool = False) -> bool:
     if not _is_interactive():
         return False
 
+    answers = {
+        "y": True,
+        "yes": True,
+        "n": False,
+        "no": False,
+    }
     prompt = " [Y/n]: " if default else " [y/N]: "
     while True:
-        try:
-            answer = input(question + prompt).strip().lower()
-        except (EOFError, KeyboardInterrupt):
+        raw = _read_input(question + prompt)
+        if raw is None:
             return False
+        answer = raw.strip().lower()
         if not answer:
             return default
-        if answer in ("y", "yes"):
-            return True
-        if answer in ("n", "no"):
-            return False
+        resolved = answers.get(answer)
+        if resolved is not None:
+            return resolved
 
 
 def _prompt_text(question: str, *, default: str | None = None) -> str | None:
@@ -137,14 +153,11 @@ def _prompt_text(question: str, *, default: str | None = None) -> str | None:
         return default
 
     suffix = f" (default: {default})" if default else ""
-    while True:
-        try:
-            answer = input(f"{question}{suffix}: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            return default
-        if not answer:
-            return default
-        return answer
+    raw = _read_input(f"{question}{suffix}: ")
+    if raw is None:
+        return default
+    answer = raw.strip()
+    return answer if answer else default
 
 
 def _prompt_choice(
@@ -181,6 +194,89 @@ class _AutoMapOptions:
     comprehensiveness: str
     audience: str
     map_context: Path | None
+
+
+@dataclass(frozen=True)
+class _AutoDocCommandContext:
+    args: object
+    config: Config
+    formatter: RichOutputFormatter
+    output_dir: Path
+
+
+@dataclass(frozen=True)
+class _DocsiteGenerationInputs:
+    map_dir: Path
+    llm_manager: LLMManager
+    cleanup_config: CleanupConfig
+    allow_delete_topics_dir: bool
+    index_patterns: list[str] | None
+    site_title: str | None
+    site_tagline: str | None
+
+
+def _resolve_map_out_dir(*, args, output_dir: Path) -> Path:
+    map_out_dir_arg = getattr(args, "map_out_dir", None)
+    default_plan = _build_auto_map_plan(output_dir=output_dir)
+    map_out_dir_hint = (
+        Path(map_out_dir_arg).expanduser()
+        if map_out_dir_arg is not None
+        else default_plan.map_out_dir
+    )
+
+    map_out_dir = Path(map_out_dir_arg).expanduser() if map_out_dir_arg else None
+    if map_out_dir is None:
+        raw = _prompt_text(
+            "Where should Code Mapper write its outputs",
+            default=str(map_out_dir_hint),
+        )
+        map_out_dir = Path(raw).expanduser() if raw else map_out_dir_hint
+    if not map_out_dir.is_absolute():
+        map_out_dir = (Path.cwd() / map_out_dir).resolve()
+    return map_out_dir
+
+
+def _resolve_map_comprehensiveness(*, args) -> str:
+    map_comprehensiveness_arg = getattr(args, "map_comprehensiveness", None)
+    comprehensiveness = (
+        map_comprehensiveness_arg
+        if isinstance(map_comprehensiveness_arg, str)
+        else None
+    )
+    if comprehensiveness is None:
+        return _prompt_choice(
+            "Code Mapper comprehensiveness",
+            choices=("minimal", "low", "medium", "high", "ultra"),
+            default="medium",
+        )
+    return comprehensiveness
+
+
+def _resolve_map_audience(*, args) -> str:
+    map_audience_arg = getattr(args, "map_audience", None)
+    map_audience = map_audience_arg if isinstance(map_audience_arg, str) else None
+    if map_audience is None:
+        default_audience = getattr(args, "audience", "balanced")
+        return _prompt_choice(
+            "Code Mapper audience (map generation)",
+            choices=("technical", "balanced", "end-user"),
+            default=default_audience,
+        )
+    return map_audience
+
+
+def _resolve_map_context(*, args) -> Path | None:
+    map_context_arg = getattr(args, "map_context", None)
+    map_context: Path | None = (
+        Path(map_context_arg).expanduser() if map_context_arg is not None else None
+    )
+    if map_context is None:
+        raw = _prompt_text(
+            "Optional Code Mapper context file (--map-context, leave blank for none)",
+            default=None,
+        )
+        map_context = Path(raw).expanduser() if raw else None
+    return map_context
 
 
 def _confirm_autorun_and_validate_prereqs(
@@ -243,59 +339,10 @@ def _build_auto_map_plan(
 
 
 def _resolve_auto_map_options(*, args, output_dir: Path) -> _AutoMapOptions:
-    map_out_dir_arg = getattr(args, "map_out_dir", None)
-    map_comprehensiveness_arg = getattr(args, "map_comprehensiveness", None)
-    map_context_arg = getattr(args, "map_context", None)
-
-    default_plan = _build_auto_map_plan(output_dir=output_dir)
-    map_out_dir_hint = (
-        Path(map_out_dir_arg).expanduser()
-        if map_out_dir_arg is not None
-        else default_plan.map_out_dir
-    )
-
-    map_out_dir = Path(map_out_dir_arg).expanduser() if map_out_dir_arg else None
-    if map_out_dir is None:
-        raw = _prompt_text(
-            "Where should Code Mapper write its outputs",
-            default=str(map_out_dir_hint),
-        )
-        map_out_dir = Path(raw).expanduser() if raw else map_out_dir_hint
-    if not map_out_dir.is_absolute():
-        map_out_dir = (Path.cwd() / map_out_dir).resolve()
-
-    comprehensiveness = (
-        map_comprehensiveness_arg
-        if isinstance(map_comprehensiveness_arg, str)
-        else None
-    )
-    if comprehensiveness is None:
-        comprehensiveness = _prompt_choice(
-            "Code Mapper comprehensiveness",
-            choices=("minimal", "low", "medium", "high", "ultra"),
-            default="medium",
-        )
-
-    map_audience_arg = getattr(args, "map_audience", None)
-    map_audience = map_audience_arg if isinstance(map_audience_arg, str) else None
-    if map_audience is None:
-        default_audience = getattr(args, "audience", "balanced")
-        map_audience = _prompt_choice(
-            "Code Mapper audience (map generation)",
-            choices=("technical", "balanced", "end-user"),
-            default=default_audience,
-        )
-
-    map_context: Path | None = (
-        Path(map_context_arg).expanduser() if map_context_arg is not None else None
-    )
-    if map_context is None:
-        raw = _prompt_text(
-            "Optional Code Mapper context file (--map-context, leave blank for none)",
-            default=None,
-        )
-        map_context = Path(raw).expanduser() if raw else None
-
+    map_out_dir = _resolve_map_out_dir(args=args, output_dir=output_dir)
+    comprehensiveness = _resolve_map_comprehensiveness(args=args)
+    map_audience = _resolve_map_audience(args=args)
+    map_context = _resolve_map_context(args=args)
     return _AutoMapOptions(
         map_out_dir=map_out_dir,
         comprehensiveness=comprehensiveness,
@@ -323,14 +370,96 @@ def _effective_config_for_code_mapper_autorun(
     return effective
 
 
+def _dedup_preserve_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        output.append(item)
+    return output
+
+
+def _code_mapper_autorun_database_prereqs(effective: Config) -> tuple[list[str], list[str]]:
+    missing: list[str] = []
+    details: list[str] = []
+    try:
+        db_path = effective.database.get_db_path()
+    except ValueError:
+        missing.append("database")
+        details.append("- Database path is not configured.")
+        return missing, details
+
+    if not db_path.exists():
+        missing.append("database")
+        details.append(f"- Database not found at: {db_path}")
+
+    return missing, details
+
+
+def _provider_supports_reranking(provider: object) -> bool:
+    try:
+        supports = getattr(provider, "supports_reranking", None)
+        if callable(supports):
+            return bool(supports())
+    except Exception:
+        return False
+    return False
+
+
+def _code_mapper_autorun_embedding_prereqs(
+    effective: Config,
+) -> tuple[list[str], list[str]]:
+    from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+
+    missing: list[str] = []
+    details: list[str] = []
+
+    if effective.embedding is None:
+        missing.append("embeddings")
+        details.append("- Embedding provider is not configured.")
+        return missing, details
+
+    try:
+        provider = EmbeddingProviderFactory.create_provider(effective.embedding)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        missing.append("embeddings")
+        details.append(f"- Embedding provider setup failed: {exc}")
+        return missing, details
+
+    if not _provider_supports_reranking(provider):
+        missing.append("reranking")
+        details.append(
+            "- Embedding provider does not support reranking with current "
+            "config (configure reranking; typically `embedding.rerank_model`)."
+        )
+
+    return missing, details
+
+
+def _code_mapper_autorun_llm_prereqs(effective: Config) -> tuple[list[str], list[str]]:
+    missing: list[str] = []
+    details: list[str] = []
+
+    if effective.llm is None:
+        missing.append("llm")
+        details.append("- LLM provider is not configured.")
+        return missing, details
+
+    if not effective.llm.is_provider_configured():
+        missing.append("llm")
+        details.append("- LLM provider is not fully configured.")
+
+    return missing, details
+
+
 def _code_mapper_autorun_prereq_summary(
     *,
     config: Config,
     config_path: Path | None,
 ) -> tuple[bool, list[str], list[str]]:
     """Return (ok, missing_labels, detail_lines) for Code Mapper auto-run."""
-    from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
-
     effective = _effective_config_for_code_mapper_autorun(
         config=config,
         config_path=config_path,
@@ -339,55 +468,19 @@ def _code_mapper_autorun_prereq_summary(
     missing: list[str] = []
     details: list[str] = []
 
-    db_path: Path | None = None
-    try:
-        db_path = effective.database.get_db_path()
-    except ValueError:
-        missing.append("database")
-        details.append("- Database path is not configured.")
-    else:
-        if not db_path.exists():
-            missing.append("database")
-            details.append(f"- Database not found at: {db_path}")
+    db_missing, db_details = _code_mapper_autorun_database_prereqs(effective)
+    missing.extend(db_missing)
+    details.extend(db_details)
 
-    if effective.embedding is None:
-        missing.append("embeddings")
-        details.append("- Embedding provider is not configured.")
-    else:
-        try:
-            provider = EmbeddingProviderFactory.create_provider(effective.embedding)
-        except (OSError, RuntimeError, TypeError, ValueError) as exc:
-            missing.append("embeddings")
-            details.append(f"- Embedding provider setup failed: {exc}")
-        else:
-            supports_reranking = False
-            try:
-                if hasattr(provider, "supports_reranking") and callable(
-                    provider.supports_reranking
-                ):
-                    supports_reranking = bool(provider.supports_reranking())
-            except Exception:
-                supports_reranking = False
-            if not supports_reranking:
-                missing.append("reranking")
-                details.append(
-                    "- Embedding provider does not support reranking with current "
-                    "config (configure reranking; typically `embedding.rerank_model`)."
-                )
+    embed_missing, embed_details = _code_mapper_autorun_embedding_prereqs(effective)
+    missing.extend(embed_missing)
+    details.extend(embed_details)
 
-    if effective.llm is None:
-        missing.append("llm")
-        details.append("- LLM provider is not configured.")
-    elif not effective.llm.is_provider_configured():
-        missing.append("llm")
-        details.append("- LLM provider is not fully configured.")
+    llm_missing, llm_details = _code_mapper_autorun_llm_prereqs(effective)
+    missing.extend(llm_missing)
+    details.extend(llm_details)
 
-    # De-dup while preserving order
-    missing_dedup: list[str] = []
-    for item in missing:
-        if item not in missing_dedup:
-            missing_dedup.append(item)
-
+    missing_dedup = _dedup_preserve_order(missing)
     return not missing_dedup, missing_dedup, details
 
 
@@ -488,6 +581,98 @@ def _build_cleanup_provider_configs(
     return utility_config, synthesis_config
 
 
+def _try_load_llm_config_from_env(*, formatter: RichOutputFormatter) -> LLMConfig | None:
+    if not _has_llm_env():
+        return None
+    try:
+        return LLMConfig()
+    except Exception as exc:
+        formatter.warning(f"Failed to load LLM config from environment: {exc}")
+        return None
+
+
+def _resolve_llm_config_for_cleanup(
+    *, config: Config, formatter: RichOutputFormatter
+) -> LLMConfig | None:
+    llm_config = config.llm
+    if llm_config is None:
+        llm_config = _try_load_llm_config_from_env(formatter=formatter)
+
+    if llm_config is None:
+        formatter.warning("No LLM provider configured; AutoDoc cleanup cannot run.")
+        return None
+
+    if not llm_config.is_provider_configured():
+        formatter.warning(
+            "LLM provider is not fully configured; AutoDoc cleanup cannot run."
+        )
+        return None
+
+    return llm_config
+
+
+def _log_cleanup_model_selection(
+    *,
+    formatter: RichOutputFormatter,
+    llm_config: LLMConfig,
+    synthesis_config: dict[str, object],
+) -> None:
+    provider = synthesis_config.get("provider", "unknown")
+    model = synthesis_config.get("model", "unknown")
+    effort = synthesis_config.get("reasoning_effort")
+
+    override_notes = [
+        label
+        for label, enabled in (
+            ("cleanup provider", llm_config.autodoc_cleanup_provider),
+            ("cleanup model", llm_config.autodoc_cleanup_model),
+            ("cleanup reasoning effort", llm_config.autodoc_cleanup_reasoning_effort),
+        )
+        if enabled
+    ]
+    suffix = f" ({', '.join(override_notes)} override)" if override_notes else ""
+
+    if isinstance(provider, str) and provider == "codex-cli":
+        resolved_model, _model_source = CodexCLIProvider.describe_model_resolution(
+            model if isinstance(model, str) else None
+        )
+        resolved_effort, _effort_source = (
+            CodexCLIProvider.describe_reasoning_effort_resolution(
+                effort if isinstance(effort, str) else None
+            )
+        )
+        formatter.info(
+            "Cleanup model selection: "
+            f"provider={provider}, model={model} (resolved={resolved_model}), "
+            f"reasoning_effort={resolved_effort}{suffix}"
+        )
+        return
+
+    effort_display = f", reasoning_effort={effort}" if effort else ""
+    formatter.info(
+        f"Cleanup model selection: provider={provider}, model={model}{effort_display}{suffix}"
+    )
+
+
+def _build_llm_manager_for_cleanup(
+    *,
+    llm_config: LLMConfig,
+    formatter: RichOutputFormatter,
+) -> LLMManager | None:
+    try:
+        utility_config, synthesis_config = _build_cleanup_provider_configs(llm_config)
+        _log_cleanup_model_selection(
+            formatter=formatter,
+            llm_config=llm_config,
+            synthesis_config=synthesis_config,
+        )
+        return LLMManager(utility_config, synthesis_config)
+    except Exception as exc:
+        formatter.warning(f"Failed to configure LLM provider: {exc}")
+        logger.exception("LLM configuration error")
+        return None
+
+
 def _resolve_llm_manager(
     *,
     config: Config,
@@ -497,67 +682,48 @@ def _resolve_llm_manager(
     if cleanup_mode != "llm":
         return None
 
-    llm_config = config.llm
-    if llm_config is None and _has_llm_env():
-        try:
-            llm_config = LLMConfig()
-        except Exception as exc:
-            formatter.warning(f"Failed to load LLM config from environment: {exc}")
-            return None
-
+    llm_config = _resolve_llm_config_for_cleanup(config=config, formatter=formatter)
     if llm_config is None:
-        formatter.warning(
-            "No LLM provider configured; AutoDoc cleanup cannot run."
-        )
         return None
+    return _build_llm_manager_for_cleanup(llm_config=llm_config, formatter=formatter)
 
-    if not llm_config.is_provider_configured():
-        formatter.warning(
-            "LLM provider is not fully configured; AutoDoc cleanup cannot run."
-        )
-        return None
 
-    try:
-        utility_config, synthesis_config = _build_cleanup_provider_configs(llm_config)
-        provider = synthesis_config.get("provider", "unknown")
-        model = synthesis_config.get("model", "unknown")
-        effort = synthesis_config.get("reasoning_effort")
-        override_notes: list[str] = []
-        if llm_config.autodoc_cleanup_provider:
-            override_notes.append("cleanup provider")
-        if llm_config.autodoc_cleanup_model:
-            override_notes.append("cleanup model")
-        if llm_config.autodoc_cleanup_reasoning_effort:
-            override_notes.append("cleanup reasoning effort")
-        suffix = f" ({', '.join(override_notes)} override)" if override_notes else ""
-        if isinstance(provider, str) and provider == "codex-cli":
-            resolved_model, _model_source = CodexCLIProvider.describe_model_resolution(
-                model if isinstance(model, str) else None
-            )
-            resolved_effort, _effort_source = (
-                CodexCLIProvider.describe_reasoning_effort_resolution(
-                    effort if isinstance(effort, str) else None
-                )
-            )
-            formatter.info(
-                "Cleanup model selection: "
-                f"provider={provider}, model={model} (resolved={resolved_model}), "
-                f"reasoning_effort={resolved_effort}{suffix}"
-            )
-        elif effort:
-            formatter.info(
-                f"Cleanup model selection: provider={provider}, model={model}, "
-                f"reasoning_effort={effort}{suffix}"
-            )
-        else:
-            formatter.info(
-                f"Cleanup model selection: provider={provider}, model={model}{suffix}"
-            )
-        return LLMManager(utility_config, synthesis_config)
-    except Exception as exc:
-        formatter.warning(f"Failed to configure LLM provider: {exc}")
-        logger.exception("LLM configuration error")
-        return None
+def _resolve_cleanup_config_and_llm_manager(
+    *,
+    args,
+    config: Config,
+    formatter: RichOutputFormatter,
+) -> tuple[CleanupConfig, LLMManager]:
+    cleanup_mode = getattr(args, "cleanup_mode", "llm")
+    if cleanup_mode != "llm":
+        _exit_with_error(
+            formatter,
+            "Unsupported AutoDoc cleanup mode: "
+            f"{cleanup_mode!r}. AutoDoc cleanup now requires an LLM.",
+            2,
+        )
+
+    llm_manager = _resolve_llm_manager(
+        config=config,
+        cleanup_mode=cleanup_mode,
+        formatter=formatter,
+    )
+    if llm_manager is None:
+        _exit_with_error(
+            formatter,
+            "AutoDoc cleanup requires an LLM provider, but none is configured. "
+            "Configure `llm` in your config/environment, or run with --assets-only "
+            "to update UI assets without regenerating topic pages.",
+            2,
+        )
+
+    cleanup_config = CleanupConfig(
+        mode=cleanup_mode,
+        batch_size=max(1, int(getattr(args, "cleanup_batch_size", 4))),
+        max_completion_tokens=max(512, int(getattr(args, "cleanup_max_tokens", 4096))),
+        audience=getattr(args, "audience", "balanced"),
+    )
+    return cleanup_config, llm_manager
 
 
 async def _call_generate_docsite(
@@ -622,49 +788,24 @@ async def _autorun_code_mapper_for_autodoc(
     return plan.map_out_dir
 
 
-async def autodoc_command(args, config: Config) -> None:
-    """Generate an Astro docs site from AutoDoc outputs."""
-    formatter = RichOutputFormatter(verbose=getattr(args, "verbose", False))
-
-    output_dir = Path(getattr(args, "out_dir")).resolve()
-
-    map_in_arg = getattr(args, "map_in", None)
-    map_dir: Path | None
+async def _ensure_map_dir(
+    ctx: _AutoDocCommandContext,
+) -> Path:
+    map_in_arg = getattr(ctx.args, "map_in", None)
     if map_in_arg is None:
-        map_dir = None
-    else:
-        map_dir = Path(map_in_arg).resolve()
-        if not map_dir.exists():
-            formatter.error(f"Map outputs directory not found: {map_dir}")
-            sys.exit(1)
-
-    _maybe_warn_git_output_dir(output_dir, formatter)
-
-    if bool(getattr(args, "assets_only", False)):
-        if not output_dir.exists():
-            formatter.error(
-                "Output directory not found for --assets-only: "
-                f"{output_dir}. Run a full `chunkhound autodoc` first."
-            )
-            sys.exit(1)
-        write_astro_assets_only(output_dir=output_dir)
-        formatter.success("AutoDoc assets update complete.")
-        formatter.info(f"Output directory: {output_dir}")
-        return
-
-    if map_dir is None:
         if not _is_interactive():
-            formatter.error(
+            _exit_with_error(
+                ctx.formatter,
                 "Missing required input: map-in (Code Mapper outputs directory). "
-                "Non-interactive mode cannot prompt to auto-generate maps."
+                "Non-interactive mode cannot prompt to auto-generate maps.",
+                2,
             )
-            sys.exit(2)
 
-        map_dir = await _autorun_code_mapper_for_autodoc(
-            args=args,
-            config=config,
-            formatter=formatter,
-            output_dir=output_dir,
+        return await _autorun_code_mapper_for_autodoc(
+            args=ctx.args,
+            config=ctx.config,
+            formatter=ctx.formatter,
+            output_dir=ctx.output_dir,
             question=(
                 "No `map-in` provided. Generate the codemap first by running "
                 "`chunkhound map`, then continue with AutoDoc?"
@@ -675,112 +816,151 @@ async def autodoc_command(args, config: Config) -> None:
             decline_exit_code=2,
         )
 
-    cleanup_mode = getattr(args, "cleanup_mode", "llm")
-    if cleanup_mode != "llm":
-        formatter.error(
-            "Unsupported AutoDoc cleanup mode: "
-            f"{cleanup_mode!r}. AutoDoc cleanup now requires an LLM."
-        )
-        sys.exit(2)
-    llm_manager = _resolve_llm_manager(
-        config=config,
-        cleanup_mode=cleanup_mode,
-        formatter=formatter,
-    )
-    if llm_manager is None:
-        formatter.error(
-            "AutoDoc cleanup requires an LLM provider, but none is configured. "
-            "Configure `llm` in your config/environment, or run with --assets-only "
-            "to update UI assets without regenerating topic pages."
-        )
-        sys.exit(2)
+    map_dir = Path(map_in_arg).resolve()
+    if not map_dir.exists():
+        _exit_with_error(ctx.formatter, f"Map outputs directory not found: {map_dir}", 1)
+    return map_dir
 
-    cleanup_config = CleanupConfig(
-        mode=cleanup_mode,
-        batch_size=max(1, int(getattr(args, "cleanup_batch_size", 4))),
-        max_completion_tokens=max(512, int(getattr(args, "cleanup_max_tokens", 4096))),
-        audience=getattr(args, "audience", "balanced"),
+
+def _resolve_allow_delete_topics_dir(
+    ctx: _AutoDocCommandContext,
+) -> bool:
+    topics_dir = ctx.output_dir / "src" / "pages" / "topics"
+    if not topics_dir.exists():
+        return False
+
+    force = bool(getattr(ctx.args, "force", False))
+    if force:
+        return True
+
+    if not _is_interactive():
+        _exit_with_error(
+            ctx.formatter,
+            "Output directory already contains topic pages at "
+            f"{topics_dir}. Re-generating will delete them. "
+            "Re-run with `--force` to allow deletion.",
+            2,
+        )
+
+    if not _prompt_yes_no(
+        "Output directory already contains generated topic pages at "
+        f"{topics_dir}. Delete and re-generate them?",
+        default=False,
+    ):
+        _exit_with_error(ctx.formatter, "Aborted.", 2)
+
+    return True
+
+
+def _exit_missing_index_noninteractive(formatter: RichOutputFormatter) -> None:
+    _exit_with_error(
+        formatter,
+        "AutoDoc index not found in map-in directory, and non-interactive "
+        "mode cannot prompt to auto-generate maps. Run `chunkhound map` "
+        "first (then re-run `chunkhound autodoc` with map-in), or ensure "
+        "the map-in folder contains a `*_code_mapper_index.md`.",
+        1,
+    )
+
+
+async def _recover_missing_index_via_autorun(
+    ctx: _AutoDocCommandContext, *, decline_error: str
+) -> Path:
+    if not _is_interactive():
+        _exit_missing_index_noninteractive(ctx.formatter)
+    return await _autorun_code_mapper_for_autodoc(
+        args=ctx.args,
+        config=ctx.config,
+        formatter=ctx.formatter,
+        output_dir=ctx.output_dir,
+        question=(
+            "Generate the codemap first by running `chunkhound map`, then retry "
+            "AutoDoc?"
+        ),
+        decline_error=decline_error,
+        decline_exit_code=1,
+    )
+
+
+async def _generate_docsite_with_optional_autorun(
+    ctx: _AutoDocCommandContext,
+    inputs: _DocsiteGenerationInputs,
+):
+    current_map_dir = inputs.map_dir
+    for attempt in range(2):
+        try:
+            return await _call_generate_docsite(
+                formatter=ctx.formatter,
+                input_dir=current_map_dir,
+                output_dir=ctx.output_dir,
+                llm_manager=inputs.llm_manager,
+                cleanup_config=inputs.cleanup_config,
+                allow_delete_topics_dir=inputs.allow_delete_topics_dir,
+                index_patterns=inputs.index_patterns,
+                site_title=inputs.site_title,
+                site_tagline=inputs.site_tagline,
+            )
+        except FileNotFoundError as exc:
+            if attempt == 1:
+                _exit_with_error(ctx.formatter, str(exc), 1)
+
+            ctx.formatter.warning(str(exc))
+            current_map_dir = await _recover_missing_index_via_autorun(
+                ctx, decline_error=str(exc)
+            )
+
+
+async def autodoc_command(args, config: Config) -> None:
+    """Generate an Astro docs site from AutoDoc outputs."""
+    formatter = RichOutputFormatter(verbose=getattr(args, "verbose", False))
+
+    output_dir = Path(getattr(args, "out_dir")).resolve()
+    ctx = _AutoDocCommandContext(
+        args=args,
+        config=config,
+        formatter=formatter,
+        output_dir=output_dir,
+    )
+
+    _maybe_warn_git_output_dir(output_dir, formatter)
+
+    if bool(getattr(args, "assets_only", False)):
+        if not output_dir.exists():
+            _exit_with_error(
+                formatter,
+                "Output directory not found for --assets-only: "
+                f"{output_dir}. Run a full `chunkhound autodoc` first.",
+                1,
+            )
+        write_astro_assets_only(output_dir=output_dir)
+        formatter.success("AutoDoc assets update complete.")
+        formatter.info(f"Output directory: {output_dir}")
+        return
+
+    map_dir = await _ensure_map_dir(ctx)
+    cleanup_config, llm_manager = _resolve_cleanup_config_and_llm_manager(
+        args=args,
+        config=config,
+        formatter=formatter,
     )
 
     index_patterns = getattr(args, "index_patterns", None)
     site_title = getattr(args, "site_title", None)
     site_tagline = getattr(args, "site_tagline", None)
 
-    allow_delete_topics_dir = False
-    topics_dir = output_dir / "src" / "pages" / "topics"
-    if topics_dir.exists():
-        force = bool(getattr(args, "force", False))
-        if force:
-            allow_delete_topics_dir = True
-        elif not _is_interactive():
-            formatter.error(
-                "Output directory already contains topic pages at "
-                f"{topics_dir}. Re-generating will delete them. "
-                "Re-run with `--force` to allow deletion."
-            )
-            sys.exit(2)
-        else:
-            if not _prompt_yes_no(
-                "Output directory already contains generated topic pages at "
-                f"{topics_dir}. Delete and re-generate them?",
-                default=False,
-            ):
-                formatter.error("Aborted.")
-                sys.exit(2)
-            allow_delete_topics_dir = True
+    allow_delete_topics_dir = _resolve_allow_delete_topics_dir(ctx)
+    gen_inputs = _DocsiteGenerationInputs(
+        map_dir=map_dir,
+        llm_manager=llm_manager,
+        cleanup_config=cleanup_config,
+        allow_delete_topics_dir=allow_delete_topics_dir,
+        index_patterns=index_patterns,
+        site_title=site_title,
+        site_tagline=site_tagline,
+    )
 
     try:
-        result = await _call_generate_docsite(
-            formatter=formatter,
-            input_dir=map_dir,
-            output_dir=output_dir,
-            llm_manager=llm_manager,
-            cleanup_config=cleanup_config,
-            allow_delete_topics_dir=allow_delete_topics_dir,
-            index_patterns=index_patterns,
-            site_title=site_title,
-            site_tagline=site_tagline,
-        )
-    except FileNotFoundError as exc:
-        formatter.warning(str(exc))
-
-        if not _is_interactive():
-            formatter.error(
-                "AutoDoc index not found in map-in directory, and non-interactive "
-                "mode cannot prompt to auto-generate maps. Run `chunkhound map` "
-                "first (then re-run `chunkhound autodoc` with map-in), or ensure "
-                "the map-in folder contains a `*_code_mapper_index.md`."
-            )
-            sys.exit(1)
-
-        map_dir = await _autorun_code_mapper_for_autodoc(
-            args=args,
-            config=config,
-            formatter=formatter,
-            output_dir=output_dir,
-            question=(
-                "Generate the codemap first by running `chunkhound map`, then retry "
-                "AutoDoc?"
-            ),
-            decline_error=str(exc),
-            decline_exit_code=1,
-        )
-
-        try:
-            result = await _call_generate_docsite(
-                formatter=formatter,
-                input_dir=map_dir,
-                output_dir=output_dir,
-                llm_manager=llm_manager,
-                cleanup_config=cleanup_config,
-                allow_delete_topics_dir=allow_delete_topics_dir,
-                index_patterns=index_patterns,
-                site_title=site_title,
-                site_tagline=site_tagline,
-            )
-        except FileNotFoundError as exc2:
-            formatter.error(str(exc2))
-            sys.exit(1)
+        result = await _generate_docsite_with_optional_autorun(ctx, gen_inputs)
     except Exception as exc:
         formatter.error(f"AutoDoc generation failed: {exc}")
         logger.exception("AutoDoc generation failed")
