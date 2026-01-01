@@ -930,7 +930,7 @@ class LanceDBProvider(SerialDatabaseProvider):
 
     def get_chunks_in_range(
         self, file_id: int, start_line: int, end_line: int
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Get all chunks overlapping a line range (pattern from context_retriever.py)."""
         return self._execute_in_db_thread_sync(
             "get_chunks_in_range", file_id, start_line, end_line
