@@ -283,6 +283,23 @@ class DatabaseProvider(Protocol):
         """
         ...
 
+    def get_chunks_in_range(
+        self, file_id: int, start_line: int, end_line: int
+    ) -> list[dict[str, Any]]:
+        """Get chunks overlapping a line range within a file.
+
+        Used for window expansion in research to find neighboring context.
+
+        Args:
+            file_id: ID of the file to search within
+            start_line: Start of line range (1-indexed)
+            end_line: End of line range (1-indexed)
+
+        Returns:
+            List of chunk dictionaries overlapping the range
+        """
+        ...
+
     # Statistics and Monitoring
     def get_stats(self) -> dict[str, int]:
         """Get database statistics (file count, chunk count, etc.)."""
