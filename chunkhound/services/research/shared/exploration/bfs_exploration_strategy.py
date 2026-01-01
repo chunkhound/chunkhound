@@ -895,10 +895,10 @@ class BFSExplorationStrategy:
         )
 
         # Sort chunks by score from multi-hop semantic search (highest first)
-        sorted_chunks = sorted(chunks, key=lambda c: c.get("score", 0.0), reverse=True)
+        sorted_chunks = sorted(chunks, key=get_unified_score, reverse=True)
 
         # Apply elbow detection to filter low-relevance chunks before file grouping
-        chunk_scores = [c.get("score", 0.0) for c in sorted_chunks]
+        chunk_scores = [get_unified_score(c) for c in sorted_chunks]
         elbow_idx = find_elbow_kneedle(chunk_scores)
         original_count = len(sorted_chunks)
         if elbow_idx is not None:
@@ -932,7 +932,7 @@ class BFSExplorationStrategy:
         for file_path, file_chunks in file_to_chunks.items():
             # Sort chunks by score and take top N chunks
             sorted_file_chunks = sorted(
-                file_chunks, key=lambda c: c.get("score", 0.0), reverse=True
+                file_chunks, key=get_unified_score, reverse=True
             )
             top_chunks = sorted_file_chunks[:MAX_CHUNKS_PER_FILE_REPR]
 
@@ -975,7 +975,7 @@ class BFSExplorationStrategy:
             logger.warning("File reranking returned no results, falling back to chunk scores")
             for file_path, file_chunks in file_to_chunks.items():
                 file_priorities[file_path] = sum(
-                    c.get("score", 0.0) for c in file_chunks
+                    get_unified_score(c) for c in file_chunks
                 )
 
             logger.info(f"Using chunk score fallback for {len(file_priorities)} files")
