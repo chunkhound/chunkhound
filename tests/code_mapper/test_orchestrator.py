@@ -4,15 +4,15 @@ from chunkhound.code_mapper.orchestrator import CodeMapperOrchestrator
 from chunkhound.core.config.config import Config
 
 
-def test_orchestrator_run_context_max_points() -> None:
+def test_orchestrator_run_context_max_points(tmp_path: Path, clean_environment) -> None:
     class Args:
         def __init__(self) -> None:
             self.comprehensiveness = "low"
             self.path = "scope"
 
     config = Config(
-        target_dir=Path(".").resolve(),
-        database={"path": Path(".") / ".chunkhound" / "db", "provider": "duckdb"},
+        target_dir=tmp_path,
+        database={"path": tmp_path / ".chunkhound" / "db", "provider": "duckdb"},
         embedding={"provider": "openai", "api_key": "test", "model": "test"},
         llm={"provider": "openai", "api_key": "test"},
     )
@@ -24,7 +24,7 @@ def test_orchestrator_run_context_max_points() -> None:
     assert run_context.max_points == 5
 
 
-def test_orchestrator_resolve_scope_label(tmp_path: Path) -> None:
+def test_orchestrator_resolve_scope_label(tmp_path: Path, clean_environment) -> None:
     class Args:
         def __init__(self) -> None:
             self.comprehensiveness = "low"
@@ -48,7 +48,9 @@ def test_orchestrator_resolve_scope_label(tmp_path: Path) -> None:
     assert scope.scope_path == scope_dir.resolve()
 
 
-def test_orchestrator_metadata_bundle_overview_only(tmp_path: Path) -> None:
+def test_orchestrator_metadata_bundle_overview_only(
+    tmp_path: Path, clean_environment
+) -> None:
     class Args:
         def __init__(self) -> None:
             self.comprehensiveness = "low"
