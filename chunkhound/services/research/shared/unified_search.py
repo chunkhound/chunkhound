@@ -92,7 +92,7 @@ class UnifiedSearch:
         search_service = self._db_services.search_service
 
         # Helper for event emission (if callback provided)
-        async def emit_event(event_type: str, message: str, **kwargs):
+        async def emit_event(event_type: str, message: str, **kwargs: Any) -> None:
             if emit_event_callback:
                 await emit_event_callback(event_type, message, **kwargs)
 

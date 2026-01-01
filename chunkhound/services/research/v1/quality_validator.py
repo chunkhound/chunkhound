@@ -247,7 +247,7 @@ class QualityValidator:
             "Timeout [5] and threshold [1][2][3]"
         """
 
-        def sort_sequence(match):
+        def sort_sequence(match: re.Match[str]) -> str:
             """Extract numbers, sort numerically, and reconstruct."""
             sequence = match.group(0)
             numbers = re.findall(r"\d+", sequence)
