@@ -175,8 +175,9 @@ __all__ = [
     "SINGLE_PASS_OVERHEAD_TOKENS",
     "SINGLE_PASS_TIMEOUT_SECONDS",
     "TARGET_OUTPUT_TOKENS",
-    # NOTE: Repository sizing constants (CHUNKS_TO_LOC_ESTIMATE, LOC_THRESHOLD_*, SYNTHESIS_INPUT_TOKENS_*)
-    # have been removed. Elbow detection now determines relevance cutoffs based on score distributions.
+    # NOTE: Repository sizing constants (CHUNKS_TO_LOC_ESTIMATE, LOC_THRESHOLD_*,
+    # SYNTHESIS_INPUT_TOKENS_*) have been removed. Elbow detection now determines
+    # relevance cutoffs based on score distributions.
     # Constants - Citations
     "REQUIRE_CITATIONS",
     "_CITATION_PATTERN",

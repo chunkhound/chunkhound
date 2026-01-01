@@ -1,7 +1,7 @@
 """Backwards compatibility shim for research models.
 
-This module re-exports all components from shared.models to maintain backwards compatibility
-with code that imports from chunkhound.services.research.models.
+This module re-exports all components from shared.models to maintain backwards
+compatibility with code that imports from chunkhound.services.research.models.
 
 New code should import directly from chunkhound.services.research.shared.models.
 """
