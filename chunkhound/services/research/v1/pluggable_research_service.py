@@ -625,8 +625,19 @@ class PluggableResearchService:
             file_path: File path for language detection
 
         Returns:
-            Tuple of (expanded_start_line, expanded_end_line) in 1-indexed format
+            Tuple of (expanded_start_line, expanded_end_line) in 1-indexed format,
+            or (0, 0) if inputs are invalid.
         """
+        # Validate 1-indexed inputs
+        if (
+            start_line < 1
+            or end_line < 1
+            or start_line > end_line
+            or start_line > len(lines)
+            or end_line > len(lines)
+        ):
+            return (0, 0)
+
         if not ENABLE_SMART_BOUNDARIES:
             # Fallback to legacy fixed-window behavior
             context_lines = EXTRA_CONTEXT_TOKENS // 20  # ~50 lines
@@ -859,6 +870,14 @@ class PluggableResearchService:
                             )
                         )
 
+                        # Skip chunks with invalid boundary expansion
+                        if expanded_start == 0 and expanded_end == 0:
+                            logger.warning(
+                                f"Skipping chunk with invalid boundaries: "
+                                f"{file_path}:{start_line}-{end_line}"
+                            )
+                            continue
+
                         # Store expanded range in chunk for later deduplication
                         chunk["expanded_start_line"] = expanded_start
                         chunk["expanded_end_line"] = expanded_end
@@ -965,6 +984,13 @@ class PluggableResearchService:
         expanded_start, expanded_end = self._expand_to_natural_boundaries(
             lines, start_line, end_line, chunk, file_path
         )
+
+        # Fallback to original range if expansion fails
+        if expanded_start == 0 and expanded_end == 0:
+            logger.warning(
+                f"Boundary expansion failed for {file_path}, using original range"
+            )
+            return (start_line, end_line)
 
         return (expanded_start, expanded_end)
 
