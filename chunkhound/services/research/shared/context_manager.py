@@ -150,7 +150,7 @@ class ContextManager:
 
         # Reuse the sources footer builder for consistent formatting
         # This creates a markdown tree structure with chunk line ranges
-        footer = self._service._build_sources_footer(chunks, files)
+        footer = self._service._citation_manager.build_sources_footer(chunks, files)
 
         # Return just the tree portion (skip "---" separator at the start)
         # Keep the "## Sources" header and the tree

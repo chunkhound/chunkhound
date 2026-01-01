@@ -224,10 +224,12 @@ class SynthesisEngine:
         code_context = "\n\n".join(code_sections)
 
         # Build file reference map for numbered citations
-        file_reference_map = self._parent._build_file_reference_map(
+        file_reference_map = self._parent._citation_manager.build_file_reference_map(
             budgeted_chunks, files
         )
-        reference_table = self._parent._format_reference_table(file_reference_map)
+        reference_table = self._parent._citation_manager.format_reference_table(
+            file_reference_map
+        )
 
         # Build constants context section
         constants_section = ""
@@ -289,7 +291,7 @@ class SynthesisEngine:
 
         # Append sources footer with file and chunk information
         try:
-            footer = self._parent._build_sources_footer(
+            footer = self._parent._citation_manager.build_sources_footer(
                 budgeted_chunks, files, file_reference_map
             )
             if footer:
@@ -382,10 +384,12 @@ class SynthesisEngine:
 
         # Build file reference map for numbered citations (cluster-specific)
         cluster_files = cluster.files_content
-        file_reference_map = self._parent._build_file_reference_map(
+        file_reference_map = self._parent._citation_manager.build_file_reference_map(
             cluster_chunks, cluster_files
         )
-        reference_table = self._parent._format_reference_table(file_reference_map)
+        reference_table = self._parent._citation_manager.format_reference_table(
+            file_reference_map
+        )
 
         # Build cluster-specific synthesis prompt
         # Proportional output budget: each cluster gets output proportional to its input share
@@ -523,17 +527,19 @@ Provide a comprehensive analysis focusing on the query."""
         )
 
         # Build global file reference map for all clusters
-        file_reference_map = self._parent._build_file_reference_map(
+        file_reference_map = self._parent._citation_manager.build_file_reference_map(
             budgeted_chunks, all_files
         )
-        reference_table = self._parent._format_reference_table(file_reference_map)
+        reference_table = self._parent._citation_manager.format_reference_table(
+            file_reference_map
+        )
 
         # Remap cluster-local citations to global reference numbers
         logger.info("Remapping cluster-local citations to global references")
         for result in cluster_results:
             cluster_file_map = result["file_reference_map"]
             original_summary = result["summary"]
-            remapped_summary = self._parent._remap_cluster_citations(
+            remapped_summary = self._parent._citation_manager.remap_cluster_citations(
                 original_summary, cluster_file_map, file_reference_map
             )
             result["summary"] = remapped_summary
@@ -625,7 +631,7 @@ Provide a complete, integrated analysis that addresses the original query."""
             )
 
         # Validate citation references are valid
-        invalid_citations = self._parent._validate_citation_references(
+        invalid_citations = self._parent._citation_manager.validate_citation_references(
             answer, file_reference_map
         )
         if invalid_citations:
@@ -641,7 +647,7 @@ Provide a complete, integrated analysis that addresses the original query."""
 
         # Append sources footer (aggregate all sources from all clusters)
         try:
-            footer = self._parent._build_sources_footer(
+            footer = self._parent._citation_manager.build_sources_footer(
                 budgeted_chunks, all_files, file_reference_map
             )
             if footer:
