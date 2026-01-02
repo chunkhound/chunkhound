@@ -210,9 +210,7 @@ def main():
         print(f"DEBUG: Loading config with base_folder: {args.base_folder}")
         config = Config(args=args, target_dir=args.base_folder)
         print("DEBUG: Config loaded successfully")
-    except Exception as e:
-        print(f"Error loading configuration: {e}")
-        return 1
+        print(f"DEBUG: config.database = {repr(config.database)}")
 
         print(f"Database provider: {config.database.provider}")
         print(f"Database path: {config.database.get_db_path()}")
