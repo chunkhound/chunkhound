@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from chunkhound.code_mapper.llm import build_llm_metadata_and_assembly
+from chunkhound.code_mapper.llm import build_llm_metadata_and_map_hyde
 from chunkhound.core.config.config import Config
 
 
@@ -35,42 +35,38 @@ def _make_config(tmp_path: Path) -> Config:
     )
 
 
-def test_build_llm_metadata_and_assembly_env_overrides(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_build_llm_metadata_and_map_hyde_overrides(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     manager = _FakeLLMManager()
 
-    monkeypatch.setenv("CH_AGENT_DOC_ASSEMBLY_PROVIDER", "codex-cli")
-    monkeypatch.setenv("CH_AGENT_DOC_ASSEMBLY_MODEL", "assembly-model")
-    monkeypatch.setenv("CH_AGENT_DOC_ASSEMBLY_REASONING_EFFORT", "HIGH")
+    config.llm.map_hyde_provider = "codex-cli"
+    config.llm.map_hyde_model = "hyde-model"
+    config.llm.map_hyde_reasoning_effort = "high"
 
-    llm_meta, assembly_provider = build_llm_metadata_and_assembly(
+    llm_meta, map_hyde_provider = build_llm_metadata_and_map_hyde(
         config=config, llm_manager=manager
     )
 
-    assert assembly_provider is not None
+    assert map_hyde_provider is not None
     assert manager.seen_configs
 
-    assembly_cfg = manager.seen_configs[0]
-    assert assembly_cfg["provider"] == "codex-cli"
-    assert assembly_cfg["model"] == "assembly-model"
-    assert assembly_cfg["reasoning_effort"] == "high"
+    hyde_cfg = manager.seen_configs[0]
+    assert hyde_cfg["provider"] == "codex-cli"
+    assert hyde_cfg["model"] == "hyde-model"
+    assert hyde_cfg["reasoning_effort"] == "high"
 
-    assert llm_meta["assembly_synthesis_provider"] == "codex-cli"
-    assert llm_meta["assembly_synthesis_model"] == "assembly-model"
-    assert llm_meta["assembly_reasoning_effort"] == "high"
+    assert llm_meta["map_hyde_provider"] == "codex-cli"
+    assert llm_meta["map_hyde_model"] == "hyde-model"
+    assert llm_meta["map_hyde_reasoning_effort"] == "high"
 
 
-def test_build_llm_metadata_and_assembly_falls_back_to_synthesis(
-    tmp_path: Path,
-) -> None:
+def test_build_llm_metadata_and_map_hyde_falls_back_to_synthesis(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
 
-    llm_meta, assembly_provider = build_llm_metadata_and_assembly(
+    llm_meta, map_hyde_provider = build_llm_metadata_and_map_hyde(
         config=config, llm_manager=None
     )
 
-    assert assembly_provider is None
-    assert llm_meta["assembly_synthesis_provider"] == "openai"
-    assert llm_meta["assembly_synthesis_model"] == "synth-model"
+    assert map_hyde_provider is None
+    assert llm_meta["map_hyde_provider"] == "openai"
+    assert llm_meta["map_hyde_model"] == "synth-model"

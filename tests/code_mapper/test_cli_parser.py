@@ -29,6 +29,7 @@ def test_map_parser_defaults_and_flags() -> None:
     assert args.path == Path(".")
     assert args.overview_only is False
     assert args.combined is None
+    assert args.audience == "balanced"
 
     args = parser.parse_args(
         ["map", "src", "--out", "out", "--plan", "--verbose"]
@@ -37,6 +38,17 @@ def test_map_parser_defaults_and_flags() -> None:
     assert args.path == Path("src")
     assert args.overview_only is True
     assert args.verbose is True
+
+
+def test_map_parser_accepts_taint_values() -> None:
+    parser = _build_parser()
+    base = ["map", "--out", "out", "--audience"]
+    assert parser.parse_args([*base, "1"]).audience == "technical"
+    assert parser.parse_args([*base, "technical"]).audience == "technical"
+    assert parser.parse_args([*base, "2"]).audience == "balanced"
+    assert parser.parse_args([*base, "balanced"]).audience == "balanced"
+    assert parser.parse_args([*base, "3"]).audience == "end-user"
+    assert parser.parse_args([*base, "end-user"]).audience == "end-user"
 
 
 def test_map_parser_combined_flag() -> None:

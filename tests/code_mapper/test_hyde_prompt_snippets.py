@@ -51,3 +51,39 @@ def test_hyde_scope_prompt_includes_snippets_when_project_root_diff_cwd(
     assert "File: arguseek/foo.py" in prompt
     assert "(no sample code snippets available)" not in prompt
 
+
+def test_hyde_scope_prompt_context_replaces_repo_derived_blocks(tmp_path: Path) -> None:
+    project_root = tmp_path / "workspace"
+    project_root.mkdir(parents=True, exist_ok=True)
+
+    meta = AgentDocMetadata(
+        created_from_sha="TEST_SHA",
+        previous_target_sha="TEST_SHA",
+        target_sha="TEST_SHA",
+        generated_at="2025-01-01T00:00:00Z",
+        llm_config={},
+        generation_stats={},
+    )
+    hyde_cfg = HydeConfig.from_env()
+
+    template = (
+        "created={created}\n"
+        "scope={scope_display}\n"
+        "files:\n{files_block}\n"
+        "snips:\n{code_context_block}\n"
+    )
+
+    prompt = build_hyde_scope_prompt(
+        meta=meta,
+        scope_label="scope",
+        file_paths=["scope/should_not_appear.py"],
+        hyde_cfg=hyde_cfg,
+        context="STEERING CONTEXT",
+        project_root=project_root,
+        template=template,
+    )
+
+    assert "STEERING CONTEXT" in prompt
+    assert "````markdown" in prompt
+    assert "should_not_appear.py" not in prompt
+    assert "File: scope/should_not_appear.py" not in prompt

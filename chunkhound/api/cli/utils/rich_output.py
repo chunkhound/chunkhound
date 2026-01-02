@@ -218,7 +218,6 @@ class RichOutputFormatter:
         """Print a table header - use Rich Table instead."""
         # This is a legacy method - recommend using Rich Table directly
         from rich.table import Table
-
         table = Table(show_header=True)
         for header in headers:
             table.add_column(header)
@@ -228,6 +227,23 @@ class RichOutputFormatter:
             self.console.print(table)
         else:
             print(" | ".join(headers))
+
+    def text_block(self, text: str, *, title: str | None = None) -> None:
+        """Print a raw multi-line text block (no INFO/WARN prefix)."""
+        if self._terminal_compatible and self.console is not None:
+            try:
+                block = Text(text)
+                if title:
+                    self.console.print(Panel(block, title=title, box=rich.box.ROUNDED))
+                else:
+                    self.console.print(block)
+                return
+            except Exception:
+                pass
+
+        if title:
+            sys.stdout.write(f"\n=== {title} ===\n\n")
+        sys.stdout.write(text.rstrip() + "\n")
 
     def startup_info(
         self, version: str, directory: str, database: str, config: dict[str, Any]

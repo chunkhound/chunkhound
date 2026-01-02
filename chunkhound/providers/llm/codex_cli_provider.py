@@ -72,35 +72,60 @@ class CodexCLIProvider(LLMProvider):
 
     def _resolve_model_name(self, requested: str | None) -> str:
         """Resolve requested model name to Codex CLI model identifier."""
+        resolved, _source = self.describe_model_resolution(requested)
+        return resolved
+
+    @classmethod
+    def describe_model_resolution(cls, requested: str | None) -> tuple[str, str]:
+        """Return (resolved_model, source) for Codex CLI model selection.
+
+        Notes:
+        - The special value "codex" means "use ChunkHound's default".
+        - Override defaults via CHUNKHOUND_CODEX_DEFAULT_MODEL.
+        """
         env_override = os.getenv("CHUNKHOUND_CODEX_DEFAULT_MODEL")
-        # Default to the current Codex reasoning model unless explicitly overridden
+        # Default to a Codex-optimized reasoning model unless explicitly overridden.
         default_model = env_override.strip() if env_override else "gpt-5.1-codex"
+        default_source = (
+            "env:CHUNKHOUND_CODEX_DEFAULT_MODEL" if env_override else "default"
+        )
 
         if not requested:
-            return default_model
+            return default_model, default_source
 
         model_name = requested.strip()
         if not model_name or model_name.lower() == "codex":
-            return default_model
+            return default_model, default_source
 
-        return model_name
+        return model_name, "explicit"
 
     def _resolve_reasoning_effort(self, requested: str | None) -> str:
         """Resolve reasoning effort override."""
+        effort, _source = self.describe_reasoning_effort_resolution(requested)
+        return effort
+
+    @classmethod
+    def describe_reasoning_effort_resolution(cls, requested: str | None) -> tuple[str, str]:
+        """Return (resolved_effort, source) for Codex CLI reasoning effort selection."""
         env_override = os.getenv("CHUNKHOUND_CODEX_REASONING_EFFORT")
         candidate = requested or env_override
         allowed = {"minimal", "low", "medium", "high", "xhigh"}
 
         if not candidate:
-            return "low"
+            return "low", "default"
 
         effort = candidate.strip().lower()
         if effort not in allowed:
             logger.warning(
                 "Unknown Codex reasoning effort '%s'; falling back to 'low'", candidate
             )
-            return "low"
-        return effort
+            return "low", "fallback"
+
+        if requested:
+            return effort, "explicit"
+        if env_override:
+            return effort, "env:CHUNKHOUND_CODEX_REASONING_EFFORT"
+        return effort, "default"
 
     def _resolve_sandbox_mode(self, requested: str | None = None) -> str:
         """Resolve sandbox mode for codex exec command execution."""

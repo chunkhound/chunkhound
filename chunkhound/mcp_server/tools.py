@@ -618,46 +618,17 @@ async def deep_research_impl(
     Raises:
         Exception: If LLM or reranker not configured
     """
-    # Validate LLM is configured
-    if not llm_manager or not llm_manager.is_configured():
-        raise Exception(
-            "LLM not configured. Configure an LLM provider via:\n"
-            "1. Create .chunkhound.json with llm configuration, OR\n"
-            "2. Set CHUNKHOUND_LLM_API_KEY environment variable"
-        )
+    from chunkhound.services.deep_research_service import run_deep_research
 
-    # Validate reranker is configured
-    if not embedding_manager or not embedding_manager.list_providers():
-        raise Exception(
-            "No embedding providers available. Code research requires reranking "
-            "support."
-        )
-
-    embedding_provider = embedding_manager.get_provider()
-    if not (
-        hasattr(embedding_provider, "supports_reranking")
-        and embedding_provider.supports_reranking()
-    ):
-        raise Exception(
-            "Code research requires a provider with reranking support. "
-            "Configure a rerank_model in your embedding configuration."
-        )
-
-    # Create code research service with dynamic tool name
-    # This ensures followup suggestions automatically update if tool is renamed
-    research_service = DeepResearchService(
-        database_services=services,
+    return await run_deep_research(
+        services=services,
         embedding_manager=embedding_manager,
         llm_manager=llm_manager,
-        tool_name="code_research",  # Matches tool registration below
-        progress=progress,  # Pass progress for terminal UI (None in MCP mode)
-        path_filter=path,
+        query=query,
+        tool_name="code_research",
+        progress=progress,
+        path=path,
     )
-
-    # Perform code research with fixed depth and dynamic budgets
-    result = await research_service.deep_research(query)
-
-    return result
 
 
 # =============================================================================

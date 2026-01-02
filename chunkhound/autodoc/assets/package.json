@@ -1,0 +1,17 @@
+{
+  "name": "{{PACKAGE_NAME}}",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "astro": "^4.0.0",
+    "mermaid": "^10.9.0",
+    "remark-gfm": "^4.0.0"
+  }
+}
+
