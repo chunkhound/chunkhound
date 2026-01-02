@@ -2415,18 +2415,23 @@ class LanceDBProvider(SerialDatabaseProvider):
     def optimize_tables(self) -> None:
         """Optimize tables by compacting fragments and rebuilding indexes.
 
-        This method ensures complete fragment elimination to prevent duplicate
-        results in embedding generation workflows. It uses aggressive cleanup
-        parameters and iterative optimization passes to guarantee all fragments
-        are consolidated.
+        This method consolidates fragments to prevent duplicate results in search
+        and embedding generation workflows. LanceDB stores data in fragments, and
+        queries across multiple fragments can return duplicate results if not
+        consolidated. This optimization helps maintain search result uniqueness.
         """
         # Use higher timeout for optimization operations (10 minutes vs default 30s)
         import os
+        import time
+
         original_timeout = os.environ.get("CHUNKHOUND_DB_EXECUTE_TIMEOUT")
+        start_time = time.time()
         try:
             os.environ["CHUNKHOUND_DB_EXECUTE_TIMEOUT"] = "600"  # 10 minutes
             return self._execute_in_db_thread_sync("optimize_tables")
         finally:
+            total_duration = time.time() - start_time
+            logger.info(f"optimize_tables completed in {total_duration:.2f}s")
             # Restore original timeout
             if original_timeout is not None:
                 os.environ["CHUNKHOUND_DB_EXECUTE_TIMEOUT"] = original_timeout
@@ -2436,70 +2441,71 @@ class LanceDBProvider(SerialDatabaseProvider):
     def _executor_optimize_tables(self, conn: Any, state: dict[str, Any]) -> None:
         """Executor method for optimize_tables - runs in DB thread."""
         from datetime import timedelta
+        import time
 
         try:
             # Get initial fragment counts
             initial_counts = self.get_fragment_count()
             logger.debug(f"Initial fragment counts: chunks={initial_counts.get('chunks', 0)}, files={initial_counts.get('files', 0)}")
 
-            if self._chunks_table:
-                logger.debug("Optimizing chunks table - compacting fragments...")
-                # Use aggressive cleanup to ensure complete fragment reduction for embedding deduplication
-                # cleanup_older_than=None allows cleanup of all unverified data
-                stats = self._chunks_table.optimize(
-                    cleanup_older_than=None, delete_unverified=True
-                )
-                if stats is not None:
-                    logger.debug(
-                        f"Chunks table cleanup freed {stats.bytes_removed / 1024 / 1024:.2f} MB"
-                    )
-                logger.debug("Chunks table optimization complete")
-
-            if self._files_table:
-                logger.debug("Optimizing files table - compacting fragments...")
-                stats = self._files_table.optimize(
-                    cleanup_older_than=None, delete_unverified=True
-                )
-                if stats is not None:
-                    logger.debug(
-                        f"Files table cleanup freed {stats.bytes_removed / 1024 / 1024:.2f} MB"
-                    )
-                logger.debug("Files table optimization complete")
-
-            # Verify fragment reduction
-            final_counts = self.get_fragment_count()
-            chunks_reduction = initial_counts.get('chunks', 0) - final_counts.get('chunks', 0)
-            files_reduction = initial_counts.get('files', 0) - final_counts.get('files', 0)
-            logger.info(f"Fragment reduction: chunks={chunks_reduction}, files={files_reduction}")
-
-            # If fragments remain, run additional optimization passes
+            # Perform optimization with retry loop for short cleanup windows
             max_passes = 3
+            current_counts = initial_counts
+
             for pass_num in range(max_passes):
-                if final_counts.get('chunks', 0) == 0 and final_counts.get('files', 0) == 0:
+                logger.debug(f"Optimization pass {pass_num + 1}/{max_passes}")
+
+                if self._chunks_table:
+                    logger.debug("Optimizing chunks table - compacting fragments...")
+                    # Use short cleanup window with unverified deletion for incremental optimization
+                    cleanup_window = timedelta(minutes=1)
+                    start_time = time.time()
+                    stats = self._chunks_table.optimize(
+                        cleanup_older_than=cleanup_window, delete_unverified=True
+                    )
+                    duration = time.time() - start_time
+                    if stats is not None:
+                        logger.debug(
+                            f"Chunks table cleanup freed {stats.bytes_removed / 1024 / 1024:.2f} MB in {duration:.2f}s"
+                        )
+                    logger.debug(f"Chunks table optimization complete in {duration:.2f}s")
+
+                if self._files_table:
+                    logger.debug("Optimizing files table - compacting fragments...")
+                    cleanup_window = timedelta(minutes=1)
+                    start_time = time.time()
+                    stats = self._files_table.optimize(
+                        cleanup_older_than=cleanup_window, delete_unverified=True
+                    )
+                    duration = time.time() - start_time
+                    if stats is not None:
+                        logger.debug(
+                            f"Files table cleanup freed {stats.bytes_removed / 1024 / 1024:.2f} MB in {duration:.2f}s"
+                        )
+                    logger.debug(f"Files table optimization complete in {duration:.2f}s")
+
+                # Check fragment counts after this pass
+                current_counts = self.get_fragment_count()
+                remaining_chunks = current_counts.get('chunks', 0)
+                remaining_files = current_counts.get('files', 0)
+
+                logger.debug(f"After pass {pass_num + 1}: chunks={remaining_chunks}, files={remaining_files}")
+
+                # If no fragments remain, we're done
+                if remaining_chunks == 0 and remaining_files == 0:
+                    logger.info(f"Fragment optimization completed successfully in {pass_num + 1} passes")
                     break
 
-                logger.debug(f"Running additional optimization pass {pass_num + 1} to eliminate remaining fragments")
+            # Final reporting
+            final_chunks_reduction = initial_counts.get('chunks', 0) - current_counts.get('chunks', 0)
+            final_files_reduction = initial_counts.get('files', 0) - current_counts.get('files', 0)
+            logger.info(f"Total fragment reduction after {max_passes} passes: chunks={final_chunks_reduction}, files={final_files_reduction}")
 
-                if self._chunks_table and final_counts.get('chunks', 0) > 0:
-                    stats = self._chunks_table.optimize(
-                        cleanup_older_than=None, delete_unverified=True
-                    )
-                    if stats is not None:
-                        logger.debug(f"Additional chunks cleanup freed {stats.bytes_removed / 1024 / 1024:.2f} MB")
-
-                if self._files_table and final_counts.get('files', 0) > 0:
-                    stats = self._files_table.optimize(
-                        cleanup_older_than=None, delete_unverified=True
-                    )
-                    if stats is not None:
-                        logger.debug(f"Additional files cleanup freed {stats.bytes_removed / 1024 / 1024:.2f} MB")
-
-                final_counts = self.get_fragment_count()
-                if pass_num == max_passes - 1:
-                    remaining_chunks = final_counts.get('chunks', 0)
-                    remaining_files = final_counts.get('files', 0)
-                    if remaining_chunks > 0 or remaining_files > 0:
-                        logger.warning(f"Unable to eliminate all fragments after {max_passes} passes: chunks={remaining_chunks}, files={remaining_files}")
+            # Warn if fragments still remain
+            remaining_chunks = current_counts.get('chunks', 0)
+            remaining_files = current_counts.get('files', 0)
+            if remaining_chunks > 0 or remaining_files > 0:
+                logger.warning(f"Fragments remain after {max_passes} optimization passes: chunks={remaining_chunks}, files={remaining_files}. This may affect embedding deduplication.")
 
         except Exception as e:
             logger.warning(f"Failed to optimize tables: {e}")

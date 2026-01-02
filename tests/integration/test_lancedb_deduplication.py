@@ -159,6 +159,38 @@ class TestScalarIndexCreation:
         print("✓ Scalar index creation verified (table exists)")
 
 
+class TestFragmentOptimization:
+    """Test suite for fragment optimization to ensure complete cleanup."""
+
+    def test_optimize_tables_runs_without_error(self, fragmented_lancedb_provider):
+        """Verify optimize_tables runs multiple passes without hanging or errors."""
+        # The fragmented_lancedb_provider starts with 50+ fragments
+        initial_counts = fragmented_lancedb_provider.get_fragment_count()
+        initial_chunks = initial_counts.get("chunks", 0)
+
+        assert initial_chunks >= 50, f"Expected at least 50 chunks fragments, got {initial_chunks}"
+        print(f"Initial fragments: chunks={initial_chunks}")
+
+        # Run optimization with multiple passes - should complete without hanging
+        import time
+        start_time = time.time()
+        fragmented_lancedb_provider.optimize_tables()
+        duration = time.time() - start_time
+
+        print(f"✓ optimize_tables completed in {duration:.2f}s without hanging")
+
+        # Verify fragment reduction occurred
+        final_counts = fragmented_lancedb_provider.get_fragment_count()
+        final_chunks = final_counts.get("chunks", 0)
+
+        chunks_reduction = initial_chunks - final_chunks
+        print(f"Final fragments: chunks={final_chunks} (reduced by {chunks_reduction})")
+
+        # Should have reduced fragments (at least some reduction from multiple passes)
+        assert final_chunks < initial_chunks, f"Fragments should be reduced: {initial_chunks} -> {final_chunks}"
+        assert chunks_reduction > 0, f"Expected some fragment reduction, got {chunks_reduction}"
+
+
 class TestSearchDeduplication:
     """Test suite for search result deduplication across LanceDB fragments.
 
