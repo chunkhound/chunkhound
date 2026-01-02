@@ -203,9 +203,13 @@ def main():
 
     args = parser.parse_args()
 
+    print("DEBUG: Starting script execution")
+
     try:
         # Load configuration
+        print(f"DEBUG: Loading config with base_folder: {args.base_folder}")
         config = Config(args=args, target_dir=args.base_folder)
+        print("DEBUG: Config loaded successfully")
     except Exception as e:
         print(f"Error loading configuration: {e}")
         return 1
@@ -214,13 +218,18 @@ def main():
         print(f"Database path: {config.database.get_db_path()}")
 
         # Create database provider
+        print("DEBUG: Creating database provider")
         provider = get_database_provider(config)
 
         # Connect to database
+        print("DEBUG: Connecting to database")
         provider.connect()
+        print("DEBUG: Connected to database")
 
         # Get current statistics
+        print("DEBUG: Getting embedding stats")
         initial_stats = get_embedding_stats(provider)
+        print(f"DEBUG: Stats obtained: {initial_stats}")
 
         print(f"\nConnected to {config.database.provider} database")
         print(f"Database contains {initial_stats['total_files']:,} files, "
