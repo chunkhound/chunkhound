@@ -65,6 +65,7 @@ from chunkhound.services.research.v1.synthesis_engine import SynthesisEngine
 
 if TYPE_CHECKING:
     from chunkhound.api.cli.utils.tree_progress import TreeProgressDisplay
+    from chunkhound.core.config.research_config import ResearchConfig
 
 
 class PluggableResearchService:
@@ -84,6 +85,7 @@ class PluggableResearchService:
         tool_name: str = "code_research",
         progress: "TreeProgressDisplay | None" = None,
         path_filter: str | None = None,
+        config: "ResearchConfig | None" = None,
     ):
         """Initialize pluggable research service.
 
@@ -96,6 +98,8 @@ class PluggableResearchService:
             tool_name: Name of the MCP tool (used in followup suggestions)
             progress: Optional TreeProgressDisplay instance for terminal UI (None for MCP)
             path_filter: Optional path filter to limit research scope
+            config: Optional ResearchConfig for query expansion settings.
+                If None, falls back to hardcoded constants.
         """
         self._db_services = database_services
         self._embedding_manager = embedding_manager
@@ -109,14 +113,29 @@ class PluggableResearchService:
         self._citation_manager = CitationManager()
         self._quality_validator = QualityValidator(llm_manager)
         self._path_filter = path_filter
+        self._config = config
         self._unified_search_helper = UnifiedSearch(
             db_services=database_services,
             embedding_manager=embedding_manager,
-            config=None,  # v1 doesn't use ResearchConfig
+            config=config,
         )
 
         # Store exploration strategy (required - pluggable algorithm for chunk discovery)
         self._exploration_strategy = exploration_strategy
+
+    @property
+    def _query_expansion_enabled(self) -> bool:
+        """Get query expansion enabled setting from config or fallback to constant."""
+        if self._config is not None:
+            return self._config.query_expansion_enabled
+        return QUERY_EXPANSION_ENABLED
+
+    @property
+    def _num_expanded_queries(self) -> int:
+        """Get number of expanded queries from config or fallback to constant."""
+        if self._config is not None:
+            return self._config.num_expanded_queries
+        return NUM_LLM_EXPANDED_QUERIES
 
     async def _emit_event(
         self,
@@ -190,9 +209,7 @@ class PluggableResearchService:
             max_depth=1,
         )
 
-        initial_chunks = await self._unified_search(
-            query, context, node_id=0, depth=0
-        )
+        initial_chunks = await self._unified_search(query, context, node_id=0, depth=0)
 
         logger.info(f"Initial search found {len(initial_chunks)} chunks")
 
@@ -220,7 +237,11 @@ class PluggableResearchService:
         # Use default threshold (0.0) since v1 doesn't use elbow detection for exploration cutoff
         phase1_threshold = 0.0
 
-        expanded_chunks, exploration_stats, file_contents = await self._exploration_strategy.explore(
+        (
+            expanded_chunks,
+            exploration_stats,
+            file_contents,
+        ) = await self._exploration_strategy.explore(
             root_query=query,
             initial_chunks=initial_chunks,
             phase1_threshold=phase1_threshold,
@@ -235,7 +256,9 @@ class PluggableResearchService:
         )
 
         # Aggregate chunks into synthesis format
-        await self._emit_event("synthesis_start", "Aggregating findings from exploration")
+        await self._emit_event(
+            "synthesis_start", "Aggregating findings from exploration"
+        )
 
         aggregated = self._aggregate_all_findings(expanded_chunks, file_contents)
 
@@ -366,11 +389,14 @@ class PluggableResearchService:
                 async with semaphore:
                     # Get cluster-specific facts context
                     cluster_files = set(cluster.file_paths)
-                    cluster_facts_context = evidence_ledger.get_facts_map_prompt_context(
-                        cluster_files
+                    cluster_facts_context = (
+                        evidence_ledger.get_facts_map_prompt_context(cluster_files)
                     )
                     return await self._synthesis_engine._map_synthesis_on_cluster(
-                        cluster, query, prioritized_chunks, synthesis_budgets,
+                        cluster,
+                        query,
+                        prioritized_chunks,
+                        synthesis_budgets,
                         total_input_tokens,
                         constants_context=constants_context,
                         facts_context=cluster_facts_context,
@@ -492,13 +518,14 @@ class PluggableResearchService:
         llm = self._llm_manager.get_utility_provider()
 
         # Define JSON schema for structured output
+        num_queries = self._num_expanded_queries
         schema = {
             "type": "object",
             "properties": {
                 "queries": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": f"Array of exactly {NUM_LLM_EXPANDED_QUERIES} expanded search queries (semantically complete sentences)",
+                    "description": f"Array of exactly {num_queries} expanded search queries (semantically complete sentences)",
                 }
             },
             "required": ["queries"],
@@ -519,7 +546,7 @@ class PluggableResearchService:
             query=query,
             context_root_query=context.root_query,
             context_str=context_str,
-            num_queries=NUM_LLM_EXPANDED_QUERIES,
+            num_queries=num_queries,
         )
 
         logger.debug(
@@ -536,10 +563,10 @@ class PluggableResearchService:
 
             expanded = result.get("queries", [])
 
-            # Validation: expect exactly 2 queries from LLM
-            if not expanded or len(expanded) < NUM_LLM_EXPANDED_QUERIES:
+            # Validation: expect exactly num_queries from LLM
+            if not expanded or len(expanded) < num_queries:
                 logger.warning(
-                    f"LLM returned {len(expanded) if expanded else 0} queries, expected {NUM_LLM_EXPANDED_QUERIES}, using original query only"
+                    f"LLM returned {len(expanded) if expanded else 0} queries, expected {num_queries}, using original query only"
                 )
                 return [query]
 
@@ -548,7 +575,7 @@ class PluggableResearchService:
 
             # PREPEND ORIGINAL QUERY (new logic)
             # Original query goes first for position bias in embedding models
-            final_queries = [query] + expanded[:NUM_LLM_EXPANDED_QUERIES]
+            final_queries = [query] + expanded[:num_queries]
 
             logger.debug(
                 f"Expanded query into {len(final_queries)} variations: {final_queries}"
@@ -581,7 +608,7 @@ class PluggableResearchService:
         """
         # Step 1: Query expansion (v1-specific - handled before delegation)
         expanded_queries = None
-        if QUERY_EXPANSION_ENABLED:
+        if self._query_expansion_enabled:
             await self._emit_event(
                 "query_expand", "Expanding query", node_id=node_id, depth=depth
             )

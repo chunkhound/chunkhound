@@ -84,6 +84,7 @@ class ResearchServiceFactory:
                 tool_name=tool_name,
                 progress=progress,
                 path_filter=path_filter,
+                config=config.research,
             )
         elif algorithm == "v3":
             # v3 = parallel BFS + WideCoverage with unified elbow detection
@@ -132,6 +133,7 @@ class ResearchServiceFactory:
                 tool_name=tool_name,
                 progress=progress,
                 path_filter=path_filter,
+                config=config.research,
             )
         else:
             # Default to v1 with BFS exploration strategy
@@ -157,4 +159,5 @@ class ResearchServiceFactory:
                 tool_name=tool_name,
                 progress=progress,
                 path_filter=path_filter,
+                config=config.research,
             )

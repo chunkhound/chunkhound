@@ -113,10 +113,11 @@ class UnifiedSearch:
             time_limit = self._config.get_effective_time_limit() if self._config else None
             result_limit = self._config.get_effective_result_limit() if self._config else None
 
+            page_size = self._config.initial_page_size if self._config else 30
             search_tasks = [
                 search_service.search_semantic(
                     query=expanded_q,
-                    page_size=30,
+                    page_size=page_size,
                     threshold=None,  # No threshold filtering - elbow detection computes threshold
                     force_strategy="multi_hop",
                     path_filter=path_filter,
@@ -180,9 +181,10 @@ class UnifiedSearch:
             time_limit = self._config.get_effective_time_limit() if self._config else None
             result_limit = self._config.get_effective_result_limit() if self._config else None
 
+            page_size = self._config.initial_page_size if self._config else 30
             semantic_results, _ = await search_service.search_semantic(
                 query=query,
-                page_size=30,
+                page_size=page_size,
                 threshold=None,  # No threshold filtering - elbow detection computes threshold
                 force_strategy="multi_hop",
                 path_filter=path_filter,
@@ -434,7 +436,7 @@ class UnifiedSearch:
         symbols: list[str],
         target_per_symbol: int = 10,
         path_filter: str | None = None,
-        exclude_ids: set[str] | None = None,
+        exclude_ids: set[int | str] | None = None,
     ) -> list[dict[str, Any]]:
         """Search codebase for top-ranked symbols using parallel async regex (Step 5).
 
