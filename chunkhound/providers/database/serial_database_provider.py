@@ -144,6 +144,20 @@ class SerialDatabaseProvider(ABC):
             # Shutdown executor with Windows-specific handling
             self._executor.shutdown(wait=True)
 
+    def soft_disconnect(self, skip_checkpoint: bool = False) -> None:
+        """Close DB connection without shutting down executor.
+
+        Use for temporary disconnections (e.g., compaction) where reconnection
+        will happen soon. For final cleanup, use disconnect() instead.
+
+        Args:
+            skip_checkpoint: If True, skip final checkpoint (faster but less safe)
+        """
+        try:
+            self._execute_in_db_thread_sync("disconnect", skip_checkpoint)
+        finally:
+            self._executor.close_connection()
+
     def _execute_in_db_thread_sync(self, operation_name: str, *args, **kwargs) -> Any:
         """Execute operation synchronously in DB thread."""
         return self._executor.execute_sync(self, operation_name, *args, **kwargs)
@@ -520,3 +534,32 @@ class SerialDatabaseProvider(ABC):
         """Optimize tables by compacting fragments and rebuilding indexes."""
         # Default no-op implementation
         pass
+
+    def optimize(self) -> bool:
+        """Optimize database storage. Provider-specific implementation.
+
+        This is the unified entry point for all database optimization:
+        - Lightweight operations (CHECKPOINT, index maintenance)
+        - Deep compaction when fragmentation exceeds threshold
+
+        Returns:
+            True if optimization was performed, False if skipped.
+        """
+        return False  # Default: no-op for providers without optimization
+
+    def get_storage_stats(self) -> dict[str, Any]:
+        """Get storage statistics.
+
+        Override in subclasses for provider-specific metrics.
+        """
+        return {
+            "total_blocks": 0,
+            "used_blocks": 0,
+            "free_blocks": 0,
+            "block_size": 0,
+            "fragmentation_ratio": 0.0,
+        }
+
+    def should_compact(self, threshold: float = 0.5) -> tuple[bool, dict[str, Any]]:
+        """Check if compaction is needed. Override in subclasses."""
+        return False, self.get_storage_stats()

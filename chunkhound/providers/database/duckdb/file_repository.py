@@ -385,11 +385,3 @@ class DuckDBFileRepository:
         except Exception as e:
             logger.error(f"Failed to get file stats for {file_id}: {e}")
             return {}
-
-    def _maybe_checkpoint(self, force: bool = False) -> None:
-        """Perform checkpoint if needed - delegate to provider."""
-        if self._provider:
-            self._provider._maybe_checkpoint(force)
-        else:
-            # Fallback for tests - no checkpoint needed
-            pass
