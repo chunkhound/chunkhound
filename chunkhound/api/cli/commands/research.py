@@ -101,6 +101,7 @@ async def research_command(args: argparse.Namespace, config: Config) -> None:
                 llm_manager=llm_manager,
                 query=args.query,
                 progress=tree_progress,
+                config=config,
             )
 
             # Output the markdown result (already formatted by the service)
