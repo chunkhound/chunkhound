@@ -73,9 +73,10 @@ class BudgetCalculator:
     def calculate_synthesis_budgets(self, repo_stats: dict[str, Any]) -> dict[str, int]:
         """Calculate synthesis token budgets based on repository size.
 
-        Output budget is FIXED at 30k tokens for reasoning models (includes thinking + output).
-        Only INPUT budget scales with repo size from small repos (~65k total) to large repos
-        (~185k total) using piecewise linear brackets with diminishing returns.
+        Output budget is FIXED at 30k tokens for reasoning models (includes
+        thinking + output). Only INPUT budget scales with repo size from small
+        repos (~65k total) to large repos (~185k total) using piecewise linear
+        brackets with diminishing returns.
 
         Args:
             repo_stats: Repository statistics from get_stats() including chunk count
@@ -88,7 +89,7 @@ class BudgetCalculator:
         # Estimate LOC from chunk count
         estimated_loc = total_chunks * CHUNKS_TO_LOC_ESTIMATE
 
-        # Scale INPUT budget based on repository size (piecewise linear brackets with diminishing returns)
+        # Scale INPUT budget based on repository size (piecewise linear)
         if estimated_loc < LOC_THRESHOLD_TINY:
             # Very small repos: minimal input context
             input_tokens = SYNTHESIS_INPUT_TOKENS_TINY
