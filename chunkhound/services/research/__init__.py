@@ -5,10 +5,7 @@ Backwards compatibility layer: Re-exports shared components and v1 implementatio
 
 # Re-export factory and protocol (primary interface)
 from chunkhound.services.research.factory import ResearchServiceFactory
-from chunkhound.services.research.protocol import (
-    ResearchResult,
-    ResearchServiceProtocol,
-)
+from chunkhound.services.research.protocol import ResearchServiceProtocol
 
 # Re-export shared components for backwards compatibility
 # Re-export gap models from shared

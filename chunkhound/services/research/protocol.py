@@ -1,21 +1,9 @@
 """Protocol for research services - both v1 (BFS) and v2 (coverage-first)."""
 
-from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 
-@dataclass
-class ResearchResult:
-    """Result from research service."""
-
-    answer: str
-    citations: list[dict[str, Any]]
-    stats: dict[str, Any]
-    # Optional fields for v2
-    gap_queries: list[str] | None = None
-    phase_timings: dict[str, float] | None = None
-
-
+@runtime_checkable
 class ResearchServiceProtocol(Protocol):
     """Protocol for research services (v1/v2/v3 implementations).
 
