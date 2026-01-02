@@ -1628,21 +1628,6 @@ class IndexingCoordinator(BaseService):
             )
 
         except Exception as e:
-            # Debug log to trace if this is the mystery error source
-            import os
-            from datetime import datetime
-
-            debug_file = os.getenv("CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_debug.log")
-            timestamp = datetime.now().isoformat()
-            try:
-                with open(debug_file, "a") as f:
-                    f.write(
-                        f"[{timestamp}] [COORDINATOR-MISSING] Failed to generate missing embeddings: {e}\n"
-                    )
-                    f.flush()
-            except Exception:
-                pass
-
             logger.error(
                 f"[IndexCoord-Missing] Failed to generate missing embeddings: {e}"
             )
