@@ -176,6 +176,8 @@ class LanceDBProvider(SerialDatabaseProvider):
         # Performance monitoring
         self._query_performance = {}
 
+        self.provider_type = "lancedb"  # Identify this as LanceDB provider
+
     def _create_connection(self) -> Any:
         """Create and return a LanceDB connection.
 
