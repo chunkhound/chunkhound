@@ -125,7 +125,16 @@ class TreeProgressDisplay:
 
         parts = []
         for key, value in metadata.items():
-            if key in ("chunks", "files", "children", "tokens", "queries", "symbols", "constants_count", "facts_count"):
+            if key in (
+                "chunks",
+                "files",
+                "children",
+                "tokens",
+                "queries",
+                "symbols",
+                "constants_count",
+                "facts_count",
+            ):
                 parts.append(f"{key}={value}")
             elif key == "max_completion_tokens":
                 parts.append(f"max_completion_tokens={value}")
