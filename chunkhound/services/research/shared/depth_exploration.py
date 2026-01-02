@@ -369,7 +369,7 @@ class DepthExplorationService:
             constants_section = f"\n{constants_context}\n"
 
         # Exploration query generation prompt
-        prompt = f"""ROOT QUERY: {root_query}
+        prompt = f"""RESEARCH QUERY: {root_query}
 {constants_section}
 FILE: {file_path}
 {imports_context}CHUNKS FOUND ({len(file_chunks)} total):
