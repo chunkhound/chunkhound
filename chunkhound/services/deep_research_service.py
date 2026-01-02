@@ -1,6 +1,7 @@
 """Deep Research Service for ChunkHound - BFS-based semantic exploration."""
 
 import asyncio
+import os
 import re
 import threading
 from dataclasses import dataclass, field
@@ -20,6 +21,7 @@ from chunkhound.services.research.context_manager import ContextManager
 from chunkhound.services.research.file_reader import FileReader
 from chunkhound.services.research.quality_validator import QualityValidator
 from chunkhound.services.research.query_expander import QueryExpander
+from chunkhound.services.research.schemas import QueryExpansionResponse
 from chunkhound.services.research.question_generator import QuestionGenerator
 from chunkhound.services.research.synthesis_engine import SynthesisEngine
 from chunkhound.services.research.unified_search import UnifiedSearch
@@ -540,6 +542,32 @@ class DeepResearchService:
             "token_budget": budget_info,
         }
 
+        # Expose the subset of files and chunks that were actually used for
+        # synthesis so orchestrators (like agent-doc) can build a unified
+        # Sources footer without re-running searches. This is additive metadata
+        # and does not affect tool behavior for existing code_research users.
+        try:
+            sources_files = list(budgeted_files.keys())
+            sources_chunks: list[dict[str, Any]] = []
+            for chunk in prioritized_chunks:
+                file_path = chunk.get("file_path")
+                if not file_path:
+                    continue
+                sources_chunks.append(
+                    {
+                        "file_path": file_path,
+                        "start_line": chunk.get("start_line"),
+                        "end_line": chunk.get("end_line"),
+                    }
+                )
+            metadata["sources"] = {
+                "files": sources_files,
+                "chunks": sources_chunks,
+            }
+        except Exception:
+            # Sources metadata is best-effort; never break main flow.
+            pass
+
         logger.info(f"Deep research completed: {metadata}")
 
         # Emit completion event
@@ -798,20 +826,6 @@ class DeepResearchService:
         """
         llm = self._llm_manager.get_utility_provider()
 
-        # Define JSON schema for structured output
-        schema = {
-            "type": "object",
-            "properties": {
-                "queries": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": f"Array of exactly {NUM_LLM_EXPANDED_QUERIES} expanded search queries (semantically complete sentences)",
-                }
-            },
-            "required": ["queries"],
-            "additionalProperties": False,
-        }
-
         # Simplified system prompt per GPT-5-Nano best practices
         system = prompts.QUERY_EXPANSION_SYSTEM
 
@@ -834,14 +848,15 @@ class DeepResearchService:
         )
 
         try:
-            result = await llm.complete_structured(
+            # Use typed structured output with Pydantic model
+            result = await llm.complete_structured_typed(
                 prompt=prompt,
-                json_schema=schema,
+                response_model=QueryExpansionResponse,
                 system=system,
                 max_completion_tokens=QUERY_EXPANSION_TOKENS,
             )
 
-            expanded = result.get("queries", [])
+            expanded = result.queries  # Type-safe access
 
             # Validation: expect exactly 2 queries from LLM
             if not expanded or len(expanded) < NUM_LLM_EXPANDED_QUERIES:
@@ -1206,7 +1221,8 @@ class DeepResearchService:
             file_path: File path for language detection
 
         Returns:
-            Tuple of (expanded_start_line, expanded_end_line) in 1-indexed format
+            Tuple of (expanded_start_line, expanded_end_line) in 1-indexed format.
+            Returns (0, 0) when the requested range is invalid.
         """
         if not ENABLE_SMART_BOUNDARIES:
             # Fallback to legacy fixed-window behavior
@@ -1256,9 +1272,40 @@ class DeepResearchService:
             )
         )
 
-        # Convert to 0-indexed for array access
+        # Safety: empty files cannot be expanded meaningfully
+        if not lines:
+            logger.debug(
+                f"Empty file content for {file_path}, skipping boundary expansion"
+            )
+            return start_line, end_line
+
+        # Convert to 0-indexed for array access. Chunk metadata can drift
+        # slightly from real file length (for example, after manual edits or
+        # legacy index entries), so we defensively clamp to valid bounds.
+        max_idx = len(lines) - 1
         start_idx = max(0, start_line - 1)
-        end_idx = min(len(lines) - 1, end_line - 1)
+        if start_idx > max_idx:
+            logger.warning(
+                f"Start line {start_line} for {file_path} exceeds file length "
+                f"{len(lines)}; skipping boundary expansion."
+            )
+            return 0, 0
+
+        end_idx = end_line - 1
+        if end_idx < 0:
+            logger.warning(
+                f"End line {end_line} for {file_path} is invalid; "
+                "skipping boundary expansion."
+            )
+            return 0, 0
+        if end_idx > max_idx:
+            end_idx = max_idx
+        if end_idx < start_idx:
+            logger.warning(
+                f"End line {end_line} for {file_path} precedes start line "
+                f"{start_line}; skipping boundary expansion."
+            )
+            return 0, 0
 
         # Expand backward to find function/class start
         expanded_start = start_idx
@@ -1440,6 +1487,9 @@ class DeepResearchService:
                             )
                         )
 
+                        if expanded_start <= 0 or expanded_end <= 0:
+                            continue
+
                         # Store expanded range in chunk for later deduplication
                         chunk["expanded_start_line"] = expanded_start
                         chunk["expanded_end_line"] = expanded_end
@@ -1450,6 +1500,9 @@ class DeepResearchService:
 
                         chunk_with_context = "\n".join(lines[start_idx:end_idx])
                         chunk_contents.append(chunk_with_context)
+
+                    if not chunk_contents:
+                        continue
 
                     combined_chunks = "\n\n...\n\n".join(chunk_contents)
                     chunk_tokens = llm.estimate_tokens(combined_chunks)

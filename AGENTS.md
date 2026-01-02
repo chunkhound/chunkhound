@@ -80,4 +80,5 @@ uv publish
 
 ## PROJECT_MAINTENANCE
 - Smoke tests are mandatory guardrails
+- Run `uv run mypy chunkhound` during reviews to catch Optional/type boundary issues
 - All code patterns should be self-documenting

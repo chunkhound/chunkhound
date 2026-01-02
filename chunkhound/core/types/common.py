@@ -152,6 +152,7 @@ class Language(Enum):
     OBJC = "objc"
     PHP = "php"
     VUE = "vue"
+    SVELTE = "svelte"
     SWIFT = "swift"
     DART = "dart"
 
@@ -241,6 +242,7 @@ class Language(Enum):
             ".php5": cls.PHP,
             ".phps": cls.PHP,
             ".vue": cls.VUE,
+            ".svelte": cls.SVELTE,
             ".swift": cls.SWIFT,
             ".swiftinterface": cls.SWIFT,
         }
@@ -279,6 +281,7 @@ class Language(Enum):
             Language.OBJC,
             Language.PHP,
             Language.VUE,
+            Language.SVELTE,
             Language.SWIFT,
             Language.DART,
         }
@@ -300,6 +303,7 @@ class Language(Enum):
             Language.OBJC,
             Language.PHP,
             Language.VUE,
+            Language.SVELTE,
             Language.SWIFT,
             Language.DART,
         }
@@ -314,6 +318,7 @@ class Language(Enum):
             Language.TSX,
             Language.PHP,
             Language.VUE,
+            Language.SVELTE,
             Language.SWIFT,
         }
 

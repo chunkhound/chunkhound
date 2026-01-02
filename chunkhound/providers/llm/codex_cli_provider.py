@@ -80,7 +80,7 @@ class CodexCLIProvider(BaseCLIProvider):
         """Resolve reasoning effort override."""
         env_override = os.getenv("CHUNKHOUND_CODEX_REASONING_EFFORT")
         candidate = requested or env_override
-        allowed = {"minimal", "low", "medium", "high"}
+        allowed = {"minimal", "low", "medium", "high", "xhigh"}
 
         if not candidate:
             return "low"
@@ -206,10 +206,8 @@ class CodexCLIProvider(BaseCLIProvider):
             if base and base.exists():
                 self._copy_minimal_codex_state(base, overlay)
 
-            # Write our minimal config.toml ensuring no MCP and no history
             config_path = overlay / "config.toml"
             # Many Codex builds expect top-level `model` keys (not a [model] table).
-            # Ensure model configuration lives at the root table, with history isolated.
             cfg_lines = [
                 f'model = "{model_name}"',
                 f'model_reasoning_effort = "{self._reasoning_effort}"',
@@ -351,8 +349,10 @@ class CodexCLIProvider(BaseCLIProvider):
                 use_stdin,
                 MAX_ARG_CHARS,
             )
-
-        # Newer Codex builds require --skip-git-repo-check; default to passing it.
+        # Newer Codex builds require --skip-git-repo-check; default to passing
+        # it on the first attempt to avoid noisy negotiation warnings. This
+        # can be disabled via CHUNKHOUND_CODEX_SKIP_GIT_CHECK=0 if needed for
+        # older binaries.
         add_skip_git = os.getenv("CHUNKHOUND_CODEX_SKIP_GIT_CHECK", "1") != "0"
 
         last_error: Exception | None = None
@@ -361,6 +361,12 @@ class CodexCLIProvider(BaseCLIProvider):
                 proc: asyncio.subprocess.Process | None = None
                 try:
                     if use_stdin:
+                        if debug_codex:
+                            logger.debug(
+                                "Codex CLI attempt %d using stdin transport (skip_git=%s)",
+                                attempt + 1,
+                                add_skip_git,
+                            )
                         proc = await asyncio.create_subprocess_exec(
                             binary,
                             "exec",
@@ -383,6 +389,12 @@ class CodexCLIProvider(BaseCLIProvider):
                         )
                     else:
                         # argv mode
+                        if debug_codex:
+                            logger.debug(
+                                "Codex CLI attempt %d using argv transport (skip_git=%s)",
+                                attempt + 1,
+                                add_skip_git,
+                            )
                         proc = await asyncio.create_subprocess_exec(
                             binary,
                             "exec",
@@ -402,6 +414,19 @@ class CodexCLIProvider(BaseCLIProvider):
                     if proc.returncode != 0:
                         raw_err = stderr.decode("utf-8", errors="ignore")
                         err = self._sanitize_text(raw_err)
+                        if debug_codex:
+                            logger.debug(
+                                "Codex CLI non-zero exit (attempt %d, use_stdin=%s): %s",
+                                attempt + 1,
+                                use_stdin,
+                                err,
+                            )
+                        if add_skip_git and self._skip_git_flag_unsupported(err):
+                            add_skip_git = False
+                            logger.warning(
+                                "codex exec does not support --skip-git-repo-check; retrying without flag"
+                            )
+                            continue
                         err_lower = err.lower()
 
                         # Skip-git repo check negotiation for newer Codex builds
@@ -454,6 +479,12 @@ class CodexCLIProvider(BaseCLIProvider):
                     last_error = RuntimeError(
                         f"codex exec timed out after {request_timeout}s"
                     )
+                    if debug_codex:
+                        logger.debug(
+                            "Codex CLI timeout on attempt %d after %ds",
+                            attempt + 1,
+                            request_timeout,
+                        )
                     if attempt < self._max_retries - 1:
                         logger.warning(
                             f"codex exec attempt {attempt + 1} timed out; retrying"
@@ -464,6 +495,11 @@ class CodexCLIProvider(BaseCLIProvider):
                     # Treat BrokenPipe/connection reset on stdin as "no stdin support" and fall back to argv
                     if use_stdin:
                         use_stdin = False
+                        if debug_codex:
+                            logger.debug(
+                                "Codex CLI stdin connection lost on attempt %d; switching to argv",
+                                attempt + 1,
+                            )
                         if attempt < self._max_retries - 1:
                             logger.warning(
                                 "codex exec stdin connection lost; retrying with argv mode"
@@ -478,6 +514,11 @@ class CodexCLIProvider(BaseCLIProvider):
                     if e.errno == 7:  # Argument list too long
                         if not use_stdin:
                             use_stdin = True
+                            if debug_codex:
+                                logger.debug(
+                                    "Codex CLI argv too long on attempt %d; switching to stdin",
+                                    attempt + 1,
+                                )
                             logger.warning("codex exec argv too long; retrying with stdin mode")
                             continue
                     raise
@@ -531,6 +572,19 @@ class CodexCLIProvider(BaseCLIProvider):
         if system and system.strip():
             return f"System Instructions:\n{system.strip()}\n\nUser Request:\n{prompt}"
         return prompt
+
+    def _skip_git_flag_unsupported(self, err: str) -> bool:
+        lowered = err.lower()
+        if "--skip-git-repo-check" not in lowered:
+            return False
+        unsupported_markers = (
+            "unexpected argument",
+            "unknown option",
+            "unrecognized option",
+            "no such option",
+            "invalid option",
+        )
+        return any(marker in lowered for marker in unsupported_markers)
 
     # ----- BaseCLIProvider hooks -----
 
