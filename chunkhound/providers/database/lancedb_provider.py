@@ -31,6 +31,16 @@ if TYPE_CHECKING:
     from chunkhound.core.config.database_config import DatabaseConfig
 
 
+# IMPORTANT: Executor Method Deadlock Prevention
+# ===============================================
+# Executor methods (_executor_*) run in the DB thread and MUST NOT call public methods
+# that use _execute_in_db_thread_sync(), as this creates a deadlock. The DB thread would
+# try to submit another operation to itself.
+#
+# Instead, call other _executor_* methods directly with (conn, state) parameters.
+# Example: self._executor_get_fragment_count(conn, state) instead of self.get_fragment_count()
+# ===============================================
+
 # PyArrow schemas - avoiding LanceModel to prevent enum issues
 def get_files_schema() -> pa.Schema:
     """Get PyArrow schema for files table."""
@@ -2445,7 +2455,7 @@ class LanceDBProvider(SerialDatabaseProvider):
 
         try:
             # Get initial fragment counts
-            initial_counts = self.get_fragment_count()
+            initial_counts = self._executor_get_fragment_count(conn, state)
             logger.debug(f"Initial fragment counts: chunks={initial_counts.get('chunks', 0)}, files={initial_counts.get('files', 0)}")
 
             # Perform optimization with retry loop for short cleanup windows
@@ -2485,7 +2495,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     logger.debug(f"Files table optimization complete in {duration:.2f}s")
 
                 # Check fragment counts after this pass
-                current_counts = self.get_fragment_count()
+                current_counts = self._executor_get_fragment_count(conn, state)
                 remaining_chunks = current_counts.get('chunks', 0)
                 remaining_files = current_counts.get('files', 0)
 
