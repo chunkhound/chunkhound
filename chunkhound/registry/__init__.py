@@ -261,7 +261,6 @@ class ProviderRegistry:
             embedding_batch_size=embedding_batch_size,
             db_batch_size=db_batch_size,
             max_concurrent_batches=max_concurrent,
-            optimization_batch_frequency=1000,
         )
 
     # Private setup methods - explicit provider creation
