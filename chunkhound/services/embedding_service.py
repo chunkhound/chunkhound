@@ -855,6 +855,30 @@ class EmbeddingService(BaseService):
                 # Prepare for next retry attempt
                 current_batch = transient_failures
 
+            # Deduplicate results to prevent duplicate inserts/updates
+            # This can happen when chunks succeed in multiple retry attempts
+            def _classification_priority(classification):
+                """Get priority for classification deduplication (higher = more severe)."""
+                priorities = {
+                    EmbeddingErrorClassification.PERMANENT: 3,
+                    EmbeddingErrorClassification.TRANSIENT: 2,
+                    EmbeddingErrorClassification.BATCH_RECOVERABLE: 1,
+                }
+                return priorities.get(classification, 0)
+
+            # Deduplicate successful chunks (keep last vector)
+            successful_by_id = {}
+            for chunk_id, vector in result.successful_chunks:
+                successful_by_id[chunk_id] = vector
+            result.successful_chunks = [(cid, vec) for cid, vec in successful_by_id.items()]
+
+            # Deduplicate failed chunks (keep highest priority classification)
+            failed_by_id = {}
+            for chunk_id, text, classification in result.failed_chunks:
+                if chunk_id not in failed_by_id or _classification_priority(classification) > _classification_priority(failed_by_id[chunk_id][1]):
+                    failed_by_id[chunk_id] = (text, classification)
+            result.failed_chunks = [(cid, text, cls) for cid, (text, cls) in failed_by_id.items()]
+
             return result
 
         # Process batches with optional progress tracking
