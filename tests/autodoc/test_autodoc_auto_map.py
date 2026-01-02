@@ -7,6 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 from chunkhound.api.cli.commands import autodoc as autodoc_command
+from chunkhound.api.cli.commands import autodoc_autorun as autorun
+from chunkhound.api.cli.commands import autodoc_cleanup as cleanup
+from chunkhound.api.cli.commands import autodoc_generate as generate
+from chunkhound.api.cli.commands import autodoc_prompts as prompts
 from chunkhound.core.config.config import Config
 
 
@@ -39,7 +43,7 @@ async def test_autodoc_offers_auto_map_when_map_dir_missing_index(
         audience: str | None,
         **_kwargs,
     ):
-        plan = autodoc_command._build_auto_map_plan(
+        plan = autorun._build_auto_map_plan(  # type: ignore[attr-defined]
             output_dir=output_dir,
             map_out_dir=map_out_dir,
             comprehensiveness=comprehensiveness,
@@ -59,23 +63,23 @@ async def test_autodoc_offers_auto_map_when_map_dir_missing_index(
         assert plan.audience == "balanced"
         return plan
 
-    monkeypatch.setattr(autodoc_command, "generate_docsite", fake_generate_docsite)
+    monkeypatch.setattr(generate, "generate_docsite", fake_generate_docsite)
     monkeypatch.setattr(
-        autodoc_command,
-        "_run_code_mapper_for_autodoc",
+        autorun,
+        "run_code_mapper_for_autodoc",
         fake_run_code_mapper_for_autodoc,
     )
     monkeypatch.setattr(
-        autodoc_command,
-        "_code_mapper_autorun_prereq_summary",
+        autorun,
+        "code_mapper_autorun_prereq_summary",
         lambda **_kwargs: (True, [], []),
     )
     monkeypatch.setattr(
-        autodoc_command,
-        "_resolve_llm_manager",
+        cleanup,
+        "resolve_llm_manager",
         lambda **_kwargs: object(),
     )
-    monkeypatch.setattr(autodoc_command, "_is_interactive", lambda: True)
+    monkeypatch.setattr(prompts, "is_interactive", lambda: True)
     inputs = iter(["y", "", "", "", ""])
     monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
 
@@ -118,11 +122,11 @@ async def test_autodoc_does_not_prompt_in_non_interactive_mode(
     async def fake_generate_docsite(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         raise FileNotFoundError("No AutoDoc index file found")
 
-    monkeypatch.setattr(autodoc_command, "generate_docsite", fake_generate_docsite)
-    monkeypatch.setattr(autodoc_command, "_is_interactive", lambda: False)
+    monkeypatch.setattr(generate, "generate_docsite", fake_generate_docsite)
+    monkeypatch.setattr(prompts, "is_interactive", lambda: False)
     monkeypatch.setattr(
-        autodoc_command,
-        "_resolve_llm_manager",
+        cleanup,
+        "resolve_llm_manager",
         lambda **_kwargs: object(),
     )
 
@@ -176,7 +180,7 @@ async def test_autodoc_generates_map_when_map_in_omitted(
         audience: str | None,
         **_kwargs,
     ):
-        plan = autodoc_command._build_auto_map_plan(
+        plan = autorun._build_auto_map_plan(  # type: ignore[attr-defined]
             output_dir=output_dir,
             map_out_dir=map_out_dir,
             comprehensiveness=comprehensiveness,
@@ -186,23 +190,23 @@ async def test_autodoc_generates_map_when_map_in_omitted(
         assert map_context is None
         return plan
 
-    monkeypatch.setattr(autodoc_command, "generate_docsite", fake_generate_docsite)
+    monkeypatch.setattr(generate, "generate_docsite", fake_generate_docsite)
     monkeypatch.setattr(
-        autodoc_command,
-        "_run_code_mapper_for_autodoc",
+        autorun,
+        "run_code_mapper_for_autodoc",
         fake_run_code_mapper_for_autodoc,
     )
     monkeypatch.setattr(
-        autodoc_command,
-        "_code_mapper_autorun_prereq_summary",
+        autorun,
+        "code_mapper_autorun_prereq_summary",
         lambda **_kwargs: (True, [], []),
     )
     monkeypatch.setattr(
-        autodoc_command,
-        "_resolve_llm_manager",
+        cleanup,
+        "resolve_llm_manager",
         lambda **_kwargs: object(),
     )
-    monkeypatch.setattr(autodoc_command, "_is_interactive", lambda: True)
+    monkeypatch.setattr(prompts, "is_interactive", lambda: True)
     inputs = iter(["y", "", "", "", ""])
     monkeypatch.setattr(builtins, "input", lambda _prompt="": next(inputs))
 
@@ -239,8 +243,8 @@ async def test_autodoc_auto_map_prereq_failure_exits_before_prompting_map_params
 
     # Force preflight failure
     monkeypatch.setattr(
-        autodoc_command,
-        "_code_mapper_autorun_prereq_summary",
+        autorun,
+        "code_mapper_autorun_prereq_summary",
         lambda **_kwargs: (
             False,
             ["database", "embeddings", "reranking", "llm"],
@@ -257,15 +261,20 @@ async def test_autodoc_auto_map_prereq_failure_exits_before_prompting_map_params
 
     async def fake_run_code_mapper_for_autodoc(**_kwargs):  # type: ignore[no-untyped-def]
         ran_map.append(Path("should-not-run"))
-        return autodoc_command._build_auto_map_plan(output_dir=tmp_path / "autodoc")
+        return autorun._build_auto_map_plan(output_dir=tmp_path / "autodoc")  # type: ignore[attr-defined]
 
     monkeypatch.setattr(
-        autodoc_command,
-        "_run_code_mapper_for_autodoc",
+        autorun,
+        "run_code_mapper_for_autodoc",
         fake_run_code_mapper_for_autodoc,
     )
 
-    monkeypatch.setattr(autodoc_command, "_is_interactive", lambda: True)
+    monkeypatch.setattr(prompts, "is_interactive", lambda: True)
+    monkeypatch.setattr(
+        cleanup,
+        "resolve_llm_manager",
+        lambda **_kwargs: object(),
+    )
 
     # Only consent prompt should be consumed; map param prompts must not run.
     inputs = iter(["y"])

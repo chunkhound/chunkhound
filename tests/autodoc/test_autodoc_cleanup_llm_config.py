@@ -1,4 +1,4 @@
-from chunkhound.api.cli.commands import autodoc as autodoc_command
+from chunkhound.api.cli.commands import autodoc_cleanup as autodoc_cleanup
 from chunkhound.core.config.llm_config import LLMConfig
 
 
@@ -12,7 +12,7 @@ def test_cleanup_uses_autodoc_cleanup_overrides() -> None:
         autodoc_cleanup_reasoning_effort="medium",
     )
 
-    _, synthesis = autodoc_command._build_cleanup_provider_configs(llm_config)
+    _, synthesis = autodoc_cleanup._build_cleanup_provider_configs(llm_config)
 
     assert synthesis["provider"] == "codex-cli"
     assert synthesis["model"] == "gpt-5.1-codex"

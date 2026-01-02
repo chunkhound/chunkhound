@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from chunkhound.api.cli.commands import autodoc as autodoc_command
+from chunkhound.api.cli.commands.autodoc_cleanup import resolve_cleanup_config_and_llm_manager
+from chunkhound.api.cli.commands.autodoc_errors import AutoDocCLIExit
 from chunkhound.core.config.config import Config
 
 
@@ -20,19 +22,21 @@ class _CaptureFormatter:
         self.warnings.append(message)
 
 
-def test_autodoc_cleanup_does_not_auto_select_codex_from_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_autodoc_cleanup_requires_explicit_llm_config(tmp_path: Path) -> None:
     formatter = _CaptureFormatter()
     cfg = Config(target_dir=tmp_path)
+    cfg.llm = None  # type: ignore[assignment]
 
-    monkeypatch.setattr(autodoc_command, "_has_llm_env", lambda: False)
-    monkeypatch.setattr(autodoc_command, "_codex_available", lambda: True)
-
-    manager = autodoc_command._resolve_llm_manager(
-        config=cfg, cleanup_mode="llm", formatter=formatter
+    args = SimpleNamespace(
+        cleanup_mode="llm",
+        cleanup_batch_size=1,
+        cleanup_max_tokens=512,
+        audience="balanced",
     )
 
-    assert manager is None
-    assert any("No LLM provider configured" in msg for msg in formatter.warnings)
+    with pytest.raises(AutoDocCLIExit) as excinfo:
+        resolve_cleanup_config_and_llm_manager(args=args, config=cfg, formatter=formatter)  # type: ignore[arg-type]
+
+    assert excinfo.value.exit_code == 2
+    assert any("AutoDoc cleanup requires an LLM provider" in msg for msg in excinfo.value.errors)
 
