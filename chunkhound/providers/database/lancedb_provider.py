@@ -2420,11 +2420,11 @@ class LanceDBProvider(SerialDatabaseProvider):
         parameters and iterative optimization passes to guarantee all fragments
         are consolidated.
         """
-        # Use higher timeout for optimization operations (5 minutes vs default 30s)
+        # Use higher timeout for optimization operations (10 minutes vs default 30s)
         import os
         original_timeout = os.environ.get("CHUNKHOUND_DB_EXECUTE_TIMEOUT")
         try:
-            os.environ["CHUNKHOUND_DB_EXECUTE_TIMEOUT"] = "300"  # 5 minutes
+            os.environ["CHUNKHOUND_DB_EXECUTE_TIMEOUT"] = "600"  # 10 minutes
             return self._execute_in_db_thread_sync("optimize_tables")
         finally:
             # Restore original timeout
