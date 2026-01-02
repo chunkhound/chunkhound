@@ -8,7 +8,7 @@ synthesis). The pattern is: deduplicate by chunk_id, keeping highest rerank_scor
 from loguru import logger
 
 
-def get_chunk_id(chunk: dict) -> str | None:
+def get_chunk_id(chunk: dict) -> int | str | None:
     """Extract chunk ID from a chunk dictionary.
 
     Chunks may have their ID in either 'chunk_id' or 'id' field depending
@@ -18,7 +18,7 @@ def get_chunk_id(chunk: dict) -> str | None:
         chunk: Chunk dictionary
 
     Returns:
-        Chunk ID string or None if not found
+        Chunk ID (int from DB or str) or None if not found
     """
     return chunk.get("chunk_id") or chunk.get("id")
 
@@ -44,7 +44,7 @@ def deduplicate_chunks(
     Returns:
         Deduplicated list of chunks (highest score wins)
     """
-    chunk_map: dict[str, dict] = {}
+    chunk_map: dict[int | str, dict] = {}
 
     for chunk_list in chunk_lists:
         for chunk in chunk_list:
@@ -91,7 +91,7 @@ def merge_chunk_lists(
     Returns:
         Merged and deduplicated list (highest score wins)
     """
-    chunk_map: dict[str, dict] = {}
+    chunk_map: dict[int | str, dict] = {}
 
     # Add base chunks first
     for chunk in base_chunks:

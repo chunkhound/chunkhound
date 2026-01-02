@@ -640,7 +640,7 @@ class BFSExplorationStrategy:
         Keeps the highest-scoring version when the same chunk appears multiple times,
         consistent with v3 parallel strategy's merge behavior.
         """
-        chunks_map: dict[str, dict[str, Any]] = {}
+        chunks_map: dict[int | str, dict[str, Any]] = {}
         for node in all_nodes:
             for chunk in node.chunks:
                 chunk_id = chunk.get("chunk_id") or chunk.get("id")

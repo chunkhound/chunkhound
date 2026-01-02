@@ -266,7 +266,7 @@ class ParallelExplorationStrategy:
         Returns:
             List of unique chunks, with highest-scored version on conflicts
         """
-        chunk_map: dict[str, dict[str, Any]] = {}
+        chunk_map: dict[int | str, dict[str, Any]] = {}
 
         for chunk in bfs_chunks + wide_chunks:
             chunk_id = chunk.get("chunk_id") or chunk.get("id")
