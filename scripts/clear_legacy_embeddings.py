@@ -6,11 +6,13 @@ This script removes all embeddings from the database, preparing it for testing
 new embedding flows. It works with both DuckDB and LanceDB providers.
 
 Usage:
-    uv run scripts/clear_legacy_embeddings.py [--dry-run] [--yes]
+    uv run scripts/clear_legacy_embeddings.py --base-folder /path/to/base/folder [--dry-run] [--yes] [--config /path/to/config.json]
 
 Options:
+    --base-folder: Path to the base folder containing chunkhound config file and .chunkhound directory (required)
     --dry-run: Show what would be deleted without actually deleting
     --yes: Skip confirmation prompts (use with caution)
+    --config: Path to config file (optional, will auto-detect from base folder if not provided)
 
 Safety Features:
 - Shows statistics of what will be deleted before proceeding
@@ -183,6 +185,12 @@ def main():
         help="Show what would be deleted without actually deleting"
     )
     parser.add_argument(
+        "--base-folder",
+        type=Path,
+        required=True,
+        help="Path to the base folder containing chunkhound config file and .chunkhound directory"
+    )
+    parser.add_argument(
         "--yes",
         action="store_true",
         help="Skip confirmation prompts (use with caution)"
@@ -190,23 +198,14 @@ def main():
     parser.add_argument(
         "--config",
         type=Path,
-        help="Path to config file (optional, will auto-detect if not provided)"
+        help="Path to config file (optional, will auto-detect from base folder if not provided)"
     )
 
     args = parser.parse_args()
 
     try:
         # Load configuration
-        config = Config.from_environment()
-        if args.config and args.config.exists():
-            # If config file specified, load it
-            import json
-            with open(args.config) as f:
-                config_data = json.load(f)
-            # Merge with existing config
-            for key, value in config_data.items():
-                if hasattr(config, key):
-                    setattr(config, key, value)
+        config = Config(args=args, target_dir=args.base_folder)
     except Exception as e:
         print(f"Error loading configuration: {e}")
         return 1
