@@ -16,8 +16,8 @@ from chunkhound.core.config.research_config import ResearchConfig
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
-from chunkhound.services.research.shared.elbow_detection import find_elbow_kneedle
 from chunkhound.services.research.shared.exploration.elbow_filter import (
+    filter_chunks_by_elbow,
     get_unified_score,
 )
 from chunkhound.services.research.shared.models import (
@@ -280,7 +280,7 @@ class BFSExplorationStrategy:
 
         # Apply elbow detection and reranking before returning
         filtered_chunks, filtered_files, filter_stats = (
-            await self._filter_for_synthesis(all_chunks, all_files, root_query)
+            await self._filter_for_synthesis(all_chunks, root_query)
         )
 
         stats = {
@@ -871,7 +871,6 @@ class BFSExplorationStrategy:
     async def _filter_for_synthesis(
         self,
         chunks: list[dict[str, Any]],
-        files: dict[str, str],
         root_query: str,
     ) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, Any]]:
         """Apply elbow detection and file reranking before synthesis.
@@ -882,7 +881,6 @@ class BFSExplorationStrategy:
 
         Args:
             chunks: All chunks from BFS traversal
-            files: All file contents from BFS traversal
             root_query: Original research query (for reranking files)
 
         Returns:
@@ -890,24 +888,14 @@ class BFSExplorationStrategy:
         """
         llm = self._llm_manager.get_utility_provider()
 
+        logger.info(f"Filtering chunks for synthesis: {len(chunks)} chunks")
+
+        # Apply elbow detection using shared utility (handles sorting internally)
+        original_count = len(chunks)
+        sorted_chunks, elbow_stats = filter_chunks_by_elbow(chunks, score_key=None)
         logger.info(
-            f"Filtering files for synthesis: {len(chunks)} chunks, {len(files)} files"
+            f"Elbow detection: keeping {len(sorted_chunks)}/{original_count} chunks"
         )
-
-        # Sort chunks by score from multi-hop semantic search (highest first)
-        sorted_chunks = sorted(chunks, key=get_unified_score, reverse=True)
-
-        # Apply elbow detection to filter low-relevance chunks before file grouping
-        chunk_scores = [get_unified_score(c) for c in sorted_chunks]
-        elbow_idx = find_elbow_kneedle(chunk_scores)
-        original_count = len(sorted_chunks)
-        if elbow_idx is not None:
-            cutoff_score = chunk_scores[elbow_idx]
-            sorted_chunks = sorted_chunks[: elbow_idx + 1]
-            logger.info(
-                f"Elbow detection: keeping {len(sorted_chunks)}/{original_count} "
-                f"chunks (cutoff score: {cutoff_score:.3f})"
-            )
 
         # Read files for elbow-filtered chunks (token budget applied here)
         elbow_filtered_files = await self._read_files_for_synthesis(sorted_chunks)

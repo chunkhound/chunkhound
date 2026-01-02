@@ -36,7 +36,7 @@ def get_unified_score(chunk: dict[str, Any]) -> float:
 
 def filter_chunks_by_elbow(
     chunks: list[dict[str, Any]],
-    score_key: str | None = "score",
+    score_key: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Filter chunks using elbow detection on score distribution.
 
