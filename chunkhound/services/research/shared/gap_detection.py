@@ -316,7 +316,7 @@ class GapDetectionService:
 
         for cluster in cluster_groups:
             for chunk in cluster:
-                chunk_tokens = llm.estimate_tokens(chunk.get("content", ""))
+                chunk_tokens = llm.estimate_tokens(get_chunk_text(chunk))
 
                 # If adding this chunk exceeds budget, start new shard
                 if current_tokens + chunk_tokens > shard_budget and current_shard:
