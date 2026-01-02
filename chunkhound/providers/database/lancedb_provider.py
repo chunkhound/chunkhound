@@ -938,7 +938,7 @@ class LanceDBProvider(SerialDatabaseProvider):
 
     def _executor_get_chunks_in_range(
         self, conn: Any, state: dict[str, Any], file_id: int, start_line: int, end_line: int
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Executor method for get_chunks_in_range - runs in DB thread.
 
         Args:
