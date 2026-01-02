@@ -29,7 +29,10 @@ class QuestionSynthesisResponse(BaseModel):
     """Response schema for question synthesis with reasoning."""
 
     reasoning: str = Field(
-        description="Brief explanation of synthesis strategy and why these questions explore different unexplored aspects"
+        description=(
+            "Brief explanation of synthesis strategy and why these questions "
+            "explore different unexplored aspects"
+        )
     )
     questions: list[str] = Field(
         description="Synthesized research questions, each exploring a distinct aspect"

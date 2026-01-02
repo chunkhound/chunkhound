@@ -4,10 +4,12 @@ This module provides Dart-specific tree-sitter queries and extraction logic
 for mapping Dart AST nodes to semantic chunks.
 """
 
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from chunkhound.core.types.common import Language
-from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 
 if TYPE_CHECKING:
     from chunkhound.parsers.universal_engine import UniversalConcept
@@ -265,6 +267,12 @@ class DartMapping(BaseMapping):
             (extension_declaration
                 name: (identifier) @name
             ) @definition
+
+            (static_final_declaration_list
+                (static_final_declaration
+                    (identifier) @name
+                )
+            ) @definition
             """
 
         elif concept == UniversalConcept.COMMENT:
@@ -507,3 +515,107 @@ class DartMapping(BaseMapping):
         if type_node:
             return self.get_node_text(type_node, source)
         return ""
+
+    def extract_constants(
+        self, concept: "UniversalConcept", captures: dict[str, Any], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constant definitions from Dart code.
+
+        Identifies const and final top-level variables as constants.
+
+        Args:
+            concept: The universal concept being extracted
+            captures: Dictionary of capture names to tree-sitter nodes
+            content: Source code as bytes
+
+        Returns:
+            List of constant dictionaries with 'name' and 'value' keys, or None
+        """
+        try:
+            from chunkhound.parsers.universal_engine import UniversalConcept
+        except ImportError:
+            return None
+
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        # Get the definition node
+        def_node = captures.get("definition")
+        if not def_node or def_node.type != "static_final_declaration_list":
+            return None
+
+        source = content.decode("utf-8")
+
+        # Look for const_builtin or final_builtin as SIBLINGS of the declaration list
+        # In Dart AST: const/final keywords are at the same level as static_final_declaration_list
+        # This works for both top-level (parent: program) and class-level (parent: declaration) scopes
+        has_const_or_final = False
+        decl_parent = def_node.parent
+        if decl_parent:
+            for sibling in decl_parent.children:
+                if sibling.type in ["const_builtin", "final_builtin"]:
+                    has_const_or_final = True
+                    break
+
+        if not has_const_or_final:
+            return None
+
+        # Extract variable name
+        name_node = captures.get("name")
+        if not name_node:
+            return None
+
+        name = self.get_node_text(name_node, source).strip()
+
+        # Try to extract value from static_final_declaration
+        value = ""
+        # Find the static_final_declaration child
+        for child in def_node.children:
+            if child.type == "static_final_declaration":
+                # Look for assignment value (node after "=")
+                found_equals = False
+                for decl_child in child.children:
+                    if found_equals and decl_child.type != ";":
+                        value = self.get_node_text(decl_child, source).strip()
+                        break
+                    if decl_child.type == "=":
+                        found_equals = True
+
+        # Truncate long values
+        if len(value) > MAX_CONSTANT_VALUE_LENGTH:
+            value = value[:MAX_CONSTANT_VALUE_LENGTH] + "..."
+
+        return [{"name": name, "value": value}]
+
+    def resolve_import_path(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> Path | None:
+        """Resolve import path for Dart.
+
+        Attempts to resolve relative imports and local file imports.
+
+        Args:
+            import_text: The import statement text
+            base_dir: Base directory of the project
+            source_file: Path to the file containing the import
+
+        Returns:
+            Path to the imported file if resolvable, None otherwise
+        """
+        match = re.search(r"import\s+['\"](.+?)['\"]", import_text)
+        if not match:
+            return None
+
+        path = match.group(1)
+
+        # External package imports start with 'package:'
+        if path.startswith("package:"):
+            return None
+
+        # Relative imports
+        if path.startswith("./") or path.startswith("../"):
+            resolved = (source_file.parent / path).resolve()
+            if resolved.exists():
+                return resolved
+
+        return None

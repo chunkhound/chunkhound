@@ -66,6 +66,24 @@ class TestModuleImports:
             except Exception as e:
                 pytest.fail(f"Failed to import {module_name}: {e}")
 
+    def test_v3_research_imports(self):
+        """Test v3 parallel research services can be imported."""
+        from chunkhound.services.research.shared.exploration import (
+            ExplorationStrategy,
+            BFSExplorationStrategy,
+            WideCoverageStrategy,
+            ParallelExplorationStrategy,
+        )
+        from chunkhound.services.research.factory import ResearchServiceFactory
+        from chunkhound.services.research.protocol import ResearchServiceProtocol
+
+        assert ExplorationStrategy is not None
+        assert BFSExplorationStrategy is not None
+        assert WideCoverageStrategy is not None
+        assert ParallelExplorationStrategy is not None
+        assert ResearchServiceFactory is not None
+        assert ResearchServiceProtocol is not None
+
 
 class TestCLICommands:
     """Test that CLI commands at least show help without crashing."""

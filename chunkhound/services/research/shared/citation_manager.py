@@ -349,12 +349,15 @@ class CitationManager:
         # Render tree recursively
         def render_node(node: TreeNode, prefix: str = "", is_last: bool = True) -> None:
             if node.name:  # Skip root
-                # Build connector
                 connector = "└── " if is_last else "├── "
                 display_name = node.name
 
                 # Add reference number for files (if map provided)
-                if node.is_file and file_reference_map and node.full_path in file_reference_map:
+                if (
+                    node.is_file
+                    and file_reference_map
+                    and node.full_path in file_reference_map
+                ):
                     ref_num = file_reference_map[node.full_path]
                     display_name = f"[{ref_num}] {display_name}"
 
@@ -397,12 +400,8 @@ class CitationManager:
             for idx, child in enumerate(children_list):
                 is_last_child = idx == len(children_list) - 1
 
-                # Build new prefix with tab indentation
                 if node.name:  # Not root
-                    if is_last:
-                        new_prefix = prefix + "\t"
-                    else:
-                        new_prefix = prefix + "│\t"
+                    new_prefix = prefix + ("\t" if is_last else "│\t")
                 else:
                     new_prefix = ""
 

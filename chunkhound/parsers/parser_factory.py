@@ -53,6 +53,7 @@ from chunkhound.parsers.mappings import (
     YamlMapping,
     ZigMapping,
 )
+from chunkhound.parsers.concept_extractor import LanguageMapping
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import SetupError, TreeSitterEngine
 from chunkhound.parsers.universal_parser import CASTConfig, UniversalParser
@@ -873,6 +874,26 @@ class ParserFactory:
             if total_count > 0
             else 0.0,
         }
+
+    def get_mapping_for_file(self, file_path: Path) -> LanguageMapping | None:
+        """Get the language mapping for a file to access resolve_import_path().
+
+        Returns None if no mapping exists for the file type.
+
+        Args:
+            file_path: Path to the file
+
+        Returns:
+            LanguageMapping instance for the file's language, or None if unsupported
+        """
+        try:
+            language = self.detect_language(file_path)
+            if language not in LANGUAGE_CONFIGS:
+                return None
+            config = LANGUAGE_CONFIGS[language]
+            return config.mapping_class()
+        except Exception:
+            return None
 
 
 # Global factory instance for convenience

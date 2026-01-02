@@ -5,12 +5,14 @@ for the universal concept system. It maps Bash's AST nodes to universal
 semantic concepts used by the unified parser.
 """
 
+import re
+from pathlib import Path
 from typing import Any
 
 from tree_sitter import Node
 
 from chunkhound.core.types.common import Language
-from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 
@@ -73,6 +75,8 @@ class BashMapping(BaseMapping):
             (for_statement
                 variable: (variable_name) @name
             ) @definition
+
+            (declaration_command) @definition
             """
 
         elif concept == UniversalConcept.BLOCK:
@@ -399,3 +403,84 @@ class BashMapping(BaseMapping):
             "shopt",
         }
         return command in builtins
+
+    def extract_constants(
+        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constant definitions from Bash code.
+
+        Identifies readonly variables and declare -r variables as constants.
+
+        Args:
+            concept: The universal concept being extracted
+            captures: Dictionary of capture names to tree-sitter nodes
+            content: Source code as bytes
+
+        Returns:
+            List of constant dictionaries with 'name' and 'value' keys, or None
+        """
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        # Get the definition node
+        def_node = captures.get("definition")
+        if not def_node or def_node.type != "declaration_command":
+            return None
+
+        source = content.decode("utf-8")
+        node_text = self.get_node_text(def_node, source)
+
+        # Only extract readonly or declare -r declarations (not declare without -r)
+        if not (node_text.startswith("readonly ") or "declare -r" in node_text):
+            return None
+
+        # Extract variable name and value
+        # Pattern: readonly VAR=value or declare -r VAR=value
+        match = re.match(
+            r"(?:readonly|declare\s+-r)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)",
+            node_text.strip(),
+        )
+        if not match:
+            return None
+
+        name = match.group(1)
+        value = match.group(2).strip()
+
+        # Truncate long values
+        if len(value) > MAX_CONSTANT_VALUE_LENGTH:
+            value = value[:MAX_CONSTANT_VALUE_LENGTH] + "..."
+
+        return [{"name": name, "value": value}]
+
+    def resolve_import_path(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> Path | None:
+        """Resolve import path from Bash source/. command.
+
+        Args:
+            import_text: The text of the import statement
+            base_dir: Base directory of the indexed codebase
+            source_file: Path to the file containing the import
+
+        Returns:
+            Resolved absolute path if found, None otherwise
+        """
+        # source ./file.sh or . ./file.sh
+        match = re.search(r'(?:source|\.)\s+["\']?([^\s"\']+)', import_text)
+        if not match:
+            return None
+
+        path = match.group(1)
+
+        # Try relative to source file first
+        if path.startswith("./") or path.startswith("../"):
+            resolved = (source_file.parent / path).resolve()
+            if resolved.exists():
+                return resolved
+
+        # Try relative to base directory
+        full_path = base_dir / path
+        if full_path.exists():
+            return full_path
+
+        return None

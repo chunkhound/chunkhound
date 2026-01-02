@@ -24,6 +24,25 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.services.research.shared.models import (
+    ENABLE_ADAPTIVE_BUDGETS,
+    FILE_CONTENT_TOKENS_MAX,
+    FILE_CONTENT_TOKENS_MIN,
+    FOLLOWUP_OUTPUT_TOKENS_MAX,
+    FOLLOWUP_OUTPUT_TOKENS_MIN,
+    INTERNAL_MAX_TOKENS,
+    INTERNAL_ROOT_TARGET,
+    LEAF_ANSWER_TOKENS_BASE,
+    LEAF_ANSWER_TOKENS_BONUS,
+    LLM_INPUT_TOKENS_MAX,
+    LLM_INPUT_TOKENS_MIN,
+    MAX_FILE_CONTENT_TOKENS,
+    MAX_LEAF_ANSWER_TOKENS,
+    MAX_LLM_INPUT_TOKENS,
+    MAX_SYNTHESIS_TOKENS,
+    OUTPUT_TOKENS_WITH_REASONING,
+)
+
 # Repository size thresholds
 CHUNKS_TO_LOC_ESTIMATE = 20  # Rough estimation: 1 chunk ≈ 20 lines of code
 LOC_THRESHOLD_TINY = 10_000  # Very small repos
@@ -37,58 +56,8 @@ SYNTHESIS_INPUT_TOKENS_SMALL = 50_000  # Small repos (< 100k LOC)
 SYNTHESIS_INPUT_TOKENS_MEDIUM = 80_000  # Medium repos (< 1M LOC)
 SYNTHESIS_INPUT_TOKENS_LARGE = 150_000  # Large repos (>= 1M LOC)
 
-# Fixed output and overhead budgets
-OUTPUT_TOKENS_WITH_REASONING = 30_000  # Fixed output budget for reasoning models (18k output + 12k reasoning buffer)
+# Fixed overhead budget (unique to budget_calculator)
 SINGLE_PASS_OVERHEAD_TOKENS = 5_000  # Prompt template and overhead
-
-# Adaptive budget control
-ENABLE_ADAPTIVE_BUDGETS = True  # Enable depth-based adaptive budgets
-
-# File content budget range (input: what LLM sees for code)
-FILE_CONTENT_TOKENS_MIN = 10_000  # Root nodes (synthesizing, need less raw code)
-FILE_CONTENT_TOKENS_MAX = 50_000  # Leaf nodes (analyzing, need full implementations)
-
-# LLM total input budget range (query + context + code)
-LLM_INPUT_TOKENS_MIN = 15_000  # Root nodes
-LLM_INPUT_TOKENS_MAX = 60_000  # Leaf nodes
-
-# Leaf answer output budget (what LLM generates at leaves)
-# NOTE: Reduced from 30k to balance cost vs quality. If you observe:
-#   - Frequent "Missing: [detail]" statements
-#   - Theoretical placeholders ("provide exact values")
-#   - Incomplete analysis of complex components
-# Consider increasing these values. Quality validation warnings will indicate budget pressure.
-LEAF_ANSWER_TOKENS_BASE = (
-    18_000  # Base budget for leaf nodes (was 30k, reduced for cost)
-)
-LEAF_ANSWER_TOKENS_BONUS = (
-    3_000  # Additional tokens for deeper leaves (was 5k, reduced for cost)
-)
-
-# Internal synthesis output budget (what LLM generates at internal nodes)
-# NOTE: Reduced from 17.5k/32k to balance cost vs quality. If root synthesis appears rushed or
-# omits critical architectural details, consider increasing INTERNAL_ROOT_TARGET.
-INTERNAL_ROOT_TARGET = 11_000  # Root synthesis target (was 17.5k, reduced for cost)
-INTERNAL_MAX_TOKENS = (
-    19_000  # Maximum for deep internal nodes (was 32k, reduced for cost)
-)
-
-# Follow-up question generation output budget (what LLM generates for follow-up questions)
-# NOTE: High budgets needed for reasoning models (o1/o3/GPT-5) which use internal "thinking" tokens
-# WHY: Reasoning models consume 5-15k tokens for internal reasoning before producing 100-500 tokens of output
-# The actual generated questions are concise, but the model needs reasoning budget to evaluate relevance
-FOLLOWUP_OUTPUT_TOKENS_MIN = (
-    8_000  # Root/shallow nodes: simpler questions, less reasoning needed
-)
-FOLLOWUP_OUTPUT_TOKENS_MAX = (
-    15_000  # Deep nodes: complex synthesis requires more reasoning depth
-)
-
-# Legacy constants (used when ENABLE_ADAPTIVE_BUDGETS = False)
-MAX_FILE_CONTENT_TOKENS = 3000
-MAX_LLM_INPUT_TOKENS = 5000
-MAX_LEAF_ANSWER_TOKENS = 400
-MAX_SYNTHESIS_TOKENS = 600
 
 
 class BudgetCalculator:
@@ -104,9 +73,10 @@ class BudgetCalculator:
     def calculate_synthesis_budgets(self, repo_stats: dict[str, Any]) -> dict[str, int]:
         """Calculate synthesis token budgets based on repository size.
 
-        Output budget is FIXED at 30k tokens for reasoning models (includes thinking + output).
-        Only INPUT budget scales with repo size from small repos (~65k total) to large repos
-        (~185k total) using piecewise linear brackets with diminishing returns.
+        Output budget is FIXED at 30k tokens for reasoning models (includes
+        thinking + output). Only INPUT budget scales with repo size from small
+        repos (~65k total) to large repos (~185k total) using piecewise linear
+        brackets with diminishing returns.
 
         Args:
             repo_stats: Repository statistics from get_stats() including chunk count
@@ -119,7 +89,7 @@ class BudgetCalculator:
         # Estimate LOC from chunk count
         estimated_loc = total_chunks * CHUNKS_TO_LOC_ESTIMATE
 
-        # Scale INPUT budget based on repository size (piecewise linear brackets with diminishing returns)
+        # Scale INPUT budget based on repository size (piecewise linear)
         if estimated_loc < LOC_THRESHOLD_TINY:
             # Very small repos: minimal input context
             input_tokens = SYNTHESIS_INPUT_TOKENS_TINY

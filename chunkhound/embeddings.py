@@ -5,6 +5,11 @@ from typing import TYPE_CHECKING, Protocol
 
 from loguru import logger
 
+from chunkhound.interfaces.embedding_provider import (
+    EmbeddingProvider as InterfaceEmbeddingProvider,
+    RerankResult,
+)
+
 if TYPE_CHECKING:
     from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
 
@@ -53,6 +58,25 @@ class EmbeddingProvider(Protocol):
         """
         ...
 
+    def supports_reranking(self) -> bool:
+        """Return True if this provider supports reranking."""
+        ...
+
+    async def rerank(
+        self, query: str, documents: list[str], top_k: int | None = None
+    ) -> list[RerankResult]:
+        """Rerank documents by relevance to query.
+
+        Args:
+            query: Query text to rank against
+            documents: List of document texts to rank
+            top_k: Optional limit on number of results
+
+        Returns:
+            List of RerankResult with original index and relevance score
+        """
+        ...
+
 
 @dataclass
 class LocalEmbeddingResult:
@@ -74,11 +98,11 @@ class EmbeddingManager:
     """Manages embedding providers and generation."""
 
     def __init__(self) -> None:
-        self._providers: dict[str, EmbeddingProvider] = {}
+        self._providers: dict[str, InterfaceEmbeddingProvider] = {}
         self._default_provider: str | None = None
 
     def register_provider(
-        self, provider: EmbeddingProvider, set_default: bool = False
+        self, provider: InterfaceEmbeddingProvider, set_default: bool = False
     ) -> None:
         """Register an embedding provider.
 
@@ -95,7 +119,7 @@ class EmbeddingManager:
             self._default_provider = provider.name
             logger.info(f"Set default embedding provider: {provider.name}")
 
-    def get_provider(self, name: str | None = None) -> EmbeddingProvider:
+    def get_provider(self, name: str | None = None) -> InterfaceEmbeddingProvider:
         """Get an embedding provider by name.
 
         Args:
@@ -114,7 +138,7 @@ class EmbeddingManager:
 
         return self._providers[name]
 
-    def get_default_provider(self) -> EmbeddingProvider | None:
+    def get_default_provider(self) -> InterfaceEmbeddingProvider | None:
         """Get the default embedding provider if one is set.
 
         Returns:

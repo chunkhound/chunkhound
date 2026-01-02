@@ -27,6 +27,12 @@ from loguru import logger
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 
+# Multi-hop search parameters
+INITIAL_LIMIT_CAP_NORMAL = 100
+INITIAL_LIMIT_CAP_EXHAUSTIVE = 500
+NEIGHBORS_PER_CANDIDATE_NORMAL = 20
+NEIGHBORS_PER_CANDIDATE_EXHAUSTIVE = 30
+
 
 class MultiHopStrategy:
     """Dynamic multi-hop semantic search with relevance-based termination."""
@@ -36,6 +42,7 @@ class MultiHopStrategy:
         database_provider: DatabaseProvider,
         embedding_provider: EmbeddingProvider,
         single_hop_search_fn,
+        config: Any = None,
     ):
         """Initialize multi-hop search strategy.
 
@@ -43,10 +50,12 @@ class MultiHopStrategy:
             database_provider: Database provider for vector search and expansion
             embedding_provider: Embedding provider with reranking support
             single_hop_search_fn: Function to perform initial single-hop search
+            config: Optional configuration object with exhaustive_mode attribute
         """
         self._db = database_provider
         self._embedding_provider = embedding_provider
         self._single_hop_search = single_hop_search_fn
+        self._config = config
 
     async def search(
         self,
@@ -57,6 +66,8 @@ class MultiHopStrategy:
         provider: str,
         model: str,
         path_filter: str | None,
+        time_limit: float | None = None,
+        result_limit: int | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Perform dynamic multi-hop semantic search with reranking.
 
@@ -68,14 +79,25 @@ class MultiHopStrategy:
             provider: Embedding provider name
             model: Embedding model name
             path_filter: Optional relative path to limit search scope
+            time_limit: Optional time limit in seconds (default: 5.0)
+            result_limit: Optional result limit (default: 500, None = unlimited)
 
         Returns:
             Tuple of (results, pagination_metadata)
         """
         start_time = time.perf_counter()
 
+        # Apply defaults
+        effective_time_limit = time_limit if time_limit is not None else 5.0
+        effective_result_limit = result_limit if result_limit is not None else 500
+
         # Step 1: Initial search + rerank
-        initial_limit = min(page_size * 3, 100)  # Cap at 100 for performance
+        # Select cap based on exhaustive mode
+        if self._config and self._config.exhaustive_mode:
+            cap = INITIAL_LIMIT_CAP_EXHAUSTIVE  # 500 for exhaustive mode
+        else:
+            cap = INITIAL_LIMIT_CAP_NORMAL  # 100 for normal mode
+        initial_limit = min(page_size * 3, cap)
         initial_results, _ = await self._single_hop_search(
             query=query,
             page_size=initial_limit,
@@ -151,13 +173,13 @@ class MultiHopStrategy:
 
         while True:
             # Check termination conditions
-            if time.perf_counter() - start_time >= 5.0:
+            if time.perf_counter() - start_time >= effective_time_limit:
                 logger.debug(
-                    "Dynamic expansion terminated: 5 second time limit reached"
+                    f"Dynamic expansion terminated: {effective_time_limit:.1f} second time limit reached"
                 )
                 break
-            if len(all_results) >= 500:
-                logger.debug("Dynamic expansion terminated: 500 result limit reached")
+            if effective_result_limit is not None and len(all_results) >= effective_result_limit:
+                logger.debug(f"Dynamic expansion terminated: {effective_result_limit} result limit reached")
                 break
 
             # Get top 5 candidates for expansion
@@ -173,11 +195,17 @@ class MultiHopStrategy:
             for candidate in top_candidates:
                 try:
                     # logger.debug(f"Expanding chunk_id={candidate['chunk_id']} using provider='{provider}', model='{model}'")
+                    # Select neighbor limit based on exhaustive mode
+                    neighbor_limit = (
+                        NEIGHBORS_PER_CANDIDATE_EXHAUSTIVE
+                        if self._config and self._config.exhaustive_mode
+                        else NEIGHBORS_PER_CANDIDATE_NORMAL
+                    )
                     neighbors = self._db.find_similar_chunks(
                         chunk_id=candidate["chunk_id"],
                         provider=provider,
                         model=model,
-                        limit=20,  # Get more neighbors per round
+                        limit=neighbor_limit,
                         threshold=None,
                         path_filter=path_filter,
                     )

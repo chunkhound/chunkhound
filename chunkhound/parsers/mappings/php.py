@@ -41,10 +41,12 @@ class_declaration
 ```
 """
 
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from chunkhound.core.types.common import Language
-from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 if TYPE_CHECKING:
@@ -173,6 +175,15 @@ class PHPMapping(BaseMapping):
                 name: (name) @name
             ) @definition
 
+            (const_declaration) @definition
+
+            (expression_statement
+                (function_call_expression
+                    function: (name) @func_name
+                    (#eq? @func_name "define")
+                )
+            ) @definition
+
             ;; Fallback for config-style files: top-level return statement
             (program
                 (return_statement) @definition
@@ -263,6 +274,12 @@ class PHPMapping(BaseMapping):
                     return self.get_fallback_name(def_node, "trait")
                 elif def_node.type == "function_definition":
                     return self.get_fallback_name(def_node, "function")
+                elif def_node.type == "const_declaration":
+                    line = def_node.start_point[0] + 1
+                    return f"const_line_{line}"
+                elif def_node.type == "expression_statement":
+                    line = def_node.start_point[0] + 1
+                    return f"define_line_{line}"
 
             return "unnamed_definition"
 
@@ -405,6 +422,20 @@ class PHPMapping(BaseMapping):
                         metadata["chunk_type_hint"] = "array"
                     else:
                         metadata["chunk_type_hint"] = "block"
+
+                # Constants
+                elif def_node.type == "const_declaration":
+                    metadata["kind"] = "const"
+                elif def_node.type == "expression_statement":
+                    # Check if it's a define() call
+                    for child in self.walk_tree(def_node):
+                        if child and child.type == "function_call_expression":
+                            name_node = self.find_child_by_type(child, "name")
+                            if name_node:
+                                func_name = self.get_node_text(name_node, source).strip()
+                                if func_name == "define":
+                                    metadata["kind"] = "define"
+                                    break
 
         elif concept == UniversalConcept.COMMENT:
             if "definition" in captures:
@@ -627,3 +658,135 @@ class PHPMapping(BaseMapping):
         except Exception:
             return False
         return False
+
+    def extract_constants(
+        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constant definitions from PHP code.
+
+        Detects:
+        - const declarations (const X = 5)
+        - define() function calls (define('X', 5))
+
+        Args:
+            concept: The universal concept being processed
+            captures: Tree-sitter query captures
+            content: Source file content as bytes
+
+        Returns:
+            List of dictionaries with "name" and "value" keys, or None
+        """
+        if not TREE_SITTER_AVAILABLE:
+            return None
+
+        source = content.decode("utf-8")
+        constants: list[dict[str, str]] = []
+
+        # Only process DEFINITION concept
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        def_node = captures.get("definition")
+        if not def_node:
+            return None
+
+        # Handle const declarations (const X = 5;)
+        if def_node.type == "const_declaration":
+            # Walk through const_element nodes
+            for child in self.walk_tree(def_node):
+                if child and child.type == "const_element":
+                    # Get the name
+                    name_node = self.find_child_by_type(child, "name")
+                    if name_node:
+                        name = self.get_node_text(name_node, source).strip()
+
+                        # Get the value
+                        value_text = ""
+                        for value_child in child.children:
+                            if value_child.type in (
+                                "integer",
+                                "float",
+                                "string",
+                                "boolean",
+                                "null",
+                            ):
+                                value_text = self.get_node_text(value_child, source).strip()
+                                break
+
+                        # Truncate to 50 chars if longer
+                        if len(value_text) > MAX_CONSTANT_VALUE_LENGTH:
+                            value_text = value_text[:MAX_CONSTANT_VALUE_LENGTH]
+
+                        constants.append({"name": name, "value": value_text})
+
+        # Handle define() function calls
+        elif def_node.type == "expression_statement":
+            # Look for function_call_expression with name "define"
+            for child in self.walk_tree(def_node):
+                if child and child.type == "function_call_expression":
+                    # Check if function name is "define"
+                    name_node = self.find_child_by_type(child, "name")
+                    if name_node:
+                        func_name = self.get_node_text(name_node, source).strip()
+                        if func_name == "define":
+                            # Extract arguments from arguments node
+                            args_node = self.find_child_by_type(child, "arguments")
+                            if args_node:
+                                # Get the first two arguments (name and value)
+                                arg_nodes = [
+                                    n
+                                    for n in args_node.children
+                                    if n.type != "," and n.type != "(" and n.type != ")"
+                                ]
+
+                                if len(arg_nodes) >= 2:
+                                    # First argument is the constant name (usually a string)
+                                    const_name_text = self.get_node_text(
+                                        arg_nodes[0], source
+                                    ).strip()
+                                    # Remove quotes from string
+                                    const_name = const_name_text.strip("\"'")
+
+                                    # Second argument is the value
+                                    const_value = self.get_node_text(
+                                        arg_nodes[1], source
+                                    ).strip()
+
+                                    # Truncate to 50 chars if longer
+                                    if len(const_value) > MAX_CONSTANT_VALUE_LENGTH:
+                                        const_value = const_value[:MAX_CONSTANT_VALUE_LENGTH]
+
+                                    constants.append(
+                                        {"name": const_name, "value": const_value}
+                                    )
+
+        return constants if constants else None
+
+    def resolve_import_path(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> Path | None:
+        """Resolve import path for PHP.
+
+        Attempts to resolve relative require/include statements.
+
+        Args:
+            import_text: The import statement text
+            base_dir: Base directory of the project
+            source_file: Path to the file containing the import
+
+        Returns:
+            Path to the imported file if resolvable, None otherwise
+        """
+        match = re.search(
+            r'(?:require|include)(?:_once)?\s*\(\s*[\'"](.+?)[\'"]\s*\)', import_text
+        )
+        if not match:
+            return None
+
+        path = match.group(1)
+        if path.startswith("./") or path.startswith("../"):
+            resolved = (source_file.parent / path).resolve()
+            if resolved.exists():
+                return resolved
+
+        return None

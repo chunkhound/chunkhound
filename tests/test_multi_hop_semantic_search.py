@@ -12,9 +12,8 @@ Tests run parametrically against all available reranking-capable providers:
 - Ollama (if Ollama server and reranking service running)
 """
 
-import os
 from pathlib import Path
-from unittest.mock import Mock, patch, call
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -133,32 +132,33 @@ async def simple_test_database(tmp_path):
     db.connect()
     yield db
 
+
 @pytest.mark.asyncio
 async def test_search_strategy_selection_verification(simple_test_database):
     """Verify that SearchService correctly selects search strategy based on provider capabilities."""
     db = simple_test_database
-    
+
     # Mock providers to test strategy selection
     reranking_provider = Mock()
     reranking_provider.supports_reranking.return_value = True
-    reranking_provider.name = "mock_voyage" 
+    reranking_provider.name = "mock_voyage"
     reranking_provider.model = "mock-model"
-    
+
     non_reranking_provider = Mock()
     non_reranking_provider.supports_reranking.return_value = False
     non_reranking_provider.name = "mock_openai"
     non_reranking_provider.model = "mock-model"
-    
+
     # Create search services
     voyage_search = SearchService(db, reranking_provider)
     openai_search = SearchService(db, non_reranking_provider)
-    
+
     query = "user authentication"
-    
+
     # Test strategy selection by mocking the internal methods
     with patch.object(voyage_search._multi_hop_strategy, 'search', return_value=([], {})) as mock_multi_hop:
         with patch.object(openai_search._single_hop_strategy, 'search', return_value=([], {})) as mock_standard:
-            
+
             # VoyageAI provider should trigger multi-hop search
             await voyage_search.search_semantic(query, page_size=5)
             mock_multi_hop.assert_called_once_with(
@@ -166,11 +166,13 @@ async def test_search_strategy_selection_verification(simple_test_database):
                 page_size=5,
                 offset=0,
                 threshold=None,
-                provider="mock_voyage", 
+                provider="mock_voyage",
                 model="mock-model",
-                path_filter=None
+                path_filter=None,
+                time_limit=None,
+                result_limit=None,
             )
-            
+
             # OpenAI provider should use standard search
             await openai_search.search_semantic(query, page_size=5)
             mock_standard.assert_called_once_with(
@@ -179,8 +181,8 @@ async def test_search_strategy_selection_verification(simple_test_database):
                 offset=0,
                 threshold=None,
                 provider="mock_openai",
-                model="mock-model", 
-                path_filter=None
+                model="mock-model",
+                path_filter=None,
             )
 
 

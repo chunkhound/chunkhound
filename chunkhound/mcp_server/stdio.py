@@ -189,6 +189,7 @@ class StdioMCPServer(MCPServerBase):
                 debug_mode=self.debug_mode,
                 scan_progress=self._scan_progress,
                 llm_manager=self.llm_manager,
+                config=self.config,
             )
 
         self._register_list_tools()

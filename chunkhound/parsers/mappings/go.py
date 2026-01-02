@@ -5,12 +5,15 @@ for the universal concept system. It maps Go's AST nodes to universal
 semantic concepts used by the unified parser.
 """
 
+import re
+from pathlib import Path
 from typing import Any
 
 from tree_sitter import Node
+from typing_extensions import assert_never
 
 from chunkhound.core.types.common import Language
-from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 
@@ -31,7 +34,10 @@ class GoMapping(BaseMapping):
         """
 
     def get_class_query(self) -> str:
-        """Get tree-sitter query pattern for struct definitions (Go's equivalent of classes)."""
+        """Get tree-sitter query for struct definitions.
+
+        Go's equivalent of classes.
+        """
         return """
         (type_declaration
             (type_spec
@@ -80,7 +86,7 @@ class GoMapping(BaseMapping):
             (function_declaration
                 name: (identifier) @name
             ) @definition
-            
+
             (method_declaration
                 receiver: (parameter_list
                     (parameter_declaration
@@ -89,42 +95,44 @@ class GoMapping(BaseMapping):
                 )
                 name: (field_identifier) @name
             ) @definition
-            
+
             (type_declaration
                 (type_spec
                     name: (type_identifier) @name
                     type: (struct_type)
                 )
             ) @definition
-            
+
             (type_declaration
                 (type_spec
                     name: (type_identifier) @name
                     type: (interface_type)
                 )
             ) @definition
-            
+
             (type_declaration
                 (type_spec
                     name: (type_identifier) @name
                     type: (_)
                 )
             ) @definition
+
+            (const_declaration) @definition
             """
 
         elif concept == UniversalConcept.BLOCK:
             return """
             (block) @definition
-            
+
             (if_statement
                 condition: (_)
                 consequence: (block) @block
             ) @definition
-            
+
             (for_statement
                 body: (block) @block
             ) @definition
-            
+
             (expression_switch_statement
                 (expression_case) @case
             ) @definition
@@ -142,7 +150,7 @@ class GoMapping(BaseMapping):
                     path: (interpreted_string_literal) @import_path
                 ) @import_spec
             ) @definition
-            
+
             (package_clause
                 (package_identifier) @package_name
             ) @definition
@@ -156,8 +164,7 @@ class GoMapping(BaseMapping):
             ) @definition
             """
 
-        # All cases handled above
-        return None
+        assert_never(concept)
 
     def extract_name(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
@@ -168,6 +175,20 @@ class GoMapping(BaseMapping):
         source = content.decode("utf-8")
 
         if concept == UniversalConcept.DEFINITION:
+            # Check if this is a const_declaration
+            def_node = captures.get("definition")
+            if def_node and def_node.type == "const_declaration":
+                # For const blocks with multiple constants, use location-based naming
+                const_specs = self.find_children_by_type(def_node, "const_spec")
+                if len(const_specs) > 1:
+                    line = def_node.start_point[0] + 1
+                    return f"const_block_line_{line}"
+                # For single const, extract name from const_spec
+                elif len(const_specs) == 1:
+                    name_node = self.find_child_by_type(const_specs[0], "identifier")
+                    if name_node:
+                        return self.get_node_text(name_node, source).strip()
+
             # Try to get the name from various capture groups
             if "name" in captures:
                 name_node = captures["name"]
@@ -226,8 +247,7 @@ class GoMapping(BaseMapping):
         elif concept == UniversalConcept.STRUCTURE:
             return "file_structure"
 
-        # All cases handled above
-        return "unnamed"
+        assert_never(concept)
 
     def extract_content(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
@@ -253,7 +273,7 @@ class GoMapping(BaseMapping):
         """Extract Go-specific metadata."""
 
         source = content.decode("utf-8")
-        metadata = {}
+        metadata: dict[str, Any] = {}
 
         if concept == UniversalConcept.DEFINITION:
             # Extract function/method specific metadata
@@ -293,6 +313,10 @@ class GoMapping(BaseMapping):
                         if child and child.type in ["struct_type", "interface_type"]:
                             metadata["type_kind"] = child.type
                             break
+
+                # For const declarations
+                elif def_node.type == "const_declaration":
+                    metadata["kind"] = "constant"
 
         elif concept == UniversalConcept.IMPORT:
             if "import_path" in captures:
@@ -384,5 +408,151 @@ class GoMapping(BaseMapping):
                     if next_child and next_child.type != "block":
                         # This might be the return type
                         return self.get_node_text(next_child, source).strip()
+
+        return None
+
+    def extract_constants(
+        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constant definitions from Go const declarations.
+
+        Args:
+            concept: Universal concept being processed
+            captures: Captured nodes from tree-sitter query
+            content: Source file content as bytes
+
+        Returns:
+            List of constant dictionaries with name, value, and optional type,
+            or None if no constants found
+        """
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        def_node = captures.get("definition")
+        if not def_node or def_node.type != "const_declaration":
+            return None
+
+        source = content.decode("utf-8")
+        constants = []
+
+        # Find all const_spec nodes (handles both single and block const declarations)
+        const_specs = self.find_children_by_type(def_node, "const_spec")
+
+        for const_spec in const_specs:
+            # Extract name (identifier)
+            name_node = self.find_child_by_type(const_spec, "identifier")
+            if not name_node:
+                continue
+
+            name = self.get_node_text(name_node, source).strip()
+
+            # Extract value (expression after =)
+            value = None
+            const_type = None
+
+            # Navigate children to find type and value
+            found_equals = False
+            for i in range(const_spec.child_count):
+                child = const_spec.child(i)
+                if not child:
+                    continue
+
+                # After identifier, look for optional type then value
+                if child == name_node:
+                    continue
+
+                # Check for type (appears before = or value)
+                if not found_equals and child.type in [
+                    "type_identifier",
+                    "qualified_type",
+                    "pointer_type",
+                    "array_type",
+                    "slice_type",
+                ]:
+                    const_type = self.get_node_text(child, source).strip()
+                    continue
+
+                # Check for equals sign
+                if child.type == "=":
+                    found_equals = True
+                    continue
+
+                # After equals, next non-whitespace is the value
+                if found_equals or (i > 0 and not value):
+                    # Extract value expression (literal, iota, expression, etc.)
+                    value_text = self.get_node_text(child, source).strip()
+                    if value_text and value_text != "=":
+                        # Handle iota specially
+                        if value_text == "iota" or "iota" in value_text:
+                            value = "iota"
+                        else:
+                            # Truncate if longer than limit
+                            value = (
+                                value_text[:MAX_CONSTANT_VALUE_LENGTH]
+                                if len(value_text) > MAX_CONSTANT_VALUE_LENGTH
+                                else value_text
+                            )
+                        break
+
+            # Build constant entry
+            const_entry: dict[str, str] = {"name": name}
+            if value:
+                const_entry["value"] = value
+            if const_type:
+                const_entry["type"] = const_type
+
+            constants.append(const_entry)
+
+        return constants if constants else None
+
+    def resolve_import_path(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> Path | None:
+        """Resolve Go import to file path.
+
+        Args:
+            import_text: Import statement text (e.g., 'import "path/to/pkg"')
+            base_dir: Project root directory
+            source_file: Path to the file containing the import
+
+        Returns:
+            Path to the imported file, or None if not found
+        """
+        # Extract package path from: import "path/to/pkg" or "pkg"
+        match = re.search(r'''import\s+(?:\w+\s+)?["'](.+?)["']''', import_text)
+        if not match:
+            # Try block import format
+            match = re.search(r'''["'](.+?)["']''', import_text)
+
+        if not match:
+            return None
+
+        pkg_path = match.group(1)
+        if not pkg_path:
+            return None
+
+        # Skip standard library (no dots typically) and external packages
+        # Local packages typically start with the module name
+        # For simplicity, try to find in project
+
+        # Try as relative path from base_dir
+        pkg_dir = base_dir / pkg_path
+        if pkg_dir.is_dir():
+            # Return first .go file in the package
+            go_files = list(pkg_dir.glob("*.go"))
+            if go_files:
+                # Prefer non-test file
+                for f in go_files:
+                    if not f.name.endswith("_test.go"):
+                        return f
+                return go_files[0]
+
+        # Try internal/ or pkg/ directories
+        for prefix in ["internal/", "pkg/", "cmd/"]:
+            pkg_dir = base_dir / prefix / pkg_path.split("/")[-1]
+            if pkg_dir.is_dir():
+                go_files = list(pkg_dir.glob("*.go"))
+                if go_files:
+                    return go_files[0]
 
         return None

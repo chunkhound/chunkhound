@@ -6,6 +6,7 @@ and line-based chunking using simple text analysis.
 """
 
 import re
+from pathlib import Path
 from typing import Any
 
 from tree_sitter import Node
@@ -393,3 +394,12 @@ class TextMapping(BaseMapping):
             annotations.append(match.group(1).upper())
 
         return annotations
+
+    def resolve_import_path(
+        self,
+        import_text: str,
+        base_dir: Path,
+        source_file: Path
+    ) -> Path | None:
+        """Data formats don't have imports."""
+        return None
