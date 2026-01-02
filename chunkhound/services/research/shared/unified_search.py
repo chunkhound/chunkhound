@@ -21,6 +21,7 @@ from chunkhound.core.config.research_config import ResearchConfig
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.services.research.shared.chunk_context_builder import get_chunk_text
+from chunkhound.services.research.shared.chunk_dedup import get_chunk_id
 from chunkhound.services.research.shared.models import (
     MAX_SYMBOLS_TO_SEARCH,
     QUERY_EXPANSION_ENABLED,
@@ -142,7 +143,7 @@ class UnifiedSearch:
                     continue
                 results, _ = result
                 for chunk in results:
-                    chunk_id = chunk.get("chunk_id") or chunk.get("id")
+                    chunk_id = get_chunk_id(chunk)
                     if chunk_id and chunk_id not in semantic_map:
                         semantic_map[chunk_id] = chunk
 
@@ -256,7 +257,7 @@ class UnifiedSearch:
                     # Collect semantic chunk IDs for exclusion (before regex search)
                     semantic_chunk_ids = set()
                     for chunk in semantic_results:
-                        chunk_id = chunk.get("chunk_id") or chunk.get("id")
+                        chunk_id = get_chunk_id(chunk)
                         if chunk_id:
                             semantic_chunk_ids.add(chunk_id)
 
@@ -284,13 +285,13 @@ class UnifiedSearch:
 
         # Add semantic results first (they have relevance scores from multi-hop)
         for chunk in semantic_results:
-            chunk_id = chunk.get("chunk_id") or chunk.get("id")
+            chunk_id = get_chunk_id(chunk)
             if chunk_id:
                 unified_map[chunk_id] = chunk
 
         # Add regex results (only new chunks not already found)
         for chunk in regex_results:
-            chunk_id = chunk.get("chunk_id") or chunk.get("id")
+            chunk_id = get_chunk_id(chunk)
             if chunk_id and chunk_id not in unified_map:
                 unified_map[chunk_id] = chunk
 
@@ -490,7 +491,7 @@ class UnifiedSearch:
 
                     # Filter out excluded chunk IDs and collect undiscovered chunks
                     for chunk in page:
-                        chunk_id = chunk.get("chunk_id") or chunk.get("id")
+                        chunk_id = get_chunk_id(chunk)
                         if chunk_id and chunk_id not in seen_chunk_ids:
                             results.append(chunk)
                             seen_chunk_ids.add(chunk_id)
@@ -572,7 +573,7 @@ class UnifiedSearch:
 
         # Start with all original chunks (preserve already-expanded ones)
         expanded_chunks = list(chunks)
-        existing_ids = {c.get("chunk_id") or c.get("id") for c in expanded_chunks}
+        existing_ids = {get_chunk_id(c) for c in expanded_chunks}
 
         for file_id, file_chunks in by_file.items():
             # Find line range to cover (with window expansion)
@@ -588,7 +589,7 @@ class UnifiedSearch:
 
             # Deduplicate by chunk_id
             for neighbor in neighbors:
-                nid = neighbor.get("chunk_id") or neighbor.get("id")
+                nid = get_chunk_id(neighbor)
                 if nid not in existing_ids:
                     expanded_chunks.append(neighbor)
                     existing_ids.add(nid)
