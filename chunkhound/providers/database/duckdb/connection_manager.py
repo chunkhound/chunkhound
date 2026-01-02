@@ -33,6 +33,14 @@ import duckdb
 from loguru import logger
 
 
+def get_compaction_lock_path(db_path: Path) -> Path:
+    """Get the compaction lock file path for a database.
+
+    Single source of truth for lock file location.
+    """
+    return Path(str(db_path) + ".compaction.lock")
+
+
 class DuckDBConnectionManager:
     """Manages DuckDB connections, schema creation, and database operations."""
 
@@ -63,6 +71,16 @@ class DuckDBConnectionManager:
     def connect(self) -> None:
         """Establish database connection and initialize schema with WAL validation."""
         logger.info(f"Connecting to DuckDB database: {self.db_path}")
+
+        # Check for interrupted compaction
+        if isinstance(self.db_path, Path):
+            lock_file = get_compaction_lock_path(self.db_path)
+            if lock_file.exists():
+                logger.warning(
+                    "Found compaction lock file - previous compaction may have been "
+                    "interrupted. Running WAL validation..."
+                )
+                lock_file.unlink(missing_ok=True)
 
         # Ensure parent directory exists for file-based databases
         if isinstance(self.db_path, Path):

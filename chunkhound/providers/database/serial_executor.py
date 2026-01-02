@@ -55,24 +55,9 @@ def get_thread_local_state() -> dict[str, Any]:
     if not hasattr(_executor_local, "state"):
         _executor_local.state = {
             "transaction_active": False,
-            "operations_since_checkpoint": 0,
-            "last_checkpoint_time": time.time(),
             "last_activity_time": time.time(),  # Track last database activity
-            "deferred_checkpoint": False,
-            "checkpoint_threshold": 100,  # Checkpoint every N operations
         }
     return dict(_executor_local.state)  # Return a typed dict copy
-
-
-def track_operation(state: dict[str, Any]) -> None:
-    """Track a database operation for checkpoint management.
-
-    This function should ONLY be called from within the executor thread.
-
-    Args:
-        state: Thread-local state dictionary
-    """
-    state["operations_since_checkpoint"] += 1
 
 
 class SerialDatabaseExecutor:
@@ -187,6 +172,30 @@ class SerialDatabaseExecutor:
         return await loop.run_in_executor(
             self._db_executor, ctx.run, executor_operation
         )
+
+    def close_connection(self) -> None:
+        """Close thread-local DB connection without shutting down executor.
+
+        Use for temporary disconnections (e.g., compaction) where reconnection
+        will happen soon. The executor thread remains alive and can be reused.
+        """
+
+        def do_close():
+            try:
+                if hasattr(_executor_local, "connection"):
+                    conn = _executor_local.connection
+                    if conn and hasattr(conn, "close"):
+                        conn.close()
+                        logger.debug("Closed thread-local connection (executor still active)")
+                    delattr(_executor_local, "connection")
+            except Exception as e:
+                logger.error(f"Error closing connection: {e}")
+
+        try:
+            future = self._db_executor.submit(do_close)
+            future.result(timeout=5.0)
+        except Exception as e:
+            logger.error(f"Error during connection close: {e}")
 
     def shutdown(self, wait: bool = True) -> None:
         """Shutdown the executor with proper cleanup.

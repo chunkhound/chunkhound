@@ -51,6 +51,17 @@ class DatabaseProvider(Protocol):
         """Close database connection and cleanup resources."""
         ...
 
+    def soft_disconnect(self, skip_checkpoint: bool = False) -> None:
+        """Close connection temporarily without shutting down executor.
+
+        Use for temporary disconnections (e.g., compaction) where reconnection
+        will happen soon. For final cleanup, use disconnect() instead.
+
+        Args:
+            skip_checkpoint: If True, skip final checkpoint (faster but less safe)
+        """
+        ...
+
     # Schema Management
     def create_schema(self) -> None:
         """Create database schema for files, chunks, and embeddings."""
@@ -324,8 +335,31 @@ class DatabaseProvider(Protocol):
         ...
 
     # Health and Diagnostics
+    def should_optimize(self, operation: str = "") -> bool:
+        """Check if optimization/compaction is warranted.
+
+        Args:
+            operation: Optional context string for logging (e.g., 'post-chunking')
+
+        Returns:
+            True if optimization should be performed
+        """
+        ...
+
     def optimize_tables(self) -> None:
-        """Optimize tables by compacting fragments and rebuilding indexes (provider-specific)."""
+        """Optimize tables by compacting fragments and rebuilding indexes.
+
+        For DuckDB: CHECKPOINT + PRAGMA hnsw_compact_index for each index
+        For LanceDB: Fragment compaction via table.optimize()
+        """
+        ...
+
+    def create_deferred_indexes(self) -> None:
+        """Create any deferred vector indexes.
+
+        Called at end of indexing to create HNSW indexes that were deferred
+        during first-time indexing for performance.
+        """
         ...
 
     def health_check(self) -> dict[str, Any]:
