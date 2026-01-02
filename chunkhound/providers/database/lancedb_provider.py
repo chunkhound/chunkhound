@@ -1287,6 +1287,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     "embedding": embedding,
                     "provider": e["provider"],
                     "model": e["model"],
+                    "status": e["status"],
                 }
 
             # Build lookup of chunk_id -> chunk data for efficient access
