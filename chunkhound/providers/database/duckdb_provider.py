@@ -534,9 +534,9 @@ class DuckDBProvider(SerialDatabaseProvider):
                 # First, create a temporary table with the new schema
                 conn.execute("""
                     CREATE TEMP TABLE chunks_new AS
-                    SELECT id, file_id, chunk_type, symbol, code, 
-                           start_line, end_line, start_byte, end_byte, 
-                           language, created_at, updated_at
+                    SELECT id, file_id, chunk_type, symbol, code,
+                           start_line, end_line, start_byte, end_byte,
+                           language, NULL AS metadata, created_at, updated_at
                     FROM chunks
                 """)
 
@@ -580,7 +580,8 @@ class DuckDBProvider(SerialDatabaseProvider):
             )
 
         except Exception as e:
-            logger.warning(f"Failed to migrate schema: {e}")
+            logger.error(f"Failed to migrate schema: {e}")
+            raise
 
     def _get_all_embedding_tables(self) -> list[str]:
         """Get list of all embedding tables (dimension-specific) - delegate to connection manager."""
