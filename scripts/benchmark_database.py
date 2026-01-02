@@ -97,6 +97,7 @@ async def benchmark_provider(repo_path: Path, provider: str, output: Path | None
                         "model": "mock-768",
                         "dims": dim,
                         "embedding": [random.random() * 2 - 1 for _ in range(dim)],
+                        "status": "success",
                     }
                     for cid in chunk_ids
                 ]

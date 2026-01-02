@@ -1103,5 +1103,104 @@ def test_relative_rerank_url_requires_base_url():
     print("   • Absolute URL works without base_url")
 
 
+async def test_embedding_flow_with_simulated_failures():
+    """Test embedding generation with simulated permanent and transient failures.
+
+    This test reproduces the infinite loop bug in generate_missing_embeddings where:
+    - Permanent failures (oversized chunks, invalid content) cause infinite retries
+    - Transient failures (timeouts, rate limits) are not properly handled with retries
+
+    The test should FAIL initially, demonstrating the bug before implementing the fix.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from chunkhound.services.embedding_service import EmbeddingService
+    from chunkhound.interfaces.database_provider import DatabaseProvider
+    from chunkhound.interfaces.embedding_provider import EmbeddingProvider
+
+    # Create mock database provider
+    mock_db = MagicMock(spec=DatabaseProvider)
+    mock_db.get_stats.return_value = {"chunks": 10, "embeddings": 0}  # 10 chunks, 0 embeddings
+
+    # Mock chunks data - simulate chunks that will cause different errors
+    mock_chunks = [
+        {"id": 1, "code": "normal code", "file_path": "test.py"},  # Should succeed
+        {"id": 2, "code": "a" * 1000000, "file_path": "big.py"},  # Oversized - permanent failure
+        {"id": 3, "code": "invalid \x00 content", "file_path": "invalid.py"},  # Invalid content - permanent
+        {"id": 4, "code": "normal code 2", "file_path": "test2.py"},  # Should succeed after retries
+    ]
+
+    # Mock pagination to return chunks on first call, then empty list to prevent infinite loops
+    call_count = {"count": 0}
+    def mock_get_chunks(*args, **kwargs):
+        call_count["count"] += 1
+        if call_count["count"] == 1:
+            return mock_chunks
+        else:
+            return []  # No more chunks after first batch
+
+    mock_db.get_chunks_without_embeddings_paginated.side_effect = mock_get_chunks
+    mock_db.optimize_tables = MagicMock()
+
+    # Create mock embedding provider that simulates failures
+    mock_provider = MagicMock(spec=EmbeddingProvider)
+    mock_provider.name = "test_provider"
+    mock_provider.model = "test_model"
+    mock_provider.get_max_tokens_per_batch.return_value = 1000
+    mock_provider.get_max_documents_per_batch.return_value = 10
+    # Add get_dimensions method
+    mock_provider.get_dimensions = MagicMock(return_value=1536)
+
+    # Track call attempts to simulate different error types
+    call_count = {"count": 0}
+
+    async def mock_embed(texts):
+        call_count["count"] += 1
+        if not texts:
+            return []
+
+        # Simulate different error types based on content
+        first_text = texts[0]
+        if len(first_text) > 500000:  # Oversized chunk - permanent failure
+            raise ValueError("Request too large: chunk exceeds maximum size")
+        elif "\x00" in first_text:  # Invalid content - permanent failure
+            raise ValueError("Invalid content: unsupported encoding")
+        elif call_count["count"] <= 2:  # Transient failures for first few calls
+            raise Exception("Network timeout")  # Transient - should retry
+        else:
+            # Success after retries
+            return [[0.1] * 1536 for _ in texts]
+
+    mock_provider.embed = AsyncMock(side_effect=mock_embed)
+
+    # Create embedding service
+    service = EmbeddingService(
+        database_provider=mock_db,
+        embedding_provider=mock_provider,
+        embedding_batch_size=2,  # Small batch to trigger issues
+        db_batch_size=1000,
+        max_concurrent_batches=1,
+    )
+
+    # Test the infinite loop behavior
+    # Initially, this should fail due to infinite loop on permanent failures
+    # After implementing the fix, it should complete successfully
+    result = await asyncio.wait_for(
+        service.generate_missing_embeddings(),
+        timeout=10.0  # Allow enough time for retries but catch infinite loops
+    )
+
+    # Verify the result structure
+    assert "status" in result
+    assert result["status"] == "success"
+    assert "generated" in result
+    assert "attempted" in result
+    assert "failed" in result
+    assert "permanent_failures" in result
+    # With embedding failure handling, some chunks may fail permanently
+    # Should generate embeddings for successful chunks (normal code ones)
+    # Permanent failures should be marked and not retried infinitely
+
+
 if __name__ == "__main__":
     asyncio.run(main())

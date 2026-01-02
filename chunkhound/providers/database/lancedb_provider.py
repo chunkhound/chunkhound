@@ -76,6 +76,7 @@ def get_chunks_schema(embedding_dims: int | None = None) -> pa.Schema:
             ("provider", pa.string()),
             ("model", pa.string()),
             ("embedding_signature", pa.string()),
+            ("embedding_status", pa.string()),
             ("created_time", pa.float64()),
         ]
     )
@@ -319,6 +320,17 @@ class LanceDBProvider(SerialDatabaseProvider):
             except Exception as col_error:
                 logger.debug(f"Could not add embedding_signature column (may already exist or not supported): {col_error}")
 
+            # Try to add embedding_status column to existing tables (migration)
+            try:
+                current_schema = self._chunks_table.schema
+                has_embedding_status = any(field.name == "embedding_status" for field in current_schema)
+                if not has_embedding_status:
+                    logger.info("Adding embedding_status column to existing chunks table for status tracking")
+                    self._chunks_table.add_columns([pa.field("embedding_status", pa.string(), nullable=True)])
+                    logger.info("embedding_status column added successfully")
+            except Exception as col_error:
+                logger.debug(f"Could not add embedding_status column (may already exist or not supported): {col_error}")
+
         except Exception:
             # Table doesn't exist, create it
             # Try to get embedding dimensions to avoid migration later
@@ -389,6 +401,20 @@ class LanceDBProvider(SerialDatabaseProvider):
                     logger.info("Scalar index on chunks.embedding_signature created successfully")
                 else:
                     logger.debug("Scalar index on chunks.embedding_signature already exists")
+
+                # Create scalar index on embedding_status for query optimization
+                indices = self._chunks_table.list_indices()
+                has_embedding_status_index = any(
+                    idx.columns == ["embedding_status"] or "embedding_status" in idx.columns
+                    for idx in indices
+                )
+
+                if not has_embedding_status_index:
+                    logger.info("Creating scalar index on chunks.embedding_status for query optimization")
+                    self._chunks_table.create_scalar_index("embedding_status")
+                    logger.info("Scalar index on chunks.embedding_status created successfully")
+                else:
+                    logger.debug("Scalar index on chunks.embedding_status already exists")
             except Exception as e:
                 # Non-fatal: merge_insert works without index, just slower
                 logger.warning(
@@ -754,6 +780,7 @@ class LanceDBProvider(SerialDatabaseProvider):
             "provider": "",
             "model": "",
             "embedding_signature": None,
+            "embedding_status": "pending",
             "created_time": time.time(),
         }
 
@@ -829,6 +856,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     "provider": "",
                     "model": "",
                     "embedding_signature": None,
+                    "embedding_status": "pending",
                     "created_time": time.time(),
                 }
                 chunk_data_list.append(chunk_data)
@@ -1043,6 +1071,39 @@ class LanceDBProvider(SerialDatabaseProvider):
         # LanceDB doesn't support in-place updates, need to implement via delete/insert
         pass
 
+    def update_chunk_status(self, chunk_id: int, status: str) -> None:
+        """Update the embedding status of a chunk."""
+        return self._execute_in_db_thread_sync("update_chunk_status", chunk_id, status)
+
+    def _executor_update_chunk_status(
+        self, conn: Any, state: dict[str, Any], chunk_id: int, status: str
+    ) -> None:
+        """Executor method for update_chunk_status - runs in DB thread."""
+        if not self._chunks_table:
+            return
+
+        try:
+            # Get existing chunk data
+            existing_chunks = self._chunks_table.search().where(f"id = {chunk_id}").to_list()
+            if not existing_chunks:
+                return
+
+            existing_chunk = existing_chunks[0]
+
+            # Update the status
+            updated_chunk = dict(existing_chunk)
+            updated_chunk["embedding_status"] = status
+            updated_chunk["created_time"] = time.time()  # Update timestamp
+
+            # Use merge_insert to update the record
+            self._chunks_table.merge_insert("id").when_matched_update_all().execute([updated_chunk])
+
+            # Clear caches since chunk data changed
+            self._clear_query_caches()
+
+        except Exception as e:
+            logger.error(f"Error updating chunk status {chunk_id}: {e}")
+
     # Embedding Operations
     def insert_embedding(self, embedding: Embedding) -> int:
         """Insert embedding record and return embedding ID."""
@@ -1141,6 +1202,10 @@ class LanceDBProvider(SerialDatabaseProvider):
                     # Prepare data for reinsertion
                     chunks_to_restore = []
                     for _, row in existing_data_df.iterrows():
+                        # Determine embedding status based on whether embedding exists
+                        has_embedding = row.get("embedding") is not None and _has_valid_embedding(row.get("embedding"))
+                        embedding_status = "success" if has_embedding else "pending"
+
                         chunk_data = {
                             "id": row["id"],
                             "file_id": row["file_id"],
@@ -1150,9 +1215,11 @@ class LanceDBProvider(SerialDatabaseProvider):
                             "chunk_type": row["chunk_type"],
                             "language": row["language"],
                             "name": row["name"],
-                            "embedding": None,  # No placeholder - needs embedding generation
-                            "provider": "",
-                            "model": "",
+                            "embedding": row.get("embedding"),  # Preserve existing embeddings
+                            "provider": row.get("provider", ""),
+                            "model": row.get("model", ""),
+                            "embedding_signature": row.get("embedding_signature"),
+                            "embedding_status": embedding_status,
                             "created_time": row.get("created_time", time.time()),
                         }
                         chunks_to_restore.append(chunk_data)
@@ -1234,6 +1301,9 @@ class LanceDBProvider(SerialDatabaseProvider):
                     chunk = chunks_lookup.get(chunk_id)
                     if chunk and chunk_id in embedding_lookup:
                         emb_data = embedding_lookup[chunk_id]
+                        status = emb_data.get("status")
+                        if status is None:
+                            raise ValueError(f"Missing status for embedding chunk_id {emb_data['chunk_id']}")
                         merge_data.append(
                             {
                                 "id": chunk["id"],
@@ -1248,6 +1318,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                                 "provider": emb_data["provider"],
                                 "model": emb_data["model"],
                                 "embedding_signature": f"{emb_data['provider']}-{emb_data['model']}",
+                                "embedding_status": status,
                                 "created_time": chunk.get("created_time", time.time()),
                             }
                         )
@@ -1458,6 +1529,22 @@ class LanceDBProvider(SerialDatabaseProvider):
         """Delete all embeddings for a specific chunk."""
         # In LanceDB, this would involve updating the chunk to remove embedding data
         pass
+
+    def invalidate_embeddings_by_provider_model(
+        self, current_provider: str, current_model: str
+    ) -> None:
+        """Invalidate embeddings that don't match the current provider/model combination.
+
+        Removes all embeddings except those matching the current provider/model combination.
+        This prepares the database for new embeddings from the specified provider/model.
+
+        Args:
+            current_provider: The embedding provider name to keep
+            current_model: The embedding model name to keep
+        """
+        self._execute_in_db_thread_sync(
+            "invalidate_embeddings_by_provider_model", current_provider, current_model
+        )
 
 
 
@@ -2388,20 +2475,12 @@ class LanceDBProvider(SerialDatabaseProvider):
 
         try:
             # Query for chunks needing embeddings with direct pagination
-            # Use optimized embedding_signature filter if available, fallback to legacy filter
+            # Use embedding_signature reliably (no fallback) with status filtering
             target_sig = f"{provider}-{model}"
-            try:
-                # Try optimized query using embedding_signature column
-                results = self._chunks_table.search().where(
-                    f"(embedding_signature IS NULL OR embedding_signature != '{target_sig}')"
-                ).limit(limit).to_list()
-                logger.debug(f"Using optimized embedding_signature query for provider={provider}, model={model}")
-            except Exception as sig_error:
-                # Fallback to legacy query if embedding_signature column doesn't exist
-                logger.debug(f"embedding_signature column not available ({sig_error}), using legacy query")
-                results = self._chunks_table.search().where(
-                    f"(embedding IS NULL OR provider != '{provider}' OR model != '{model}')"
-                ).limit(limit).to_list()
+            results = self._chunks_table.search().where(
+                f"(embedding_signature IS NULL OR embedding_signature != '{target_sig}') AND (embedding_status IS NULL OR embedding_status != 'permanent_failure')"
+            ).limit(limit).to_list()
+            logger.debug(f"Using embedding_signature query with status filtering for provider={provider}, model={model}")
 
             # Deduplicate to handle fragment-induced duplicates
             results = _deduplicate_by_id(results)
@@ -2499,6 +2578,36 @@ class LanceDBProvider(SerialDatabaseProvider):
             model,
             limit,
         )
+
+    def _executor_invalidate_embeddings_by_provider_model(
+        self, conn: Any, state: dict[str, Any], current_provider: str, current_model: str
+    ) -> None:
+        """Executor method for invalidate_embeddings_by_provider_model - runs in DB thread."""
+        if not self._chunks_table:
+            return
+
+        try:
+            # In LanceDB, we need to update chunks that don't match the current provider/model
+            # Set embedding to None, provider to empty, model to empty for mismatched embeddings
+            self._chunks_table.update(
+                where=f"NOT (provider = '{current_provider}' AND model = '{current_model}')",
+                values={
+                    "embedding": None,
+                    "provider": "",
+                    "model": "",
+                    "embedding_signature": None,
+                    "embedding_status": "pending",
+                }
+            )
+
+            logger.info(
+                f"Invalidated embeddings not matching {current_provider}/{current_model} "
+                "in chunks table"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to invalidate embeddings by provider/model: {e}")
+            raise
 
     def get_connection_info(self) -> dict[str, Any]:
         """Get information about the database connection."""

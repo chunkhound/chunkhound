@@ -6,7 +6,8 @@ Built: 100% by AI agents - NO human-written code
 Purpose: Transform codebases into searchable knowledge bases for AI assistants
 
 ## CRITICAL_CONSTRAINTS
-- DuckDB/LanceDB: SINGLE_THREADED_ONLY (concurrent access = segfault/corruption)
+- DuckDB/LanceDB: SINGLE_THREADED_ONLY (concurrent access = segfault/corruption). 
+DuckDB is not very important. changes done to improve lancedb are the key focus now and they should never be prevented dueto duckDB compativilty reasons. 
 - Embedding batching: MANDATORY (100x performance difference)
 - Vector index optimization: DROP_BEFORE_BULK_INSERT (20x speedup for >50 embeddings)
 - MCP server: NO_STDOUT_LOGS (breaks JSON-RPC protocol)
@@ -23,11 +24,11 @@ Purpose: Transform codebases into searchable knowledge bases for AI assistants
 - NEVER: Remove SerialDatabaseProvider wrapper
 - NEVER: Add concurrent database operations (parsing is parallelized, storage is single-threaded)
 - NEVER: Use print() in MCP server
-- NEVER: Make single-row DB inserts in loops
+- NEVER: Make single-row DB inserts or updates in loops
 - NEVER: Use forward references (quotes) in type annotations unless needed
 - ALWAYS: Run smoke tests before committing (uv run pytest tests/test_smoke.py)
 - ALWAYS: Batch embeddings (min: 100, max: provider_limit)
-- ALWAYS: Drop HNSW indexes for bulk inserts > 50 rows
+- ALWAYS: Drop HNSW indexes for bulk inserts > 50 rows ONLY FOR DuckDB. Not applied to LanceDB.
 - ALWAYS: Use uv for all Python operations
 - ALWAYS: Update version via scripts/update_version.py
 
@@ -158,30 +159,6 @@ chunkhound --version
 - Use `search_semantic` and `search_regex` with small, focused queries
 - Multiple targeted searches > one broad search
 
-# Mindset
-You are a senior architect with 20 years of experience across all software domains.
-- TDD delivery as a primary paradigm. RED-FIRST tests before implementation
-- Gather thorough information with tools before solving
-- Work in explicit steps - ask clarifying questions when uncertain
-- BE CRITICAL - validate assumptions, don't trust code blindly
-- MINIMALISM ABOVE ALL - less code is better code
-
-# Architecture First
-LEARN THE SURROUNDING ARCHITECTURE BEFORE CODING.
-- Understand the big picture and how components fit
-- Find and reuse existing code - never duplicate
-- When finding duplicate responsibilities, refactor to shared core
-- Match surrounding patterns and style
-
-# Coding Standards
-KISS - Keep It Simple:
-- Write minimal code that compiles and lints cleanly
-- Fix bugs by deleting code when possible
-- Optimize for readability and maintenance
-- No over-engineering, no temporary compatibility layers
-- No silent errors - failures must be explicit and visible
-- Run tests after major changes
-- Document inline when necessary
 
 
 # Operational Rules

@@ -172,6 +172,7 @@ def test_no_migration_when_schema_matches_dimensions(tmp_path):
             "model": "test-model",
             "embedding": [0.1] * 768,
             "dims": 768,
+            "status": "success",
         }]
 
         provider.insert_embeddings_batch(embeddings, chunks_data)
@@ -281,6 +282,7 @@ def test_migration_still_works_for_existing_databases(tmp_path):
             "model": "test-model",
             "embedding": [0.1] * 768,
             "dims": 768,
+            "status": "success",
         }]
 
         provider.insert_embeddings_batch(embeddings, chunks_data)

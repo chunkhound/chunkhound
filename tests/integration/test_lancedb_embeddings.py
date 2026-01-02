@@ -66,6 +66,7 @@ def test_lancedb_embeddings_stored_during_indexing(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.1] * embedding_dim,
+            "status": "success",
         },
         {
             "chunk_id": chunk_ids[1],
@@ -73,6 +74,7 @@ def test_lancedb_embeddings_stored_during_indexing(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.2] * embedding_dim,
+            "status": "success",
         },
     ]
 
@@ -189,6 +191,7 @@ def test_lancedb_embedding_update_finds_chunks(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [float(i) / 100] * embedding_dim,
+            "status": "success",
         }
         for i, cid in enumerate(chunk_ids)
     ]
@@ -270,6 +273,7 @@ def test_lancedb_find_similar_chunks_basic(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.9, 0.8, 0.7, 0.6, 0.1, 0.1, 0.1, 0.1],  # Auth-related
+            "status": "success",
         },
         {
             "chunk_id": chunk_ids[1],
@@ -277,6 +281,7 @@ def test_lancedb_find_similar_chunks_basic(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.8, 0.9, 0.6, 0.7, 0.1, 0.1, 0.1, 0.1],  # Similar to chunk 0
+            "status": "success",
         },
         {
             "chunk_id": chunk_ids[2],
@@ -284,6 +289,7 @@ def test_lancedb_find_similar_chunks_basic(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.1, 0.1, 0.1, 0.1, 0.9, 0.8, 0.7, 0.6],  # Different domain
+            "status": "success",
         },
     ]
 
@@ -353,6 +359,7 @@ def test_lancedb_find_similar_chunks_excludes_source(lancedb_provider, tmp_path)
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.5] * embedding_dim,
+            "status": "success",
         }
         for cid in chunk_ids
     ]
@@ -461,6 +468,7 @@ def test_lancedb_find_similar_chunks_threshold(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "status": "success",
         },
         {
             "chunk_id": chunk_ids[1],
@@ -468,6 +476,7 @@ def test_lancedb_find_similar_chunks_threshold(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],  # Very similar
+            "status": "success",
         },
         {
             "chunk_id": chunk_ids[2],
@@ -475,6 +484,7 @@ def test_lancedb_find_similar_chunks_threshold(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],  # Not similar
+            "status": "success",
         },
     ]
 
@@ -538,6 +548,7 @@ def test_lancedb_find_similar_chunks_limit(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.5 + i * 0.01 for i in range(embedding_dim)],
+            "status": "success",
         }
         for cid in chunk_ids
     ]
@@ -599,6 +610,7 @@ def test_lancedb_find_similar_chunks_wrong_provider(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.5] * embedding_dim,
+            "status": "success",
         }
     ]
 

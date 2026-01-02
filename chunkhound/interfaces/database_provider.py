@@ -115,6 +115,14 @@ class DatabaseProvider(Protocol):
 
     def update_chunk(self, chunk_id: int, **kwargs: Any) -> None:
         """Update chunk record with new values."""
+
+    def update_chunk_status(self, chunk_id: int, status: str) -> None:
+        """Update the embedding status of a chunk.
+
+        Args:
+            chunk_id: ID of the chunk to update
+            status: New status ('pending', 'success', 'failed', 'permanent_failure')
+        """
         ...
 
     # Embedding Operations
@@ -149,6 +157,20 @@ class DatabaseProvider(Protocol):
 
     def delete_embeddings_by_chunk_id(self, chunk_id: int) -> None:
         """Delete all embeddings for a specific chunk."""
+        ...
+
+    def invalidate_embeddings_by_provider_model(
+        self, current_provider: str, current_model: str
+    ) -> None:
+        """Invalidate embeddings that don't match the current provider/model combination.
+
+        Removes all embeddings except those matching the current provider/model combination.
+        This prepares the database for new embeddings from the specified provider/model.
+
+        Args:
+            current_provider: The embedding provider name to keep
+            current_model: The embedding model name to keep
+        """
         ...
 
 

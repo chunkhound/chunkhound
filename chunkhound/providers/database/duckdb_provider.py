@@ -459,10 +459,16 @@ class DuckDBProvider(SerialDatabaseProvider):
                     start_byte INTEGER,
                     end_byte INTEGER,
                     language TEXT,
+                    embedding_status TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            # Ensure embedding_status exists for existing DBs
+            conn.execute(
+                "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS embedding_status TEXT"
+            )
 
             # Create sequence for embeddings table
             conn.execute("CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq")
@@ -531,9 +537,9 @@ class DuckDBProvider(SerialDatabaseProvider):
                 # First, create a temporary table with the new schema
                 conn.execute("""
                     CREATE TEMP TABLE chunks_new AS
-                    SELECT id, file_id, chunk_type, symbol, code, 
-                           start_line, end_line, start_byte, end_byte, 
-                           language, created_at, updated_at
+                    SELECT id, file_id, chunk_type, symbol, code,
+                           start_line, end_line, start_byte, end_byte,
+                           language, 'pending' as embedding_status, created_at, updated_at
                     FROM chunks
                 """)
 
@@ -553,6 +559,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                         start_byte INTEGER,
                         end_byte INTEGER,
                         language TEXT,
+                        embedding_status TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
@@ -612,6 +619,9 @@ class DuckDBProvider(SerialDatabaseProvider):
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_chunks_symbol ON chunks(symbol)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chunks_embedding_status ON chunks(embedding_status)"
             )
 
             # Embedding indexes are created per-table in _executor_ensure_embedding_table_exists()
@@ -1436,6 +1446,22 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Update chunk record with new values - delegate to chunk repository."""
         self._chunk_repository.update_chunk(chunk_id, **kwargs)
 
+    def update_chunk_status(self, chunk_id: int, status: str) -> None:
+        """Update the embedding status of a chunk."""
+        self._execute_in_db_thread_sync("update_chunk_status", chunk_id, status)
+
+    def _executor_update_chunk_status(
+        self, conn: Any, state: dict[str, Any], chunk_id: int, status: str
+    ) -> None:
+        """Executor method for update_chunk_status - runs in DB thread."""
+        # Track operation for checkpoint management
+        track_operation(state)
+
+        conn.execute(
+            "UPDATE chunks SET embedding_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            [status, chunk_id],
+        )
+
     def _executor_insert_chunk_single(
         self, conn: Any, state: dict[str, Any], chunk: Chunk
     ) -> int:
@@ -1650,6 +1676,9 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Prepare batch data
             batch_data = []
             for emb in dim_embeddings:
+                status = emb.get("status")
+                if status is None:
+                    raise ValueError(f"Missing status for embedding chunk_id {emb['chunk_id']}")
                 batch_data.append(
                     (
                         emb["chunk_id"],
@@ -1657,6 +1686,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                         emb["model"],
                         emb["embedding"],
                         dims,
+                        status,
                     )
                 )
 
@@ -1668,6 +1698,11 @@ class DuckDBProvider(SerialDatabaseProvider):
             """,
                 batch_data,
             )
+
+            # Update chunk statuses
+            for emb in dim_embeddings:
+                status = emb["status"]  # Status is now required
+                self._executor_update_chunk_status(conn, {}, emb["chunk_id"], status)
             total_inserted += len(batch_data)
 
         return total_inserted
@@ -1726,6 +1761,22 @@ class DuckDBProvider(SerialDatabaseProvider):
     def delete_embeddings_by_chunk_id(self, chunk_id: int) -> None:
         """Delete all embeddings for a specific chunk - delegate to embedding repository."""
         self._embedding_repository.delete_embeddings_by_chunk_id(chunk_id)
+
+    def invalidate_embeddings_by_provider_model(
+        self, current_provider: str, current_model: str
+    ) -> None:
+        """Invalidate embeddings that don't match the current provider/model combination.
+
+        Removes all embeddings except those matching the current provider/model combination.
+        This prepares the database for new embeddings from the specified provider/model.
+
+        Args:
+            current_provider: The embedding provider name to keep
+            current_model: The embedding model name to keep
+        """
+        self._execute_in_db_thread_sync(
+            "invalidate_embeddings_by_provider_model", current_provider, current_model
+        )
 
 
 
@@ -2552,7 +2603,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                        f.path as file_path
                 FROM chunks c
                 JOIN files f ON c.file_id = f.id
-                WHERE {" AND ".join(not_exists_clauses)}
+                WHERE {" AND ".join(not_exists_clauses)} AND (c.embedding_status IS NULL OR c.embedding_status != 'permanent_failure')
             """
 
             # Parameters need to be repeated for each table (provider, model per table)
@@ -2654,6 +2705,33 @@ class DuckDBProvider(SerialDatabaseProvider):
         state["transaction_active"] = False
         state["deferred_checkpoint"] = False
 
+    def _executor_invalidate_embeddings_by_provider_model(
+        self, conn: Any, state: dict[str, Any], current_provider: str, current_model: str
+    ) -> None:
+        """Executor method for invalidate_embeddings_by_provider_model - runs in DB thread."""
+        try:
+            # Get all embedding tables
+            embedding_tables = self._executor_get_all_embedding_tables(conn, state)
+
+            # Delete embeddings that don't match the current provider/model from each table
+            for table_name in embedding_tables:
+                conn.execute(
+                    f"""
+                    DELETE FROM {table_name}
+                    WHERE NOT (provider = ? AND model = ?)
+                    """,
+                    [current_provider, current_model],
+                )
+
+            logger.info(
+                f"Invalidated embeddings not matching {current_provider}/{current_model} "
+                f"across {len(embedding_tables)} tables"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to invalidate embeddings by provider/model: {e}")
+            raise
+
     def should_optimize_fragments(
         self, threshold: int | None = None, operation: str = ""
     ) -> bool:
@@ -2703,3 +2781,4 @@ class DuckDBProvider(SerialDatabaseProvider):
                 )
         except Exception:
             pass
+
