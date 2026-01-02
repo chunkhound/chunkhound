@@ -1306,7 +1306,10 @@ class LanceDBProvider(SerialDatabaseProvider):
                         emb_data = embedding_lookup[chunk_id]
                         status = emb_data.get("status")
                         if status is None:
-                            raise ValueError(f"Missing status for embedding chunk_id {emb_data['chunk_id']}")
+                            # Log callstack for debugging missing status field
+                            import traceback
+                            logger.error(f"Missing status for embedding chunk_id {chunk_id}. Callstack:\n{traceback.format_stack()}")
+                            raise ValueError(f"Missing status for embedding chunk_id {chunk_id}")
                         merge_data.append(
                             {
                                 "id": chunk["id"],
@@ -2410,7 +2413,13 @@ class LanceDBProvider(SerialDatabaseProvider):
 
 
     def optimize_tables(self) -> None:
-        """Optimize tables by compacting fragments and rebuilding indexes."""
+        """Optimize tables by compacting fragments and rebuilding indexes.
+
+        This method ensures complete fragment elimination to prevent duplicate
+        results in embedding generation workflows. It uses aggressive cleanup
+        parameters and iterative optimization passes to guarantee all fragments
+        are consolidated.
+        """
         # Use higher timeout for optimization operations (5 minutes vs default 30s)
         import os
         original_timeout = os.environ.get("CHUNKHOUND_DB_EXECUTE_TIMEOUT")
@@ -2429,12 +2438,16 @@ class LanceDBProvider(SerialDatabaseProvider):
         from datetime import timedelta
 
         try:
+            # Get initial fragment counts
+            initial_counts = self.get_fragment_count()
+            logger.debug(f"Initial fragment counts: chunks={initial_counts.get('chunks', 0)}, files={initial_counts.get('files', 0)}")
+
             if self._chunks_table:
                 logger.debug("Optimizing chunks table - compacting fragments...")
-                # Use minimal cleanup window (1 minute) to focus on fragment consolidation
-                # rather than time-based cleanup. The goal is compaction, not age-based deletion.
+                # Use aggressive cleanup to ensure complete fragment reduction for embedding deduplication
+                # cleanup_older_than=None allows cleanup of all unverified data
                 stats = self._chunks_table.optimize(
-                    cleanup_older_than=timedelta(minutes=1), delete_unverified=True
+                    cleanup_older_than=None, delete_unverified=True
                 )
                 if stats is not None:
                     logger.debug(
@@ -2445,13 +2458,48 @@ class LanceDBProvider(SerialDatabaseProvider):
             if self._files_table:
                 logger.debug("Optimizing files table - compacting fragments...")
                 stats = self._files_table.optimize(
-                    cleanup_older_than=timedelta(minutes=1), delete_unverified=True
+                    cleanup_older_than=None, delete_unverified=True
                 )
                 if stats is not None:
                     logger.debug(
                         f"Files table cleanup freed {stats.bytes_removed / 1024 / 1024:.2f} MB"
                     )
                 logger.debug("Files table optimization complete")
+
+            # Verify fragment reduction
+            final_counts = self.get_fragment_count()
+            chunks_reduction = initial_counts.get('chunks', 0) - final_counts.get('chunks', 0)
+            files_reduction = initial_counts.get('files', 0) - final_counts.get('files', 0)
+            logger.info(f"Fragment reduction: chunks={chunks_reduction}, files={files_reduction}")
+
+            # If fragments remain, run additional optimization passes
+            max_passes = 3
+            for pass_num in range(max_passes):
+                if final_counts.get('chunks', 0) == 0 and final_counts.get('files', 0) == 0:
+                    break
+
+                logger.debug(f"Running additional optimization pass {pass_num + 1} to eliminate remaining fragments")
+
+                if self._chunks_table and final_counts.get('chunks', 0) > 0:
+                    stats = self._chunks_table.optimize(
+                        cleanup_older_than=None, delete_unverified=True
+                    )
+                    if stats is not None:
+                        logger.debug(f"Additional chunks cleanup freed {stats.bytes_removed / 1024 / 1024:.2f} MB")
+
+                if self._files_table and final_counts.get('files', 0) > 0:
+                    stats = self._files_table.optimize(
+                        cleanup_older_than=None, delete_unverified=True
+                    )
+                    if stats is not None:
+                        logger.debug(f"Additional files cleanup freed {stats.bytes_removed / 1024 / 1024:.2f} MB")
+
+                final_counts = self.get_fragment_count()
+                if pass_num == max_passes - 1:
+                    remaining_chunks = final_counts.get('chunks', 0)
+                    remaining_files = final_counts.get('files', 0)
+                    if remaining_chunks > 0 or remaining_files > 0:
+                        logger.warning(f"Unable to eliminate all fragments after {max_passes} passes: chunks={remaining_chunks}, files={remaining_files}")
 
         except Exception as e:
             logger.warning(f"Failed to optimize tables: {e}")

@@ -834,9 +834,9 @@ class EmbeddingService(BaseService):
                         result.failed_chunks.append((chunk_id, text, EmbeddingErrorClassification.PERMANENT))
 
                 # Recoverable failures should have been handled by splitting in process_single_batch
-                # If they still failed, treat as permanent
+                # If they still failed after splitting, treat as permanent failures
                 for chunk_id, text in recoverable_failures:
-                    result.failed_chunks.append((chunk_id, text, EmbeddingErrorClassification.BATCH_RECOVERABLE))
+                    result.failed_chunks.append((chunk_id, text, EmbeddingErrorClassification.PERMANENT))
 
                 # Merge error stats
                 for error_type, count in batch_result.error_stats.items():
@@ -848,8 +848,8 @@ class EmbeddingService(BaseService):
                         result.error_samples[error_type] = []
                     result.error_samples[error_type].extend(samples[:self._error_sample_limit - len(result.error_samples[error_type])])
 
-                # If we have successful chunks or no more retries, break
-                if result.successful_chunks or attempt > max_retries:
+                # Only break when max retries reached
+                if attempt > max_retries:
                     break
 
                 # Prepare for next retry attempt
