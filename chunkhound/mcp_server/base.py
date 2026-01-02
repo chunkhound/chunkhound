@@ -15,13 +15,17 @@ import os
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from chunkhound.core.config import EmbeddingProviderFactory
+
+if TYPE_CHECKING:
+    from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices, create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
+from chunkhound.services.compaction_service import CompactionService
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 
@@ -58,6 +62,8 @@ class MCPServerBase(ABC):
         self.embedding_manager: EmbeddingManager | None = None
         self.llm_manager: LLMManager | None = None
         self.realtime_indexing: RealtimeIndexingService | None = None
+        self._compaction_service: CompactionService | None = None
+        self._target_path: Path | None = None  # Stored for reindex callback
 
         # Initialization state
         self._initialized = False
@@ -140,7 +146,9 @@ class MCPServerBase(ABC):
             # Initialize LLM manager with dual providers (optional - continue if it fails)
             try:
                 if self.config.llm:
-                    utility_config, synthesis_config = self.config.llm.get_provider_configs()
+                    utility_config, synthesis_config = (
+                        self.config.llm.get_provider_configs()
+                    )
                     self.llm_manager = LLMManager(utility_config, synthesis_config)
                     self.debug_log(
                         f"LLM providers registered: {self.config.llm.provider} "
@@ -168,6 +176,14 @@ class MCPServerBase(ABC):
                 # Fallback to config resolution (shouldn't happen in normal usage)
                 target_path = self.config.target_dir or db_path.parent.parent
                 self.debug_log(f"Using fallback path resolution: {target_path}")
+
+            # Store target path for reindex callback
+            self._target_path = target_path
+
+            # Initialize compaction service for background compaction (MCP mode)
+            if self.config.database.provider == "duckdb":
+                self._compaction_service = CompactionService(db_path, self.config)
+                self.debug_log("CompactionService initialized for background mode")
 
             # Mark as initialized immediately (tools available)
             self._initialized = True
@@ -274,17 +290,85 @@ class MCPServerBase(ABC):
                 f"Background scan completed: {stats.files_processed} files, {stats.chunks_created} chunks"
             )
 
+            # Trigger background compaction after initial scan
+            await self._trigger_background_compaction()
+
         except Exception as e:
             self.debug_log(f"Background initial scan failed: {e}")
             self._scan_progress["is_scanning"] = False
             self._scan_progress["scan_error"] = str(e)
+
+    async def _trigger_background_compaction(self) -> None:
+        """Trigger background compaction if warranted.
+
+        Uses non-blocking compaction with a callback that triggers
+        incremental reindexing after the database swap completes.
+        """
+        if self._compaction_service is None:
+            return
+
+        if not self.services or not hasattr(self.services.provider, "should_compact"):
+            return
+
+        try:
+            # Cast is safe - we verified provider has should_compact (DuckDB only)
+            db_provider = cast("DuckDBProvider", self.services.provider)
+            started = await self._compaction_service.compact_background(
+                provider=db_provider,
+                on_complete=self._post_compaction_reindex,
+            )
+            if started:
+                self.debug_log("Background compaction started")
+        except Exception as e:
+            self.debug_log(f"Background compaction failed to start: {e}")
+
+    async def _post_compaction_reindex(self) -> None:
+        """Callback after compaction - triggers incremental reindex.
+
+        This uses the existing change detection which will find
+        files with mtime > last_indexed_time and reprocess them.
+        """
+        if not self.services or not self._target_path:
+            self.debug_log(
+                "Skipping post-compaction reindex: services or target unavailable"
+            )
+            return
+
+        try:
+            self.debug_log("Starting post-compaction incremental reindex...")
+
+            # Create indexing service for incremental reindex
+            indexing_service = DirectoryIndexingService(
+                indexing_coordinator=self.services.indexing_coordinator,
+                config=self.config,
+                progress_callback=lambda msg: self.debug_log(f"[reindex] {msg}"),
+            )
+
+            # Incremental reindex - only processes files modified during compaction
+            stats = await indexing_service.process_directory(
+                self._target_path, no_embeddings=False
+            )
+
+            self.debug_log(
+                f"Post-compaction reindex complete: {stats.files_processed} files, "
+                f"{stats.chunks_created} chunks"
+            )
+
+        except Exception as e:
+            self.debug_log(f"Post-compaction reindex failed: {e}")
 
     async def cleanup(self) -> None:
         """Clean up resources and close database connection.
 
         This method is idempotent - safe to call multiple times.
         """
-        # Stop real-time indexing first
+        # Stop compaction service first (cancels any in-progress compaction)
+        if self._compaction_service:
+            self.debug_log("Stopping compaction service")
+            await self._compaction_service.shutdown()
+            self._compaction_service = None
+
+        # Stop real-time indexing
         if self.realtime_indexing:
             self.debug_log("Stopping real-time indexing service")
             await self.realtime_indexing.stop()
