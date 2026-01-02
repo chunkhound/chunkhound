@@ -156,21 +156,24 @@ def test_write_astro_assets_only_emits_byte_stable_tree(tmp_path: Path) -> None:
     topics_dir = output_dir / "src" / "pages" / "topics"
     topics_dir.mkdir(parents=True)
     topic_path = topics_dir / "sentinel.md"
-    topic_path.write_text("sentinel topic\n", encoding="utf-8")
+    # Force LF newlines for byte-stable manifests across platforms (Windows defaults to CRLF).
+    with topic_path.open("w", encoding="utf-8", newline="\n") as f:
+        f.write("sentinel topic\n")
 
     data_dir = output_dir / "src" / "data"
     data_dir.mkdir(parents=True)
-    (data_dir / "site.json").write_text(
-        "{\n"
-        '  "title": "My Docs",\n'
-        '  "tagline": "Tagline",\n'
-        '  "scopeLabel": "repo",\n'
-        '  "generatedAt": "2025-01-01T00:00:00Z",\n'
-        '  "sourceDir": "/repo",\n'
-        '  "topicCount": 1\n'
-        "}\n",
-        encoding="utf-8",
-    )
+    site_json_path = data_dir / "site.json"
+    with site_json_path.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(
+            "{\n"
+            '  "title": "My Docs",\n'
+            '  "tagline": "Tagline",\n'
+            '  "scopeLabel": "repo",\n'
+            '  "generatedAt": "2025-01-01T00:00:00Z",\n'
+            '  "sourceDir": "/repo",\n'
+            '  "topicCount": 1\n'
+            "}\n"
+        )
 
     write_astro_assets_only(output_dir=output_dir)
 
