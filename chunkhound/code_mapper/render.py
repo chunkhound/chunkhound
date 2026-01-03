@@ -61,14 +61,15 @@ def render_combined_document(
 def build_topic_artifacts(
     *,
     scope_label: str,
-    poi_sections: list[tuple[str, dict[str, Any]]],
+    poi_sections_indexed: list[tuple[int, str, dict[str, Any]]],
+    failed_poi_sections: list[tuple[int, str, str]] | None = None,
 ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
     """Return topic file contents plus index entries for each topic."""
     safe_scope = safe_scope_label(scope_label)
     topic_files: list[tuple[str, str]] = []
     index_entries: list[tuple[str, str]] = []
 
-    for idx, (poi, result) in enumerate(poi_sections, start=1):
+    for idx, poi, result in poi_sections_indexed:
         heading = _derive_heading_from_point(poi)
         slug = _slugify_heading(heading)
         filename = f"{safe_scope}_topic_{idx:02d}_{slug}.md"
@@ -83,6 +84,15 @@ def build_topic_artifacts(
         topic_files.append((filename, content))
         index_entries.append((heading, filename))
 
+    if failed_poi_sections:
+        for idx, poi, content in failed_poi_sections:
+            heading = _derive_heading_from_point(poi)
+            slug = _slugify_heading(heading)
+            filename = f"{safe_scope}_topic_{idx:02d}_{slug}.md"
+            topic_files.append((filename, content.rstrip() + "\n"))
+            index_entries.append((f"{heading} (failed)", filename))
+
+    index_entries.sort(key=lambda entry: entry[1])
     return topic_files, index_entries
 
 

@@ -241,6 +241,7 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
                 out_dir=Path(out_dir_arg),
                 assembly_provider=meta_bundle.assembly_provider,
                 indexing_cfg=getattr(config, "indexing", None),
+                poi_jobs=getattr(args, "jobs", None),
                 progress=tree_progress,
                 log_info=formatter.info,
                 log_warning=formatter.warning,
@@ -266,6 +267,8 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
 
     overview_result = pipeline_result.overview_result
     poi_sections = pipeline_result.poi_sections
+    poi_sections_indexed = pipeline_result.poi_sections_indexed
+    failed_poi_sections = pipeline_result.failed_poi_sections
     unified_source_files = pipeline_result.unified_source_files
     unified_chunks_dedup = pipeline_result.unified_chunks_dedup
     total_files_global = pipeline_result.total_files_global
@@ -318,6 +321,8 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
         meta=meta_bundle.meta,
         overview_answer=overview_result.get("answer", "").strip(),
         poi_sections=poi_sections,
+        poi_sections_indexed=poi_sections_indexed,
+        failed_poi_sections=failed_poi_sections,
         coverage_lines=coverage_lines,
         include_topics=not getattr(args, "overview_only", False),
         include_combined=include_combined,

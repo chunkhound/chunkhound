@@ -22,6 +22,8 @@ def test_write_code_mapper_outputs_without_topics(tmp_path: Path) -> None:
         meta=_meta(),
         overview_answer="Overview",
         poi_sections=[],
+        poi_sections_indexed=[],
+        failed_poi_sections=None,
         coverage_lines=["## Coverage Summary", ""],
         include_topics=False,
         include_combined=True,
@@ -42,6 +44,10 @@ def test_write_code_mapper_outputs_with_topics_and_unreferenced(tmp_path: Path) 
         meta=meta,
         overview_answer="Overview",
         poi_sections=[("Core Flow", {"answer": "Section body"})],
+        poi_sections_indexed=[(1, "Core Flow", {"answer": "Section body"})],
+        failed_poi_sections=[
+            (2, "Error Handling", "# Error Handling (failed)\n\nDetails\n")
+        ],
         coverage_lines=["## Coverage Summary", ""],
         include_topics=True,
         include_combined=True,
@@ -55,4 +61,8 @@ def test_write_code_mapper_outputs_with_topics_and_unreferenced(tmp_path: Path) 
 
     index_content = result.index_path.read_text(encoding="utf-8")
     assert "scope_scope_unreferenced_files.txt" in index_content
-    assert meta.generation_stats["files"]["unreferenced_list_file"] == "scope_scope_unreferenced_files.txt"
+    assert "Error Handling (failed)" in index_content
+    assert (
+        meta.generation_stats["files"]["unreferenced_list_file"]
+        == "scope_scope_unreferenced_files.txt"
+    )
