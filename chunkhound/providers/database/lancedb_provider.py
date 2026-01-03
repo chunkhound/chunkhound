@@ -7,6 +7,7 @@
 import os
 import time
 from datetime import datetime
+from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -151,6 +152,40 @@ def _deduplicate_by_id(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
         unique.append(best_results[chunk_id])
 
     return unique
+
+
+def _deduplicate_chunks_by_id(chunks: list[Chunk], generate_id_func) -> list[Chunk]:
+    """Deduplicate chunks by computed ID, preserving order and selecting best chunk.
+
+    Chunks with identical computed IDs are grouped, and the "best" chunk (longest content)
+    is selected to represent the group. Warnings are logged for debugging duplicate detection.
+
+    Args:
+        chunks: List of Chunk objects to deduplicate
+        generate_id_func: Function to generate chunk ID from chunk object
+
+    Returns:
+        Deduplicated list of chunks (first occurrence order preserved)
+    """
+    if not chunks:
+        return chunks
+
+    # Group chunks by computed ID
+    grouped_chunks = defaultdict(list)
+    for chunk in chunks:
+        chunk_id = generate_id_func(chunk)
+        grouped_chunks[chunk_id].append(chunk)
+
+    # Select best chunk from each group
+    deduped_chunks = []
+    for chunk_id, group in grouped_chunks.items():
+        if len(group) > 1:
+            logger.warning(f"Detected {len(group)} duplicate chunks for ID {chunk_id} — keeping one")
+        # Pick best: chunk with longest content
+        best_chunk = max(group, key=lambda c: len(c.code or ""))
+        deduped_chunks.append(best_chunk)
+
+    return deduped_chunks
 
 
 class LanceDBProvider(SerialDatabaseProvider):
@@ -855,13 +890,16 @@ class LanceDBProvider(SerialDatabaseProvider):
         for i in range(0, len(chunks), batch_size):
             batch_chunks = chunks[i : i + batch_size]
 
+            # Deduplicate chunks by computed ID to prevent duplicate insertions
+            deduped_chunks = _deduplicate_chunks_by_id(batch_chunks, self._generate_chunk_id_safe)
+
             # PERFORMANCE PROFILING: Track individual sub-batch time
             sub_batch_start = time.time()
 
             chunk_data_list = []
             chunk_ids = []
 
-            for chunk in batch_chunks:
+            for chunk in deduped_chunks:
                 chunk_id = self._generate_chunk_id_safe(chunk)
                 chunk_ids.append(chunk_id)
 

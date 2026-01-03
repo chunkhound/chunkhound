@@ -15,6 +15,7 @@ import os
 import re
 import threading
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -45,6 +46,40 @@ from chunkhound.providers.database.serial_executor import (
 # Type hinting only
 if TYPE_CHECKING:
     from chunkhound.core.config.database_config import DatabaseConfig
+
+
+def _deduplicate_chunks_by_id(chunks: list[Chunk], generate_id_func) -> list[Chunk]:
+    """Deduplicate chunks by computed ID, preserving order and selecting best chunk.
+
+    Chunks with identical computed IDs are grouped, and the "best" chunk (longest content)
+    is selected to represent the group. Warnings are logged for debugging duplicate detection.
+
+    Args:
+        chunks: List of Chunk objects to deduplicate
+        generate_id_func: Function to generate chunk ID from chunk object
+
+    Returns:
+        Deduplicated list of chunks (first occurrence order preserved)
+    """
+    if not chunks:
+        return chunks
+
+    # Group chunks by computed ID
+    grouped_chunks = defaultdict(list)
+    for chunk in chunks:
+        chunk_id = generate_id_func(chunk)
+        grouped_chunks[chunk_id].append(chunk)
+
+    # Select best chunk from each group
+    deduped_chunks = []
+    for chunk_id, group in grouped_chunks.items():
+        if len(group) > 1:
+            logger.warning(f"Detected {len(group)} duplicate chunks for ID {chunk_id} — keeping one")
+        # Pick best: chunk with longest content
+        best_chunk = max(group, key=lambda c: len(c.code or ""))
+        deduped_chunks.append(best_chunk)
+
+    return deduped_chunks
 
 
 class DuckDBProvider(SerialDatabaseProvider):
@@ -1232,6 +1267,9 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         # Track operation for checkpoint management
         track_operation(state)
+
+        # Deduplicate chunks by computed ID to prevent duplicate insertions
+        chunks = _deduplicate_chunks_by_id(chunks, self._generate_chunk_id_safe)
 
         # Prepare data for bulk insert
         chunk_data = []
