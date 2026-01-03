@@ -1318,6 +1318,9 @@ class LanceDBProvider(SerialDatabaseProvider):
                     "status": e["status"],
                 }
 
+            # Deduplicate chunks_data to handle any duplicates in input
+            chunks_data = _deduplicate_by_id(chunks_data)
+
             # Build lookup of chunk_id -> chunk data for efficient access
             chunks_lookup = {chunk["id"]: chunk for chunk in chunks_data}
 
