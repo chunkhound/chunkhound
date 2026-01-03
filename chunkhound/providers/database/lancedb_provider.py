@@ -109,28 +109,46 @@ def _has_valid_embedding(x: Any) -> bool:
 
 
 def _deduplicate_by_id(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Deduplicate LanceDB results by 'id' field, preserving order.
+    """Deduplicate LanceDB results by 'id' field, preserving order and preferring chunks with embeddings.
 
     LanceDB queries may return duplicates across table fragments until
-    compaction runs. This helper ensures each chunk_id appears once.
+    compaction runs. This helper ensures each chunk_id appears once,
+    preferring chunks that have valid embeddings over those that don't.
 
     Args:
         results: List of result dictionaries with 'id' field
 
     Returns:
-        Deduplicated list (first occurrence wins, preserves order)
+        Deduplicated list (first occurrence wins, but prefers chunks with valid embeddings)
     """
     if not results:
         return results
 
-    seen: set[int] = set()
-    unique: list[dict[str, Any]] = []
+    # Track the best result for each ID (preferring valid embeddings)
+    best_results: dict[int, dict[str, Any]] = {}
+    first_occurrence_order: dict[int, int] = {}
 
-    for result in results:
+    for i, result in enumerate(results):
         chunk_id = result.get("id")
-        if chunk_id is not None and chunk_id not in seen:
-            seen.add(chunk_id)
-            unique.append(result)
+        if chunk_id is not None:
+            if chunk_id not in best_results:
+                # First time seeing this ID
+                best_results[chunk_id] = result
+                first_occurrence_order[chunk_id] = i
+            else:
+                # Already seen, check if this one is better
+                current_best = best_results[chunk_id]
+                current_has_embedding = _has_valid_embedding(current_best.get("embedding"))
+                new_has_embedding = _has_valid_embedding(result.get("embedding"))
+
+                # Prefer the one with valid embedding
+                if new_has_embedding and not current_has_embedding:
+                    best_results[chunk_id] = result
+
+    # Return results in order of first occurrence, using the best version
+    unique: list[dict[str, Any]] = []
+    for chunk_id in sorted(first_occurrence_order.keys(), key=lambda x: first_occurrence_order[x]):
+        unique.append(best_results[chunk_id])
 
     return unique
 
@@ -2459,7 +2477,7 @@ class LanceDBProvider(SerialDatabaseProvider):
             logger.debug(f"Initial fragment counts: chunks={initial_counts.get('chunks', 0)}, files={initial_counts.get('files', 0)}")
 
             # Perform optimization with retry loop for short cleanup windows
-            max_passes = 3
+            max_passes = 1
             current_counts = initial_counts
 
             for pass_num in range(max_passes):
