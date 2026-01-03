@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,7 @@ async def test_run_code_mapper_pipeline_raises_when_no_points(
             out_dir=None,
             assembly_provider=None,
             indexing_cfg=None,
+            poi_jobs=None,
             progress=None,
         )
 
@@ -97,6 +99,7 @@ async def test_run_code_mapper_pipeline_skips_empty_results(
         out_dir=None,
         assembly_provider=None,
         indexing_cfg=None,
+        poi_jobs=None,
         progress=None,
     )
 
@@ -211,3 +214,383 @@ async def test_code_mapper_coverage_uses_deep_research_sources(
         assert stats["files"]["coverage"] not in ("0.00%", None)
     finally:
         db.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_run_code_mapper_pipeline_runs_poi_research_in_parallel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_overview(**_: Any) -> tuple[str, list[str]]:
+        return "overview", ["Core Flow", "Error Handling", "Observability"]
+
+    active_calls = 0
+    max_active_calls = 0
+    started_calls = 0
+    saw_parallelism = asyncio.Event()
+    release_calls = asyncio.Event()
+
+    async def fake_deep_research_impl(*, query: str, **__: Any) -> dict[str, Any]:
+        nonlocal active_calls, max_active_calls, started_calls
+        active_calls += 1
+        max_active_calls = max(max_active_calls, active_calls)
+        started_calls += 1
+        if max_active_calls >= 2:
+            saw_parallelism.set()
+        try:
+            await release_calls.wait()
+        finally:
+            active_calls -= 1
+        return {
+            "answer": f"content for {query}",
+            "metadata": {"sources": {"files": [], "chunks": []}},
+        }
+
+    monkeypatch.setattr(
+        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
+    )
+    monkeypatch.setattr(
+        code_mapper_service, "deep_research_impl", fake_deep_research_impl
+    )
+    monkeypatch.setattr(
+        code_mapper_service,
+        "compute_db_scope_stats",
+        lambda *_: (0, 0, set()),
+    )
+    monkeypatch.setenv("CH_CODE_MAPPER_POI_CONCURRENCY", "2")
+
+    pipeline_task = asyncio.create_task(
+        code_mapper_service.run_code_mapper_pipeline(
+            services=object(),
+            embedding_manager=object(),
+            llm_manager=object(),
+            target_dir=object(),
+            scope_path=object(),
+            scope_label="scope",
+            path_filter=None,
+            comprehensiveness="low",
+            max_points=5,
+            out_dir=None,
+            assembly_provider=None,
+            indexing_cfg=None,
+            poi_jobs=None,
+            progress=None,
+        )
+    )
+
+    try:
+        await asyncio.wait_for(saw_parallelism.wait(), timeout=2.0)
+    finally:
+        release_calls.set()
+    result = await pipeline_task
+
+    assert started_calls == 3
+    assert max_active_calls >= 2
+    assert len(result.poi_sections) == 3
+
+
+@pytest.mark.asyncio
+async def test_run_code_mapper_pipeline_backs_off_to_serial_on_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_overview(**_: Any) -> tuple[str, list[str]]:
+        return "overview", ["Alpha", "Boom", "Charlie"]
+
+    events: list[str] = []
+    alpha_started = asyncio.Event()
+    alpha_can_finish = asyncio.Event()
+    alpha_finished = asyncio.Event()
+    boom_called = asyncio.Event()
+    charlie_started = asyncio.Event()
+
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(_: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(code_mapper_service.random, "uniform", lambda *_: 0.0)
+    monkeypatch.setattr(code_mapper_service.asyncio, "sleep", fake_sleep)
+
+    async def fake_deep_research_impl(*, query: str, **__: Any) -> dict[str, Any]:
+        if "Alpha" in query:
+            events.append("alpha_start")
+            alpha_started.set()
+            await alpha_can_finish.wait()
+            events.append("alpha_done")
+            alpha_finished.set()
+            return {
+                "answer": "alpha",
+                "metadata": {"sources": {"files": [], "chunks": []}},
+            }
+        if "Boom" in query:
+            events.append("boom_start")
+            boom_called.set()
+            raise RuntimeError("boom")
+        if "Charlie" in query:
+            events.append("charlie_start")
+            charlie_started.set()
+            return {
+                "answer": "charlie",
+                "metadata": {"sources": {"files": [], "chunks": []}},
+            }
+        raise AssertionError("unexpected query")
+
+    monkeypatch.setattr(
+        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
+    )
+    monkeypatch.setattr(
+        code_mapper_service, "deep_research_impl", fake_deep_research_impl
+    )
+    monkeypatch.setattr(
+        code_mapper_service,
+        "compute_db_scope_stats",
+        lambda *_: (0, 0, set()),
+    )
+
+    pipeline_task = asyncio.create_task(
+        code_mapper_service.run_code_mapper_pipeline(
+            services=object(),
+            embedding_manager=object(),
+            llm_manager=object(),
+            target_dir=object(),
+            scope_path=object(),
+            scope_label="scope",
+            path_filter=None,
+            comprehensiveness="low",
+            max_points=5,
+            out_dir=None,
+            assembly_provider=None,
+            indexing_cfg=None,
+            poi_jobs=2,
+            progress=None,
+        )
+    )
+
+    await asyncio.wait_for(alpha_started.wait(), timeout=2.0)
+    await asyncio.wait_for(boom_called.wait(), timeout=2.0)
+
+    assert not charlie_started.is_set(), "Expected serial backoff to block new PoIs"
+
+    alpha_can_finish.set()
+    await asyncio.wait_for(alpha_finished.wait(), timeout=2.0)
+    result = await asyncio.wait_for(pipeline_task, timeout=2.0)
+
+    assert events.index("alpha_done") < events.index("charlie_start")
+    assert len(result.poi_sections) == 2
+    assert len(result.failed_poi_sections) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_code_mapper_pipeline_retries_empty_result_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_overview(**_: Any) -> tuple[str, list[str]]:
+        return "overview", ["Alpha"]
+
+    attempts = 0
+    sleep_calls: list[float] = []
+    uniform_calls: list[tuple[float, float]] = []
+
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        await real_sleep(0)
+
+    def fake_uniform(low: float, high: float) -> float:
+        uniform_calls.append((low, high))
+        return 0.0
+
+    async def fake_deep_research_impl(*, query: str, **__: Any) -> dict[str, Any]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return {
+                "answer": "",
+                "metadata": {"sources": {"files": [], "chunks": []}},
+            }
+        return {
+            "answer": "ok",
+            "metadata": {"sources": {"files": [], "chunks": []}},
+        }
+
+    monkeypatch.setattr(
+        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
+    )
+    monkeypatch.setattr(
+        code_mapper_service, "deep_research_impl", fake_deep_research_impl
+    )
+    monkeypatch.setattr(
+        code_mapper_service,
+        "compute_db_scope_stats",
+        lambda *_: (0, 0, set()),
+    )
+    monkeypatch.setattr(code_mapper_service.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(code_mapper_service.random, "uniform", fake_uniform)
+
+    result = await code_mapper_service.run_code_mapper_pipeline(
+        services=object(),
+        embedding_manager=object(),
+        llm_manager=object(),
+        target_dir=object(),
+        scope_path=object(),
+        scope_label="scope",
+        path_filter=None,
+        comprehensiveness="low",
+        max_points=5,
+        out_dir=None,
+        assembly_provider=None,
+        indexing_cfg=None,
+        poi_jobs=2,
+        progress=None,
+    )
+
+    assert attempts == 2
+    assert uniform_calls == [(0.0, 1.0)]
+    assert sleep_calls == [0.0]
+    assert len(result.poi_sections) == 1
+    assert result.failed_poi_sections == []
+
+
+@pytest.mark.asyncio
+async def test_run_code_mapper_pipeline_emits_poi_progress_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_overview(**_: Any) -> tuple[str, list[str]]:
+        return "overview", ["Observability"]
+
+    class FakeProgress:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, str, int | None, int | None]] = []
+
+        async def emit_event(
+            self,
+            event_type: str,
+            message: str,
+            node_id: int | None = None,
+            depth: int | None = None,
+            metadata: dict[str, Any] | None = None,
+        ) -> None:
+            self.events.append((event_type, message, node_id, depth))
+
+    async def fake_deep_research_impl(*, progress: Any, **__: Any) -> dict[str, Any]:
+        await progress.emit_event("node_start", "inner", node_id=1, depth=0)
+        return {"answer": "ok", "metadata": {"sources": {"files": [], "chunks": []}}}
+
+    monkeypatch.setattr(
+        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
+    )
+    monkeypatch.setattr(
+        code_mapper_service, "deep_research_impl", fake_deep_research_impl
+    )
+    monkeypatch.setattr(
+        code_mapper_service,
+        "compute_db_scope_stats",
+        lambda *_: (0, 0, set()),
+    )
+
+    progress = FakeProgress()
+    result = await code_mapper_service.run_code_mapper_pipeline(
+        services=object(),
+        embedding_manager=object(),
+        llm_manager=object(),
+        target_dir=object(),
+        scope_path=object(),
+        scope_label="scope",
+        path_filter=None,
+        comprehensiveness="low",
+        max_points=5,
+        out_dir=None,
+        assembly_provider=None,
+        indexing_cfg=None,
+        poi_jobs=1,
+        progress=progress,
+    )
+
+    assert result.poi_sections
+    assert progress.events[0][0] == "poi_start"
+    assert progress.events[0][2] == 1_000_000
+    assert progress.events[0][3] == 0
+
+    assert any(
+        event_type == "node_start" and node_id == 1_000_002 and depth == 1
+        for event_type, _message, node_id, depth in progress.events
+    )
+    assert any(event_type == "poi_complete" for event_type, *_ in progress.events)
+
+
+@pytest.mark.asyncio
+async def test_run_code_mapper_pipeline_emits_poi_failed_only_after_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_overview(**_: Any) -> tuple[str, list[str]]:
+        return "overview", ["Observability"]
+
+    class FakeProgress:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, str, int | None, int | None]] = []
+
+        async def emit_event(
+            self,
+            event_type: str,
+            message: str,
+            node_id: int | None = None,
+            depth: int | None = None,
+            metadata: dict[str, Any] | None = None,
+        ) -> None:
+            self.events.append((event_type, message, node_id, depth))
+
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(_: float) -> None:
+        await real_sleep(0)
+
+    async def fake_deep_research_impl(**__: Any) -> dict[str, Any]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(code_mapper_service.random, "uniform", lambda *_: 0.0)
+    monkeypatch.setattr(code_mapper_service.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
+    )
+    monkeypatch.setattr(
+        code_mapper_service, "deep_research_impl", fake_deep_research_impl
+    )
+    monkeypatch.setattr(
+        code_mapper_service,
+        "compute_db_scope_stats",
+        lambda *_: (0, 0, set()),
+    )
+
+    progress = FakeProgress()
+    result = await code_mapper_service.run_code_mapper_pipeline(
+        services=object(),
+        embedding_manager=object(),
+        llm_manager=object(),
+        target_dir=object(),
+        scope_path=object(),
+        scope_label="scope",
+        path_filter=None,
+        comprehensiveness="low",
+        max_points=5,
+        out_dir=None,
+        assembly_provider=None,
+        indexing_cfg=None,
+        poi_jobs=1,
+        progress=progress,
+    )
+
+    assert result.poi_sections == []
+    assert len(result.failed_poi_sections) == 1
+
+    event_types = [event_type for event_type, *_ in progress.events]
+    assert event_types.count("poi_start") == 1
+    assert event_types.count("poi_complete") == 0
+    assert event_types.count("poi_failed") == 1
+    assert event_types.index("poi_failed") > event_types.index("poi_start")
+
+    assert any(
+        event_type == "main_info"
+        and depth == 1
+        and message == "Retrying after error"
+        for event_type, message, _node_id, depth in progress.events
+    )

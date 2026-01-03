@@ -54,3 +54,15 @@ def test_map_parser_level_shortcuts() -> None:
     parser = _build_parser()
     args = parser.parse_args(["map", "--ultra", "--out", "out"])
     assert args.comprehensiveness == "ultra"
+
+
+def test_map_parser_jobs_flag() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(["map", "--out", "out", "--jobs", "3"])
+    assert args.jobs == 3
+
+
+def test_map_parser_jobs_rejects_zero() -> None:
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["map", "--out", "out", "--jobs", "0"])

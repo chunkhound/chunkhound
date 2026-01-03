@@ -227,13 +227,14 @@ async def test_code_mapper_end_to_end_default_omits_combined_doc(
     assert "scope_scope_unreferenced_files.txt" in index_content
 
     topic_files = list(out_dir.glob("*_topic_*.md"))
-    # One of the deep research calls returns an empty answer and should be skipped.
-    assert len(topic_files) == 1, "Expected only non-empty topics to be written"
-    topic_content = topic_files[0].read_text(encoding="utf-8")
-    assert (
-        topic_content.startswith("# Error Handling")
-        or "\n# Error Handling\n" in topic_content
-    )
+    # One of the deep research calls returns an empty answer and should fail after
+    # a retry, producing a (failed) topic entry that is omitted from the combined
+    # doc but still written as a topic file.
+    assert len(topic_files) == 2
+    topic_contents = [path.read_text(encoding="utf-8") for path in topic_files]
+    assert any(content.startswith("# Error Handling") for content in topic_contents)
+    assert any(content.startswith("# Core Flow (failed)") for content in topic_contents)
+    assert "Core Flow (failed)" in index_content
     unref_files = list(out_dir.glob("*_scope_unreferenced_files.txt"))
     assert unref_files, "Expected unreferenced files artifact to be written"
     unref_content = unref_files[0].read_text(encoding="utf-8")
