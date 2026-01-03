@@ -519,6 +519,114 @@ async def test_run_code_mapper_pipeline_emits_poi_progress_events(
 
 
 @pytest.mark.asyncio
+async def test_run_code_mapper_pipeline_ignores_progress_emit_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_overview(**_: Any) -> tuple[str, list[str]]:
+        return "overview", ["Alpha", "Bravo"]
+
+    class FlakyProgress:
+        async def emit_event(
+            self,
+            event_type: str,
+            message: str,
+            node_id: int | None = None,
+            depth: int | None = None,
+            metadata: dict[str, Any] | None = None,
+        ) -> None:
+            raise RuntimeError(f"progress failed for {event_type}")
+
+    async def fake_deep_research_impl(*, query: str, **__: Any) -> dict[str, Any]:
+        return {"answer": f"ok: {query}", "metadata": {"sources": {"files": [], "chunks": []}}}
+
+    monkeypatch.setattr(
+        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
+    )
+    monkeypatch.setattr(
+        code_mapper_service, "deep_research_impl", fake_deep_research_impl
+    )
+    monkeypatch.setattr(
+        code_mapper_service,
+        "compute_db_scope_stats",
+        lambda *_: (0, 0, set()),
+    )
+
+    result = await code_mapper_service.run_code_mapper_pipeline(
+        services=object(),
+        embedding_manager=object(),
+        llm_manager=object(),
+        target_dir=object(),
+        scope_path=object(),
+        scope_label="scope",
+        path_filter=None,
+        comprehensiveness="low",
+        max_points=5,
+        out_dir=None,
+        assembly_provider=None,
+        indexing_cfg=None,
+        poi_jobs=2,
+        progress=FlakyProgress(),
+    )
+
+    assert len(result.poi_sections) == 2
+    assert result.failed_poi_sections == []
+
+
+@pytest.mark.asyncio
+async def test_run_code_mapper_pipeline_ignores_inner_progress_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_overview(**_: Any) -> tuple[str, list[str]]:
+        return "overview", ["Observability"]
+
+    class FlakyProgress:
+        async def emit_event(
+            self,
+            event_type: str,
+            message: str,
+            node_id: int | None = None,
+            depth: int | None = None,
+            metadata: dict[str, Any] | None = None,
+        ) -> None:
+            raise RuntimeError(f"progress failed for {event_type}")
+
+    async def fake_deep_research_impl(*, progress: Any, **__: Any) -> dict[str, Any]:
+        await progress.emit_event("node_start", "inner", node_id=1, depth=0)
+        return {"answer": "ok", "metadata": {"sources": {"files": [], "chunks": []}}}
+
+    monkeypatch.setattr(
+        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
+    )
+    monkeypatch.setattr(
+        code_mapper_service, "deep_research_impl", fake_deep_research_impl
+    )
+    monkeypatch.setattr(
+        code_mapper_service,
+        "compute_db_scope_stats",
+        lambda *_: (0, 0, set()),
+    )
+
+    result = await code_mapper_service.run_code_mapper_pipeline(
+        services=object(),
+        embedding_manager=object(),
+        llm_manager=object(),
+        target_dir=object(),
+        scope_path=object(),
+        scope_label="scope",
+        path_filter=None,
+        comprehensiveness="low",
+        max_points=5,
+        out_dir=None,
+        assembly_provider=None,
+        indexing_cfg=None,
+        poi_jobs=1,
+        progress=FlakyProgress(),
+    )
+
+    assert len(result.poi_sections) == 1
+    assert result.failed_poi_sections == []
+
+@pytest.mark.asyncio
 async def test_run_code_mapper_pipeline_emits_poi_failed_only_after_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

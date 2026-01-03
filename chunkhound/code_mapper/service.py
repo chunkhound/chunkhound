@@ -74,10 +74,12 @@ class _PoiProgressProxy:
         *,
         depth_offset: int,
         node_id_offset: int,
+        on_error: Callable[[str, Exception], None] | None = None,
     ) -> None:
         self._progress = progress
         self._depth_offset = depth_offset
         self._node_id_offset = node_id_offset
+        self._on_error = on_error
 
     async def emit_event(
         self,
@@ -93,13 +95,22 @@ class _PoiProgressProxy:
             mapped_depth = depth + self._depth_offset
         mapped_node_id = None if node_id is None else self._node_id_offset + node_id
 
-        await self._progress.emit_event(
-            event_type,
-            message,
-            node_id=mapped_node_id,
-            depth=mapped_depth,
-            metadata=metadata,
-        )
+        try:
+            await self._progress.emit_event(
+                event_type,
+                message,
+                node_id=mapped_node_id,
+                depth=mapped_depth,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            if self._on_error is not None:
+                self._on_error(event_type, exc)
+            else:
+                logger.debug(
+                    "[Code Mapper] Progress emit failed for event_type="
+                    f"{event_type}: {exc}"
+                )
 
 
 async def run_code_mapper_overview_only(
@@ -181,6 +192,39 @@ async def run_code_mapper_pipeline(
         raise CodeMapperNoPointsError(overview_answer)
 
     total_points_of_interest = len(points_of_interest)
+
+    progress_failures: set[str] = set()
+
+    def _on_progress_error(event_type: str, exc: Exception) -> None:
+        if event_type in progress_failures:
+            return
+        progress_failures.add(event_type)
+        logger.debug(
+            "[Code Mapper] Progress emit failed for event_type="
+            f"{event_type}: {exc}"
+        )
+
+    async def _safe_progress_emit(
+        event_type: str,
+        message: str,
+        *,
+        node_id: int | None = None,
+        depth: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if progress is None:
+            return
+        try:
+            await progress.emit_event(
+                event_type,
+                message,
+                node_id=node_id,
+                depth=depth,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            _on_progress_error(event_type, exc)
+
     if poi_jobs is not None:
         if poi_jobs < 1:
             raise ValueError("poi_jobs must be >= 1")
@@ -226,6 +270,8 @@ async def run_code_mapper_pipeline(
         ]
     )
     pending_lock = asyncio.Lock()
+    pending_cond = asyncio.Condition(pending_lock)
+    in_flight = 0
     successful_sections: list[tuple[int, str, dict[str, Any]]] = []
     retry_candidates: dict[int, tuple[str, str, str]] = {}
     failed_poi_sections: list[tuple[int, str, str]] = []
@@ -241,12 +287,11 @@ async def run_code_mapper_pipeline(
             progress,
             depth_offset=1,
             node_id_offset=poi_id + 1,
+            on_error=_on_progress_error,
         )
 
     async def _emit_poi_start(idx: int, heading: str) -> None:
-        if progress is None:
-            return
-        await progress.emit_event(
+        await _safe_progress_emit(
             "poi_start",
             f"PoI {idx}/{total_points_of_interest}: {heading}",
             node_id=_poi_node_id(idx),
@@ -254,9 +299,7 @@ async def run_code_mapper_pipeline(
         )
 
     async def _emit_poi_complete(idx: int, heading: str) -> None:
-        if progress is None:
-            return
-        await progress.emit_event(
+        await _safe_progress_emit(
             "poi_complete",
             f"PoI {idx}/{total_points_of_interest} complete: {heading}",
             node_id=_poi_node_id(idx),
@@ -264,20 +307,34 @@ async def run_code_mapper_pipeline(
         )
 
     async def _emit_poi_failed(idx: int, heading: str) -> None:
-        if progress is None:
-            return
-        await progress.emit_event(
+        await _safe_progress_emit(
             "poi_failed",
             f"PoI {idx}/{total_points_of_interest} failed: {heading}",
             node_id=_poi_node_id(idx),
             depth=0,
         )
 
-    async def _next_pending() -> tuple[int, str, str] | None:
-        async with pending_lock:
-            if not pending:
-                return None
-            return pending.popleft()
+    async def _next_pending(worker_id: int) -> tuple[int, str, str] | None:
+        nonlocal in_flight
+        async with pending_cond:
+            while True:
+                if not pending:
+                    return None
+                if backoff_to_serial.is_set():
+                    if worker_id != 0:
+                        return None
+                    while in_flight > 0:
+                        await pending_cond.wait()
+                item = pending.popleft()
+                in_flight += 1
+                return item
+
+    async def _mark_item_done() -> None:
+        nonlocal in_flight
+        async with pending_cond:
+            in_flight -= 1
+            if in_flight == 0:
+                pending_cond.notify_all()
 
     async def _run_point_once(
         *,
@@ -329,34 +386,59 @@ async def run_code_mapper_pipeline(
             logger.exception(f"Code Mapper deep research failed for point {idx}.")
             return heading, None, f"{type(exc).__name__}: {exc}", True
 
+    async def _process_item(idx: int, poi: str, heading: str) -> None:
+        await _emit_poi_start(idx, heading)
+        poi_progress = _poi_progress(idx)
+        heading, result, error_summary, should_backoff = await _run_point_once(
+            idx=idx,
+            poi=poi,
+            heading=heading,
+            poi_progress=poi_progress,
+        )
+        if result is not None:
+            successful_sections.append((idx, poi, result))
+            await _emit_poi_complete(idx, heading)
+            return
+
+        if should_backoff:
+            backoff_to_serial.set()
+        retry_candidates[idx] = (poi, heading, error_summary or "unknown error")
+
     async def _worker(worker_id: int) -> None:
         while True:
-            if backoff_to_serial.is_set() and worker_id != 0:
-                return
-
-            item = await _next_pending()
+            item = await _next_pending(worker_id)
             if item is None:
                 return
             idx, poi, heading = item
-            await _emit_poi_start(idx, heading)
-            poi_progress = _poi_progress(idx)
-            heading, result, error_summary, should_backoff = await _run_point_once(
-                idx=idx,
-                poi=poi,
-                heading=heading,
-                poi_progress=poi_progress,
-            )
-            if result is not None:
-                successful_sections.append((idx, poi, result))
-                await _emit_poi_complete(idx, heading)
-                continue
-
-            if should_backoff:
-                backoff_to_serial.set()
-            retry_candidates[idx] = (poi, heading, error_summary or "unknown error")
+            try:
+                await _process_item(idx, poi, heading)
+            finally:
+                await _mark_item_done()
 
     workers = [asyncio.create_task(_worker(i)) for i in range(poi_concurrency)]
-    await asyncio.gather(*workers)
+    worker_results = await asyncio.gather(*workers, return_exceptions=True)
+    worker_failed = False
+    for result in worker_results:
+        if isinstance(result, asyncio.CancelledError):
+            raise result
+        if isinstance(result, BaseException):
+            worker_failed = True
+            if log_error:
+                log_error(f"[Code Mapper] Worker failed unexpectedly: {result}")
+            logger.opt(exception=result).error(
+                "[Code Mapper] Worker failed unexpectedly."
+            )
+    if worker_failed:
+        backoff_to_serial.set()
+        while True:
+            item = await _next_pending(0)
+            if item is None:
+                break
+            idx, poi, heading = item
+            try:
+                await _process_item(idx, poi, heading)
+            finally:
+                await _mark_item_done()
 
     if retry_candidates:
         for idx in sorted(retry_candidates.keys()):
