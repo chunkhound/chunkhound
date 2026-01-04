@@ -6,16 +6,15 @@ These tests verify that:
 3. Unscoped research can see chunks from multiple prefixes.
 """
 
-import asyncio
 from pathlib import Path
 
 import pytest
 
+from chunkhound.core.types.common import Language
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
 from chunkhound.mcp_server.tools import deep_research_impl
-from chunkhound.core.types.common import Language
 from chunkhound.parsers.parser_factory import create_parser_for_language
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.services.embedding_service import EmbeddingService
@@ -38,15 +37,11 @@ async def test_scoped_deep_research_uses_path_filter(tmp_path: Path) -> None:
     b_file = repo_b / "b.py"
 
     a_file.write_text(
-        "def alpha():\n"
-        "    '''Function in repo-a.'''\n"
-        "    return 'A'\n",
+        "def alpha():\n    '''Function in repo-a.'''\n    return 'A'\n",
         encoding="utf-8",
     )
     b_file.write_text(
-        "def beta():\n"
-        "    '''Function in repo-b.'''\n"
-        "    return 'B'\n",
+        "def beta():\n    '''Function in repo-b.'''\n    return 'B'\n",
         encoding="utf-8",
     )
 
@@ -255,12 +250,12 @@ async def test_deep_research_propagates_path_filter_to_search_service(
 
     # At least one semantic search must have been performed with the scoped path
     assert semantic_path_filters, "Expected search_semantic to be called at least once"
-    assert all(
-        pf == "repo-a" for pf in semantic_path_filters
-    ), f"All semantic searches should use path_filter='repo-a', got {semantic_path_filters}"
+    assert all(pf == "repo-a" for pf in semantic_path_filters), (
+        f"All semantic searches should use path_filter='repo-a', got {semantic_path_filters}"
+    )
 
     # Regex stage is optional; if it runs, it must also respect the same scope
     if regex_path_filters:
-        assert all(
-            pf == "repo-a" for pf in regex_path_filters
-        ), f"All regex searches should use path_filter='repo-a', got {regex_path_filters}"
+        assert all(pf == "repo-a" for pf in regex_path_filters), (
+            f"All regex searches should use path_filter='repo-a', got {regex_path_filters}"
+        )

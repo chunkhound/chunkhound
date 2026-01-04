@@ -3,8 +3,6 @@
 import tempfile
 from pathlib import Path
 
-import pytest
-
 from chunkhound.core.models.file import File
 from chunkhound.core.types.common import Language
 
@@ -22,13 +20,15 @@ class TestMFileDetection:
 - (void)doSomething;
 @end
 """
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.m', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".m", delete=False) as f:
             f.write(objc_code)
             temp_path = Path(f.name)
 
         try:
             language = File._detect_language(temp_path)
-            assert language == Language.OBJC, "File with @interface should be detected as Objective-C"
+            assert language == Language.OBJC, (
+                "File with @interface should be detected as Objective-C"
+            )
         finally:
             temp_path.unlink()
 
@@ -45,13 +45,15 @@ class TestMFileDetection:
 
 @end
 """
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.m', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".m", delete=False) as f:
             f.write(objc_code)
             temp_path = Path(f.name)
 
         try:
             language = File._detect_language(temp_path)
-            assert language == Language.OBJC, "File with @implementation should be detected as Objective-C"
+            assert language == Language.OBJC, (
+                "File with @implementation should be detected as Objective-C"
+            )
         finally:
             temp_path.unlink()
 
@@ -67,13 +69,15 @@ class TestMFileDetection:
 - (void)optionalMethod;
 @end
 """
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.m', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".m", delete=False) as f:
             f.write(objc_code)
             temp_path = Path(f.name)
 
         try:
             language = File._detect_language(temp_path)
-            assert language == Language.OBJC, "File with @protocol should be detected as Objective-C"
+            assert language == Language.OBJC, (
+                "File with @protocol should be detected as Objective-C"
+            )
         finally:
             temp_path.unlink()
 
@@ -86,13 +90,15 @@ class TestMFileDetection:
 - (void)workWith:(MyOtherClass *)obj;
 @end
 """
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.m', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".m", delete=False) as f:
             f.write(objc_code)
             temp_path = Path(f.name)
 
         try:
             language = File._detect_language(temp_path)
-            assert language == Language.OBJC, "File with @class should be detected as Objective-C"
+            assert language == Language.OBJC, (
+                "File with @class should be detected as Objective-C"
+            )
         finally:
             temp_path.unlink()
 
@@ -107,13 +113,15 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 """
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.m', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".m", delete=False) as f:
             f.write(objc_code)
             temp_path = Path(f.name)
 
         try:
             language = File._detect_language(temp_path)
-            assert language == Language.OBJC, "File with #import should be detected as Objective-C"
+            assert language == Language.OBJC, (
+                "File with #import should be detected as Objective-C"
+            )
         finally:
             temp_path.unlink()
 
@@ -125,20 +133,22 @@ function result = calculateSum(a, b)
     result = a + b;
 end
 """
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.m', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".m", delete=False) as f:
             f.write(matlab_code)
             temp_path = Path(f.name)
 
         try:
             language = File._detect_language(temp_path)
-            assert language == Language.MATLAB, "File with function keyword should be detected as MATLAB"
+            assert language == Language.MATLAB, (
+                "File with function keyword should be detected as MATLAB"
+            )
         finally:
             temp_path.unlink()
 
     def test_defaults_to_matlab_for_empty_file(self):
         """Test that empty .m files default to MATLAB (historical precedent)."""
         matlab_code = ""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.m', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".m", delete=False) as f:
             f.write(matlab_code)
             temp_path = Path(f.name)
 
@@ -155,32 +165,36 @@ end
 % MATLAB uses % for comments
 % No code here yet
 """
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.m', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".m", delete=False) as f:
             f.write(matlab_code)
             temp_path = Path(f.name)
 
         try:
             language = File._detect_language(temp_path)
-            assert language == Language.MATLAB, "Comment-only .m file should default to MATLAB"
+            assert language == Language.MATLAB, (
+                "Comment-only .m file should default to MATLAB"
+            )
         finally:
             temp_path.unlink()
 
     def test_mm_extension_not_detected(self):
         """Test that .mm files return None (don't need content detection)."""
         # .mm is unambiguous (Objective-C++)
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.mm', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".mm", delete=False) as f:
             f.write("// Objective-C++ code")
             temp_path = Path(f.name)
 
         try:
             language = File._detect_language(temp_path)
-            assert language is None, ".mm files should return None (use extension-based detection)"
+            assert language is None, (
+                ".mm files should return None (use extension-based detection)"
+            )
         finally:
             temp_path.unlink()
 
     def test_non_m_extension_returns_none(self):
         """Test that non-.m files return None (don't need content detection)."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
             f.write("print('hello')")
             temp_path = Path(f.name)
 
@@ -197,7 +211,9 @@ end
 
         # Should return MATLAB as fallback, not raise an exception
         language = File._detect_language(nonexistent_path)
-        assert language == Language.MATLAB, "Unreadable .m file should default to MATLAB"
+        assert language == Language.MATLAB, (
+            "Unreadable .m file should default to MATLAB"
+        )
 
     def test_detects_objc_within_first_1kb(self):
         """Test that Objective-C markers within first 1KB are detected."""
@@ -214,13 +230,15 @@ end
 - (void)method;
 @end
 """
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.m', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".m", delete=False) as f:
             f.write(objc_code)
             temp_path = Path(f.name)
 
         try:
             language = File._detect_language(temp_path)
-            assert language == Language.OBJC, "Objective-C markers within 1KB should be detected"
+            assert language == Language.OBJC, (
+                "Objective-C markers within 1KB should be detected"
+            )
         finally:
             temp_path.unlink()
 
@@ -232,7 +250,7 @@ x = 1:10;
 y = x.^2;
 plot(x, y);
 """
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.m', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".m", delete=False) as f:
             f.write(matlab_code)
             temp_path = Path(f.name)
 

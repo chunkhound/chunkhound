@@ -21,7 +21,6 @@ Usage examples:
 from __future__ import annotations
 
 import argparse
-import os
 import random
 import time
 from dataclasses import dataclass
@@ -33,8 +32,8 @@ from typing import Any
 def _import_lance() -> tuple[Any, Any, Any]:
     try:
         import lancedb  # type: ignore
-        import pyarrow as pa  # type: ignore
         import numpy as np  # type: ignore
+        import pyarrow as pa  # type: ignore
     except Exception as e:  # pragma: no cover
         raise SystemExit(
             f"Missing dependencies for LanceDB experiment: {e}.\n"
@@ -171,7 +170,11 @@ def ensure_vector_index(conn: Any, dims: int, index_type: str | None = None) -> 
     try:
         chunks = conn.open_table("chunks")
         if index_type == "IVF_HNSW_SQ":
-            chunks.create_index(vector_column_name="embedding", index_type="IVF_HNSW_SQ", metric="cosine")
+            chunks.create_index(
+                vector_column_name="embedding",
+                index_type="IVF_HNSW_SQ",
+                metric="cosine",
+            )
         else:
             chunks.create_index(vector_column_name="embedding", metric="cosine")
     except Exception:
@@ -219,7 +222,9 @@ def reader_worker(
             rows = (
                 conn.open_table("chunks")
                 .search(q, vector_column_name="embedding")
-                .where(f"provider = '{provider}' AND model = '{model}' AND embedding IS NOT NULL")
+                .where(
+                    f"provider = '{provider}' AND model = '{model}' AND embedding IS NOT NULL"
+                )
                 .limit(5)
                 .to_list()
             )
@@ -280,7 +285,11 @@ def writer_worker(
                             "model": model,
                         }
                     )
-                chunks.merge_insert("id").when_matched_update_all().when_not_matched_insert_all().execute(updates)
+                chunks.merge_insert(
+                    "id"
+                ).when_matched_update_all().when_not_matched_insert_all().execute(
+                    updates
+                )
 
             # 2) Insert brand new rows with embeddings (simulates new chunks being indexed)
             new_rows = []
@@ -316,7 +325,15 @@ def writer_worker(
     out_q.put(metrics)
 
 
-def run_probe(db_dir: Path, dims: int, rows: int, readers: int, writers: int, duration: float, index_type: str | None) -> dict[str, int]:
+def run_probe(
+    db_dir: Path,
+    dims: int,
+    rows: int,
+    readers: int,
+    writers: int,
+    duration: float,
+    index_type: str | None,
+) -> dict[str, int]:
     conn = connect(db_dir)
     ids = seed_data(conn, rows, dims, provider="prov", model="mdl")
     ensure_vector_index(conn, dims, index_type=index_type)
@@ -376,12 +393,20 @@ def run_probe(db_dir: Path, dims: int, rows: int, readers: int, writers: int, du
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="LanceDB concurrency probe")
-    parser.add_argument("--db", type=Path, default=Path("/tmp/lancedb_probe"), help="Database directory")
+    parser.add_argument(
+        "--db", type=Path, default=Path("/tmp/lancedb_probe"), help="Database directory"
+    )
     parser.add_argument("--dims", type=int, default=1536, help="Embedding dimensions")
     parser.add_argument("--rows", type=int, default=10000, help="Initial rows to seed")
-    parser.add_argument("--readers", type=int, default=4, help="Number of reader processes")
-    parser.add_argument("--writers", type=int, default=0, help="Number of writer processes")
-    parser.add_argument("--duration", type=float, default=15.0, help="Run duration in seconds")
+    parser.add_argument(
+        "--readers", type=int, default=4, help="Number of reader processes"
+    )
+    parser.add_argument(
+        "--writers", type=int, default=0, help="Number of writer processes"
+    )
+    parser.add_argument(
+        "--duration", type=float, default=15.0, help="Run duration in seconds"
+    )
     parser.add_argument(
         "--index-type",
         type=str,
@@ -398,7 +423,15 @@ def main() -> None:
     args.db.mkdir(parents=True, exist_ok=True)
 
     t0 = time.time()
-    stats = run_probe(args.db, args.dims, args.rows, args.readers, args.writers, args.duration, index_type)
+    stats = run_probe(
+        args.db,
+        args.dims,
+        args.rows,
+        args.readers,
+        args.writers,
+        args.duration,
+        index_type,
+    )
     elapsed = time.time() - t0
 
     # Print structured summary (JSON-ish for easy parsing)

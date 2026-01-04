@@ -2,8 +2,9 @@
 """Test PHP parser Phase 3 implementation."""
 
 from pathlib import Path
-from chunkhound.parsers.parser_factory import ParserFactory
+
 from chunkhound.core.types.common import Language
+from chunkhound.parsers.parser_factory import ParserFactory
 
 # Comprehensive test PHP code
 test_php = """<?php
@@ -55,12 +56,15 @@ try:
 
     # Debug: Check if mapping has the protocol methods
     print(f"\nMapping type: {type(parser.mapping).__name__}")
-    print(f"Has get_query_for_concept: {hasattr(parser.mapping, 'get_query_for_concept')}")
+    print(
+        f"Has get_query_for_concept: {hasattr(parser.mapping, 'get_query_for_concept')}"
+    )
     print(f"Base mapping type: {type(parser.base_mapping).__name__}")
 
     # Check which queries are compiled
     from chunkhound.parsers.universal_engine import UniversalConcept
-    print(f"\nCompiled queries:")
+
+    print("\nCompiled queries:")
     for concept in UniversalConcept:
         has_query = concept in parser.extractor._compiled_queries
         print(f"  {concept.value}: {'✅' if has_query else '❌'}")
@@ -78,23 +82,40 @@ try:
 
     print("Extracting concepts...")
     for concept in UniversalConcept:
-        concept_chunks = parser.extractor.extract_concept(ast_tree.root_node, content_bytes, concept)
+        concept_chunks = parser.extractor.extract_concept(
+            ast_tree.root_node, content_bytes, concept
+        )
         print(f"  {concept.value}: {len(concept_chunks)} chunks")
         for chunk in concept_chunks[:5]:  # Show first 5
-            content_preview = chunk.content[:50].replace("\n", "\\n") if len(chunk.content) > 50 else chunk.content.replace("\n", "\\n")
-            print(f"    - {chunk.name} (lines {chunk.start_line}-{chunk.end_line}): {content_preview}...")
+            content_preview = (
+                chunk.content[:50].replace("\n", "\\n")
+                if len(chunk.content) > 50
+                else chunk.content.replace("\n", "\\n")
+            )
+            print(
+                f"    - {chunk.name} (lines {chunk.start_line}-{chunk.end_line}): {content_preview}..."
+            )
 
     print("\nNow parsing with full pipeline...")
     # Temporarily disable greedy_merge to see what happens
     from chunkhound.parsers.universal_parser import CASTConfig
+
     test_config = CASTConfig(greedy_merge=False)
     parser_no_merge = factory.create_parser(Language.PHP, test_config)
-    chunks_no_merge = parser_no_merge.parse_content(test_php, Path("test.php"), file_id=1)
+    chunks_no_merge = parser_no_merge.parse_content(
+        test_php, Path("test.php"), file_id=1
+    )
     print(f"Without greedy merge: {len(chunks_no_merge)} chunks")
     for chunk in chunks_no_merge[:5]:
-        print(f"  - {chunk.symbol} ({chunk.chunk_type.value}, lines {chunk.start_line}-{chunk.end_line})")
+        print(
+            f"  - {chunk.symbol} ({chunk.chunk_type.value}, lines {chunk.start_line}-{chunk.end_line})"
+        )
         # Print first 100 chars of content
-        preview = chunk.code[:100].replace("\n", "\\n") if len(chunk.code) > 100 else chunk.code.replace("\n", "\\n")
+        preview = (
+            chunk.code[:100].replace("\n", "\\n")
+            if len(chunk.code) > 100
+            else chunk.code.replace("\n", "\\n")
+        )
         print(f"    Content: {preview}...")
 
     print("\nWith greedy merge:")
@@ -130,8 +151,15 @@ try:
         ("UserRepository" in str(symbols), "UserRepository interface"),
         ("Timestampable" in str(symbols), "Timestampable trait"),
         ("namespace" in str(symbols).lower(), "namespace declaration"),
-        ("use" in str(symbols).lower() or len([c for c in chunks if "use" in c.code.lower()]) > 0, "use statement"),
-        (len([c for c in chunks if c.chunk_type.value == "comment"]) > 0, "comments/docblocks"),
+        (
+            "use" in str(symbols).lower()
+            or len([c for c in chunks if "use" in c.code.lower()]) > 0,
+            "use statement",
+        ),
+        (
+            len([c for c in chunks if c.chunk_type.value == "comment"]) > 0,
+            "comments/docblocks",
+        ),
     ]
 
     for passed, check_name in checks:
@@ -141,4 +169,5 @@ try:
 except Exception as e:
     print(f"\n❌ Error: {e}")
     import traceback
+
     traceback.print_exc()

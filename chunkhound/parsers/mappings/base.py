@@ -363,7 +363,7 @@ class BaseMapping(ABC):
 
         # Truncate if too long
         if len(expr) > max_length:
-            expr = expr[:max_length - 3] + "..."
+            expr = expr[: max_length - 3] + "..."
 
         return expr if expr else "expr"
 

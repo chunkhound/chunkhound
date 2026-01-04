@@ -1,16 +1,22 @@
 import os
+
 import pytest
 
 
 def pytest_configure(config):
-    config.addinivalue_line("markers", "heavy: mark tests that generate large synthetic trees (skipped by default)")
+    config.addinivalue_line(
+        "markers",
+        "heavy: mark tests that generate large synthetic trees (skipped by default)",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
     run_heavy = os.getenv("CHUNKHOUND_RUN_HEAVY_TESTS") == "1"
     if run_heavy:
         return
-    skip_heavy = pytest.mark.skip(reason="heavy tests skipped by default (set CHUNKHOUND_RUN_HEAVY_TESTS=1 to run)")
+    skip_heavy = pytest.mark.skip(
+        reason="heavy tests skipped by default (set CHUNKHOUND_RUN_HEAVY_TESTS=1 to run)"
+    )
     for item in items:
         if "heavy" in item.keywords:
             item.add_marker(skip_heavy)

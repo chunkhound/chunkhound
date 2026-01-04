@@ -1,10 +1,9 @@
 """Unit tests for LanceDB dimension detection edge cases."""
 
-import pytest
-from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock
-from chunkhound.providers.database.lancedb_provider import LanceDBProvider
+
 from chunkhound.embeddings import EmbeddingManager
+from chunkhound.providers.database.lancedb_provider import LanceDBProvider
 
 
 class TestLanceDBDimensionDetection:
@@ -13,11 +12,7 @@ class TestLanceDBDimensionDetection:
     def test_get_dimensions_no_manager(self, tmp_path):
         """Edge case: No embedding_manager"""
         db_path = tmp_path / "test.lancedb"
-        provider = LanceDBProvider(
-            db_path,
-            tmp_path,
-            embedding_manager=None
-        )
+        provider = LanceDBProvider(db_path, tmp_path, embedding_manager=None)
         dims = provider._get_embedding_dimensions_safe()
         assert dims is None
 
@@ -25,11 +20,7 @@ class TestLanceDBDimensionDetection:
         """Edge case: embedding_manager with no providers registered"""
         db_path = tmp_path / "test.lancedb"
         em = EmbeddingManager()
-        provider = LanceDBProvider(
-            db_path,
-            tmp_path,
-            embedding_manager=em
-        )
+        provider = LanceDBProvider(db_path, tmp_path, embedding_manager=em)
         dims = provider._get_embedding_dimensions_safe()
         assert dims is None
 
@@ -38,18 +29,14 @@ class TestLanceDBDimensionDetection:
         db_path = tmp_path / "test.lancedb"
 
         # Create mock provider without dims attribute
-        mock_provider = MagicMock(spec=['name', 'model'])  # No dims in spec
+        mock_provider = MagicMock(spec=["name", "model"])  # No dims in spec
         mock_provider.name = "test"
         mock_provider.model = "test-model"
 
         em = EmbeddingManager()
         em.register_provider(mock_provider, set_default=True)
 
-        provider = LanceDBProvider(
-            db_path,
-            tmp_path,
-            embedding_manager=em
-        )
+        provider = LanceDBProvider(db_path, tmp_path, embedding_manager=em)
         dims = provider._get_embedding_dimensions_safe()
         assert dims is None
 
@@ -58,7 +45,7 @@ class TestLanceDBDimensionDetection:
         db_path = tmp_path / "test.lancedb"
 
         # Create mock provider where accessing dims raises exception
-        mock_provider = MagicMock(spec=['name', 'model', 'dims'])
+        mock_provider = MagicMock(spec=["name", "model", "dims"])
         mock_provider.name = "test"
         mock_provider.model = "test-model"
         type(mock_provider).dims = PropertyMock(side_effect=RuntimeError("API error"))
@@ -66,11 +53,7 @@ class TestLanceDBDimensionDetection:
         em = EmbeddingManager()
         em.register_provider(mock_provider, set_default=True)
 
-        provider = LanceDBProvider(
-            db_path,
-            tmp_path,
-            embedding_manager=em
-        )
+        provider = LanceDBProvider(db_path, tmp_path, embedding_manager=em)
         dims = provider._get_embedding_dimensions_safe()
         assert dims is None
 
@@ -86,11 +69,7 @@ class TestLanceDBDimensionDetection:
         em = EmbeddingManager()
         em.register_provider(mock_provider, set_default=True)
 
-        provider = LanceDBProvider(
-            db_path,
-            tmp_path,
-            embedding_manager=em
-        )
+        provider = LanceDBProvider(db_path, tmp_path, embedding_manager=em)
         dims = provider._get_embedding_dimensions_safe()
         assert dims is None
 
@@ -106,11 +85,7 @@ class TestLanceDBDimensionDetection:
         em = EmbeddingManager()
         em.register_provider(mock_provider, set_default=True)
 
-        provider = LanceDBProvider(
-            db_path,
-            tmp_path,
-            embedding_manager=em
-        )
+        provider = LanceDBProvider(db_path, tmp_path, embedding_manager=em)
         dims = provider._get_embedding_dimensions_safe()
         assert dims is None
 
@@ -126,11 +101,7 @@ class TestLanceDBDimensionDetection:
         em = EmbeddingManager()
         em.register_provider(mock_provider, set_default=True)
 
-        provider = LanceDBProvider(
-            db_path,
-            tmp_path,
-            embedding_manager=em
-        )
+        provider = LanceDBProvider(db_path, tmp_path, embedding_manager=em)
         dims = provider._get_embedding_dimensions_safe()
         assert dims is None
 
@@ -146,11 +117,7 @@ class TestLanceDBDimensionDetection:
         em = EmbeddingManager()
         em.register_provider(mock_provider, set_default=True)
 
-        provider = LanceDBProvider(
-            db_path,
-            tmp_path,
-            embedding_manager=em
-        )
+        provider = LanceDBProvider(db_path, tmp_path, embedding_manager=em)
         dims = provider._get_embedding_dimensions_safe()
         assert dims == 1536
 
@@ -166,11 +133,7 @@ class TestLanceDBDimensionDetection:
         em = EmbeddingManager()
         em.register_provider(mock_provider, set_default=True)
 
-        provider = LanceDBProvider(
-            db_path,
-            tmp_path,
-            embedding_manager=em
-        )
+        provider = LanceDBProvider(db_path, tmp_path, embedding_manager=em)
         dims = provider._get_embedding_dimensions_safe()
         assert dims == 768
 
@@ -186,10 +149,6 @@ class TestLanceDBDimensionDetection:
         em = EmbeddingManager()
         em.register_provider(mock_provider, set_default=True)
 
-        provider = LanceDBProvider(
-            db_path,
-            tmp_path,
-            embedding_manager=em
-        )
+        provider = LanceDBProvider(db_path, tmp_path, embedding_manager=em)
         dims = provider._get_embedding_dimensions_safe()
         assert dims == 4096

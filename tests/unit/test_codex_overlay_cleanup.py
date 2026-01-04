@@ -1,7 +1,4 @@
 import asyncio
-import os
-import shutil
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -47,8 +44,11 @@ async def test_codex_overlay_cleanup(monkeypatch, tmp_path: Path):
     be removed regardless of success.
     """
     from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
+
     # Force provider to consider Codex available
-    monkeypatch.setattr(CodexCLIProvider, "_codex_available", lambda self: True, raising=True)
+    monkeypatch.setattr(
+        CodexCLIProvider, "_codex_available", lambda self: True, raising=True
+    )
 
     # Create a deterministic overlay directory
     overlay_dir = tmp_path / "overlay-home"
@@ -61,13 +61,17 @@ async def test_codex_overlay_cleanup(monkeypatch, tmp_path: Path):
         requested_model["value"] = model_override
         return str(overlay_dir)
 
-    monkeypatch.setattr(CodexCLIProvider, "_build_overlay_home", _fake_overlay_home, raising=True)
+    monkeypatch.setattr(
+        CodexCLIProvider, "_build_overlay_home", _fake_overlay_home, raising=True
+    )
 
     # Stub out subprocess creation to avoid calling real codex
     async def _fake_create_subprocess_exec(*args, **kwargs):  # noqa: ANN001
         return _DummyProc(rc=0, out=b"OK", err=b"")
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True)
+    monkeypatch.setattr(
+        asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True
+    )
 
     prov = CodexCLIProvider(model="codex")
 
@@ -75,7 +79,9 @@ async def test_codex_overlay_cleanup(monkeypatch, tmp_path: Path):
     assert overlay_dir.exists()
 
     # Run via argv path (short content) and ensure success
-    out = await prov._run_exec("ping", cwd=None, max_tokens=16, timeout=10, model="codex")  # type: ignore[attr-defined]
+    out = await prov._run_exec(
+        "ping", cwd=None, max_tokens=16, timeout=10, model="codex"
+    )  # type: ignore[attr-defined]
     assert out.strip() == "OK"
 
     # Overlay should be cleaned up by provider

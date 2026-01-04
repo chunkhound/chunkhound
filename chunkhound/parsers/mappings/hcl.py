@@ -8,7 +8,7 @@ and comments, providing meaningful names and metadata for chunking.
 
 from __future__ import annotations
 
-from typing import Any, List
+from typing import Any
 
 from tree_sitter import Node
 
@@ -89,7 +89,9 @@ class HclMapping(BaseMapping):
     def extract_name(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
     ) -> str:
-        node = captures.get("definition") or (list(captures.values())[0] if captures else None)
+        node = captures.get("definition") or (
+            list(captures.values())[0] if captures else None
+        )
         if node is None:
             return f"unnamed_{concept.value}"
 
@@ -112,7 +114,11 @@ class HclMapping(BaseMapping):
         if node.type == "object_elem":
             src = self._decode(content)
             inner_key_node = captures.get("inner_key")
-            inner_key_raw = self.get_node_text(inner_key_node, src).strip() if inner_key_node else ""
+            inner_key_raw = (
+                self.get_node_text(inner_key_node, src).strip()
+                if inner_key_node
+                else ""
+            )
             inner_key = self.clean_string_literal(inner_key_raw)
 
             # Find nearest attribute ancestor to get the attribute key
@@ -144,7 +150,9 @@ class HclMapping(BaseMapping):
     def extract_content(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
     ) -> str:
-        node = captures.get("definition") or (list(captures.values())[0] if captures else None)
+        node = captures.get("definition") or (
+            list(captures.values())[0] if captures else None
+        )
         if node is None:
             return ""
         start, end = node.start_byte, node.end_byte
@@ -153,8 +161,13 @@ class HclMapping(BaseMapping):
     def extract_metadata(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
     ) -> dict[str, Any]:
-        node = captures.get("definition") or (list(captures.values())[0] if captures else None)
-        meta: dict[str, Any] = {"concept": concept.value, "language": self.language.value}
+        node = captures.get("definition") or (
+            list(captures.values())[0] if captures else None
+        )
+        meta: dict[str, Any] = {
+            "concept": concept.value,
+            "language": self.language.value,
+        }
         if node is None:
             return meta
 
@@ -239,8 +252,7 @@ class HclMapping(BaseMapping):
     def _decode(self, content: bytes) -> str:
         return content.decode("utf-8", errors="replace")
 
-
-    def _block_header(self, node: Node, content: bytes) -> tuple[str, List[str]]:
+    def _block_header(self, node: Node, content: bytes) -> tuple[str, list[str]]:
         """Extract block type and labels from a `block` node.
 
         Structure: identifier (type), then 0..n labels (string_lit or identifier) until `{`.
@@ -251,7 +263,7 @@ class HclMapping(BaseMapping):
 
         # child(0) should be the type identifier
         btype = ""
-        labels: List[str] = []
+        labels: list[str] = []
         for i in range(node.child_count):
             child = node.child(i)
             if child is None:
@@ -269,7 +281,7 @@ class HclMapping(BaseMapping):
                 break
         return btype, labels
 
-    def _block_path(self, btype: str, labels: List[str]) -> str:
+    def _block_path(self, btype: str, labels: list[str]) -> str:
         if not btype:
             return "block"
         if labels:

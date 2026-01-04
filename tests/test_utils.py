@@ -8,8 +8,8 @@ from pathlib import Path
 def _find_config_file() -> Path | None:
     """Find .chunkhound.json in current or parent directory."""
     search_paths = [
-        Path(".chunkhound.json"),      # Current directory
-        Path("../.chunkhound.json"),   # Parent directory
+        Path(".chunkhound.json"),  # Current directory
+        Path("../.chunkhound.json"),  # Parent directory
     ]
 
     for config_file in search_paths:
@@ -37,7 +37,7 @@ def get_api_key_for_tests() -> tuple[str | None, str | None]:
         config_file = _find_config_file()
         if config_file:
             try:
-                with open(config_file, 'r') as f:
+                with open(config_file) as f:
                     config_data = json.load(f)
                 embedding_config = config_data.get("embedding", {})
                 provider = embedding_config.get("provider")
@@ -45,24 +45,24 @@ def get_api_key_for_tests() -> tuple[str | None, str | None]:
             except (json.JSONDecodeError, FileNotFoundError, KeyError):
                 pass
         return api_key.strip(), None
-    
+
     # Priority 2: Local .chunkhound.json file
     config_file = _find_config_file()
     if config_file:
         try:
-            with open(config_file, 'r') as f:
+            with open(config_file) as f:
                 config_data = json.load(f)
-            
+
             embedding_config = config_data.get("embedding", {})
             api_key = embedding_config.get("api_key")
             provider = embedding_config.get("provider")
-            
+
             if api_key and api_key.strip():
                 return api_key.strip(), provider
-                
+
         except (json.JSONDecodeError, FileNotFoundError, KeyError):
             pass
-    
+
     return None, None
 
 
@@ -71,8 +71,8 @@ def should_run_live_api_tests(expected_provider: str | None = None) -> bool:
     api_key, provider = get_api_key_for_tests()
     if not api_key:
         return False
-    
+
     if expected_provider and provider != expected_provider:
         return False
-        
+
     return True

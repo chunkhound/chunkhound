@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-import pytest
-
 from chunkhound.core.config.config import Config
 from chunkhound.services.realtime_indexing_service import SimpleEventHandler
 
@@ -44,4 +42,3 @@ def test_realtime_should_index_prunes_excluded_subtrees(tmp_path: Path) -> None:
     assert h._should_index(root / "node_modules" / "mod.txt") is False
     # README should be checked against include patterns (md is supported)
     assert h._should_index(root / "README.md") is True
-

@@ -354,7 +354,11 @@ class CitationManager:
                 display_name = node.name
 
                 # Add reference number for files (if map provided)
-                if node.is_file and file_reference_map and node.full_path in file_reference_map:
+                if (
+                    node.is_file
+                    and file_reference_map
+                    and node.full_path in file_reference_map
+                ):
                     ref_num = file_reference_map[node.full_path]
                     display_name = f"[{ref_num}] {display_name}"
 
@@ -383,7 +387,9 @@ class CitationManager:
                         if len(ranges) <= 3:
                             range_str = ", ".join(ranges)
                         else:
-                            range_str = f"{', '.join(ranges[:3])}, +{len(ranges) - 3} more"
+                            range_str = (
+                                f"{', '.join(ranges[:3])}, +{len(ranges) - 3} more"
+                            )
 
                         line += f" ({chunk_count} chunks: {range_str})"
                     else:

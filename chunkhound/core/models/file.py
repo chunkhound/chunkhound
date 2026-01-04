@@ -10,8 +10,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from loguru import logger
-
 from chunkhound.core.detection import detect_language
 from chunkhound.core.exceptions import ModelError, ValidationError
 from chunkhound.core.types import FileId, FilePath, Language, Timestamp

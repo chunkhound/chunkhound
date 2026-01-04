@@ -10,8 +10,6 @@ import asyncio
 import json
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:  # type-checkers only; avoid runtime hard dep
     import mcp.types as types  # noqa: F401
 
@@ -161,6 +159,7 @@ async def handle_tool_call(
         # Lazy import at runtime to construct MCP content objects without
         # forcing hard dependency during module import/collection.
         import mcp.types as types  # noqa: WPS433
+
         # Wait for initialization (reduced timeout since server is immediately available)
         await asyncio.wait_for(initialization_complete.wait(), timeout=5.0)
 

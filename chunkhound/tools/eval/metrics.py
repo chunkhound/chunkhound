@@ -233,5 +233,3 @@ def build_json_payload(result: EvalResult) -> dict[str, Any]:
         "per_language": per_language,
         "per_query": per_query_payload,
     }
-
-

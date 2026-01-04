@@ -5,8 +5,16 @@ import subprocess
 from pathlib import Path
 
 
-def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 25) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["uv", "run", *cmd], cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
+def _run(
+    cmd: list[str], cwd: Path | None = None, timeout: int = 25
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["uv", "run", *cmd],
+        cwd=str(cwd) if cwd else None,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
 
 
 def test_simulate_debug_ignores_prints_context(tmp_path: Path) -> None:
@@ -32,7 +40,16 @@ def test_simulate_debug_ignores_prints_context(tmp_path: Path) -> None:
 def test_simulate_debug_ignores_with_json_is_clean(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("print('x')\n")
 
-    proc = _run(["chunkhound", "index", "--simulate", str(tmp_path), "--json", "--debug-ignores"])
+    proc = _run(
+        [
+            "chunkhound",
+            "index",
+            "--simulate",
+            str(tmp_path),
+            "--json",
+            "--debug-ignores",
+        ]
+    )
     assert proc.returncode == 0, proc.stderr
 
     # Stdout should be valid JSON and not contain debug text
@@ -42,4 +59,3 @@ def test_simulate_debug_ignores_with_json_is_clean(tmp_path: Path) -> None:
 
     # Debug text goes to stderr
     assert "[debug-ignores] Active sources:" in proc.stderr
-

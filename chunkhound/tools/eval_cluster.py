@@ -20,8 +20,9 @@ import asyncio
 import json
 import statistics
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from loguru import logger
 from sklearn.metrics import (  # type: ignore[import-not-found]
@@ -266,7 +267,9 @@ async def _cluster_and_evaluate(
     total_tokens = metadata.get("total_tokens", sum(cluster_token_counts))
     num_clusters = metadata.get("num_clusters", len(cluster_groups))
 
-    max_tokens_per_cluster_obs = max(cluster_token_counts) if cluster_token_counts else 0
+    max_tokens_per_cluster_obs = (
+        max(cluster_token_counts) if cluster_token_counts else 0
+    )
     mean_tokens_per_cluster = (
         statistics.mean(cluster_token_counts) if cluster_token_counts else 0.0
     )

@@ -1,6 +1,5 @@
 """Tests for Objective-C language mapping and parsing."""
 
-import pytest
 
 from chunkhound.core.types.common import ChunkType, FileId, Language
 from chunkhound.parsers.parser_factory import get_parser_factory
@@ -29,8 +28,9 @@ class TestObjCInterfaceAndImplementation:
         symbols = {c.symbol for c in chunks}
 
         assert len(class_chunks) > 0, "Should capture @interface as CLASS chunk"
-        assert "MyClass" in symbols, \
+        assert "MyClass" in symbols, (
             f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_implementation(self):
         """Test that @implementation blocks are captured."""
@@ -47,12 +47,22 @@ class TestObjCInterfaceAndImplementation:
         symbols = {c.symbol for c in chunks}
 
         # Implementation might be captured as CLASS, BLOCK, or METHOD depending on tree-sitter grammar
-        relevant_chunks = [c for c in chunks if c.chunk_type in (ChunkType.CLASS, ChunkType.BLOCK, ChunkType.METHOD)]
+        relevant_chunks = [
+            c
+            for c in chunks
+            if c.chunk_type in (ChunkType.CLASS, ChunkType.BLOCK, ChunkType.METHOD)
+        ]
 
         assert len(relevant_chunks) > 0, "Should capture @implementation"
         # Either class name or method name should be in symbols
-        has_relevant = "MyClass" in symbols or "doSomething" in symbols or any("do" in s.lower() for s in symbols)
-        assert has_relevant, f"Expected MyClass or doSomething in symbols, got: {sorted(symbols)}"
+        has_relevant = (
+            "MyClass" in symbols
+            or "doSomething" in symbols
+            or any("do" in s.lower() for s in symbols)
+        )
+        assert has_relevant, (
+            f"Expected MyClass or doSomething in symbols, got: {sorted(symbols)}"
+        )
 
 
 class TestObjCMethods:
@@ -84,8 +94,14 @@ class TestObjCMethods:
 
         assert len(method_chunks) > 0, "Should capture instance method"
         # Check if method name appears in symbols (with or without - prefix)
-        has_method = "instanceMethod" in symbols or "-instanceMethod" in symbols or any("instance" in s.lower() for s in symbols)
-        assert has_method, f"Expected 'instanceMethod' in symbols, got: {sorted(symbols)}"
+        has_method = (
+            "instanceMethod" in symbols
+            or "-instanceMethod" in symbols
+            or any("instance" in s.lower() for s in symbols)
+        )
+        assert has_method, (
+            f"Expected 'instanceMethod' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_class_method(self):
         """Test that class methods (+ prefix) are captured."""
@@ -103,12 +119,20 @@ class TestObjCMethods:
         symbols = {c.symbol for c in chunks}
 
         # Look for the method in either METHOD or FUNCTION chunks
-        method_chunks = [c for c in chunks if c.chunk_type in (ChunkType.METHOD, ChunkType.FUNCTION)]
+        method_chunks = [
+            c for c in chunks if c.chunk_type in (ChunkType.METHOD, ChunkType.FUNCTION)
+        ]
 
         assert len(method_chunks) > 0, "Should capture class method"
         # Check if method name appears in symbols (with or without + prefix)
-        has_method = "sharedInstance" in symbols or "+sharedInstance" in symbols or any("shared" in s.lower() for s in symbols)
-        assert has_method, f"Expected 'sharedInstance' in symbols, got: {sorted(symbols)}"
+        has_method = (
+            "sharedInstance" in symbols
+            or "+sharedInstance" in symbols
+            or any("shared" in s.lower() for s in symbols)
+        )
+        assert has_method, (
+            f"Expected 'sharedInstance' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_method_with_parameters(self):
         """Test that methods with parameters are captured correctly."""
@@ -126,12 +150,16 @@ class TestObjCMethods:
         symbols = {c.symbol for c in chunks}
 
         # Look for the method
-        method_chunks = [c for c in chunks if c.chunk_type in (ChunkType.METHOD, ChunkType.FUNCTION)]
+        method_chunks = [
+            c for c in chunks if c.chunk_type in (ChunkType.METHOD, ChunkType.FUNCTION)
+        ]
 
         assert len(method_chunks) > 0, "Should capture method with parameters"
         # The method name in Objective-C includes colons: setName:age:
         has_method = any("setName" in s or "age:" in s for s in symbols)
-        assert has_method, f"Expected method with parameters (setName:age:), got: {sorted(symbols)}"
+        assert has_method, (
+            f"Expected method with parameters (setName:age:), got: {sorted(symbols)}"
+        )
 
 
 class TestObjCProtocols:
@@ -153,8 +181,11 @@ class TestObjCProtocols:
         chunks = parse_objc(content)
 
         # Protocols might be captured as CLASS, INTERFACE, or BLOCK
-        relevant_chunks = [c for c in chunks
-                          if c.chunk_type in (ChunkType.CLASS, ChunkType.INTERFACE, ChunkType.BLOCK)]
+        relevant_chunks = [
+            c
+            for c in chunks
+            if c.chunk_type in (ChunkType.CLASS, ChunkType.INTERFACE, ChunkType.BLOCK)
+        ]
 
         assert len(relevant_chunks) > 0, "Should capture @protocol declaration"
 
@@ -174,7 +205,9 @@ class TestObjCCategories:
         chunks = parse_objc(content)
 
         # Categories might be captured as CLASS or BLOCK
-        relevant_chunks = [c for c in chunks if c.chunk_type in (ChunkType.CLASS, ChunkType.BLOCK)]
+        relevant_chunks = [
+            c for c in chunks if c.chunk_type in (ChunkType.CLASS, ChunkType.BLOCK)
+        ]
 
         assert len(relevant_chunks) > 0, "Should capture category interface"
 
@@ -211,8 +244,9 @@ class TestObjCProperties:
         chunks = parse_objc(content)
 
         # Properties might be captured as PROPERTY or FIELD
-        property_chunks = [c for c in chunks
-                          if c.chunk_type in (ChunkType.PROPERTY, ChunkType.FIELD)]
+        property_chunks = [
+            c for c in chunks if c.chunk_type in (ChunkType.PROPERTY, ChunkType.FIELD)
+        ]
 
         # At minimum, the interface should be captured
         assert len(chunks) > 0, "Should capture interface with properties"
@@ -591,10 +625,16 @@ class TestObjCSymbolNames:
         symbols = {c.symbol for c in chunks}
 
         # Method symbols should include scope prefix
-        assert "-instanceMethod" in symbols or "instanceMethod" in symbols, \
+        assert "-instanceMethod" in symbols or "instanceMethod" in symbols, (
             f"Expected '-instanceMethod' or 'instanceMethod' in symbols, got: {sorted(symbols)}"
-        assert "+classMethod" in symbols or "classMethod" in symbols or "sharedInstance" in symbols, \
+        )
+        assert (
+            "+classMethod" in symbols
+            or "classMethod" in symbols
+            or "sharedInstance" in symbols
+        ), (
             f"Expected '+classMethod' or 'classMethod' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_category_symbols_include_category_name(self):
         """Test that category symbols include category name in format Class+Category."""
@@ -630,9 +670,16 @@ class TestObjCSymbolNames:
 
         # Look for category-related symbols
         # Category names might appear in class chunks or have special formatting
-        relevant_chunks = [c for c in chunks if "MyClass" in c.symbol or "Utilities" in c.symbol or "utility" in c.symbol.lower()]
-        assert len(relevant_chunks) > 0, \
+        relevant_chunks = [
+            c
+            for c in chunks
+            if "MyClass" in c.symbol
+            or "Utilities" in c.symbol
+            or "utility" in c.symbol.lower()
+        ]
+        assert len(relevant_chunks) > 0, (
             f"Expected category-related chunks, got: {[c.symbol for c in chunks]}"
+        )
 
     def test_protocol_symbols_include_prefix(self):
         """Test that protocol symbols include @protocol prefix or are clearly identifiable."""
@@ -651,9 +698,14 @@ class TestObjCSymbolNames:
         symbols = {c.symbol for c in chunks}
 
         # Protocol should be captured with identifiable name
-        protocol_related = [s for s in symbols if "MyProtocol" in s or "Protocol" in s or "protocol" in s.lower()]
-        assert len(protocol_related) > 0 or "MyProtocol" in symbols, \
+        protocol_related = [
+            s
+            for s in symbols
+            if "MyProtocol" in s or "Protocol" in s or "protocol" in s.lower()
+        ]
+        assert len(protocol_related) > 0 or "MyProtocol" in symbols, (
             f"Expected protocol-related symbol, got: {sorted(symbols)}"
+        )
 
 
 class TestObjCMetadata:
@@ -700,7 +752,9 @@ class TestObjCMetadata:
         chunks = parse_objc(content)
 
         # Check for methods with metadata
-        method_chunks = [c for c in chunks if "Method" in c.symbol or "method" in c.symbol.lower()]
+        method_chunks = [
+            c for c in chunks if "Method" in c.symbol or "method" in c.symbol.lower()
+        ]
 
         # At least should have parsed the implementation
         assert len(chunks) > 0, "Should extract chunks"
@@ -815,11 +869,14 @@ class TestObjCComplexFile:
 
         # Check that we got some meaningful chunks
         class_chunks = [c for c in chunks if c.chunk_type == ChunkType.CLASS]
-        method_chunks = [c for c in chunks if c.chunk_type in (ChunkType.METHOD, ChunkType.FUNCTION)]
+        method_chunks = [
+            c for c in chunks if c.chunk_type in (ChunkType.METHOD, ChunkType.FUNCTION)
+        ]
 
         # Should have at least the class definition
-        assert len(class_chunks) > 0 or len(method_chunks) > 0, \
+        assert len(class_chunks) > 0 or len(method_chunks) > 0, (
             "Should capture class or method chunks from complex file"
+        )
 
     def test_objc_realistic_module(self):
         """Test parsing a realistic Objective-C module with multiple advanced features."""
@@ -1101,22 +1158,37 @@ typedef void (^UserCompletionBlock)(BOOL success, NSError *error);
         assert len(chunks) > 0, "Should extract chunks from realistic module"
 
         # Check for class/interface
-        has_interface = any("UserManager" in c.code and "@interface" in c.code for c in chunks)
-        has_implementation = any("UserManager" in c.code and "@implementation" in c.code for c in chunks)
+        has_interface = any(
+            "UserManager" in c.code and "@interface" in c.code for c in chunks
+        )
+        has_implementation = any(
+            "UserManager" in c.code and "@implementation" in c.code for c in chunks
+        )
         assert has_interface or has_implementation, "Should find UserManager class"
 
         # Check for protocol
-        has_protocol = any("UserAuthenticationDelegate" in c.code or "protocol" in c.code.lower() for c in chunks)
+        has_protocol = any(
+            "UserAuthenticationDelegate" in c.code or "protocol" in c.code.lower()
+            for c in chunks
+        )
         assert has_protocol, "Should find protocol declaration"
 
         # Check for category
-        has_category = any("UserValidation" in c.code or "NSString" in c.code for c in chunks)
+        has_category = any(
+            "UserValidation" in c.code or "NSString" in c.code for c in chunks
+        )
         assert has_category, "Should find category"
 
         # Verify multiple chunk types are present
         chunk_types = {c.chunk_type for c in chunks}
-        assert len(chunk_types) >= 2, f"Should have multiple chunk types, got: {chunk_types}"
+        assert len(chunk_types) >= 2, (
+            f"Should have multiple chunk types, got: {chunk_types}"
+        )
 
         # Check for various methods
-        method_chunks = [c for c in chunks if c.chunk_type in (ChunkType.METHOD, ChunkType.FUNCTION)]
-        assert len(method_chunks) >= 3, f"Should find at least 3 methods, found {len(method_chunks)}"
+        method_chunks = [
+            c for c in chunks if c.chunk_type in (ChunkType.METHOD, ChunkType.FUNCTION)
+        ]
+        assert len(method_chunks) >= 3, (
+            f"Should find at least 3 methods, found {len(method_chunks)}"
+        )

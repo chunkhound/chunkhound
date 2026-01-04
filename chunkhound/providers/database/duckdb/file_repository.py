@@ -56,8 +56,10 @@ class DuckDBFileRepository:
                 file_id = self._extract_file_id(existing)
                 if file_id is not None:
                     self.update_file(
-                        file_id, size_bytes=file.size_bytes, mtime=file.mtime,
-                        content_hash=file.content_hash
+                        file_id,
+                        size_bytes=file.size_bytes,
+                        mtime=file.mtime,
+                        content_hash=file.content_hash,
                     )
                     return file_id
 
@@ -206,8 +208,11 @@ class DuckDBFileRepository:
             return None
 
     def update_file(
-        self, file_id: int, size_bytes: int | None = None, mtime: float | None = None,
-        content_hash: str | None = None
+        self,
+        file_id: int,
+        size_bytes: int | None = None,
+        mtime: float | None = None,
+        content_hash: str | None = None,
     ) -> None:
         """Update file record with new values.
 

@@ -32,7 +32,10 @@ from chunkhound.core.types.common import (
 )
 from chunkhound.core.utils import estimate_tokens
 from chunkhound.interfaces.language_parser import ParseResult
-from chunkhound.utils.chunk_deduplication import deduplicate_chunks, get_chunk_specificity
+from chunkhound.utils.chunk_deduplication import (
+    deduplicate_chunks,
+    get_chunk_specificity,
+)
 from chunkhound.utils.normalization import normalize_content
 
 from .concept_extractor import ConceptExtractor
@@ -1075,8 +1078,12 @@ class UniversalParser:
             # Don't merge if either chunk explicitly prevents merging
             # This respects language-specific metadata that marks chunks as semantically
             # independent (e.g., HCL attributes and blocks that should remain separate)
-            current_prevents_merge = current_chunk.metadata.get("prevent_merge_across_concepts", False)
-            next_prevents_merge = next_chunk.metadata.get("prevent_merge_across_concepts", False)
+            current_prevents_merge = current_chunk.metadata.get(
+                "prevent_merge_across_concepts", False
+            )
+            next_prevents_merge = next_chunk.metadata.get(
+                "prevent_merge_across_concepts", False
+            )
             if current_prevents_merge or next_prevents_merge:
                 result.append(current_chunk)
                 current_chunk = next_chunk

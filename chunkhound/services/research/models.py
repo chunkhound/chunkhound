@@ -6,11 +6,10 @@ used by the deep research service for BFS-based semantic exploration.
 
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from chunkhound.api.cli.utils.tree_progress import TreeProgressDisplay
+    pass
 
 # Constants
 RELEVANCE_THRESHOLD = 0.5  # Lower threshold for better recall, reranking will filter
@@ -122,7 +121,9 @@ CLUSTER_OUTPUT_TOKEN_BUDGET = 15_000  # Max output tokens per cluster summary
 
 # Pre-compiled regex patterns for citation processing
 _CITATION_PATTERN = re.compile(r"\[\d+\]")  # Matches [N] citations
-_CITATION_SEQUENCE_PATTERN = re.compile(r"(?:\[\d+\])+")  # Matches sequences like [1][2][3]
+_CITATION_SEQUENCE_PATTERN = re.compile(
+    r"(?:\[\d+\])+"
+)  # Matches sequences like [1][2][3]
 
 # Smart boundary detection for context-aware file reading
 ENABLE_SMART_BOUNDARIES = True  # Expand to natural code boundaries (functions/classes)

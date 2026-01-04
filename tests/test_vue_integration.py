@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from chunkhound.core.types.common import ChunkType, FileId, Language
+from chunkhound.core.types.common import FileId, Language
 from chunkhound.parsers.vue_parser import VueParser
 
 
@@ -59,29 +59,31 @@ function handleClick() {
         assert len(chunks) > 0
 
         # Verify all sections are represented
-        sections = set(c.metadata.get('vue_section') for c in chunks if c.metadata)
-        assert 'script' in sections
-        assert 'template' in sections
-        assert 'style' in sections
+        sections = set(c.metadata.get("vue_section") for c in chunks if c.metadata)
+        assert "script" in sections
+        assert "template" in sections
+        assert "style" in sections
 
         # Verify cross-references were added
         template_chunks = [
-            c for c in chunks if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
         cross_ref_chunks = [
-            c for c in template_chunks if 'script_references' in c.metadata
+            c for c in template_chunks if "script_references" in c.metadata
         ]
         assert len(cross_ref_chunks) > 0
 
         # Verify specific references (at least one should be found)
         all_refs = set()
         for chunk in cross_ref_chunks:
-            all_refs.update(chunk.metadata['script_references'])
+            all_refs.update(chunk.metadata["script_references"])
 
         # At least some references should be detected
         assert len(all_refs) > 0
         # Common references that might be found
-        possible_refs = ['title', 'description', 'handleClick']
+        possible_refs = ["title", "description", "handleClick"]
         found_refs = [ref for ref in possible_refs if ref in all_refs]
         assert len(found_refs) > 0
 
@@ -158,10 +160,10 @@ button { padding: 10px; }
             assert isinstance(chunk.metadata, dict)
 
             # All chunks should indicate they're from a Vue SFC
-            assert chunk.metadata.get('is_vue_sfc') is True
+            assert chunk.metadata.get("is_vue_sfc") is True
 
             # All chunks should have a vue_section
-            assert 'vue_section' in chunk.metadata
+            assert "vue_section" in chunk.metadata
 
             # All chunks should have Language.VUE
             assert chunk.language == Language.VUE
@@ -223,13 +225,13 @@ div { color: red; }
         ts_sections = mapping.extract_sections_ts(content)
 
         # Compare section counts
-        assert len(regex_sections['script']) == len(ts_sections['script'])
-        assert len(regex_sections['template']) == len(ts_sections['template'])
-        assert len(regex_sections['style']) == len(ts_sections['style'])
+        assert len(regex_sections["script"]) == len(ts_sections["script"])
+        assert len(regex_sections["template"]) == len(ts_sections["template"])
+        assert len(regex_sections["style"]) == len(ts_sections["style"])
 
         # Compare content (normalized)
         for (r_attrs, r_content, _), (ts_attrs, ts_content, _) in zip(
-            regex_sections['script'], ts_sections['script']
+            regex_sections["script"], ts_sections["script"]
         ):
             assert r_content.strip() == ts_content.strip()
 
@@ -255,10 +257,14 @@ function handleClick() {
 
         # Should have chunks for script elements and template
         script_chunks = [
-            c for c in chunks if c.metadata and c.metadata.get('vue_section') == 'script'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "script"
         ]
         template_chunks = [
-            c for c in chunks if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         # Basic sanity checks
@@ -277,7 +283,9 @@ class TestTemplateDirectiveExtraction:
     def test_all_directive_types_extracted(self, parser):
         """Test that all major directive types are extracted."""
         # Use the template_directives fixture
-        fixture_path = Path(__file__).parent / "fixtures" / "vue" / "template_directives.vue"
+        fixture_path = (
+            Path(__file__).parent / "fixtures" / "vue" / "template_directives.vue"
+        )
         if not fixture_path.exists():
             pytest.skip("template_directives.vue fixture not found")
 
@@ -287,8 +295,8 @@ class TestTemplateDirectiveExtraction:
         directive_types = set()
         for chunk in chunks:
             if chunk.metadata:
-                if 'directive_type' in chunk.metadata:
-                    directive_types.add(chunk.metadata['directive_type'])
+                if "directive_type" in chunk.metadata:
+                    directive_types.add(chunk.metadata["directive_type"])
 
         # Should have extracted various directive types
         # Note: The exact types depend on how VueTemplateMapping categorizes them
@@ -314,10 +322,13 @@ const status = ref('loading')
 
         # Find chunks with conditional directives
         conditional_chunks = [
-            c for c in chunks
-            if c.metadata and (
-                'condition' in c.metadata or
-                c.code and ('v-if' in c.code or 'v-else' in c.code)
+            c
+            for c in chunks
+            if c.metadata
+            and (
+                "condition" in c.metadata
+                or c.code
+                and ("v-if" in c.code or "v-else" in c.code)
             )
         ]
 
@@ -351,8 +362,10 @@ const array = ref([])
 
         # Find chunks with loop metadata
         loop_chunks = [
-            c for c in chunks
-            if c.metadata and ('loop_iterable' in c.metadata or 'loop_variable' in c.metadata)
+            c
+            for c in chunks
+            if c.metadata
+            and ("loop_iterable" in c.metadata or "loop_variable" in c.metadata)
         ]
 
         # Should have extracted loop information
@@ -384,19 +397,20 @@ function handleVOn() {}
 
         # Find chunks with event handler metadata
         event_chunks = [
-            c for c in chunks
-            if c.metadata and ('handler_expression' in c.metadata or 'event_name' in c.metadata)
+            c
+            for c in chunks
+            if c.metadata
+            and ("handler_expression" in c.metadata or "event_name" in c.metadata)
         ]
 
         # Verify parsing succeeded and cross-references added
         template_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
         refs_found = any(
-            'script_references' in c.metadata
-            for c in template_chunks
-            if c.metadata
+            "script_references" in c.metadata for c in template_chunks if c.metadata
         )
         assert refs_found or len(template_chunks) > 0
 
@@ -426,18 +440,19 @@ const componentName = ref('div')
 
         # Find template chunks with cross-references
         template_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         # Should have cross-references to bound variables
         refs = set()
         for chunk in template_chunks:
-            if chunk.metadata and 'script_references' in chunk.metadata:
-                refs.update(chunk.metadata['script_references'])
+            if chunk.metadata and "script_references" in chunk.metadata:
+                refs.update(chunk.metadata["script_references"])
 
         # At least some bindings should be referenced
-        expected_refs = ['imageUrl', 'linkUrl', 'dynamicClass']
+        expected_refs = ["imageUrl", "linkUrl", "dynamicClass"]
         found_refs = [ref for ref in expected_refs if ref in refs]
         assert len(found_refs) >= 0  # Some refs should be found
 
@@ -469,18 +484,19 @@ const selected = ref('a')
 
         # Find template chunks
         template_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         # Should have references to v-model variables
         refs = set()
         for chunk in template_chunks:
-            if chunk.metadata and 'script_references' in chunk.metadata:
-                refs.update(chunk.metadata['script_references'])
+            if chunk.metadata and "script_references" in chunk.metadata:
+                refs.update(chunk.metadata["script_references"])
 
         # Check for v-model variables
-        assert 'text' in refs or 'description' in refs or len(template_chunks) > 0
+        assert "text" in refs or "description" in refs or len(template_chunks) > 0
 
     def test_component_usage(self, parser):
         """Test component usage detection (PascalCase)."""
@@ -508,17 +524,18 @@ function handleClick() {}
 
         # Verify component props are referenced
         template_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         refs = set()
         for chunk in template_chunks:
-            if chunk.metadata and 'script_references' in chunk.metadata:
-                refs.update(chunk.metadata['script_references'])
+            if chunk.metadata and "script_references" in chunk.metadata:
+                refs.update(chunk.metadata["script_references"])
 
         # Should reference component props
-        assert 'currentUser' in refs or 'tableData' in refs
+        assert "currentUser" in refs or "tableData" in refs
 
     def test_interpolations(self, parser):
         """Test {{ }} interpolation extraction."""
@@ -544,14 +561,15 @@ const user = ref({ name: 'John', email: 'john@example.com' })
 
         # Find template chunks with interpolation references
         template_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         refs = set()
         for chunk in template_chunks:
-            if chunk.metadata and 'script_references' in chunk.metadata:
-                refs.update(chunk.metadata['script_references'])
+            if chunk.metadata and "script_references" in chunk.metadata:
+                refs.update(chunk.metadata["script_references"])
 
         # Should have interpolated variables referenced (at least some)
         # Note: Template chunks may merge interpolations
@@ -589,8 +607,9 @@ function closeModal() {
 
         # Verify slots are parsed
         template_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
         assert len(template_chunks) > 0
 
@@ -622,18 +641,19 @@ const count = ref(0)
 
         # Find template chunks with references
         template_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         refs = set()
         for chunk in template_chunks:
-            if chunk.metadata and 'script_references' in chunk.metadata:
-                refs.update(chunk.metadata['script_references'])
+            if chunk.metadata and "script_references" in chunk.metadata:
+                refs.update(chunk.metadata["script_references"])
 
         # Variables should be referenced if they're used in interpolations
         # Note: refs() declarations may not create chunks themselves
-        assert 'message' in refs or 'count' in refs or len(template_chunks) > 0
+        assert "message" in refs or "count" in refs or len(template_chunks) > 0
 
     def test_function_event_handler_linking(self, parser):
         """Test that functions in event handlers link to script symbols."""
@@ -658,16 +678,17 @@ function handleSubmit() {
         chunks = parser.parse_content(content)
 
         template_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         refs = set()
         for chunk in template_chunks:
-            if chunk.metadata and 'script_references' in chunk.metadata:
-                refs.update(chunk.metadata['script_references'])
+            if chunk.metadata and "script_references" in chunk.metadata:
+                refs.update(chunk.metadata["script_references"])
 
-        assert 'handleClick' in refs or 'handleSubmit' in refs
+        assert "handleClick" in refs or "handleSubmit" in refs
 
     def test_props_binding_linking(self, parser):
         """Test that props in bindings link to script symbols."""
@@ -688,14 +709,15 @@ const linkUrl = ref('https://example.com')
         chunks = parser.parse_content(content)
 
         template_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         refs = set()
         for chunk in template_chunks:
-            if chunk.metadata and 'script_references' in chunk.metadata:
-                refs.update(chunk.metadata['script_references'])
+            if chunk.metadata and "script_references" in chunk.metadata:
+                refs.update(chunk.metadata["script_references"])
 
         # Should have references to bound variables (if chunks were created)
         # Note: Simple const declarations may not create chunks
@@ -703,24 +725,27 @@ const linkUrl = ref('https://example.com')
 
     def test_composable_reference_linking(self, parser):
         """Test that composables in expressions link to script symbols."""
-        fixture_path = Path(__file__).parent / "fixtures" / "vue" / "with_composables.vue"
+        fixture_path = (
+            Path(__file__).parent / "fixtures" / "vue" / "with_composables.vue"
+        )
         if not fixture_path.exists():
             pytest.skip("with_composables.vue fixture not found")
 
         chunks = parser.parse_file(fixture_path, FileId(1))
 
         template_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         refs = set()
         for chunk in template_chunks:
-            if chunk.metadata and 'script_references' in chunk.metadata:
-                refs.update(chunk.metadata['script_references'])
+            if chunk.metadata and "script_references" in chunk.metadata:
+                refs.update(chunk.metadata["script_references"])
 
         # Should reference composable-provided variables
-        composable_refs = ['user', 'count', 'isAuthenticated']
+        composable_refs = ["user", "count", "isAuthenticated"]
         found_refs = [ref for ref in composable_refs if ref in refs]
         assert len(found_refs) > 0
 
@@ -747,14 +772,15 @@ function definedFunc() {
         chunks = parser.parse_content(content)
 
         template_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         undefined_refs = set()
         for chunk in template_chunks:
-            if chunk.metadata and 'undefined_references' in chunk.metadata:
-                undefined_refs.update(chunk.metadata['undefined_references'])
+            if chunk.metadata and "undefined_references" in chunk.metadata:
+                undefined_refs.update(chunk.metadata["undefined_references"])
 
         # Should detect undefined references or at least parse successfully
         # Note: Undefined references are only detected for identifiers that aren't in symbol table
@@ -825,30 +851,33 @@ fetchUser(props.userId)
         chunks = parser.parse_content(content)
 
         # Verify all sections parsed
-        sections = set(c.metadata.get('vue_section') for c in chunks if c.metadata)
-        assert 'script' in sections
-        assert 'template' in sections
-        assert 'style' in sections
+        sections = set(c.metadata.get("vue_section") for c in chunks if c.metadata)
+        assert "script" in sections
+        assert "template" in sections
+        assert "style" in sections
 
         # Verify cross-references
         template_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         refs = set()
         for chunk in template_chunks:
-            if chunk.metadata and 'script_references' in chunk.metadata:
-                refs.update(chunk.metadata['script_references'])
+            if chunk.metadata and "script_references" in chunk.metadata:
+                refs.update(chunk.metadata["script_references"])
 
         # Should reference variables and functions
-        expected = ['user', 'handleUpdate', 'handleDelete', 'title']
+        expected = ["user", "handleUpdate", "handleDelete", "title"]
         found = [ref for ref in expected if ref in refs]
         assert len(found) >= 2
 
     def test_complex_template_logic(self, parser):
         """Test component with complex template logic (nested v-if, v-for)."""
-        fixture_path = Path(__file__).parent / "fixtures" / "vue" / "template_directives.vue"
+        fixture_path = (
+            Path(__file__).parent / "fixtures" / "vue" / "template_directives.vue"
+        )
         if not fixture_path.exists():
             pytest.skip("template_directives.vue fixture not found")
 
@@ -859,14 +888,13 @@ fetchUser(props.userId)
 
         # Verify cross-references exist
         template_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         refs_found = any(
-            'script_references' in c.metadata
-            for c in template_chunks
-            if c.metadata
+            "script_references" in c.metadata for c in template_chunks if c.metadata
         )
         assert refs_found
 
@@ -901,24 +929,26 @@ function increment() {
 
         # Should parse both script blocks
         script_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'script'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "script"
         ]
 
         assert len(script_chunks) > 0
 
         # Check for cross-references
         template_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         refs = set()
         for chunk in template_chunks:
-            if chunk.metadata and 'script_references' in chunk.metadata:
-                refs.update(chunk.metadata['script_references'])
+            if chunk.metadata and "script_references" in chunk.metadata:
+                refs.update(chunk.metadata["script_references"])
 
-        assert 'count' in refs or 'increment' in refs
+        assert "count" in refs or "increment" in refs
 
     def test_vue3_script_setup_features(self, parser):
         """Test Vue 3 features (script setup, defineProps, etc.)."""
@@ -961,16 +991,18 @@ defineExpose({
 
         # Check for macro detection
         script_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'script'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "script"
         ]
 
         # Note: TypeScript parser may not create chunks for all declarations
         # The important thing is that the file parsed without errors
         # and template chunks were created
         template_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         # At least template should be parsed
@@ -1007,7 +1039,9 @@ const message = ref('Hello')
 
     def test_medium_file_performance(self, parser):
         """Test parsing performance with medium file (100-300 lines)."""
-        fixture_path = Path(__file__).parent / "fixtures" / "vue" / "template_directives.vue"
+        fixture_path = (
+            Path(__file__).parent / "fixtures" / "vue" / "template_directives.vue"
+        )
         if not fixture_path.exists():
             pytest.skip("template_directives.vue fixture not found")
 
@@ -1174,22 +1208,23 @@ class TestFixturesParsing:
         assert len(chunks) > 0
 
         # Verify sections
-        sections = set(c.metadata.get('vue_section') for c in chunks if c.metadata)
-        assert 'script' in sections
-        assert 'template' in sections
-        assert 'style' in sections
+        sections = set(c.metadata.get("vue_section") for c in chunks if c.metadata)
+        assert "script" in sections
+        assert "template" in sections
+        assert "style" in sections
 
         # Verify cross-references
         template_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
         refs = set()
         for chunk in template_chunks:
-            if chunk.metadata and 'script_references' in chunk.metadata:
-                refs.update(chunk.metadata['script_references'])
+            if chunk.metadata and "script_references" in chunk.metadata:
+                refs.update(chunk.metadata["script_references"])
 
-        assert 'message' in refs
+        assert "message" in refs
 
     def test_with_props_fixture(self, parser):
         """Test parsing with_props.vue fixture."""
@@ -1203,14 +1238,17 @@ class TestFixturesParsing:
 
         # Verify macros detected
         script_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'script'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "script"
         ]
         assert len(script_chunks) > 0
 
     def test_with_composables_fixture(self, parser):
         """Test parsing with_composables.vue fixture."""
-        fixture_path = Path(__file__).parent / "fixtures" / "vue" / "with_composables.vue"
+        fixture_path = (
+            Path(__file__).parent / "fixtures" / "vue" / "with_composables.vue"
+        )
         if not fixture_path.exists():
             pytest.skip("with_composables.vue fixture not found")
 
@@ -1220,22 +1258,25 @@ class TestFixturesParsing:
 
         # Verify composables referenced
         template_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         refs = set()
         for chunk in template_chunks:
-            if chunk.metadata and 'script_references' in chunk.metadata:
-                refs.update(chunk.metadata['script_references'])
+            if chunk.metadata and "script_references" in chunk.metadata:
+                refs.update(chunk.metadata["script_references"])
 
-        composable_vars = ['user', 'count', 'isAuthenticated']
+        composable_vars = ["user", "count", "isAuthenticated"]
         found = [v for v in composable_vars if v in refs]
         assert len(found) > 0
 
     def test_template_directives_fixture(self, parser):
         """Test parsing template_directives.vue fixture."""
-        fixture_path = Path(__file__).parent / "fixtures" / "vue" / "template_directives.vue"
+        fixture_path = (
+            Path(__file__).parent / "fixtures" / "vue" / "template_directives.vue"
+        )
         if not fixture_path.exists():
             pytest.skip("template_directives.vue fixture not found")
 
@@ -1245,14 +1286,17 @@ class TestFixturesParsing:
 
         # Verify comprehensive directive coverage
         template_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
         assert len(template_chunks) > 0
 
     def test_cross_reference_fixture(self, parser):
         """Test parsing cross_reference.vue fixture."""
-        fixture_path = Path(__file__).parent / "fixtures" / "vue" / "cross_reference.vue"
+        fixture_path = (
+            Path(__file__).parent / "fixtures" / "vue" / "cross_reference.vue"
+        )
         if not fixture_path.exists():
             pytest.skip("cross_reference.vue fixture not found")
 
@@ -1262,18 +1306,19 @@ class TestFixturesParsing:
 
         # Verify cross-references
         template_chunks = [
-            c for c in chunks
-            if c.metadata and c.metadata.get('vue_section') == 'template'
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         refs = set()
         undefined = set()
         for chunk in template_chunks:
             if chunk.metadata:
-                if 'script_references' in chunk.metadata:
-                    refs.update(chunk.metadata['script_references'])
-                if 'undefined_references' in chunk.metadata:
-                    undefined.update(chunk.metadata['undefined_references'])
+                if "script_references" in chunk.metadata:
+                    refs.update(chunk.metadata["script_references"])
+                if "undefined_references" in chunk.metadata:
+                    undefined.update(chunk.metadata["undefined_references"])
 
         # Should have both defined and undefined references
         assert len(refs) > 0

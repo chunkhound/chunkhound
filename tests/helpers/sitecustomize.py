@@ -14,11 +14,15 @@ import os
 
 def _patch_codex_cli_provider() -> None:
     try:
-        from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider  # type: ignore
+        from chunkhound.providers.llm.codex_cli_provider import (
+            CodexCLIProvider,  # type: ignore
+        )
     except Exception:
         return
 
-    async def _stub_run_exec(self, text, cwd=None, max_tokens=1024, timeout=None, model=None):
+    async def _stub_run_exec(
+        self, text, cwd=None, max_tokens=1024, timeout=None, model=None
+    ):
         mark = os.getenv("CH_TEST_CODEX_MARK_FILE")
         if mark:
             try:
@@ -51,11 +55,14 @@ def _force_code_research_synthesis() -> None:
     except Exception:
         return
 
-    async def _stub_deep_research_impl(*, services, embedding_manager, llm_manager, query, progress=None):
+    async def _stub_deep_research_impl(
+        *, services, embedding_manager, llm_manager, query, progress=None
+    ):
         # Ensure we have an LLM manager even if server didn't configure one
         if llm_manager is None:
             try:
                 from chunkhound.llm_manager import LLMManager  # type: ignore
+
                 llm_manager = LLMManager(
                     {"provider": "codex-cli", "model": "codex"},
                     {"provider": "codex-cli", "model": "codex"},
@@ -68,7 +75,9 @@ def _force_code_research_synthesis() -> None:
 
     try:
         tools_mod.deep_research_impl = _stub_deep_research_impl  # type: ignore[assignment]
-        tools_mod.TOOL_REGISTRY["code_research"].implementation = _stub_deep_research_impl  # type: ignore[index]
+        tools_mod.TOOL_REGISTRY[
+            "code_research"
+        ].implementation = _stub_deep_research_impl  # type: ignore[index]
     except Exception:
         pass
 

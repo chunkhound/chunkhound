@@ -1,4 +1,3 @@
-import pytest
 
 
 def test_build_git_pathspecs_ext_and_exact_names():
@@ -25,4 +24,3 @@ def test_build_git_pathspecs_ignores_complex_patterns():
     # Only the simple extension gets pushed
     assert ":(glob)src/**/*.py" in specs
     assert all("[ab]" not in s for s in specs)
-

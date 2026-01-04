@@ -11,8 +11,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from chunkhound.core.types.common import Language
-from chunkhound.parsers.universal_engine import UniversalConcept
 from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.universal_engine import UniversalConcept
 
 if TYPE_CHECKING:
     from tree_sitter import Node as TSNode

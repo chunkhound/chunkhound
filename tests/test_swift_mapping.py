@@ -1,6 +1,5 @@
 """Tests for Swift language mapping and parsing."""
 
-import pytest
 
 from chunkhound.core.types.common import ChunkType, FileId, Language
 from chunkhound.parsers.parser_factory import get_parser_factory
@@ -32,7 +31,9 @@ class MyClass {
         symbols = {c.symbol for c in chunks}
 
         assert len(class_chunks) > 0, "Should capture class declaration"
-        assert "MyClass" in symbols, f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        assert "MyClass" in symbols, (
+            f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_struct_declaration(self):
         """Test that struct declarations are captured with value type metadata."""
@@ -50,12 +51,18 @@ struct Point {
         symbols = {c.symbol for c in chunks}
 
         assert len(chunks) > 0, "Should capture struct declaration"
-        assert "Point" in symbols, f"Expected 'Point' in symbols, got: {sorted(symbols)}"
+        assert "Point" in symbols, (
+            f"Expected 'Point' in symbols, got: {sorted(symbols)}"
+        )
 
         # Check for value_type metadata
-        struct_chunks = [c for c in chunks if c.chunk_type == ChunkType.CLASS and "Point" in c.symbol]
+        struct_chunks = [
+            c for c in chunks if c.chunk_type == ChunkType.CLASS and "Point" in c.symbol
+        ]
         if struct_chunks and struct_chunks[0].metadata:
-            assert struct_chunks[0].metadata.get("value_type") is True, "Struct should be marked as value type"
+            assert struct_chunks[0].metadata.get("value_type") is True, (
+                "Struct should be marked as value type"
+            )
 
     def test_captures_protocol_declaration(self):
         """Test that protocol declarations are captured."""
@@ -87,7 +94,9 @@ enum Direction {
         symbols = {c.symbol for c in chunks}
 
         assert len(chunks) > 0, "Should capture enum"
-        assert "Direction" in symbols, f"Expected 'Direction' in symbols, got: {sorted(symbols)}"
+        assert "Direction" in symbols, (
+            f"Expected 'Direction' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_actor_declaration(self):
         """Test that actor declarations are captured with concurrency metadata."""
@@ -112,8 +121,9 @@ actor BankAccount {
         if actor_chunks and actor_chunks[0].metadata:
             # Actor should have concurrency metadata
             metadata = actor_chunks[0].metadata
-            assert metadata.get("concurrency") is True or metadata.get("kind") == "actor", \
-                "Actor should have concurrency metadata or kind=actor"
+            assert (
+                metadata.get("concurrency") is True or metadata.get("kind") == "actor"
+            ), "Actor should have concurrency metadata or kind=actor"
 
 
 class TestSwiftFunctions:
@@ -131,7 +141,9 @@ func greet(name: String) -> String {
         func_chunks = [c for c in chunks if c.chunk_type == ChunkType.FUNCTION]
 
         assert len(func_chunks) > 0, "Should capture function"
-        assert "greet" in symbols, f"Expected 'greet' in symbols, got: {sorted(symbols)}"
+        assert "greet" in symbols, (
+            f"Expected 'greet' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_initializer(self):
         """Test that init methods are captured."""
@@ -177,7 +189,9 @@ struct Number {
         # Check metadata
         init_chunks = [c for c in chunks if "init?" in c.symbol]
         if init_chunks and init_chunks[0].metadata:
-            assert init_chunks[0].metadata.get("failable") is True, "Failable init should have failable=True"
+            assert init_chunks[0].metadata.get("failable") is True, (
+                "Failable init should have failable=True"
+            )
 
     def test_captures_deinitializer(self):
         """Test that deinit methods are captured."""
@@ -230,7 +244,9 @@ struct Matrix {
         symbols = {c.symbol for c in chunks}
 
         # Should find subscript or at least capture the Matrix struct
-        has_subscript = any("subscript" in s.lower() for s in symbols) or any("subscript" in c.code for c in chunks)
+        has_subscript = any("subscript" in s.lower() for s in symbols) or any(
+            "subscript" in c.code for c in chunks
+        )
         assert len(chunks) > 0, "Should capture Matrix with subscript"
 
     def test_captures_function_with_generics(self):
@@ -310,8 +326,12 @@ extension String: Identifiable {
         chunks = parse_swift(content)
 
         # Look for extension chunks
-        extension_chunks = [c for c in chunks if "extension" in c.symbol.lower() or
-                           ("String" in c.code and "Identifiable" in c.code)]
+        extension_chunks = [
+            c
+            for c in chunks
+            if "extension" in c.symbol.lower()
+            or ("String" in c.code and "Identifiable" in c.code)
+        ]
 
         # Should have captured the extension
         assert len(chunks) > 0, "Should capture extension and protocol"
@@ -388,7 +408,9 @@ fileprivate class FilePrivateClass {
         if class_chunks and class_chunks[0].metadata:
             access = class_chunks[0].metadata.get("access")
             if access:
-                assert access == "fileprivate", f"Expected access='fileprivate', got: {access}"
+                assert access == "fileprivate", (
+                    f"Expected access='fileprivate', got: {access}"
+                )
 
     def test_private_modifier(self):
         """Test that private access is captured with metadata."""
@@ -426,7 +448,9 @@ class DataManager {
 
         # Find async function
         func_chunks = [c for c in chunks if c.chunk_type == ChunkType.FUNCTION]
-        async_funcs = [c for c in func_chunks if c.metadata and c.metadata.get("async") is True]
+        async_funcs = [
+            c for c in func_chunks if c.metadata and c.metadata.get("async") is True
+        ]
 
         # Should find at least one async function
         if func_chunks:
@@ -445,7 +469,9 @@ func processFile() throws {
 
         # Find throwing function
         func_chunks = [c for c in chunks if c.chunk_type == ChunkType.FUNCTION]
-        throwing_funcs = [c for c in func_chunks if c.metadata and c.metadata.get("throws") is True]
+        throwing_funcs = [
+            c for c in func_chunks if c.metadata and c.metadata.get("throws") is True
+        ]
 
         # Should find function (metadata depends on tree-sitter implementation)
         assert len(func_chunks) > 0, "Should find throwing function"
@@ -489,7 +515,11 @@ class Container<T> {
         assert has_container, f"Expected 'Container' in symbols, got: {sorted(symbols)}"
 
         # Check for generic parameters
-        container_chunks = [c for c in chunks if "Container" in c.symbol and c.chunk_type == ChunkType.CLASS]
+        container_chunks = [
+            c
+            for c in chunks
+            if "Container" in c.symbol and c.chunk_type == ChunkType.CLASS
+        ]
         if container_chunks and container_chunks[0].metadata:
             generic_params = container_chunks[0].metadata.get("generic_parameters", [])
             if generic_params:
@@ -512,7 +542,9 @@ func findIndex<T: Equatable>(of value: T, in array: [T]) -> Int? {
 
         # Should find function with generic
         has_find_index = any("findIndex" in s for s in symbols)
-        assert has_find_index, f"Expected 'findIndex' in symbols, got: {sorted(symbols)}"
+        assert has_find_index, (
+            f"Expected 'findIndex' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_generic_type_constraints(self):
         """Test that generic type constraints are handled."""
@@ -531,7 +563,9 @@ class SortedArray<T: Comparable> {
 
         # Should find SortedArray
         has_sorted_array = any("SortedArray" in s for s in symbols)
-        assert has_sorted_array, f"Expected 'SortedArray' in symbols, got: {sorted(symbols)}"
+        assert has_sorted_array, (
+            f"Expected 'SortedArray' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_multiple_generic_parameters(self):
         """Test that multiple generic parameters are extracted."""
@@ -554,11 +588,15 @@ class Pair<T, U> {
         assert has_pair, f"Expected 'Pair' in symbols, got: {sorted(symbols)}"
 
         # Check for multiple generic parameters
-        pair_chunks = [c for c in chunks if "Pair" in c.symbol and c.chunk_type == ChunkType.CLASS]
+        pair_chunks = [
+            c for c in chunks if "Pair" in c.symbol and c.chunk_type == ChunkType.CLASS
+        ]
         if pair_chunks and pair_chunks[0].metadata:
             generic_params = pair_chunks[0].metadata.get("generic_parameters", [])
             if generic_params:
-                assert len(generic_params) >= 2, f"Should capture 2 generic parameters, got: {generic_params}"
+                assert len(generic_params) >= 2, (
+                    f"Should capture 2 generic parameters, got: {generic_params}"
+                )
 
 
 class TestSwiftMetadata:
@@ -575,9 +613,15 @@ struct ValueType {
         chunks = parse_swift(content)
 
         # Find struct chunks
-        struct_chunks = [c for c in chunks if c.chunk_type == ChunkType.CLASS and "ValueType" in c.symbol]
+        struct_chunks = [
+            c
+            for c in chunks
+            if c.chunk_type == ChunkType.CLASS and "ValueType" in c.symbol
+        ]
         if struct_chunks and struct_chunks[0].metadata:
-            assert struct_chunks[0].metadata.get("value_type") is True, "Struct should have value_type=True"
+            assert struct_chunks[0].metadata.get("value_type") is True, (
+                "Struct should have value_type=True"
+            )
 
     def test_reference_type_metadata(self):
         """Test that classes are reference types (no value_type flag)."""
@@ -589,11 +633,16 @@ class ReferenceType {
         chunks = parse_swift(content)
 
         # Find class chunks
-        class_chunks = [c for c in chunks if c.chunk_type == ChunkType.CLASS and "ReferenceType" in c.symbol]
+        class_chunks = [
+            c
+            for c in chunks
+            if c.chunk_type == ChunkType.CLASS and "ReferenceType" in c.symbol
+        ]
         if class_chunks and class_chunks[0].metadata:
             # Classes should not have value_type=True
-            assert class_chunks[0].metadata.get("value_type") is not True, \
+            assert class_chunks[0].metadata.get("value_type") is not True, (
                 "Class should not have value_type=True"
+            )
 
     def test_concurrency_metadata(self):
         """Test that actors have concurrency metadata."""
@@ -613,7 +662,9 @@ actor Counter {
         if actor_chunks and actor_chunks[0].metadata:
             metadata = actor_chunks[0].metadata
             # Should have concurrency marker or kind=actor
-            has_concurrency = metadata.get("concurrency") is True or metadata.get("kind") == "actor"
+            has_concurrency = (
+                metadata.get("concurrency") is True or metadata.get("kind") == "actor"
+            )
             assert has_concurrency, "Actor should have concurrency metadata"
 
     def test_protocol_conformance_metadata(self):
@@ -632,12 +683,16 @@ class Shape: Drawable {
         chunks = parse_swift(content)
 
         # Find Shape class
-        shape_chunks = [c for c in chunks if "Shape" in c.symbol and c.chunk_type == ChunkType.CLASS]
+        shape_chunks = [
+            c for c in chunks if "Shape" in c.symbol and c.chunk_type == ChunkType.CLASS
+        ]
         if shape_chunks and shape_chunks[0].metadata:
             # Check for protocol conformance
             conforms_to = shape_chunks[0].metadata.get("conforms_to", [])
             if conforms_to:
-                assert "Drawable" in conforms_to, "Should capture Drawable protocol conformance"
+                assert "Drawable" in conforms_to, (
+                    "Should capture Drawable protocol conformance"
+                )
 
     def test_class_inheritance_metadata(self):
         """Test that class inheritance is extracted in metadata."""
@@ -653,7 +708,11 @@ class DerivedClass: BaseClass {
         chunks = parse_swift(content)
 
         # Find DerivedClass
-        derived_chunks = [c for c in chunks if "DerivedClass" in c.symbol and c.chunk_type == ChunkType.CLASS]
+        derived_chunks = [
+            c
+            for c in chunks
+            if "DerivedClass" in c.symbol and c.chunk_type == ChunkType.CLASS
+        ]
         if derived_chunks and derived_chunks[0].metadata:
             # Check for inheritance
             inherits = derived_chunks[0].metadata.get("inherits", [])
@@ -679,7 +738,9 @@ struct SafeNumber {
         # Find init? method
         init_chunks = [c for c in chunks if "init?" in c.symbol]
         if init_chunks and init_chunks[0].metadata:
-            assert init_chunks[0].metadata.get("failable") is True, "Failable init should have failable=True"
+            assert init_chunks[0].metadata.get("failable") is True, (
+                "Failable init should have failable=True"
+            )
 
 
 class TestSwiftSymbolNames:
@@ -706,8 +767,12 @@ func greet(name: String) {
         symbols = {c.symbol for c in chunks}
 
         # Should find both functions
-        assert "calculateSum" in symbols, f"Expected 'calculateSum' in symbols, got: {sorted(symbols)}"
-        assert "greet" in symbols, f"Expected 'greet' in symbols, got: {sorted(symbols)}"
+        assert "calculateSum" in symbols, (
+            f"Expected 'calculateSum' in symbols, got: {sorted(symbols)}"
+        )
+        assert "greet" in symbols, (
+            f"Expected 'greet' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_function_symbols_with_generics(self):
         """Test that generic function symbols include type parameters."""
@@ -771,8 +836,12 @@ extension Int: Printable {
         chunks = parse_swift(content)
 
         # Should capture extension
-        extension_chunks = [c for c in chunks if "extension" in c.symbol.lower() or
-                           ("Int" in c.code and "Printable" in c.code)]
+        extension_chunks = [
+            c
+            for c in chunks
+            if "extension" in c.symbol.lower()
+            or ("Int" in c.code and "Printable" in c.code)
+        ]
         assert len(chunks) > 0, "Should capture protocol and extension"
 
 
@@ -1112,7 +1181,9 @@ actor Counter {
         assert has_client, "Should find NetworkClient class"
 
         # Check for protocol
-        has_protocol = any("DataFetcher" in c.code or "protocol" in c.code.lower() for c in chunks)
+        has_protocol = any(
+            "DataFetcher" in c.code or "protocol" in c.code.lower() for c in chunks
+        )
         assert has_protocol, "Should find protocol declaration"
 
         # Check for enum
@@ -1124,9 +1195,13 @@ actor Counter {
         assert has_actor, "Should find actor declaration"
 
         # Check for extension
-        has_extension = any("extension" in c.code.lower() and "URL" in c.code for c in chunks)
+        has_extension = any(
+            "extension" in c.code.lower() and "URL" in c.code for c in chunks
+        )
         assert has_extension, "Should find extension"
 
         # Verify multiple chunk types are present
         chunk_types = {c.chunk_type for c in chunks}
-        assert len(chunk_types) >= 1, f"Should have multiple chunk types, got: {chunk_types}"
+        assert len(chunk_types) >= 1, (
+            f"Should have multiple chunk types, got: {chunk_types}"
+        )

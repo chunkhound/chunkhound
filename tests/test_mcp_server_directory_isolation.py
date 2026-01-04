@@ -13,13 +13,13 @@ import asyncio
 import json
 import os
 import tempfile
-import pytest
 from pathlib import Path
 
-from chunkhound.database_factory import create_database_with_dependencies
+import pytest
+
 from chunkhound.core.config.config import Config
+from chunkhound.database_factory import create_database_with_dependencies
 from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
-from .test_utils import get_api_key_for_tests
 
 # Import Windows-safe subprocess utilities and JSON-RPC client
 from tests.utils import (
@@ -27,36 +27,37 @@ from tests.utils import (
     create_subprocess_exec_safe,
     get_safe_subprocess_env,
 )
-from tests.utils.windows_compat import path_contains, windows_safe_tempdir, database_cleanup_context
+
+from .test_utils import get_api_key_for_tests
 
 
 class TestMCPServerDirectoryIsolationWithRealCommunication:
     """Test MCP server serving different directory with real indexing and MCP communication."""
-    
+
     @pytest.mark.asyncio
     async def test_mcp_server_serves_indexed_different_directory(
         self, clean_environment
     ):
         """
         Complete test: Index target directory, start MCP server from different CWD, send real search queries.
-        
+
         Flow:
         1. Create isolated directories (test CWD vs target project)
-        2. Index the target project directory 
+        2. Index the target project directory
         3. Start MCP server from test CWD (different from target)
         4. Send real MCP search queries via stdio
         5. Verify responses contain indexed content from target directory
         """
         temp_base = Path(tempfile.mkdtemp())
-        
+
         try:
             # === STEP 1: Directory Setup ===
             test_cwd = temp_base / "test_execution_dir"  # NO config here
             test_cwd.mkdir()
-            
-            project_dir = temp_base / "target_project"   # WITH config and content
+
+            project_dir = temp_base / "target_project"  # WITH config and content
             project_dir.mkdir()
-            
+
             # Create test content with unique identifiers
             test_files = {
                 "main.py": '''
@@ -111,7 +112,7 @@ class ConfigManager:
         """Load configuration from file."""
         return {"app_name": "test_isolated_app_67890"}
 ''',
-                "README.md": '''
+                "README.md": """
 # Test Project
 
 This is a test project for MCP server directory isolation testing.
@@ -123,125 +124,132 @@ This is a test project for MCP server directory isolation testing.
 
 ## Usage
 Run the application with proper configuration.
-'''
+""",
             }
-            
+
             # Write test files
             for filename, content in test_files.items():
                 (project_dir / filename).write_text(content.strip())
-            
+
             # Database setup
             db_path = project_dir / ".chunkhound" / "isolated_test.db"
             db_path.parent.mkdir(exist_ok=True)
-            
+
             # Project config - no embedding provider to avoid API key requirement for this test
             config_path = project_dir / ".chunkhound.json"
             config_content = {
                 "database": {"path": str(db_path), "provider": "duckdb"},
                 "indexing": {
                     "include": ["*.py", "*.md"],
-                    "exclude": ["*.log", "__pycache__/"]
-                }
+                    "exclude": ["*.log", "__pycache__/"],
+                },
             }
             config_path.write_text(json.dumps(config_content, indent=2))
-            
+
             # Verify isolation
             assert not (test_cwd / ".chunkhound.json").exists()
             assert (project_dir / ".chunkhound.json").exists()
-            
+
             # === STEP 2: Index the Target Directory ===
             print(f"Indexing target directory: {project_dir}")
-            
+
             # Run indexing from target directory
             index_env = os.environ.copy()
-            index_env.update({
-                "CHUNKHOUND_DATABASE__PATH": str(db_path)
-            })
-            
+            index_env.update({"CHUNKHOUND_DATABASE__PATH": str(db_path)})
+
             index_process = await create_subprocess_exec_safe(
-                "uv", "run", "chunkhound", "index", str(project_dir), "--no-embeddings",
+                "uv",
+                "run",
+                "chunkhound",
+                "index",
+                str(project_dir),
+                "--no-embeddings",
                 cwd=str(project_dir),  # Index from project directory
                 env=get_safe_subprocess_env(index_env),
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
             )
-            
+
             stdout, stderr = await index_process.communicate()
-            
-            assert index_process.returncode == 0, (
-                f"Indexing failed: {stderr.decode()}"
-            )
-            
-            print(f"Indexing completed successfully")
-            
+
+            assert index_process.returncode == 0, f"Indexing failed: {stderr.decode()}"
+
+            print("Indexing completed successfully")
+
             # Verify database has content
             # Use fake args to prevent find_project_root call that fails in CI
             from types import SimpleNamespace
+
             fake_args = SimpleNamespace(path=db_path.parent)
             config_for_db = Config(
-                args=fake_args,
-                database={"path": str(db_path), "provider": "duckdb"}
+                args=fake_args, database={"path": str(db_path), "provider": "duckdb"}
             )
             db = create_database_with_dependencies(
-                db_path=db_path,
-                config=config_for_db,
-                embedding_manager=None
+                db_path=db_path, config=config_for_db, embedding_manager=None
             )
             db.connect()
             stats = db.get_stats()
             db.close()
-            
+
             file_count = stats.get("files", 0)
             chunk_count = stats.get("chunks", 0)
-            assert file_count > 0, f"Database should contain indexed files, got {file_count}"
+            assert file_count > 0, (
+                f"Database should contain indexed files, got {file_count}"
+            )
             assert chunk_count > 0, f"Database should contain chunks, got {chunk_count}"
             print(f"Database contains {file_count} files and {chunk_count} chunks")
-            
+
             # === STEP 3: Start MCP Server from Different Directory ===
             mcp_env = os.environ.copy()
             # Remove any existing chunkhound env vars to avoid conflicts
             for key in list(mcp_env.keys()):
                 if key.startswith("CHUNKHOUND_"):
                     del mcp_env[key]
-            
-            mcp_env.update({
-                "CHUNKHOUND_DATABASE__PATH": str(db_path),
-                "CHUNKHOUND_MCP_MODE": "1",
-                "CHUNKHOUND_DEBUG": "1"
-            })
-            
+
+            mcp_env.update(
+                {
+                    "CHUNKHOUND_DATABASE__PATH": str(db_path),
+                    "CHUNKHOUND_MCP_MODE": "1",
+                    "CHUNKHOUND_DEBUG": "1",
+                }
+            )
+
             print(f"MCP server will use database: {db_path}")
             print(f"Database exists: {db_path.exists()}")
-            print(f"Database size: {db_path.stat().st_size if db_path.exists() else 'N/A'}")
-            
+            print(
+                f"Database size: {db_path.stat().st_size if db_path.exists() else 'N/A'}"
+            )
+
             # Use CLI positional argument to specify project directory
-            print(f"Environment variables set for MCP server:")
+            print("Environment variables set for MCP server:")
             for key, value in mcp_env.items():
                 if key.startswith("CHUNKHOUND_"):
                     print(f"  {key} = {value}")
-            
+
             # Critical: Start from test_cwd, not project_dir - pass target path as argument
             mcp_cmd = ["uv", "run", "chunkhound", "mcp", "--stdio", str(project_dir)]
             print(f"Running command: {' '.join(mcp_cmd)} from cwd: {test_cwd}")
-            mcp_process = await create_subprocess_exec_safe(  
+            mcp_process = await create_subprocess_exec_safe(
                 *mcp_cmd,
                 cwd=str(test_cwd),  # Different from project_dir!
                 env=get_safe_subprocess_env(mcp_env),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
             )
-            
+
             try:
                 # Check if process started successfully (extended for Ollama compatibility)
                 await asyncio.sleep(3)
                 if mcp_process.returncode is not None:
                     stdout, stderr = await mcp_process.communicate()
-                    print(f"MCP server failed to start:")
+                    print("MCP server failed to start:")
                     print(f"Return code: {mcp_process.returncode}")
                     print(f"stdout: {stdout.decode()}")
                     print(f"stderr: {stderr.decode()}")
-                    raise Exception(f"MCP server failed to start with code {mcp_process.returncode}")
+                    raise Exception(
+                        f"MCP server failed to start with code {mcp_process.returncode}"
+                    )
 
                 print("MCP server is running, proceeding with initialization...")
 
@@ -259,9 +267,9 @@ Run the application with proper configuration.
                             "capabilities": {},
                             "clientInfo": {
                                 "name": "chunkhound-test-client",
-                                "version": "1.0.0"
-                            }
-                        }
+                                "version": "1.0.0",
+                            },
+                        },
                     )
                     assert init_result["protocolVersion"] == "2024-11-05"
                     print("MCP server initialized successfully")
@@ -300,17 +308,13 @@ Run the application with proper configuration.
                 tools_result = await mcp_client.send_request("tools/list", {})
                 tools = tools_result["tools"]
                 print(f"Available tools: {[tool['name'] for tool in tools]}")
-                
+
                 # === STEP 5: Test Search Queries ===
 
                 # Test 0.1: Check what the MCP server sees in the database
                 print("Getting database stats from MCP server...")
                 stats_result = await mcp_client.send_request(
-                    "tools/call",
-                    {
-                        "name": "get_stats",
-                        "arguments": {}
-                    }
+                    "tools/call", {"name": "get_stats", "arguments": {}}
                 )
                 if "content" in stats_result:
                     stats_data = json.loads(stats_result["content"][0]["text"])
@@ -324,12 +328,8 @@ Run the application with proper configuration.
                     "tools/call",
                     {
                         "name": "search_regex",
-                        "arguments": {
-                            "pattern": "def",
-                            "page_size": 10,
-                            "offset": 0
-                        }
-                    }
+                        "arguments": {"pattern": "def", "page_size": 10, "offset": 0},
+                    },
                 )
                 print(f"Def search response: {def_result}")
 
@@ -342,35 +342,46 @@ Run the application with proper configuration.
                         "arguments": {
                             "pattern": "calculate_fibonacci",
                             "page_size": 10,
-                            "offset": 0
-                        }
-                    }
+                            "offset": 0,
+                        },
+                    },
                 )
                 print(f"Fibonacci response: {fibonacci_result}")
 
                 # The result has content array with text
-                if "content" in fibonacci_result and len(fibonacci_result["content"]) > 0:
-                    fibonacci_results = json.loads(fibonacci_result["content"][0]["text"])["results"]
+                if (
+                    "content" in fibonacci_result
+                    and len(fibonacci_result["content"]) > 0
+                ):
+                    fibonacci_results = json.loads(
+                        fibonacci_result["content"][0]["text"]
+                    )["results"]
                 else:
                     print(f"Unexpected result format: {fibonacci_result}")
                     fibonacci_results = []
                 assert len(fibonacci_results) > 0, "Should find fibonacci function"
-                
+
                 # Verify content comes from target project, not test CWD
                 found_fibonacci = False
                 for result in fibonacci_results:
                     if "calculate_fibonacci" in result.get("content", ""):
                         file_path = result["file_path"]
                         # Search should return relative path from indexed project directory
-                        assert file_path == "main.py", f"Expected 'main.py', got: {file_path}"
+                        assert file_path == "main.py", (
+                            f"Expected 'main.py', got: {file_path}"
+                        )
                         # Verify it's a relative path (not absolute)
-                        assert not Path(file_path).is_absolute(), f"File path should be relative: {file_path}"
+                        assert not Path(file_path).is_absolute(), (
+                            f"File path should be relative: {file_path}"
+                        )
                         found_fibonacci = True
                         break
-                
-                assert found_fibonacci, "Should find fibonacci function in target project"
+
+                assert found_fibonacci, (
+                    "Should find fibonacci function in target project"
+                )
                 print("✓ Fibonacci function found in correct directory")
-                
+
                 # Test 2: Search for unique identifier from utils.py
                 print("Testing regex search for unique app identifier...")
                 app_result = await mcp_client.send_request(
@@ -380,9 +391,9 @@ Run the application with proper configuration.
                         "arguments": {
                             "pattern": "test_isolated_app_67890",
                             "page_size": 10,
-                            "offset": 0
-                        }
-                    }
+                            "offset": 0,
+                        },
+                    },
                 )
 
                 app_results = json.loads(app_result["content"][0]["text"])["results"]
@@ -393,9 +404,13 @@ Run the application with proper configuration.
                     if "test_isolated_app_67890" in result.get("content", ""):
                         file_path = result["file_path"]
                         # Search should return relative path from indexed project directory
-                        assert file_path == "utils.py", f"Expected 'utils.py', got: {file_path}"
+                        assert file_path == "utils.py", (
+                            f"Expected 'utils.py', got: {file_path}"
+                        )
                         # Verify it's a relative path (not absolute)
-                        assert not Path(file_path).is_absolute(), f"File path should be relative: {file_path}"
+                        assert not Path(file_path).is_absolute(), (
+                            f"File path should be relative: {file_path}"
+                        )
                         found_app_id = True
                         break
 
@@ -411,12 +426,14 @@ Run the application with proper configuration.
                         "arguments": {
                             "pattern": "unique_feature_identifier_99999",
                             "page_size": 10,
-                            "offset": 0
-                        }
-                    }
+                            "offset": 0,
+                        },
+                    },
                 )
 
-                readme_results = json.loads(readme_result["content"][0]["text"])["results"]
+                readme_results = json.loads(readme_result["content"][0]["text"])[
+                    "results"
+                ]
                 assert len(readme_results) > 0, "Should find README content"
 
                 found_readme = False
@@ -424,9 +441,13 @@ Run the application with proper configuration.
                     if "unique_feature_identifier_99999" in result.get("content", ""):
                         file_path = result["file_path"]
                         # Search should return relative path from indexed project directory
-                        assert file_path == "README.md", f"Expected 'README.md', got: {file_path}"
+                        assert file_path == "README.md", (
+                            f"Expected 'README.md', got: {file_path}"
+                        )
                         # Verify it's a relative path (not absolute)
-                        assert not Path(file_path).is_absolute(), f"File path should be relative: {file_path}"
+                        assert not Path(file_path).is_absolute(), (
+                            f"File path should be relative: {file_path}"
+                        )
                         found_readme = True
                         break
 
@@ -442,12 +463,14 @@ Run the application with proper configuration.
                         "arguments": {
                             "pattern": "class DataProcessor",
                             "page_size": 10,
-                            "offset": 0
-                        }
-                    }
+                            "offset": 0,
+                        },
+                    },
                 )
 
-                class_results = json.loads(class_result["content"][0]["text"])["results"]
+                class_results = json.loads(class_result["content"][0]["text"])[
+                    "results"
+                ]
                 assert len(class_results) > 0, "Should find DataProcessor class"
                 print("✓ DataProcessor class found")
 
@@ -468,14 +491,18 @@ def should_not_appear():
                         "arguments": {
                             "pattern": "this_should_not_be_indexed_54321",
                             "page_size": 10,
-                            "offset": 0
-                        }
-                    }
+                            "offset": 0,
+                        },
+                    },
                 )
-                isolation_results = json.loads(isolation_result["content"][0]["text"])["results"]
+                isolation_results = json.loads(isolation_result["content"][0]["text"])[
+                    "results"
+                ]
 
                 # Should find nothing because test_cwd is not indexed
-                assert len(isolation_results) == 0, "Should not find content from test_cwd"
+                assert len(isolation_results) == 0, (
+                    "Should not find content from test_cwd"
+                )
                 print("✓ Content isolation verified - test_cwd content not indexed")
 
                 print("All MCP stdio communication tests passed!")
@@ -483,36 +510,41 @@ def should_not_appear():
             finally:
                 # Clean shutdown of client
                 await mcp_client.close()
-                    
+
         finally:
             # Use Windows-safe cleanup
             from tests.utils.windows_compat import cleanup_database_resources
+
             cleanup_database_resources()
-            
+
             import shutil
+
             try:
                 shutil.rmtree(temp_base, ignore_errors=True)
-            except Exception as e:
+            except Exception:
                 # Windows may need extra time for file handles to be released
                 import time
+
                 if IS_WINDOWS:
                     time.sleep(WINDOWS_FILE_HANDLE_DELAY)
                     shutil.rmtree(temp_base, ignore_errors=True)
 
     @pytest.mark.asyncio
-    @pytest.mark.skipif(get_api_key_for_tests()[0] is None, reason="No API key available")
+    @pytest.mark.skipif(
+        get_api_key_for_tests()[0] is None, reason="No API key available"
+    )
     async def test_mcp_server_semantic_search_isolation(self, clean_environment):
         """Test semantic search also respects directory isolation."""
         temp_base = Path(tempfile.mkdtemp())
-        
+
         try:
             # Setup directories
             test_cwd = temp_base / "test_execution_dir"
             test_cwd.mkdir()
-            
+
             project_dir = temp_base / "target_project"
             project_dir.mkdir()
-            
+
             # Create content for semantic search
             (project_dir / "algorithms.py").write_text('''
 def binary_search(arr, target):
@@ -542,94 +574,119 @@ def quicksort(arr):
     
     return quicksort(left) + middle + quicksort(right)
 ''')
-            
+
             # Use the same pattern as working MCP integration test
             from chunkhound.core.config.config import Config
             from chunkhound.database_factory import create_services
             from chunkhound.embeddings import EmbeddingManager
-            
+
             # Database and config setup
             db_path = project_dir / ".chunkhound" / "semantic_test.db"
             db_path.parent.mkdir(exist_ok=True)
-            
+
             # Get API key and provider configuration
             api_key, provider_name = get_api_key_for_tests()
-            model = "text-embedding-3-small" if provider_name == "openai" else "voyage-3.5"
-            
+            model = (
+                "text-embedding-3-small" if provider_name == "openai" else "voyage-3.5"
+            )
+
             # Configure embedding based on available API key
             embedding_config = {
                 "provider": provider_name,
                 "api_key": api_key,
-                "model": model
+                "model": model,
             }
-            
+
             config = Config(
                 database={"path": str(db_path), "provider": "duckdb"},
                 embedding=embedding_config,
-                indexing={"include": ["*.py"]}
+                indexing={"include": ["*.py"]},
             )
-            
+
             # Create embedding manager
             embedding_manager = EmbeddingManager()
             if provider_name == "openai":
-                from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
-                embedding_provider = OpenAIEmbeddingProvider(api_key=api_key, model=model)
+                from chunkhound.providers.embeddings.openai_provider import (
+                    OpenAIEmbeddingProvider,
+                )
+
+                embedding_provider = OpenAIEmbeddingProvider(
+                    api_key=api_key, model=model
+                )
             elif provider_name == "voyageai":
-                from chunkhound.providers.embeddings.voyageai_provider import VoyageAIEmbeddingProvider
-                embedding_provider = VoyageAIEmbeddingProvider(api_key=api_key, model=model)
-            
+                from chunkhound.providers.embeddings.voyageai_provider import (
+                    VoyageAIEmbeddingProvider,
+                )
+
+                embedding_provider = VoyageAIEmbeddingProvider(
+                    api_key=api_key, model=model
+                )
+
             embedding_manager.register_provider(embedding_provider, set_default=True)
-            
+
             # Create services
             services = create_services(db_path, config.to_dict(), embedding_manager)
             services.provider.connect()
-            
+
             # Index the project files
-            result = await services.indexing_coordinator.process_file(project_dir / "algorithms.py")
+            result = await services.indexing_coordinator.process_file(
+                project_dir / "algorithms.py"
+            )
             if result["status"] == "error":
                 pytest.skip(f"Indexing failed: {result.get('error', 'Unknown error')}")
-            
+
             try:
                 # Test semantic search with services (no subprocess needed)
                 from chunkhound.mcp_server.tools import execute_tool
-                
+
                 # Search for sorting algorithms semantically
                 semantic_response = await execute_tool(
                     tool_name="search_semantic",
                     services=services,
                     embedding_manager=embedding_manager,
-                    arguments={"query": "sorting algorithms", "page_size": 10, "offset": 0}
+                    arguments={
+                        "query": "sorting algorithms",
+                        "page_size": 10,
+                        "offset": 0,
+                    },
                 )
-                
-                semantic_results = semantic_response.get('results', [])
-                        
+
+                semantic_results = semantic_response.get("results", [])
+
                 # Should find sorting-related content from target project
                 for result in semantic_results:
                     file_path = result["file_path"]
                     # Search should return relative path from indexed project directory
-                    assert file_path == "algorithms.py", f"Expected 'algorithms.py', got: {file_path}"
+                    assert file_path == "algorithms.py", (
+                        f"Expected 'algorithms.py', got: {file_path}"
+                    )
                     # Verify it's a relative path (not absolute)
-                    assert not Path(file_path).is_absolute(), f"File path should be relative: {file_path}"
-                    
+                    assert not Path(file_path).is_absolute(), (
+                        f"File path should be relative: {file_path}"
+                    )
+
                 print("✓ Semantic search respects directory isolation")
-                    
+
             finally:
-                if hasattr(services.provider, 'close'):
+                if hasattr(services.provider, "close"):
                     services.provider.close()
                 else:
                     services.provider.disconnect()
-                    
+
         finally:
             # Use Windows-safe cleanup
             from tests.utils.windows_compat import cleanup_database_resources
+
             cleanup_database_resources()
-            
+
             import shutil
+
             try:
                 shutil.rmtree(temp_base, ignore_errors=True)
-            except Exception as e:
+            except Exception:
                 # Windows may need extra time for file handles to be released
                 import time
+
                 if IS_WINDOWS:
                     time.sleep(WINDOWS_FILE_HANDLE_DELAY)
                     shutil.rmtree(temp_base, ignore_errors=True)

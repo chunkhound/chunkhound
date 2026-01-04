@@ -698,7 +698,12 @@ class TestStrictToolUse:
         """Test detecting strict tools."""
         tools = [
             {"name": "tool1", "description": "desc", "input_schema": {}},
-            {"name": "tool2", "description": "desc", "strict": True, "input_schema": {}},
+            {
+                "name": "tool2",
+                "description": "desc",
+                "strict": True,
+                "input_schema": {},
+            },
         ]
 
         has_strict = any(tool.get("strict") for tool in tools)

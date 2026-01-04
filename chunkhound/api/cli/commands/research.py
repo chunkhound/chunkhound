@@ -2,7 +2,6 @@
 
 import argparse
 import sys
-from pathlib import Path
 
 from loguru import logger
 
@@ -105,7 +104,12 @@ async def research_command(args: argparse.Namespace, config: Config) -> None:
 
             # Output the markdown result (already formatted by the service)
             print("\n")  # Add newline after progress output
-            print(result.get("answer", f"Research incomplete: Unable to analyze '{args.query}'. Try a more specific query or check that relevant code exists."))
+            print(
+                result.get(
+                    "answer",
+                    f"Research incomplete: Unable to analyze '{args.query}'. Try a more specific query or check that relevant code exists.",
+                )
+            )
 
         except Exception as e:
             formatter.error(f"Research failed: {e}")

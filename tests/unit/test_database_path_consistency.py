@@ -4,7 +4,6 @@ This test module ensures that DatabaseConfig.get_db_path() returns the correct
 final database location for each provider, preventing path duplication bugs.
 """
 
-from pathlib import Path
 
 import pytest
 

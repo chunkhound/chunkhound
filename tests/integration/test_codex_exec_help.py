@@ -1,7 +1,6 @@
 import os
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -42,7 +41,9 @@ def test_codex_exec_help_available():
 
     # `--help` should succeed and print usage text
     combined = (proc.stdout + proc.stderr).decode("utf-8", errors="ignore").lower()
-    assert proc.returncode == 0, f"codex exec --help failed: rc={proc.returncode}, out={combined!r}"
+    assert proc.returncode == 0, (
+        f"codex exec --help failed: rc={proc.returncode}, out={combined!r}"
+    )
     assert "usage" in combined and "codex exec" in combined, (
         "Help output did not contain expected usage text. Output was: " + combined
     )
@@ -62,7 +63,7 @@ def test_codex_exec_simple_prompt():
 
     env = os.environ.copy()
 
-    prompt = 'Output exactly the uppercase string OK and nothing else.'
+    prompt = "Output exactly the uppercase string OK and nothing else."
 
     def run_cmd(args):
         return subprocess.run(
@@ -86,18 +87,30 @@ def test_codex_exec_simple_prompt():
         # Verify overlay config enforces our requirements
         cfg = Path(overlay) / "config.toml"
         content = cfg.read_text(encoding="utf-8") if cfg.exists() else ""
-        assert "history" in content and "persistence" in content and "none" in content.lower(), (
-            "Overlay config.toml does not disable history persistence."
+        assert (
+            "history" in content
+            and "persistence" in content
+            and "none" in content.lower()
+        ), "Overlay config.toml does not disable history persistence."
+        assert "mcp_servers" not in content.lower(), (
+            "Overlay config.toml must not define MCP servers."
         )
-        assert "mcp_servers" not in content.lower(), "Overlay config.toml must not define MCP servers."
-        assert 'model = "gpt-5.1-codex"' in content, "Overlay config.toml must set model to gpt-5.1-codex."
+        assert 'model = "gpt-5.1-codex"' in content, (
+            "Overlay config.toml must set model to gpt-5.1-codex."
+        )
         assert "model_reasoning_effort" in content and "low" in content.lower(), (
             "Overlay config.toml must set model_reasoning_effort to low."
         )
 
         # Try explicit model/effort flags first; gracefully remove if unsupported
         base = [codex_bin, "exec", prompt]
-        flags = ["--model", "gpt-5.1-codex", "--model-reasoning-effort", "low", "--skip-git-repo-check"]
+        flags = [
+            "--model",
+            "gpt-5.1-codex",
+            "--model-reasoning-effort",
+            "low",
+            "--skip-git-repo-check",
+        ]
 
         def try_exec(args):
             p = run_cmd(args)
@@ -108,22 +121,36 @@ def test_codex_exec_simple_prompt():
             )
 
         proc, out, err = try_exec(base + flags)
-        if proc.returncode != 0 and "unexpected argument '--model-reasoning-effort'" in err:
+        if (
+            proc.returncode != 0
+            and "unexpected argument '--model-reasoning-effort'" in err
+        ):
             flags = ["--model", "gpt-5.1-codex", "--skip-git-repo-check"]
             proc, out, err = try_exec(base + flags)
         if proc.returncode != 0 and "unexpected argument '--model'" in err:
             # Try only skip-git flag
             proc, out, err = try_exec(base + ["--skip-git-repo-check"])
-        if proc.returncode != 0 and "unexpected argument '--skip-git-repo-check'" in err:
+        if (
+            proc.returncode != 0
+            and "unexpected argument '--skip-git-repo-check'" in err
+        ):
             # Last resort: no flags at all
             proc, out, err = try_exec(base)
 
         # If not authenticated, xfail instead of failing the suite
-        auth_hints = ("login", "authenticate", "not logged in", "sign in", "unauthorized")
+        auth_hints = (
+            "login",
+            "authenticate",
+            "not logged in",
+            "sign in",
+            "unauthorized",
+        )
         if proc.returncode != 0 and any(h in err for h in auth_hints):
             pytest.xfail("Codex CLI not authenticated in this environment.")
 
-        assert proc.returncode == 0, f"codex exec failed: rc={proc.returncode}, stderr={err!r}"
+        assert proc.returncode == 0, (
+            f"codex exec failed: rc={proc.returncode}, stderr={err!r}"
+        )
         assert out, "codex exec produced no output"
         assert out.strip() == "OK" or "ok" in out.lower(), (
             f"Unexpected output from codex exec. Expected 'OK', got: {out!r}"
@@ -180,7 +207,13 @@ def test_codex_exec_status_reports_overlay_model(monkeypatch):
         out = proc.stdout.decode("utf-8", errors="ignore")
         err = proc.stderr.decode("utf-8", errors="ignore").lower()
 
-        auth_hints = ("login", "authenticate", "not logged in", "sign in", "unauthorized")
+        auth_hints = (
+            "login",
+            "authenticate",
+            "not logged in",
+            "sign in",
+            "unauthorized",
+        )
         if proc.returncode != 0 and any(h in err for h in auth_hints):
             pytest.xfail("Codex CLI not authenticated in this environment.")
 

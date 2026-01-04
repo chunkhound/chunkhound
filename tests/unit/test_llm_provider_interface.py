@@ -1,6 +1,5 @@
 """Tests for LLM Provider interface utilities."""
 
-import pytest
 
 from chunkhound.interfaces.llm_provider import _normalize_schema_for_structured_outputs
 
@@ -236,8 +235,18 @@ class TestNormalizeSchemaForStructuredOutputs:
         # All levels should have additionalProperties
         assert result["additionalProperties"] is False
         assert result["properties"]["level1"]["additionalProperties"] is False
-        assert result["properties"]["level1"]["properties"]["level2"]["additionalProperties"] is False
-        assert result["properties"]["level1"]["properties"]["level2"]["properties"]["level3"]["additionalProperties"] is False
+        assert (
+            result["properties"]["level1"]["properties"]["level2"][
+                "additionalProperties"
+            ]
+            is False
+        )
+        assert (
+            result["properties"]["level1"]["properties"]["level2"]["properties"][
+                "level3"
+            ]["additionalProperties"]
+            is False
+        )
 
     def test_pydantic_model_schema_format(self):
         """Test with a typical Pydantic model schema format."""

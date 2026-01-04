@@ -96,9 +96,7 @@ class Config(BaseModel):
             from chunkhound.utils.project_detection import find_project_root
 
             target_dir = find_project_root(
-                None
-                if is_map
-                else (getattr(args, "path", None) if args else None)
+                None if is_map else (getattr(args, "path", None) if args else None)
             )
 
         # 2. Load config file if found

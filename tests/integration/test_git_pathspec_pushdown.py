@@ -5,16 +5,31 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(subprocess.run(["which","git"], stdout=subprocess.DEVNULL).returncode != 0, reason="git required")
+pytestmark = pytest.mark.skipif(
+    subprocess.run(["which", "git"], stdout=subprocess.DEVNULL).returncode != 0,
+    reason="git required",
+)
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(["git","-C",str(repo),*args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=check)
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=check,
+    )
 
 
 def _git_init_and_commit(repo: Path) -> None:
     repo.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git","init"], cwd=str(repo), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(
+        ["git", "init"],
+        cwd=str(repo),
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
     _git(repo, "config", "user.email", "ci@example.com")
     _git(repo, "config", "user.name", "CI")
     _git(repo, "add", "-A")
@@ -26,7 +41,9 @@ def _w(p: Path, s: str = "x\n"):
     p.write_text(s, encoding="utf-8")
 
 
-def _simulate_with_profile(dir_path: Path, backend: str, pushdown: bool | None, include_only_py: bool = False) -> tuple[list[str], dict]:
+def _simulate_with_profile(
+    dir_path: Path, backend: str, pushdown: bool | None, include_only_py: bool = False
+) -> tuple[list[str], dict]:
     env = os.environ.copy()
     env["CHUNKHOUND_NO_RICH"] = "1"
     env["CHUNKHOUND_INDEXING__DISCOVERY_BACKEND"] = backend
@@ -35,7 +52,17 @@ def _simulate_with_profile(dir_path: Path, backend: str, pushdown: bool | None, 
     if include_only_py:
         env["CHUNKHOUND_INDEXING__INCLUDE"] = "**/*.py"
     p = subprocess.run(
-        ["uv","run","chunkhound","index","--simulate", str(dir_path), "--profile-startup", "--sort","path"],
+        [
+            "uv",
+            "run",
+            "chunkhound",
+            "index",
+            "--simulate",
+            str(dir_path),
+            "--profile-startup",
+            "--sort",
+            "path",
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -48,7 +75,9 @@ def _simulate_with_profile(dir_path: Path, backend: str, pushdown: bool | None, 
     for ln in p.stderr.splitlines()[::-1]:
         try:
             obj = json.loads(ln)
-            if isinstance(obj, dict) and ("startup_profile" in obj or "discovery_ms" in obj):
+            if isinstance(obj, dict) and (
+                "startup_profile" in obj or "discovery_ms" in obj
+            ):
                 prof = obj.get("startup_profile", obj)
                 break
         except Exception:
@@ -68,9 +97,13 @@ def test_git_pathspec_pushdown_reduces_rows_and_preserves_coverage(tmp_path: Pat
     _git_init_and_commit(repo)
 
     # Baseline without pushdown
-    files_no, prof_no = _simulate_with_profile(repo, backend="git", pushdown=False, include_only_py=True)
+    files_no, prof_no = _simulate_with_profile(
+        repo, backend="git", pushdown=False, include_only_py=True
+    )
     # With pushdown
-    files_yes, prof_yes = _simulate_with_profile(repo, backend="git", pushdown=True, include_only_py=True)
+    files_yes, prof_yes = _simulate_with_profile(
+        repo, backend="git", pushdown=True, include_only_py=True
+    )
 
     # Coverage must be identical
     assert set(files_yes) == set(files_no)

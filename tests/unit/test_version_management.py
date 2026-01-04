@@ -2,10 +2,11 @@
 """Tests for version management utilities."""
 
 import pytest
+
 from scripts.update_version import (
-    validate_version,
-    parse_version,
     bump_version,
+    parse_version,
+    validate_version,
 )
 
 

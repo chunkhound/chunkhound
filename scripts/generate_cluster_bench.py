@@ -15,8 +15,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 
 def _project_root() -> Path:
@@ -77,7 +77,9 @@ def _add_uniform_topics(root: Path, num_topics: int, files_per_topic: int) -> No
             _write_file(root / rel, content)
 
 
-def _add_mixed_sizes(root: Path, topic: str, small_count: int, large_count: int) -> None:
+def _add_mixed_sizes(
+    root: Path, topic: str, small_count: int, large_count: int
+) -> None:
     """Create a mix of small and large files for a single topic."""
     # Small files
     for i in range(small_count):
@@ -105,9 +107,7 @@ def _add_noise_files(root: Path, count: int) -> None:
         _write_file(root / rel, content)
 
 
-def _add_overlapping_search_topics(
-    root: Path, files_per_topic: int, size: int
-) -> None:
+def _add_overlapping_search_topics(root: Path, files_per_topic: int, size: int) -> None:
     """Create several search-related topics with overlapping vocabulary.
 
     These are intentionally confusable (shared words like 'search', 'index',
@@ -160,8 +160,7 @@ def _add_cross_topic_bridge_files(root: Path, count: int) -> None:
         pair_name = f"{t1}_AND_{t2}"
         rel = Path("cross_topic") / pair_name / f"file_{i:03d}.txt"
         content = (
-            base
-            + f"It focuses on the interaction between {t1} and {t2}, including "
+            base + f"It focuses on the interaction between {t1} and {t2}, including "
             "trade-offs, incident patterns, and ambiguous ownership boundaries. "
         )
         # Make files moderately long so they affect token budgets

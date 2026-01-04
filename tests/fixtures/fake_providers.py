@@ -9,8 +9,8 @@ import hashlib
 from collections.abc import AsyncIterator
 from typing import Any
 
-from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
+from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 
 
 class FakeLLMProvider(LLMProvider):

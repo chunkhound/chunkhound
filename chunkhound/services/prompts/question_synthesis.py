@@ -4,7 +4,9 @@ Synthesizes multiple research questions into distinct unexplored aspects.
 """
 
 # Direct, unambiguous prompt optimized for GPT-5-Nano instruction adherence
-SYSTEM_MESSAGE = """Synthesize research questions to explore unexplored aspects of the codebase."""
+SYSTEM_MESSAGE = (
+    """Synthesize research questions to explore unexplored aspects of the codebase."""
+)
 
 # User prompt template with variables: root_query, questions_str, target_count
 USER_TEMPLATE = """TASK: Synthesize research questions to explore distinct unexplored aspects.

@@ -8,16 +8,17 @@ and richer rule origins in follow-up steps.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional, Dict, List, Tuple
+
 from loguru import logger
 
 try:
     from pathspec import PathSpec
     from pathspec.patterns.gitwildmatch import GitWildMatchPattern
-except Exception as e:  # pragma: no cover - import error surfaced at runtime
+except Exception:  # pragma: no cover - import error surfaced at runtime
     PathSpec = None  # type: ignore
     GitWildMatchPattern = None  # type: ignore
 
@@ -25,16 +26,16 @@ except Exception as e:  # pragma: no cover - import error surfaced at runtime
 @dataclass
 class MatchInfo:
     matched: bool
-    source: Optional[Path] = None
-    pattern: Optional[str] = None
+    source: Path | None = None
+    pattern: str | None = None
 
 
 class IgnoreEngine:
-    def __init__(self, root: Path, compiled_specs: list[tuple[Path, "PathSpec"]]):
+    def __init__(self, root: Path, compiled_specs: list[tuple[Path, PathSpec]]):
         self.root = root.resolve()
         self._compiled_specs = compiled_specs
 
-    def matches(self, path: Path, is_dir: bool) -> Optional[MatchInfo]:
+    def matches(self, path: Path, is_dir: bool) -> MatchInfo | None:
         # Normalize to root-relative POSIX path
         try:
             rel = path.resolve().relative_to(self.root)
@@ -49,7 +50,7 @@ class IgnoreEngine:
         return None
 
 
-def _compile_gitwildmatch(patterns: Iterable[str]) -> "PathSpec":
+def _compile_gitwildmatch(patterns: Iterable[str]) -> PathSpec:
     if PathSpec is None or GitWildMatchPattern is None:
         raise RuntimeError(
             "pathspec is required for IgnoreEngine; please add dependency 'pathspec'"
@@ -97,7 +98,7 @@ def build_ignore_engine(
     root: Path,
     sources: list[str],
     chignore_file: str = ".chignore",
-    config_exclude: Optional[Iterable[str]] = None,
+    config_exclude: Iterable[str] | None = None,
 ) -> IgnoreEngine:
     """Build an IgnoreEngine for the given root and sources.
 
@@ -134,7 +135,9 @@ def build_ignore_engine(
     return IgnoreEngine(root, compiled)
 
 
-def _collect_gitignore_patterns(root: Path, pre_exclude_spec: Optional["PathSpec"] = None) -> list[str]:
+def _collect_gitignore_patterns(
+    root: Path, pre_exclude_spec: PathSpec | None = None
+) -> list[str]:
     """Return root-relative gitwildmatch patterns transformed from .gitignore files.
 
     We walk the directory tree top-down so that root patterns appear before
@@ -151,7 +154,9 @@ def _collect_gitignore_patterns(root: Path, pre_exclude_spec: Optional["PathSpec
             to_remove = []
             for dn in dirnames:
                 child = dn if rel_base == "." else f"{rel_base}/{dn}"
-                if pre_exclude_spec.match_file(child) or pre_exclude_spec.match_file(child + "/"):
+                if pre_exclude_spec.match_file(child) or pre_exclude_spec.match_file(
+                    child + "/"
+                ):
                     to_remove.append(dn)
             for dn in to_remove:
                 dirnames.remove(dn)
@@ -172,7 +177,9 @@ def _collect_gitignore_patterns(root: Path, pre_exclude_spec: Optional["PathSpec
     return out
 
 
-def _detect_repo_roots(root: Path, pre_exclude_spec: Optional["PathSpec"] = None) -> list[Path]:
+def _detect_repo_roots(
+    root: Path, pre_exclude_spec: PathSpec | None = None
+) -> list[Path]:
     """Detect Git repository roots under root by looking for .git dir or file.
 
     Prunes excluded subtrees using pre_exclude_spec (e.g., node_modules) to
@@ -189,7 +196,9 @@ def _detect_repo_roots(root: Path, pre_exclude_spec: Optional["PathSpec"] = None
             to_remove = []
             for dn in dirnames:
                 child = dn if rel_base == "." else f"{rel_base}/{dn}"
-                if pre_exclude_spec.match_file(child) or pre_exclude_spec.match_file(child + "/"):
+                if pre_exclude_spec.match_file(child) or pre_exclude_spec.match_file(
+                    child + "/"
+                ):
                     to_remove.append(dn)
             for dn in to_remove:
                 dirnames.remove(dn)
@@ -217,19 +226,25 @@ class RepoAwareIgnoreEvaluator:
         repo_roots: list[Path],
         sources: list[str],
         chignore_file: str,
-        config_exclude: Optional[Iterable[str]] = None,
+        config_exclude: Iterable[str] | None = None,
         workspace_root_only_gitignore: bool = False,
     ) -> None:
         self.root = workspace_root.resolve()
-        self.repo_roots = sorted([p.resolve() for p in repo_roots], key=lambda p: len(p.as_posix()), reverse=True)
+        self.repo_roots = sorted(
+            [p.resolve() for p in repo_roots],
+            key=lambda p: len(p.as_posix()),
+            reverse=True,
+        )
         self.sources = sources
         self.chignore_file = chignore_file
         self.config_exclude = list(config_exclude or [])
 
         # Build per-repo engines
-        self._per_repo: Dict[Path, IgnoreEngine] = {}
+        self._per_repo: dict[Path, IgnoreEngine] = {}
         for rr in self.repo_roots:
-            self._per_repo[rr] = build_ignore_engine(rr, sources, chignore_file, self.config_exclude)
+            self._per_repo[rr] = build_ignore_engine(
+                rr, sources, chignore_file, self.config_exclude
+            )
         # Workspace engine for non-repo areas
         if workspace_root_only_gitignore:
             # Workspace (non-repo) overlay: honor .gitignore files under the root
@@ -240,7 +255,11 @@ class RepoAwareIgnoreEvaluator:
             if self.config_exclude:
                 compiled.append((self.root, _compile_gitwildmatch(self.config_exclude)))
             try:
-                pre = _compile_gitwildmatch(self.config_exclude) if self.config_exclude else None
+                pre = (
+                    _compile_gitwildmatch(self.config_exclude)
+                    if self.config_exclude
+                    else None
+                )
             except Exception:
                 pre = None
             try:
@@ -257,7 +276,7 @@ class RepoAwareIgnoreEvaluator:
                 compiled.append((self.root, _compile_gitwildmatch(self.config_exclude)))
             self._workspace_engine = IgnoreEngine(self.root, compiled)
 
-    def _nearest_repo(self, path: Path) -> Optional[Path]:
+    def _nearest_repo(self, path: Path) -> Path | None:
         p = path.resolve()
         for rr in self.repo_roots:
             try:
@@ -267,7 +286,7 @@ class RepoAwareIgnoreEvaluator:
                 continue
         return None
 
-    def matches(self, path: Path, is_dir: bool) -> Optional[MatchInfo]:
+    def matches(self, path: Path, is_dir: bool) -> MatchInfo | None:
         rr = self._nearest_repo(path)
         if rr is not None:
             return self._per_repo[rr].matches(path, is_dir)
@@ -278,14 +297,16 @@ def build_repo_aware_ignore_engine(
     root: Path,
     sources: list[str],
     chignore_file: str = ".chignore",
-    config_exclude: Optional[Iterable[str]] = None,
+    config_exclude: Iterable[str] | None = None,
     backend: str = "python",
-    workspace_root_only_gitignore: Optional[bool] = None,
+    workspace_root_only_gitignore: bool | None = None,
 ) -> RepoAwareIgnoreEvaluator:
     pre_spec = _compile_gitwildmatch(config_exclude or []) if (config_exclude) else None
     repo_roots = _detect_repo_roots(root, pre_spec)
     if backend == "libgit2":
-        eng = _try_build_libgit2_repo_aware(root, repo_roots, sources, chignore_file, config_exclude)
+        eng = _try_build_libgit2_repo_aware(
+            root, repo_roots, sources, chignore_file, config_exclude
+        )
         if eng is not None:
             return eng
     # Determine workspace-root-only behavior.
@@ -301,7 +322,9 @@ def build_repo_aware_ignore_engine(
             wr_only = True
         else:
             try:
-                wr_only = os.environ.get("CHUNKHOUND_INDEXING__WORKSPACE_GITIGNORE_NONREPO", "").strip() not in ("", "0", "false", "no")
+                wr_only = os.environ.get(
+                    "CHUNKHOUND_INDEXING__WORKSPACE_GITIGNORE_NONREPO", ""
+                ).strip() not in ("", "0", "false", "no")
             except Exception:
                 wr_only = False
     return RepoAwareIgnoreEvaluator(
@@ -312,7 +335,6 @@ def build_repo_aware_ignore_engine(
         config_exclude,
         workspace_root_only_gitignore=wr_only,
     )
-
 
 
 def _transform_gitignore_line(dir_rel: str, line: str) -> list[str]:
@@ -377,7 +399,9 @@ def _transform_gitignore_line(dir_rel: str, line: str) -> list[str]:
     return parts
 
 
-def detect_repo_roots(root: Path, config_exclude: Optional[Iterable[str]] = None) -> list[Path]:
+def detect_repo_roots(
+    root: Path, config_exclude: Iterable[str] | None = None
+) -> list[Path]:
     """Public helper to detect repo roots under a workspace root.
 
     Applies pruning using config_exclude (gitwildmatch semantics) to avoid
@@ -392,26 +416,37 @@ def build_repo_aware_ignore_engine_from_roots(
     repo_roots: list[Path],
     sources: list[str],
     chignore_file: str = ".chignore",
-    config_exclude: Optional[Iterable[str]] = None,
+    config_exclude: Iterable[str] | None = None,
     backend: str = "python",
-    workspace_root_only_gitignore: Optional[bool] = None,
+    workspace_root_only_gitignore: bool | None = None,
 ) -> RepoAwareIgnoreEvaluator:
     """Build a repo-aware evaluator from a precomputed list of repo roots.
 
     Avoids re-scanning the entire workspace per worker when running in parallel.
     """
     if backend == "libgit2":
-        eng = _try_build_libgit2_repo_aware(root, repo_roots, sources, chignore_file, config_exclude)
+        eng = _try_build_libgit2_repo_aware(
+            root, repo_roots, sources, chignore_file, config_exclude
+        )
         if eng is not None:
             return eng
     if workspace_root_only_gitignore is None:
         try:
-            wr_only = os.environ.get("CHUNKHOUND_INDEXING__WORKSPACE_GITIGNORE_NONREPO", "").strip() not in ("", "0", "false", "no")
+            wr_only = os.environ.get(
+                "CHUNKHOUND_INDEXING__WORKSPACE_GITIGNORE_NONREPO", ""
+            ).strip() not in ("", "0", "false", "no")
         except Exception:
             wr_only = False
     else:
         wr_only = bool(workspace_root_only_gitignore)
-    return RepoAwareIgnoreEvaluator(root, repo_roots, sources, chignore_file, config_exclude, workspace_root_only_gitignore=wr_only)
+    return RepoAwareIgnoreEvaluator(
+        root,
+        repo_roots,
+        sources,
+        chignore_file,
+        config_exclude,
+        workspace_root_only_gitignore=wr_only,
+    )
 
 
 # --------------------------- Optional libgit2 backend ---------------------------
@@ -428,21 +463,28 @@ class RepoAwareLibgit2Evaluator:
         repo_roots: list[Path],
         sources: list[str],
         chignore_file: str,
-        config_exclude: Optional[Iterable[str]] = None,
+        config_exclude: Iterable[str] | None = None,
     ) -> None:
         self.root = workspace_root.resolve()
-        self.repo_roots = sorted([p.resolve() for p in repo_roots], key=lambda p: len(p.as_posix()), reverse=True)
+        self.repo_roots = sorted(
+            [p.resolve() for p in repo_roots],
+            key=lambda p: len(p.as_posix()),
+            reverse=True,
+        )
         self.sources = sources
         self.chignore_file = chignore_file
         self.config_exclude = list(config_exclude or [])
 
         # Precompile config_exclude with pathspec for fast hard excludes
-        self._cfg_spec = _compile_gitwildmatch(self.config_exclude) if self.config_exclude else None
+        self._cfg_spec = (
+            _compile_gitwildmatch(self.config_exclude) if self.config_exclude else None
+        )
 
         # Open libgit2 repos
-        self._repos: Dict[Path, object] = {}
+        self._repos: dict[Path, object] = {}
         try:
             import pygit2  # type: ignore
+
             self._pygit2 = pygit2
         except Exception:
             self._pygit2 = None
@@ -456,7 +498,7 @@ class RepoAwareLibgit2Evaluator:
                     # Ignore repos we can't open; they'll be handled by cfg spec only
                     continue
 
-    def _nearest_repo(self, path: Path) -> Optional[Path]:
+    def _nearest_repo(self, path: Path) -> Path | None:
         p = path.resolve()
         for rr in self.repo_roots:
             try:
@@ -469,9 +511,11 @@ class RepoAwareLibgit2Evaluator:
     def _cfg_excluded(self, rel: str, is_dir: bool) -> bool:
         if self._cfg_spec is None:
             return False
-        return self._cfg_spec.match_file(rel) or (is_dir and self._cfg_spec.match_file(rel + "/"))
+        return self._cfg_spec.match_file(rel) or (
+            is_dir and self._cfg_spec.match_file(rel + "/")
+        )
 
-    def matches(self, path: Path, is_dir: bool) -> Optional[MatchInfo]:
+    def matches(self, path: Path, is_dir: bool) -> MatchInfo | None:
         # Hard exclude via config_exclude first
         try:
             rel_cfg = path.resolve().relative_to(self.root).as_posix()
@@ -495,7 +539,9 @@ class RepoAwareLibgit2Evaluator:
 
         # Try common pygit2 ignore API methods (varies by version)
         try:
-            fn = getattr(repo, "is_path_ignored", None) or getattr(repo, "path_is_ignored", None)
+            fn = getattr(repo, "is_path_ignored", None) or getattr(
+                repo, "path_is_ignored", None
+            )
             if callable(fn):
                 ign = bool(fn(rel if not is_dir else (rel + "/")))
                 if ign:
@@ -510,8 +556,8 @@ def _try_build_libgit2_repo_aware(
     repo_roots: list[Path],
     sources: list[str],
     chignore_file: str,
-    config_exclude: Optional[Iterable[str]] = None,
-) -> Optional[RepoAwareLibgit2Evaluator]:
+    config_exclude: Iterable[str] | None = None,
+) -> RepoAwareLibgit2Evaluator | None:
     # Warn exactly once per process when we cannot honor libgit2 backend
     global _LIBGIT2_WARNED
     try:
@@ -531,7 +577,9 @@ def _try_build_libgit2_repo_aware(
             _LIBGIT2_WARNED = True  # type: ignore[assignment]
         return None
     try:
-        return RepoAwareLibgit2Evaluator(root, repo_roots, sources, chignore_file, config_exclude)
+        return RepoAwareLibgit2Evaluator(
+            root, repo_roots, sources, chignore_file, config_exclude
+        )
     except Exception:
         if not _LIBGIT2_WARNED and not os.environ.get("CHUNKHOUND_MCP_MODE"):
             logger.warning(

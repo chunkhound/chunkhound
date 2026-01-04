@@ -1,5 +1,4 @@
 import asyncio
-import os
 from pathlib import Path
 
 import pytest
@@ -26,13 +25,16 @@ class _DummyProc:
 async def test_codex_error_redaction(monkeypatch, tmp_path: Path):
     """Provider should redact sensitive tokens from stderr and truncate output."""
     from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
+
     # Make redaction limit small for test
     monkeypatch.setenv("CHUNKHOUND_CODEX_LOG_MAX_ERR", "120")
     # Force argv path to avoid needing a real stdin pipe in the dummy proc
     monkeypatch.setenv("CHUNKHOUND_CODEX_STDIN_FIRST", "0")
 
     # Force availability
-    monkeypatch.setattr(CodexCLIProvider, "_codex_available", lambda self: True, raising=True)
+    monkeypatch.setattr(
+        CodexCLIProvider, "_codex_available", lambda self: True, raising=True
+    )
 
     # Deterministic overlay path
     overlay_dir = tmp_path / "overlay-home"
@@ -43,7 +45,9 @@ async def test_codex_error_redaction(monkeypatch, tmp_path: Path):
         requested_model["value"] = model_override
         return str(overlay_dir)
 
-    monkeypatch.setattr(CodexCLIProvider, "_build_overlay_home", _fake_overlay_home, raising=True)
+    monkeypatch.setattr(
+        CodexCLIProvider, "_build_overlay_home", _fake_overlay_home, raising=True
+    )
 
     # Prepare stderr with secrets
     secret = (
@@ -56,7 +60,9 @@ async def test_codex_error_redaction(monkeypatch, tmp_path: Path):
     async def _fake_create_subprocess_exec(*args, **kwargs):  # noqa: ANN001
         return _DummyProc(rc=2, out=b"", err=secret)
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True)
+    monkeypatch.setattr(
+        asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True
+    )
 
     prov = CodexCLIProvider(model="codex", max_retries=1)
 

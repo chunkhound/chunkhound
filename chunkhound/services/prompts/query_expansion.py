@@ -4,7 +4,9 @@ Generates semantically diverse search queries for embedding-based retrieval.
 """
 
 # Simplified system prompt per GPT-5-Nano best practices
-SYSTEM_MESSAGE = """Generate diverse code search queries for semantic embedding systems."""
+SYSTEM_MESSAGE = (
+    """Generate diverse code search queries for semantic embedding systems."""
+)
 
 # User prompt template with variables: query, context_str, NUM_LLM_EXPANDED_QUERIES
 USER_TEMPLATE = """Query: {query}

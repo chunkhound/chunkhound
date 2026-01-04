@@ -28,4 +28,3 @@ __all__ = [
     "build_json_payload",
     "format_human_summary",
 ]
-

@@ -4,8 +4,16 @@ import subprocess
 from pathlib import Path
 
 
-def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 20) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["uv", "run", *cmd], cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
+def _run(
+    cmd: list[str], cwd: Path | None = None, timeout: int = 20
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["uv", "run", *cmd],
+        cwd=str(cwd) if cwd else None,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
 
 
 def test_simulate_isolates_sibling_gitignores(tmp_path: Path) -> None:
@@ -38,4 +46,3 @@ def test_simulate_isolates_sibling_gitignores(tmp_path: Path) -> None:
     # repoB rules apply only under repoB
     assert "repoB/a.txt" in out
     assert "repoB/b.md" not in out
-

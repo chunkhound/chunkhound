@@ -32,8 +32,9 @@ public class MyClass {
         symbols = {c.symbol for c in chunks}
 
         assert len(class_chunks) > 0, "Should capture class declaration as CLASS chunk"
-        assert "MyClass" in symbols, \
+        assert "MyClass" in symbols, (
             f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_generic_class(self):
         """Test that generic class declarations are captured."""
@@ -53,8 +54,7 @@ public class Box<T> {
         chunks = parse_csharp(content)
         symbols = {c.symbol for c in chunks}
 
-        assert "Box" in symbols, \
-            f"Expected 'Box' in symbols, got: {sorted(symbols)}"
+        assert "Box" in symbols, f"Expected 'Box' in symbols, got: {sorted(symbols)}"
 
     def test_captures_nested_class(self):
         """Test that nested/inner classes are captured."""
@@ -78,8 +78,9 @@ public class OuterClass {
         has_outer = "OuterClass" in symbols
         has_inner = "InnerClass" in symbols
 
-        assert has_outer or has_inner, \
+        assert has_outer or has_inner, (
             f"Expected OuterClass or InnerClass in symbols, got: {sorted(symbols)}"
+        )
 
 
 class TestCSharpInterfaceParsing:
@@ -94,12 +95,15 @@ public interface IMyInterface {
 }
 """
         chunks = parse_csharp(content)
-        class_chunks = [c for c in chunks if c.chunk_type in (ChunkType.CLASS, ChunkType.INTERFACE)]
+        class_chunks = [
+            c for c in chunks if c.chunk_type in (ChunkType.CLASS, ChunkType.INTERFACE)
+        ]
         symbols = {c.symbol for c in chunks}
 
         assert len(class_chunks) > 0, "Should capture interface declaration"
-        assert "IMyInterface" in symbols, \
+        assert "IMyInterface" in symbols, (
             f"Expected 'IMyInterface' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_interface_with_default_method(self):
         """Test that interfaces with default methods are captured (C# 8.0+)."""
@@ -123,8 +127,9 @@ public interface IMyInterface {
         has_interface = "IMyInterface" in symbols
         has_method = any("Method" in s for s in symbols)
 
-        assert has_interface or has_method, \
+        assert has_interface or has_method, (
             f"Expected interface or method in symbols, got: {sorted(symbols)}"
+        )
 
 
 class TestCSharpStructParsing:
@@ -148,8 +153,9 @@ public struct Point {
 
         # Should capture the struct (as CLASS or other chunk type)
         assert len(chunks) > 0, "Should capture struct declaration"
-        assert "Point" in symbols, \
+        assert "Point" in symbols, (
             f"Expected 'Point' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_struct_with_methods(self):
         """Test that structs with methods and constructors are captured."""
@@ -175,8 +181,9 @@ public struct Vector {
         chunks = parse_csharp(content)
         symbols = {c.symbol for c in chunks}
 
-        assert "Vector" in symbols, \
+        assert "Vector" in symbols, (
             f"Expected 'Vector' in symbols, got: {sorted(symbols)}"
+        )
 
 
 class TestCSharpEnumParsing:
@@ -194,8 +201,9 @@ public enum Status {
 
         # Should capture the enum (as CLASS or other chunk type)
         assert len(chunks) > 0, "Should capture enum declaration"
-        assert "Status" in symbols, \
+        assert "Status" in symbols, (
             f"Expected 'Status' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_enum_with_values(self):
         """Test that enums with explicit values are captured."""
@@ -210,8 +218,9 @@ public enum Priority : int {
         chunks = parse_csharp(content)
         symbols = {c.symbol for c in chunks}
 
-        assert "Priority" in symbols, \
+        assert "Priority" in symbols, (
             f"Expected 'Priority' in symbols, got: {sorted(symbols)}"
+        )
 
 
 class TestCSharpRecordParsing:
@@ -227,8 +236,9 @@ public record Person(string FirstName, string LastName, int Age);
 
         # Should capture the record (as CLASS or other chunk type)
         assert len(chunks) > 0, "Should capture record declaration"
-        assert "Person" in symbols, \
+        assert "Person" in symbols, (
             f"Expected 'Person' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_record_struct(self):
         """Test that record structs are captured (C# 10.0+)."""
@@ -242,8 +252,9 @@ public record struct Point3D(double X, double Y, double Z) {
         chunks = parse_csharp(content)
         symbols = {c.symbol for c in chunks}
 
-        assert "Point3D" in symbols, \
+        assert "Point3D" in symbols, (
             f"Expected 'Point3D' in symbols, got: {sorted(symbols)}"
+        )
 
 
 class TestCSharpMethodParsing:
@@ -272,8 +283,9 @@ public class MyClass {
         # Method may be captured as part of class or separately
         assert len(chunks) > 0, "Should capture class with instance method"
         has_class_or_method = "MyClass" in symbols or "InstanceMethod" in symbols
-        assert has_class_or_method, \
+        assert has_class_or_method, (
             f"Expected 'MyClass' or 'InstanceMethod' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_static_method(self):
         """Test that classes with static methods are captured."""
@@ -297,8 +309,9 @@ public class MyClass {
 
         # Static method may be captured as part of class or separately
         has_class_or_method = "MyClass" in symbols or "StaticMethod" in symbols
-        assert has_class_or_method, \
+        assert has_class_or_method, (
             f"Expected 'MyClass' or 'StaticMethod' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_constructor(self):
         """Test that constructors are captured."""
@@ -333,7 +346,9 @@ public class MyClass {
 
         # Destructor should be captured
         assert len(chunks) > 0, "Should capture class with destructor"
-        assert "MyClass" in symbols, f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        assert "MyClass" in symbols, (
+            f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_method_overloading(self):
         """Test that classes with overloaded methods are captured."""
@@ -371,8 +386,9 @@ public class Calculator {
         # Should capture the Calculator class (methods may be within it)
         has_calculator = "Calculator" in symbols
         has_add = "Add" in symbols or any("add" in s.lower() for s in symbols)
-        assert has_calculator or has_add, \
+        assert has_calculator or has_add, (
             f"Expected 'Calculator' or 'Add' in symbols, got: {sorted(symbols)}"
+        )
 
 
 class TestCSharpPropertyParsing:
@@ -391,7 +407,9 @@ public class MyClass {
         symbols = {c.symbol for c in chunks}
 
         # Should capture the class with properties
-        assert "MyClass" in symbols, f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        assert "MyClass" in symbols, (
+            f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_expression_bodied_property(self):
         """Test that expression-bodied properties are captured."""
@@ -408,7 +426,9 @@ public class MyClass {
         symbols = {c.symbol for c in chunks}
 
         # Should capture the class with properties
-        assert "MyClass" in symbols, f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        assert "MyClass" in symbols, (
+            f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_full_property(self):
         """Test that properties with get/set bodies are captured."""
@@ -435,7 +455,9 @@ public class MyClass {
         symbols = {c.symbol for c in chunks}
 
         # Should capture the class with properties
-        assert "MyClass" in symbols, f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        assert "MyClass" in symbols, (
+            f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        )
 
 
 class TestCSharpAttributes:
@@ -559,9 +581,12 @@ public class Utils {
         symbols = {c.symbol for c in chunks}
 
         # Should capture Utils class (methods may be within it)
-        has_class_or_method = "Utils" in symbols or "GetFirst" in symbols or "CreateMap" in symbols
-        assert has_class_or_method, \
+        has_class_or_method = (
+            "Utils" in symbols or "GetFirst" in symbols or "CreateMap" in symbols
+        )
+        assert has_class_or_method, (
             f"Expected 'Utils' or methods in symbols, got: {sorted(symbols)}"
+        )
 
     def test_type_constraints(self):
         """Test that generic type constraints are parsed correctly."""
@@ -581,8 +606,9 @@ public class ComparableBox<T> where T : IComparable<T> {
         chunks = parse_csharp(content)
         symbols = {c.symbol for c in chunks}
 
-        assert "ComparableBox" in symbols, \
+        assert "ComparableBox" in symbols, (
             f"Expected 'ComparableBox' in symbols, got: {sorted(symbols)}"
+        )
 
 
 class TestCSharpXmlDocComments:
@@ -684,7 +710,9 @@ namespace Com.Example.Demo {
         symbols = {c.symbol for c in chunks}
 
         # Should capture the class
-        assert "MyClass" in symbols, f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        assert "MyClass" in symbols, (
+            f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_using_statements(self):
         """Test that using directives are parsed."""
@@ -760,7 +788,9 @@ public class MyClass {
         # Should capture the class with methods (methods may be part of class chunk)
         assert len(chunks) > 0, "Should capture class with methods"
         symbols = {c.symbol for c in chunks}
-        assert "MyClass" in symbols, f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        assert "MyClass" in symbols, (
+            f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_class_modifiers(self):
         """Test that classes with various modifiers are captured."""
@@ -815,7 +845,10 @@ static class StaticClass {
         symbols = {c.symbol for c in chunks}
 
         # Should capture at least one class with modifiers
-        has_classes = any(name in symbols for name in ["PublicClass", "AbstractClass", "SealedClass", "StaticClass"])
+        has_classes = any(
+            name in symbols
+            for name in ["PublicClass", "AbstractClass", "SealedClass", "StaticClass"]
+        )
         assert has_classes, f"Expected class names in symbols, got: {sorted(symbols)}"
 
 
@@ -845,9 +878,12 @@ public class MyClass {
         symbols = {c.symbol for c in chunks}
 
         # Should have method names in symbols
-        has_methods = any(name in symbols for name in ["SimpleMethod", "GetName", "SetName"])
-        assert has_methods or "MyClass" in symbols, \
+        has_methods = any(
+            name in symbols for name in ["SimpleMethod", "GetName", "SetName"]
+        )
+        assert has_methods or "MyClass" in symbols, (
             f"Expected method names or class name in symbols, got: {sorted(symbols)}"
+        )
 
     def test_class_symbol_names(self):
         """Test that class symbols are correctly extracted."""
@@ -871,8 +907,9 @@ public class OuterClass {
         has_outer = "OuterClass" in symbols
         has_nested = "StaticNestedClass" in symbols or "InnerClass" in symbols
 
-        assert has_outer or has_nested, \
+        assert has_outer or has_nested, (
             f"Expected class names in symbols, got: {sorted(symbols)}"
+        )
 
     def test_property_symbol_names(self):
         """Test that property symbols are correctly extracted."""
@@ -888,8 +925,9 @@ public class MyClass {
 
         # Should have property names or class name in symbols
         has_properties = any(name in symbols for name in ["Name", "Age", "IsActive"])
-        assert has_properties or "MyClass" in symbols, \
+        assert has_properties or "MyClass" in symbols, (
             f"Expected property names or class name in symbols, got: {sorted(symbols)}"
+        )
 
 
 class TestCSharpMetadata:
@@ -916,11 +954,14 @@ public class Calculator {
 
         # Return types should be visible in the code chunks
         has_int = any("int Add" in c.code or "int" in c.code for c in chunks)
-        has_string = any("string GetString" in c.code or "string" in c.code for c in chunks)
+        has_string = any(
+            "string GetString" in c.code or "string" in c.code for c in chunks
+        )
         has_void = any("void" in c.code for c in chunks)
 
-        assert has_int or has_string or has_void, \
+        assert has_int or has_string or has_void, (
             "Expected return types to be visible in code"
+        )
 
     def test_method_parameter_metadata(self):
         """Test that method parameters are visible in code."""
@@ -939,10 +980,12 @@ public class MyClass {
 
         # Parameters should be visible in the code chunks
         has_params = any("string name" in c.code or "int age" in c.code for c in chunks)
-        has_generics = any("List<string>" in c.code or "Dictionary<string, int>" in c.code for c in chunks)
+        has_generics = any(
+            "List<string>" in c.code or "Dictionary<string, int>" in c.code
+            for c in chunks
+        )
 
-        assert has_params or has_generics, \
-            "Expected parameters to be visible in code"
+        assert has_params or has_generics, "Expected parameters to be visible in code"
 
     def test_generic_type_parameter_metadata(self):
         """Test that generic type parameters are visible in code."""
@@ -964,8 +1007,9 @@ public class Container<T> where T : class {
         # Generic type parameters should be visible in code chunks
         has_generic = any("<T>" in c.code or "where T" in c.code for c in chunks)
 
-        assert has_generic or len(chunks) > 0, \
+        assert has_generic or len(chunks) > 0, (
             "Expected generic type parameters to be visible in code"
+        )
 
 
 class TestCSharpComplexModule:
@@ -1013,14 +1057,18 @@ public class CompleteExample {
         symbols = {c.symbol for c in chunks}
 
         # Should capture the class
-        assert "CompleteExample" in symbols, \
+        assert "CompleteExample" in symbols, (
             f"Expected 'CompleteExample' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_csharp_realistic_module(self):
         """Test parsing a realistic C# module with advanced features using Sample.cs."""
         # Read the Sample.cs fixture
         import pathlib
-        fixture_path = pathlib.Path(__file__).parent / "fixtures" / "csharp" / "Sample.cs"
+
+        fixture_path = (
+            pathlib.Path(__file__).parent / "fixtures" / "csharp" / "Sample.cs"
+        )
 
         if not fixture_path.exists():
             pytest.skip("Sample.cs fixture not found")
@@ -1030,12 +1078,18 @@ public class CompleteExample {
         symbols = {c.symbol for c in chunks}
 
         # Should capture multiple classes/interfaces/structs/enums from Sample.cs
-        expected_symbols = ["Sample", "Status", "Priority", "IProcessor", "Configuration"]
+        expected_symbols = [
+            "Sample",
+            "Status",
+            "Priority",
+            "IProcessor",
+            "Configuration",
+        ]
         has_expected = any(sym in symbols for sym in expected_symbols)
 
-        assert has_expected, \
-            f"Expected symbols from Sample.cs, got: {sorted(symbols)}"
+        assert has_expected, f"Expected symbols from Sample.cs, got: {sorted(symbols)}"
 
         # Should have captured multiple chunks
-        assert len(chunks) >= 3, \
+        assert len(chunks) >= 3, (
             f"Expected at least 3 chunks from realistic module, got {len(chunks)}"
+        )

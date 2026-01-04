@@ -301,7 +301,9 @@ class LanceDBProvider(SerialDatabaseProvider):
         try:
             provider = self.embedding_manager.get_default_provider()
             if provider is None:
-                logger.debug("No default embedding provider - using variable-size schema")
+                logger.debug(
+                    "No default embedding provider - using variable-size schema"
+                )
                 return None
 
             dims = provider.dims
@@ -318,10 +320,14 @@ class LanceDBProvider(SerialDatabaseProvider):
             return dims
 
         except AttributeError:
-            logger.debug("Embedding provider has no 'dims' attribute - using variable-size schema")
+            logger.debug(
+                "Embedding provider has no 'dims' attribute - using variable-size schema"
+            )
             return None
         except Exception as e:
-            logger.warning(f"Error detecting embedding dimensions: {e} - using variable-size schema")
+            logger.warning(
+                f"Error detecting embedding dimensions: {e} - using variable-size schema"
+            )
             return None
 
     def create_schema(self) -> None:
@@ -389,12 +395,13 @@ class LanceDBProvider(SerialDatabaseProvider):
                 # Check if index already exists
                 indices = self._chunks_table.list_indices()
                 has_id_index = any(
-                    idx.columns == ["id"] or "id" in idx.columns
-                    for idx in indices
+                    idx.columns == ["id"] or "id" in idx.columns for idx in indices
                 )
 
                 if not has_id_index:
-                    logger.info("Creating scalar index on chunks.id for merge_insert performance")
+                    logger.info(
+                        "Creating scalar index on chunks.id for merge_insert performance"
+                    )
                     self._chunks_table.create_scalar_index("id")
                     logger.info("Scalar index on chunks.id created successfully")
                 else:
@@ -1110,7 +1117,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                 # NOTE: Using Lance SQL filter instead of .search() because .search()
                 # may not reliably find rows with NULL embedding columns (vector search semantics)
                 chunk_ids = list(embedding_lookup.keys())
-                chunk_ids_str = ','.join(map(str, chunk_ids))
+                chunk_ids_str = ",".join(map(str, chunk_ids))
 
                 try:
                     # Primary: Use LanceDB's native Lance filter (efficient for large tables)
@@ -1136,33 +1143,43 @@ class LanceDBProvider(SerialDatabaseProvider):
                     for offset in range(0, total_rows, page_size):
                         # Load batch of rows
                         try:
-                            batch_df = self._chunks_table.to_pandas(offset=offset, limit=page_size)
+                            batch_df = self._chunks_table.to_pandas(
+                                offset=offset, limit=page_size
+                            )
                         except TypeError:
                             # LanceDB may not support offset/limit in to_pandas()
                             # Fall back to loading all and slicing (less efficient but works)
                             if offset == 0:
-                                logger.debug("LanceDB to_pandas() doesn't support pagination, loading full table")
+                                logger.debug(
+                                    "LanceDB to_pandas() doesn't support pagination, loading full table"
+                                )
                                 all_chunks_df = self._chunks_table.to_pandas()
-                                batch_df = all_chunks_df[all_chunks_df['id'].isin(chunk_ids)]
-                                existing_rows.extend(batch_df.to_dict('records'))
+                                batch_df = all_chunks_df[
+                                    all_chunks_df["id"].isin(chunk_ids)
+                                ]
+                                existing_rows.extend(batch_df.to_dict("records"))
                                 break
                             else:
                                 break
 
                         # Filter to requested chunk IDs
-                        matching = batch_df[batch_df['id'].isin(chunk_ids_set)]
+                        matching = batch_df[batch_df["id"].isin(chunk_ids_set)]
                         if len(matching) > 0:
-                            existing_rows.extend(matching.to_dict('records'))
+                            existing_rows.extend(matching.to_dict("records"))
 
                         # Early termination if we found all requested chunks
                         if len(existing_rows) >= len(chunk_ids):
                             break
 
                     # Convert to DataFrame for consistent downstream handling
-                    existing_df = pd.DataFrame(existing_rows) if existing_rows else pd.DataFrame()
+                    existing_df = (
+                        pd.DataFrame(existing_rows) if existing_rows else pd.DataFrame()
+                    )
 
                 # Diagnostic logging
-                logger.debug(f"Looking for {len(chunk_ids)} chunk IDs, found {len(existing_df)} existing chunks")
+                logger.debug(
+                    f"Looking for {len(chunk_ids)} chunk IDs, found {len(existing_df)} existing chunks"
+                )
                 if len(existing_df) == 0 and len(chunk_ids) > 0:
                     total_rows = self._chunks_table.count_rows()
                     logger.warning(
@@ -1732,8 +1749,7 @@ class LanceDBProvider(SerialDatabaseProvider):
             target_results = (
                 self._chunks_table.search()
                 .where(
-                    f"id = {chunk_id} AND provider = '{provider}' "
-                    f"AND model = '{model}'"
+                    f"id = {chunk_id} AND provider = '{provider}' AND model = '{model}'"
                 )
                 .limit(1)
                 .to_list()
@@ -1776,8 +1792,7 @@ class LanceDBProvider(SerialDatabaseProvider):
             # See https://github.com/chunkhound/chunkhound/issues/107
             if path_filter:
                 logger.warning(
-                    "Path filtering not yet implemented for LanceDB "
-                    "find_similar_chunks"
+                    "Path filtering not yet implemented for LanceDB find_similar_chunks"
                 )
 
             results = query.to_list()
@@ -1803,17 +1818,19 @@ class LanceDBProvider(SerialDatabaseProvider):
             formatted_results = []
             for result, similarity in filtered_results:
                 file_path = file_map.get(result.get("file_id"), "")
-                formatted_results.append({
-                    "chunk_id": result["id"],
-                    "name": result.get("name", ""),
-                    "content": result.get("content", ""),
-                    "chunk_type": result.get("chunk_type", ""),
-                    "start_line": result.get("start_line", 0),
-                    "end_line": result.get("end_line", 0),
-                    "file_path": file_path,
-                    "language": result.get("language", ""),
-                    "score": similarity,  # Match DuckDB convention
-                })
+                formatted_results.append(
+                    {
+                        "chunk_id": result["id"],
+                        "name": result.get("name", ""),
+                        "content": result.get("content", ""),
+                        "chunk_type": result.get("chunk_type", ""),
+                        "start_line": result.get("start_line", 0),
+                        "end_line": result.get("end_line", 0),
+                        "file_path": file_path,
+                        "language": result.get("language", ""),
+                        "score": similarity,  # Match DuckDB convention
+                    }
+                )
 
             return formatted_results
 
@@ -1869,16 +1886,18 @@ class LanceDBProvider(SerialDatabaseProvider):
             for result in paginated:
                 file_path = file_map.get(result.get("file_id"), "")
 
-                formatted.append({
-                    "chunk_id": result["id"],
-                    "symbol": result.get("name", ""),
-                    "content": result.get("content", ""),
-                    "chunk_type": result.get("chunk_type", ""),
-                    "start_line": result.get("start_line", 0),
-                    "end_line": result.get("end_line", 0),
-                    "file_path": file_path,
-                    "language": result.get("language", ""),
-                })
+                formatted.append(
+                    {
+                        "chunk_id": result["id"],
+                        "symbol": result.get("name", ""),
+                        "content": result.get("content", ""),
+                        "chunk_type": result.get("chunk_type", ""),
+                        "start_line": result.get("start_line", 0),
+                        "end_line": result.get("end_line", 0),
+                        "file_path": file_path,
+                        "language": result.get("language", ""),
+                    }
+                )
 
             pagination = {
                 "offset": offset,

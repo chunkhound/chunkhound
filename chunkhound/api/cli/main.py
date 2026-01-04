@@ -1,8 +1,8 @@
 """New modular CLI entry point for ChunkHound."""
 
 import argparse
-import logging as _pylogging
 import asyncio
+import logging as _pylogging
 import multiprocessing
 import sys
 from pathlib import Path
@@ -56,9 +56,9 @@ def create_parser() -> argparse.ArgumentParser:
     # Import parsers dynamically to avoid early loading
     from .parsers import create_main_parser, setup_subparsers
     from .parsers.calibrate_parser import add_calibrate_subparser
+    from .parsers.code_mapper_parser import add_map_subparser
     from .parsers.mcp_parser import add_mcp_subparser
     from .parsers.research_parser import add_research_subparser
-    from .parsers.code_mapper_parser import add_map_subparser
     from .parsers.run_parser import add_run_subparser
     from .parsers.search_parser import add_search_subparser
 

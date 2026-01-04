@@ -13,10 +13,7 @@ def test_hyde_scope_prompt_includes_snippets_when_project_root_diff_cwd(
     scope_path.mkdir(parents=True, exist_ok=True)
 
     (scope_path / "foo.py").write_text(
-        "def example() -> None:\n"
-        "    x = 1\n"
-        "    y = 2\n"
-        "    return x + y\n",
+        "def example() -> None:\n    x = 1\n    y = 2\n    return x + y\n",
         encoding="utf-8",
     )
 
@@ -50,4 +47,3 @@ def test_hyde_scope_prompt_includes_snippets_when_project_root_diff_cwd(
 
     assert "File: arguseek/foo.py" in prompt
     assert "(no sample code snippets available)" not in prompt
-

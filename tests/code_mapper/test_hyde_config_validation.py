@@ -36,4 +36,3 @@ def test_hyde_config_rejects_invalid_values(field: str, value: int) -> None:
 
     with pytest.raises(ValueError):
         HydeConfig(**kwargs)
-

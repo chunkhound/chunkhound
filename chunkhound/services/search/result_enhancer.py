@@ -8,8 +8,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-from loguru import logger
-
 
 def _strip_chunk_part_suffix(symbol: str) -> str:
     """Strip _partN suffixes from symbol names added during chunk splitting.

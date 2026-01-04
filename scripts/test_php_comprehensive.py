@@ -1,8 +1,10 @@
 """Comprehensive test to verify all PHP parser features."""
 
 from pathlib import Path
+
+from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.parsers.parser_factory import ParserFactory
-from chunkhound.core.types.common import Language, ChunkType
+
 
 def main():
     print("=" * 80)
@@ -45,32 +47,50 @@ def main():
         print("\n[Test 4] Feature Verification")
 
         # Classes
-        class_chunks = [c for c in chunks if c.chunk_type == ChunkType.CLASS or
-                       (c.metadata and c.metadata.get("kind") == "class")]
+        class_chunks = [
+            c
+            for c in chunks
+            if c.chunk_type == ChunkType.CLASS
+            or (c.metadata and c.metadata.get("kind") == "class")
+        ]
         print(f"  {'✅' if class_chunks else '❌'} Classes: {len(class_chunks)}")
         if class_chunks:
             for cc in class_chunks:
                 print(f"      - {cc.symbol}")
 
         # Interfaces
-        interface_chunks = [c for c in chunks if c.chunk_type == ChunkType.INTERFACE or
-                           (c.metadata and c.metadata.get("kind") == "interface")]
-        print(f"  {'✅' if interface_chunks else '❌'} Interfaces: {len(interface_chunks)}")
+        interface_chunks = [
+            c
+            for c in chunks
+            if c.chunk_type == ChunkType.INTERFACE
+            or (c.metadata and c.metadata.get("kind") == "interface")
+        ]
+        print(
+            f"  {'✅' if interface_chunks else '❌'} Interfaces: {len(interface_chunks)}"
+        )
         if interface_chunks:
             for ic in interface_chunks:
                 print(f"      - {ic.symbol}")
 
         # Traits
-        trait_chunks = [c for c in chunks if c.chunk_type == ChunkType.TRAIT or
-                       (c.metadata and c.metadata.get("kind") == "trait")]
+        trait_chunks = [
+            c
+            for c in chunks
+            if c.chunk_type == ChunkType.TRAIT
+            or (c.metadata and c.metadata.get("kind") == "trait")
+        ]
         print(f"  {'✅' if trait_chunks else '❌'} Traits: {len(trait_chunks)}")
         if trait_chunks:
             for tc in trait_chunks:
                 print(f"      - {tc.symbol}")
 
         # Functions
-        func_chunks = [c for c in chunks if c.chunk_type == ChunkType.FUNCTION or
-                      (c.metadata and c.metadata.get("kind") == "function")]
+        func_chunks = [
+            c
+            for c in chunks
+            if c.chunk_type == ChunkType.FUNCTION
+            or (c.metadata and c.metadata.get("kind") == "function")
+        ]
         print(f"  {'✅' if func_chunks else '❌'} Functions: {len(func_chunks)}")
         if func_chunks:
             for fc in func_chunks[:3]:  # Show first 3
@@ -84,8 +104,12 @@ def main():
         print("\n[Test 5] Metadata Verification")
 
         # Visibility modifiers
-        with_visibility = [c for c in chunks if c.metadata and "visibility" in c.metadata]
-        print(f"  {'✅' if with_visibility else '⚠️ '} Visibility modifiers: {len(with_visibility)}")
+        with_visibility = [
+            c for c in chunks if c.metadata and "visibility" in c.metadata
+        ]
+        print(
+            f"  {'✅' if with_visibility else '⚠️ '} Visibility modifiers: {len(with_visibility)}"
+        )
         if with_visibility:
             vis_types = {}
             for c in with_visibility:
@@ -95,12 +119,20 @@ def main():
                 print(f"      - {v}: {count}")
 
         # Static modifier
-        static_chunks = [c for c in chunks if c.metadata and c.metadata.get("is_static")]
-        print(f"  {'✅' if static_chunks else '⚠️ '} Static modifier: {len(static_chunks)}")
+        static_chunks = [
+            c for c in chunks if c.metadata and c.metadata.get("is_static")
+        ]
+        print(
+            f"  {'✅' if static_chunks else '⚠️ '} Static modifier: {len(static_chunks)}"
+        )
 
         # Abstract modifier
-        abstract_chunks = [c for c in chunks if c.metadata and c.metadata.get("is_abstract")]
-        print(f"  {'✅' if abstract_chunks else '⚠️ '} Abstract modifier: {len(abstract_chunks)}")
+        abstract_chunks = [
+            c for c in chunks if c.metadata and c.metadata.get("is_abstract")
+        ]
+        print(
+            f"  {'✅' if abstract_chunks else '⚠️ '} Abstract modifier: {len(abstract_chunks)}"
+        )
 
         # Final modifier
         final_chunks = [c for c in chunks if c.metadata and c.metadata.get("is_final")]
@@ -122,7 +154,9 @@ def main():
 
         # Check if code is extracted
         with_code = [c for c in chunks if c.code and len(c.code.strip()) > 0]
-        print(f"  {'✅' if len(with_code) == len(chunks) else '❌'} All chunks have code: {len(with_code)}/{len(chunks)}")
+        print(
+            f"  {'✅' if len(with_code) == len(chunks) else '❌'} All chunks have code: {len(with_code)}/{len(chunks)}"
+        )
 
         # Check average code length
         avg_len = sum(len(c.code) for c in chunks) / len(chunks) if chunks else 0
@@ -133,7 +167,9 @@ def main():
 
         symbols = [c.symbol for c in chunks]
         unique_symbols = set(symbols)
-        print(f"  {'✅' if len(symbols) == len(unique_symbols) else '⚠️ '} Unique symbols: {len(unique_symbols)}/{len(symbols)}")
+        print(
+            f"  {'✅' if len(symbols) == len(unique_symbols) else '⚠️ '} Unique symbols: {len(unique_symbols)}/{len(symbols)}"
+        )
 
         # Show some symbol examples
         print("\n  Sample symbols:")
@@ -149,6 +185,7 @@ def main():
 
     # Final summary
     print("\n✅ PHP parser is fully functional and production-ready!")
+
 
 if __name__ == "__main__":
     main()

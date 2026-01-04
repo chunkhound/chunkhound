@@ -6,10 +6,11 @@ while regular files are resolved (for Windows 8.3 compatibility).
 """
 
 import os
-import pytest
-from pathlib import Path
-import tempfile
 import shutil
+import tempfile
+from pathlib import Path
+
+import pytest
 
 from chunkhound.core.utils.path_utils import (
     get_relative_path_safe,

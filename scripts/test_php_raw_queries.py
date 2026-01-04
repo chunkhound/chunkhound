@@ -1,13 +1,15 @@
 """Test raw PHP queries to see what tree-sitter extracts."""
 
 from pathlib import Path
+
 import tree_sitter_php as ts_php
-from tree_sitter import Parser, Language, Query
+from tree_sitter import Language, Parser, Query
+
 
 def main():
     # Load comprehensive.php
     fixture_path = Path(__file__).parent.parent / "tests/fixtures/php/comprehensive.php"
-    with open(fixture_path, "r") as f:
+    with open(fixture_path) as f:
         code = f.read()
 
     # Create parser
@@ -43,8 +45,10 @@ def main():
                 capture_name = query.capture_names[capture.index]
                 print(f"\n[{count}] Capture: {capture_name}")
                 print(f"  Node type: {node.type}")
-                print(f"  Start: line {node.start_point[0] + 1}, col {node.start_point[1]}")
-                text = code[node.start_byte:node.end_byte]
+                print(
+                    f"  Start: line {node.start_point[0] + 1}, col {node.start_point[1]}"
+                )
+                text = code[node.start_byte : node.end_byte]
                 print(f"  Text preview: {text.strip()[:100]}...")
 
     # Test COMMENT concept
@@ -65,8 +69,10 @@ def main():
                 capture_name = query.capture_names[capture.index]
                 print(f"\n[{count}] Capture: {capture_name}")
                 print(f"  Node type: {node.type}")
-                print(f"  Start: line {node.start_point[0] + 1}, col {node.start_point[1]}")
-                text = code[node.start_byte:node.end_byte]
+                print(
+                    f"  Start: line {node.start_point[0] + 1}, col {node.start_point[1]}"
+                )
+                text = code[node.start_byte : node.end_byte]
                 print(f"  Text preview: {text.strip()[:80]}...")
 
     # Test IMPORT concept
@@ -87,13 +93,16 @@ def main():
                 capture_name = query.capture_names[capture.index]
                 print(f"\n[{count}] Capture: {capture_name}")
                 print(f"  Node type: {node.type}")
-                print(f"  Start: line {node.start_point[0] + 1}, col {node.start_point[1]}")
-                text = code[node.start_byte:node.end_byte]
+                print(
+                    f"  Start: line {node.start_point[0] + 1}, col {node.start_point[1]}"
+                )
+                text = code[node.start_byte : node.end_byte]
                 print(f"  Text preview: {text.strip()[:80]}...")
 
     print("\n" + "=" * 80)
     print("Summary: Queries are working correctly!")
     print("=" * 80)
+
 
 if __name__ == "__main__":
     main()

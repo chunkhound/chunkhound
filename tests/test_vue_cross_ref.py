@@ -5,11 +5,15 @@ from pathlib import Path
 import pytest
 
 from chunkhound.core.models.chunk import Chunk
-from chunkhound.core.types.common import ChunkId, ChunkType, FileId, Language, LineNumber
+from chunkhound.core.types.common import (
+    ChunkType,
+    FileId,
+    Language,
+    LineNumber,
+)
 from chunkhound.parsers.vue_cross_ref import (
     VueSymbol,
     VueSymbolTable,
-    add_cross_references,
     build_symbol_table,
     extract_identifiers_from_expression,
     extract_props_from_define_props,
@@ -58,10 +62,18 @@ class TestVueSymbolTable:
         table = VueSymbolTable()
 
         var_symbol = VueSymbol(
-            name="message", type="variable", chunk_symbol="msg", start_line=1, end_line=1
+            name="message",
+            type="variable",
+            chunk_symbol="msg",
+            start_line=1,
+            end_line=1,
         )
         func_symbol = VueSymbol(
-            name="greet", type="function", chunk_symbol="greet", start_line=5, end_line=7
+            name="greet",
+            type="function",
+            chunk_symbol="greet",
+            start_line=5,
+            end_line=7,
         )
 
         table.add_symbol(var_symbol)
@@ -479,7 +491,9 @@ class TestVueParserIntegration:
     @pytest.fixture
     def cross_ref_fixture(self):
         """Load cross-reference test fixture."""
-        fixture_path = Path(__file__).parent / "fixtures" / "vue" / "cross_reference.vue"
+        fixture_path = (
+            Path(__file__).parent / "fixtures" / "vue" / "cross_reference.vue"
+        )
         return fixture_path
 
     def test_parse_cross_reference_fixture(self, parser, cross_ref_fixture):
@@ -490,15 +504,24 @@ class TestVueParserIntegration:
         chunks = parser.parse_file(cross_ref_fixture, FileId(1))
 
         # Should have script and template chunks
-        script_chunks = [c for c in chunks if c.metadata and c.metadata.get("vue_section") == "script"]
-        template_chunks = [c for c in chunks if c.metadata and c.metadata.get("vue_section") == "template"]
+        script_chunks = [
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "script"
+        ]
+        template_chunks = [
+            c
+            for c in chunks
+            if c.metadata and c.metadata.get("vue_section") == "template"
+        ]
 
         assert len(script_chunks) > 0, "Should have script chunks"
         assert len(template_chunks) > 0, "Should have template chunks"
 
         # Template chunks should have cross-reference metadata
         chunks_with_refs = [
-            c for c in template_chunks
+            c
+            for c in template_chunks
             if c.metadata and "script_references" in c.metadata
         ]
 
@@ -517,7 +540,8 @@ class TestVueParserIntegration:
 
         # Check for undefined references
         chunks_with_undefined = [
-            c for c in template_chunks
+            c
+            for c in template_chunks
             if c.metadata and "undefined_references" in c.metadata
         ]
 
@@ -545,12 +569,14 @@ class TestVueParserIntegration:
 
         # Find template chunks with references
         template_chunks = [
-            c for c in chunks
+            c
+            for c in chunks
             if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         chunks_with_refs = [
-            c for c in template_chunks
+            c
+            for c in template_chunks
             if c.metadata and "script_references" in c.metadata
         ]
 
@@ -565,7 +591,9 @@ class TestVueParserIntegration:
 
     def test_parse_with_composables(self, parser):
         """Test parsing fixture with composables."""
-        fixture_path = Path(__file__).parent / "fixtures" / "vue" / "with_composables.vue"
+        fixture_path = (
+            Path(__file__).parent / "fixtures" / "vue" / "with_composables.vue"
+        )
         if not fixture_path.exists():
             pytest.skip("Composables fixture not found")
 
@@ -573,12 +601,14 @@ class TestVueParserIntegration:
 
         # Find template chunks with references
         template_chunks = [
-            c for c in chunks
+            c
+            for c in chunks
             if c.metadata and c.metadata.get("vue_section") == "template"
         ]
 
         chunks_with_refs = [
-            c for c in template_chunks
+            c
+            for c in template_chunks
             if c.metadata and "script_references" in c.metadata
         ]
 

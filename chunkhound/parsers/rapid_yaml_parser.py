@@ -5,13 +5,12 @@ from __future__ import annotations
 import logging
 import os
 import re
+from bisect import bisect_left
 from collections import Counter
+from collections.abc import Sequence
 from contextlib import contextmanager
-import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence
-from bisect import bisect_left
 from time import perf_counter
 
 from chunkhound.core.models.chunk import Chunk
@@ -119,7 +118,9 @@ class RapidYamlParser(LanguageParser):
         file_id: FileId | None = None,
     ) -> list[Chunk]:
         # Denylist: skip ryml attempts for known-bad paths (no tree-sitter fallback)
-        if file_path is not None and str(file_path) in getattr(self, "_denylist_paths", set()):
+        if file_path is not None and str(file_path) in getattr(
+            self, "_denylist_paths", set()
+        ):
             self._count_fallback_ts += 1
             return []
 
@@ -235,9 +236,9 @@ class RapidYamlParser(LanguageParser):
 
     def cleanup(self) -> None:
         # Emit one-line summary for this parser instance
-        top_rewrites = ", ".join(
-            f"{k}={v}" for k, v in self._rewrite_counts.most_common(6)
-        ) or "-"
+        top_rewrites = (
+            ", ".join(f"{k}={v}" for k, v in self._rewrite_counts.most_common(6)) or "-"
+        )
         logger.info(
             (
                 "RapidYAML summary: sanitized=%d pre_skip=%d complex_skip=%d "
@@ -298,7 +299,7 @@ class _LineLocator:
     """Utility to approximate line ranges for emitted YAML blocks."""
 
     lines: Sequence[str]
-    depth_positions: List[int]
+    depth_positions: list[int]
     fallback_line: int = 0
 
     perf: _RymlPerf | None = None
@@ -309,9 +310,9 @@ class _LineLocator:
         self.fallback_line = 0
         self.perf = perf
         # Precompute stripped lines to avoid repeated .strip()
-        self._stripped_lines: List[str] = [ln.strip() for ln in self.lines]
+        self._stripped_lines: list[str] = [ln.strip() for ln in self.lines]
         # Build an index map for exact-match lookups: stripped_line -> sorted list of indices
-        self._index_map: dict[str, List[int]] = {}
+        self._index_map: dict[str, list[int]] = {}
         for idx, s in enumerate(self._stripped_lines):
             if not s:
                 continue
@@ -323,7 +324,7 @@ class _LineLocator:
 
         # Multi-line context index for more accurate disambiguation
         # Maps (line1, line2, line3) tuples to list of starting indices
-        self._context_index: dict[tuple[str, ...], List[int]] = {}
+        self._context_index: dict[tuple[str, ...], list[int]] = {}
         for idx in range(len(self._stripped_lines)):
             # Build context from up to 3 lines
             context = tuple(self._stripped_lines[idx : idx + 3])
@@ -407,7 +408,9 @@ class _LineLocator:
             self.perf.locate_calls += 1
         return start, end
 
-    def _find_from(self, target_line: str, start: int, node_type: str = "KEYVAL") -> int | None:
+    def _find_from(
+        self, target_line: str, start: int, node_type: str = "KEYVAL"
+    ) -> int | None:
         """Find target line with node-type specific logic."""
         stripped_target = target_line.strip()
         if not stripped_target:
@@ -538,7 +541,9 @@ class _LineLocator:
 
         return None
 
-    def _find_with_parent_scope(self, target_line: str, start: int, parent_key: str) -> int | None:
+    def _find_with_parent_scope(
+        self, target_line: str, start: int, parent_key: str
+    ) -> int | None:
         """Find target_line within parent key's scope.
 
         Strategy: Search for parent_key, then look for target_line after it
@@ -604,7 +609,14 @@ class _LineLocator:
 class _RapidYamlChunkBuilder:
     """Walks a RapidYAML tree and produces Chunk objects."""
 
-    def __init__(self, ryml_module, tree, content: str, file_id: FileId, perf: _RymlPerf | None = None) -> None:
+    def __init__(
+        self,
+        ryml_module,
+        tree,
+        content: str,
+        file_id: FileId,
+        perf: _RymlPerf | None = None,
+    ) -> None:
         self.ryml = ryml_module
         self.tree = tree
         self.file_id = file_id
@@ -667,7 +679,12 @@ class _RapidYamlChunkBuilder:
         return chunks
 
     def _create_chunk(
-        self, node: int, node_type: str, symbol: str, depth: int, parent_key: str | None = None
+        self,
+        node: int,
+        node_type: str,
+        symbol: str,
+        depth: int,
+        parent_key: str | None = None,
     ) -> Chunk | None:
         with _suppress_c_output():
             _t0 = perf_counter()

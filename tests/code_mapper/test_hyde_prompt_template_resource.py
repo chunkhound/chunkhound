@@ -24,4 +24,3 @@ def test_build_hyde_scope_prompt_loads_packaged_template() -> None:
 
     assert "HyDE objective:" in prompt
     assert "created_from_sha: AAA" in prompt
-

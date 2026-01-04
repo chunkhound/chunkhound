@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.utils import SubprocessJsonRpcClient, create_subprocess_exec_safe, get_safe_subprocess_env
+from tests.utils import (
+    SubprocessJsonRpcClient,
+    create_subprocess_exec_safe,
+    get_safe_subprocess_env,
+)
 from tests.utils.windows_compat import windows_safe_tempdir
 
 
@@ -19,6 +23,7 @@ async def test_mcp_code_research_uses_codex_cli_via_stdio():
     - Uses a sitecustomize-based patch to stub codex exec and force synthesis
     - Calls the code_research tool and asserts the stubbed codex path was used
     """
+
     async def run_index(temp_dir: Path, cfg_path: Path, db_path: Path) -> None:
         cmd = [
             "uv",
@@ -39,13 +44,17 @@ async def test_mcp_code_research_uses_codex_cli_via_stdio():
             env=get_safe_subprocess_env(os.environ.copy()),
         )
         stdout, stderr = await proc.communicate()
-        assert proc.returncode == 0, f"indexing failed\nstdout: {stdout.decode()}\nstderr: {stderr.decode()}"
+        assert proc.returncode == 0, (
+            f"indexing failed\nstdout: {stdout.decode()}\nstderr: {stderr.decode()}"
+        )
 
     with windows_safe_tempdir() as temp:
         temp_dir = temp
         src_dir = temp_dir / "src"
         src_dir.mkdir(parents=True, exist_ok=True)
-        (src_dir / "app.py").write_text("def alpha():\n    return 1\n", encoding="utf-8")
+        (src_dir / "app.py").write_text(
+            "def alpha():\n    return 1\n", encoding="utf-8"
+        )
 
         # Minimal config with database path (duckdb)
         cfg_path = temp_dir / ".chunkhound.json"
@@ -59,16 +68,18 @@ async def test_mcp_code_research_uses_codex_cli_via_stdio():
 
         # Build an environment that enables our codex stub in the child process
         mark_file = temp_dir / "codex_called.txt"
-        env = get_safe_subprocess_env({
-            **os.environ,
-            "PYTHONPATH": f"{Path('tests/helpers').resolve()}:{os.environ.get('PYTHONPATH','')}",
-            "CH_TEST_PATCH_CODEX": "1",
-            "CH_TEST_FORCE_SYNTHESIS": "1",
-            "CH_TEST_CODEX_MARK_FILE": str(mark_file),
-            "CHUNKHOUND_MCP_MODE": "1",
-            "CHUNKHOUND_DEBUG": "1",
-            "CHUNKHOUND_DEBUG_FILE": str(temp_dir / "mcp_debug.log"),
-        })
+        env = get_safe_subprocess_env(
+            {
+                **os.environ,
+                "PYTHONPATH": f"{Path('tests/helpers').resolve()}:{os.environ.get('PYTHONPATH', '')}",
+                "CH_TEST_PATCH_CODEX": "1",
+                "CH_TEST_FORCE_SYNTHESIS": "1",
+                "CH_TEST_CODEX_MARK_FILE": str(mark_file),
+                "CHUNKHOUND_MCP_MODE": "1",
+                "CHUNKHOUND_DEBUG": "1",
+                "CHUNKHOUND_DEBUG_FILE": str(temp_dir / "mcp_debug.log"),
+            }
+        )
 
         # 1) Index the tiny repo (no embeddings)
         await run_index(temp_dir, cfg_path, db_path)
@@ -129,7 +140,9 @@ async def test_mcp_code_research_uses_codex_cli_via_stdio():
             # Fallback: sometimes server returns a single text field
             if not contents and isinstance(result, dict) and "text" in result:
                 contents = [{"text": result["text"]}]
-            full_text = "\n".join([c.get("text", "") for c in contents if isinstance(c, dict)])
+            full_text = "\n".join(
+                [c.get("text", "") for c in contents if isinstance(c, dict)]
+            )
             if not full_text:
                 # Last resort: stringify the whole response for debugging
                 full_text = json.dumps(call)

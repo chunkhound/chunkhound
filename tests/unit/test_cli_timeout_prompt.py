@@ -1,4 +1,3 @@
-import asyncio
 import json
 from argparse import Namespace
 from pathlib import Path
@@ -7,7 +6,9 @@ import pytest
 
 
 @pytest.mark.asyncio
-async def test_timeout_prompt_adds_exclusions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_timeout_prompt_adds_exclusions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     # Prepare a fake coordinator that returns a timeout list
     class FakeCoordinator:
         async def get_stats(self):
@@ -27,7 +28,9 @@ async def test_timeout_prompt_adds_exclusions(tmp_path: Path, monkeypatch: pytes
     from chunkhound.api.cli.commands import run as run_mod
 
     monkeypatch.setattr(run_mod, "configure_registry", lambda cfg: None)
-    monkeypatch.setattr(run_mod, "create_indexing_coordinator", lambda: FakeCoordinator())
+    monkeypatch.setattr(
+        run_mod, "create_indexing_coordinator", lambda: FakeCoordinator()
+    )
 
     # Pretend we are in a TTY and accept the prompt
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
@@ -62,7 +65,9 @@ async def test_timeout_prompt_adds_exclusions(tmp_path: Path, monkeypatch: pytes
 
     # Run
     # Capture stdout by temporarily redirecting the Rich console to a string buffer
-    import io, sys
+    import io
+    import sys
+
     buf = io.StringIO()
     real_stdout = sys.stdout
     sys.stdout = buf
@@ -81,8 +86,11 @@ async def test_timeout_prompt_adds_exclusions(tmp_path: Path, monkeypatch: pytes
 
 
 @pytest.mark.asyncio
-async def test_timeout_prompt_skipped_in_mcp_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_timeout_prompt_skipped_in_mcp_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """CHUNKHOUND_MCP_MODE=1 must prevent input() call and show info instead."""
+
     class FakeCoordinator:
         async def get_stats(self):
             return {"files": 0, "chunks": 0, "embeddings": 0}
@@ -100,16 +108,27 @@ async def test_timeout_prompt_skipped_in_mcp_mode(tmp_path: Path, monkeypatch: p
 
     # Patch registry hooks used by run_command
     monkeypatch.setattr(run_mod, "configure_registry", lambda cfg: None)
-    monkeypatch.setattr(run_mod, "create_indexing_coordinator", lambda: FakeCoordinator())
+    monkeypatch.setattr(
+        run_mod, "create_indexing_coordinator", lambda: FakeCoordinator()
+    )
 
     # Force MCP mode, pretend we are in TTY, but ensure input() would raise if called
     monkeypatch.setenv("CHUNKHOUND_MCP_MODE", "1")
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda *_: (_ for _ in ()).throw(RuntimeError("input called")))
+    monkeypatch.setattr(
+        "builtins.input", lambda *_: (_ for _ in ()).throw(RuntimeError("input called"))
+    )
 
     # Minimal config
     proj_dir = tmp_path
-    args = Namespace(path=proj_dir, verbose=False, no_embeddings=True, include=None, exclude=None, db=None)
+    args = Namespace(
+        path=proj_dir,
+        verbose=False,
+        no_embeddings=True,
+        include=None,
+        exclude=None,
+        db=None,
+    )
 
     from chunkhound.core.config.config import Config as CoreConfig
     from chunkhound.core.config.database_config import DatabaseConfig
@@ -119,7 +138,9 @@ async def test_timeout_prompt_skipped_in_mcp_mode(tmp_path: Path, monkeypatch: p
     cfg.database = db_cfg
 
     # Capture stdout
-    import io, sys
+    import io
+    import sys
+
     buf = io.StringIO()
     real_stdout = sys.stdout
     sys.stdout = buf

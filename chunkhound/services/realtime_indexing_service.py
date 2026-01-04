@@ -13,17 +13,17 @@ Architecture:
 
 import asyncio
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from loguru import logger
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
-from chunkhound.utils.windows_constants import IS_WINDOWS
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices
+from chunkhound.utils.windows_constants import IS_WINDOWS
 
 
 def normalize_file_path(path: Path | str) -> str:
@@ -47,7 +47,9 @@ class SimpleEventHandler(FileSystemEventHandler):
         self._include_patterns: list[str] | None = None
         self._pattern_cache: dict[str, Any] = {}
         try:
-            self._root = (config.target_dir if config and config.target_dir else Path.cwd()).resolve()
+            self._root = (
+                config.target_dir if config and config.target_dir else Path.cwd()
+            ).resolve()
         except Exception:
             self._root = Path.cwd().resolve()
 
@@ -117,18 +119,31 @@ class SimpleEventHandler(FileSystemEventHandler):
         # Repo-aware ignore engine (lazy init)
         try:
             if self._engine is None:
-                from chunkhound.utils.ignore_engine import build_repo_aware_ignore_engine
+                from chunkhound.utils.ignore_engine import (
+                    build_repo_aware_ignore_engine,
+                )
+
                 sources = self.config.indexing.resolve_ignore_sources()
                 cfg_ex = self.config.indexing.get_effective_config_excludes()
                 chf = self.config.indexing.chignore_file
-                overlay = bool(getattr(self.config.indexing, "workspace_gitignore_nonrepo", False))
-                self._engine = build_repo_aware_ignore_engine(self._root, sources, chf, cfg_ex, workspace_root_only_gitignore=overlay)
+                overlay = bool(
+                    getattr(self.config.indexing, "workspace_gitignore_nonrepo", False)
+                )
+                self._engine = build_repo_aware_ignore_engine(
+                    self._root,
+                    sources,
+                    chf,
+                    cfg_ex,
+                    workspace_root_only_gitignore=overlay,
+                )
         except Exception:
             self._engine = None
 
         # Exclude via engine
         try:
-            if self._engine is not None and self._engine.matches(file_path, is_dir=False):
+            if self._engine is not None and self._engine.matches(
+                file_path, is_dir=False
+            ):
                 return False
         except Exception:
             pass
@@ -137,14 +152,19 @@ class SimpleEventHandler(FileSystemEventHandler):
         try:
             if self._include_patterns is None:
                 from chunkhound.utils.file_patterns import normalize_include_patterns
+
                 inc = list(self.config.indexing.include)
                 self._include_patterns = normalize_include_patterns(inc)
 
             from chunkhound.utils.file_patterns import should_include_file
-            return should_include_file(file_path, self._root, self._include_patterns, self._pattern_cache)
+
+            return should_include_file(
+                file_path, self._root, self._include_patterns, self._pattern_cache
+            )
         except Exception:
             # Fallback to Language-based detection if include matching fails
             from chunkhound.core.types.common import Language
+
             if file_path.suffix.lower() in Language.get_all_extensions():
                 return True
             if file_path.name.lower() in Language.get_all_filename_patterns():
@@ -219,7 +239,9 @@ class RealtimeIndexingService:
         self._debounce_delay = 0.5  # 500ms delay from research
         self._debounce_tasks: set[asyncio.Task] = set()  # Track active debounce tasks
 
-        self._recent_file_events: dict[str, tuple[str, float]] = {}  # Layer 3: event dedup
+        self._recent_file_events: dict[
+            str, tuple[str, float]
+        ] = {}  # Layer 3: event dedup
 
         # Background scan state
         self.scan_iterator: Iterator | None = None
@@ -568,9 +590,17 @@ class RealtimeIndexingService:
                 current_time = time.time()
 
                 if file_key in self._recent_file_events:
-                    last_event_type, last_event_time = self._recent_file_events[file_key]
-                    if last_event_type == event_type and (current_time - last_event_time) < self._EVENT_DEDUP_WINDOW_SECONDS:
-                        logger.debug(f"Suppressing duplicate {event_type} event for {file_path} (within {self._EVENT_DEDUP_WINDOW_SECONDS}s window)")
+                    last_event_type, last_event_time = self._recent_file_events[
+                        file_key
+                    ]
+                    if (
+                        last_event_type == event_type
+                        and (current_time - last_event_time)
+                        < self._EVENT_DEDUP_WINDOW_SECONDS
+                    ):
+                        logger.debug(
+                            f"Suppressing duplicate {event_type} event for {file_path} (within {self._EVENT_DEDUP_WINDOW_SECONDS}s window)"
+                        )
                         self._debug(f"suppressed duplicate {event_type}: {file_path}")
                         self.event_queue.task_done()
                         continue
@@ -582,7 +612,8 @@ class RealtimeIndexingService:
                 if len(self._recent_file_events) > 1000:
                     cutoff = current_time - self._EVENT_HISTORY_RETENTION_SECONDS
                     self._recent_file_events = {
-                        k: v for k, v in self._recent_file_events.items()
+                        k: v
+                        for k, v in self._recent_file_events.items()
                         if v[1] > cutoff
                     }
 
@@ -721,7 +752,9 @@ class RealtimeIndexingService:
                     try:
                         await self.services.indexing_coordinator.generate_missing_embeddings()
                     except Exception as e:
-                        logger.warning(f"Embedding generation failed in realtime (embed pass): {e}")
+                        logger.warning(
+                            f"Embedding generation failed in realtime (embed pass): {e}"
+                        )
                     continue
 
                 # Skip embeddings for initial and change events to keep loop responsive.

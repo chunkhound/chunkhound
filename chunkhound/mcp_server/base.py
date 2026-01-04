@@ -140,7 +140,9 @@ class MCPServerBase(ABC):
             # Initialize LLM manager with dual providers (optional - continue if it fails)
             try:
                 if self.config.llm:
-                    utility_config, synthesis_config = self.config.llm.get_provider_configs()
+                    utility_config, synthesis_config = (
+                        self.config.llm.get_provider_configs()
+                    )
                     self.llm_manager = LLMManager(utility_config, synthesis_config)
                     self.debug_log(
                         f"LLM providers registered: {self.config.llm.provider} "

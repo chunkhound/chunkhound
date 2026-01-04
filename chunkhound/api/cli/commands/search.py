@@ -2,7 +2,6 @@
 
 import argparse
 import sys
-from pathlib import Path
 from typing import Any, cast
 
 from loguru import logger

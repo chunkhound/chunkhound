@@ -78,7 +78,5 @@ class SingleHopStrategy:
             path_filter=path_filter,
         )
 
-        logger.info(
-            f"Standard semantic search completed: {len(results)} results found"
-        )
+        logger.info(f"Standard semantic search completed: {len(results)} results found")
         return results, pagination

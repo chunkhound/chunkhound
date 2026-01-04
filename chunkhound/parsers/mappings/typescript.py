@@ -11,16 +11,16 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from chunkhound.core.types.common import ChunkType, Language
-from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.mappings._shared.js_family_extraction import (
     JSFamilyExtraction,
 )
 from chunkhound.parsers.mappings._shared.js_query_patterns import (
-    TOP_LEVEL_LEXICAL_CONFIG,
+    COMMONJS_EXPORTS_SHORTHAND,
     COMMONJS_MODULE_EXPORTS,
     COMMONJS_NESTED_EXPORTS,
-    COMMONJS_EXPORTS_SHORTHAND,
+    TOP_LEVEL_LEXICAL_CONFIG,
 )
+from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 if TYPE_CHECKING:
@@ -113,8 +113,9 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
           modules that export object literals are chunked.
         """
         if concept == UniversalConcept.DEFINITION:
-            return ("\n".join([
-                """
+            return "\n".join(
+                [
+                    """
                 ; Standard definitions
                 (function_declaration
                     name: (identifier) @name
@@ -127,9 +128,9 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
                 ; Top-level export (default or named)
                 (export_statement) @definition
                 """,
-                TOP_LEVEL_LEXICAL_CONFIG,
-                # Top-level function/arrow declarators
-                """
+                    TOP_LEVEL_LEXICAL_CONFIG,
+                    # Top-level function/arrow declarators
+                    """
                 (program
                     (lexical_declaration
                         (variable_declarator
@@ -147,10 +148,11 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
                     )
                 )
                 """,
-                COMMONJS_MODULE_EXPORTS,
-                COMMONJS_NESTED_EXPORTS,
-                COMMONJS_EXPORTS_SHORTHAND,
-            ]))
+                    COMMONJS_MODULE_EXPORTS,
+                    COMMONJS_NESTED_EXPORTS,
+                    COMMONJS_EXPORTS_SHORTHAND,
+                ]
+            )
         elif concept == UniversalConcept.COMMENT:
             return """
             (comment) @definition

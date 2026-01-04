@@ -7,16 +7,17 @@ Tests verify that the three-layer defense strategy prevents duplicate chunks:
 """
 
 import asyncio
-import time
-from pathlib import Path
 
 import pytest
+
 
 # Skip these tests if lancedb is not available
 class TestChunkDeduplication:
     """Test suite for chunk deduplication via merge_insert."""
 
-    def test_duplicate_file_processing_no_duplicate_chunks(self, tmp_path, lancedb_provider):
+    def test_duplicate_file_processing_no_duplicate_chunks(
+        self, tmp_path, lancedb_provider
+    ):
         """Verify processing same file twice doesn't create duplicate chunks."""
         from chunkhound.services.indexing_coordinator import IndexingCoordinator
 
@@ -24,7 +25,9 @@ class TestChunkDeduplication:
         test_file = tmp_path / "test.py"
         test_file.write_text("def test_fn(): pass\nclass TestClass: pass")
 
-        coord = IndexingCoordinator(database_provider=lancedb_provider, base_directory=tmp_path)
+        coord = IndexingCoordinator(
+            database_provider=lancedb_provider, base_directory=tmp_path
+        )
 
         # Process file twice (simulating created + modified events)
         result1 = asyncio.run(coord.process_file(test_file))
@@ -43,8 +46,12 @@ class TestChunkDeduplication:
         chunk_ids = [c["id"] for c in all_chunks]
 
         # Verify no duplicate chunk IDs
-        assert len(chunk_ids) == len(set(chunk_ids)), f"Duplicate chunk IDs found: {chunk_ids}"
-        print(f"✓ Processed file twice, got {len(chunk_ids)} unique chunks (no duplicates)")
+        assert len(chunk_ids) == len(set(chunk_ids)), (
+            f"Duplicate chunk IDs found: {chunk_ids}"
+        )
+        print(
+            f"✓ Processed file twice, got {len(chunk_ids)} unique chunks (no duplicates)"
+        )
 
     def test_vue_haskell_no_duplicate_chunk_ids(self, tmp_path, lancedb_provider):
         """Verify Vue/Haskell files with identical content get unique chunk IDs.
@@ -66,7 +73,9 @@ export default { data() { return { show: true } } }
 </script>
 """)
 
-        coord = IndexingCoordinator(database_provider=lancedb_provider, base_directory=tmp_path)
+        coord = IndexingCoordinator(
+            database_provider=lancedb_provider, base_directory=tmp_path
+        )
 
         # Index the file
         result = asyncio.run(coord.process_file(vue_file))
@@ -82,8 +91,9 @@ export default { data() { return { show: true } } }
         chunks = lancedb_provider.get_chunks_by_file_id(file_id)
         chunk_ids = [c["id"] for c in chunks]
 
-        assert len(chunk_ids) == len(set(chunk_ids)), \
+        assert len(chunk_ids) == len(set(chunk_ids)), (
             f"Found duplicate chunk IDs in Vue file: {chunk_ids}"
+        )
         print(f"✓ Vue file indexed: {len(chunk_ids)} unique chunks (no duplicates)")
 
     def test_rapid_file_modifications(self, tmp_path, lancedb_provider):
@@ -91,7 +101,9 @@ export default { data() { return { show: true } } }
         from chunkhound.services.indexing_coordinator import IndexingCoordinator
 
         test_file = tmp_path / "rapid.py"
-        coord = IndexingCoordinator(database_provider=lancedb_provider, base_directory=tmp_path)
+        coord = IndexingCoordinator(
+            database_provider=lancedb_provider, base_directory=tmp_path
+        )
 
         # Version 1: Initial content
         test_file.write_text("def initial(): pass")
@@ -112,7 +124,9 @@ export default { data() { return { show: true } } }
         chunk_ids = [c["id"] for c in all_chunks]
 
         # Verify no duplicates despite multiple updates
-        assert len(chunk_ids) == len(set(chunk_ids)), f"Duplicate chunk IDs found: {chunk_ids}"
+        assert len(chunk_ids) == len(set(chunk_ids)), (
+            f"Duplicate chunk IDs found: {chunk_ids}"
+        )
         print(f"✓ Rapid modifications: {len(chunk_ids)} unique chunks (no duplicates)")
 
 
@@ -127,7 +141,9 @@ class TestConcurrentProcessing:
         test_file = tmp_path / "concurrent.py"
         test_file.write_text("def concurrent_test(): pass\nclass Concurrent: pass")
 
-        coord = IndexingCoordinator(database_provider=lancedb_provider, base_directory=tmp_path)
+        coord = IndexingCoordinator(
+            database_provider=lancedb_provider, base_directory=tmp_path
+        )
 
         # Process same file concurrently (simulating race between initial scan + realtime)
         results = await asyncio.gather(
@@ -145,8 +161,10 @@ class TestConcurrentProcessing:
         all_chunks = lancedb_provider.get_chunks_by_file_id(file_id)
         chunk_ids = [c["id"] for c in all_chunks]
 
-        assert len(chunk_ids) == len(set(chunk_ids)), f"Duplicate chunk IDs found"
-        print(f"✓ Concurrent processing: {len(chunk_ids)} unique chunks (no duplicates)")
+        assert len(chunk_ids) == len(set(chunk_ids)), "Duplicate chunk IDs found"
+        print(
+            f"✓ Concurrent processing: {len(chunk_ids)} unique chunks (no duplicates)"
+        )
 
 
 class TestScalarIndexCreation:
@@ -213,9 +231,7 @@ class TestSearchDeduplication:
             f"✓ Regex search with 50 fragments: {len(results)} unique results (no duplicates)"
         )
 
-    def test_file_update_creates_no_search_duplicates(
-        self, lancedb_provider, tmp_path
-    ):
+    def test_file_update_creates_no_search_duplicates(self, lancedb_provider, tmp_path):
         """Verify file updates don't create duplicate search results."""
         from chunkhound.core.models import Chunk, File
         from chunkhound.core.types.common import ChunkType, Language
@@ -321,16 +337,16 @@ class TestSearchDeduplication:
         )
 
         # Verify total count matches unique results
-        assert pagination["total"] == len(
-            results
-        ), f"Total count {pagination['total']} != actual results {len(results)}"
+        assert pagination["total"] == len(results), (
+            f"Total count {pagination['total']} != actual results {len(results)}"
+        )
         assert len(results) == 10, f"Expected 10 unique chunks, got {len(results)}"
 
         # Verify all chunk_ids are unique
         chunk_ids = [r["chunk_id"] for r in results]
-        assert len(chunk_ids) == len(
-            set(chunk_ids)
-        ), "Found duplicate chunk_ids in results"
+        assert len(chunk_ids) == len(set(chunk_ids)), (
+            "Found duplicate chunk_ids in results"
+        )
 
         print(
             f"✓ Pagination counts: total={pagination['total']}, results={len(results)} (match, no duplicates)"

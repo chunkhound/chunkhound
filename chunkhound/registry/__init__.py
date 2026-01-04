@@ -8,10 +8,10 @@ Simplified from 540 lines to ~250 lines by:
 """
 
 import os
-from collections.abc import MutableMapping
+from collections.abc import Callable, MutableMapping
 from pathlib import Path
 from threading import Lock
-from typing import Any, Callable
+from typing import Any
 
 from loguru import logger
 
@@ -20,10 +20,10 @@ from chunkhound.core.config.config import Config
 
 # Import embedding factory for unified provider creation
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
-from chunkhound.embeddings import EmbeddingManager
 
 # Import core types
 from chunkhound.core.types.common import Language
+from chunkhound.embeddings import EmbeddingManager
 
 # Import new unified parser system
 from chunkhound.parsers.parser_factory import get_parser_factory
@@ -37,9 +37,7 @@ class LazyLanguageParsers(MutableMapping[Language, Any]):
         self._instances: dict[Language, Any] = {}
         self._lock = Lock()
 
-    def register_factory(
-        self, language: Language, factory: Callable[[], Any]
-    ) -> None:
+    def register_factory(self, language: Language, factory: Callable[[], Any]) -> None:
         """Register a factory used to materialize a parser lazily."""
         self._factories[language] = factory
 
@@ -94,6 +92,7 @@ class LazyLanguageParsers(MutableMapping[Language, Any]):
         with self._lock:
             self._instances.clear()
             self._factories.clear()
+
 
 # Import services
 from chunkhound.services.embedding_service import EmbeddingService
@@ -216,7 +215,9 @@ class ProviderRegistry:
 
         if self._config and getattr(self._config, "embeddings_disabled", False):
             embedding_provider = None
-            logger.debug("[REGISTRY] Embeddings disabled; search service will run without embeddings")
+            logger.debug(
+                "[REGISTRY] Embeddings disabled; search service will run without embeddings"
+            )
         else:
             try:
                 embedding_provider = self.get_provider("embedding")
@@ -234,7 +235,9 @@ class ProviderRegistry:
 
         if self._config and getattr(self._config, "embeddings_disabled", False):
             embedding_provider = None
-            logger.debug("[REGISTRY] Embeddings disabled; embedding service will be inert")
+            logger.debug(
+                "[REGISTRY] Embeddings disabled; embedding service will be inert"
+            )
         else:
             try:
                 embedding_provider = self.get_provider("embedding")
@@ -297,12 +300,13 @@ class ProviderRegistry:
             from chunkhound.providers.database.lancedb_provider import LanceDBProvider
 
             # Get embedding_manager if available for dimension detection
-            embedding_manager = getattr(self, '_embedding_manager', None)
+            embedding_manager = getattr(self, "_embedding_manager", None)
 
             provider = LanceDBProvider(
-                db_path, base_directory,
+                db_path,
+                base_directory,
                 embedding_manager=embedding_manager,
-                config=self._config.database
+                config=self._config.database,
             )
         else:
             logger.warning(f"Unknown provider {provider_type}, defaulting to DuckDB")
@@ -385,9 +389,7 @@ class ProviderRegistry:
                         lambda lang=language: parser_factory.create_parser(lang),
                     )
                     if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                        logger.debug(
-                            f"Registered parser factory for {language.value}"
-                        )
+                        logger.debug(f"Registered parser factory for {language.value}")
                 except Exception as e:
                     if not os.environ.get("CHUNKHOUND_MCP_MODE"):
                         logger.warning(

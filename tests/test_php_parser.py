@@ -1,9 +1,10 @@
 """Unit tests for PHP parser."""
 
-import pytest
 from pathlib import Path
 
-from chunkhound.core.types.common import Language, ChunkType
+import pytest
+
+from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.parsers.parser_factory import ParserFactory
 
 
@@ -43,7 +44,9 @@ def test_php_file_detection():
 
     for filename, expected_lang in test_cases:
         detected = factory.detect_language(Path(filename))
-        assert detected == expected_lang, f"Failed to detect {filename} as {expected_lang}"
+        assert detected == expected_lang, (
+            f"Failed to detect {filename} as {expected_lang}"
+        )
 
 
 def test_parse_classes(php_parser):
@@ -61,7 +64,9 @@ def test_parse_classes(php_parser):
     # Should extract at least the class
     class_chunks = [c for c in chunks if c.chunk_type == ChunkType.CLASS]
     assert len(class_chunks) > 0, "No class chunks found"
-    assert any("TestClass" in c.symbol for c in class_chunks), "TestClass not found in chunks"
+    assert any("TestClass" in c.symbol for c in class_chunks), (
+        "TestClass not found in chunks"
+    )
 
 
 def test_parse_functions(php_parser):
@@ -93,7 +98,9 @@ def test_parse_interfaces(php_parser):
     # Should extract the interface
     interface_chunks = [c for c in chunks if c.chunk_type == ChunkType.INTERFACE]
     assert len(interface_chunks) > 0, "No interface chunks found"
-    assert any("TestInterface" in c.symbol for c in interface_chunks), "TestInterface not found"
+    assert any("TestInterface" in c.symbol for c in interface_chunks), (
+        "TestInterface not found"
+    )
 
 
 def test_parse_traits(php_parser):
@@ -109,7 +116,9 @@ def test_parse_traits(php_parser):
     # Should extract the trait (ChunkType.TRAIT after fix)
     assert len(chunks) > 0, "No chunks found"
     # Find chunks with trait metadata
-    trait_chunks = [c for c in chunks if c.metadata and c.metadata.get("kind") == "trait"]
+    trait_chunks = [
+        c for c in chunks if c.metadata and c.metadata.get("kind") == "trait"
+    ]
     assert len(trait_chunks) > 0, "No trait chunks found"
     assert any("TestTrait" in c.symbol for c in trait_chunks), "TestTrait not found"
 
@@ -189,7 +198,9 @@ def test_metadata_abstract(php_parser):
     chunks = php_parser.parse_content(code, Path("test.php"), file_id=1)
 
     # Find class with abstract metadata
-    abstract_classes = [c for c in chunks if c.metadata and c.metadata.get("is_abstract")]
+    abstract_classes = [
+        c for c in chunks if c.metadata and c.metadata.get("is_abstract")
+    ]
     assert len(abstract_classes) > 0, "No abstract classes found"
 
 
@@ -236,7 +247,9 @@ def test_metadata_return_type(php_parser):
     chunks = php_parser.parse_content(code, Path("test.php"), file_id=1)
 
     # Find function with return type
-    funcs_with_return = [c for c in chunks if c.metadata and "return_type" in c.metadata]
+    funcs_with_return = [
+        c for c in chunks if c.metadata and "return_type" in c.metadata
+    ]
     assert len(funcs_with_return) > 0, "No functions with return type found"
 
 
@@ -284,14 +297,24 @@ def test_comprehensive_file(php_parser, comprehensive_php):
 
     # Should extract multiple chunks from comprehensive file
     # Note: cAST algorithm may merge related code, so count may be lower than individual definitions
-    assert len(chunks) > 0, f"Expected chunks from comprehensive file, got {len(chunks)}"
+    assert len(chunks) > 0, (
+        f"Expected chunks from comprehensive file, got {len(chunks)}"
+    )
 
     # Should have various chunk types
     chunk_types = {c.chunk_type for c in chunks}
-    has_classes = ChunkType.CLASS in chunk_types or any("class" in str(ct) for ct in chunk_types)
-    has_functions = ChunkType.FUNCTION in chunk_types or any("function" in str(ct) for ct in chunk_types)
-    has_traits = ChunkType.TRAIT in chunk_types or any("trait" in str(ct) for ct in chunk_types)
-    has_interfaces = ChunkType.INTERFACE in chunk_types or any("interface" in str(ct) for ct in chunk_types)
+    has_classes = ChunkType.CLASS in chunk_types or any(
+        "class" in str(ct) for ct in chunk_types
+    )
+    has_functions = ChunkType.FUNCTION in chunk_types or any(
+        "function" in str(ct) for ct in chunk_types
+    )
+    has_traits = ChunkType.TRAIT in chunk_types or any(
+        "trait" in str(ct) for ct in chunk_types
+    )
+    has_interfaces = ChunkType.INTERFACE in chunk_types or any(
+        "interface" in str(ct) for ct in chunk_types
+    )
 
     # Should have at least some of these types
     type_count = sum([has_classes, has_functions, has_traits, has_interfaces])
@@ -303,7 +326,9 @@ def test_comprehensive_file(php_parser, comprehensive_php):
 
     # Should have some PHP-specific features in the code
     all_code = "\n".join(c.code for c in chunks)
-    assert "namespace" in all_code or "class" in all_code, "No PHP structures found in parsed code"
+    assert "namespace" in all_code or "class" in all_code, (
+        "No PHP structures found in parsed code"
+    )
 
 
 def test_top_level_return_config_literals(php_parser):
@@ -332,75 +357,83 @@ return [
 
     assert len(chunks) > 0, "No chunks returned for top-level return config"
     # Should include the literal token inside at least one chunk's code
-    assert any("SERVICE_URL" in c.code for c in chunks), "Literal from config not captured"
+    assert any("SERVICE_URL" in c.code for c in chunks), (
+        "Literal from config not captured"
+    )
     # Prefer tagging as ARRAY when possible
     from chunkhound.core.types.common import ChunkType
-    assert any(c.chunk_type == ChunkType.ARRAY for c in chunks), "Config array not tagged as ARRAY"
+
+    assert any(c.chunk_type == ChunkType.ARRAY for c in chunks), (
+        "Config array not tagged as ARRAY"
+    )
 
 
-@pytest.mark.parametrize("test_name,php_code,expected_checks", [
-    (
-        "Function with typed parameters and return type",
-        """<?php
+@pytest.mark.parametrize(
+    "test_name,php_code,expected_checks",
+    [
+        (
+            "Function with typed parameters and return type",
+            """<?php
 function getUser(int $id, ?string $name = null): ?User {
     return null;
 }
 """,
-        {
-            "kind": "function",
-            "node_type": "function_definition",
-            "return_type": "?User",
-        }
-    ),
-    (
-        "Abstract class",
-        """<?php
+            {
+                "kind": "function",
+                "node_type": "function_definition",
+                "return_type": "?User",
+            },
+        ),
+        (
+            "Abstract class",
+            """<?php
 abstract class BaseService {
     private static $instance;
 }
 """,
-        {
-            "kind": "class",
-            "is_abstract": True,
-        }
-    ),
-    (
-        "Final class",
-        """<?php
+            {
+                "kind": "class",
+                "is_abstract": True,
+            },
+        ),
+        (
+            "Final class",
+            """<?php
 final class FinalService {
     public function test() {}
 }
 """,
-        {
-            "kind": "class",
-            "is_final": True,
-        }
-    ),
-    (
-        "Interface",
-        """<?php
+            {
+                "kind": "class",
+                "is_final": True,
+            },
+        ),
+        (
+            "Interface",
+            """<?php
 interface ServiceInterface {
     public function execute(): mixed;
 }
 """,
-        {
-            "kind": "interface",
-        }
-    ),
-    (
-        "Trait",
-        """<?php
+            {
+                "kind": "interface",
+            },
+        ),
+        (
+            "Trait",
+            """<?php
 trait Loggable {
     private function log(string $message): void {
         echo $message;
     }
 }
 """,
-        {
-            "kind": "trait",
-        }
-    ),
-])
+            {
+                "kind": "trait",
+            },
+        ),
+    ],
+)
 def test_php_metadata_features(php_parser, test_name, php_code, expected_checks):
     """Test PHP metadata extraction for specific language features."""
     chunks = php_parser.parse_content(php_code, Path("test.php"), file_id=1)
@@ -415,8 +448,9 @@ def test_php_metadata_features(php_parser, test_name, php_code, expected_checks)
     # Check all expected metadata values
     for key, expected_value in expected_checks.items():
         actual_value = chunk.metadata.get(key)
-        assert actual_value == expected_value, \
+        assert actual_value == expected_value, (
             f"{test_name}: {key} mismatch - expected {expected_value}, got {actual_value}"
+        )
 
 
 if __name__ == "__main__":

@@ -219,7 +219,9 @@ class EmbeddingService(BaseService):
 
             # Optimize if fragmentation high after embedding generation
             if generated_count > 0 and hasattr(self._db, "optimize_tables"):
-                if hasattr(self._db, "should_optimize") and self._db.should_optimize("post-embedding"):
+                if hasattr(self._db, "should_optimize") and self._db.should_optimize(
+                    "post-embedding"
+                ):
                     logger.debug("Optimizing database after embedding generation...")
                     self._db.optimize_tables()
 

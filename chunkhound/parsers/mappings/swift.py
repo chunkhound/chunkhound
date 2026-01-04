@@ -385,7 +385,13 @@ class SwiftMapping(BaseMapping):
                 modifier_text = self.get_node_text(modifiers_node, source).strip()
 
                 # Check for access modifiers
-                access_modifiers = ["open", "public", "internal", "fileprivate", "private"]
+                access_modifiers = [
+                    "open",
+                    "public",
+                    "internal",
+                    "fileprivate",
+                    "private",
+                ]
                 for modifier in access_modifiers:
                     if modifier in modifier_text:
                         return modifier
@@ -700,7 +706,9 @@ class SwiftMapping(BaseMapping):
                             break
                         elif child.type == "actor":
                             declaration_kind = "actor"
-                            metadata["concurrency"] = True  # Mark as concurrency-related
+                            metadata["concurrency"] = (
+                                True  # Mark as concurrency-related
+                            )
                             break
                         elif child.type == "extension":
                             declaration_kind = "extension"

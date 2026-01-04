@@ -39,12 +39,12 @@ def test_hash_performance_10mb_file(tmp_path: Path):
     # Verify performance: should be <50ms (2x faster than SHA-256's ~100ms)
     # Allow some slack for CI environments (100ms max)
     assert elapsed < 0.1, (
-        f"Hash computation took {elapsed*1000:.1f}ms, expected <100ms. "
+        f"Hash computation took {elapsed * 1000:.1f}ms, expected <100ms. "
         f"This may indicate a performance regression."
     )
 
     # Log actual performance for monitoring
-    print(f"\nxxHash3-64 performance: {elapsed*1000:.1f}ms for 10MB file")
+    print(f"\nxxHash3-64 performance: {elapsed * 1000:.1f}ms for 10MB file")
 
 
 def test_hash_format_consistency(tmp_path: Path):

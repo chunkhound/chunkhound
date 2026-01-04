@@ -58,8 +58,7 @@ class IndexingConfig(BaseModel):
     # File parsing safety
     per_file_timeout_seconds: float = Field(
         default=3.0,
-        description=
-        "Maximum seconds to spend parsing a single file (0 disables timeout)",
+        description="Maximum seconds to spend parsing a single file (0 disables timeout)",
     )
     per_file_timeout_min_size_kb: int = Field(
         default=128,
@@ -206,7 +205,10 @@ class IndexingConfig(BaseModel):
     # - "combined": same as default behavior
     # - "config_only": use only config excludes (legacy behavior)
     # - "gitignore_only": use only gitignore (rare; sentinel also forces this)
-    exclude_mode: str | None = Field(default=None, description="Exclude source mode: combined|config_only|gitignore_only")
+    exclude_mode: str | None = Field(
+        default=None,
+        description="Exclude source mode: combined|config_only|gitignore_only",
+    )
 
     # Root-level file name for ChunkHound-specific ignores (gitwildmatch syntax)
     chignore_file: str = Field(default=".chignore")
@@ -426,7 +428,11 @@ class IndexingConfig(BaseModel):
 
         # Non‑repo workspace .gitignore toggle
         if wr := os.getenv("CHUNKHOUND_INDEXING__WORKSPACE_GITIGNORE_NONREPO"):
-            config["workspace_gitignore_nonrepo"] = wr.strip().lower() not in ("0", "false", "no")
+            config["workspace_gitignore_nonrepo"] = wr.strip().lower() not in (
+                "0",
+                "false",
+                "no",
+            )
 
         return config
 
@@ -468,7 +474,9 @@ class IndexingConfig(BaseModel):
     # Convenience helper for callers to interpret ignore source selection
     def resolve_ignore_sources(self) -> list[str]:
         # 1) Sentinel or explicit mode -> gitignore only
-        if self.exclude_sentinel == ".gitignore" or (self.exclude_mode and self.exclude_mode.lower() == "gitignore_only"):
+        if self.exclude_sentinel == ".gitignore" or (
+            self.exclude_mode and self.exclude_mode.lower() == "gitignore_only"
+        ):
             return ["gitignore"]
         # 2) User provided exclude list (detect either explicit flag or any deviation from defaults)
         if getattr(self, "exclude_user_supplied", False):
@@ -528,15 +536,23 @@ class IndexingConfig(BaseModel):
                 )
             except (TypeError, ValueError):
                 pass
-        if hasattr(args, "mtime_epsilon_seconds") and args.mtime_epsilon_seconds is not None:
+        if (
+            hasattr(args, "mtime_epsilon_seconds")
+            and args.mtime_epsilon_seconds is not None
+        ):
             try:
                 overrides["mtime_epsilon_seconds"] = float(args.mtime_epsilon_seconds)
             except (TypeError, ValueError):
                 pass
         # Structured config file size threshold override via CLI
-        if hasattr(args, "config_file_size_threshold_kb") and args.config_file_size_threshold_kb is not None:
+        if (
+            hasattr(args, "config_file_size_threshold_kb")
+            and args.config_file_size_threshold_kb is not None
+        ):
             try:
-                overrides["config_file_size_threshold_kb"] = int(args.config_file_size_threshold_kb)
+                overrides["config_file_size_threshold_kb"] = int(
+                    args.config_file_size_threshold_kb
+                )
             except (TypeError, ValueError):
                 pass
 

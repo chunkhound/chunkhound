@@ -13,7 +13,6 @@ heavy dependencies like vLLM or TEI servers.
 import asyncio
 import json
 import sys
-from typing import Any
 
 import httpx
 from aiohttp import web
@@ -59,7 +58,9 @@ class MockRerankServer:
             top_n = body.get("top_n")
 
             format_name = "TEI" if is_tei else "Cohere"
-            logger.debug(f"Detected {format_name} format request with {len(documents)} documents")
+            logger.debug(
+                f"Detected {format_name} format request with {len(documents)} documents"
+            )
 
             # Calculate mock relevance scores
             results = []
@@ -84,58 +85,68 @@ class MockRerankServer:
                 f"Reranked {len(documents)} documents, returning {len(results)} results ({format_name} format)"
             )
 
-            return web.json_response({"results": results, "model": model, "meta": {"api_version": "v1"}})
+            return web.json_response(
+                {"results": results, "model": model, "meta": {"api_version": "v1"}}
+            )
 
         except Exception as e:
             logger.error(f"Error in rerank handler: {e}")
             return web.json_response({"error": str(e)}, status=400)
-    
+
     def _calculate_relevance(self, query: str, document: str) -> float:
         """
         Calculate mock relevance score using simple heuristics.
-        
+
         This is for testing only - uses basic text similarity.
         """
         if not query or not document:
             return 0.0
-        
+
         # Convert to lowercase for comparison
         query_lower = query.lower()
         doc_lower = document.lower()
-        
+
         # Simple scoring heuristics
         score = 0.0
-        
+
         # 1. Exact query match
         if query_lower in doc_lower:
             score += 0.5
-        
+
         # 2. Word overlap (Jaccard similarity)
         query_words = set(query_lower.split())
         doc_words = set(doc_lower.split())
-        
+
         if query_words and doc_words:
             intersection = query_words & doc_words
             union = query_words | doc_words
             if union:
                 jaccard = len(intersection) / len(union)
                 score += jaccard * 0.3
-        
+
         # 3. Keyword matching for common programming terms
         programming_keywords = {
-            "function", "class", "method", "def", "import", 
-            "return", "async", "await", "api", "endpoint"
+            "function",
+            "class",
+            "method",
+            "def",
+            "import",
+            "return",
+            "async",
+            "await",
+            "api",
+            "endpoint",
         }
-        
+
         query_has_keywords = bool(query_words & programming_keywords)
         doc_has_keywords = bool(doc_words & programming_keywords)
-        
+
         if query_has_keywords and doc_has_keywords:
             score += 0.2
-        
+
         # Ensure score is between 0 and 1
         return min(max(score, 0.0), 1.0)
-    
+
     async def start(self) -> None:
         """Start the mock server."""
         logger.info(f"Starting mock rerank server on {self.host}:{self.port}")
@@ -152,7 +163,7 @@ class MockRerankServer:
         await self.site.start()
 
         logger.info(f"Mock rerank server listening on http://{self.host}:{self.port}")
-        logger.info(f"Endpoints: /health, /rerank")
+        logger.info("Endpoints: /health, /rerank")
 
     async def stop(self) -> None:
         """Stop the mock server."""
@@ -183,16 +194,16 @@ async def test_server():
     # Start server
     server = MockRerankServer()
     await server.start()
-    
+
     try:
         # Give server time to start
         await asyncio.sleep(0.1)
-        
+
         # Test health endpoint
         async with httpx.AsyncClient() as client:
             response = await client.get("http://localhost:8001/health")
             print(f"Health check: {response.status_code} - {response.json()}")
-            
+
             # Test rerank endpoint
             rerank_request = {
                 "model": "test-model",
@@ -201,17 +212,16 @@ async def test_server():
                     "def calculate_sum(a, b): return a + b",
                     "import numpy as np",
                     "class Calculator: pass",
-                    "function add(x, y) { return x + y; }"
-                ]
+                    "function add(x, y) { return x + y; }",
+                ],
             }
-            
+
             response = await client.post(
-                "http://localhost:8001/rerank",
-                json=rerank_request
+                "http://localhost:8001/rerank", json=rerank_request
             )
             print(f"Rerank response: {response.status_code}")
             print(json.dumps(response.json(), indent=2))
-            
+
     finally:
         await server.stop()
 
@@ -219,14 +229,14 @@ async def test_server():
 def main():
     """Run the mock rerank server."""
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="Mock reranking server for testing")
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8001, help="Port to bind to")
     parser.add_argument("--test", action="store_true", help="Run test mode")
-    
+
     args = parser.parse_args()
-    
+
     if args.test:
         # Run test mode
         asyncio.run(test_server())

@@ -69,8 +69,7 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
     out_dir_arg = getattr(args, "out", None)
     if out_dir_arg is None:
         formatter.error(
-            "Map requires --out so it can write an index and per-topic "
-            "files."
+            "Map requires --out so it can write an index and per-topic files."
         )
         sys.exit(2)
 

@@ -73,7 +73,9 @@ class _DummyProc:
 
 
 @pytest.mark.asyncio
-async def test_llm_codex_cli_status_reflects_configured_model_and_effort(monkeypatch, tmp_path: Path):
+async def test_llm_codex_cli_status_reflects_configured_model_and_effort(
+    monkeypatch, tmp_path: Path
+):
     """End-to-end check: LLMConfig -> LLMManager -> CodexCLI overlay config."""
     from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 
@@ -92,8 +94,12 @@ async def test_llm_codex_cli_status_reflects_configured_model_and_effort(monkeyp
     # Ensure we never touch a real Codex home or binary
     monkeypatch.setenv("CHUNKHOUND_CODEX_STDIN_FIRST", "0")
     monkeypatch.setenv("CHUNKHOUND_CODEX_CONFIG_OVERRIDE", "env")
-    monkeypatch.setattr(CodexCLIProvider, "_get_base_codex_home", lambda self: None, raising=True)
-    monkeypatch.setattr(CodexCLIProvider, "_codex_available", lambda self: True, raising=True)
+    monkeypatch.setattr(
+        CodexCLIProvider, "_get_base_codex_home", lambda self: None, raising=True
+    )
+    monkeypatch.setattr(
+        CodexCLIProvider, "_codex_available", lambda self: True, raising=True
+    )
 
     captured: dict[str, object] = {"env": None, "config_text": None}
 
@@ -122,7 +128,9 @@ async def test_llm_codex_cli_status_reflects_configured_model_and_effort(monkeyp
         status_text = f"MODEL={model_name};REASONING_EFFORT={effort_value}"
         return _DummyProc(rc=0, out=status_text.encode("utf-8"), err=b"")
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True)
+    monkeypatch.setattr(
+        asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True
+    )
 
     llm_manager = LLMManager(utility_config, synthesis_config)
     provider = llm_manager.get_synthesis_provider()

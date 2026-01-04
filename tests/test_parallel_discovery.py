@@ -4,8 +4,9 @@ Verifies that parallel and sequential file discovery produce identical results,
 especially with .gitignore patterns and root-level files.
 """
 
+
 import pytest
-from pathlib import Path
+
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.parser_factory import create_parser_for_language
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
@@ -15,8 +16,9 @@ from chunkhound.services.indexing_coordinator import IndexingCoordinator
 @pytest.fixture
 async def coordinator(tmp_path):
     """Create test coordinator with config."""
-    from chunkhound.core.config.config import Config
     import json
+
+    from chunkhound.core.config.config import Config
 
     db = DuckDBProvider(":memory:", base_directory=tmp_path)
     db.connect()
@@ -124,7 +126,9 @@ async def test_gitignore_excludes_root_files(coordinator, test_repo):
     assert "debug.log" not in filenames, "Should exclude .log files at root"
     assert "temp.tmp" not in filenames, "Should exclude .tmp files at root"
     assert "test.log" not in filenames, "Should exclude .log files in subdirs"
-    assert "data.cache" not in filenames, "Should exclude .cache files from subdir gitignore"
+    assert "data.cache" not in filenames, (
+        "Should exclude .cache files from subdir gitignore"
+    )
 
 
 @pytest.mark.asyncio

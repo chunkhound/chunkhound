@@ -141,20 +141,20 @@ class TestOllamaProviderIntegration:
 
     def test_factory_can_create_ollama_provider_without_api_key(self):
         """Test that factory can create provider for Ollama config without API key.
-        
+
         This test reproduces the actual bug: the config layer works correctly,
         but the provider creation fails because is_available() requires API key.
         """
         config = EmbeddingConfig(
             provider="openai",
-            base_url="http://localhost:11434/v1", 
-            model="nomic-embed-text"
+            base_url="http://localhost:11434/v1",
+            model="nomic-embed-text",
             # No api_key - this should work for custom endpoints
         )
-        
+
         # Config validation should pass (this already works)
         assert config.is_provider_configured(), "Config should be valid"
-        
+
         # Provider creation should NOT raise an exception (this currently fails)
         try:
             provider = EmbeddingProviderFactory.create_provider(config)
@@ -164,44 +164,54 @@ class TestOllamaProviderIntegration:
 
     def test_openai_provider_is_available_for_custom_endpoints(self):
         """Test that OpenAIEmbeddingProvider.is_available() works for custom endpoints.
-        
+
         This test directly tests the buggy method: is_available() always requires
         API key regardless of endpoint type.
         """
         # Import here to avoid dependency issues if OpenAI lib not available
         try:
-            from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
+            from chunkhound.providers.embeddings.openai_provider import (
+                OpenAIEmbeddingProvider,
+            )
         except ImportError:
-            pytest.skip("OpenAI provider not available - install with: pip install openai")
-        
+            pytest.skip(
+                "OpenAI provider not available - install with: pip install openai"
+            )
+
         provider = OpenAIEmbeddingProvider(
             base_url="http://localhost:11434/v1",
-            model="nomic-embed-text"
+            model="nomic-embed-text",
             # No api_key provided
         )
-        
+
         # This should return True but currently returns False (the bug)
-        assert provider.is_available(), "Custom endpoint should be available without API key"
+        assert provider.is_available(), (
+            "Custom endpoint should be available without API key"
+        )
 
     @pytest.mark.asyncio
     async def test_openai_provider_client_init_custom_endpoint_without_api_key(self):
         """Test that OpenAI provider can initialize client for custom endpoints without API key.
-        
+
         This test verifies the client initialization process works correctly
         for custom endpoints even when no API key is provided.
         """
         # Import here to avoid dependency issues if OpenAI lib not available
         try:
-            from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
+            from chunkhound.providers.embeddings.openai_provider import (
+                OpenAIEmbeddingProvider,
+            )
         except ImportError:
-            pytest.skip("OpenAI provider not available - install with: pip install openai")
-        
+            pytest.skip(
+                "OpenAI provider not available - install with: pip install openai"
+            )
+
         provider = OpenAIEmbeddingProvider(
             base_url="http://localhost:11434/v1",
-            model="nomic-embed-text"
+            model="nomic-embed-text",
             # No api_key provided
         )
-        
+
         # This should not raise an exception
         try:
             await provider._ensure_client()

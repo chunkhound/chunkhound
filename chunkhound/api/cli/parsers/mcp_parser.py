@@ -35,7 +35,9 @@ def add_mcp_subparser(subparsers: Any) -> argparse.ArgumentParser:
     add_common_arguments(mcp_parser)
 
     # Add config-specific arguments - include LLM so MCP can override providers
-    add_config_arguments(mcp_parser, ["database", "embedding", "indexing", "llm", "mcp"])
+    add_config_arguments(
+        mcp_parser, ["database", "embedding", "indexing", "llm", "mcp"]
+    )
 
     return cast(argparse.ArgumentParser, mcp_parser)
 

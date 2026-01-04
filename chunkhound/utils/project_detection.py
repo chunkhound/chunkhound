@@ -73,7 +73,10 @@ def find_project_root(start_path: Path | None = None) -> Path:
     print("Solutions:", file=sys.stderr)
     print("  1. Create .chunkhound.json in your project root", file=sys.stderr)
     print("  2. Run 'chunkhound index .' from project root first", file=sys.stderr)
-    print("  3. Pass explicit path: chunkhound <command> /path/to/project", file=sys.stderr)
+    print(
+        "  3. Pass explicit path: chunkhound <command> /path/to/project",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 

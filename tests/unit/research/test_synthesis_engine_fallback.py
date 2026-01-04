@@ -46,7 +46,9 @@ def llm_manager(monkeypatch):
 async def test_rerank_out_of_bounds_falls_back(llm_manager):
     embedding_provider = _OutOfBoundsEmbeddingProvider()
     parent = _FakeParent(embedding_provider)
-    engine = SynthesisEngine(llm_manager, database_services=object(), parent_service=parent)
+    engine = SynthesisEngine(
+        llm_manager, database_services=object(), parent_service=parent
+    )
 
     chunks = [
         {
@@ -60,7 +62,11 @@ async def test_rerank_out_of_bounds_falls_back(llm_manager):
     files = {"a.py": "print('hi')"}
     budgets = {"input_tokens": 1000, "output_tokens": 100}
 
-    _prioritized, budgeted_files, _info = await engine._manage_token_budget_for_synthesis(
+    (
+        _prioritized,
+        budgeted_files,
+        _info,
+    ) = await engine._manage_token_budget_for_synthesis(
         chunks=chunks,
         files=files,
         root_query="test query",

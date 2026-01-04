@@ -17,9 +17,9 @@ from loguru import logger
 
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services.research.models import (
-    REQUIRE_CITATIONS,
     _CITATION_PATTERN,
     _CITATION_SEQUENCE_PATTERN,
+    REQUIRE_CITATIONS,
 )
 
 

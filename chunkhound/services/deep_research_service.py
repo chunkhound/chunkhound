@@ -1,7 +1,6 @@
 """Deep Research Service for ChunkHound - BFS-based semantic exploration."""
 
 import asyncio
-import os
 import re
 import threading
 from dataclasses import dataclass, field
@@ -14,17 +13,12 @@ from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services import prompts
-from chunkhound.services.clustering_service import ClusterGroup, ClusteringService
-from chunkhound.services.research.budget_calculator import BudgetCalculator
+from chunkhound.services.clustering_service import ClusterGroup
 from chunkhound.services.research.citation_manager import CitationManager
-from chunkhound.services.research.context_manager import ContextManager
-from chunkhound.services.research.file_reader import FileReader
 from chunkhound.services.research.quality_validator import QualityValidator
-from chunkhound.services.research.query_expander import QueryExpander
-from chunkhound.services.research.schemas import QueryExpansionResponse
 from chunkhound.services.research.question_generator import QuestionGenerator
+from chunkhound.services.research.schemas import QueryExpansionResponse
 from chunkhound.services.research.synthesis_engine import SynthesisEngine
-from chunkhound.services.research.unified_search import UnifiedSearch
 
 if TYPE_CHECKING:
     from chunkhound.api.cli.utils.tree_progress import TreeProgressDisplay
@@ -139,7 +133,9 @@ CLUSTER_OUTPUT_TOKEN_BUDGET = 15_000  # Max output tokens per cluster summary
 
 # Pre-compiled regex patterns for citation processing
 _CITATION_PATTERN = re.compile(r"\[\d+\]")  # Matches [N] citations
-_CITATION_SEQUENCE_PATTERN = re.compile(r"(?:\[\d+\])+")  # Matches sequences like [1][2][3]
+_CITATION_SEQUENCE_PATTERN = re.compile(
+    r"(?:\[\d+\])+"
+)  # Matches sequences like [1][2][3]
 
 # Smart boundary detection for context-aware file reading
 ENABLE_SMART_BOUNDARIES = True  # Expand to natural code boundaries (functions/classes)
@@ -2620,7 +2616,11 @@ class DeepResearchService:
                 display_name = node.name
 
                 # Add reference number for files (if map provided)
-                if node.is_file and file_reference_map and node.full_path in file_reference_map:
+                if (
+                    node.is_file
+                    and file_reference_map
+                    and node.full_path in file_reference_map
+                ):
                     ref_num = file_reference_map[node.full_path]
                     display_name = f"[{ref_num}] {display_name}"
 

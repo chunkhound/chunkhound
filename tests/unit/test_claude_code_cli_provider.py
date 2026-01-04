@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import subprocess
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -325,7 +324,9 @@ class TestClaudeCodeCLIProvider:
         assert mock_subprocess.call_count == 3
 
     @pytest.mark.asyncio
-    async def test_timeout_with_already_terminated_process(self, provider, mock_subprocess):
+    async def test_timeout_with_already_terminated_process(
+        self, provider, mock_subprocess
+    ):
         """Test that process is not killed if already terminated."""
         # Mock process that terminates before we can kill it
         mock_process = AsyncMock()

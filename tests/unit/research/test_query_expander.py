@@ -33,6 +33,7 @@ def llm_manager(fake_llm_provider, monkeypatch):
     Monkeypatch the provider creation to return our fake provider
     instead of initializing real providers.
     """
+
     # Mock the _create_provider method to return our fake provider
     def mock_create_provider(self, config):
         return fake_llm_provider
@@ -104,9 +105,7 @@ class TestBuildSearchQuery:
     def test_query_first_position_for_embedding_bias(self, query_expander):
         """Query must come before context for embedding model position bias."""
         query = "database query"
-        context = ResearchContext(
-            root_query="root", ancestors=["parent1", "parent2"]
-        )
+        context = ResearchContext(root_query="root", ancestors=["parent1", "parent2"])
 
         result = query_expander.build_search_query(query, context)
 

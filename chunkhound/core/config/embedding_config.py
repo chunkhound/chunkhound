@@ -18,7 +18,6 @@ from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
 
 from .openai_utils import is_official_openai_endpoint
 
-
 # Error message constants for consistent messaging across config and provider
 RERANK_MODEL_REQUIRED_COHERE = (
     "rerank_model is required when using rerank_format='cohere'. "

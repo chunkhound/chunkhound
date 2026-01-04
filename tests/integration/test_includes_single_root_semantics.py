@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 pytestmark = pytest.mark.skipif(
-    subprocess.run(["which","git"], stdout=subprocess.DEVNULL).returncode != 0,
+    subprocess.run(["which", "git"], stdout=subprocess.DEVNULL).returncode != 0,
     reason="git required",
 )
 
@@ -23,7 +23,13 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
 
 def _git_init_and_commit(repo: Path) -> None:
     repo.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git","init"], cwd=str(repo), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(
+        ["git", "init"],
+        cwd=str(repo),
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
     _git(repo, "config", "user.email", "ci@example.com")
     _git(repo, "config", "user.name", "CI")
     _git(repo, "add", "-A")
@@ -42,13 +48,7 @@ def test_anchored_include_is_evaluated_from_ch_root(tmp_path: Path) -> None:
     _git_init_and_commit(repo)
 
     # Config anchored from CH root
-    cfg = {
-        "indexing": {
-            "include": [
-                "monorepo/src/**/*.ts"
-            ]
-        }
-    }
+    cfg = {"indexing": {"include": ["monorepo/src/**/*.ts"]}}
     (ws / ".chunkhound.json").write_text(json.dumps(cfg))
 
     env = os.environ.copy()
@@ -56,7 +56,7 @@ def test_anchored_include_is_evaluated_from_ch_root(tmp_path: Path) -> None:
     # Force git backend to exercise repo enumeration path
     env["CHUNKHOUND_INDEXING__DISCOVERY_BACKEND"] = "git"
     p = subprocess.run(
-        ["uv","run","chunkhound","index","--simulate", str(ws), "--sort","path"],
+        ["uv", "run", "chunkhound", "index", "--simulate", str(ws), "--sort", "path"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

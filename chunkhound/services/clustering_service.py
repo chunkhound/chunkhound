@@ -112,9 +112,7 @@ class ClusteringService:
         # Phase 1: HDBSCAN discovery of natural clusters
         logger.debug("Phase 1: Discovering natural clusters with HDBSCAN")
         embeddings_array = np.array(embeddings)
-        labels, phase1_meta = self._discover_natural_clusters(
-            embeddings_array
-        )
+        labels, phase1_meta = self._discover_natural_clusters(embeddings_array)
 
         # Partition files by cluster labels
         native_clusters: dict[int, list[str]] = {}
