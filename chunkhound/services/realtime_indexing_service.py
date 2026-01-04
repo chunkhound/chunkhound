@@ -212,6 +212,10 @@ class RealtimeIndexingService:
     # Retention period for event history - entries older than this are cleaned up
     _EVENT_HISTORY_RETENTION_SECONDS = 10.0
 
+    # Loop safety: health logging intervals (service loops run continuously)
+    _LOOP_HEALTH_LOG_ITERATIONS = 10000  # Log health every N iterations
+    _LOOP_HEALTH_LOG_SECONDS = 3600  # Log health every N seconds (1 hour)
+
     def __init__(
         self,
         services: DatabaseServices,
@@ -476,7 +480,27 @@ class RealtimeIndexingService:
         # freshly created files are detected quickly after startup/fallback.
         polling_start = time.time()
 
+        # Loop safety: track iterations for health logging
+        loop_iterations = 0
+        loop_start_time = time.monotonic()
+        last_health_log_time = loop_start_time
+
         while True:
+            loop_iterations += 1
+
+            # Periodic health logging (every N iterations or N seconds)
+            current_time = time.monotonic()
+            if (
+                loop_iterations % self._LOOP_HEALTH_LOG_ITERATIONS == 0
+                or current_time - last_health_log_time > self._LOOP_HEALTH_LOG_SECONDS
+            ):
+                elapsed = current_time - loop_start_time
+                logger.debug(
+                    f"Polling monitor health: {loop_iterations} iterations, "
+                    f"{elapsed:.0f}s elapsed, {len(known_files)} known files"
+                )
+                last_health_log_time = current_time
+
             try:
                 current_files = set()
                 files_checked = 0
@@ -573,13 +597,36 @@ class RealtimeIndexingService:
 
     async def _consume_events(self) -> None:
         """Simple event consumer - pure asyncio queue."""
+        # Loop safety: track iterations for health logging
+        loop_iterations = 0
+        loop_start_time = time.monotonic()
+        last_health_log_time = loop_start_time
+        events_processed = 0
+
         while True:
+            loop_iterations += 1
+
+            # Periodic health logging (every N iterations or N seconds)
+            current_monotonic = time.monotonic()
+            if (
+                loop_iterations % self._LOOP_HEALTH_LOG_ITERATIONS == 0
+                or current_monotonic - last_health_log_time
+                > self._LOOP_HEALTH_LOG_SECONDS
+            ):
+                elapsed = current_monotonic - loop_start_time
+                logger.debug(
+                    f"Event consumer health: {loop_iterations} iterations, "
+                    f"{events_processed} events processed, {elapsed:.0f}s elapsed"
+                )
+                last_health_log_time = current_monotonic
+
             try:
                 # Get event from async queue with timeout
                 try:
                     event_type, file_path = await asyncio.wait_for(
                         self.event_queue.get(), timeout=1.0
                     )
+                    events_processed += 1
                 except asyncio.TimeoutError:
                     # Normal timeout, continue to check if task should stop
                     continue
@@ -730,10 +777,34 @@ class RealtimeIndexingService:
         """Main processing loop - simple and robust."""
         logger.debug("Starting processing loop")
 
+        # Loop safety: track iterations for health logging
+        loop_iterations = 0
+        loop_start_time = time.monotonic()
+        last_health_log_time = loop_start_time
+        files_processed = 0
+
         while True:
+            loop_iterations += 1
+
+            # Periodic health logging (every N iterations or N seconds)
+            current_monotonic = time.monotonic()
+            if (
+                loop_iterations % self._LOOP_HEALTH_LOG_ITERATIONS == 0
+                or current_monotonic - last_health_log_time
+                > self._LOOP_HEALTH_LOG_SECONDS
+            ):
+                elapsed = current_monotonic - loop_start_time
+                logger.debug(
+                    f"Process loop health: {loop_iterations} iterations, "
+                    f"{files_processed} files processed, {elapsed:.0f}s elapsed, "
+                    f"{len(self.failed_files)} failures"
+                )
+                last_health_log_time = current_monotonic
+
             try:
                 # Wait for next file (blocks if queue is empty)
                 priority, file_path = await self.file_queue.get()
+                files_processed += 1
 
                 # Remove from pending set
                 self.pending_files.discard(file_path)
@@ -762,8 +833,11 @@ class RealtimeIndexingService:
                 skip_embeddings = True
 
                 # Use existing indexing coordinator
+                # Pass watch_path as base_directory for correct path resolution
                 result = await self.services.indexing_coordinator.process_file(
-                    file_path, skip_embeddings=skip_embeddings
+                    file_path,
+                    skip_embeddings=skip_embeddings,
+                    base_directory=self.watch_path,
                 )
 
                 # Ensure database transaction is flushed for immediate visibility

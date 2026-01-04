@@ -12,6 +12,78 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 
+class MultiRepoConfig(BaseModel):
+    """Multi-repository database configuration.
+
+    Supports two modes:
+    - per-repo: Each repository has its own .chunkhound/db (legacy mode)
+    - global: All repositories indexed to single database at global_db_path
+    """
+
+    enabled: bool = Field(default=False, description="Enable multi-repository support")
+    mode: Literal["per-repo", "global"] = Field(
+        default="per-repo",
+        description="Database mode: per-repo (default) or global (single DB)",
+    )
+    global_db_path: Path = Field(
+        default_factory=lambda: Path.home() / ".chunkhound" / "global" / "db",
+        description="Path to global database (used when mode=global)",
+    )
+
+    # Daemon configuration
+    daemon_port: int = Field(
+        default=5173,
+        ge=1,
+        le=65535,
+        description="Port for HTTP daemon server",
+    )
+    daemon_host: str = Field(
+        default="127.0.0.1",
+        description="Host for HTTP daemon server (use 0.0.0.0 for all interfaces)",
+    )
+
+    # Watcher configuration
+    watcher_debounce_seconds: float = Field(
+        default=2.0,
+        ge=0.1,
+        le=60.0,
+        description="Debounce delay in seconds for file watcher events",
+    )
+    watcher_max_pending_events: int = Field(
+        default=10000,
+        ge=100,
+        le=1000000,
+        description="Maximum total pending events before force-processing oldest",
+    )
+    watcher_max_pending_per_project: int = Field(
+        default=500,
+        ge=10,
+        le=10000,
+        description="Maximum pending events per project before force-flush",
+    )
+
+    # Proxy configuration
+    proxy_timeout_seconds: float = Field(
+        default=120.0,
+        ge=5.0,
+        le=3600.0,
+        description="Timeout in seconds for proxy client HTTP requests",
+    )
+
+    # Auto-start configuration
+    auto_start_daemon: bool = Field(
+        default=False,
+        description="Auto-start daemon when stdio session starts in global mode",
+    )
+
+    @field_validator("global_db_path")
+    def validate_global_db_path(cls, v: Path | None) -> Path:
+        """Convert string paths to Path objects."""
+        if v is not None and not isinstance(v, Path):
+            return Path(v)
+        return v or Path.home() / ".chunkhound" / "global" / "db"
+
+
 class DatabaseConfig(BaseModel):
     """Database configuration with support for multiple providers.
 
@@ -49,6 +121,12 @@ class DatabaseConfig(BaseModel):
         description="Maximum database size in MB before indexing is stopped (None = no limit)",
     )
 
+    # Multi-repository support
+    multi_repo: MultiRepoConfig = Field(
+        default_factory=MultiRepoConfig,
+        description="Multi-repository database configuration",
+    )
+
     @field_validator("path")
     def validate_path(cls, v: Path | None) -> Path | None:
         """Convert string paths to Path objects."""
@@ -64,8 +142,11 @@ class DatabaseConfig(BaseModel):
             raise ValueError(f"Invalid provider: {v}. Must be one of {valid_providers}")
         return v
 
-    def get_db_path(self) -> Path:
-        """Get the actual database location for the configured provider.
+    def get_db_path(self, current_dir: Path | None = None) -> Path:
+        """Get the actual database location for the configured provider and mode.
+
+        Args:
+            current_dir: Current directory for per-repo mode path resolution
 
         Returns the final path used by the provider, including all
         provider-specific transformations:
@@ -73,12 +154,27 @@ class DatabaseConfig(BaseModel):
         - LanceDB: path/lancedb.lancedb/ (directory with .lancedb suffix)
 
         This is the authoritative source for database location checks.
+
+        Raises:
+            ValueError: If database path not configured or invalid mode
         """
-        if self.path is None:
-            raise ValueError("Database path not configured")
+        # Determine which path to use based on multi-repo mode
+        if self.multi_repo.enabled and self.multi_repo.mode == "global":
+            # Global mode: use global_db_path
+            db_dir = self.multi_repo.global_db_path
+        else:
+            # Per-repo mode (legacy): use configured path or derive from current_dir
+            if self.path is None:
+                if current_dir is None:
+                    raise ValueError(
+                        "Database path not configured and current_dir not provided"
+                    )
+                db_dir = current_dir / ".chunkhound" / "db"
+            else:
+                db_dir = self.path
 
         # Skip directory creation for in-memory databases (":memory:" is invalid on Windows)
-        is_memory = str(self.path) == ":memory:"
+        is_memory = str(db_dir) == ":memory:"
 
         # Backwards-compatible handling:
         # - Older ChunkHound versions used `database.path` as the direct DuckDB
@@ -90,19 +186,20 @@ class DatabaseConfig(BaseModel):
         # legacy DuckDB database file and return it directly instead of trying
         # to create a directory at that location.
         if self.provider == "duckdb" and not is_memory:
-            if self.path.exists() and self.path.is_file():
-                return self.path
+            if db_dir.exists() and db_dir.is_file():
+                return db_dir
 
         if not is_memory:
             # For directory-style layouts, ensure the base path exists.
-            self.path.mkdir(parents=True, exist_ok=True)
+            db_dir.mkdir(parents=True, exist_ok=True)
 
+        # Return provider-specific path
         if self.provider == "duckdb":
-            return self.path if is_memory else self.path / "chunks.db"
+            return db_dir if is_memory else db_dir / "chunks.db"
         elif self.provider == "lancedb":
             # LanceDB adds .lancedb suffix to prevent naming collisions
             # and clarify storage structure (see lancedb_provider.py:111-113)
-            lancedb_base = self.path / "lancedb"
+            lancedb_base = db_dir / "lancedb"
             return lancedb_base.parent / f"{lancedb_base.stem}.lancedb"
         else:
             raise ValueError(f"Unknown database provider: {self.provider}")
@@ -140,7 +237,8 @@ class DatabaseConfig(BaseModel):
     def load_from_env(cls) -> dict[str, Any]:
         """Load database config from environment variables."""
         config = {}
-        # Support both new and legacy env var names
+
+        # Database path and provider
         if db_path := (
             os.getenv("CHUNKHOUND_DATABASE__PATH") or os.getenv("CHUNKHOUND_DB_PATH")
         ):
@@ -160,6 +258,74 @@ class DatabaseConfig(BaseModel):
             except ValueError:
                 # Invalid value - silently ignore
                 pass
+
+        # Multi-repo configuration
+        multi_repo_config = {}
+        if enabled := os.getenv("CHUNKHOUND_DATABASE__MULTI_REPO__ENABLED"):
+            multi_repo_config["enabled"] = enabled.lower() in ("true", "1", "yes")
+        if mode := os.getenv("CHUNKHOUND_DATABASE__MULTI_REPO__MODE"):
+            multi_repo_config["mode"] = mode
+        if global_db_path := os.getenv(
+            "CHUNKHOUND_DATABASE__MULTI_REPO__GLOBAL_DB_PATH"
+        ):
+            multi_repo_config["global_db_path"] = Path(global_db_path)
+
+        # Daemon configuration
+        if daemon_port := os.getenv("CHUNKHOUND_DATABASE__MULTI_REPO__DAEMON_PORT"):
+            try:
+                multi_repo_config["daemon_port"] = int(daemon_port)
+            except ValueError:
+                pass
+        if daemon_host := os.getenv("CHUNKHOUND_DATABASE__MULTI_REPO__DAEMON_HOST"):
+            multi_repo_config["daemon_host"] = daemon_host
+
+        # Watcher configuration
+        if debounce := os.getenv(
+            "CHUNKHOUND_DATABASE__MULTI_REPO__WATCHER_DEBOUNCE_SECONDS"
+        ):
+            try:
+                multi_repo_config["watcher_debounce_seconds"] = float(debounce)
+            except ValueError:
+                pass
+        if max_events := os.getenv(
+            "CHUNKHOUND_DATABASE__MULTI_REPO__WATCHER_MAX_PENDING_EVENTS"
+        ):
+            try:
+                multi_repo_config["watcher_max_pending_events"] = int(max_events)
+            except ValueError:
+                pass
+        if max_per_project := os.getenv(
+            "CHUNKHOUND_DATABASE__MULTI_REPO__WATCHER_MAX_PENDING_PER_PROJECT"
+        ):
+            try:
+                multi_repo_config["watcher_max_pending_per_project"] = int(
+                    max_per_project
+                )
+            except ValueError:
+                pass
+
+        # Proxy configuration
+        if timeout := os.getenv(
+            "CHUNKHOUND_DATABASE__MULTI_REPO__PROXY_TIMEOUT_SECONDS"
+        ):
+            try:
+                multi_repo_config["proxy_timeout_seconds"] = float(timeout)
+            except ValueError:
+                pass
+
+        # Auto-start configuration
+        if auto_start := os.getenv(
+            "CHUNKHOUND_DATABASE__MULTI_REPO__AUTO_START_DAEMON"
+        ):
+            multi_repo_config["auto_start_daemon"] = auto_start.lower() in (
+                "true",
+                "1",
+                "yes",
+            )
+
+        if multi_repo_config:
+            config["multi_repo"] = multi_repo_config
+
         return config
 
     @classmethod

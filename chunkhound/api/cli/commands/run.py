@@ -54,8 +54,8 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
     if local_config_path.exists():
         formatter.info(f"Found local config: {local_config_path}")
 
-    # Use database path from config
-    db_path = Path(config.database.path)
+    # Use database path from config (handles global mode automatically)
+    db_path = config.database.get_db_path(current_dir=project_dir)
 
     # Display modern startup information
     formatter.startup_info(
@@ -72,6 +72,114 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
     args.db = db_path
     if not _validate_run_arguments(args, formatter, config):
         sys.exit(1)
+
+    # Check if we should proxy through daemon (global mode with daemon running)
+    from chunkhound.api.cli.utils.database import get_daemon_proxy_if_running
+
+    proxy = get_daemon_proxy_if_running(config)
+    if proxy:
+        formatter.info("Daemon running - indexing via background job...")
+        try:
+            # Fetch current stats for this project before indexing
+            try:
+                # Resolve to absolute path before sending to daemon
+                initial_stats = proxy.get_stats(project_dir.resolve())
+                formatter.initial_stats_panel(initial_stats)
+            except Exception:
+                # Non-fatal: continue even if stats fetch fails
+                pass
+
+            tags_arg = getattr(args, "tags", None)
+            tags = [t.strip() for t in tags_arg.split(",")] if tags_arg else None
+
+            # Start async indexing job
+            result = proxy.index_project(project_dir, tags=tags, async_mode=True)
+
+            if result.get("status") == "accepted":
+                job_id = result.get("job_id")
+                formatter.info(f"Job started: {job_id}")
+
+                # Wait for job with progress display
+                last_phase = [None]  # Use list for closure mutability
+                last_files = [0]
+                last_chunks = [0]
+                last_embeddings = [0]
+
+                def show_progress(status: dict) -> None:
+                    phase = status.get("phase", "unknown")
+                    progress = status.get("progress", {})
+
+                    files = progress.get("files_processed", 0)
+                    chunks = progress.get("chunks_created", 0)
+                    generated = progress.get("embeddings_generated", 0)
+                    total = progress.get("embeddings_total", 0)
+
+                    # Only show update if something changed
+                    phase_changed = phase != last_phase[0]
+                    progress_changed = (
+                        files != last_files[0]
+                        or chunks != last_chunks[0]
+                        or generated != last_embeddings[0]
+                    )
+
+                    if not phase_changed and not progress_changed:
+                        return
+
+                    last_phase[0] = phase
+                    last_files[0] = files
+                    last_chunks[0] = chunks
+                    last_embeddings[0] = generated
+
+                    if phase == "indexing":
+                        if files > 0 or chunks > 0:
+                            formatter.info(
+                                f"  Indexing: {files} files, {chunks} chunks..."
+                            )
+                    elif phase == "embedding":
+                        if total > 0:
+                            pct = (generated / total) * 100
+                            formatter.info(
+                                f"  Embeddings: {generated}/{total} ({pct:.0f}%)..."
+                            )
+                        else:
+                            formatter.info(f"  Embeddings: {generated} generated...")
+
+                final_status = proxy.wait_for_job(
+                    job_id,
+                    poll_interval=2.0,
+                    progress_callback=show_progress,
+                )
+
+                job_result = final_status.get("result", {})
+                if final_status.get("status") == "completed":
+                    files = job_result.get("files_processed", 0)
+                    embeddings = job_result.get("embeddings_generated", 0)
+                    elapsed = final_status.get("elapsed_seconds", 0)
+                    formatter.success(
+                        f"Indexed: {files} files, {embeddings} embeddings ({elapsed:.1f}s)"
+                    )
+                elif final_status.get("status") == "failed":
+                    formatter.error(f"Indexing failed: {final_status.get('error')}")
+                    sys.exit(1)
+                else:
+                    formatter.warning(
+                        f"Job ended with status: {final_status.get('status')}"
+                    )
+            else:
+                # Sync response (shouldn't happen with async=True)
+                formatter.success(f"Indexed: {result.get('files_processed', 0)} files")
+            return
+
+        except Exception as e:
+            formatter.error(f"Daemon proxy failed: {e}")
+            if "429" in str(e):
+                formatter.error(
+                    "Maximum concurrent jobs reached. "
+                    "Wait for existing jobs to complete or check: chunkhound jobs list"
+                )
+            else:
+                formatter.error("Daemon error. Check logs with: chunkhound daemon logs")
+            sys.exit(1)
 
     try:
         # Configure registry with the Config object
@@ -120,6 +228,11 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
 
         # Display results
         _print_completion_summary(stats, formatter)
+
+        # Apply tags if specified (global mode)
+        tags_arg = getattr(args, "tags", None)
+        if tags_arg:
+            await _apply_project_tags(args.path, tags_arg, config, formatter)
 
         # Emit startup profiling timings if requested
         if getattr(args, "profile_startup", False):
@@ -263,6 +376,57 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
         sys.exit(1)
     finally:
         pass
+
+
+async def _apply_project_tags(
+    project_path: Path,
+    tags_str: str,
+    config: Config,
+    formatter: RichOutputFormatter,
+) -> None:
+    """Apply tags to the indexed project.
+
+    Args:
+        project_path: Path to the indexed project
+        tags_str: Comma-separated tags string
+        config: Configuration object
+        formatter: Rich output formatter
+    """
+    # Parse tags
+    tags = [t.strip() for t in tags_str.split(",") if t.strip()]
+    if not tags:
+        return
+
+    # Check if global mode is enabled
+    if not (config.database.multi_repo and config.database.multi_repo.enabled):
+        formatter.warning(
+            "Tags are only supported in global mode. "
+            "Enable with: CHUNKHOUND_DATABASE__MULTI_REPO__ENABLED=true"
+        )
+        return
+
+    try:
+        from chunkhound.database_factory import create_services
+        from chunkhound.services.project_registry import ProjectRegistry
+
+        # Create services to access database (handles global mode automatically)
+        db_path = config.database.get_db_path(current_dir=Path(project_path))
+        services = create_services(db_path=db_path, config=config)
+        services.provider.connect()
+
+        # Create registry and apply tags
+        registry = ProjectRegistry(services.provider)
+        abs_path = Path(project_path).resolve()
+
+        if registry.set_project_tags(str(abs_path), tags):
+            formatter.success(f"Applied tags: {', '.join(tags)}")
+        else:
+            formatter.warning(f"Could not apply tags to project: {abs_path}")
+
+        services.provider.disconnect()
+
+    except Exception as e:
+        formatter.warning(f"Failed to apply tags: {e}")
 
 
 def _print_completion_summary(stats, formatter: RichOutputFormatter) -> None:

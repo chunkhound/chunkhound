@@ -76,6 +76,24 @@ def get_chunks_schema(embedding_dims: int | None = None) -> pa.Schema:
     )
 
 
+def get_indexed_roots_schema() -> pa.Schema:
+    """Get PyArrow schema for indexed_roots table (multi-repo support)."""
+    return pa.schema(
+        [
+            ("base_directory", pa.string()),  # Primary key - absolute path
+            ("project_name", pa.string()),
+            ("indexed_at", pa.float64()),
+            ("updated_at", pa.float64()),
+            ("file_count", pa.int64()),
+            ("config_snapshot", pa.string()),  # JSON string
+            ("watcher_active", pa.bool_()),
+            ("last_error", pa.string()),
+            ("error_count", pa.int64()),
+            ("tags", pa.list_(pa.string())),  # List of tag strings
+        ]
+    )
+
+
 def _has_valid_embedding(x: Any) -> bool:
     """Check if embedding is valid (not None, not empty, not all zeros).
 
@@ -168,6 +186,19 @@ class LanceDBProvider(SerialDatabaseProvider):
         # Table references
         self._files_table = None
         self._chunks_table = None
+        self._indexed_roots_table = None
+
+    def _is_global_mode(self) -> bool:
+        """Check if database is in global multi-repo mode.
+
+        Returns:
+            True if in global mode (absolute paths), False otherwise.
+        """
+        if self.config is None:
+            return False
+        return (
+            self.config.multi_repo.enabled and self.config.multi_repo.mode == "global"
+        )
 
     def _build_path_like_clause(self, prefix: str) -> str:
         escaped = _escape_like_pattern(prefix)
@@ -194,7 +225,8 @@ class LanceDBProvider(SerialDatabaseProvider):
             try:
                 fid = int(row.get("id"))
                 path = str(row.get("path") or "")
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Ignored exception parsing file row: {e}")
                 continue
             if path:
                 file_map[fid] = path
@@ -274,6 +306,7 @@ class LanceDBProvider(SerialDatabaseProvider):
             self.connection = None
             self._files_table = None
             self._chunks_table = None
+            self._indexed_roots_table = None
 
             # Connection will be closed by base class
             logger.info("Disconnected from LanceDB")
@@ -339,8 +372,9 @@ class LanceDBProvider(SerialDatabaseProvider):
         # Create files table if it doesn't exist
         try:
             self._files_table = conn.open_table("files")
-        except Exception:
+        except Exception as e:
             # Table doesn't exist, create it
+            logger.debug(f"Files table doesn't exist (expected on first run): {e}")
             # Create table using PyArrow schema
             self._files_table = conn.create_table("files", schema=get_files_schema())
             logger.info("Created files table")
@@ -349,8 +383,9 @@ class LanceDBProvider(SerialDatabaseProvider):
         try:
             self._chunks_table = conn.open_table("chunks")
             logger.debug("Opened existing chunks table")
-        except Exception:
+        except Exception as e:
             # Table doesn't exist, create it
+            logger.debug(f"Chunks table doesn't exist (expected on first run): {e}")
             # Try to get embedding dimensions to avoid migration later
             embedding_dims = self._get_embedding_dimensions_safe()
 
@@ -369,6 +404,20 @@ class LanceDBProvider(SerialDatabaseProvider):
                 "chunks", schema=get_chunks_schema(embedding_dims)
             )
             logger.info("Created chunks table")
+
+        # Create indexed_roots table if it doesn't exist (for multi-repo support)
+        try:
+            self._indexed_roots_table = conn.open_table("indexed_roots")
+            logger.debug("Opened existing indexed_roots table")
+        except Exception as e:
+            # Table doesn't exist, create it
+            logger.debug(
+                f"Indexed roots table doesn't exist (expected on first run): {e}"
+            )
+            self._indexed_roots_table = conn.create_table(
+                "indexed_roots", schema=get_indexed_roots_schema()
+            )
+            logger.info("Created indexed_roots table")
 
     def create_indexes(self) -> None:
         """Create database indexes for performance optimization."""
@@ -444,8 +493,9 @@ class LanceDBProvider(SerialDatabaseProvider):
                 ).limit(1).to_list()
                 logger.debug(f"Vector index already exists for {provider}/{model}")
                 return
-            except Exception:
+            except Exception as e:
                 # Index doesn't exist, create it
+                logger.debug(f"Vector index doesn't exist yet, will create: {e}")
                 pass
 
             # Verify sufficient data exists for IVF PQ training
@@ -582,7 +632,9 @@ class LanceDBProvider(SerialDatabaseProvider):
             from chunkhound.core.utils import normalize_path_for_lookup
 
             base_dir = state.get("base_directory")
-            normalized_path = normalize_path_for_lookup(path, base_dir)
+            normalized_path = normalize_path_for_lookup(
+                path, base_dir, use_absolute=self._is_global_mode()
+            )
             results = (
                 self._files_table.search()
                 .where(f"path = '{normalized_path}'")
@@ -1381,7 +1433,10 @@ class LanceDBProvider(SerialDatabaseProvider):
                         fid = row.get("id")
                         if fid is not None:
                             file_ids.add(int(fid))
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(
+                            f"Ignored exception parsing file ID in scope stats: {e}"
+                        )
                         continue
 
                 total_files = len(file_ids)
@@ -1400,14 +1455,16 @@ class LanceDBProvider(SerialDatabaseProvider):
                     batched_total = self._count_chunks_for_file_ids(file_ids_list)
                     if batched_total is not None:
                         return total_files, batched_total
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Ignored exception in batched chunk count: {e}")
                     pass
 
                 # Fallback: scan the chunks table in pages to avoid loading the
                 # entire dataset at once when pagination is supported.
                 try:
                     chunks_count = int(self._chunks_table.count_rows())
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Ignored exception counting chunk rows: {e}")
                     chunks_count = 0
 
                 if chunks_count <= 0:
@@ -1426,11 +1483,17 @@ class LanceDBProvider(SerialDatabaseProvider):
                         if offset == 0:
                             try:
                                 chunks_df = self._chunks_table.to_pandas()
-                            except Exception:
+                            except Exception as e:
+                                logger.debug(
+                                    f"Ignored exception loading chunks to pandas, trying optimize: {e}"
+                                )
                                 try:
                                     self._chunks_table.optimize()
                                     chunks_df = self._chunks_table.to_pandas()
-                                except Exception:
+                                except Exception as e2:
+                                    logger.debug(
+                                        f"Ignored exception after optimize: {e2}"
+                                    )
                                     return total_files, 0
                             if "file_id" not in chunks_df.columns:
                                 return total_files, 0
@@ -1438,7 +1501,10 @@ class LanceDBProvider(SerialDatabaseProvider):
                                 total_chunks = int(
                                     chunks_df["file_id"].isin(list(file_ids_set)).sum()
                                 )
-                            except Exception:
+                            except Exception as e:
+                                logger.debug(
+                                    f"Ignored exception counting chunks by file_id: {e}"
+                                )
                                 total_chunks = 0
                         break
 
@@ -1449,7 +1515,8 @@ class LanceDBProvider(SerialDatabaseProvider):
                         total_chunks += int(
                             batch_df["file_id"].isin(list(file_ids_set)).sum()
                         )
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(f"Ignored exception counting batch chunks: {e}")
                         continue
 
                 return total_files, total_chunks
@@ -1458,7 +1525,8 @@ class LanceDBProvider(SerialDatabaseProvider):
             total_files = int(self._files_table.count_rows())
             total_chunks = int(self._chunks_table.count_rows())
             return total_files, total_chunks
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception in get_scope_stats: {e}")
             return 0, 0
 
     def get_scope_file_paths(self, scope_prefix: str | None) -> list[str]:
@@ -1479,7 +1547,8 @@ class LanceDBProvider(SerialDatabaseProvider):
             else:
                 total = int(self._files_table.count_rows())
                 rows = self._files_table.head(total).to_list()
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception getting scope file paths: {e}")
             return []
 
         out: list[str] = []
@@ -1634,11 +1703,16 @@ class LanceDBProvider(SerialDatabaseProvider):
             if threshold:
                 query = query.where(f"_distance <= {threshold}")
 
-            if path_filter:
-                # Join with files table to filter by path
-                pass  # Would need more complex query joining with files table
-
             results = query.to_list()
+
+            # Apply path filter if provided (post-filter approach since LanceDB
+            # doesn't support cross-table joins in vector search)
+            if path_filter:
+                normalized_path = path_filter.replace("\\", "/")
+                clause = self._build_path_like_clause(normalized_path)
+                file_results = self._files_table.search().where(clause).to_list()
+                valid_file_ids = {r["id"] for r in file_results}
+                results = [r for r in results if r.get("file_id") in valid_file_ids]
 
             # Deduplicate across fragments (safety net for fragment-induced duplicates)
             results = _deduplicate_by_id(results)
@@ -1784,18 +1858,21 @@ class LanceDBProvider(SerialDatabaseProvider):
 
             # Note: Cannot filter by _distance in WHERE clause - it only exists in results
             # We'll filter after getting results if threshold is specified
-            # Request more results than needed if using threshold
-            fetch_limit = limit * 3 if threshold is not None else limit
+            # Request more results than needed if using threshold or path filter
+            # (path filtering is post-filter so we need extra results)
+            fetch_limit = limit * 3 if (threshold is not None or path_filter) else limit
             query = query.limit(fetch_limit)
 
-            # TODO(#107): Path filtering not yet implemented in LanceDB
-            # See https://github.com/chunkhound/chunkhound/issues/107
-            if path_filter:
-                logger.warning(
-                    "Path filtering not yet implemented for LanceDB find_similar_chunks"
-                )
-
             results = query.to_list()
+
+            # Apply path filter if provided (post-filter approach since LanceDB
+            # doesn't support cross-table joins in vector search)
+            if path_filter and self._files_table:
+                normalized_path = path_filter.replace("\\", "/")
+                clause = self._build_path_like_clause(normalized_path)
+                file_results = self._files_table.search().where(clause).to_list()
+                valid_file_ids = {r["id"] for r in file_results}
+                results = [r for r in results if r.get("file_id") in valid_file_ids]
 
             # PHASE 3: Format results with file paths and apply threshold
             filtered_results: list[tuple[dict[str, Any], float]] = []
@@ -1997,6 +2074,283 @@ class LanceDBProvider(SerialDatabaseProvider):
         """Executor method for search_text - runs in DB thread."""
         return self._executor_search_fuzzy(conn, state, query, page_size, offset, None)
 
+    # Multi-path search methods for multi-repo support
+    def search_semantic_multi_path(
+        self,
+        query_embedding: list[float],
+        path_prefixes: list[str],
+        provider: str,
+        model: str,
+        page_size: int = 10,
+        offset: int = 0,
+        threshold: float | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Perform semantic vector search with OR-based multi-path filtering.
+
+        Args:
+            query_embedding: Query vector for similarity search
+            path_prefixes: List of path prefixes to include (OR logic)
+            provider: Embedding provider name
+            model: Embedding model name
+            page_size: Number of results per page
+            offset: Pagination offset
+            threshold: Optional similarity threshold
+
+        Returns:
+            Tuple of (results, pagination_info)
+        """
+        return self._execute_in_db_thread_sync(
+            "search_semantic_multi_path",
+            query_embedding,
+            path_prefixes,
+            provider,
+            model,
+            page_size,
+            offset,
+            threshold,
+        )
+
+    def _executor_search_semantic_multi_path(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        query_embedding: list[float],
+        path_prefixes: list[str],
+        provider: str,
+        model: str,
+        page_size: int,
+        offset: int,
+        threshold: float | None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Executor method for search_semantic_multi_path - runs in DB thread."""
+        empty_pagination = {
+            "offset": offset,
+            "page_size": page_size,
+            "has_more": False,
+            "total": 0,
+        }
+
+        if not path_prefixes:
+            # No prefixes = search nothing (empty result)
+            return [], empty_pagination
+
+        if self._chunks_table is None or self._files_table is None:
+            raise RuntimeError("Database tables not initialized")
+
+        try:
+            # Build set of valid file_ids from all path prefixes (OR logic)
+            valid_file_ids: set[int] = set()
+            for prefix in path_prefixes:
+                normalized = prefix.replace("\\", "/")
+                clause = self._build_path_like_clause(normalized)
+                try:
+                    file_results = self._files_table.search().where(clause).to_list()
+                    for r in file_results:
+                        fid = r.get("id")
+                        if fid is not None:
+                            valid_file_ids.add(int(fid))
+                except Exception as e:
+                    logger.debug(f"Failed to query files for prefix {prefix}: {e}")
+                    continue
+
+            if not valid_file_ids:
+                # No files match any prefix
+                return [], empty_pagination
+
+            # Perform vector search
+            # Request extra results since we'll filter by file_id post-search
+            fetch_limit = (page_size + offset) * 3
+            query = self._chunks_table.search(
+                query_embedding, vector_column_name="embedding"
+            )
+            query = query.where(
+                f"provider = '{provider}' AND model = '{model}' "
+                f"AND embedding IS NOT NULL"
+            )
+            query = query.limit(fetch_limit)
+
+            if threshold:
+                query = query.where(f"_distance <= {threshold}")
+
+            results = query.to_list()
+
+            # Filter by valid file_ids (OR logic across all prefixes)
+            results = [r for r in results if r.get("file_id") in valid_file_ids]
+
+            # Deduplicate across fragments
+            results = _deduplicate_by_id(results)
+
+            # Get total count for pagination
+            total_count = len(results)
+
+            # Apply pagination
+            paginated_results = results[offset : offset + page_size]
+
+            # Format results with file paths
+            file_map = self._fetch_file_paths_by_ids(
+                [r.get("file_id") for r in paginated_results if "file_id" in r]
+            )
+
+            formatted_results = []
+            for result in paginated_results:
+                file_path = file_map.get(result.get("file_id"), "")
+                similarity = (
+                    1.0 - result.get("_distance", 0.0) if "_distance" in result else 1.0
+                )
+
+                formatted_results.append(
+                    {
+                        "chunk_id": result["id"],
+                        "symbol": result.get("name", ""),
+                        "content": result.get("content", ""),
+                        "chunk_type": result.get("chunk_type", ""),
+                        "start_line": result.get("start_line", 0),
+                        "end_line": result.get("end_line", 0),
+                        "file_path": file_path,
+                        "language": result.get("language", ""),
+                        "similarity": similarity,
+                    }
+                )
+
+            has_more = total_count > offset + page_size
+            pagination = {
+                "offset": offset,
+                "page_size": len(paginated_results),
+                "has_more": has_more,
+                "next_offset": offset + page_size if has_more else None,
+                "total": total_count,
+            }
+
+            return formatted_results, pagination
+
+        except Exception as e:
+            logger.error(f"Failed to perform multi-path semantic search: {e}")
+            return [], empty_pagination
+
+    def search_regex_multi_path(
+        self,
+        pattern: str,
+        path_prefixes: list[str],
+        page_size: int = 10,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Perform regex search with OR-based multi-path filtering.
+
+        Args:
+            pattern: Regex pattern to search for
+            path_prefixes: List of path prefixes to include (OR logic)
+            page_size: Number of results per page
+            offset: Pagination offset
+
+        Returns:
+            Tuple of (results, pagination_info)
+        """
+        return self._execute_in_db_thread_sync(
+            "search_regex_multi_path",
+            pattern,
+            path_prefixes,
+            page_size,
+            offset,
+        )
+
+    def _executor_search_regex_multi_path(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        pattern: str,
+        path_prefixes: list[str],
+        page_size: int,
+        offset: int,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Executor method for search_regex_multi_path - runs in DB thread."""
+        empty_pagination = {
+            "offset": offset,
+            "page_size": page_size,
+            "has_more": False,
+            "total": 0,
+        }
+
+        if not path_prefixes:
+            # No prefixes = search nothing (empty result)
+            return [], empty_pagination
+
+        if not self._chunks_table or not self._files_table:
+            return [], empty_pagination
+
+        try:
+            # Build set of valid file_ids from all path prefixes (OR logic)
+            valid_file_ids: set[int] = set()
+            for prefix in path_prefixes:
+                normalized = prefix.replace("\\", "/")
+                clause = self._build_path_like_clause(normalized)
+                try:
+                    file_results = self._files_table.search().where(clause).to_list()
+                    for r in file_results:
+                        fid = r.get("id")
+                        if fid is not None:
+                            valid_file_ids.add(int(fid))
+                except Exception as e:
+                    logger.debug(f"Failed to query files for prefix {prefix}: {e}")
+                    continue
+
+            if not valid_file_ids:
+                # No files match any prefix
+                return [], empty_pagination
+
+            # Build WHERE clause using regexp_match (DataFusion SQL function)
+            escaped_pattern = pattern.replace("'", "''")
+            where_clause = f"regexp_match(content, '{escaped_pattern}')"
+
+            # Get all matching chunks
+            results = self._chunks_table.search().where(where_clause).to_list()
+
+            # Deduplicate across fragments
+            results = _deduplicate_by_id(results)
+
+            # Filter by valid file_ids (OR logic across all prefixes)
+            results = [r for r in results if r.get("file_id") in valid_file_ids]
+
+            total_count = len(results)
+
+            # Apply pagination
+            paginated = results[offset : offset + page_size]
+
+            # Format results with file paths
+            file_map = self._fetch_file_paths_by_ids(
+                [r.get("file_id") for r in paginated if "file_id" in r]
+            )
+
+            formatted = []
+            for result in paginated:
+                file_path = file_map.get(result.get("file_id"), "")
+                formatted.append(
+                    {
+                        "chunk_id": result["id"],
+                        "name": result.get("name", ""),
+                        "content": result.get("content", ""),
+                        "chunk_type": result.get("chunk_type", ""),
+                        "start_line": result.get("start_line", 0),
+                        "end_line": result.get("end_line", 0),
+                        "file_path": file_path,
+                        "language": result.get("language", ""),
+                    }
+                )
+
+            has_more = total_count > offset + page_size
+            pagination = {
+                "offset": offset,
+                "page_size": len(paginated),
+                "has_more": has_more,
+                "next_offset": offset + page_size if has_more else None,
+                "total": total_count,
+            }
+
+            return formatted, pagination
+
+        except Exception as e:
+            logger.error(f"Failed to perform multi-path regex search: {e}")
+            return [], empty_pagination
+
     # Statistics and Monitoring
     def get_stats(self) -> dict[str, int]:
         """Get database statistics (file count, chunk count, etc.)."""
@@ -2045,6 +2399,73 @@ class LanceDBProvider(SerialDatabaseProvider):
             logger.error(f"Error getting stats: {e}")
 
         return stats
+
+    def get_stats_for_path(self, path: str) -> dict[str, int]:
+        """Get database statistics filtered by path prefix.
+
+        Args:
+            path: Path prefix to filter by (files starting with this path)
+
+        Returns:
+            Dictionary with file, chunk, and embedding counts for the path
+        """
+        return self._execute_in_db_thread_sync("get_stats_for_path", path)
+
+    def _executor_get_stats_for_path(
+        self, conn: Any, state: dict[str, Any], path: str
+    ) -> dict[str, int]:
+        """Executor method for get_stats_for_path - runs in DB thread."""
+        try:
+            from pathlib import Path as PathLib
+
+            normalized_path = str(PathLib(path).resolve())
+
+            # Filter files by path prefix
+            file_count = 0
+            chunk_count = 0
+            embedding_count = 0
+
+            if self._files_table:
+                try:
+                    files_df = self._files_table.to_pandas()
+                    # Filter by path prefix
+                    mask = files_df["path"].str.startswith(normalized_path)
+                    file_count = mask.sum()
+                except Exception:
+                    pass
+
+            if self._chunks_table:
+                try:
+                    chunks_df = self._chunks_table.to_pandas()
+                    # Get file IDs for path
+                    if self._files_table:
+                        files_df = self._files_table.to_pandas()
+                        file_ids = files_df[
+                            files_df["path"].str.startswith(normalized_path)
+                        ]["id"].tolist()
+                        mask = chunks_df["file_id"].isin(file_ids)
+                        chunk_count = mask.sum()
+                        # Count embeddings (chunks with non-empty embedding)
+                        filtered = chunks_df[mask]
+                        embedding_count = (
+                            filtered["embedding"].apply(
+                                lambda x: isinstance(x, (list, np.ndarray))
+                                and len(x) > 0
+                            )
+                        ).sum()
+                except Exception:
+                    pass
+
+            return {
+                "files": int(file_count),
+                "chunks": int(chunk_count),
+                "embeddings": int(embedding_count),
+                "path": normalized_path,
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to get stats for path {path}: {e}")
+            return {"files": 0, "chunks": 0, "embeddings": 0, "path": path}
 
     def get_file_stats(self, file_id: int) -> dict[str, Any]:
         """Get statistics for a specific file."""
@@ -2122,13 +2543,15 @@ class LanceDBProvider(SerialDatabaseProvider):
                     select_part = q.split("from", 1)[0]
                     select_part = select_part.replace("select", "").strip()
                     cols = [c.strip() for c in select_part.split(",") if c.strip()]
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Ignored exception parsing SQL columns: {e}")
                     cols = ["path", "size", "modified_time", "content_hash"]
 
                 # Fetch all rows via native API
                 try:
                     total = int(self._files_table.count_rows())
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Ignored exception counting files rows: {e}")
                     total = 0
                 rows: list[dict[str, Any]] = []
                 try:
@@ -2148,12 +2571,14 @@ class LanceDBProvider(SerialDatabaseProvider):
                                 out[c] = None
                         rows.append(out)
                     return rows
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Ignored exception in execute_query file fetch: {e}")
                     return []
 
             # Unsupported pattern → no-op (coordinator will fall back)
             return []
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception in execute_query: {e}")
             return []
 
     # File Processing Integration (inherited from base class)
@@ -2302,3 +2727,627 @@ class LanceDBProvider(SerialDatabaseProvider):
             "connected": self.is_connected,
             "index_type": self.index_type,
         }
+
+    # =========================================================================
+    # Multi-Repo Support Methods
+    # =========================================================================
+
+    def get_indexed_roots(self, filter_by: str | None = None) -> list[dict[str, Any]]:
+        """Get all registered base directories.
+
+        Args:
+            filter_by: Optional path prefix to filter results
+
+        Returns:
+            List of dicts with keys: base_directory, project_name, indexed_at, etc.
+        """
+        return self._execute_in_db_thread_sync("get_indexed_roots", filter_by)
+
+    def _executor_get_indexed_roots(
+        self, conn: Any, state: dict[str, Any], filter_by: str | None
+    ) -> list[dict[str, Any]]:
+        """Executor method for get_indexed_roots - runs in DB thread."""
+        if not self._indexed_roots_table:
+            return []
+
+        try:
+            if filter_by:
+                # Filter by path prefix
+                escaped = _escape_like_pattern(filter_by)
+                results = (
+                    self._indexed_roots_table.search()
+                    .where(f"base_directory LIKE '{escaped}%' ESCAPE '\\\\'")
+                    .to_list()
+                )
+            else:
+                results = self._indexed_roots_table.search().to_list()
+
+            # Convert to list of dicts and sort by updated_at descending
+            output = []
+            for row in results:
+                output.append(
+                    {
+                        "base_directory": row.get("base_directory"),
+                        "project_name": row.get("project_name"),
+                        "indexed_at": row.get("indexed_at"),
+                        "updated_at": row.get("updated_at"),
+                        "file_count": row.get("file_count", 0),
+                        "config_snapshot": row.get("config_snapshot"),
+                        "watcher_active": row.get("watcher_active", False),
+                        "last_error": row.get("last_error"),
+                        "error_count": row.get("error_count", 0),
+                        "tags": list(row.get("tags") or []),
+                    }
+                )
+
+            # Sort by updated_at descending
+            output.sort(key=lambda x: x.get("updated_at") or 0, reverse=True)
+            return output
+        except Exception as e:
+            logger.error(f"Error getting indexed roots: {e}")
+            return []
+
+    def register_base_directory(
+        self,
+        base_directory: str,
+        project_name: str | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> None:
+        """Register a base directory in the indexed_roots table.
+
+        Args:
+            base_directory: Absolute path to the project root
+            project_name: Optional name for the project (defaults to directory name)
+            config: Optional config snapshot
+        """
+        return self._execute_in_db_thread_sync(
+            "register_base_directory", base_directory, project_name, config
+        )
+
+    def _executor_register_base_directory(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        base_directory: str,
+        project_name: str | None,
+        config: dict[str, Any] | None,
+    ) -> None:
+        """Executor method for register_base_directory - runs in DB thread."""
+        import json
+
+        if not self._indexed_roots_table:
+            self._executor_create_schema(conn, state)
+
+        # Normalize base_directory
+        base_directory = str(Path(base_directory).resolve())
+
+        # Check if project already exists
+        existing = (
+            self._indexed_roots_table.search()
+            .where(f"base_directory = '{base_directory}'")
+            .to_list()
+        )
+
+        current_time = time.time()
+
+        if existing:
+            # Update existing record (keep project name)
+            config_json = json.dumps(config) if config else None
+
+            # Delete and re-insert (LanceDB doesn't support in-place updates well)
+            old_record = existing[0]
+            self._indexed_roots_table.delete(f"base_directory = '{base_directory}'")
+
+            new_record = {
+                "base_directory": base_directory,
+                "project_name": old_record.get("project_name"),
+                "indexed_at": old_record.get("indexed_at", current_time),
+                "updated_at": current_time,
+                "file_count": old_record.get("file_count", 0),
+                "config_snapshot": config_json,
+                "watcher_active": old_record.get("watcher_active", False),
+                "last_error": old_record.get("last_error"),
+                "error_count": old_record.get("error_count", 0),
+                "tags": list(old_record.get("tags") or []),
+            }
+            self._indexed_roots_table.add([new_record])
+        else:
+            # New project: generate unique name if not provided
+            if project_name is None:
+                project_name = self._generate_unique_project_name(base_directory)
+
+            config_json = json.dumps(config) if config else None
+
+            new_record = {
+                "base_directory": base_directory,
+                "project_name": project_name,
+                "indexed_at": current_time,
+                "updated_at": current_time,
+                "file_count": 0,
+                "config_snapshot": config_json,
+                "watcher_active": False,
+                "last_error": None,
+                "error_count": 0,
+                "tags": [],
+            }
+            self._indexed_roots_table.add([new_record])
+
+    def _generate_unique_project_name(self, base_directory: str) -> str:
+        """Generate a unique, CLI-safe project name from a directory path.
+
+        Converts directory name to slug (alphanumeric, dashes, underscores only).
+        If duplicate exists, appends -2, -3, etc.
+        """
+        import re
+
+        # Get directory name and slugify it
+        dir_name = Path(base_directory).name
+
+        # Convert to lowercase, replace spaces/special chars with dashes
+        slug = re.sub(r"[^a-zA-Z0-9_-]", "-", dir_name.lower())
+        # Collapse multiple dashes
+        slug = re.sub(r"-+", "-", slug)
+        # Remove leading/trailing dashes
+        slug = slug.strip("-")
+        # Ensure not empty
+        if not slug:
+            slug = "project"
+
+        # Check for existing projects with this name prefix
+        if not self._indexed_roots_table:
+            return slug
+
+        try:
+            escaped = _escape_like_pattern(slug)
+            existing = (
+                self._indexed_roots_table.search()
+                .where(f"project_name LIKE '{escaped}%' ESCAPE '\\\\'")
+                .to_list()
+            )
+            existing_names = {row.get("project_name") for row in existing}
+
+            # If base name is unique, use it
+            if slug not in existing_names:
+                return slug
+
+            # Otherwise find next available sequence number
+            seq = 2
+            while f"{slug}-{seq}" in existing_names:
+                seq += 1
+
+            return f"{slug}-{seq}"
+        except Exception:
+            return slug
+
+    def remove_base_directory(self, base_directory: str, cascade: bool = False) -> None:
+        """Remove a base directory from the indexed_roots table.
+
+        Args:
+            base_directory: Absolute path to base directory to remove
+            cascade: If True, also delete all files/chunks under this directory
+        """
+        return self._execute_in_db_thread_sync(
+            "remove_base_directory", base_directory, cascade
+        )
+
+    def _executor_remove_base_directory(
+        self, conn: Any, state: dict[str, Any], base_directory: str, cascade: bool
+    ) -> None:
+        """Executor method for remove_base_directory - runs in DB thread."""
+        if not self._indexed_roots_table:
+            return
+
+        # Delete from indexed_roots table
+        self._indexed_roots_table.delete(f"base_directory = '{base_directory}'")
+
+        if cascade:
+            # Clean up all data associated with this base directory
+            if self._is_global_mode():
+                # Match files under this directory by absolute path prefix
+                escaped = _escape_like_pattern(base_directory.rstrip(os.sep) + os.sep)
+
+                # Get file IDs to delete
+                if self._files_table:
+                    files_to_delete = (
+                        self._files_table.search()
+                        .where(
+                            f"path = '{base_directory}' OR path LIKE '{escaped}%' ESCAPE '\\\\'"
+                        )
+                        .to_list()
+                    )
+                    file_ids = [f.get("id") for f in files_to_delete if f.get("id")]
+
+                    if file_ids:
+                        # Delete chunks for these files
+                        if self._chunks_table:
+                            for fid in file_ids:
+                                self._chunks_table.delete(f"file_id = {fid}")
+
+                        # Delete files
+                        for fid in file_ids:
+                            self._files_table.delete(f"id = {fid}")
+            else:
+                # Per-repo mode: delete all files/chunks (single repo per DB)
+                if self._chunks_table:
+                    # Delete all chunks
+                    try:
+                        self._chunks_table.delete("id >= 0")
+                    except Exception:
+                        pass
+
+                if self._files_table:
+                    # Delete all files
+                    try:
+                        self._files_table.delete("id >= 0")
+                    except Exception:
+                        pass
+
+            logger.info(f"Cascaded delete for base directory: {base_directory}")
+
+    def update_indexed_root_stats(self, base_directory: str) -> None:
+        """Update file_count and updated_at for a base directory.
+
+        Args:
+            base_directory: The base directory to update stats for
+        """
+        return self._execute_in_db_thread_sync(
+            "update_indexed_root_stats", base_directory
+        )
+
+    def _executor_update_indexed_root_stats(
+        self, conn: Any, state: dict[str, Any], base_directory: str
+    ) -> None:
+        """Executor method for update_indexed_root_stats - runs in DB thread."""
+        if not self._indexed_roots_table or not self._files_table:
+            return
+
+        # Count files that belong to this base_directory
+        if self._is_global_mode():
+            # Files stored with absolute paths - match by prefix
+            escaped = _escape_like_pattern(base_directory.rstrip(os.sep) + os.sep)
+            files = (
+                self._files_table.search()
+                .where(
+                    f"path = '{base_directory}' OR path LIKE '{escaped}%' ESCAPE '\\\\'"
+                )
+                .to_list()
+            )
+            file_count = len(files)
+        else:
+            # Per-repo mode: count all files
+            file_count = self._files_table.count_rows()
+
+        # Get existing record
+        existing = (
+            self._indexed_roots_table.search()
+            .where(f"base_directory = '{base_directory}'")
+            .to_list()
+        )
+
+        if existing:
+            old_record = existing[0]
+            self._indexed_roots_table.delete(f"base_directory = '{base_directory}'")
+
+            new_record = {
+                "base_directory": base_directory,
+                "project_name": old_record.get("project_name"),
+                "indexed_at": old_record.get("indexed_at"),
+                "updated_at": time.time(),
+                "file_count": file_count,
+                "config_snapshot": old_record.get("config_snapshot"),
+                "watcher_active": old_record.get("watcher_active", False),
+                "last_error": old_record.get("last_error"),
+                "error_count": old_record.get("error_count", 0),
+                "tags": list(old_record.get("tags") or []),
+            }
+            self._indexed_roots_table.add([new_record])
+
+    def update_indexed_root_watcher_status(
+        self, base_directory: str, active: bool, error: str | None = None
+    ) -> None:
+        """Update watcher status for a base directory.
+
+        Args:
+            base_directory: The base directory to update
+            active: Whether the watcher is currently active
+            error: Error message if watcher failed (clears error_count if None)
+        """
+        return self._execute_in_db_thread_sync(
+            "update_indexed_root_watcher_status", base_directory, active, error
+        )
+
+    def _executor_update_indexed_root_watcher_status(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        base_directory: str,
+        active: bool,
+        error: str | None,
+    ) -> None:
+        """Executor method for update_indexed_root_watcher_status - runs in DB thread."""
+        if not self._indexed_roots_table:
+            return
+
+        existing = (
+            self._indexed_roots_table.search()
+            .where(f"base_directory = '{base_directory}'")
+            .to_list()
+        )
+
+        if existing:
+            old_record = existing[0]
+            self._indexed_roots_table.delete(f"base_directory = '{base_directory}'")
+
+            if error:
+                # Increment error count
+                new_error_count = (old_record.get("error_count") or 0) + 1
+                new_last_error = error
+            else:
+                # Clear error state
+                new_error_count = 0
+                new_last_error = None
+
+            new_record = {
+                "base_directory": base_directory,
+                "project_name": old_record.get("project_name"),
+                "indexed_at": old_record.get("indexed_at"),
+                "updated_at": time.time(),
+                "file_count": old_record.get("file_count", 0),
+                "config_snapshot": old_record.get("config_snapshot"),
+                "watcher_active": active,
+                "last_error": new_last_error,
+                "error_count": new_error_count,
+                "tags": list(old_record.get("tags") or []),
+            }
+            self._indexed_roots_table.add([new_record])
+
+    # =========================================================================
+    # Tag Management Methods
+    # =========================================================================
+
+    def get_indexed_roots_by_tags(
+        self, tags: list[str], match_all: bool = True
+    ) -> list[dict[str, Any]]:
+        """Get indexed roots that have the specified tags.
+
+        Args:
+            tags: List of tags to filter by
+            match_all: If True, roots must have ALL tags (AND). If False, ANY tag (OR).
+
+        Returns:
+            List of indexed root dicts matching the tag criteria
+        """
+        return self._execute_in_db_thread_sync(
+            "get_indexed_roots_by_tags", tags, match_all
+        )
+
+    def _executor_get_indexed_roots_by_tags(
+        self, conn: Any, state: dict[str, Any], tags: list[str], match_all: bool
+    ) -> list[dict[str, Any]]:
+        """Executor method for get_indexed_roots_by_tags - runs in DB thread."""
+        if not tags or not self._indexed_roots_table:
+            return []
+
+        # Get all indexed roots and filter in Python
+        # (LanceDB doesn't have DuckDB's list_has_all/list_has_any functions)
+        all_roots = self._executor_get_indexed_roots(conn, state, None)
+
+        result = []
+        for root in all_roots:
+            root_tags = set(root.get("tags") or [])
+            tag_set = set(tags)
+
+            if match_all:
+                # AND logic: root must have ALL specified tags
+                if tag_set.issubset(root_tags):
+                    result.append(root)
+            else:
+                # OR logic: root must have ANY of the specified tags
+                if tag_set & root_tags:
+                    result.append(root)
+
+        return result
+
+    def update_indexed_root_tags(self, base_directory: str, tags: list[str]) -> None:
+        """Set tags for an indexed root (replaces existing tags).
+
+        Args:
+            base_directory: Path to the indexed root
+            tags: New list of tags (replaces existing)
+        """
+        self._execute_in_db_thread_sync(
+            "update_indexed_root_tags", base_directory, tags
+        )
+
+    def _executor_update_indexed_root_tags(
+        self, conn: Any, state: dict[str, Any], base_directory: str, tags: list[str]
+    ) -> None:
+        """Executor method for update_indexed_root_tags - runs in DB thread."""
+        if not self._indexed_roots_table:
+            return
+
+        existing = (
+            self._indexed_roots_table.search()
+            .where(f"base_directory = '{base_directory}'")
+            .to_list()
+        )
+
+        if existing:
+            old_record = existing[0]
+            self._indexed_roots_table.delete(f"base_directory = '{base_directory}'")
+
+            new_record = {
+                "base_directory": base_directory,
+                "project_name": old_record.get("project_name"),
+                "indexed_at": old_record.get("indexed_at"),
+                "updated_at": time.time(),
+                "file_count": old_record.get("file_count", 0),
+                "config_snapshot": old_record.get("config_snapshot"),
+                "watcher_active": old_record.get("watcher_active", False),
+                "last_error": old_record.get("last_error"),
+                "error_count": old_record.get("error_count", 0),
+                "tags": list(tags),
+            }
+            self._indexed_roots_table.add([new_record])
+
+    def add_indexed_root_tags(self, base_directory: str, tags: list[str]) -> None:
+        """Add tags to an indexed root (preserves existing tags).
+
+        Args:
+            base_directory: Path to the indexed root
+            tags: Tags to add
+        """
+        self._execute_in_db_thread_sync("add_indexed_root_tags", base_directory, tags)
+
+    def _executor_add_indexed_root_tags(
+        self, conn: Any, state: dict[str, Any], base_directory: str, tags: list[str]
+    ) -> None:
+        """Executor method for add_indexed_root_tags - runs in DB thread."""
+        if not self._indexed_roots_table:
+            return
+
+        existing = (
+            self._indexed_roots_table.search()
+            .where(f"base_directory = '{base_directory}'")
+            .to_list()
+        )
+
+        if existing:
+            old_record = existing[0]
+            old_tags = set(old_record.get("tags") or [])
+            new_tags = list(old_tags | set(tags))
+
+            self._indexed_roots_table.delete(f"base_directory = '{base_directory}'")
+
+            new_record = {
+                "base_directory": base_directory,
+                "project_name": old_record.get("project_name"),
+                "indexed_at": old_record.get("indexed_at"),
+                "updated_at": time.time(),
+                "file_count": old_record.get("file_count", 0),
+                "config_snapshot": old_record.get("config_snapshot"),
+                "watcher_active": old_record.get("watcher_active", False),
+                "last_error": old_record.get("last_error"),
+                "error_count": old_record.get("error_count", 0),
+                "tags": new_tags,
+            }
+            self._indexed_roots_table.add([new_record])
+
+    def remove_indexed_root_tags(self, base_directory: str, tags: list[str]) -> None:
+        """Remove tags from an indexed root.
+
+        Args:
+            base_directory: Path to the indexed root
+            tags: Tags to remove
+        """
+        self._execute_in_db_thread_sync(
+            "remove_indexed_root_tags", base_directory, tags
+        )
+
+    def _executor_remove_indexed_root_tags(
+        self, conn: Any, state: dict[str, Any], base_directory: str, tags: list[str]
+    ) -> None:
+        """Executor method for remove_indexed_root_tags - runs in DB thread."""
+        if not self._indexed_roots_table:
+            return
+
+        existing = (
+            self._indexed_roots_table.search()
+            .where(f"base_directory = '{base_directory}'")
+            .to_list()
+        )
+
+        if existing:
+            old_record = existing[0]
+            old_tags = set(old_record.get("tags") or [])
+            new_tags = list(old_tags - set(tags))
+
+            self._indexed_roots_table.delete(f"base_directory = '{base_directory}'")
+
+            new_record = {
+                "base_directory": base_directory,
+                "project_name": old_record.get("project_name"),
+                "indexed_at": old_record.get("indexed_at"),
+                "updated_at": time.time(),
+                "file_count": old_record.get("file_count", 0),
+                "config_snapshot": old_record.get("config_snapshot"),
+                "watcher_active": old_record.get("watcher_active", False),
+                "last_error": old_record.get("last_error"),
+                "error_count": old_record.get("error_count", 0),
+                "tags": new_tags,
+            }
+            self._indexed_roots_table.add([new_record])
+
+    def get_all_tags(self) -> list[str]:
+        """Get all unique tags across all indexed roots.
+
+        Returns:
+            Sorted list of unique tag names
+        """
+        return self._execute_in_db_thread_sync("get_all_tags")
+
+    def _executor_get_all_tags(self, conn: Any, state: dict[str, Any]) -> list[str]:
+        """Executor method for get_all_tags - runs in DB thread."""
+        if not self._indexed_roots_table:
+            return []
+
+        try:
+            all_roots = self._indexed_roots_table.search().to_list()
+            all_tags: set[str] = set()
+
+            for root in all_roots:
+                tags = root.get("tags")
+                if tags:
+                    all_tags.update(tags)
+
+            return sorted(all_tags)
+        except Exception as e:
+            logger.error(f"Error getting all tags: {e}")
+            return []
+
+    # =========================================================================
+    # Path Resolution Methods
+    # =========================================================================
+
+    def find_base_for_path(self, path: str) -> str | None:
+        """Find which indexed base_directory contains the given path.
+
+        Args:
+            path: Absolute or relative path to check
+
+        Returns:
+            The base_directory that contains this path, or None if not found
+        """
+        return self._execute_in_db_thread_sync("find_base_for_path", path)
+
+    def _executor_find_base_for_path(
+        self, conn: Any, state: dict[str, Any], path: str
+    ) -> str | None:
+        """Executor method for find_base_for_path - runs in DB thread."""
+        # Only works with absolute paths
+        if not os.path.isabs(path):
+            return None
+
+        if not self._indexed_roots_table:
+            return None
+
+        try:
+            all_roots = self._indexed_roots_table.search().to_list()
+
+            # Find the longest matching base directory
+            best_match = None
+            best_length = 0
+
+            for root in all_roots:
+                base_dir = root.get("base_directory")
+                if base_dir:
+                    # Check if path is under this base_directory
+                    if path == base_dir or path.startswith(base_dir + os.sep):
+                        if len(base_dir) > best_length:
+                            best_match = base_dir
+                            best_length = len(base_dir)
+
+            return best_match
+        except Exception as e:
+            logger.error(f"Error finding base for path: {e}")
+            return None

@@ -11,6 +11,7 @@ import json
 import types
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, TypedDict, Union, cast, get_args, get_origin
 
 try:
@@ -21,6 +22,7 @@ except (ImportError, AttributeError):
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
+from chunkhound.mcp_server.exceptions import EmbeddingProviderError, ToolExecutionError
 from chunkhound.services.deep_research_service import DeepResearchService
 from chunkhound.version import __version__
 
@@ -46,6 +48,9 @@ class Tool:
     parameters: dict[str, Any]
     implementation: Callable
     requires_embeddings: bool = False
+    annotations: dict[str, Any] | None = None
+    title: str | None = None  # Human-readable display name (MCP 2025-11-25)
+    output_schema: dict[str, Any] | None = None  # JSON Schema for structured output
 
 
 # Tool registry - populated by @register_tool decorator
@@ -199,6 +204,7 @@ def _generate_json_schema_from_signature(func: Callable) -> dict[str, Any]:
         "type": "object",
         "properties": properties,
         "required": required if required else [],
+        "additionalProperties": False,
     }
 
 
@@ -206,6 +212,9 @@ def register_tool(
     description: str,
     requires_embeddings: bool = False,
     name: str | None = None,
+    annotations: dict[str, Any] | None = None,
+    title: str | None = None,
+    output_schema: dict[str, Any] | None = None,
 ) -> Callable[[Callable], Callable]:
     """Decorator to register a function as an MCP tool.
 
@@ -215,6 +224,9 @@ def register_tool(
         description: Comprehensive tool description for LLM users
         requires_embeddings: Whether tool requires embedding providers
         name: Optional tool name (defaults to function name)
+        annotations: Optional MCP tool annotations (e.g., {"readOnlyHint": True})
+        title: Human-readable display name (MCP 2025-11-25)
+        output_schema: JSON Schema for structured output (MCP 2025-11-25)
 
     Returns:
         Decorator function
@@ -222,7 +234,9 @@ def register_tool(
     Example:
         @register_tool(
             description="Search using regex patterns",
-            requires_embeddings=False
+            requires_embeddings=False,
+            title="Regex Code Search",
+            annotations={"readOnlyHint": True}
         )
         async def search_regex(pattern: str, page_size: int = 10) -> dict:
             ...
@@ -241,6 +255,9 @@ def register_tool(
             parameters=parameters,
             implementation=func,
             requires_embeddings=requires_embeddings,
+            annotations=annotations,
+            title=title,
+            output_schema=output_schema,
         )
 
         return func
@@ -289,6 +306,105 @@ class HealthStatus(TypedDict):
     version: str
     database_connected: bool
     embedding_providers: list[str]
+
+
+# =============================================================================
+# Output Schemas (MCP 2025-11-25)
+# =============================================================================
+# JSON Schema definitions for structured tool output validation.
+
+PAGINATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "offset": {"type": "integer", "description": "Starting offset of results"},
+        "page_size": {"type": "integer", "description": "Number of results per page"},
+        "has_more": {"type": "boolean", "description": "Whether more results exist"},
+        "total": {"type": ["integer", "null"], "description": "Total result count"},
+        "next_offset": {"type": ["integer", "null"], "description": "Next page offset"},
+    },
+    "required": ["offset", "page_size", "has_more"],
+}
+
+SEARCH_RESULT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "file_path": {"type": "string", "description": "Path to the source file"},
+        "content": {"type": "string", "description": "Code chunk content"},
+        "start_line": {"type": "integer", "description": "Starting line number"},
+        "end_line": {"type": "integer", "description": "Ending line number"},
+        "chunk_type": {"type": "string", "description": "Type of code chunk"},
+        "language": {"type": "string", "description": "Programming language"},
+        "score": {"type": "number", "description": "Relevance score (semantic only)"},
+    },
+    "required": ["file_path", "content", "start_line", "end_line"],
+}
+
+SEARCH_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": SEARCH_RESULT_SCHEMA,
+            "description": "Matching code chunks",
+        },
+        "pagination": PAGINATION_SCHEMA,
+    },
+    "required": ["results", "pagination"],
+}
+
+STATS_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "string", "description": "Database status"},
+        "version": {"type": "string", "description": "ChunkHound version"},
+        "database_connected": {"type": "boolean", "description": "Connection status"},
+        "embedding_providers": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Available embedding providers",
+        },
+    },
+    "required": ["status", "version", "database_connected", "embedding_providers"],
+}
+
+HEALTH_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "string", "enum": ["healthy", "unhealthy"]},
+        "message": {"type": "string", "description": "Health status message"},
+    },
+    "required": ["status"],
+}
+
+RESEARCH_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "analysis": {"type": "string", "description": "Research analysis"},
+        "sources_consulted": {"type": "integer", "description": "Sources used"},
+    },
+    "required": ["analysis"],
+}
+
+PROJECTS_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "projects": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "path": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "indexed_at": {"type": ["string", "null"]},
+                },
+                "required": ["name", "path"],
+            },
+            "description": "List of indexed projects",
+        },
+    },
+    "required": ["projects"],
+}
 
 
 def estimate_tokens(text: str) -> int:
@@ -359,6 +475,9 @@ def limit_response_size(
     ),
     requires_embeddings=False,
     name="search_regex",
+    title="Regex Code Search",
+    annotations={"readOnlyHint": True},
+    output_schema=SEARCH_OUTPUT_SCHEMA,
 )
 async def search_regex_impl(
     services: DatabaseServices,
@@ -366,7 +485,8 @@ async def search_regex_impl(
     page_size: int = 10,
     offset: int = 0,
     max_response_tokens: int = 20000,
-    path: str | None = None,
+    path: list[str] | None = None,
+    tags: list[str] | None = None,
 ) -> SearchResponse:
     """Core regex search implementation.
 
@@ -376,7 +496,12 @@ async def search_regex_impl(
         page_size: Number of results per page (1-100)
         offset: Starting offset for pagination
         max_response_tokens: Maximum response size in tokens (1000-25000)
-        path: Optional path to limit search scope
+        path: Paths to search (list of strings). Supports:
+            - None/empty: current project (per-repo) or all projects (global)
+            - Relative paths: ["src/", "tests/"] - relative to current project
+            - Absolute paths: ["/path/to/project-a", "/path/to/project-b"]
+            - Mixed: absolute and relative paths can be combined
+        tags: Filter to projects with ALL specified tags (global mode, AND logic)
 
     Returns:
         Dict with 'results' and 'pagination' keys
@@ -389,12 +514,24 @@ async def search_regex_impl(
     if services and not services.provider.is_connected:
         services.provider.connect()
 
+    # Convert path list to path_filter or path_prefixes
+    # This is handled by _resolve_search_scope which processes the path list
+    path_filter: str | None = None
+    path_prefixes: list[str] | None = None
+
+    if path:
+        if len(path) == 1:
+            path_filter = path[0]
+        else:
+            path_prefixes = path
+
     # Perform search using SearchService
     results, pagination = services.search_service.search_regex(
         pattern=pattern,
         page_size=page_size,
         offset=offset,
-        path_filter=path,
+        path_filter=path_filter,
+        path_prefixes=path_prefixes,
     )
 
     # Convert file paths to native platform format
@@ -416,6 +553,9 @@ async def search_regex_impl(
     ),
     requires_embeddings=True,
     name="search_semantic",
+    title="Semantic Code Search",
+    annotations={"readOnlyHint": True},
+    output_schema=SEARCH_OUTPUT_SCHEMA,
 )
 async def search_semantic_impl(
     services: DatabaseServices,
@@ -424,7 +564,8 @@ async def search_semantic_impl(
     page_size: int = 10,
     offset: int = 0,
     max_response_tokens: int = 20000,
-    path: str | None = None,
+    path: list[str] | None = None,
+    tags: list[str] | None = None,
     provider: str | None = None,
     model: str | None = None,
     threshold: float | None = None,
@@ -438,10 +579,14 @@ async def search_semantic_impl(
         page_size: Number of results per page (1-100)
         offset: Starting offset for pagination
         max_response_tokens: Maximum response size in tokens (1000-25000)
-        path: Optional path to limit search scope
-        provider: Embedding provider name (optional, uses configured provider if not
-            specified)
-        model: Embedding model name (optional, uses configured model if not specified)
+        path: Paths to search (list of strings). Supports:
+            - None/empty: current project (per-repo) or all projects (global)
+            - Relative paths: ["src/", "tests/"] - relative to current project
+            - Absolute paths: ["/path/to/project-a", "/path/to/project-b"]
+            - Mixed: absolute and relative paths can be combined
+        tags: Filter to projects with ALL specified tags (global mode, AND logic)
+        provider: Embedding provider name (optional, uses configured if not specified)
+        model: Embedding model name (optional, uses configured if not specified)
         threshold: Distance threshold for filtering (optional)
 
     Returns:
@@ -453,7 +598,7 @@ async def search_semantic_impl(
     """
     # Validate embedding manager and providers
     if not embedding_manager or not embedding_manager.list_providers():
-        raise Exception(
+        raise EmbeddingProviderError(
             "No embedding providers available. Configure an embedding provider via:\n"
             "1. Create .chunkhound.json with embedding configuration, OR\n"
             "2. Set CHUNKHOUND_EMBEDDING__API_KEY environment variable"
@@ -468,7 +613,7 @@ async def search_semantic_impl(
             if not model:
                 model = default_provider_obj.model
         except ValueError:
-            raise Exception(
+            raise EmbeddingProviderError(
                 "No default embedding provider configured. "
                 "Either specify provider and model explicitly, or configure a "
                 "default provider."
@@ -482,6 +627,16 @@ async def search_semantic_impl(
     if services and not services.provider.is_connected:
         services.provider.connect()
 
+    # Convert path list to path_filter or path_prefixes
+    path_filter: str | None = None
+    path_prefixes: list[str] | None = None
+
+    if path:
+        if len(path) == 1:
+            path_filter = path[0]
+        else:
+            path_prefixes = path
+
     # Perform search using SearchService
     results, pagination = await services.search_service.search_semantic(
         query=query,
@@ -490,7 +645,8 @@ async def search_semantic_impl(
         threshold=threshold,
         provider=provider,
         model=model,
-        path_filter=path,
+        path_filter=path_filter,
+        path_prefixes=path_prefixes,
     )
 
     # Convert file paths to native platform format
@@ -507,6 +663,9 @@ async def search_semantic_impl(
     description="Get database statistics including file, chunk, and embedding counts",
     requires_embeddings=False,
     name="get_stats",
+    title="Database Statistics",
+    annotations={"readOnlyHint": True},
+    output_schema=STATS_OUTPUT_SCHEMA,
 )
 async def get_stats_impl(
     services: DatabaseServices, scan_progress: dict | None = None
@@ -557,6 +716,9 @@ async def get_stats_impl(
     description="Check server health status",
     requires_embeddings=False,
     name="health_check",
+    title="Health Check",
+    annotations={"readOnlyHint": True},
+    output_schema=HEALTH_OUTPUT_SCHEMA,
 )
 async def health_check_impl(
     services: DatabaseServices, embedding_manager: EmbeddingManager
@@ -592,6 +754,9 @@ async def health_check_impl(
     ),
     requires_embeddings=True,
     name="code_research",
+    title="Deep Code Research",
+    annotations={"readOnlyHint": True},
+    output_schema=RESEARCH_OUTPUT_SCHEMA,
 )
 async def deep_research_impl(
     services: DatabaseServices,
@@ -599,7 +764,8 @@ async def deep_research_impl(
     llm_manager: LLMManager,
     query: str,
     progress: Any = None,
-    path: str | None = None,
+    path: list[str] | None = None,
+    tags: list[str] | None = None,
 ) -> dict[str, Any]:
     """Core deep research implementation.
 
@@ -609,8 +775,12 @@ async def deep_research_impl(
         llm_manager: LLM manager instance
         query: Research query
         progress: Optional Rich Progress instance for terminal UI (None for MCP)
-        path: Optional relative path to limit research scope
-            (e.g., 'tree-sitter-haskell', 'src/')
+        path: Paths to search (list of strings). Supports:
+            - None/empty: current project (per-repo) or all projects (global)
+            - Relative paths: ["src/", "tests/"] - relative to current project
+            - Absolute paths: ["/path/to/project-a", "/path/to/project-b"]
+            - Mixed: absolute and relative paths can be combined
+        tags: Filter to projects with ALL specified tags (global mode, AND logic)
 
     Returns:
         Dict with answer and metadata
@@ -620,7 +790,7 @@ async def deep_research_impl(
     """
     # Validate LLM is configured
     if not llm_manager or not llm_manager.is_configured():
-        raise Exception(
+        raise ToolExecutionError(
             "LLM not configured. Configure an LLM provider via:\n"
             "1. Create .chunkhound.json with llm configuration, OR\n"
             "2. Set CHUNKHOUND_LLM_API_KEY environment variable"
@@ -628,7 +798,7 @@ async def deep_research_impl(
 
     # Validate reranker is configured
     if not embedding_manager or not embedding_manager.list_providers():
-        raise Exception(
+        raise EmbeddingProviderError(
             "No embedding providers available. Code research requires reranking "
             "support."
         )
@@ -638,10 +808,20 @@ async def deep_research_impl(
         hasattr(embedding_provider, "supports_reranking")
         and embedding_provider.supports_reranking()
     ):
-        raise Exception(
+        raise EmbeddingProviderError(
             "Code research requires a provider with reranking support. "
             "Configure a rerank_model in your embedding configuration."
         )
+
+    # Convert path list to path_filter or path_prefixes
+    path_filter: str | None = None
+    path_prefixes: list[str] | None = None
+
+    if path:
+        if len(path) == 1:
+            path_filter = path[0]
+        else:
+            path_prefixes = path
 
     # Create code research service with dynamic tool name
     # This ensures followup suggestions automatically update if tool is renamed
@@ -651,13 +831,223 @@ async def deep_research_impl(
         llm_manager=llm_manager,
         tool_name="code_research",  # Matches tool registration below
         progress=progress,  # Pass progress for terminal UI (None in MCP mode)
-        path_filter=path,
+        path_filter=path_filter,
+        path_prefixes=path_prefixes,
     )
 
     # Perform code research with fixed depth and dynamic budgets
     result = await research_service.deep_research(query)
 
     return result
+
+
+# =============================================================================
+# Project Management Tools (Global Mode)
+# =============================================================================
+
+
+class ProjectListResponse(TypedDict):
+    """Response type for list_projects tool."""
+
+    projects: list[dict[str, Any]]
+    total_count: int
+    mode: str
+
+
+@register_tool(
+    description=(
+        "List all indexed projects in global database mode. Use to discover "
+        "available projects before cross-project search. Returns project names, "
+        "paths, file counts, tags, and watcher status."
+    ),
+    requires_embeddings=False,
+    name="list_projects",
+    title="List Indexed Projects",
+    annotations={"readOnlyHint": True},
+    output_schema=PROJECTS_OUTPUT_SCHEMA,
+)
+async def list_projects_impl(
+    services: DatabaseServices,
+) -> ProjectListResponse:
+    """List all indexed projects.
+
+    Args:
+        services: Database services bundle
+
+    Returns:
+        Dict with 'projects' list and metadata
+    """
+    # Check database connection
+    if services and not services.provider.is_connected:
+        services.provider.connect()
+
+    # Get indexed roots from database
+    try:
+        roots = services.provider.get_indexed_roots()
+    except AttributeError:
+        # Provider doesn't support get_indexed_roots (per-repo mode)
+        return cast(
+            ProjectListResponse,
+            {
+                "projects": [],
+                "total_count": 0,
+                "mode": "per-repo",
+            },
+        )
+
+    # Format projects for response
+    projects = []
+    for root in roots:
+        # Convert datetime objects to ISO strings for JSON serialization
+        indexed_at = root.get("indexed_at")
+        updated_at = root.get("updated_at")
+        if indexed_at and hasattr(indexed_at, "isoformat"):
+            indexed_at = indexed_at.isoformat()
+        if updated_at and hasattr(updated_at, "isoformat"):
+            updated_at = updated_at.isoformat()
+
+        projects.append(
+            {
+                "name": root.get("project_name", "unknown"),
+                "path": root.get("base_directory", ""),
+                "file_count": root.get("file_count", 0),
+                "indexed_at": indexed_at,
+                "updated_at": updated_at,
+                "watcher_active": root.get("watcher_active", False),
+                "tags": root.get("tags", []),
+            }
+        )
+
+    return cast(
+        ProjectListResponse,
+        {
+            "projects": projects,
+            "total_count": len(projects),
+            "mode": "global",
+        },
+    )
+
+
+# =============================================================================
+# Path Resolution
+# =============================================================================
+
+
+def _resolve_paths(
+    arguments: dict[str, Any],
+    client_context: dict[str, Any] | None,
+    project_registry: Any,
+) -> dict[str, Any]:
+    """Resolve path list and tags to concrete path filters.
+
+    Semantics:
+        - Tags select projects (must have ALL specified tags)
+        - Relative paths are applied to each tagged project
+        - Absolute paths are added directly (union with tagged projects)
+        - No paths + tags → search entire tagged projects
+        - No paths + no tags → current project (per-repo) or all (global)
+
+    Examples:
+        tags=["work"] → all work project roots
+        tags=["work"], path=["src/"] → src/ in each work project
+        tags=["work"], path=["/lib/"] → all work roots + /lib/
+        path=["src/"] → src/ in client context project
+        path=["/specific/"] → just /specific/
+
+    Args:
+        arguments: Tool arguments (path: list[str] | None, tags: list[str] | None)
+        client_context: Client context with project path
+        project_registry: ProjectRegistry instance for tag filtering
+
+    Returns:
+        Updated arguments dict with resolved paths
+    """
+    from loguru import logger
+
+    updated_args = arguments.copy()
+    path_list: list[str] | None = arguments.get("path")
+    tags: list[str] | None = arguments.get("tags")
+    client_project = client_context.get("project") if client_context else None
+
+    # Handle tags - expand to matching project directories
+    if tags and project_registry:
+        matching_projects = project_registry.get_projects_by_tags(tags)
+        if not matching_projects:
+            logger.warning(f"No projects matched tags: {tags}")
+            # Tags specified but no matches - return empty results
+            updated_args.pop("tags", None)
+            updated_args["path"] = []
+            return updated_args
+        else:
+            logger.debug(f"Tags {tags} matched {len(matching_projects)} projects")
+
+            expanded_paths: list[str] = []
+
+            # Separate relative and absolute paths
+            relative_paths = [p for p in (path_list or []) if not Path(p).is_absolute()]
+            absolute_paths = [p for p in (path_list or []) if Path(p).is_absolute()]
+
+            # For each tagged project, apply relative paths or use base
+            for project in matching_projects:
+                base = str(project.base_directory)
+                if relative_paths:
+                    # Apply relative paths to this project (with path traversal check)
+                    for p in relative_paths:
+                        from .common import validate_and_join_path
+
+                        safe_path = validate_and_join_path(base, p)
+                        if safe_path:
+                            expanded_paths.append(safe_path)
+                        else:
+                            logger.warning(
+                                f"Rejected unsafe relative path: {p!r} "
+                                f"(potential path traversal)"
+                            )
+                else:
+                    # No relative paths - use project base directory
+                    expanded_paths.append(base)
+
+            # Add absolute paths directly (union with tagged projects)
+            expanded_paths.extend(absolute_paths)
+
+            path_list = list(set(expanded_paths))
+
+        # Remove tags from args (handled)
+        updated_args.pop("tags", None)
+
+    # Handle path list without tags (resolve relative against client context)
+    elif path_list:
+        from .common import validate_and_join_path
+
+        resolved_paths = []
+        for p in path_list:
+            if Path(p).is_absolute():
+                resolved_paths.append(p)
+            elif client_project:
+                # Validate relative path to prevent traversal attacks
+                safe_path = validate_and_join_path(client_project, p)
+                if safe_path:
+                    resolved_paths.append(safe_path)
+                    logger.debug(f"Resolved relative path '{p}' to '{safe_path}'")
+                else:
+                    logger.warning(
+                        f"Rejected unsafe relative path: {p!r} "
+                        f"(potential path traversal)"
+                    )
+            else:
+                # No context - use as-is (will be relative to cwd)
+                resolved_paths.append(p)
+        path_list = resolved_paths
+
+    # Update path in arguments
+    if path_list:
+        updated_args["path"] = path_list
+    elif client_project:
+        # No paths specified - scope to client's project
+        updated_args["path"] = [client_project]
+    # else: leave path as None (search all in global mode)
+
+    return updated_args
 
 
 # =============================================================================
@@ -672,6 +1062,8 @@ async def execute_tool(
     arguments: dict[str, Any],
     scan_progress: dict | None = None,
     llm_manager: Any = None,
+    client_context: dict[str, Any] | None = None,
+    project_registry: Any = None,
 ) -> dict[str, Any] | str:
     """Execute a tool from the registry with proper argument handling.
 
@@ -682,6 +1074,8 @@ async def execute_tool(
         arguments: Tool arguments from the request
         scan_progress: Optional scan progress from MCPServerBase
         llm_manager: Optional LLMManager instance for code_research
+        client_context: Optional client context (project path from HTTP header)
+        project_registry: Optional ProjectRegistry for multi-project search
 
     Returns:
         Tool execution result
@@ -694,6 +1088,10 @@ async def execute_tool(
         raise ValueError(f"Unknown tool: {tool_name}")
 
     tool = TOOL_REGISTRY[tool_name]
+
+    # Resolve paths and tags for search tools
+    if tool_name in ("search_regex", "search_semantic", "code_research"):
+        arguments = _resolve_paths(arguments, client_context, project_registry)
 
     # Build kwargs by inspecting function signature and mapping available arguments
     sig = inspect.signature(tool.implementation)

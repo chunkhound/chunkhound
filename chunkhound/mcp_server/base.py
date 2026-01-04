@@ -6,8 +6,12 @@ This module provides a base class that handles:
 - Lifecycle management (startup/shutdown)
 - Common error handling patterns
 
-Architecture Note: MCP server (stdio-only) inherits from this base
-to ensure consistent initialization while respecting protocol-specific constraints.
+Architecture Note: MCP servers inherit from this base to ensure consistent
+initialization while respecting protocol-specific constraints.
+
+Session Modes:
+- Per-repo mode: stdio server has exclusive access to local database
+- Global mode: stdio server proxies to HTTP daemon for shared database access
 """
 
 import asyncio
@@ -30,7 +34,7 @@ class MCPServerBase(ABC):
     """Base class for MCP server implementations.
 
     Provides common initialization, configuration validation, and lifecycle
-    management for stdio MCP server.
+    management for MCP servers.
 
     Subclasses must implement:
     - _register_tools(): Register protocol-specific tool handlers
@@ -111,10 +115,11 @@ class MCPServerBase(ABC):
             self.debug_log("Starting service initialization")
 
             # Validate database configuration
-            if not self.config.database or not self.config.database.path:
+            if not self.config.database:
                 raise ValueError("Database configuration not initialized")
 
-            db_path = Path(self.config.database.path)
+            # Get database path (handles global mode automatically)
+            db_path = self.config.database.get_db_path(current_dir=Path.cwd())
             db_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Initialize embedding manager
@@ -179,14 +184,38 @@ class MCPServerBase(ABC):
             asyncio.create_task(self._deferred_connect_and_start(target_path))
 
     async def _deferred_connect_and_start(self, target_path: Path) -> None:
-        """Connect DB and start realtime monitoring in background."""
+        """Connect DB and start realtime monitoring in background.
+
+        In per-repo mode, this server has exclusive access to the database.
+        In global mode, the HTTP daemon handles database access and this
+        server proxies to it.
+        """
         try:
             # Ensure services exist
             if not self.services:
                 return
-            # Connect to database lazily
+
+            # Change working directory to target_path for correct path resolution
+            # This ensures os.getcwd() in SearchService returns the indexed project directory,
+            # allowing relative paths in MCP queries to work correctly
+            original_cwd = os.getcwd()
+            os.chdir(target_path)
+            self.debug_log(
+                f"Changed working directory: {original_cwd} -> {target_path}"
+            )
+
+            # Connect to database
             if not self.services.provider.is_connected:
                 self.services.provider.connect()
+                self.debug_log("Database connected")
+
+            # Check for --query-only flag (query-only mode)
+            skip_indexing = getattr(self.args, "query_only", False)
+            if skip_indexing:
+                self.debug_log("Skipping indexing (--query-only mode)")
+                self._scan_progress["is_scanning"] = False
+                self._initialization_complete.set()
+                return
 
             # Start real-time indexing service
             self.debug_log("Starting real-time indexing service (deferred)")
@@ -196,10 +225,12 @@ class MCPServerBase(ABC):
             monitoring_task = asyncio.create_task(
                 self.realtime_indexing.start(target_path)
             )
+
             # Schedule background scan AFTER monitoring is confirmed ready
             asyncio.create_task(
                 self._coordinated_initial_scan(target_path, monitoring_task)
             )
+
         except Exception as e:
             self.debug_log(f"Deferred connect/start failed: {e}")
 

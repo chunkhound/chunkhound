@@ -86,6 +86,13 @@ class TestCLICommands:
             ["chunkhound", "map", "--help"],
             ["chunkhound", "mcp", "--help"],
             ["chunkhound", "calibrate", "--help"],
+            ["chunkhound", "migrate", "--help"],
+            ["chunkhound", "migrate", "discover", "--help"],
+            ["chunkhound", "migrate", "to-global", "--help"],
+            ["chunkhound", "repos", "--help"],
+            ["chunkhound", "repos", "list", "--help"],
+            ["chunkhound", "repos", "show", "--help"],
+            ["chunkhound", "repos", "remove", "--help"],
         ],
     )
     def test_cli_help_commands(self, command):
@@ -166,9 +173,13 @@ from chunkhound.mcp_server.stdio import main
 import asyncio
 
 async def test():
-    # Set minimal config
+    # Set minimal config and clear any reranking env vars that could conflict
     os.environ["CHUNKHOUND_EMBEDDING__PROVIDER"] = "openai"
     os.environ["CHUNKHOUND_EMBEDDING__API_KEY"] = "test"
+    # Clear reranking config to avoid base_url validation issues
+    for key in ["CHUNKHOUND_EMBEDDING__RERANK_MODEL", "CHUNKHOUND_EMBEDDING__RERANK_URL",
+                "CHUNKHOUND_EMBEDDING__RERANK_FORMAT", "CHUNKHOUND_EMBEDDING__RERANK_BATCH_SIZE"]:
+        os.environ.pop(key, None)
     
     # Test we can import without immediate crash
     try:
@@ -254,6 +265,7 @@ sys.exit(asyncio.run(test()))
                 "run",
                 "chunkhound",
                 "mcp",
+                "stdio",
                 str(temp_path),
                 cwd=str(temp_path),
                 env=mcp_env,

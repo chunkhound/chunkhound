@@ -221,7 +221,7 @@ class MappingAdapter(LanguageMapping):
                     params = self.base_mapping.extract_parameters(def_node, source)
                     if params:
                         metadata["parameters"] = params
-                except:
+                except Exception:
                     pass  # Ignore extraction errors
 
         return metadata

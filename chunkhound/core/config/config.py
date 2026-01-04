@@ -285,20 +285,30 @@ class Config(BaseModel):
             # Use object.__setattr__ to avoid Pydantic validation recursion
             object.__setattr__(self, "target_dir", self.target_dir.resolve())
 
-        # Ensure database path is set
+        # Ensure database path is set (unless in global multi-repo mode)
+        # In global mode, get_db_path() will return the global path dynamically
         if not self.database.path:
-            # Try to detect project root from target_dir or auto-detect
-            from chunkhound.utils.project_detection import find_project_root
+            # Only set default path if NOT in global multi-repo mode
+            if not (
+                self.database.multi_repo.enabled
+                and self.database.multi_repo.mode == "global"
+            ):
+                # Try to detect project root from target_dir or auto-detect
+                from chunkhound.utils.project_detection import find_project_root
 
-            # Use the target_dir if it was provided during initialization
-            start_path = self.target_dir
-            project_root = find_project_root(start_path)
+                # Use the target_dir if it was provided during initialization
+                start_path = self.target_dir
+                project_root = find_project_root(start_path)
 
-            # Set default database path in project root
-            self.database.path = project_root / ".chunkhound" / "db"
+                # Set default database path in project root (per-repo mode)
+                self.database.path = project_root / ".chunkhound" / "db"
 
         # Ensure database path is resolved to canonical form (handles symlinks)
-        if self.database.path:
+        # Skip resolution in global mode since path will be set via get_db_path()
+        if self.database.path and not (
+            self.database.multi_repo.enabled
+            and self.database.multi_repo.mode == "global"
+        ):
             self.database.path = self.database.path.resolve()
 
         return self

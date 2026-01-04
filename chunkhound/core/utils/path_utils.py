@@ -47,9 +47,12 @@ def get_relative_path_safe(path: Path, base_dir: Path) -> Path:
 
 
 def normalize_path_for_lookup(
-    input_path: str | Path, base_dir: Path | None = None
+    input_path: str | Path, base_dir: Path | None = None, use_absolute: bool = False
 ) -> str:
     """Normalize path for database lookup operations.
+
+    In per-repo mode (use_absolute=False): Converts to relative paths
+    In global mode (use_absolute=True): Keeps as absolute paths
 
     Converts absolute paths to relative paths using base directory,
     and ensures forward slash normalization for cross-platform compatibility.
@@ -60,21 +63,30 @@ def normalize_path_for_lookup(
 
     Args:
         input_path: Path to normalize (can be absolute or relative)
-        base_dir: Base directory for relative path calculation (required for absolute paths)
+        base_dir: Base directory for relative path calculation
+        use_absolute: If True, return absolute paths (global mode).
+                     If False, return relative paths (per-repo mode, default)
 
     Returns:
-        Normalized relative path with forward slashes
+        Normalized path with forward slashes (relative or absolute based on mode)
 
     Raises:
-        ValueError: If absolute path is provided without base_dir, or if path is not under base_dir
+        ValueError: If path normalization fails
     """
     path_obj = Path(input_path)
 
+    # GLOBAL MODE: Return absolute paths
+    if use_absolute:
+        # Resolve to canonical form (handles symlinks)
+        resolved_path = path_obj.resolve()
+        return resolved_path.as_posix()
+
+    # PER-REPO MODE: Return relative paths
     # If path is already relative, just normalize slashes
     if not path_obj.is_absolute():
         return path_obj.as_posix()
 
-    # For absolute paths, base_dir is REQUIRED
+    # For absolute paths, base_dir is REQUIRED in per-repo mode
     if base_dir is None:
         raise ValueError(
             f"Cannot normalize absolute path without base_dir: {input_path}. "

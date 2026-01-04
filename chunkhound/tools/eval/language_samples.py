@@ -319,8 +319,8 @@ def _build_language_sample_source(language: Language, token: str) -> str:
     # Swift style
     if language == Language.SWIFT:
         return (
-            f'import Foundation\n\nlet marker = "{token}"\n'
-            + '\nprint("Evaluation marker: \\(marker)")\n'
+            "import Foundation\n\n"
+            f'let marker = "{token}"\n' + '\nprint("Evaluation marker: \\(marker)")\n'
         )
 
     # PHP style

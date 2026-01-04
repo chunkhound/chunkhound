@@ -8,43 +8,111 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+from collections.abc import Coroutine
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
-if TYPE_CHECKING:  # type-checkers only; avoid runtime hard dep
+if TYPE_CHECKING:
     import mcp.types as types  # noqa: F401
 
-from .tools import TOOL_REGISTRY, execute_tool
-
-if TYPE_CHECKING:
     from chunkhound.database_factory import DatabaseServices
     from chunkhound.embeddings import EmbeddingManager
     from chunkhound.llm_manager import LLMManager
 
+# Re-export exceptions for backward compatibility
+from .exceptions import (
+    MCPError,
+)
+
 T = TypeVar("T")
 
+# Shared protocol constants
+SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-11-25"}
+CURRENT_PROTOCOL_VERSION = "2025-11-25"
 
-class MCPError(Exception):
-    """Base exception for MCP operations."""
-
-    pass
-
-
-class ServiceNotInitializedError(MCPError):
-    """Raised when services are accessed before initialization."""
-
-    pass
+# Request size limits
+MAX_REQUEST_BODY_SIZE = 1024 * 1024  # 1MB
 
 
-class EmbeddingTimeoutError(MCPError):
-    """Raised when embedding operations timeout."""
+def is_safe_relative_path(path: str) -> bool:
+    """Validate that a relative path doesn't escape the base directory.
 
-    pass
+    Checks for path traversal attacks like '../../../etc/passwd'.
+
+    Args:
+        path: The path string to validate
+
+    Returns:
+        True if the path is safe, False if it attempts directory traversal
+    """
+    # Normalize the path to resolve . and ..
+    normalized = os.path.normpath(path)
+
+    # Reject if it starts with parent references or is absolute
+    if normalized.startswith("..") or normalized.startswith(os.sep):
+        return False
+
+    # On Windows, also check for drive letters
+    if os.name == "nt" and len(normalized) >= 2 and normalized[1] == ":":
+        return False
+
+    return True
 
 
-class EmbeddingProviderError(MCPError):
-    """Raised when embedding provider is not available."""
+def validate_and_join_path(base: str | Path, relative: str) -> str | None:
+    """Safely join a base path with a relative path.
 
-    pass
+    Validates that the relative path doesn't escape the base directory
+    before joining.
+
+    Args:
+        base: The base directory path
+        relative: The relative path to join
+
+    Returns:
+        The joined path string if safe, None if path traversal detected
+    """
+    if not is_safe_relative_path(relative):
+        return None
+
+    base_path = Path(base).resolve()
+    joined = base_path / relative
+
+    # Double-check: ensure the resolved path is still under base
+    try:
+        joined_resolved = joined.resolve()
+        # Check that the joined path starts with the base path
+        joined_resolved.relative_to(base_path)
+        return str(joined)
+    except ValueError:
+        # relative_to raises ValueError if not a subpath
+        return None
+
+
+# Lazy import to avoid circular dependency
+_TOOL_REGISTRY = None
+_execute_tool = None
+
+
+def _get_tool_registry():
+    """Lazy load TOOL_REGISTRY to avoid circular import."""
+    global _TOOL_REGISTRY
+    if _TOOL_REGISTRY is None:
+        from .tools import TOOL_REGISTRY
+
+        _TOOL_REGISTRY = TOOL_REGISTRY
+    return _TOOL_REGISTRY
+
+
+def _get_execute_tool():
+    """Lazy load execute_tool to avoid circular import."""
+    global _execute_tool
+    if _execute_tool is None:
+        from .tools import execute_tool
+
+        _execute_tool = execute_tool
+    return _execute_tool
 
 
 async def with_timeout(
@@ -133,11 +201,17 @@ async def handle_tool_call(
     debug_mode: bool = False,
     scan_progress: dict | None = None,
     llm_manager: LLMManager | None = None,
-) -> list[types.TextContent]:
-    """Unified tool call handler for all MCP servers.
+    client_context: dict[str, Any] | None = None,
+    project_registry: Any = None,
+) -> list[types.TextContent] | dict[str, Any]:
+    """Unified tool call handler for all MCP servers (MCP 2025-11-25 compliant).
 
     Single entry point for all tool executions across transports.
     Handles initialization, validation, execution, and formatting.
+
+    Return types per MCP 2025-11-25:
+    - Tools with outputSchema: Returns dict (SDK sets structuredContent + content)
+    - Tools without outputSchema: Returns list[TextContent] (unstructured)
 
     Args:
         tool_name: Name of the tool to execute from TOOL_REGISTRY
@@ -148,9 +222,12 @@ async def handle_tool_call(
         debug_mode: Whether to include stack traces in error responses
         scan_progress: Optional scan progress from MCPServerBase
         llm_manager: Optional LLM manager for code_research
+        client_context: Optional client context (project path from HTTP header)
+        project_registry: Optional ProjectRegistry for multi-project search
 
     Returns:
-        List containing a single TextContent with JSON-formatted response
+        dict for structured tools (SDK auto-sets structuredContent),
+        list[TextContent] for unstructured tools
 
     Raises:
         MCPError: On tool execution failure (caught and formatted as error response)
@@ -160,15 +237,19 @@ async def handle_tool_call(
         # forcing hard dependency during module import/collection.
         import mcp.types as types  # noqa: WPS433
 
-        # Wait for initialization (reduced timeout since server is immediately available)
+        # Wait for init (reduced timeout since server is immediately available)
         await asyncio.wait_for(initialization_complete.wait(), timeout=5.0)
 
+        # Lazy load to avoid circular import
+        tool_registry = _get_tool_registry()
+        execute_tool_fn = _get_execute_tool()
+
         # Validate tool exists
-        if tool_name not in TOOL_REGISTRY:
+        if tool_name not in tool_registry:
             raise ValueError(f"Unknown tool: {tool_name}")
 
         # Check embedding requirements
-        tool = TOOL_REGISTRY[tool_name]
+        tool = tool_registry[tool_name]
         if tool.requires_embeddings and not embedding_manager:
             raise ValueError(f"Tool {tool_name} requires embedding provider")
 
@@ -176,25 +257,31 @@ async def handle_tool_call(
         parsed_args = parse_mcp_arguments(arguments)
 
         # Execute tool
-        result = await execute_tool(
+        result = await execute_tool_fn(
             tool_name=tool_name,
             services=services,
             embedding_manager=embedding_manager,
             arguments=parsed_args,
             scan_progress=scan_progress,
             llm_manager=llm_manager,
+            client_context=client_context,
+            project_registry=project_registry,
         )
 
-        # Format response based on result type
-        # - code_research tool returns raw markdown string (for rich formatting)
-        # - All other tools return dicts (formatted as JSON)
+        # Format response based on tool type (MCP 2025-11-25 structured content)
+        # - Tools with outputSchema: Return dict directly (SDK sets structuredContent)
+        # - Tools without outputSchema: Return list[TextContent] (unstructured)
         if isinstance(result, str):
-            # Raw string response - pass through directly
-            response_text = result
+            # Raw string response (e.g., code_research markdown) - unstructured
+            return [types.TextContent(type="text", text=result)]
+        elif tool.output_schema is not None:
+            # Tool has outputSchema - return dict for structured content
+            # SDK will set structuredContent and serialize to content automatically
+            return result
         else:
-            # Dict response - format as JSON for MCP protocol
+            # Dict result but no outputSchema - serialize as unstructured content
             response_text = format_tool_response(result, format_type="json")
-        return [types.TextContent(type="text", text=response_text)]
+            return [types.TextContent(type="text", text=response_text)]
 
     except Exception as e:
         error_response = format_error_response(e, include_traceback=debug_mode)

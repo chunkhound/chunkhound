@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+from pathlib import Path
 from typing import Any, cast
 
 from loguru import logger
@@ -13,6 +14,7 @@ from chunkhound.database_factory import create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.mcp_server.tools import search_regex_impl, search_semantic_impl
 from chunkhound.registry import configure_registry
+from chunkhound.services.project_registry import ProjectRegistry
 
 from ..utils.rich_output import RichOutputFormatter
 
@@ -72,6 +74,76 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
         formatter.error(f"Failed to initialize services: {e}")
         sys.exit(1)
 
+    # Handle global mode options (--tags, --projects)
+    path_list: list[str] | None = None
+    tags_list: list[str] | None = None
+
+    # Parse tags if provided
+    tags_arg = getattr(args, "tags", None)
+    if tags_arg:
+        tags_list = [t.strip() for t in tags_arg.split(",") if t.strip()]
+        if not (config.database.multi_repo and config.database.multi_repo.enabled):
+            formatter.error(
+                "--tags requires global mode. Enable with:\n"
+                "  export CHUNKHOUND_DATABASE__MULTI_REPO__ENABLED=true\n"
+                "  export CHUNKHOUND_DATABASE__MULTI_REPO__MODE=global"
+            )
+            sys.exit(1)
+
+    # Parse projects if provided
+    projects_arg = getattr(args, "projects", None)
+    if projects_arg:
+        if not (config.database.multi_repo and config.database.multi_repo.enabled):
+            formatter.error(
+                "--projects requires global mode. Enable with:\n"
+                "  export CHUNKHOUND_DATABASE__MULTI_REPO__ENABLED=true\n"
+                "  export CHUNKHOUND_DATABASE__MULTI_REPO__MODE=global"
+            )
+            sys.exit(1)
+
+        # Resolve project names to paths
+        project_names = [p.strip() for p in projects_arg.split(",") if p.strip()]
+        registry = ProjectRegistry(services.provider)
+        path_list = []
+        for name in project_names:
+            project = registry.get_project(name)
+            if project:
+                path_list.append(str(project.base_directory))
+            elif Path(name).is_absolute() and Path(name).exists():
+                # Allow absolute paths directly
+                path_list.append(name)
+            else:
+                formatter.warning(f"Project not found: {name}")
+
+        if not path_list:
+            formatter.error("No valid projects found")
+            sys.exit(1)
+
+    # Resolve tags to project paths if provided
+    if tags_list:
+        registry = ProjectRegistry(services.provider)
+        matching = registry.get_projects_by_tags(tags_list)
+        if not matching:
+            formatter.error(f"No projects match tags: {', '.join(tags_list)}")
+            sys.exit(1)
+
+        formatter.info(f"Searching {len(matching)} projects with tags: {tags_list}")
+        # Combine with any existing path_list (OR logic for projects)
+        tag_paths = [str(p.base_directory) for p in matching]
+        if path_list:
+            path_list = list(set(path_list + tag_paths))
+        else:
+            path_list = tag_paths
+
+    # Add path_filter to path_list if provided
+    path_filter = getattr(args, "path_filter", None)
+    if path_filter:
+        if path_list:
+            # Apply path_filter as suffix to each project path
+            path_list = [str(Path(p) / path_filter) for p in path_list]
+        else:
+            path_list = [path_filter]
+
     # Determine search strategy
     force_strategy = None
     if args.single_hop:
@@ -87,7 +159,7 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
                 pattern=args.query,
                 page_size=args.page_size,
                 offset=args.offset,
-                path=args.path_filter,
+                path=path_list,  # Use resolved path list
             )
             result_dict = cast(dict[str, Any], result)
         else:
@@ -118,6 +190,9 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
                     )
 
                 # Call service directly with force_strategy
+                # Convert path_list to path_filter/path_prefixes
+                pf = path_list[0] if path_list and len(path_list) == 1 else None
+                pp = path_list if path_list and len(path_list) > 1 else None
                 results, pagination = await services.search_service.search_semantic(
                     query=args.query,
                     page_size=args.page_size,
@@ -125,7 +200,8 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
                     threshold=None,
                     provider=provider_name,
                     model=model_name,
-                    path_filter=args.path_filter,
+                    path_filter=pf,
+                    path_prefixes=pp,
                     force_strategy=force_strategy,
                 )
                 result_dict = {"results": results, "pagination": pagination}
@@ -137,7 +213,7 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
                     query=args.query,
                     page_size=args.page_size,
                     offset=args.offset,
-                    path=args.path_filter,
+                    path=path_list,  # Use resolved path list
                 )
                 result_dict = cast(dict[str, Any], result)
 

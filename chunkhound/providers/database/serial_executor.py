@@ -253,5 +253,5 @@ class SerialDatabaseExecutor:
         try:
             future = self._db_executor.submit(get_activity_time)
             return future.result(timeout=1.0)  # Quick operation, short timeout
-        except:
+        except Exception:
             return None

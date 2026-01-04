@@ -33,6 +33,10 @@ def _safe_print(text: str) -> None:
 async def mcp_command(args: argparse.Namespace, config) -> None:
     """Execute the MCP server command.
 
+    Supports two transport modes:
+    - stdio (default): Standard MCP stdio protocol
+    - http: HTTP/SSE server for multi-project mode
+
     Args:
         args: Parsed command-line arguments containing database path
         config: Pre-validated configuration instance
@@ -53,10 +57,22 @@ async def mcp_command(args: argparse.Namespace, config) -> None:
     except ImportError:
         pass
 
-    # Use stdio transport (only supported mode)
-    from chunkhound.mcp_server.stdio import main
+    # Check which transport mode to use
+    transport = getattr(args, "mcp_transport", None)
 
-    await main(args=args)
+    if transport == "http":
+        # HTTP/SSE mode for multi-project global database
+        from chunkhound.mcp_server.http_server import main as http_main
+
+        host = getattr(args, "host", "127.0.0.1")
+        port = getattr(args, "port", 5173)
+
+        await http_main(host=host, port=port, args=args)
+    else:
+        # Default: stdio transport (backwards compatible)
+        from chunkhound.mcp_server.stdio import main
+
+        await main(args=args)
 
 
 def _show_mcp_setup_instructions(

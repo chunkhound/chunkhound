@@ -30,10 +30,10 @@ from typing import TYPE_CHECKING, Any
 # initialize handshake.
 _MCP_AVAILABLE = True
 try:  # runtime path
-    import mcp.server.stdio  # type: ignore
-    import mcp.types as types  # type: ignore
-    from mcp.server import Server  # type: ignore
-    from mcp.server.models import InitializationOptions  # type: ignore
+    import mcp.server.stdio
+    import mcp.types as types
+    from mcp.server import Server
+    from mcp.server.models import InitializationOptions
 except Exception:  # pragma: no cover - optional dependency path
     _MCP_AVAILABLE = False
 
@@ -48,6 +48,7 @@ from chunkhound.version import __version__
 
 from .base import MCPServerBase
 from .common import handle_tool_call
+from .proxy_client import MCPProxyClient, should_use_proxy
 from .tools import TOOL_REGISTRY
 
 # CRITICAL: Disable ALL logging to prevent JSON-RPC corruption
@@ -103,9 +104,14 @@ class StdioMCPServer(MCPServerBase):
                         CodexCLIProvider,
                     )
 
-                    async def _stub_run_exec(
-                        self, text, cwd=None, max_tokens=1024, timeout=None, model=None
-                    ):  # type: ignore[override]
+                    async def _stub_run(
+                        self: Any,
+                        text: str,
+                        cwd: Any = None,
+                        max_tokens: int = 1024,
+                        timeout: Any = None,
+                        model: Any = None,
+                    ) -> str:
                         mark = os.getenv("CH_TEST_CODEX_MARK_FILE")
                         if mark:
                             try:
@@ -115,11 +121,11 @@ class StdioMCPServer(MCPServerBase):
                                 pass
                         return "SYNTH_OK: codex-cli invoked"
 
-                    def _stub_available(self) -> bool:  # pragma: no cover
+                    def _stub_available(self: Any) -> bool:  # pragma: no cover
                         return True
 
-                    CodexCLIProvider._run_exec = _stub_run_exec  # type: ignore[attr-defined]
-                    CodexCLIProvider._codex_available = _stub_available  # type: ignore[attr-defined]
+                    CodexCLIProvider._run_exec = _stub_run  # type: ignore[assignment,method-assign]
+                    CodexCLIProvider._codex_available = _stub_available  # type: ignore[method-assign]
                 except Exception:
                     pass
 
@@ -132,12 +138,14 @@ class StdioMCPServer(MCPServerBase):
 
                         async def _stub_deep_research_impl(
                             *,
-                            services,
-                            embedding_manager,
-                            llm_manager,
-                            query,
-                            progress=None,
-                        ):
+                            services: Any,
+                            embedding_manager: Any,
+                            llm_manager: Any,
+                            query: str,
+                            progress: Any = None,
+                            path: Any = None,
+                            tags: Any = None,
+                        ) -> dict[str, Any]:
                             if llm_manager is None:
                                 try:
                                     from chunkhound.llm_manager import (
@@ -154,11 +162,11 @@ class StdioMCPServer(MCPServerBase):
                             resp = await prov.complete(prompt=f"E2E: {query}")
                             return {"answer": resp.content}
 
-                        tools_mod.deep_research_impl = _stub_deep_research_impl  # type: ignore[assignment]
+                        tools_mod.deep_research_impl = _stub_deep_research_impl
                         if "code_research" in tools_mod.TOOL_REGISTRY:
                             tools_mod.TOOL_REGISTRY[
                                 "code_research"
-                            ].implementation = _stub_deep_research_impl  # type: ignore[index]
+                            ].implementation = _stub_deep_research_impl
                     except Exception:
                         pass
         except Exception:
@@ -166,13 +174,32 @@ class StdioMCPServer(MCPServerBase):
             pass
 
         # Create MCP server instance (lazy import if SDK is present)
-        if not _MCP_AVAILABLE:
-            # Defer server creation; fallback path implemented in run()
-            self.server = None  # type: ignore
-        else:
+        self.server: Any = None  # Will be Server instance if MCP SDK available
+        if _MCP_AVAILABLE:
             from mcp.server import Server  # noqa: WPS433
 
-            self.server: Server = Server("ChunkHound Code Search")
+            self.server = Server("ChunkHound Code Search")
+
+        # Check if we should use proxy mode (forward to HTTP daemon)
+        self._proxy_mode = False
+        self._proxy_client: MCPProxyClient | None = None
+        self._proxy_url: str | None = None
+        self._global_mode_error: str | None = None  # Error if global mode but no daemon
+
+        try:
+            decision = should_use_proxy(config)
+            if decision.use_proxy and decision.daemon_url:
+                self._proxy_mode = True
+                self._proxy_url = decision.daemon_url
+                self.debug_log(f"Proxy mode enabled: {decision.daemon_url}")
+            elif decision.global_mode_error:
+                # Global mode is enabled but daemon is not running
+                # Store error to return on tool calls - do NOT allow direct mode
+                self._global_mode_error = decision.error_message
+                self.debug_log(f"Global mode error: {decision.error_message}")
+        except Exception:
+            # Silent - can't log in stdio mode
+            pass
 
         # Event to signal initialization completion
         self._initialization_complete = asyncio.Event()
@@ -192,8 +219,59 @@ class StdioMCPServer(MCPServerBase):
         @self.server.call_tool()  # type: ignore[misc]
         async def handle_all_tools(
             tool_name: str, arguments: dict[str, Any]
-        ) -> list[types.TextContent]:
-            """Universal tool handler that routes to the unified handler."""
+        ) -> list[types.TextContent] | dict[str, Any]:
+            """Universal tool handler that routes to the unified handler.
+
+            Returns structured content (dict) for tools with outputSchema,
+            or unstructured content (list[TextContent]) otherwise.
+            MCP SDK handles structuredContent automatically for dict returns.
+
+            Includes automatic fallback to direct mode if proxy becomes unhealthy.
+            """
+            # Check for global mode error - do NOT allow direct database access
+            if self._global_mode_error:
+                error_msg = (
+                    f"ChunkHound Error: {self._global_mode_error}\n\n"
+                    "To fix this:\n"
+                    "1. Start the daemon: chunkhound daemon start --background\n"
+                    "2. Or enable auto-start: export CHUNKHOUND_DATABASE__MULTI_REPO__AUTO_START_DAEMON=true"
+                )
+                return [types.TextContent(type="text", text=error_msg)]
+
+            # Check if we should use proxy mode
+            if self._proxy_mode and self._proxy_client:
+                # Check proxy health before using
+                if not self._proxy_client.is_healthy:
+                    # In global mode, don't fall back to direct - return error
+                    if self._is_global_mode():
+                        error_msg = (
+                            "ChunkHound daemon became unavailable. "
+                            "Restart with: chunkhound daemon start --background"
+                        )
+                        return [types.TextContent(type="text", text=error_msg)]
+                    self.debug_log("Proxy unhealthy, falling back to direct mode")
+                    await self._fallback_to_direct_mode()
+                else:
+                    try:
+                        return await self._handle_proxied_tool(tool_name, arguments)
+                    except Exception as proxy_err:
+                        # Proxy failed - in global mode, don't fall back
+                        if self._is_global_mode():
+                            error_msg = (
+                                f"ChunkHound daemon error: {proxy_err}\n"
+                                "Restart with: chunkhound daemon start --background"
+                            )
+                            return [types.TextContent(type="text", text=error_msg)]
+                        # Per-repo mode - try fallback if available
+                        self.debug_log(f"Proxy failed: {proxy_err}, trying fallback")
+                        if await self._try_fallback_to_direct():
+                            # Retry with direct mode
+                            pass
+                        else:
+                            # Can't fallback - re-raise
+                            raise
+
+            # Direct mode - handle locally
             return await handle_tool_call(
                 tool_name=tool_name,
                 arguments=arguments,
@@ -225,6 +303,31 @@ class StdioMCPServer(MCPServerBase):
                 # Return basic tools even if not fully initialized
                 pass
 
+            # In proxy mode, get tools from daemon
+            if self._proxy_mode and self._proxy_client:
+                try:
+                    daemon_tools = await self._proxy_client.list_tools()
+                    result = []
+                    for t in daemon_tools:
+                        annotations = None
+                        if t.get("annotations"):
+                            annotations = types.ToolAnnotations(**t["annotations"])
+                        result.append(
+                            types.Tool(
+                                name=t.get("name", ""),
+                                description=t.get("description", ""),
+                                inputSchema=t.get("inputSchema", {}),
+                                title=t.get("title"),
+                                outputSchema=t.get("outputSchema"),
+                                annotations=annotations,
+                            )
+                        )
+                    return result
+                except Exception:
+                    # Fallback to local registry on error
+                    pass
+
+            # Direct mode - use local registry
             tools = []
             for tool_name, tool in TOOL_REGISTRY.items():
                 # Skip embedding-dependent tools if no providers available
@@ -234,22 +337,186 @@ class StdioMCPServer(MCPServerBase):
                 ):
                     continue
 
+                # Build Tool with optional annotations (MCP 2025-11-25 compliant)
+                annotations = None
+                if tool.annotations:
+                    annotations = types.ToolAnnotations(**tool.annotations)
                 tools.append(
                     types.Tool(
                         name=tool_name,
                         description=tool.description,
                         inputSchema=tool.parameters,
+                        title=tool.title,
+                        outputSchema=tool.output_schema,
+                        annotations=annotations,
                     )
                 )
 
             return tools
 
+    def _is_global_mode(self) -> bool:
+        """Check if we're configured for global database mode.
+
+        Returns:
+            True if global mode is enabled in config
+        """
+        return (
+            self.config.database.multi_repo.enabled
+            and self.config.database.multi_repo.mode == "global"
+        )
+
+    async def _fallback_to_direct_mode(self) -> None:
+        """Switch from proxy mode to direct mode.
+
+        Called when the daemon becomes unavailable and we need to
+        handle requests directly using a local database connection.
+
+        NOTE: In global mode, this should NOT be called - use error response instead.
+        """
+        if self._proxy_client:
+            try:
+                await self._proxy_client.close()
+            except Exception:
+                pass
+            self._proxy_client = None
+
+        self._proxy_mode = False
+        self.debug_log("Switched to direct mode")
+
+        # Initialize local services if not already done
+        if not self._initialized:
+            await self.initialize()
+
+    async def _try_fallback_to_direct(self) -> bool:
+        """Attempt to fall back to direct mode.
+
+        Returns:
+            True if fallback successful and services initialized
+        """
+        try:
+            await self._fallback_to_direct_mode()
+            return self.services is not None
+        except Exception as e:
+            self.debug_log(f"Fallback to direct mode failed: {e}")
+            return False
+
+    async def _handle_proxied_tool(
+        self, tool_name: str, arguments: dict[str, Any]
+    ) -> list | dict:
+        """Handle tool call via proxy to HTTP daemon.
+
+        Args:
+            tool_name: Name of the tool to call
+            arguments: Tool arguments
+
+        Returns:
+            dict for structured content (with outputSchema),
+            list[TextContent] for unstructured content
+        """
+        import json
+
+        import mcp.types as types  # noqa: WPS433
+
+        from chunkhound.mcp_server.exceptions import ToolExecutionError  # noqa: WPS433
+
+        try:
+            if not self._proxy_client:
+                raise ToolExecutionError("Proxy client not initialized")
+
+            result = await self._proxy_client.call_tool(tool_name, arguments)
+
+            # Check for error in result
+            if result.get("isError"):
+                error_content = result.get("content", [])
+                if error_content and isinstance(error_content, list):
+                    return [
+                        types.TextContent(type="text", text=item.get("text", ""))
+                        for item in error_content
+                        if item.get("type") == "text"
+                    ]
+
+            # MCP 2025-11-25: Return structuredContent if present
+            # SDK will handle setting structuredContent field
+            structured_content = result.get("structuredContent")
+            if isinstance(structured_content, dict):
+                return structured_content
+
+            # Extract unstructured content from daemon response
+            content_list = result.get("content", [])
+            if content_list and isinstance(content_list, list):
+                return [
+                    types.TextContent(type="text", text=item.get("text", ""))
+                    for item in content_list
+                    if item.get("type") == "text"
+                ]
+
+            # Fallback: if result has unexpected structure, serialize it
+            return [
+                types.TextContent(type="text", text=json.dumps(result, default=str))
+            ]
+
+        except Exception as e:
+            error_response = {"error": {"type": type(e).__name__, "message": str(e)}}
+            return [types.TextContent(type="text", text=json.dumps(error_response))]
+
+    async def _initialize_proxy(self) -> bool:
+        """Initialize proxy client if in proxy mode.
+
+        Returns:
+            True if proxy initialized successfully or not needed
+        """
+        if not self._proxy_mode or not self._proxy_url:
+            return True  # Not using proxy
+
+        from pathlib import Path
+
+        try:
+            # Create proxy client with current directory as project context
+            self._proxy_client = MCPProxyClient(
+                server_url=self._proxy_url,
+                project_context=Path.cwd(),
+            )
+
+            # Initialize and verify connection
+            if await self._proxy_client.initialize():
+                self.debug_log("Proxy client connected to daemon")
+                return True
+            else:
+                # Fallback to direct mode if daemon unavailable
+                self.debug_log("Daemon unavailable, falling back to direct mode")
+                self._proxy_mode = False
+                self._proxy_client = None
+                return True
+
+        except Exception:
+            # Fallback to direct mode
+            self._proxy_mode = False
+            self._proxy_client = None
+            return True
+
     @asynccontextmanager
     async def server_lifespan(self) -> AsyncIterator[dict]:
         """Manage server lifecycle with proper initialization and cleanup."""
         try:
-            # Initialize services
-            await self.initialize()
+            # If global mode error, skip all initialization
+            # Tools will return error messages when called
+            if self._global_mode_error:
+                self.debug_log(
+                    f"Skipping initialization due to global mode error: "
+                    f"{self._global_mode_error}"
+                )
+                self._initialization_complete.set()
+                yield {"services": None, "embeddings": None}
+                return
+
+            # Initialize proxy if in proxy mode
+            if self._proxy_mode:
+                await self._initialize_proxy()
+
+            # Initialize services (skip if in full proxy mode)
+            if not self._proxy_mode:
+                await self.initialize()
+
             self._initialization_complete.set()
             self.debug_log("Server initialization complete")
 
@@ -257,8 +524,14 @@ class StdioMCPServer(MCPServerBase):
             yield {"services": self.services, "embeddings": self.embedding_manager}
 
         finally:
-            # Cleanup on shutdown
-            await self.cleanup()
+            # Cleanup proxy client
+            if self._proxy_client:
+                await self._proxy_client.close()
+                self._proxy_client = None
+
+            # Cleanup local services
+            if not self._proxy_mode and not self._global_mode_error:
+                await self.cleanup()
 
     async def run(self) -> None:
         """Run the stdio server with proper lifecycle management."""
@@ -293,16 +566,27 @@ class StdioMCPServer(MCPServerBase):
                             init_options,
                         )
             else:
-                # Minimal fallback stdio: immediately emit a valid initialize response
-                # so tests can proceed without the official MCP SDK.
+                # Minimal fallback stdio: read initialize request and emit valid
+                # response so tests can proceed without the official MCP SDK.
                 import json
                 import os as _os
+                import sys as _sys
+
+                # Read the initialize request from stdin to get the actual request ID
+                request_id = 1  # Default fallback
+                try:
+                    line = _sys.stdin.readline()
+                    if line:
+                        init_request = json.loads(line)
+                        request_id = init_request.get("id", 1)
+                except Exception:
+                    pass
 
                 resp = {
                     "jsonrpc": "2.0",
-                    "id": 1,
+                    "id": request_id,
                     "result": {
-                        "protocolVersion": "2024-11-05",
+                        "protocolVersion": "2025-11-25",
                         "serverInfo": {
                             "name": "ChunkHound Code Search",
                             "version": __version__,

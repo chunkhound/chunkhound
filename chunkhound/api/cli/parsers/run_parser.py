@@ -134,6 +134,17 @@ def add_run_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help="Directory path to index (default: current directory)",
     )
 
+    # Tags for multi-repo organization (global mode)
+    run_parser.add_argument(
+        "--tags",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated tags to assign to this project (global mode). "
+            "Example: --tags backend,python,work"
+        ),
+    )
+
     # Add common arguments
     add_common_arguments(run_parser)
 

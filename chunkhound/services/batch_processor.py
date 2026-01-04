@@ -61,12 +61,8 @@ def _parse_file_worker(
         # Local imports to keep worker picklable and light
         from pathlib import Path as _Path
 
-        from chunkhound.core.types.common import (
-            FileId as _FileId,
-        )
-        from chunkhound.core.types.common import (
-            Language as _Language,
-        )
+        from chunkhound.core.types.common import FileId as _FileId
+        from chunkhound.core.types.common import Language as _Language
         from chunkhound.parsers.parser_factory import (
             create_parser_for_language as _create,
         )

@@ -283,11 +283,12 @@ class ProviderRegistry:
             return
 
         provider_type = self._config.database.provider
-        # Use get_db_path() to get the actual database location (includes provider-specific transformations)
-        db_path = str(self._config.database.get_db_path())
 
         # Get base directory from config (guaranteed to be set)
         base_directory = self._config.target_dir
+
+        # Use get_db_path() to respect multi-repo mode configuration
+        db_path = str(self._config.database.get_db_path(current_dir=base_directory))
 
         # Create the appropriate provider
         if provider_type == "duckdb":

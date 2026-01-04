@@ -90,12 +90,56 @@ class DuckDBConnectionManager:
             logger.error(f"DuckDB connection failed: {e}")
             raise
 
-    def _connect_with_wal_validation(self) -> None:
-        """Connect to DuckDB with WAL corruption detection and automatic cleanup."""
+    def connect_readonly(self) -> None:
+        """Establish read-only database connection.
+
+        Read-only connections allow concurrent access while a primary connection
+        has exclusive write access. Ideal for secondary MCP sessions that only
+        need to serve search queries.
+
+        DuckDB's WAL mode supports multiple concurrent read-only connections.
+        """
+        logger.info(f"Connecting to DuckDB database (read-only): {self.db_path}")
+
+        # Check database exists before attempting read-only connection
+        if isinstance(self.db_path, Path):
+            if not self.db_path.exists():
+                raise FileNotFoundError(
+                    f"Database not found at {self.db_path}. "
+                    "Run 'chunkhound index' to create it first, or use read-write mode."
+                )
+            # Ensure parent directory exists for file-based databases
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            if duckdb is None:
+                raise ImportError("duckdb not available")
+
+            # Connect in read-only mode (no WAL cleanup needed for readers)
+            self._connect_with_wal_validation(read_only=True)
+
+            logger.info("DuckDB read-only connection established")
+
+            # Load required extensions
+            self._load_extensions()
+
+            logger.info("DuckDB read-only connection manager initialization complete")
+
+        except Exception as e:
+            logger.error(f"DuckDB read-only connection failed: {e}")
+            raise
+
+    def _connect_with_wal_validation(self, read_only: bool = False) -> None:
+        """Connect to DuckDB with WAL corruption detection and automatic cleanup.
+
+        Args:
+            read_only: If True, open connection in read-only mode (allows concurrent readers)
+        """
         try:
             # Attempt initial connection
-            self.connection = duckdb.connect(str(self.db_path))
-            logger.debug("DuckDB connection successful")
+            self.connection = duckdb.connect(str(self.db_path), read_only=read_only)
+            mode = "read-only" if read_only else "read-write"
+            logger.debug(f"DuckDB connection successful ({mode} mode)")
 
         except duckdb.Error as e:
             error_msg = str(e)
@@ -105,10 +149,15 @@ class DuckDBConnectionManager:
                 logger.warning(f"WAL corruption detected: {error_msg}")
                 self._handle_wal_corruption()
 
-                # Retry connection after WAL cleanup
+                # Retry connection after WAL cleanup (preserve read_only mode)
                 try:
-                    self.connection = duckdb.connect(str(self.db_path))
-                    logger.info("DuckDB connection successful after WAL cleanup")
+                    self.connection = duckdb.connect(
+                        str(self.db_path), read_only=read_only
+                    )
+                    mode = "read-only" if read_only else "read-write"
+                    logger.info(
+                        f"DuckDB connection successful after WAL cleanup ({mode} mode)"
+                    )
                 except Exception as retry_error:
                     logger.error(
                         f"Connection failed even after WAL cleanup: {retry_error}"

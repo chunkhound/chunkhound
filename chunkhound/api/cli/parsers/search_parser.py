@@ -79,6 +79,20 @@ def add_search_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help="Optional path filter (e.g., 'src/', 'tests/')",
     )
 
+    # Multi-repo / global mode options
+    search_parser.add_argument(
+        "--tags",
+        type=str,
+        help="Filter by project tags (comma-separated, AND logic). "
+        "Requires global mode. Example: --tags backend,python",
+    )
+    search_parser.add_argument(
+        "--projects",
+        type=str,
+        help="Search specific projects (comma-separated names or paths). "
+        "Requires global mode. Example: --projects myapp,lib",
+    )
+
     # Add common arguments
     add_common_arguments(search_parser)
 

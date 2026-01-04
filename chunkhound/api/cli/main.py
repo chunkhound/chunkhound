@@ -57,10 +57,15 @@ def create_parser() -> argparse.ArgumentParser:
     from .parsers import create_main_parser, setup_subparsers
     from .parsers.calibrate_parser import add_calibrate_subparser
     from .parsers.code_mapper_parser import add_map_subparser
+    from .parsers.daemon_parser import add_daemon_subparser
+    from .parsers.jobs_parser import add_jobs_parser
     from .parsers.mcp_parser import add_mcp_subparser
+    from .parsers.migrate_parser import add_migrate_subparser
+    from .parsers.repos_parser import add_repos_subparser
     from .parsers.research_parser import add_research_subparser
     from .parsers.run_parser import add_run_subparser
     from .parsers.search_parser import add_search_subparser
+    from .parsers.tags_parser import add_tags_subparser
 
     parser = create_main_parser()
     subparsers = setup_subparsers(parser)
@@ -71,6 +76,11 @@ def create_parser() -> argparse.ArgumentParser:
     add_search_subparser(subparsers)
     add_research_subparser(subparsers)
     add_map_subparser(subparsers)
+    add_repos_subparser(subparsers)
+    add_migrate_subparser(subparsers)
+    add_daemon_subparser(subparsers)
+    add_tags_subparser(subparsers)
+    add_jobs_parser(subparsers)
     # Diagnose command retired; functionality lives under: index --check-ignores
     add_calibrate_subparser(subparsers)
 
@@ -167,6 +177,76 @@ async def async_main() -> None:
             from .commands.calibrate import calibrate_command
 
             await calibrate_command(args, config)
+        elif args.command == "repos":
+            # Dynamic import to avoid early chunkhound module loading
+            from .commands.repos import list_command, remove_command, show_command
+            from .utils.rich_output import RichOutputFormatter
+
+            formatter = RichOutputFormatter()
+
+            # Route to appropriate repos subcommand
+            if args.repos_command == "list":
+                await list_command(args, formatter)
+            elif args.repos_command == "show":
+                await show_command(args, formatter)
+            elif args.repos_command == "remove":
+                await remove_command(args, formatter)
+            else:
+                logger.error(f"Unknown repos subcommand: {args.repos_command}")
+                sys.exit(1)
+        elif args.command == "migrate":
+            # Dynamic import to avoid early chunkhound module loading
+            from .commands.migrate import discover_command, migrate_command
+            from .utils.rich_output import RichOutputFormatter
+
+            formatter = RichOutputFormatter()
+
+            # Route to appropriate migrate subcommand
+            if args.migrate_command == "discover":
+                await discover_command(args, formatter)
+            elif args.migrate_command == "to-global":
+                await migrate_command(args, formatter)
+            else:
+                logger.error(f"Unknown migrate subcommand: {args.migrate_command}")
+                sys.exit(1)
+        elif args.command == "daemon":
+            # Dynamic import to avoid early chunkhound module loading
+            from .commands.daemon import (
+                logs_command,
+                refresh_watchers_command,
+                restart_command,
+                start_command,
+                status_command,
+                stop_command,
+            )
+            from .utils.rich_output import RichOutputFormatter
+
+            formatter = RichOutputFormatter()
+
+            # Route to appropriate daemon subcommand
+            if args.daemon_command == "start":
+                await start_command(args, formatter)
+            elif args.daemon_command == "stop":
+                await stop_command(args, formatter)
+            elif args.daemon_command == "status":
+                await status_command(args, formatter)
+            elif args.daemon_command == "restart":
+                await restart_command(args, formatter)
+            elif args.daemon_command == "logs":
+                await logs_command(args, formatter)
+            elif args.daemon_command == "refresh-watchers":
+                await refresh_watchers_command(args, formatter)
+            else:
+                logger.error(f"Unknown daemon subcommand: {args.daemon_command}")
+                sys.exit(1)
+        elif args.command == "tags":
+            from .commands.tags import tags_command
+
+            await tags_command(args, config)
+        elif args.command == "jobs":
+            from .commands.jobs import jobs_command
+
+            await jobs_command(args, config)
         # 'diagnose' command retired; use: chunkhound index --check-ignores --vs git
         else:
             logger.error(f"Unknown command: {args.command}")

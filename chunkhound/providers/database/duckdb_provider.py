@@ -184,6 +184,35 @@ class DuckDBProvider(SerialDatabaseProvider):
             logger.error(f"DuckDB connection failed: {e}")
             raise
 
+    def connect_readonly(self) -> None:
+        """Establish read-only database connection for concurrent read access.
+
+        Read-only connections allow secondary MCP sessions to serve search queries
+        while a primary session has exclusive write access. This leverages DuckDB's
+        WAL mode support for concurrent readers.
+
+        Read-only sessions can:
+        - Execute all SELECT queries
+        - Serve MCP search tools
+        - Access indexed data
+
+        Read-only sessions cannot:
+        - Modify database (INSERT/UPDATE/DELETE)
+        - Create schemas or indexes
+        - Process update queue (primary session only)
+        """
+        try:
+            # Initialize connection manager in read-only mode
+            self._connection_manager.connect_readonly()
+
+            # Call parent connect which handles executor initialization
+            # Note: Schema creation will be skipped for read-only connections
+            super().connect()
+
+        except Exception as e:
+            logger.error(f"DuckDB read-only connection failed: {e}")
+            raise
+
     def _executor_connect(self, conn: Any, state: dict[str, Any]) -> None:
         """Executor method for connect - runs in DB thread.
 
@@ -211,6 +240,18 @@ class DuckDBProvider(SerialDatabaseProvider):
         except Exception as e:
             logger.error(f"Database initialization failed: {e}")
             raise
+
+    def _is_global_mode(self) -> bool:
+        """Check if database is in global multi-repo mode.
+
+        Returns:
+            True if in global mode (absolute paths), False otherwise.
+        """
+        if self.config is None:
+            return False
+        return (
+            self.config.multi_repo.enabled and self.config.multi_repo.mode == "global"
+        )
 
     def _perform_wal_cleanup_in_executor(self, conn: Any) -> None:
         """Perform WAL cleanup within the executor thread.
@@ -440,7 +481,24 @@ class DuckDBProvider(SerialDatabaseProvider):
             """)
 
             # Ensure content_hash exists for existing DBs
-            conn.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS content_hash TEXT")
+            # Only run if column doesn't exist (avoids DDL on every connect)
+            try:
+                has_content_hash = (
+                    conn.execute("""
+                    SELECT COUNT(*) FROM information_schema.columns
+                    WHERE table_name = 'files' AND column_name = 'content_hash'
+                """).fetchone()[0]
+                    > 0
+                )
+
+                if not has_content_hash:
+                    conn.execute(
+                        "ALTER TABLE files ADD COLUMN IF NOT EXISTS content_hash TEXT"
+                    )
+                    logger.info("Migrated files table: added content_hash column")
+            except Exception as e:
+                # Expected if column already exists or schema check fails
+                logger.debug(f"Column migration check (content_hash): {e}")
 
             # Create sequence for chunks table
             conn.execute("CREATE SEQUENCE IF NOT EXISTS chunks_id_seq")
@@ -462,6 +520,53 @@ class DuckDBProvider(SerialDatabaseProvider):
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            # Indexed roots table for multi-repository support
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS indexed_roots (
+                    base_directory TEXT PRIMARY KEY,
+                    project_name TEXT,
+                    indexed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    file_count INTEGER DEFAULT 0 CHECK (file_count >= 0),
+                    config_snapshot JSON,
+                    watcher_active BOOLEAN DEFAULT FALSE,
+                    last_error TEXT,
+                    error_count INTEGER DEFAULT 0,
+                    tags TEXT[] DEFAULT []
+                )
+            """)
+
+            # Create index on updated_at for efficient queries
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_indexed_roots_updated_at
+                ON indexed_roots(updated_at DESC)
+            """)
+
+            # Create index on project_name for fast lookups (repos show/remove commands)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_indexed_roots_project_name
+                ON indexed_roots(project_name)
+            """)
+
+            # Migration: Add tags column to existing indexed_roots tables
+            # Only run if column doesn't exist (avoids DDL on every connect)
+            try:
+                has_tags_column = (
+                    conn.execute("""
+                    SELECT COUNT(*) FROM information_schema.columns
+                    WHERE table_name = 'indexed_roots' AND column_name = 'tags'
+                """).fetchone()[0]
+                    > 0
+                )
+
+                if not has_tags_column:
+                    conn.execute(
+                        "ALTER TABLE indexed_roots ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT []"
+                    )
+                    logger.info("Migrated indexed_roots table: added tags column")
+            except Exception:
+                pass  # Column already exists or table doesn't exist yet
 
             # Create sequence for embeddings table
             conn.execute("CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq")
@@ -940,8 +1045,8 @@ class DuckDBProvider(SerialDatabaseProvider):
                 conn.execute("ROLLBACK")
                 state["transaction_active"] = False
                 logger.info("Transaction rolled back due to error")
-            except:
-                pass
+            except Exception:
+                pass  # Rollback failed, but we're already handling an error
 
             # Attempt to recreate dropped indexes on failure
             if dropped_indexes:
@@ -993,6 +1098,19 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Track operation for checkpoint management
             track_operation(state)
 
+            # Normalize path for storage: absolute in global mode, relative in per-repo mode
+            # If the path is already absolute, use it directly (just normalize format).
+            # This allows the coordinator to pass pre-computed absolute paths in global mode.
+            path_obj = Path(file.path)
+            if path_obj.is_absolute():
+                # Already absolute - just normalize to POSIX format for storage consistency
+                storage_path = path_obj.as_posix()
+            else:
+                base_dir = state.get("base_directory")
+                storage_path = normalize_path_for_lookup(
+                    file.path, base_dir, use_absolute=self._is_global_mode()
+                )
+
             # No existing file, insert new one
             result = conn.execute(
                 """
@@ -1001,7 +1119,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 RETURNING id
             """,
                 [
-                    file.path,  # Store path as-is (now relative with forward slashes)
+                    storage_path,  # Store absolute path in global mode, relative in per-repo mode
                     file.name if hasattr(file, "name") else Path(file.path).name,
                     file.extension
                     if hasattr(file, "extension")
@@ -1041,7 +1159,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         from chunkhound.core.utils import normalize_path_for_lookup
 
         base_dir = state.get("base_directory")
-        lookup_path = normalize_path_for_lookup(path, base_dir)
+        lookup_path = normalize_path_for_lookup(
+            path, base_dir, use_absolute=self._is_global_mode()
+        )
         result = conn.execute(
             """
             SELECT id, path, name, extension, size, modified_time, language, content_hash, created_at, updated_at
@@ -1099,6 +1219,575 @@ class DuckDBProvider(SerialDatabaseProvider):
             )
 
         return file_dict
+
+    # Indexed Roots Management (Multi-Repo Support)
+
+    def register_base_directory(
+        self,
+        base_directory: str,
+        project_name: str | None = None,
+        config: dict | None = None,
+    ) -> None:
+        """Register a base directory in the indexed_roots table.
+
+        Args:
+            base_directory: Absolute path to the project root that was indexed
+            project_name: Optional name for the project (defaults to directory name)
+            config: Optional config snapshot (embedding provider, model, etc.)
+        """
+        return self._execute_in_db_thread_sync(
+            "register_base_directory", base_directory, project_name, config
+        )
+
+    def _executor_register_base_directory(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        base_directory: str,
+        project_name: str | None,
+        config: dict | None,
+    ) -> None:
+        """Executor method for register_base_directory - runs in DB thread."""
+        import json
+        from pathlib import Path
+
+        # Normalize base_directory to canonical form (resolve symlinks, remove trailing slashes)
+        base_directory = str(Path(base_directory).resolve())
+
+        # Check if project already exists (for reindex - keep existing name)
+        existing = conn.execute(
+            "SELECT project_name FROM indexed_roots WHERE base_directory = ?",
+            [base_directory],
+        ).fetchone()
+
+        if existing:
+            # Reindex: keep existing name, just update timestamps
+            config_json = json.dumps(config) if config else None
+            conn.execute(
+                """
+                UPDATE indexed_roots SET
+                    updated_at = now(),
+                    config_snapshot = ?
+                WHERE base_directory = ?
+                """,
+                [config_json, base_directory],
+            )
+        else:
+            # New project: generate unique CLI-safe name
+            if project_name is None:
+                project_name = self._generate_unique_project_name(conn, base_directory)
+
+            config_json = json.dumps(config) if config else None
+            conn.execute(
+                """
+                INSERT INTO indexed_roots
+                (base_directory, project_name, indexed_at, updated_at, config_snapshot)
+                VALUES (?, ?, now(), now(), ?)
+                """,
+                [base_directory, project_name, config_json],
+            )
+
+    def _generate_unique_project_name(self, conn: Any, base_directory: str) -> str:
+        """Generate a unique, CLI-safe project name from a directory path.
+
+        Converts directory name to slug (alphanumeric, dashes, underscores only).
+        If duplicate exists, appends -2, -3, etc.
+
+        Args:
+            conn: Database connection
+            base_directory: Absolute path to project
+
+        Returns:
+            Unique project name like 'my-project' or 'my-project-2'
+        """
+        import re
+        from pathlib import Path
+
+        # Get directory name and slugify it
+        dir_name = Path(base_directory).name
+
+        # Convert to lowercase, replace spaces/special chars with dashes
+        slug = re.sub(r"[^a-zA-Z0-9_-]", "-", dir_name.lower())
+        # Collapse multiple dashes
+        slug = re.sub(r"-+", "-", slug)
+        # Remove leading/trailing dashes
+        slug = slug.strip("-")
+        # Ensure not empty
+        if not slug:
+            slug = "project"
+
+        # Check for existing projects with this name
+        existing = conn.execute(
+            "SELECT project_name FROM indexed_roots WHERE project_name LIKE ?",
+            [f"{slug}%"],
+        ).fetchall()
+
+        existing_names = {row[0] for row in existing}
+
+        # If base name is unique, use it
+        if slug not in existing_names:
+            return slug
+
+        # Otherwise find next available sequence number
+        seq = 2
+        while f"{slug}-{seq}" in existing_names:
+            seq += 1
+
+        return f"{slug}-{seq}"
+
+    def get_indexed_roots(self, filter_by: str | None = None) -> list[dict[str, Any]]:
+        """Get all registered base directories.
+
+        Args:
+            filter_by: Optional path prefix to filter results
+
+        Returns:
+            List of dicts with keys: base_directory, project_name, indexed_at, updated_at, file_count, config_snapshot
+        """
+        return self._execute_in_db_thread_sync("get_indexed_roots", filter_by)
+
+    def _executor_get_indexed_roots(
+        self, conn: Any, state: dict[str, Any], filter_by: str | None
+    ) -> list[dict[str, Any]]:
+        """Executor method for get_indexed_roots - runs in DB thread."""
+        if filter_by:
+            # Properly construct LIKE pattern with parameter
+            like_pattern = filter_by + "%"
+            results = conn.execute(
+                """
+                SELECT base_directory, project_name, indexed_at, updated_at, file_count,
+                       config_snapshot, watcher_active, last_error, error_count, tags
+                FROM indexed_roots
+                WHERE base_directory LIKE ?
+                ORDER BY updated_at DESC
+                """,
+                [like_pattern],
+            ).fetchall()
+        else:
+            results = conn.execute(
+                """
+                SELECT base_directory, project_name, indexed_at, updated_at, file_count,
+                       config_snapshot, watcher_active, last_error, error_count, tags
+                FROM indexed_roots
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+
+        return [
+            {
+                "base_directory": row[0],
+                "project_name": row[1],
+                "indexed_at": row[2],
+                "updated_at": row[3],
+                "file_count": row[4],
+                "config_snapshot": row[5],
+                "watcher_active": row[6],
+                "last_error": row[7],
+                "error_count": row[8],
+                "tags": list(row[9]) if row[9] else [],
+            }
+            for row in results
+        ]
+
+    def update_indexed_root_stats(self, base_directory: str) -> None:
+        """Update file_count and updated_at for a base directory.
+
+        Args:
+            base_directory: The base directory to update stats for
+        """
+        return self._execute_in_db_thread_sync(
+            "update_indexed_root_stats", base_directory
+        )
+
+    def _executor_update_indexed_root_stats(
+        self, conn: Any, state: dict[str, Any], base_directory: str
+    ) -> None:
+        """Executor method for update_indexed_root_stats - runs in DB thread."""
+        import os
+
+        # Count files that belong to this base_directory
+        # In global mode: files are stored with absolute paths, match by prefix
+        # In per-repo mode: count ALL files (single base_directory per DB)
+        if self._is_global_mode():
+            # Files stored with absolute paths - match by prefix with path separator
+            # This prevents /project from matching /project-backup
+            like_pattern = base_directory.rstrip(os.sep) + os.sep + "%"
+            file_count = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM files
+                WHERE path = ? OR path LIKE ?
+                """,
+                [base_directory, like_pattern],
+            ).fetchone()[0]
+        else:
+            # Per-repo mode: files stored with relative paths - count all files
+            file_count = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM files
+                """
+            ).fetchone()[0]
+
+        # Update the indexed_roots record
+        conn.execute(
+            """
+            UPDATE indexed_roots
+            SET file_count = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE base_directory = ?
+            """,
+            [file_count, base_directory],
+        )
+
+    def update_indexed_root_watcher_status(
+        self, base_directory: str, active: bool, error: str | None = None
+    ) -> None:
+        """Update watcher status for a base directory.
+
+        Args:
+            base_directory: The base directory to update
+            active: Whether the watcher is currently active
+            error: Error message if watcher failed (clears error_count if None)
+        """
+        return self._execute_in_db_thread_sync(
+            "update_indexed_root_watcher_status", base_directory, active, error
+        )
+
+    def _executor_update_indexed_root_watcher_status(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        base_directory: str,
+        active: bool,
+        error: str | None,
+    ) -> None:
+        """Executor method for update_indexed_root_watcher_status - runs in DB thread."""
+        if error:
+            # Increment error count and set error message
+            conn.execute(
+                """
+                UPDATE indexed_roots
+                SET watcher_active = ?,
+                    last_error = ?,
+                    error_count = error_count + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE base_directory = ?
+                """,
+                [active, error, base_directory],
+            )
+        else:
+            # Clear error state when successful
+            conn.execute(
+                """
+                UPDATE indexed_roots
+                SET watcher_active = ?,
+                    last_error = NULL,
+                    error_count = 0,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE base_directory = ?
+                """,
+                [active, base_directory],
+            )
+
+    # =========================================================================
+    # Tag Management Methods
+    # =========================================================================
+
+    def get_indexed_roots_by_tags(
+        self, tags: list[str], match_all: bool = True
+    ) -> list[dict[str, Any]]:
+        """Get indexed roots that have the specified tags.
+
+        Args:
+            tags: List of tags to filter by
+            match_all: If True, roots must have ALL tags (AND). If False, ANY tag (OR).
+
+        Returns:
+            List of indexed root dicts matching the tag criteria
+        """
+        return self._execute_in_db_thread_sync(
+            "get_indexed_roots_by_tags", tags, match_all
+        )
+
+    def _executor_get_indexed_roots_by_tags(
+        self, conn: Any, state: dict[str, Any], tags: list[str], match_all: bool
+    ) -> list[dict[str, Any]]:
+        """Executor method for get_indexed_roots_by_tags - runs in DB thread."""
+        if not tags:
+            return []
+
+        if match_all:
+            # AND logic: root must have ALL specified tags
+            # Use array containment: tags column must contain all query tags
+            results = conn.execute(
+                """
+                SELECT base_directory, project_name, indexed_at, updated_at, file_count,
+                       config_snapshot, watcher_active, last_error, error_count, tags
+                FROM indexed_roots
+                WHERE list_has_all(tags, ?)
+                ORDER BY updated_at DESC
+                """,
+                [tags],
+            ).fetchall()
+        else:
+            # OR logic: root must have ANY of the specified tags
+            results = conn.execute(
+                """
+                SELECT base_directory, project_name, indexed_at, updated_at, file_count,
+                       config_snapshot, watcher_active, last_error, error_count, tags
+                FROM indexed_roots
+                WHERE list_has_any(tags, ?)
+                ORDER BY updated_at DESC
+                """,
+                [tags],
+            ).fetchall()
+
+        return [
+            {
+                "base_directory": row[0],
+                "project_name": row[1],
+                "indexed_at": row[2],
+                "updated_at": row[3],
+                "file_count": row[4],
+                "config_snapshot": row[5],
+                "watcher_active": row[6],
+                "last_error": row[7],
+                "error_count": row[8],
+                "tags": list(row[9]) if row[9] else [],
+            }
+            for row in results
+        ]
+
+    def update_indexed_root_tags(self, base_directory: str, tags: list[str]) -> None:
+        """Set tags for an indexed root (replaces existing tags).
+
+        Args:
+            base_directory: Path to the indexed root
+            tags: New list of tags (replaces existing)
+        """
+        self._execute_in_db_thread_sync(
+            "update_indexed_root_tags", base_directory, tags
+        )
+
+    def _executor_update_indexed_root_tags(
+        self, conn: Any, state: dict[str, Any], base_directory: str, tags: list[str]
+    ) -> None:
+        """Executor method for update_indexed_root_tags - runs in DB thread."""
+        conn.execute(
+            """
+            UPDATE indexed_roots
+            SET tags = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE base_directory = ?
+            """,
+            [tags, base_directory],
+        )
+
+    def add_indexed_root_tags(self, base_directory: str, tags: list[str]) -> None:
+        """Add tags to an indexed root (preserves existing tags).
+
+        Args:
+            base_directory: Path to the indexed root
+            tags: Tags to add
+        """
+        self._execute_in_db_thread_sync("add_indexed_root_tags", base_directory, tags)
+
+    def _executor_add_indexed_root_tags(
+        self, conn: Any, state: dict[str, Any], base_directory: str, tags: list[str]
+    ) -> None:
+        """Executor method for add_indexed_root_tags - runs in DB thread."""
+        # Use list_distinct to merge and deduplicate
+        conn.execute(
+            """
+            UPDATE indexed_roots
+            SET tags = list_distinct(list_concat(COALESCE(tags, []), ?)),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE base_directory = ?
+            """,
+            [tags, base_directory],
+        )
+
+    def remove_indexed_root_tags(self, base_directory: str, tags: list[str]) -> None:
+        """Remove tags from an indexed root.
+
+        Args:
+            base_directory: Path to the indexed root
+            tags: Tags to remove
+        """
+        self._execute_in_db_thread_sync(
+            "remove_indexed_root_tags", base_directory, tags
+        )
+
+    def _executor_remove_indexed_root_tags(
+        self, conn: Any, state: dict[str, Any], base_directory: str, tags: list[str]
+    ) -> None:
+        """Executor method for remove_indexed_root_tags - runs in DB thread."""
+        # Use list_filter to remove specified tags
+        conn.execute(
+            """
+            UPDATE indexed_roots
+            SET tags = list_filter(COALESCE(tags, []), x -> NOT list_contains(?, x)),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE base_directory = ?
+            """,
+            [tags, base_directory],
+        )
+
+    def get_all_tags(self) -> list[str]:
+        """Get all unique tags across all indexed roots.
+
+        Returns:
+            Sorted list of unique tag names
+        """
+        return self._execute_in_db_thread_sync("get_all_tags")
+
+    def _executor_get_all_tags(self, conn: Any, state: dict[str, Any]) -> list[str]:
+        """Executor method for get_all_tags - runs in DB thread."""
+        # Unnest all tags arrays and get distinct values
+        result = conn.execute(
+            """
+            SELECT DISTINCT unnest(tags) AS tag
+            FROM indexed_roots
+            WHERE tags IS NOT NULL AND len(tags) > 0
+            ORDER BY tag
+            """
+        ).fetchall()
+        return [row[0] for row in result]
+
+    # =========================================================================
+    # Path Resolution Methods
+    # =========================================================================
+
+    def find_base_for_path(self, path: str) -> str | None:
+        """Find which indexed base_directory contains the given path.
+
+        Args:
+            path: Absolute or relative path to check
+
+        Returns:
+            The base_directory that contains this path, or None if not found
+        """
+        return self._execute_in_db_thread_sync("find_base_for_path", path)
+
+    def _executor_find_base_for_path(
+        self, conn: Any, state: dict[str, Any], path: str
+    ) -> str | None:
+        """Executor method for find_base_for_path - runs in DB thread."""
+        import os
+
+        # Only works with absolute paths
+        if not os.path.isabs(path):
+            return None
+
+        # Query indexed roots that could contain this path
+        # Filter candidates using SQL WHERE to reduce rows (optimization)
+        # A base_directory can only contain path if path starts with it
+        # Use LENGTH-based ordering to get longest (most specific) match first
+        roots = conn.execute(
+            """
+            SELECT base_directory
+            FROM indexed_roots
+            WHERE ? LIKE base_directory || '%'
+            ORDER BY LENGTH(base_directory) DESC
+            LIMIT 1
+            """,
+            [path],
+        ).fetchall()
+
+        # Verify the match with path separator boundary check (prevents /project matching /project-backup)
+        for (base_dir,) in roots:
+            if path == base_dir or path.startswith(base_dir + os.sep):
+                return base_dir
+
+        return None
+
+    # Phase 3: Remove base directory from indexed_roots
+
+    def remove_base_directory(self, base_directory: str, cascade: bool = False) -> None:
+        """Remove a base directory from the indexed_roots table.
+
+        Args:
+            base_directory: Absolute path to base directory to remove
+            cascade: If True, also delete all files/chunks/embeddings under this directory
+        """
+        return self._execute_in_db_thread_sync(
+            "remove_base_directory", base_directory, cascade
+        )
+
+    def _executor_remove_base_directory(
+        self, conn: Any, state: dict[str, Any], base_directory: str, cascade: bool
+    ) -> None:
+        """Executor method for remove_base_directory - runs in DB thread."""
+        import os
+
+        # Delete from indexed_roots table
+        conn.execute(
+            """
+            DELETE FROM indexed_roots
+            WHERE base_directory = ?
+            """,
+            [base_directory],
+        )
+
+        if cascade:
+            # Clean up all data associated with this base directory
+
+            # In global mode: files stored with absolute paths - match by prefix
+            # In per-repo mode: files stored with relative paths - delete ALL files
+            if self._is_global_mode():
+                # Match files under this directory by absolute path prefix
+                like_pattern = base_directory.rstrip(os.sep) + os.sep + "%"
+
+                # 1. Delete embeddings
+                embedding_tables = self._executor_get_all_embedding_tables(conn, state)
+                for table_name in embedding_tables:
+                    conn.execute(
+                        f"""
+                        DELETE FROM {table_name}
+                        WHERE chunk_id IN (
+                            SELECT c.id 
+                            FROM chunks c
+                            JOIN files f ON c.file_id = f.id
+                            WHERE f.path = ? OR f.path LIKE ?
+                        )
+                    """,
+                        [base_directory, like_pattern],
+                    )
+
+                # 2. Delete chunks
+                conn.execute(
+                    """
+                    DELETE FROM chunks
+                    WHERE file_id IN (
+                        SELECT id FROM files
+                        WHERE path = ? OR path LIKE ?
+                    )
+                """,
+                    [base_directory, like_pattern],
+                )
+
+                # 3. Delete files
+                conn.execute(
+                    """
+                    DELETE FROM files
+                    WHERE path = ? OR path LIKE ?
+                """,
+                    [base_directory, like_pattern],
+                )
+            else:
+                # Per-repo mode: delete all files/chunks/embeddings (single repo per DB)
+                # 1. Delete all embeddings
+                embedding_tables = self._executor_get_all_embedding_tables(conn, state)
+                for table_name in embedding_tables:
+                    conn.execute(f"DELETE FROM {table_name}")
+
+                # 2. Delete all chunks
+                conn.execute("DELETE FROM chunks")
+
+                # 3. Delete all files
+                conn.execute("DELETE FROM files")
+
+            logger.info(f"Cascaded delete for base directory: {base_directory}")
 
     def get_file_by_id(
         self, file_id: int, as_model: bool = False
@@ -1172,7 +1861,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         # Get file ID first
         # Normalize path to handle both absolute and relative paths
         base_dir = state.get("base_directory")
-        normalized_path = normalize_path_for_lookup(file_path, base_dir)
+        normalized_path = normalize_path_for_lookup(
+            file_path, base_dir, use_absolute=self._is_global_mode()
+        )
         result = conn.execute(
             "SELECT id FROM files WHERE path = ?", [normalized_path]
         ).fetchone()
@@ -1808,6 +2499,8 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         Args:
             path_filter: User-provided path filter
+                - In global mode: absolute or relative path (e.g., "/home/user/project/src/", "src/")
+                - In per-repo mode: relative path only (e.g., "src/core/", "lib/")
 
         Returns:
             Normalized path filter safe for SQL LIKE queries, or None
@@ -1833,10 +2526,12 @@ class DuckDBProvider(SerialDatabaseProvider):
         # Normalize path separators to forward slashes
         normalized = normalized.replace("\\", "/")
 
-        # Remove leading slashes to ensure relative paths
-        normalized = normalized.lstrip("/")
+        # In global mode: preserve absolute paths; in per-repo mode: force relative
+        if not self._is_global_mode():
+            # Per-repo mode: remove leading slashes to ensure relative paths
+            normalized = normalized.lstrip("/")
 
-        # Ensure trailing slash for directory patterns
+        # Ensure trailing slash for directory patterns (only if not a specific file)
         if (
             normalized
             and not normalized.endswith("/")
@@ -2006,6 +2701,185 @@ class DuckDBProvider(SerialDatabaseProvider):
                 "total": 0,
             }
 
+    def search_semantic_multi_path(
+        self,
+        query_embedding: list[float],
+        path_prefixes: list[str],
+        provider: str,
+        model: str,
+        page_size: int = 10,
+        offset: int = 0,
+        threshold: float | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Perform semantic vector search with OR-based multi-path filtering.
+
+        Args:
+            query_embedding: Query vector for similarity search
+            path_prefixes: List of path prefixes to include (OR logic)
+            provider: Embedding provider name
+            model: Embedding model name
+            page_size: Number of results per page
+            offset: Pagination offset
+            threshold: Optional similarity threshold
+
+        Returns:
+            Tuple of (results, pagination_info)
+        """
+        return self._execute_in_db_thread_sync(
+            "search_semantic_multi_path",
+            query_embedding,
+            path_prefixes,
+            provider,
+            model,
+            page_size,
+            offset,
+            threshold,
+        )
+
+    def _executor_search_semantic_multi_path(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        query_embedding: list[float],
+        path_prefixes: list[str],
+        provider: str,
+        model: str,
+        page_size: int,
+        offset: int,
+        threshold: float | None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Executor method for search_semantic_multi_path - runs in DB thread."""
+        try:
+            if not path_prefixes:
+                # No prefixes = search nothing (empty result)
+                return [], {
+                    "offset": offset,
+                    "page_size": page_size,
+                    "has_more": False,
+                    "total": 0,
+                }
+
+            # Detect dimensions from query embedding
+            query_dims = len(query_embedding)
+            table_name = f"embeddings_{query_dims}"
+
+            # Check if table exists for these dimensions
+            if not self._executor_table_exists(conn, state, table_name):
+                logger.warning(
+                    f"No embeddings table found for {query_dims} dimensions ({table_name})"
+                )
+                return [], {
+                    "offset": offset,
+                    "page_size": page_size,
+                    "has_more": False,
+                    "total": 0,
+                }
+
+            # Build OR-based path filter condition
+            path_conditions = []
+            path_params: list[Any] = []
+            for prefix in path_prefixes:
+                normalized = self._validate_and_normalize_path_filter(prefix)
+                if normalized is not None:
+                    escaped = escape_like_pattern(normalized)
+                    path_conditions.append("f.path LIKE ? ESCAPE '\\'")
+                    path_params.append(f"{escaped}%")  # Prefix match (not substring)
+
+            if not path_conditions:
+                # All prefixes were invalid
+                return [], {
+                    "offset": offset,
+                    "page_size": page_size,
+                    "has_more": False,
+                    "total": 0,
+                }
+
+            path_clause = "(" + " OR ".join(path_conditions) + ")"
+
+            # Build query with dimension-specific table
+            query = f"""
+                SELECT
+                    c.id as chunk_id,
+                    c.symbol,
+                    c.code,
+                    c.chunk_type,
+                    c.start_line,
+                    c.end_line,
+                    f.path as file_path,
+                    f.language,
+                    array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) as similarity
+                FROM {table_name} e
+                JOIN chunks c ON e.chunk_id = c.id
+                JOIN files f ON c.file_id = f.id
+                WHERE e.provider = ? AND e.model = ?
+                AND {path_clause}
+            """
+
+            params: list[Any] = [query_embedding, provider, model] + path_params
+
+            if threshold is not None:
+                query += f" AND array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) >= ?"
+                params.append(query_embedding)
+                params.append(threshold)
+
+            # Get total count for pagination
+            count_query = f"""
+                SELECT COUNT(*)
+                FROM {table_name} e
+                JOIN chunks c ON e.chunk_id = c.id
+                JOIN files f ON c.file_id = f.id
+                WHERE e.provider = ? AND e.model = ?
+                AND {path_clause}
+            """
+            count_params: list[Any] = [provider, model] + path_params
+
+            if threshold is not None:
+                count_query += f" AND array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) >= ?"
+                count_params.extend([query_embedding, threshold])
+
+            total_count = conn.execute(count_query, count_params).fetchone()[0]
+
+            query += " ORDER BY similarity DESC LIMIT ? OFFSET ?"
+            params.extend([page_size, offset])
+
+            results = conn.execute(query, params).fetchall()
+
+            result_list = [
+                {
+                    "chunk_id": result[0],
+                    "symbol": result[1],
+                    "content": result[2],
+                    "chunk_type": result[3],
+                    "start_line": result[4],
+                    "end_line": result[5],
+                    "file_path": result[6],
+                    "language": result[7],
+                    "similarity": result[8],
+                }
+                for result in results
+            ]
+
+            pagination = {
+                "offset": offset,
+                "page_size": page_size,
+                "has_more": offset + page_size < total_count,
+                "next_offset": offset + page_size
+                if offset + page_size < total_count
+                else None,
+                "total": total_count,
+            }
+
+            return result_list, pagination
+
+        except Exception as e:
+            logger.error(f"Failed to perform multi-path semantic search: {e}")
+            return [], {
+                "offset": offset,
+                "page_size": page_size,
+                "has_more": False,
+                "total": 0,
+            }
+
     def search_regex(
         self,
         pattern: str,
@@ -2028,6 +2902,144 @@ class DuckDBProvider(SerialDatabaseProvider):
             page_size=1000,  # Large page for legacy behavior
         )
         return results
+
+    def search_regex_multi_path(
+        self,
+        pattern: str,
+        path_prefixes: list[str],
+        page_size: int = 10,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Perform regex search with OR-based multi-path filtering.
+
+        Args:
+            pattern: Regex pattern to search for
+            path_prefixes: List of path prefixes to include (OR logic)
+            page_size: Number of results per page
+            offset: Pagination offset
+
+        Returns:
+            Tuple of (results, pagination_info)
+        """
+        return self._execute_in_db_thread_sync(
+            "search_regex_multi_path",
+            pattern,
+            path_prefixes,
+            page_size,
+            offset,
+        )
+
+    def _executor_search_regex_multi_path(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        pattern: str,
+        path_prefixes: list[str],
+        page_size: int,
+        offset: int,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Executor method for search_regex_multi_path - runs in DB thread."""
+        try:
+            if not path_prefixes:
+                # No prefixes = search nothing (empty result)
+                return [], {
+                    "offset": offset,
+                    "page_size": page_size,
+                    "has_more": False,
+                    "total": 0,
+                }
+
+            # Build OR-based path filter condition
+            path_conditions = []
+            path_params: list[Any] = []
+            for prefix in path_prefixes:
+                normalized = self._validate_and_normalize_path_filter(prefix)
+                if normalized is not None:
+                    escaped = escape_like_pattern(normalized)
+                    path_conditions.append("f.path LIKE ? ESCAPE '\\'")
+                    path_params.append(f"{escaped}%")  # Prefix match (not substring)
+
+            if not path_conditions:
+                # All prefixes were invalid
+                return [], {
+                    "offset": offset,
+                    "page_size": page_size,
+                    "has_more": False,
+                    "total": 0,
+                }
+
+            path_clause = "(" + " OR ".join(path_conditions) + ")"
+
+            # Build base WHERE clause
+            where_conditions = ["regexp_matches(c.code, ?)", path_clause]
+            params: list[Any] = [pattern] + path_params
+
+            where_clause = " AND ".join(where_conditions)
+
+            # Get total count for pagination
+            count_query = f"""
+                SELECT COUNT(*)
+                FROM chunks c
+                JOIN files f ON c.file_id = f.id
+                WHERE {where_clause}
+            """
+            total_count = conn.execute(count_query, params).fetchone()[0]
+
+            # Get results
+            results_query = f"""
+                SELECT
+                    c.id as chunk_id,
+                    c.symbol,
+                    c.code,
+                    c.chunk_type,
+                    c.start_line,
+                    c.end_line,
+                    f.path as file_path,
+                    f.language
+                FROM chunks c
+                JOIN files f ON c.file_id = f.id
+                WHERE {where_clause}
+                ORDER BY f.path, c.start_line
+                LIMIT ? OFFSET ?
+            """
+            results = conn.execute(
+                results_query, params + [page_size, offset]
+            ).fetchall()
+
+            result_list = [
+                {
+                    "chunk_id": result[0],
+                    "name": result[1],
+                    "content": result[2],
+                    "chunk_type": result[3],
+                    "start_line": result[4],
+                    "end_line": result[5],
+                    "file_path": result[6],
+                    "language": result[7],
+                }
+                for result in results
+            ]
+
+            pagination = {
+                "offset": offset,
+                "page_size": page_size,
+                "has_more": offset + page_size < total_count,
+                "next_offset": offset + page_size
+                if offset + page_size < total_count
+                else None,
+                "total": total_count,
+            }
+
+            return result_list, pagination
+
+        except Exception as e:
+            logger.error(f"Failed to perform multi-path regex search: {e}")
+            return [], {
+                "offset": offset,
+                "page_size": page_size,
+                "has_more": False,
+                "total": 0,
+            }
 
     def _executor_search_regex(
         self,
@@ -2493,9 +3505,117 @@ class DuckDBProvider(SerialDatabaseProvider):
             logger.error(f"Failed to get database stats: {e}")
             return {"files": 0, "chunks": 0, "embeddings": 0, "providers": 0}
 
+    def get_stats_for_path(self, path: str) -> dict[str, int]:
+        """Get database statistics filtered by path prefix.
+
+        Args:
+            path: Path prefix to filter by (files starting with this path)
+
+        Returns:
+            Dictionary with file, chunk, and embedding counts for the path
+        """
+        return self._execute_in_db_thread_sync("get_stats_for_path", path)
+
+    def _executor_get_stats_for_path(
+        self, conn: Any, state: dict[str, Any], path: str
+    ) -> dict[str, int]:
+        """Executor method for get_stats_for_path - runs in DB thread."""
+        try:
+            from pathlib import Path as PathLib
+
+            # Normalize path
+            normalized_path = str(PathLib(path).resolve())
+            # Escape for LIKE query
+            escaped = normalized_path.replace("\\", "\\\\").replace("%", "\\%").replace(
+                "_", "\\_"
+            )
+            like_pattern = f"{escaped}/%"
+
+            # Get file count for path prefix
+            file_count = conn.execute(
+                """
+                SELECT COUNT(*) FROM files
+                WHERE path = ? OR path LIKE ? ESCAPE '\\'
+                """,
+                [normalized_path, like_pattern],
+            ).fetchone()[0]
+
+            # Get chunk count for path prefix
+            chunk_count = conn.execute(
+                """
+                SELECT COUNT(*) FROM chunks
+                WHERE file_id IN (
+                    SELECT id FROM files
+                    WHERE path = ? OR path LIKE ? ESCAPE '\\'
+                )
+                """,
+                [normalized_path, like_pattern],
+            ).fetchone()[0]
+
+            # Get embedding count for path prefix across all dimension tables
+            embedding_count = 0
+            embedding_tables = self._executor_get_all_embedding_tables(conn, state)
+            for table_name in embedding_tables:
+                count = conn.execute(
+                    f"""
+                    SELECT COUNT(*) FROM {table_name}
+                    WHERE chunk_id IN (
+                        SELECT c.id FROM chunks c
+                        JOIN files f ON c.file_id = f.id
+                        WHERE f.path = ? OR f.path LIKE ? ESCAPE '\\'
+                    )
+                    """,
+                    [normalized_path, like_pattern],
+                ).fetchone()[0]
+                embedding_count += count
+
+            return {
+                "files": file_count,
+                "chunks": chunk_count,
+                "embeddings": embedding_count,
+                "path": normalized_path,
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to get database stats for path {path}: {e}")
+            return {"files": 0, "chunks": 0, "embeddings": 0, "path": path}
+
     def get_file_stats(self, file_id: int) -> dict[str, Any]:
         """Get statistics for a specific file - delegate to file repository."""
         return self._file_repository.get_file_stats(file_id)
+
+    def get_unembedded_chunk_count(self) -> int:
+        """Get count of chunks without embeddings."""
+        return self._execute_in_db_thread_sync("get_unembedded_chunk_count")
+
+    def _executor_get_unembedded_chunk_count(
+        self, conn: Any, state: dict[str, Any]
+    ) -> int:
+        """Executor method for get_unembedded_chunk_count - runs in DB thread."""
+        try:
+            # Get all embedding tables
+            embedding_tables = self._executor_get_all_embedding_tables(conn, state)
+
+            if not embedding_tables:
+                # No embedding tables - all chunks are unembedded
+                return conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+
+            # Build NOT EXISTS clause for each embedding table
+            not_exists_clauses = []
+            for table_name in embedding_tables:
+                not_exists_clauses.append(
+                    f"NOT EXISTS (SELECT 1 FROM {table_name} e WHERE e.chunk_id = c.id)"
+                )
+
+            query = f"""
+                SELECT COUNT(*) FROM chunks c
+                WHERE {" AND ".join(not_exists_clauses)}
+            """
+            return conn.execute(query).fetchone()[0]
+
+        except Exception as e:
+            logger.debug(f"Failed to get unembedded chunk count: {e}")
+            return 0
 
     def get_provider_stats(self, provider: str, model: str) -> dict[str, Any]:
         """Get statistics for a specific embedding provider/model."""
@@ -2600,19 +3720,45 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     def _executor_begin_transaction(self, conn: Any, state: dict[str, Any]) -> None:
         """Executor method for begin_transaction - runs in DB thread."""
-        # Mark transaction state in executor thread
-        state["transaction_active"] = True
-        conn.execute("BEGIN TRANSACTION")
+        if state.get("transaction_active", False):
+            # Transaction already active - use savepoint
+            depth = state.get("transaction_depth", 1)
+            savepoint_name = f"sp_{depth}"
+            conn.execute(f"SAVEPOINT {savepoint_name}")
+            state["transaction_depth"] = depth + 1
+            if not os.environ.get("CHUNKHOUND_MCP_MODE"):
+                logger.debug(f"Created savepoint {savepoint_name} (depth {depth})")
+        else:
+            # Start new transaction
+            conn.execute("BEGIN TRANSACTION")
+            state["transaction_active"] = True
+            state["transaction_depth"] = 1
+            if not os.environ.get("CHUNKHOUND_MCP_MODE"):
+                logger.debug("Started new transaction")
 
     def _executor_commit_transaction(
         self, conn: Any, state: dict[str, Any], force_checkpoint: bool
     ) -> None:
         """Executor method for commit_transaction - runs in DB thread."""
         try:
+            if state.get("transaction_active", False):
+                depth = state.get("transaction_depth", 1)
+
+                if depth > 1:
+                    # Nested transaction - release savepoint
+                    savepoint_name = f"sp_{depth - 1}"
+                    conn.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+                    state["transaction_depth"] = depth - 1
+                    if not os.environ.get("CHUNKHOUND_MCP_MODE"):
+                        logger.debug(f"Released savepoint {savepoint_name}")
+                    return
+
+            # Top-level commit
             conn.execute("COMMIT")
 
             # Clear transaction state
             state["transaction_active"] = False
+            state["transaction_depth"] = 0
 
             # Handle checkpoint
             if force_checkpoint or state.get("deferred_checkpoint", False):
@@ -2632,9 +3778,24 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     def _executor_rollback_transaction(self, conn: Any, state: dict[str, Any]) -> None:
         """Executor method for rollback_transaction - runs in DB thread."""
+        if state.get("transaction_active", False):
+            depth = state.get("transaction_depth", 1)
+
+            if depth > 1:
+                # Nested transaction - rollback to savepoint
+                savepoint_name = f"sp_{depth - 1}"
+                conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+                state["transaction_depth"] = depth - 1
+                if not os.environ.get("CHUNKHOUND_MCP_MODE"):
+                    logger.debug(f"Rolled back to savepoint {savepoint_name}")
+                return
+
+        # Top-level rollback
         conn.execute("ROLLBACK")
+
         # Clear transaction state
         state["transaction_active"] = False
+        state["transaction_depth"] = 0
         state["deferred_checkpoint"] = False
 
     def optimize_tables(self) -> None:

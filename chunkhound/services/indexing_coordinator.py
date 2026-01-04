@@ -17,6 +17,8 @@ import asyncio
 import math
 import multiprocessing
 import os
+import time
+from collections import namedtuple
 from concurrent.futures import ProcessPoolExecutor
 from fnmatch import fnmatch
 from pathlib import Path
@@ -46,6 +48,10 @@ from chunkhound.utils.hashing import compute_file_hash
 from .base_service import BaseService
 from .batch_processor import ParsedFileResult, process_file_batch
 from .chunk_cache_service import ChunkCacheService
+
+
+# Lightweight stat result for passing metadata
+StatResult = namedtuple("StatResult", ["st_size", "st_mtime"])
 
 # CRITICAL FIX: Force spawn multiprocessing start method to prevent fork + asyncio issues
 # RATIONALE: Linux defaults to 'fork' which is unsafe with asyncio event loops
@@ -164,18 +170,33 @@ class IndexingCoordinator(BaseService):
         # WHY: asyncio.Lock() must be created inside the event loop
         self._file_locks: dict[str, asyncio.Lock] = {}
         self._locks_lock = None  # Will be initialized when first needed
+        self._last_lock_cleanup_time: float = 0.0  # Track last cleanup time
+
+        # Maximum file locks to prevent unbounded memory growth
+        # When exceeded, stale locks are cleaned up
+        self.MAX_FILE_LOCKS = 10000
+        # Minimum interval between lock cleanup runs (seconds)
+        self.LOCK_CLEANUP_INTERVAL = 300.0  # 5 minutes
 
         # Base directory for path normalization (immutable after initialization)
         # Store raw path - will resolve at usage time for consistent symlink handling
         self._base_directory: Path = base_directory
 
-    def _get_relative_path(self, file_path: Path) -> Path:
+    def _get_relative_path(
+        self, file_path: Path, base_directory: Path | None = None
+    ) -> Path:
         """Get relative path, preserving symlink logical paths.
 
         Uses get_relative_path_safe() which handles Windows 8.3 short names
         and preserves symlink logical paths for git worktree support.
+
+        Args:
+            file_path: Absolute path to the file
+            base_directory: Base directory for relative path calculation.
+                            If None, uses self._base_directory.
         """
-        return get_relative_path_safe(file_path, self._base_directory)
+        base = base_directory if base_directory is not None else self._base_directory
+        return get_relative_path_safe(file_path, base)
 
     def add_language_parser(self, language: Language, parser: UniversalParser) -> None:
         """Add or update a language parser.
@@ -291,7 +312,8 @@ class IndexingCoordinator(BaseService):
             )
             self._ignore_engine_cache[key] = eng
             return eng
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception building ignore engine for {root}: {e}")
             return None
 
     def _determine_db_batch_size(self, pending_inserts: list[Chunk]) -> int:
@@ -307,7 +329,10 @@ class IndexingCoordinator(BaseService):
             env_bs = int(os.environ.get("CHUNKHOUND_DB_BATCH_SIZE", "0") or "0")
             if env_bs > 0:
                 return max(1, min(env_bs, 20000))
-        except Exception:
+        except Exception as e:
+            logger.debug(
+                f"Ignored exception parsing CHUNKHOUND_DB_BATCH_SIZE env var: {e}"
+            )
             pass
 
         # 2) Config override
@@ -316,7 +341,8 @@ class IndexingCoordinator(BaseService):
                 cfg_bs = int(getattr(self.config.indexing, "db_batch_size", 0) or 0)
                 if cfg_bs > 0:
                     return max(1, min(cfg_bs, 20000))
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception reading db_batch_size from config: {e}")
             pass
 
         # 3) Dynamic heuristic
@@ -329,7 +355,8 @@ class IndexingCoordinator(BaseService):
                 import psutil  # type: ignore
 
                 return int(getattr(psutil.virtual_memory(), "available", 0)) or 0
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Ignored exception reading memory via psutil: {e}")
                 pass
             # Linux /proc/meminfo
             try:
@@ -339,7 +366,8 @@ class IndexingCoordinator(BaseService):
                             parts = line.split()
                             if len(parts) >= 2:
                                 return int(parts[1]) * 1024  # kB → B
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Ignored exception reading /proc/meminfo: {e}")
                 pass
             return 0
 
@@ -391,10 +419,68 @@ class IndexingCoordinator(BaseService):
 
         # Use the locks lock to ensure thread-safe access to the locks dictionary
         async with self._locks_lock:
+            # Check if cleanup is needed (limit exceeded or interval passed)
+            current_time = time.time()
+            should_cleanup = len(self._file_locks) >= self.MAX_FILE_LOCKS or (
+                len(self._file_locks) > 1000
+                and current_time - self._last_lock_cleanup_time
+                > self.LOCK_CLEANUP_INTERVAL
+            )
+
+            if should_cleanup:
+                await self._cleanup_stale_file_locks()
+                self._last_lock_cleanup_time = current_time
+
             if file_key not in self._file_locks:
                 # Create the lock within the event loop context
                 self._file_locks[file_key] = asyncio.Lock()
             return self._file_locks[file_key]
+
+    async def _cleanup_stale_file_locks(self) -> int:
+        """Remove locks for files that no longer exist.
+
+        Must be called while holding self._locks_lock.
+
+        Returns:
+            Number of locks removed
+        """
+        import time as _time
+
+        stale_keys = []
+        check_start = _time.perf_counter()
+
+        # Identify locks for non-existent files
+        for file_key in list(self._file_locks.keys()):
+            try:
+                file_path = Path(file_key)
+                if not file_path.exists():
+                    # Only remove if the lock is not currently held
+                    lock = self._file_locks[file_key]
+                    if not lock.locked():
+                        stale_keys.append(file_key)
+            except Exception as e:
+                # If we can't check the file, consider removing the lock
+                # only if it's not currently held
+                logger.debug(
+                    f"Ignored exception checking file lock for {file_key}: {e}"
+                )
+                lock = self._file_locks.get(file_key)
+                if lock and not lock.locked():
+                    stale_keys.append(file_key)
+
+        # Remove stale locks
+        for key in stale_keys:
+            del self._file_locks[key]
+
+        check_duration = _time.perf_counter() - check_start
+
+        if stale_keys:
+            logger.info(
+                f"Cleaned up {len(stale_keys)} stale file locks "
+                f"({len(self._file_locks)} remaining, took {check_duration:.2f}s)"
+            )
+
+        return len(stale_keys)
 
     def _cleanup_file_lock(self, file_path: Path) -> None:
         """Remove lock for a file that no longer exists.
@@ -409,7 +495,10 @@ class IndexingCoordinator(BaseService):
             logger.debug(f"Cleaned up lock for deleted file: {file_key}")
 
     async def process_file(
-        self, file_path: Path, skip_embeddings: bool = False
+        self,
+        file_path: Path,
+        skip_embeddings: bool = False,
+        base_directory: Path | None = None,
     ) -> dict[str, Any]:
         """Process a single file through the complete indexing pipeline.
 
@@ -419,6 +508,8 @@ class IndexingCoordinator(BaseService):
         Args:
             file_path: Path to the file to process
             skip_embeddings: If True, skip embedding generation
+            base_directory: Base directory for relative path calculation.
+                            If None, uses self._base_directory.
 
         Returns:
             Dictionary with processing results including status, chunks, and embeddings
@@ -448,7 +539,9 @@ class IndexingCoordinator(BaseService):
                 return {"status": "skipped", "reason": result.error, "chunks": 0}
 
             # Store the single file result
-            store_result = await self._store_parsed_results([result], file_task=None)
+            store_result = await self._store_parsed_results(
+                [result], file_task=None, base_directory=base_directory
+            )
 
             # Handle tuple return for single-file case
             if isinstance(store_result, tuple):
@@ -478,9 +571,10 @@ class IndexingCoordinator(BaseService):
                     # NOTE: Transaction management is handled internally by the database provider
                     # to avoid transaction context issues during concurrent operations
                     try:
+                        # Use tracked chunks that correspond 1:1 with IDs (fixes data mismatch bug)
                         embeddings_generated = await self._generate_embeddings(
                             stats["chunk_ids_needing_embeddings"],
-                            [chunk for r in parsed_results for chunk in r.chunks],
+                            stats["chunks_needing_embeddings"],
                         )
 
                         # Verify embeddings were actually generated
@@ -558,7 +652,8 @@ class IndexingCoordinator(BaseService):
                     getattr(self.config.indexing, "per_file_timeout_seconds", 0.0)
                     or 0.0
                 )
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception reading per_file_timeout_seconds: {e}")
             timeout_s_probe = 0.0
 
         # Inspect explicit concurrency override
@@ -568,7 +663,8 @@ class IndexingCoordinator(BaseService):
                 max_concurrent = int(
                     getattr(self.config.indexing, "max_concurrent", 0) or 0
                 )
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception reading max_concurrent config: {e}")
             max_concurrent = 0
 
         # Default behavior:
@@ -599,7 +695,10 @@ class IndexingCoordinator(BaseService):
                         getattr(self.config.indexing, "per_file_timeout_seconds", 0.0)
                         or 0.0
                     )
-            except Exception:
+            except Exception as e:
+                logger.debug(
+                    f"Ignored exception reading per_file_timeout_seconds (single file): {e}"
+                )
                 timeout_s = 0.0
 
             try:
@@ -610,7 +709,10 @@ class IndexingCoordinator(BaseService):
                             self.config.indexing, "per_file_timeout_min_size_kb", 128
                         )
                     )
-            except Exception:
+            except Exception as e:
+                logger.debug(
+                    f"Ignored exception reading per_file_timeout_min_size_kb (single file): {e}"
+                )
                 min_timeout_kb = 128
 
             config_dict = {
@@ -683,7 +785,10 @@ class IndexingCoordinator(BaseService):
                         getattr(self.config.indexing, "per_file_timeout_seconds", 0.0)
                         or 0.0
                     )
-            except Exception:
+            except Exception as e:
+                logger.debug(
+                    f"Ignored exception reading per_file_timeout_seconds (batch): {e}"
+                )
                 timeout_s = 0.0
 
             min_timeout_kb = 128
@@ -695,7 +800,10 @@ class IndexingCoordinator(BaseService):
                             self.config.indexing, "per_file_timeout_min_size_kb", 128
                         )
                     )
-            except Exception:
+            except Exception as e:
+                logger.debug(
+                    f"Ignored exception reading per_file_timeout_min_size_kb (batch): {e}"
+                )
                 min_timeout_kb = 128
 
             config_dict = {
@@ -795,8 +903,11 @@ class IndexingCoordinator(BaseService):
             for file_path in directory.rglob("*"):
                 if file_path.is_file():
                     total_size += file_path.stat().st_size
-        except Exception:
+        except Exception as e:
             # If directory traversal fails, return 0 to avoid blocking indexing
+            logger.debug(
+                f"Ignored exception calculating directory size for {directory}: {e}"
+            )
             return 0.0
         return total_size / (1024**2)
 
@@ -805,12 +916,16 @@ class IndexingCoordinator(BaseService):
         results: list[ParsedFileResult],
         file_task: TaskID | None = None,
         cumulative_counters: dict[str, int] | None = None,
+        base_directory: Path | None = None,
     ) -> dict[str, Any] | tuple[dict[str, Any], int]:
         """Store all parsed results in database (single-threaded).
 
         Args:
             results: List of parsed file results from batch processing
             file_task: Optional progress task ID for tracking
+            cumulative_counters: Optional dict for cumulative statistics
+            base_directory: Base directory for relative path calculation.
+                            If None, uses self._base_directory.
 
         Returns:
             For multiple files: Dictionary with processing statistics
@@ -821,6 +936,7 @@ class IndexingCoordinator(BaseService):
             "total_chunks": 0,
             "errors": [],
             "chunk_ids_needing_embeddings": [],
+            "chunks_needing_embeddings": [],  # Track chunk data alongside IDs
         }
 
         # Check disk usage limit before storing data
@@ -898,17 +1014,16 @@ class IndexingCoordinator(BaseService):
                     "st_mtime": result.file_mtime,
                 }
 
-                # Create mock stat object for _store_file_record
-                class StatResult:
-                    def __init__(self, size: int, mtime: float):
-                        self.st_size = size
-                        self.st_mtime = mtime
-
+                # Create stat object for _store_file_record using module-level namedtuple
                 file_stat = StatResult(result.file_size, result.file_mtime)
                 # Extract content hash if available (from parsing result or precomputed)
                 content_hash = getattr(result, "content_hash", None)
                 file_id = self._store_file_record(
-                    result.file_path, file_stat, language, content_hash
+                    result.file_path,
+                    file_stat,
+                    language,
+                    content_hash,
+                    base_directory=base_directory,
                 )
 
                 # Track file_id for single-file case
@@ -926,8 +1041,17 @@ class IndexingCoordinator(BaseService):
                         self.progress.advance(file_task, 1)
                     continue
                 # Check for existing chunks to enable smart diffing
-                relative_path = self._get_relative_path(result.file_path)
-                existing_file = self._db.get_file_by_path(relative_path.as_posix())
+                # Use same path format as storage: absolute in global mode, relative in per-repo
+                is_global = (
+                    hasattr(self._db, "_is_global_mode") and self._db._is_global_mode()
+                )
+                if is_global:
+                    lookup_path = result.file_path.resolve().as_posix()
+                else:
+                    lookup_path = self._get_relative_path(
+                        result.file_path, base_directory
+                    ).as_posix()
+                existing_file = self._db.get_file_by_path(lookup_path)
 
                 # Convert result chunks to Chunk models using from_dict()
                 new_chunk_models = [
@@ -965,14 +1089,22 @@ class IndexingCoordinator(BaseService):
                             if chunks_to_store
                             else []
                         )
+                        # Track both IDs and chunk data for embedding generation
+                        stored_chunks = chunks_to_store
                     else:
                         # No existing chunks - store all as new
                         ids = self._db.insert_chunks_batch(new_chunk_models)
+                        stored_chunks = new_chunk_models
                 else:
                     # New file - store all
                     ids = self._db.insert_chunks_batch(new_chunk_models)
+                    stored_chunks = new_chunk_models
 
                 stats["chunk_ids_needing_embeddings"].extend(ids)
+                # Track chunk data alongside IDs (must be same length as ids)
+                stats["chunks_needing_embeddings"].extend(
+                    [{"code": c.code, "symbol": c.symbol} for c in stored_chunks]
+                )
                 stats["total_chunks"] += len(ids)
                 # Count this file as processed successfully (stored or updated)
                 stats["total_files"] += 1
@@ -983,7 +1115,10 @@ class IndexingCoordinator(BaseService):
                 except TypeError:
                     try:
                         self._db.commit_transaction(force_checkpoint=True)
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(
+                            f"Ignored exception in commit with force_checkpoint: {e}"
+                        )
                         pass
 
                 # Update progress
@@ -1030,6 +1165,7 @@ class IndexingCoordinator(BaseService):
         patterns: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
         config_file_size_threshold_kb: int = 20,
+        progress_callback: Any | None = None,
     ) -> dict[str, Any]:
         """Process all supported files in a directory with batch optimization and consistency checks.
 
@@ -1038,12 +1174,21 @@ class IndexingCoordinator(BaseService):
             patterns: Optional file patterns to include
             exclude_patterns: Optional file patterns to exclude
             config_file_size_threshold_kb: Skip structured config files (JSON/YAML/TOML) larger than this (KB)
+            progress_callback: Optional callback(files_processed, chunks_created) for progress updates
 
         Returns:
             Dictionary with processing statistics
         """
         try:
             import time as _t
+
+            # Capture base directory as a local variable to avoid race conditions
+            # when multiple indexing operations run concurrently.
+            # Note: We still update self._base_directory for backwards compatibility
+            # with code that reads it directly, but internal methods should use
+            # the local variable passed through the call chain.
+            base_directory = directory.resolve()
+            self._base_directory = base_directory
 
             _t0 = _t.perf_counter() if getattr(self, "profile_startup", False) else None
             # Phase 1: Discovery - Discover files in directory (now parallelized)
@@ -1081,7 +1226,8 @@ class IndexingCoordinator(BaseService):
                     force_reindex = bool(
                         getattr(self.config.indexing, "force_reindex", False)
                     )
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Ignored exception reading force_reindex config: {e}")
                 force_reindex = False
 
             files_to_process: list[Path] = files
@@ -1104,7 +1250,10 @@ class IndexingCoordinator(BaseService):
                             getattr(self.config.indexing, "mtime_epsilon_seconds", 0.01)
                             or 0.01
                         )
-                except Exception:
+                except Exception as e:
+                    logger.debug(
+                        f"Ignored exception reading mtime_epsilon_seconds: {e}"
+                    )
                     mtime_eps = 0.01
 
                 files_to_process = []
@@ -1117,7 +1266,10 @@ class IndexingCoordinator(BaseService):
                             "SELECT path, size, modified_time, content_hash FROM files",
                             [],
                         )
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(
+                            f"Ignored exception querying with content_hash, retrying without: {e}"
+                        )
                         rows = self._db.execute_query(
                             "SELECT path, size, modified_time FROM files",
                             [],
@@ -1134,7 +1286,10 @@ class IndexingCoordinator(BaseService):
                                 if hasattr(mt, "timestamp")
                                 else float(mt)
                             )
-                        except Exception:
+                        except Exception as e:
+                            logger.debug(
+                                f"Ignored exception converting modified_time to float: {e}"
+                            )
                             mtv = None
                         ch = r.get("content_hash") if isinstance(r, dict) else None
                         db_meta_map[str(p)] = (
@@ -1142,12 +1297,20 @@ class IndexingCoordinator(BaseService):
                             mtv,
                             ch,
                         )
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Ignored exception in db_meta_map batch fetch: {e}")
                     db_meta_map = {}
                 precomputed_hashes: dict[str, str] = {}
+                # Determine path format for lookups (same as storage)
+                is_global_lookup = (
+                    hasattr(self._db, "_is_global_mode") and self._db._is_global_mode()
+                )
                 for f in files:
                     try:
-                        rel = self._get_relative_path(f).as_posix()
+                        if is_global_lookup:
+                            rel = f.resolve().as_posix()
+                        else:
+                            rel = self._get_relative_path(f, base_directory).as_posix()
                         db_tuple = db_meta_map.get(rel)
                         if db_tuple is None:
                             # Fallback for providers without execute_query() (e.g., fake or limited providers)
@@ -1170,7 +1333,10 @@ class IndexingCoordinator(BaseService):
                                             if hasattr(mt, "timestamp")
                                             else float(mt)
                                         )
-                                    except Exception:
+                                    except Exception as e:
+                                        logger.debug(
+                                            f"Ignored exception converting modified_time in fallback: {e}"
+                                        )
                                         mtv = None
                                     ch = (
                                         rec.get("content_hash")
@@ -1182,7 +1348,10 @@ class IndexingCoordinator(BaseService):
                                         mtv,
                                         ch,
                                     )
-                            except Exception:
+                            except Exception as e:
+                                logger.debug(
+                                    f"Ignored exception in fallback file lookup for {rel}: {e}"
+                                )
                                 db_tuple = None
                         st = f.stat()
                         if db_tuple is not None:
@@ -1226,7 +1395,10 @@ class IndexingCoordinator(BaseService):
                                 reasons["error"] += 1
                             else:
                                 reasons["not_found"] += 1
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(
+                            f"Ignored exception during change detection for {f}: {e}"
+                        )
                         files_to_process.append((f, None))
                         reasons["error"] += 1
                     finally:
@@ -1290,7 +1462,10 @@ class IndexingCoordinator(BaseService):
 
                 # Store this batch immediately
                 stats_part = await self._store_parsed_results(
-                    batch, store_task, cumulative_counters=store_progress_counters
+                    batch,
+                    store_task,
+                    cumulative_counters=store_progress_counters,
+                    base_directory=base_directory,
                 )
                 if isinstance(stats_part, tuple):
                     stats_part = stats_part[0]
@@ -1298,6 +1473,13 @@ class IndexingCoordinator(BaseService):
                 agg_total_files += stats_part.get("total_files", 0)
                 agg_total_chunks += stats_part.get("total_chunks", 0)
                 agg_errors.extend(stats_part.get("errors", []))
+
+                # Call progress callback with current totals
+                if progress_callback:
+                    try:
+                        progress_callback(agg_total_files, agg_total_chunks)
+                    except Exception:
+                        pass  # Don't let callback errors break indexing
 
             # Parse files (streaming progress as batches complete and store concurrently)
             # Pass files_to_process directly - preserves hash for each file
@@ -1354,7 +1536,8 @@ class IndexingCoordinator(BaseService):
                             getattr(self, "_profile_parallel_used", False)
                         ),
                     }
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Ignored exception recording startup profile: {e}")
                     pass
 
             # At this point, all parsed results have been stored via _on_batch_store
@@ -1411,6 +1594,23 @@ class IndexingCoordinator(BaseService):
                         "limit_mb": error["limit_mb"],
                         "error": error["error"],
                     }
+
+            # Register base_directory in indexed_roots table (Phase 2: Multi-repo support)
+            if hasattr(self._db, "register_base_directory"):
+                try:
+                    base_dir_str = str(directory.resolve())
+                    # Pass None for project_name - database will generate unique CLI-safe name
+                    self._db.register_base_directory(base_dir_str, None)
+
+                    # Update stats (file_count) after indexing
+                    if hasattr(self._db, "update_indexed_root_stats"):
+                        self._db.update_indexed_root_stats(base_dir_str)
+
+                    logger.debug(
+                        f"Registered base directory and updated stats: {base_dir_str}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to register base directory: {e}")
 
             return {
                 "status": "success",
@@ -1469,6 +1669,7 @@ class IndexingCoordinator(BaseService):
         file_stat: Any,
         language: Language,
         content_hash: str | None = None,
+        base_directory: Path | None = None,
     ) -> int:
         """Store or update file record in database.
 
@@ -1477,14 +1678,32 @@ class IndexingCoordinator(BaseService):
             file_stat: File stat object with st_size and st_mtime
             language: Programming language of the file
             content_hash: Optional content hash for change detection
+            base_directory: Base directory for relative path calculation.
+                            If None, uses self._base_directory.
 
         Returns:
             File ID
         """
         # Check if file already exists
         # Use consistent symlink-safe path resolution
-        relative_path = self._get_relative_path(file_path)
-        existing_file = self._db.get_file_by_path(relative_path.as_posix())
+        effective_base = base_directory if base_directory else self._base_directory
+
+        # In global mode, use absolute paths directly to avoid the DuckDB provider
+        # reconstructing paths incorrectly using its stale base_directory.
+        # In per-repo mode, use relative paths as before.
+        is_global = hasattr(self._db, "_is_global_mode") and self._db._is_global_mode()
+        if is_global:
+            # Use resolved absolute path for global mode
+            storage_path = file_path.resolve().as_posix()
+        else:
+            # Use relative path for per-repo mode
+            storage_path = self._get_relative_path(file_path, base_directory).as_posix()
+
+        logger.debug(
+            f"_store_file_record: file={file_path}, base={effective_base}, "
+            f"storage_path={storage_path}, global={is_global}"
+        )
+        existing_file = self._db.get_file_by_path(storage_path)
 
         if existing_file:
             # Update existing file with new metadata
@@ -1498,11 +1717,10 @@ class IndexingCoordinator(BaseService):
                 )
                 return file_id
 
-        # Create new File model instance with relative path
-        # Use consistent symlink-safe path resolution
-        relative_path = self._get_relative_path(file_path)
+        # Create new File model instance
+        # In global mode: absolute path, in per-repo mode: relative path
         file_model = File(
-            path=FilePath(relative_path.as_posix()),
+            path=FilePath(storage_path),
             size_bytes=file_stat.st_size,
             mtime=file_stat.st_mtime,
             language=language,
@@ -1552,16 +1770,25 @@ class IndexingCoordinator(BaseService):
             Number of chunks removed
         """
         try:
-            # Convert path to relative format for database lookup
+            # Determine lookup path format (same as storage)
+            # In global mode: absolute paths, in per-repo mode: relative paths
             file_path_obj = Path(file_path)
-            if file_path_obj.is_absolute():
+            is_global = (
+                hasattr(self._db, "_is_global_mode") and self._db._is_global_mode()
+            )
+            if is_global:
+                # Global mode: use absolute path
+                lookup_path = file_path_obj.resolve().as_posix()
+            elif file_path_obj.is_absolute():
+                # Per-repo mode with absolute input: convert to relative
                 base_dir = self._base_directory
-                relative_path = file_path_obj.relative_to(base_dir).as_posix()
+                lookup_path = file_path_obj.relative_to(base_dir).as_posix()
             else:
-                relative_path = file_path_obj.as_posix()
+                # Per-repo mode with relative input: use as-is
+                lookup_path = file_path_obj.as_posix()
 
             # Get file record to get chunk count before deletion
-            file_record = self._db.get_file_by_path(relative_path)
+            file_record = self._db.get_file_by_path(lookup_path)
             if not file_record:
                 return 0
 
@@ -1575,7 +1802,7 @@ class IndexingCoordinator(BaseService):
             chunk_count = len(chunks) if chunks else 0
 
             # Delete the file completely (this will also delete chunks and embeddings)
-            success = self._db.delete_file_completely(relative_path)
+            success = self._db.delete_file_completely(lookup_path)
 
             # Clean up the file lock since the file no longer exists
             if success:
@@ -1640,7 +1867,8 @@ class IndexingCoordinator(BaseService):
                         f"[{timestamp}] [COORDINATOR-MISSING] Failed to generate missing embeddings: {e}\n"
                     )
                     f.flush()
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Ignored exception writing debug file: {e}")
                 pass
 
             logger.error(
@@ -1728,7 +1956,10 @@ class IndexingCoordinator(BaseService):
                     # Try to clean up the aborted transaction
                     try:
                         self._db.rollback_transaction()
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(
+                            f"Ignored exception during transaction rollback cleanup: {e}"
+                        )
                         pass  # Ignore errors during cleanup
 
                     # Retry the insertion with a fresh transaction
@@ -1797,11 +2028,9 @@ class IndexingCoordinator(BaseService):
         top_level_items = []
         # Use effective config excludes (includes defaults even when sentinel is set)
         effective_excludes = list(
-
-                self.config.indexing.get_effective_config_excludes()
-                if self.config and getattr(self.config, "indexing", None)
-                else []
-
+            self.config.indexing.get_effective_config_excludes()
+            if self.config and getattr(self.config, "indexing", None)
+            else []
         )
         # Add global gitignore patterns to effective excludes
         self._extend_with_global_gitignore(effective_excludes)
@@ -1818,9 +2047,13 @@ class IndexingCoordinator(BaseService):
                         effective_excludes.extend([rp, f"{rp}/**"])  # safe duplicates
                     else:
                         effective_excludes.append(rel.as_posix())
-                except Exception:
+                except Exception as e:
+                    logger.debug(
+                        f"Ignored exception computing DB path relative path: {e}"
+                    )
                     pass
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception during DB path exclusion setup: {e}")
             pass
         try:
             for item in directory.iterdir():
@@ -1878,7 +2111,8 @@ class IndexingCoordinator(BaseService):
             from chunkhound.utils.ignore_engine import detect_repo_roots  # type: ignore
 
             precomputed_roots = detect_repo_roots(directory, effective_excludes)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception detecting repo roots: {e}")
             precomputed_roots = []
 
         # Determine number of workers for directory discovery
@@ -1907,14 +2141,23 @@ class IndexingCoordinator(BaseService):
                         try:
                             if rr.resolve().is_relative_to(sres):
                                 roots_for_subtree.append(rr)
-                        except Exception:
+                        except Exception as e:
                             # Fallback for Python versions without is_relative_to or resolution issues
+                            logger.debug(
+                                f"Ignored exception checking is_relative_to, trying fallback: {e}"
+                            )
                             try:
                                 rr.resolve().relative_to(sres)
                                 roots_for_subtree.append(rr)
-                            except Exception:
+                            except Exception as e2:
+                                logger.debug(
+                                    f"Ignored exception in relative_to fallback: {e2}"
+                                )
                                 pass
-                except Exception:
+                except Exception as e:
+                    logger.debug(
+                        f"Ignored exception filtering repo roots for subtree: {e}"
+                    )
                     roots_for_subtree = precomputed_roots
 
                 fut = loop.run_in_executor(
@@ -2120,9 +2363,13 @@ class IndexingCoordinator(BaseService):
                         else:
                             cfg_excludes.append(rel.as_posix())
                             exclude_patterns.append(rel.as_posix())
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(
+                            f"Ignored exception computing relative DB path: {e}"
+                        )
                         pass
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Ignored exception excluding DB path from discovery: {e}")
                 pass
             backend = (
                 getattr(_idx, "gitignore_backend", "python")
@@ -2167,7 +2414,8 @@ class IndexingCoordinator(BaseService):
             )
 
             patterns = _norm(list(patterns)) if patterns else patterns
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception normalizing include patterns: {e}")
             pass
 
         # If configured, try Git-backed discovery first (fast path)
@@ -2178,7 +2426,8 @@ class IndexingCoordinator(BaseService):
                 and getattr(self.config, "indexing", None)
                 else "auto"
             )
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception reading discovery_backend config: {e}")
             _disc_backend = "auto"
 
         # Resolve 'auto' to a concrete backend using a fast heuristic
@@ -2192,7 +2441,10 @@ class IndexingCoordinator(BaseService):
                     else []
                 )
                 repo_roots = self._get_or_detect_repo_roots(directory, eff)
-            except Exception:
+            except Exception as e:
+                logger.debug(
+                    f"Ignored exception in _decide_backend repo root detection: {e}"
+                )
                 repo_roots = []
             if not repo_roots:
                 reasons.append("no_repos")
@@ -2203,13 +2455,14 @@ class IndexingCoordinator(BaseService):
                 for item in directory.iterdir():
                     try:
                         if any(
-
-                                item.resolve().is_relative_to(rr.resolve())
-                                for rr in repo_roots
-
+                            item.resolve().is_relative_to(rr.resolve())
+                            for rr in repo_roots
                         ):
                             continue
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(
+                            f"Ignored exception checking is_relative_to in decide_backend: {e}"
+                        )
                         try:
                             _ = [
                                 item.resolve().relative_to(rr.resolve())
@@ -2222,16 +2475,25 @@ class IndexingCoordinator(BaseService):
                                     item.resolve().relative_to(rr.resolve())
                                     inside = True
                                     break
-                                except Exception:
+                                except Exception as e2:
+                                    logger.debug(
+                                        f"Ignored exception in relative_to fallback: {e2}"
+                                    )
                                     pass
                             if inside:
                                 continue
-                        except Exception:
+                        except Exception as e3:
+                            logger.debug(
+                                f"Ignored exception in repo check fallback: {e3}"
+                            )
                             pass
                     non_repo_items += 1
                     if non_repo_items > 1:
                         break
-            except Exception:
+            except Exception as e:
+                logger.debug(
+                    f"Ignored exception iterating directory for backend decision: {e}"
+                )
                 pass
             if non_repo_items == 0:
                 reasons.append("all_repos")
@@ -2248,7 +2510,8 @@ class IndexingCoordinator(BaseService):
         try:
             setattr(self, "_resolved_discovery_backend", _resolved)
             setattr(self, "_resolved_discovery_reasons", _reasons)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception setting discovery backend attributes: {e}")
             pass
 
         use_git_backend = _resolved in ("git", "git_only")
@@ -2276,7 +2539,10 @@ class IndexingCoordinator(BaseService):
                 ):
                     try:
                         setattr(self, "_profile_parallel_used", False)
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(
+                            f"Ignored exception setting _profile_parallel_used: {e}"
+                        )
                         pass
                     return sorted(files_git)
 
@@ -2292,7 +2558,10 @@ class IndexingCoordinator(BaseService):
                     try:
                         # mark for startup profile that parallel was used
                         setattr(self, "_profile_parallel_used", True)
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(
+                            f"Ignored exception setting _profile_parallel_used: {e}"
+                        )
                         pass
                     return discovered_files
                 # Otherwise fall through to sequential (None signal)
@@ -2322,7 +2591,10 @@ class IndexingCoordinator(BaseService):
                     backend=engine_args.get("backend", "python"),
                     overlay=engine_args.get("workspace_nonrepo_overlay", False),
                 )
-            except Exception:
+            except Exception as e:
+                logger.debug(
+                    f"Ignored exception building ignore engine for sequential discovery: {e}"
+                )
                 ignore_engine_obj = None
 
         discovered_files = self._walk_directory_with_excludes(
@@ -2335,7 +2607,8 @@ class IndexingCoordinator(BaseService):
         )
         try:
             setattr(self, "_profile_parallel_used", False)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception setting _profile_parallel_used: {e}")
             pass
         return sorted(discovered_files)
 
@@ -2360,7 +2633,8 @@ class IndexingCoordinator(BaseService):
 
             if _sh.which("git") is None:
                 return None
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception checking for git: {e}")
             return None
 
         try:
@@ -2373,7 +2647,8 @@ class IndexingCoordinator(BaseService):
             from chunkhound.utils.git_discovery import (
                 list_repo_files_via_git as _git_list,
             )
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception importing git discovery modules: {e}")
             return None
 
         patterns = list(patterns or [])
@@ -2393,7 +2668,8 @@ class IndexingCoordinator(BaseService):
                 )
 
                 effective_excludes = _Idx._default_excludes()
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception getting effective config excludes: {e}")
             from chunkhound.core.config.indexing_config import IndexingConfig as _Idx
 
             effective_excludes = _Idx._default_excludes()
@@ -2418,20 +2694,28 @@ class IndexingCoordinator(BaseService):
                     else:
                         effective_excludes.append(rel.as_posix())
                         exclude_patterns_local.append(rel.as_posix())
-                except Exception:
+                except Exception as e:
+                    logger.debug(
+                        f"Ignored exception computing relative DB path in git discovery: {e}"
+                    )
                     pass
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception excluding DB path in git discovery: {e}")
             pass
 
         # Detect repo roots under directory (pruned by effective_excludes) with cache reuse
         try:
             repo_roots = self._get_or_detect_repo_roots(directory, effective_excludes)
-        except Exception:
+        except Exception as e:
+            logger.debug(
+                f"Ignored exception detecting repo roots in git discovery: {e}"
+            )
             repo_roots = []
         # Expose whether any repos were detected for caller decisions
         try:
             setattr(self, "_git_repo_roots_detected", bool(repo_roots))
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception setting _git_repo_roots_detected: {e}")
             pass
 
         # If no repos detected
@@ -2457,12 +2741,18 @@ class IndexingCoordinator(BaseService):
                     directory.resolve().relative_to(rr.resolve())
                     # directory is inside rr
                     start_for_repo = directory
-                except Exception:
+                except Exception as e:
+                    logger.debug(
+                        f"Ignored exception checking directory relative to repo: {e}"
+                    )
                     try:
                         rr.resolve().relative_to(directory.resolve())
                         # rr is inside directory → start at rr
                         start_for_repo = rr
-                    except Exception:
+                    except Exception as e2:
+                        logger.debug(
+                            f"Ignored exception checking repo relative to directory: {e2}"
+                        )
                         # Disjoint; skip
                         continue
 
@@ -2479,8 +2769,11 @@ class IndexingCoordinator(BaseService):
                 if bool(stats.get("git_pathspecs_capped")):
                     tot_capped = True
                 results.extend(repo_files)
-            except Exception:
+            except Exception as e:
                 # If any repo fails, skip it (we'll still scan non-repo areas)
+                logger.debug(
+                    f"Ignored exception listing files via git for repo {rr}: {e}"
+                )
                 continue
 
         # Scan non-repo areas by pruning repo subtrees during walk
@@ -2505,7 +2798,10 @@ class IndexingCoordinator(BaseService):
                         and getattr(self.config, "indexing", None)
                         else False
                     )
-                except Exception:
+                except Exception as e:
+                    logger.debug(
+                        f"Ignored exception reading workspace_gitignore_nonrepo: {e}"
+                    )
                     wr_only = False
                 # Simple overlay prefixes (directory-only) parsed from root .gitignore (best-effort)
                 overlay_prefixes: list[str] = []
@@ -2524,7 +2820,10 @@ class IndexingCoordinator(BaseService):
                                     if ln.startswith("/"):
                                         ln = ln[1:]
                                     overlay_prefixes.append(ln.strip("/"))
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(
+                            f"Ignored exception parsing overlay prefixes from .gitignore: {e}"
+                        )
                         overlay_prefixes = []
                 # Reuse same sources selection; engine respects config overlay flag
                 local_engine = self._get_or_build_ignore_engine(
@@ -2570,7 +2869,10 @@ class IndexingCoordinator(BaseService):
                                 fp.resolve().relative_to(rr.resolve())
                                 inside_repo = True
                                 break
-                            except Exception:
+                            except Exception as e:
+                                logger.debug(
+                                    f"Ignored exception checking if file is inside repo: {e}"
+                                )
                                 continue
                         if not inside_repo:
                             # Overlay prefix shortcut (best-effort) for non-repo files
@@ -2580,7 +2882,10 @@ class IndexingCoordinator(BaseService):
                                     .relative_to(directory.resolve())
                                     .as_posix()
                                 )
-                            except Exception:
+                            except Exception as e:
+                                logger.debug(
+                                    f"Ignored exception getting relative path for overlay check: {e}"
+                                )
                                 rel = fp.name
                             if overlay_prefixes:
                                 skip = False
@@ -2598,14 +2903,21 @@ class IndexingCoordinator(BaseService):
                                     and local_engine.matches(fp, is_dir=False)
                                 ):  # type: ignore[attr-defined]
                                     continue
-                            except Exception:
+                            except Exception as e:
+                                logger.debug(
+                                    f"Ignored exception checking overlay engine match: {e}"
+                                )
                                 pass
                             pruned_non_repo.append(fp)
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(
+                            f"Ignored exception processing non-repo file {fp}: {e}"
+                        )
                         pruned_non_repo.append(fp)
                 results.extend(pruned_non_repo)
-            except Exception:
+            except Exception as e:
                 # Ignore non-repo scan errors; we still return repo files
+                logger.debug(f"Ignored exception during non-repo scan: {e}")
                 pass
 
         # Dedup and return
@@ -2624,7 +2936,10 @@ class IndexingCoordinator(BaseService):
             setattr(self, "_git_pathspecs", int(tot_pathspecs))
             if tot_capped:
                 setattr(self, "_git_pathspecs_capped", True)
-        except Exception:
+        except Exception as e:
+            logger.debug(
+                f"Ignored exception setting git instrumentation attributes: {e}"
+            )
             pass
         return uniq
 
@@ -2634,7 +2949,8 @@ class IndexingCoordinator(BaseService):
     ) -> tuple[str, tuple[str, ...]]:
         try:
             base = str(root.resolve())
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception resolving root path for cache key: {e}")
             base = str(root)
         try:
             items = tuple(
@@ -2649,7 +2965,10 @@ class IndexingCoordinator(BaseService):
                     ]
                 )
             )
-        except Exception:
+        except Exception as e:
+            logger.debug(
+                f"Ignored exception sorting config excludes for cache key: {e}"
+            )
             items = tuple()
         return (base, items)
 
@@ -2664,7 +2983,8 @@ class IndexingCoordinator(BaseService):
             from chunkhound.utils.ignore_engine import detect_repo_roots as _detect
 
             roots = _detect(root, cfg_excludes)  # type: ignore[arg-type]
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Ignored exception detecting repo roots in cache: {e}")
             roots = []
         self._repo_roots_cache[key] = roots
         return roots
@@ -2749,7 +3069,10 @@ class IndexingCoordinator(BaseService):
                         if _inc(fp, directory, patterns or [], pat_cache):
                             collected.append(fp)
                 files = collected
-            except Exception:
+            except Exception as e:
+                logger.debug(
+                    f"Ignored exception during fallback conservative scan: {e}"
+                )
                 pass
 
         return files
@@ -2771,19 +3094,41 @@ class IndexingCoordinator(BaseService):
             Number of orphaned files cleaned up
         """
         try:
-            # Create set of relative paths for fast lookup
-            base_dir = self._base_directory
-            current_file_paths = {
-                file_path.relative_to(base_dir).as_posix()
-                for file_path in current_files
-            }
+            # Determine path format: absolute in global mode, relative in per-repo mode
+            is_global = (
+                hasattr(self._db, "_is_global_mode") and self._db._is_global_mode()
+            )
+            # Use the directory parameter (not stale self._base_directory)
+            base_dir = directory.resolve()
 
-            # Get all files in database (stored as relative paths)
-            query = """
-                SELECT id, path
-                FROM files
-            """
-            db_files = self._db.execute_query(query, [])
+            # Create set of paths for fast lookup (using same format as storage)
+            if is_global:
+                current_file_paths = {
+                    file_path.resolve().as_posix() for file_path in current_files
+                }
+            else:
+                current_file_paths = {
+                    file_path.relative_to(base_dir).as_posix()
+                    for file_path in current_files
+                }
+
+            # Get files from current project only (filter by base directory path prefix)
+            base_dir_str = base_dir.as_posix()
+            if is_global:
+                # Global mode: paths are stored as absolute, query by prefix
+                query = """
+                    SELECT id, path
+                    FROM files
+                    WHERE path LIKE ?
+                """
+                db_files = self._db.execute_query(query, [f"{base_dir_str}/%"])
+            else:
+                # Per-repo mode: paths are relative, query all files
+                query = """
+                    SELECT id, path
+                    FROM files
+                """
+                db_files = self._db.execute_query(query, [])
 
             # Find orphaned files (in DB but not on disk or excluded by patterns)
             orphaned_files = []
@@ -2796,8 +3141,11 @@ class IndexingCoordinator(BaseService):
 
                         cfg = _Cfg()
                     patterns_to_check = cfg.indexing.get_effective_config_excludes()
-                except Exception:
+                except Exception as e:
                     # Final fallback to static defaults
+                    logger.debug(
+                        f"Ignored exception getting config excludes, using defaults: {e}"
+                    )
                     from chunkhound.core.config.indexing_config import (
                         IndexingConfig as _Idx,
                     )

@@ -197,8 +197,14 @@ class EmbeddingService(BaseService):
             target_model = model_name or self._embedding_provider.model
 
             # First, just get the count and IDs of chunks without embeddings (fast query)
-            chunk_ids_without_embeddings = self._get_chunk_ids_without_embeddings(
-                target_provider, target_model, exclude_patterns
+            # Run in executor to avoid blocking the event loop
+            loop = asyncio.get_running_loop()
+            chunk_ids_without_embeddings = await loop.run_in_executor(
+                None,
+                self._get_chunk_ids_without_embeddings,
+                target_provider,
+                target_model,
+                exclude_patterns,
             )
 
             if not chunk_ids_without_embeddings:
@@ -209,7 +215,10 @@ class EmbeddingService(BaseService):
                 }
 
             # Load chunk content and generate embeddings
-            chunks_data = self._get_chunks_by_ids(chunk_ids_without_embeddings)
+            # Run in executor to avoid blocking the event loop
+            chunks_data = await loop.run_in_executor(
+                None, self._get_chunks_by_ids, chunk_ids_without_embeddings
+            )
             chunk_id_list = [chunk["id"] for chunk in chunks_data]
             chunk_texts = [chunk["code"] for chunk in chunks_data]
 
@@ -223,7 +232,7 @@ class EmbeddingService(BaseService):
                     "post-embedding"
                 ):
                     logger.debug("Optimizing database after embedding generation...")
-                    self._db.optimize_tables()
+                    await loop.run_in_executor(None, self._db.optimize_tables)
 
             return {
                 "status": "success",
@@ -516,8 +525,13 @@ class EmbeddingService(BaseService):
                         )
 
                     # Store in database with configurable batch size
-                    stored_count = self._db.insert_embeddings_batch(
-                        embeddings_data, self._db_batch_size
+                    # Run in executor to avoid blocking the event loop
+                    loop = asyncio.get_running_loop()
+                    stored_count = await loop.run_in_executor(
+                        None,  # Use default thread pool
+                        self._db.insert_embeddings_batch,
+                        embeddings_data,
+                        self._db_batch_size,
                     )
                     logger.debug(
                         f"Batch {batch_num + 1} completed: {stored_count} embeddings stored"
@@ -681,7 +695,9 @@ class EmbeddingService(BaseService):
                     f"Running periodic DB optimization after {completed_batch_count} total batches"
                 )
                 try:
-                    self._db.optimize_tables()
+                    # Run in executor to avoid blocking the event loop
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, self._db.optimize_tables)
                     logger.debug("Periodic optimization completed")
                 except Exception as e:
                     logger.warning(f"Periodic optimization failed: {e}")

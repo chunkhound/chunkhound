@@ -17,7 +17,6 @@ from chunkhound.services.clustering_service import ClusterGroup
 from chunkhound.services.research.citation_manager import CitationManager
 from chunkhound.services.research.quality_validator import QualityValidator
 from chunkhound.services.research.question_generator import QuestionGenerator
-from chunkhound.services.research.schemas import QueryExpansionResponse
 from chunkhound.services.research.synthesis_engine import SynthesisEngine
 
 if TYPE_CHECKING:
@@ -197,6 +196,7 @@ class DeepResearchService:
         tool_name: str = "code_research",
         progress: "TreeProgressDisplay | None" = None,
         path_filter: str | None = None,
+        path_prefixes: list[str] | None = None,
     ):
         """Initialize deep research service.
 
@@ -206,6 +206,8 @@ class DeepResearchService:
             llm_manager: LLM manager for generating follow-ups and synthesis
             tool_name: Name of the MCP tool (used in followup suggestions)
             progress: Optional TreeProgressDisplay instance for terminal UI (None for MCP)
+            path_filter: Optional single path filter (e.g., 'src/')
+            path_prefixes: Optional list of paths for multi-project search
         """
         self._db_services = database_services
         self._embedding_manager = embedding_manager
@@ -224,6 +226,7 @@ class DeepResearchService:
         self._citation_manager = CitationManager()
         self._quality_validator = QualityValidator(llm_manager)
         self._path_filter = path_filter
+        self._path_prefixes = path_prefixes
 
     async def _ensure_progress_lock(self) -> None:
         """Ensure progress lock exists (must be called in async event loop context).
@@ -822,6 +825,20 @@ class DeepResearchService:
         """
         llm = self._llm_manager.get_utility_provider()
 
+        # Define JSON schema for structured output
+        schema = {
+            "type": "object",
+            "properties": {
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": f"Array of exactly {NUM_LLM_EXPANDED_QUERIES} expanded search queries (semantically complete sentences)",
+                }
+            },
+            "required": ["queries"],
+            "additionalProperties": False,
+        }
+
         # Simplified system prompt per GPT-5-Nano best practices
         system = prompts.QUERY_EXPANSION_SYSTEM
 
@@ -844,15 +861,14 @@ class DeepResearchService:
         )
 
         try:
-            # Use typed structured output with Pydantic model
-            result = await llm.complete_structured_typed(
+            result = await llm.complete_structured(
                 prompt=prompt,
-                response_model=QueryExpansionResponse,
+                json_schema=schema,
                 system=system,
                 max_completion_tokens=QUERY_EXPANSION_TOKENS,
             )
 
-            expanded = result.queries  # Type-safe access
+            expanded = result.get("queries", [])
 
             # Validation: expect exactly 2 queries from LLM
             if not expanded or len(expanded) < NUM_LLM_EXPANDED_QUERIES:
@@ -944,6 +960,7 @@ class DeepResearchService:
                     threshold=RELEVANCE_THRESHOLD,
                     force_strategy="multi_hop",
                     path_filter=self._path_filter,
+                    path_prefixes=self._path_prefixes,
                 )
                 for expanded_q in expanded_queries
             ]
@@ -1000,6 +1017,7 @@ class DeepResearchService:
                 threshold=RELEVANCE_THRESHOLD,
                 force_strategy="multi_hop",
                 path_filter=self._path_filter,
+                path_prefixes=self._path_prefixes,
             )
             logger.debug(f"Semantic search returned {len(semantic_results)} chunks")
 
@@ -1174,6 +1192,7 @@ class DeepResearchService:
                     page_size=10,  # Limit per symbol to avoid overwhelming results
                     offset=0,
                     path_filter=self._path_filter,
+                    path_prefixes=self._path_prefixes,
                 )
 
                 logger.debug(f"Found {len(results)} chunks for symbol '{symbol}'")
