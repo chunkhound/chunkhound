@@ -23,6 +23,7 @@ from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services import prompts
 from chunkhound.services.clustering_service import ClusterGroup
+from chunkhound.services.research.shared.chunk_dedup import get_chunk_id
 from chunkhound.services.research.shared.citation_manager import CitationManager
 from chunkhound.services.research.shared.evidence_ledger import (
     EvidenceLedger,
@@ -1045,9 +1046,9 @@ class PluggableResearchService:
         )
 
         # Deduplicate chunks by chunk_id
-        chunks_map: dict[str, dict[str, Any]] = {}
+        chunks_map: dict[int | str, dict[str, Any]] = {}
         for chunk in chunks:
-            chunk_id = chunk.get("chunk_id") or chunk.get("id")
+            chunk_id = get_chunk_id(chunk)
             if chunk_id and chunk_id not in chunks_map:
                 chunks_map[chunk_id] = chunk
 

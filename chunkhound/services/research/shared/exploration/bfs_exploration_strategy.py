@@ -16,6 +16,7 @@ from chunkhound.core.config.research_config import ResearchConfig
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
+from chunkhound.services.research.shared.chunk_dedup import get_chunk_id
 from chunkhound.services.research.shared.exploration.elbow_filter import (
     filter_chunks_by_elbow,
     get_unified_score,
@@ -643,7 +644,7 @@ class BFSExplorationStrategy:
         chunks_map: dict[int | str, dict[str, Any]] = {}
         for node in all_nodes:
             for chunk in node.chunks:
-                chunk_id = chunk.get("chunk_id") or chunk.get("id")
+                chunk_id = get_chunk_id(chunk)
                 if not chunk_id:
                     continue
                 existing = chunks_map.get(chunk_id)

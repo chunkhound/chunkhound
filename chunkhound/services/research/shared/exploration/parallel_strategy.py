@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from chunkhound.services.research.shared.chunk_dedup import get_chunk_id
 from chunkhound.services.research.shared.exploration.elbow_filter import (
     filter_chunks_by_elbow,
     get_unified_score,
@@ -269,7 +270,7 @@ class ParallelExplorationStrategy:
         chunk_map: dict[int | str, dict[str, Any]] = {}
 
         for chunk in bfs_chunks + wide_chunks:
-            chunk_id = chunk.get("chunk_id") or chunk.get("id")
+            chunk_id = get_chunk_id(chunk)
             if not chunk_id:
                 # Skip chunks without IDs (shouldn't happen, but be defensive)
                 logger.debug("Skipping chunk without ID during merge")
