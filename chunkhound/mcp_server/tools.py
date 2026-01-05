@@ -412,6 +412,31 @@ def estimate_tokens(text: str) -> int:
     return len(text) // 3
 
 
+def _normalize_path_arg(path: list[str] | str | None) -> list[str] | None:
+    """Normalize path argument to list[str] or None.
+
+    Handles backward compatibility where path might be passed as a string
+    instead of a list.
+
+    Args:
+        path: Path argument (list[str], str, or None)
+
+    Returns:
+        list[str] or None
+    """
+    if path is None:
+        return None
+    if isinstance(path, str):
+        from loguru import logger
+
+        logger.warning(
+            f"path should be list[str], got string: {path!r}. "
+            "Wrapping in list for compatibility."
+        )
+        return [path]
+    return path
+
+
 def limit_response_size(
     response_data: SearchResponse, max_tokens: int = MAX_RESPONSE_TOKENS
 ) -> SearchResponse:
@@ -515,15 +540,15 @@ async def search_regex_impl(
         services.provider.connect()
 
     # Convert path list to path_filter or path_prefixes
-    # This is handled by _resolve_search_scope which processes the path list
     path_filter: str | None = None
     path_prefixes: list[str] | None = None
 
-    if path:
-        if len(path) == 1:
-            path_filter = path[0]
+    normalized_path = _normalize_path_arg(path)
+    if normalized_path:
+        if len(normalized_path) == 1:
+            path_filter = normalized_path[0]
         else:
-            path_prefixes = path
+            path_prefixes = normalized_path
 
     # Perform search using SearchService
     results, pagination = services.search_service.search_regex(
@@ -631,11 +656,12 @@ async def search_semantic_impl(
     path_filter: str | None = None
     path_prefixes: list[str] | None = None
 
-    if path:
-        if len(path) == 1:
-            path_filter = path[0]
+    normalized_path = _normalize_path_arg(path)
+    if normalized_path:
+        if len(normalized_path) == 1:
+            path_filter = normalized_path[0]
         else:
-            path_prefixes = path
+            path_prefixes = normalized_path
 
     # Perform search using SearchService
     results, pagination = await services.search_service.search_semantic(
@@ -817,11 +843,12 @@ async def deep_research_impl(
     path_filter: str | None = None
     path_prefixes: list[str] | None = None
 
-    if path:
-        if len(path) == 1:
-            path_filter = path[0]
+    normalized_path = _normalize_path_arg(path)
+    if normalized_path:
+        if len(normalized_path) == 1:
+            path_filter = normalized_path[0]
         else:
-            path_prefixes = path
+            path_prefixes = normalized_path
 
     # Create code research service with dynamic tool name
     # This ensures followup suggestions automatically update if tool is renamed
