@@ -1,6 +1,5 @@
 """Tests for Java language mapping and parsing."""
 
-import pytest
 
 from chunkhound.core.types.common import ChunkType, FileId, Language
 from chunkhound.parsers.parser_factory import get_parser_factory
@@ -32,8 +31,9 @@ public class MyClass {
         symbols = {c.symbol for c in chunks}
 
         assert len(class_chunks) > 0, "Should capture class declaration as CLASS chunk"
-        assert "MyClass" in symbols, \
+        assert "MyClass" in symbols, (
             f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_nested_class(self):
         """Test that nested/inner classes are captured."""
@@ -57,8 +57,9 @@ public class OuterClass {
         has_outer = "OuterClass" in symbols
         has_inner = "InnerClass" in symbols
 
-        assert has_outer or has_inner, \
+        assert has_outer or has_inner, (
             f"Expected OuterClass or InnerClass in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_generic_class(self):
         """Test that generic class declarations are captured."""
@@ -78,8 +79,7 @@ public class Box<T> {
         chunks = parse_java(content)
         symbols = {c.symbol for c in chunks}
 
-        assert "Box" in symbols, \
-            f"Expected 'Box' in symbols, got: {sorted(symbols)}"
+        assert "Box" in symbols, f"Expected 'Box' in symbols, got: {sorted(symbols)}"
 
 
 class TestJavaInterfaceParsing:
@@ -94,12 +94,15 @@ public interface MyInterface {
 }
 """
         chunks = parse_java(content)
-        class_chunks = [c for c in chunks if c.chunk_type in (ChunkType.CLASS, ChunkType.INTERFACE)]
+        class_chunks = [
+            c for c in chunks if c.chunk_type in (ChunkType.CLASS, ChunkType.INTERFACE)
+        ]
         symbols = {c.symbol for c in chunks}
 
         assert len(class_chunks) > 0, "Should capture interface declaration"
-        assert "MyInterface" in symbols, \
+        assert "MyInterface" in symbols, (
             f"Expected 'MyInterface' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_interface_with_default_method(self):
         """Test that interfaces with default methods are captured."""
@@ -123,8 +126,9 @@ public interface MyInterface {
         has_interface = "MyInterface" in symbols
         has_method = any("Method" in s for s in symbols)
 
-        assert has_interface or has_method, \
+        assert has_interface or has_method, (
             f"Expected interface or method in symbols, got: {sorted(symbols)}"
+        )
 
 
 class TestJavaEnumParsing:
@@ -146,8 +150,9 @@ public enum Status {
 
         # Should capture the enum (as CLASS or other chunk type)
         assert len(chunks) > 0, "Should capture enum declaration"
-        assert "Status" in symbols, \
+        assert "Status" in symbols, (
             f"Expected 'Status' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_enum_with_methods(self):
         """Test that enums with methods and fields are captured."""
@@ -175,8 +180,9 @@ public enum Color {
         chunks = parse_java(content)
         symbols = {c.symbol for c in chunks}
 
-        assert "Color" in symbols, \
+        assert "Color" in symbols, (
             f"Expected 'Color' in symbols, got: {sorted(symbols)}"
+        )
 
 
 class TestJavaMethodParsing:
@@ -205,7 +211,9 @@ public class MyClass {
         # Method may be captured as part of class or separately
         assert len(chunks) > 0, "Should capture class with instance method"
         has_class_or_method = "MyClass" in symbols or "instanceMethod" in symbols
-        assert has_class_or_method, f"Expected 'MyClass' or 'instanceMethod' in symbols, got: {sorted(symbols)}"
+        assert has_class_or_method, (
+            f"Expected 'MyClass' or 'instanceMethod' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_static_method(self):
         """Test that classes with static methods are captured."""
@@ -229,7 +237,9 @@ public class MyClass {
 
         # Static method may be captured as part of class or separately
         has_class_or_method = "MyClass" in symbols or "staticMethod" in symbols
-        assert has_class_or_method, f"Expected 'MyClass' or 'staticMethod' in symbols, got: {sorted(symbols)}"
+        assert has_class_or_method, (
+            f"Expected 'MyClass' or 'staticMethod' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_constructor(self):
         """Test that constructors are captured."""
@@ -285,8 +295,9 @@ public class Calculator {
         # Should capture the Calculator class (methods may be within it)
         has_calculator = "Calculator" in symbols
         has_add = "add" in symbols or any("add" in s.lower() for s in symbols)
-        assert has_calculator or has_add, \
+        assert has_calculator or has_add, (
             f"Expected 'Calculator' or 'add' in symbols, got: {sorted(symbols)}"
+        )
 
 
 class TestJavaAnnotations:
@@ -409,8 +420,12 @@ public class Utils {
         symbols = {c.symbol for c in chunks}
 
         # Should capture Utils class (methods may be within it)
-        has_class_or_method = "Utils" in symbols or "getFirst" in symbols or "createMap" in symbols
-        assert has_class_or_method, f"Expected 'Utils' or methods in symbols, got: {sorted(symbols)}"
+        has_class_or_method = (
+            "Utils" in symbols or "getFirst" in symbols or "createMap" in symbols
+        )
+        assert has_class_or_method, (
+            f"Expected 'Utils' or methods in symbols, got: {sorted(symbols)}"
+        )
 
     def test_bounded_type_parameters(self):
         """Test that bounded type parameters are parsed correctly."""
@@ -430,8 +445,9 @@ public class ComparableBox<T extends Comparable<T>> {
         chunks = parse_java(content)
         symbols = {c.symbol for c in chunks}
 
-        assert "ComparableBox" in symbols, \
+        assert "ComparableBox" in symbols, (
             f"Expected 'ComparableBox' in symbols, got: {sorted(symbols)}"
+        )
 
 
 class TestJavaComments:
@@ -547,7 +563,9 @@ public class MyList implements List<String> {
         chunks = parse_java(content)
         symbols = {c.symbol for c in chunks}
 
-        assert "MyList" in symbols, f"Expected 'MyList' in symbols, got: {sorted(symbols)}"
+        assert "MyList" in symbols, (
+            f"Expected 'MyList' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_captures_abstract_class(self):
         """Test that abstract classes are captured."""
@@ -569,7 +587,9 @@ public abstract class Animal {
         chunks = parse_java(content)
         symbols = {c.symbol for c in chunks}
 
-        assert "Animal" in symbols, f"Expected 'Animal' in symbols, got: {sorted(symbols)}"
+        assert "Animal" in symbols, (
+            f"Expected 'Animal' in symbols, got: {sorted(symbols)}"
+        )
 
 
 class TestJavaModifiers:
@@ -626,7 +646,9 @@ public class MyClass {
         # Should capture the class with methods (methods may be part of class chunk)
         assert len(chunks) > 0, "Should capture class with methods"
         symbols = {c.symbol for c in chunks}
-        assert "MyClass" in symbols, f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        assert "MyClass" in symbols, (
+            f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_class_modifiers(self):
         """Test that classes with various modifiers are captured."""
@@ -671,7 +693,9 @@ final class FinalClass {
         symbols = {c.symbol for c in chunks}
 
         # Should capture at least one class with modifiers
-        has_classes = any(name in symbols for name in ["PublicClass", "AbstractClass", "FinalClass"])
+        has_classes = any(
+            name in symbols for name in ["PublicClass", "AbstractClass", "FinalClass"]
+        )
         assert has_classes, f"Expected class names in symbols, got: {sorted(symbols)}"
 
 
@@ -744,7 +768,9 @@ public class MyClass {
         symbols = {c.symbol for c in chunks}
 
         # Should capture the class
-        assert "MyClass" in symbols, f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        assert "MyClass" in symbols, (
+            f"Expected 'MyClass' in symbols, got: {sorted(symbols)}"
+        )
 
 
 class TestJavaImports:
@@ -811,9 +837,12 @@ public class MyClass {
         symbols = {c.symbol for c in chunks}
 
         # Should have method names in symbols
-        has_methods = any(name in symbols for name in ["simpleMethod", "getName", "setName"])
-        assert has_methods or "MyClass" in symbols, \
+        has_methods = any(
+            name in symbols for name in ["simpleMethod", "getName", "setName"]
+        )
+        assert has_methods or "MyClass" in symbols, (
             f"Expected method names or class name in symbols, got: {sorted(symbols)}"
+        )
 
     def test_class_symbol_names(self):
         """Test that class symbols are correctly extracted."""
@@ -837,8 +866,9 @@ public class OuterClass {
         has_outer = "OuterClass" in symbols
         has_nested = "StaticNestedClass" in symbols or "InnerClass" in symbols
 
-        assert has_outer or has_nested, \
+        assert has_outer or has_nested, (
             f"Expected class names in symbols, got: {sorted(symbols)}"
+        )
 
 
 class TestJavaMetadata:
@@ -868,8 +898,9 @@ public class Calculator {
         has_string = any("String getString" in c.code for c in chunks)
         has_void = any("void" in c.code for c in chunks)
 
-        assert has_int or has_string or has_void, \
+        assert has_int or has_string or has_void, (
             "Expected return types to be visible in code"
+        )
 
     def test_method_parameter_metadata(self):
         """Test that method parameters are visible in code."""
@@ -888,10 +919,11 @@ public class MyClass {
 
         # Parameters should be visible in the code chunks
         has_params = any("String name" in c.code or "int age" in c.code for c in chunks)
-        has_generics = any("List<String>" in c.code or "Map<String, Integer>" in c.code for c in chunks)
+        has_generics = any(
+            "List<String>" in c.code or "Map<String, Integer>" in c.code for c in chunks
+        )
 
-        assert has_params or has_generics, \
-            "Expected parameters to be visible in code"
+        assert has_params or has_generics, "Expected parameters to be visible in code"
 
 
 class TestJavaComplexModule:
@@ -940,8 +972,9 @@ public class CompleteExample {
         symbols = {c.symbol for c in chunks}
 
         # Should capture the class
-        assert "CompleteExample" in symbols, \
+        assert "CompleteExample" in symbols, (
             f"Expected 'CompleteExample' in symbols, got: {sorted(symbols)}"
+        )
 
     def test_java_realistic_module(self):
         """Test parsing a realistic Java module with advanced features."""
@@ -1022,9 +1055,11 @@ public class UserService {
         has_builder = "Builder" in symbols
         has_methods = any(name in symbols for name in ["findById", "findAll", "save"])
 
-        assert has_service or has_builder or has_methods, \
+        assert has_service or has_builder or has_methods, (
             f"Expected UserService, Builder, or methods in symbols, got: {sorted(symbols)}"
+        )
 
         # Should have captured multiple chunks
-        assert len(chunks) >= 2, \
+        assert len(chunks) >= 2, (
             f"Expected at least 2 chunks from realistic module, got {len(chunks)}"
+        )

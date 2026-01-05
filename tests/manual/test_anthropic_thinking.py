@@ -21,14 +21,14 @@ import sys
 import pytest
 
 from chunkhound.providers.llm.anthropic_llm_provider import (
-    AnthropicLLMProvider,
     EFFORT_SUPPORTED_MODELS,
+    AnthropicLLMProvider,
 )
 
 # Skip all tests in this file if no API key is available
 pytestmark = pytest.mark.skipif(
     not os.getenv("ANTHROPIC_API_KEY"),
-    reason="ANTHROPIC_API_KEY not set - manual integration tests require real API key"
+    reason="ANTHROPIC_API_KEY not set - manual integration tests require real API key",
 )
 
 
@@ -84,7 +84,9 @@ how far did it travel in total?"""
 
     # Note: With thinking enabled, the actual thinking process is in separate blocks
     # that we don't include in the final text output by default
-    print("\nNote: Extended thinking blocks are processed but not included in output by default.")
+    print(
+        "\nNote: Extended thinking blocks are processed but not included in output by default."
+    )
 
     return response.tokens_used > 0
 
@@ -118,7 +120,7 @@ async def test_structured_output():
         prompt, schema, max_completion_tokens=200
     )
 
-    print(f"\nStructured Response:")
+    print("\nStructured Response:")
     import json
 
     print(json.dumps(response, indent=2))
@@ -170,7 +172,7 @@ async def test_usage_stats():
 
     stats = provider.get_usage_stats()
 
-    print(f"\nUsage Statistics:")
+    print("\nUsage Statistics:")
     print(f"  Requests made: {stats['requests_made']}")
     print(f"  Total tokens: {stats['total_tokens']}")
     print(f"  Prompt tokens: {stats['prompt_tokens']}")
@@ -230,7 +232,7 @@ async def test_opus_45_full_features():
         clear_thinking_keep_turns=2,
     )
 
-    print(f"\nConfiguration:")
+    print("\nConfiguration:")
     print(f"  Model: {provider.model}")
     print(f"  Thinking: {provider._thinking_enabled}")
     print(f"  Interleaved: {provider._interleaved_thinking}")
@@ -241,7 +243,9 @@ async def test_opus_45_full_features():
     headers = provider._get_beta_headers()
     print(f"  Beta headers: {headers}")
 
-    prompt = "Explain the difference between async/await and callbacks in 2-3 sentences."
+    prompt = (
+        "Explain the difference between async/await and callbacks in 2-3 sentences."
+    )
     print(f"\nPrompt: {prompt}")
 
     response = await provider.complete(prompt, max_completion_tokens=3000)

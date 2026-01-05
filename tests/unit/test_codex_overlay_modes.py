@@ -24,7 +24,9 @@ class _DummyProc:
 
 
 @pytest.mark.asyncio
-async def test_codex_config_only_mode_uses_config_env_and_no_codex_home(monkeypatch, tmp_path: Path):
+async def test_codex_config_only_mode_uses_config_env_and_no_codex_home(
+    monkeypatch, tmp_path: Path
+):
     from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 
     # Force argv path to simplify dummy proc (no stdin pipe)
@@ -41,9 +43,13 @@ async def test_codex_config_only_mode_uses_config_env_and_no_codex_home(monkeypa
     monkeypatch.setenv("EXTRA_VAR", "123")
 
     # Avoid copying any real Codex home during the test
-    monkeypatch.setattr(CodexCLIProvider, "_get_base_codex_home", lambda self: None, raising=True)
+    monkeypatch.setattr(
+        CodexCLIProvider, "_get_base_codex_home", lambda self: None, raising=True
+    )
     # Force availability
-    monkeypatch.setattr(CodexCLIProvider, "_codex_available", lambda self: True, raising=True)
+    monkeypatch.setattr(
+        CodexCLIProvider, "_codex_available", lambda self: True, raising=True
+    )
 
     captured = {"args": None, "env": None, "config_text": None}
 
@@ -59,10 +65,14 @@ async def test_codex_config_only_mode_uses_config_env_and_no_codex_home(monkeypa
                 captured["config_text"] = cfg.read_text()
         return _DummyProc(rc=0, out=b"OK", err=b"")
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True)
+    monkeypatch.setattr(
+        asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True
+    )
 
     prov = CodexCLIProvider(model="gpt-5.1-codex-mini")
-    out = await prov._run_exec("ping", cwd=None, max_tokens=16, timeout=10, model="gpt-5.1-codex-mini")  # type: ignore[attr-defined]
+    out = await prov._run_exec(
+        "ping", cwd=None, max_tokens=16, timeout=10, model="gpt-5.1-codex-mini"
+    )  # type: ignore[attr-defined]
 
     assert out.strip() == "OK"
     assert captured["env"] is not None
@@ -98,14 +108,20 @@ async def test_codex_config_only_mode_uses_config_env_and_no_codex_home(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_codex_config_only_mode_accepts_custom_reasoning_effort(monkeypatch, tmp_path: Path):
+async def test_codex_config_only_mode_accepts_custom_reasoning_effort(
+    monkeypatch, tmp_path: Path
+):
     from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 
     monkeypatch.setenv("CHUNKHOUND_CODEX_STDIN_FIRST", "0")
     monkeypatch.setenv("CHUNKHOUND_CODEX_CONFIG_OVERRIDE", "env")
 
-    monkeypatch.setattr(CodexCLIProvider, "_get_base_codex_home", lambda self: None, raising=True)
-    monkeypatch.setattr(CodexCLIProvider, "_codex_available", lambda self: True, raising=True)
+    monkeypatch.setattr(
+        CodexCLIProvider, "_get_base_codex_home", lambda self: None, raising=True
+    )
+    monkeypatch.setattr(
+        CodexCLIProvider, "_codex_available", lambda self: True, raising=True
+    )
 
     captured = {"env": None, "config_text": None}
 
@@ -120,10 +136,14 @@ async def test_codex_config_only_mode_accepts_custom_reasoning_effort(monkeypatc
                 captured["config_text"] = cfg.read_text()
         return _DummyProc(rc=0, out=b"OK", err=b"")
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True)
+    monkeypatch.setattr(
+        asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True
+    )
 
     prov = CodexCLIProvider(model="gpt-5.1-codex-mini", reasoning_effort="high")
-    out = await prov._run_exec("ping", cwd=None, max_tokens=16, timeout=10, model="gpt-5.1-codex-mini")  # type: ignore[attr-defined]
+    out = await prov._run_exec(
+        "ping", cwd=None, max_tokens=16, timeout=10, model="gpt-5.1-codex-mini"
+    )  # type: ignore[attr-defined]
 
     assert out.strip() == "OK"
     cfg_key = os.getenv("CHUNKHOUND_CODEX_CONFIG_ENV", "CODEX_CONFIG")

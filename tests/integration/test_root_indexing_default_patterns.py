@@ -18,9 +18,6 @@ from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_database_with_dependencies
 
 
-import os
-
-
 @pytest.mark.skipif(
     os.environ.get("CHUNKHOUND_ALLOW_PROCESSPOOL", "0") != "1",
     reason="Requires ProcessPool-friendly environment (SemLock).",

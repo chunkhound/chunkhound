@@ -8,8 +8,8 @@ import pytest
 
 from chunkhound.core.types.common import FileId, Language
 from chunkhound.parsers.parser_factory import ParserFactory
-from chunkhound.parsers.universal_parser import CASTConfig, UniversalParser
 from chunkhound.parsers.rapid_yaml_parser import RapidYamlParser
+from chunkhound.parsers.universal_parser import CASTConfig, UniversalParser
 
 
 def _build_fallback_parser() -> UniversalParser:
@@ -135,7 +135,7 @@ def test_summary_logged_on_cleanup(caplog):
     caplog.clear()
     caplog.set_level("INFO")
     # Trigger a small sanitized parse
-    text = "metadata:\n  labels: {{- include \"chart.labels\" . | nindent 4 }}\n"
+    text = 'metadata:\n  labels: {{- include "chart.labels" . | nindent 4 }}\n'
     parser.parse_content(text, None, FileId(9))
     parser.cleanup()
     assert any("RapidYAML summary:" in rec.message for rec in caplog.records)

@@ -5,7 +5,6 @@ from chunkhound.core.models.chunk import Chunk
 from chunkhound.core.types.common import ChunkType, FileId, Language, LineNumber
 from chunkhound.parsers.vue_cross_ref import (
     build_symbol_table,
-    extract_references_from_chunk,
     match_template_references,
 )
 

@@ -72,7 +72,6 @@ class TreeProgressDisplay:
         # Right-align within 9-char width for column alignment
         return f"+{timestamp:7.1f}s"
 
-
     def _get_event_symbol(self, event_type: str) -> str:
         """Get visual symbol for event type.
 

@@ -20,12 +20,12 @@ from loguru import logger
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services import prompts
 from chunkhound.services.research.models import (
-    BFSNode,
     FOLLOWUP_OUTPUT_TOKENS_MAX,
     FOLLOWUP_OUTPUT_TOKENS_MIN,
     MAX_FOLLOWUP_QUESTIONS,
     QUESTION_FILTERING_TOKENS,
     QUESTION_SYNTHESIS_TOKENS,
+    BFSNode,
     ResearchContext,
 )
 from chunkhound.services.research.schemas import (

@@ -284,11 +284,23 @@ class TestExtensionCoverage:
     @pytest.mark.parametrize(
         "ext",
         [
-            ".py", ".pyi", ".pyw",  # Python variants
-            ".js", ".mjs", ".cjs",  # JavaScript variants
-            ".ts", ".mts", ".cts",  # TypeScript variants
-            ".tsx", ".jsx",  # React variants
-            ".php", ".phtml", ".php3", ".php4", ".php5", ".phps",  # PHP variants
+            ".py",
+            ".pyi",
+            ".pyw",  # Python variants
+            ".js",
+            ".mjs",
+            ".cjs",  # JavaScript variants
+            ".ts",
+            ".mts",
+            ".cts",  # TypeScript variants
+            ".tsx",
+            ".jsx",  # React variants
+            ".php",
+            ".phtml",
+            ".php3",
+            ".php4",
+            ".php5",
+            ".phps",  # PHP variants
             ".zig",  # Zig
             ".vue",  # Vue
         ],

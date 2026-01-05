@@ -38,7 +38,10 @@ class FileReader:
         self._db_services = db_services
 
     async def read_files_with_budget(
-        self, chunks: list[dict[str, Any]], llm_manager: Any, max_tokens: int | None = None
+        self,
+        chunks: list[dict[str, Any]],
+        llm_manager: Any,
+        max_tokens: int | None = None,
     ) -> dict[str, str]:
         """Read files containing chunks within token budget (Step 8).
 

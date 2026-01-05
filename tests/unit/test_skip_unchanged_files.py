@@ -1,5 +1,4 @@
 import asyncio
-import os
 import sys
 import types
 from pathlib import Path
@@ -11,24 +10,32 @@ def _install_parser_stubs():
     """Install lightweight stubs to avoid importing heavy tree-sitter modules in tests."""
     # Stub for chunkhound.parsers.universal_parser
     up = types.ModuleType("chunkhound.parsers.universal_parser")
+
     class _UniversalParser:  # pragma: no cover - only to satisfy type hints
         pass
+
     up.UniversalParser = _UniversalParser
     sys.modules["chunkhound.parsers.universal_parser"] = up
 
     # Stub for chunkhound.parsers.parser_factory
     pf = types.ModuleType("chunkhound.parsers.parser_factory")
-    def create_parser_for_language(language):  # pragma: no cover - not used in this test
+
+    def create_parser_for_language(
+        language,
+    ):  # pragma: no cover - not used in this test
         class _DummyParser:
             def parse_file(self, file_path, file_id):
                 return []
+
         return _DummyParser()
+
     pf.create_parser_for_language = create_parser_for_language
     sys.modules["chunkhound.parsers.parser_factory"] = pf
 
 
 class _FakeDB:
     """Minimal DatabaseProvider stub that serves File records by path."""
+
     def __init__(self, records):
         # records: dict[str, FileModel]
         self._records = records
@@ -38,14 +45,18 @@ class _FakeDB:
         rec = self._records.get(path)
         if not rec:
             return None
-        return rec if as_model else {
-            "id": rec.id,
-            "path": rec.path,
-            "size": rec.size_bytes,
-            "modified_time": rec.mtime,
-            "language": rec.language.value,
-            "content_hash": rec.content_hash,
-        }
+        return (
+            rec
+            if as_model
+            else {
+                "id": rec.id,
+                "path": rec.path,
+                "size": rec.size_bytes,
+                "modified_time": rec.mtime,
+                "language": rec.language.value,
+                "content_hash": rec.content_hash,
+            }
+        )
 
 
 class _Cfg:
@@ -61,7 +72,9 @@ class _Cfg:
     indexing = _Indexing()
 
 
-def test_process_directory_skips_unchanged_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_process_directory_skips_unchanged_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     monkeypatch.setenv("CHUNKHOUND_DEBUG_SKIP", "1")
     # Install parser stubs before importing the coordinator to avoid heavy deps
     _install_parser_stubs()
@@ -91,12 +104,16 @@ def test_process_directory_skips_unchanged_files(tmp_path: Path, monkeypatch: py
         )
 
     db = _FakeDB(records)
-    coord = IndexingCoordinator(database_provider=db, base_directory=tmp_path, config=_Cfg())
+    coord = IndexingCoordinator(
+        database_provider=db, base_directory=tmp_path, config=_Cfg()
+    )
 
     # Ensure we don't accidentally parse anything: capture files list used
     called_batches = []
 
-    async def _fake_batches(files, config_file_size_threshold_kb=20, parse_task=None, on_batch=None):
+    async def _fake_batches(
+        files, config_file_size_threshold_kb=20, parse_task=None, on_batch=None
+    ):
         # Record what coordinator attempted to parse
         called_batches.append(list(files))
         return []
@@ -106,7 +123,10 @@ def test_process_directory_skips_unchanged_files(tmp_path: Path, monkeypatch: py
     # Run
     result = asyncio.run(
         coord.process_directory(
-            tmp_path, patterns=["**/*.txt"], exclude_patterns=[], config_file_size_threshold_kb=20
+            tmp_path,
+            patterns=["**/*.txt"],
+            exclude_patterns=[],
+            config_file_size_threshold_kb=20,
         )
     )
 

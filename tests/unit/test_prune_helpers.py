@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 
 def test_extract_include_prefixes_gets_anchors():
     from chunkhound.utils.file_patterns import _extract_include_prefixes
@@ -9,16 +7,19 @@ def test_extract_include_prefixes_gets_anchors():
     inc = [
         "src/**/*.ts",
         "docs/api/**/*.md",
-        "**/*.py",          # wide, no anchor
-        "README",           # filename pattern, no anchor
-        "**/Makefile",      # filename pattern, no anchor
+        "**/*.py",  # wide, no anchor
+        "README",  # filename pattern, no anchor
+        "**/Makefile",  # filename pattern, no anchor
     ]
     prefixes = _extract_include_prefixes(inc)
     assert prefixes == {"src", "docs/api"}
 
 
 def test_can_prune_by_prefix_logic():
-    from chunkhound.utils.file_patterns import _extract_include_prefixes, _can_prune_dir_by_prefix
+    from chunkhound.utils.file_patterns import (
+        _can_prune_dir_by_prefix,
+        _extract_include_prefixes,
+    )
 
     inc = ["src/**/*.ts", "docs/api/**/*.md"]
     prefixes = _extract_include_prefixes(inc)
@@ -41,7 +42,16 @@ def test_heavy_dir_prune_respects_explicit_prefix():
     heavy = {"node_modules", ".venv"}
 
     # No anchors → prune heavy dir
-    assert _should_prune_heavy_dir(heavy, include_prefixes=set(), current_name="node_modules") is True
+    assert (
+        _should_prune_heavy_dir(
+            heavy, include_prefixes=set(), current_name="node_modules"
+        )
+        is True
+    )
     # Anchored to node_modules → do not prune
-    assert _should_prune_heavy_dir(heavy, include_prefixes={"node_modules"}, current_name="node_modules") is False
-
+    assert (
+        _should_prune_heavy_dir(
+            heavy, include_prefixes={"node_modules"}, current_name="node_modules"
+        )
+        is False
+    )

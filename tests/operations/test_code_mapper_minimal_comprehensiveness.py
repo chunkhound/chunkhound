@@ -28,7 +28,9 @@ async def test_code_mapper_comprehensiveness_minimal_maps_to_one_poi(
         seen_max_points.append(max_points)
         return "1. Example\n", ["Example"]
 
-    monkeypatch.setattr(code_mapper_mod, "_run_code_mapper_overview_hyde", fake_overview)
+    monkeypatch.setattr(
+        code_mapper_mod, "_run_code_mapper_overview_hyde", fake_overview
+    )
     monkeypatch.setattr(
         code_mapper_mod,
         "build_llm_metadata_and_assembly",

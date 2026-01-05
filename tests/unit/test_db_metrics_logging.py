@@ -1,12 +1,11 @@
 import io
-import os
 from pathlib import Path
 
 from loguru import logger
 
+from chunkhound.core.models import Chunk, File
+from chunkhound.core.types.common import ChunkType, FilePath, Language, LineNumber
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
-from chunkhound.core.models import File, Chunk
-from chunkhound.core.types.common import FilePath, Language, ChunkType, LineNumber
 
 
 def test_duckdb_chunk_metrics_emitted(tmp_path: Path, monkeypatch):
@@ -54,4 +53,3 @@ def test_duckdb_chunk_metrics_emitted(tmp_path: Path, monkeypatch):
     assert "DuckDB chunks bulk metrics:" in out
     assert "files=1" in out
     assert "rows=2" in out
-

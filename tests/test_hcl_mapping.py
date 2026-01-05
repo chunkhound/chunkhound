@@ -3,12 +3,11 @@ import sys
 
 import pytest
 
-
 # Ensure package path resolution for direct imports
 sys.path.insert(0, os.path.abspath("chunkhound"))
 
+from chunkhound.core.types.common import ChunkType, FileId, Language
 from chunkhound.parsers.parser_factory import ParserFactory
-from chunkhound.core.types.common import Language, FileId, ChunkType
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 
@@ -23,12 +22,14 @@ def test_hcl_attribute_paths_basic():
         'resource "aws_s3_bucket" "b" {\n'
         '  bucket = "my-bucket"\n'
         '  tags = { Env = "dev" }\n'
-        '}\n'
+        "}\n"
     )
 
     parser = ParserFactory().create_parser(Language.HCL)
     ast = parser.engine.parse_to_ast(sample)
-    chunks = parser.extractor.extract_concept(ast.root_node, sample.encode(), UniversalConcept.DEFINITION)
+    chunks = parser.extractor.extract_concept(
+        ast.root_node, sample.encode(), UniversalConcept.DEFINITION
+    )
 
     # Filter only attribute-definition nodes
     attr = [c for c in chunks if c.language_node_type == "attribute"]
@@ -41,7 +42,9 @@ def test_hcl_attribute_paths_basic():
         "resource.aws_s3_bucket.b.bucket",
         "resource.aws_s3_bucket.b.tags",
     }
-    assert expected.issubset(names), f"Missing attributes: {expected - names} (got {names})"
+    assert expected.issubset(names), (
+        f"Missing attributes: {expected - names} (got {names})"
+    )
 
     # Check metadata contains key and full path
     for c in attr:
@@ -51,14 +54,14 @@ def test_hcl_attribute_paths_basic():
 
 def test_hcl_nested_object_pairs():
     sample = (
-        'resource "aws_s3_bucket" "b" {\n'
-        '  tags = { Env = "dev", Team = "core" }\n'
-        '}\n'
+        'resource "aws_s3_bucket" "b" {\n  tags = { Env = "dev", Team = "core" }\n}\n'
     )
 
     parser = ParserFactory().create_parser(Language.HCL)
     ast = parser.engine.parse_to_ast(sample)
-    chunks = parser.extractor.extract_concept(ast.root_node, sample.encode(), UniversalConcept.DEFINITION)
+    chunks = parser.extractor.extract_concept(
+        ast.root_node, sample.encode(), UniversalConcept.DEFINITION
+    )
 
     # Collect names
     names = {c.name for c in chunks}
@@ -69,37 +72,55 @@ def test_hcl_nested_object_pairs():
 
     # Verify metadata value types are string
     name_to_chunk = {c.name: c for c in chunks}
-    assert name_to_chunk["resource.aws_s3_bucket.b.tags.Env"].metadata.get("value_type") == "string"
-    assert name_to_chunk["resource.aws_s3_bucket.b.tags.Team"].metadata.get("value_type") == "string"
+    assert (
+        name_to_chunk["resource.aws_s3_bucket.b.tags.Env"].metadata.get("value_type")
+        == "string"
+    )
+    assert (
+        name_to_chunk["resource.aws_s3_bucket.b.tags.Team"].metadata.get("value_type")
+        == "string"
+    )
 
 
 def test_hcl_template_value_type():
     sample = (
         'variable "policy" {\n'
-        '  default = <<EOF\n'
-        '  {\n'
+        "  default = <<EOF\n"
+        "  {\n"
         '    "Version": "2012-10-17",\n'
         '    "Statement": []\n'
-        '  }\n'
-        'EOF\n'
-        '}\n'
+        "  }\n"
+        "EOF\n"
+        "}\n"
     )
 
     parser = ParserFactory().create_parser(Language.HCL)
     ast = parser.engine.parse_to_ast(sample)
-    chunks = parser.extractor.extract_concept(ast.root_node, sample.encode(), UniversalConcept.DEFINITION)
+    chunks = parser.extractor.extract_concept(
+        ast.root_node, sample.encode(), UniversalConcept.DEFINITION
+    )
 
     # Find the 'variable.policy' attribute as default/template
-    candidates = [c for c in chunks if c.language_node_type in ("attribute", "object_elem") and "variable" in c.name]
-    assert any("policy" in c.name for c in candidates), "Expected variable.policy in names"
+    candidates = [
+        c
+        for c in chunks
+        if c.language_node_type in ("attribute", "object_elem") and "variable" in c.name
+    ]
+    assert any("policy" in c.name for c in candidates), (
+        "Expected variable.policy in names"
+    )
 
     # The default heredoc should be classified as a template
     # Look for the attribute node corresponding to default
     default_chunks = [c for c in candidates if c.name.endswith(".default")]
     # Fallback: accept any variable.policy.* with value_type template
     if not default_chunks:
-        default_chunks = [c for c in candidates if c.metadata.get("value_type") == "template"]
-    assert any(c.metadata.get("value_type") == "template" for c in default_chunks), "Expected template value_type for heredoc"
+        default_chunks = [
+            c for c in candidates if c.metadata.get("value_type") == "template"
+        ]
+    assert any(c.metadata.get("value_type") == "template" for c in default_chunks), (
+        "Expected template value_type for heredoc"
+    )
 
 
 def test_hcl_chunk_types_table_and_key_value():
@@ -107,7 +128,7 @@ def test_hcl_chunk_types_table_and_key_value():
         'resource "aws_s3_bucket" "b" {\n'
         '  bucket = "my-bucket"\n'
         '  tags = { Env = "dev" }\n'
-        '}\n'
+        "}\n"
     )
 
     parser = ParserFactory().create_parser(Language.HCL)
@@ -119,7 +140,9 @@ def test_hcl_chunk_types_table_and_key_value():
     assert any(
         name == "resource.aws_s3_bucket.b" and ctype == ChunkType.TABLE
         for name, ctype in name_to_type.items()
-    ), f"Expected TABLE for resource block, got: {[(n, t.value) for n, t in name_to_type.items() if 'resource.aws_s3_bucket.b' in n]}"
+    ), (
+        f"Expected TABLE for resource block, got: {[(n, t.value) for n, t in name_to_type.items() if 'resource.aws_s3_bucket.b' in n]}"
+    )
 
     # Attributes should be KEY_VALUE (HCL-only mapping)
     assert name_to_type.get("resource.aws_s3_bucket.b.bucket") == ChunkType.KEY_VALUE
@@ -129,18 +152,20 @@ def test_hcl_chunk_types_table_and_key_value():
 
 def test_hcl_value_type_metadata_present():
     sample = (
-        'locals {\n'
-        '  list  = [1, 2, 3]\n'
-        '  truth = true\n'
-        '  num   = 42\n'
-        '  ref   = var.region\n'
+        "locals {\n"
+        "  list  = [1, 2, 3]\n"
+        "  truth = true\n"
+        "  num   = 42\n"
+        "  ref   = var.region\n"
         '  text  = "hello"\n'
-        '}\n'
+        "}\n"
     )
 
     parser = ParserFactory().create_parser(Language.HCL)
     ast = parser.engine.parse_to_ast(sample)
-    chunks = parser.extractor.extract_concept(ast.root_node, sample.encode(), UniversalConcept.DEFINITION)
+    chunks = parser.extractor.extract_concept(
+        ast.root_node, sample.encode(), UniversalConcept.DEFINITION
+    )
 
     attr = [c for c in chunks if c.language_node_type == "attribute"]
     assert len(attr) >= 5, "Expected at least 5 attribute definitions from locals block"
@@ -161,5 +186,9 @@ def test_hcl_value_type_metadata_present():
     for c in attr:
         vtype = c.metadata.get("value_type")
         assert vtype is not None, f"Attribute {c.name} missing value_type metadata"
-        assert isinstance(vtype, str), f"value_type should be a string, got {type(vtype)}"
-        assert vtype in allowed_types or vtype, f"Unexpected value_type '{vtype}' for {c.name}"
+        assert isinstance(vtype, str), (
+            f"value_type should be a string, got {type(vtype)}"
+        )
+        assert vtype in allowed_types or vtype, (
+            f"Unexpected value_type '{vtype}' for {c.name}"
+        )

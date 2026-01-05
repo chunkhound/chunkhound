@@ -63,4 +63,3 @@ def test_collect_scope_files_stops_at_max_scope_files(tmp_path: Path) -> None:
     )
 
     assert len(file_paths) == 3
-

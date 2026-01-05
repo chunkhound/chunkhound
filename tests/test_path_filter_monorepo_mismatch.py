@@ -14,19 +14,22 @@ to return results from that file, even though the stored path includes the
 leading "orion-suite/" segment.
 """
 
-import pytest
 from pathlib import Path
 
+import pytest
+
+from chunkhound.core.types.common import Language
+from chunkhound.parsers.parser_factory import create_parser_for_language
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
 from chunkhound.services.search_service import SearchService
-from chunkhound.core.types.common import Language
-from chunkhound.parsers.parser_factory import create_parser_for_language
 from tests.fixtures.fake_providers import FakeEmbeddingProvider
 
 
 @pytest.mark.asyncio
-async def test_semantic_search_respects_repo_relative_path_filter(tmp_path: Path) -> None:
+async def test_semantic_search_respects_repo_relative_path_filter(
+    tmp_path: Path,
+) -> None:
     """Semantic search with repo-relative path_filter should still find results.
 
     Verifies the fix where DuckDB path filtering uses substring matching so that
@@ -42,7 +45,7 @@ async def test_semantic_search_respects_repo_relative_path_filter(tmp_path: Path
     engine_file = service_dir / "EngineModule.py"
     engine_file.write_text(
         "def orion_engine_flag():\n"
-        "    \"\"\"Unique function used for path_filter regression tests.\"\"\"\n"
+        '    """Unique function used for path_filter regression tests."""\n'
         "    return 'ok'\n",
         encoding="utf-8",
     )
@@ -84,8 +87,11 @@ async def test_semantic_search_respects_repo_relative_path_filter(tmp_path: Path
         force_strategy="single_hop",
     )
 
-    assert scoped_results, "Scoped semantic search with repo-relative path_filter should return results"
+    assert scoped_results, (
+        "Scoped semantic search with repo-relative path_filter should return results"
+    )
     for result in scoped_results:
         file_path = result.get("file_path", "")
-        assert "services/engine" in file_path, f"Result {file_path} should be under services/engine"
-
+        assert "services/engine" in file_path, (
+            f"Result {file_path} should be under services/engine"
+        )

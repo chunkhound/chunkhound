@@ -95,7 +95,9 @@ class LLMConfig(BaseSettings):
         description="Model for final synthesis (large context analysis)",
     )
 
-    codex_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = Field(
+    codex_reasoning_effort: (
+        Literal["minimal", "low", "medium", "high", "xhigh"] | None
+    ) = Field(
         default=None,
         description="Default Codex CLI reasoning effort (Responses API thinking level)",
     )
@@ -112,12 +114,15 @@ class LLMConfig(BaseSettings):
         description="Codex CLI reasoning effort override for synthesis-stage operations",
     )
 
-    assembly_provider: Literal[
-        "openai",
-        "ollama",
-        "claude-code-cli",
-        "codex-cli",
-    ] | None = Field(
+    assembly_provider: (
+        Literal[
+            "openai",
+            "ollama",
+            "claude-code-cli",
+            "codex-cli",
+        ]
+        | None
+    ) = Field(
         default=None,
         description=(
             "Override provider for agent-doc HyDE planning (points-of-interest overview). "
@@ -139,7 +144,9 @@ class LLMConfig(BaseSettings):
         description="Alias for assembly_model used by some configurations.",
     )
 
-    assembly_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = Field(
+    assembly_reasoning_effort: (
+        Literal["minimal", "low", "medium", "high", "xhigh"] | None
+    ) = Field(
         default=None,
         description=(
             "Codex/OpenAI reasoning effort override for agent-doc HyDE planning "

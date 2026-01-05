@@ -13,17 +13,17 @@ Architecture:
 
 import asyncio
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from loguru import logger
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
-from chunkhound.utils.windows_constants import IS_WINDOWS
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices
+from chunkhound.utils.windows_constants import IS_WINDOWS
 
 
 def normalize_file_path(path: Path | str) -> str:
@@ -47,7 +47,9 @@ class SimpleEventHandler(FileSystemEventHandler):
         self._include_patterns: list[str] | None = None
         self._pattern_cache: dict[str, Any] = {}
         try:
-            self._root = (config.target_dir if config and config.target_dir else Path.cwd()).resolve()
+            self._root = (
+                config.target_dir if config and config.target_dir else Path.cwd()
+            ).resolve()
         except Exception:
             self._root = Path.cwd().resolve()
 
@@ -117,18 +119,31 @@ class SimpleEventHandler(FileSystemEventHandler):
         # Repo-aware ignore engine (lazy init)
         try:
             if self._engine is None:
-                from chunkhound.utils.ignore_engine import build_repo_aware_ignore_engine
+                from chunkhound.utils.ignore_engine import (
+                    build_repo_aware_ignore_engine,
+                )
+
                 sources = self.config.indexing.resolve_ignore_sources()
                 cfg_ex = self.config.indexing.get_effective_config_excludes()
                 chf = self.config.indexing.chignore_file
-                overlay = bool(getattr(self.config.indexing, "workspace_gitignore_nonrepo", False))
-                self._engine = build_repo_aware_ignore_engine(self._root, sources, chf, cfg_ex, workspace_root_only_gitignore=overlay)
+                overlay = bool(
+                    getattr(self.config.indexing, "workspace_gitignore_nonrepo", False)
+                )
+                self._engine = build_repo_aware_ignore_engine(
+                    self._root,
+                    sources,
+                    chf,
+                    cfg_ex,
+                    workspace_root_only_gitignore=overlay,
+                )
         except Exception:
             self._engine = None
 
         # Exclude via engine
         try:
-            if self._engine is not None and self._engine.matches(file_path, is_dir=False):
+            if self._engine is not None and self._engine.matches(
+                file_path, is_dir=False
+            ):
                 return False
         except Exception:
             pass
@@ -137,14 +152,19 @@ class SimpleEventHandler(FileSystemEventHandler):
         try:
             if self._include_patterns is None:
                 from chunkhound.utils.file_patterns import normalize_include_patterns
+
                 inc = list(self.config.indexing.include)
                 self._include_patterns = normalize_include_patterns(inc)
 
             from chunkhound.utils.file_patterns import should_include_file
-            return should_include_file(file_path, self._root, self._include_patterns, self._pattern_cache)
+
+            return should_include_file(
+                file_path, self._root, self._include_patterns, self._pattern_cache
+            )
         except Exception:
             # Fallback to Language-based detection if include matching fails
             from chunkhound.core.types.common import Language
+
             if file_path.suffix.lower() in Language.get_all_extensions():
                 return True
             if file_path.name.lower() in Language.get_all_filename_patterns():
@@ -192,6 +212,10 @@ class RealtimeIndexingService:
     # Retention period for event history - entries older than this are cleaned up
     _EVENT_HISTORY_RETENTION_SECONDS = 10.0
 
+    # Loop safety: health logging intervals (service loops run continuously)
+    _LOOP_HEALTH_LOG_ITERATIONS = 10000  # Log health every N iterations
+    _LOOP_HEALTH_LOG_SECONDS = 3600  # Log health every N seconds (1 hour)
+
     def __init__(
         self,
         services: DatabaseServices,
@@ -219,7 +243,9 @@ class RealtimeIndexingService:
         self._debounce_delay = 0.5  # 500ms delay from research
         self._debounce_tasks: set[asyncio.Task] = set()  # Track active debounce tasks
 
-        self._recent_file_events: dict[str, tuple[str, float]] = {}  # Layer 3: event dedup
+        self._recent_file_events: dict[
+            str, tuple[str, float]
+        ] = {}  # Layer 3: event dedup
 
         # Background scan state
         self.scan_iterator: Iterator | None = None
@@ -454,7 +480,27 @@ class RealtimeIndexingService:
         # freshly created files are detected quickly after startup/fallback.
         polling_start = time.time()
 
+        # Loop safety: track iterations for health logging
+        loop_iterations = 0
+        loop_start_time = time.monotonic()
+        last_health_log_time = loop_start_time
+
         while True:
+            loop_iterations += 1
+
+            # Periodic health logging (every N iterations or N seconds)
+            current_time = time.monotonic()
+            if (
+                loop_iterations % self._LOOP_HEALTH_LOG_ITERATIONS == 0
+                or current_time - last_health_log_time > self._LOOP_HEALTH_LOG_SECONDS
+            ):
+                elapsed = current_time - loop_start_time
+                logger.debug(
+                    f"Polling monitor health: {loop_iterations} iterations, "
+                    f"{elapsed:.0f}s elapsed, {len(known_files)} known files"
+                )
+                last_health_log_time = current_time
+
             try:
                 current_files = set()
                 files_checked = 0
@@ -551,13 +597,36 @@ class RealtimeIndexingService:
 
     async def _consume_events(self) -> None:
         """Simple event consumer - pure asyncio queue."""
+        # Loop safety: track iterations for health logging
+        loop_iterations = 0
+        loop_start_time = time.monotonic()
+        last_health_log_time = loop_start_time
+        events_processed = 0
+
         while True:
+            loop_iterations += 1
+
+            # Periodic health logging (every N iterations or N seconds)
+            current_monotonic = time.monotonic()
+            if (
+                loop_iterations % self._LOOP_HEALTH_LOG_ITERATIONS == 0
+                or current_monotonic - last_health_log_time
+                > self._LOOP_HEALTH_LOG_SECONDS
+            ):
+                elapsed = current_monotonic - loop_start_time
+                logger.debug(
+                    f"Event consumer health: {loop_iterations} iterations, "
+                    f"{events_processed} events processed, {elapsed:.0f}s elapsed"
+                )
+                last_health_log_time = current_monotonic
+
             try:
                 # Get event from async queue with timeout
                 try:
                     event_type, file_path = await asyncio.wait_for(
                         self.event_queue.get(), timeout=1.0
                     )
+                    events_processed += 1
                 except asyncio.TimeoutError:
                     # Normal timeout, continue to check if task should stop
                     continue
@@ -568,9 +637,17 @@ class RealtimeIndexingService:
                 current_time = time.time()
 
                 if file_key in self._recent_file_events:
-                    last_event_type, last_event_time = self._recent_file_events[file_key]
-                    if last_event_type == event_type and (current_time - last_event_time) < self._EVENT_DEDUP_WINDOW_SECONDS:
-                        logger.debug(f"Suppressing duplicate {event_type} event for {file_path} (within {self._EVENT_DEDUP_WINDOW_SECONDS}s window)")
+                    last_event_type, last_event_time = self._recent_file_events[
+                        file_key
+                    ]
+                    if (
+                        last_event_type == event_type
+                        and (current_time - last_event_time)
+                        < self._EVENT_DEDUP_WINDOW_SECONDS
+                    ):
+                        logger.debug(
+                            f"Suppressing duplicate {event_type} event for {file_path} (within {self._EVENT_DEDUP_WINDOW_SECONDS}s window)"
+                        )
                         self._debug(f"suppressed duplicate {event_type}: {file_path}")
                         self.event_queue.task_done()
                         continue
@@ -582,7 +659,8 @@ class RealtimeIndexingService:
                 if len(self._recent_file_events) > 1000:
                     cutoff = current_time - self._EVENT_HISTORY_RETENTION_SECONDS
                     self._recent_file_events = {
-                        k: v for k, v in self._recent_file_events.items()
+                        k: v
+                        for k, v in self._recent_file_events.items()
                         if v[1] > cutoff
                     }
 
@@ -699,10 +777,34 @@ class RealtimeIndexingService:
         """Main processing loop - simple and robust."""
         logger.debug("Starting processing loop")
 
+        # Loop safety: track iterations for health logging
+        loop_iterations = 0
+        loop_start_time = time.monotonic()
+        last_health_log_time = loop_start_time
+        files_processed = 0
+
         while True:
+            loop_iterations += 1
+
+            # Periodic health logging (every N iterations or N seconds)
+            current_monotonic = time.monotonic()
+            if (
+                loop_iterations % self._LOOP_HEALTH_LOG_ITERATIONS == 0
+                or current_monotonic - last_health_log_time
+                > self._LOOP_HEALTH_LOG_SECONDS
+            ):
+                elapsed = current_monotonic - loop_start_time
+                logger.debug(
+                    f"Process loop health: {loop_iterations} iterations, "
+                    f"{files_processed} files processed, {elapsed:.0f}s elapsed, "
+                    f"{len(self.failed_files)} failures"
+                )
+                last_health_log_time = current_monotonic
+
             try:
                 # Wait for next file (blocks if queue is empty)
                 priority, file_path = await self.file_queue.get()
+                files_processed += 1
 
                 # Remove from pending set
                 self.pending_files.discard(file_path)
@@ -721,7 +823,9 @@ class RealtimeIndexingService:
                     try:
                         await self.services.indexing_coordinator.generate_missing_embeddings()
                     except Exception as e:
-                        logger.warning(f"Embedding generation failed in realtime (embed pass): {e}")
+                        logger.warning(
+                            f"Embedding generation failed in realtime (embed pass): {e}"
+                        )
                     continue
 
                 # Skip embeddings for initial and change events to keep loop responsive.
@@ -729,8 +833,11 @@ class RealtimeIndexingService:
                 skip_embeddings = True
 
                 # Use existing indexing coordinator
+                # Pass watch_path as base_directory for correct path resolution
                 result = await self.services.indexing_coordinator.process_file(
-                    file_path, skip_embeddings=skip_embeddings
+                    file_path,
+                    skip_embeddings=skip_embeddings,
+                    base_directory=self.watch_path,
                 )
 
                 # Ensure database transaction is flushed for immediate visibility

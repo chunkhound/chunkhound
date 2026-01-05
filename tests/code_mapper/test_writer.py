@@ -55,4 +55,7 @@ def test_write_code_mapper_outputs_with_topics_and_unreferenced(tmp_path: Path) 
 
     index_content = result.index_path.read_text(encoding="utf-8")
     assert "scope_scope_unreferenced_files.txt" in index_content
-    assert meta.generation_stats["files"]["unreferenced_list_file"] == "scope_scope_unreferenced_files.txt"
+    assert (
+        meta.generation_stats["files"]["unreferenced_list_file"]
+        == "scope_scope_unreferenced_files.txt"
+    )

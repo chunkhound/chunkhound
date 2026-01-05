@@ -42,6 +42,15 @@ class DatabaseProvider(Protocol):
         """Check if database connection is active."""
         ...
 
+    @property
+    def supports_multi_repo(self) -> bool:
+        """Check if provider supports multi-repository features.
+
+        Multi-repo features include: indexed roots, tags, watcher status.
+        Returns True if the provider implements these methods.
+        """
+        ...
+
     # Connection Management
     def connect(self) -> None:
         """Establish database connection and initialize schema."""
@@ -275,9 +284,67 @@ class DatabaseProvider(Protocol):
         """
         ...
 
+    # Multi-Path Search Operations (for multi-project support)
+    def search_semantic_multi_path(
+        self,
+        query_embedding: list[float],
+        path_prefixes: list[str],
+        provider: str,
+        model: str,
+        page_size: int = 10,
+        offset: int = 0,
+        threshold: float | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Perform semantic vector search with OR-based multi-path filtering.
+
+        Args:
+            query_embedding: Query embedding vector
+            path_prefixes: List of path prefixes to include (OR logic)
+            provider: Embedding provider name
+            model: Embedding model name
+            page_size: Number of results per page
+            offset: Starting position for pagination
+            threshold: Optional similarity threshold
+
+        Returns:
+            Tuple of (results, pagination_metadata)
+        """
+        ...
+
+    def search_regex_multi_path(
+        self,
+        pattern: str,
+        path_prefixes: list[str],
+        page_size: int = 10,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Perform regex search with OR-based multi-path filtering.
+
+        Args:
+            pattern: Regular expression pattern to search for
+            path_prefixes: List of path prefixes to include (OR logic)
+            page_size: Number of results per page
+            offset: Starting position for pagination
+
+        Returns:
+            Tuple of (results, pagination_metadata)
+        """
+        ...
+
     # Statistics and Monitoring
     def get_stats(self) -> dict[str, int]:
         """Get database statistics (file count, chunk count, etc.)."""
+        ...
+
+    def get_stats_for_path(self, path: str) -> dict[str, int]:
+        """Get database statistics filtered by path prefix.
+
+        Args:
+            path: Path prefix to filter by (files starting with this path)
+
+        Returns:
+            Dictionary with file, chunk, and embedding counts for the path
+        """
         ...
 
     def get_file_stats(self, file_id: int) -> dict[str, Any]:
@@ -334,4 +401,113 @@ class DatabaseProvider(Protocol):
 
     def get_connection_info(self) -> dict[str, Any]:
         """Get information about the database connection."""
+        ...
+
+    # Tag Management Methods
+    def get_indexed_roots_by_tags(
+        self, tags: list[str], match_all: bool = True
+    ) -> list[dict[str, Any]]:
+        """Get indexed roots that have the specified tags.
+
+        Args:
+            tags: List of tags to filter by
+            match_all: If True, roots must have ALL tags (AND). If False, ANY tag (OR).
+
+        Returns:
+            List of indexed root dicts matching the tag criteria
+        """
+        ...
+
+    def update_indexed_root_tags(self, base_directory: str, tags: list[str]) -> None:
+        """Set tags for an indexed root (replaces existing tags).
+
+        Args:
+            base_directory: Path to the indexed root
+            tags: New list of tags (replaces existing)
+        """
+        ...
+
+    def add_indexed_root_tags(self, base_directory: str, tags: list[str]) -> None:
+        """Add tags to an indexed root (preserves existing tags).
+
+        Args:
+            base_directory: Path to the indexed root
+            tags: Tags to add
+        """
+        ...
+
+    def remove_indexed_root_tags(self, base_directory: str, tags: list[str]) -> None:
+        """Remove tags from an indexed root.
+
+        Args:
+            base_directory: Path to the indexed root
+            tags: Tags to remove
+        """
+        ...
+
+    def get_all_tags(self) -> list[str]:
+        """Get all unique tags across all indexed roots.
+
+        Returns:
+            Sorted list of unique tag names
+        """
+        ...
+
+    # Multi-repo Core Methods
+    def get_indexed_roots(self, filter_by: str | None = None) -> list[dict[str, Any]]:
+        """Get all registered base directories.
+
+        Args:
+            filter_by: Optional filter string for path matching
+
+        Returns:
+            List of indexed root dicts with metadata
+        """
+        ...
+
+    def register_base_directory(
+        self,
+        base_directory: str,
+        project_name: str | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> None:
+        """Register a base directory for indexing.
+
+        Args:
+            base_directory: Absolute path to the directory
+            project_name: Optional project name (defaults to directory basename)
+            config: Optional configuration dict for this project
+        """
+        ...
+
+    def remove_base_directory(self, base_directory: str, cascade: bool = False) -> None:
+        """Remove a base directory and optionally its indexed content.
+
+        Args:
+            base_directory: Path to the directory to remove
+            cascade: If True, also delete all files/chunks for this directory
+        """
+        ...
+
+    def update_indexed_root_stats(self, base_directory: str) -> None:
+        """Update file count and timestamp for an indexed root.
+
+        Args:
+            base_directory: Path to the indexed root
+        """
+        ...
+
+    def update_indexed_root_watcher_status(
+        self,
+        base_directory: str,
+        active: bool,
+        error: str | None = None,
+    ) -> None:
+        """Update watcher status for an indexed root.
+
+        Args:
+            base_directory: Path to the indexed root
+            active: Whether the file watcher is active
+            error: Optional error message if watcher failed
+        """
         ...

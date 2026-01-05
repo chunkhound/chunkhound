@@ -5,31 +5,21 @@ for semantic code analysis. It handles JavaScript-specific language features lik
 arrow functions, ES6 classes, JSDoc comments, and modern module syntax.
 """
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from chunkhound.core.types.common import Language
+from chunkhound.parsers.mappings._shared.js_family_extraction import (
+    JSFamilyExtraction,
+)
+from chunkhound.parsers.mappings._shared.js_query_patterns import (
+    COMMONJS_EXPORTS_SHORTHAND,
+    COMMONJS_MODULE_EXPORTS,
+    COMMONJS_NESTED_EXPORTS,
+    TOP_LEVEL_LEXICAL_CONFIG,
+    TOP_LEVEL_VAR_CONFIG,
+)
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-from chunkhound.parsers.mappings._shared.js_family_extraction import (
-    JSFamilyExtraction,
-)
-from chunkhound.parsers.mappings._shared.js_query_patterns import (
-    TOP_LEVEL_LEXICAL_CONFIG,
-    TOP_LEVEL_VAR_CONFIG,
-    COMMONJS_MODULE_EXPORTS,
-    COMMONJS_NESTED_EXPORTS,
-    COMMONJS_EXPORTS_SHORTHAND,
-)
-from chunkhound.parsers.mappings._shared.js_family_extraction import (
-    JSFamilyExtraction,
-)
-from chunkhound.parsers.mappings._shared.js_query_patterns import (
-    TOP_LEVEL_LEXICAL_CONFIG,
-    TOP_LEVEL_VAR_CONFIG,
-    COMMONJS_MODULE_EXPORTS,
-    COMMONJS_NESTED_EXPORTS,
-    COMMONJS_EXPORTS_SHORTHAND,
-)
 
 if TYPE_CHECKING:
     from tree_sitter import Node as TSNode
@@ -158,10 +148,9 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
           become chunks.
         """
         if concept == UniversalConcept.DEFINITION:
-            return (
-                "\n".join(
-                    [
-                        """
+            return "\n".join(
+                [
+                    """
                         ; Standard definitions
                         (function_declaration
                             name: (identifier) @name
@@ -174,10 +163,10 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
                         ; Top-level export (default or named)
                         (export_statement) @definition
                         """,
-                        TOP_LEVEL_LEXICAL_CONFIG,
-                        TOP_LEVEL_VAR_CONFIG,
-                        # Function/arrow declarators at top level
-                        """
+                    TOP_LEVEL_LEXICAL_CONFIG,
+                    TOP_LEVEL_VAR_CONFIG,
+                    # Function/arrow declarators at top level
+                    """
                         (program
                             (lexical_declaration
                                 (variable_declarator
@@ -211,11 +200,10 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
                             )
                         )
                         """,
-                        COMMONJS_MODULE_EXPORTS,
-                        COMMONJS_NESTED_EXPORTS,
-                        COMMONJS_EXPORTS_SHORTHAND,
-                    ]
-                )
+                    COMMONJS_MODULE_EXPORTS,
+                    COMMONJS_NESTED_EXPORTS,
+                    COMMONJS_EXPORTS_SHORTHAND,
+                ]
             )
 
         elif concept == UniversalConcept.COMMENT:

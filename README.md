@@ -24,6 +24,7 @@ Your AI assistant searches code but doesn't understand it. ChunkHound researches
 
 - **[cAST Algorithm](https://arxiv.org/pdf/2506.15655)** - Research-backed semantic code chunking
 - **[Multi-Hop Semantic Search](https://chunkhound.github.io/under-the-hood/#multi-hop-semantic-search)** - Discovers interconnected code relationships beyond direct matches
+- **Multi-Repository Search** - Global database mode for cross-project search from a single MCP session
 - **Semantic search** - Natural language queries like "find authentication code"
 - **Regex search** - Pattern matching without API keys
 - **Local-first** - Your code stays on your machine

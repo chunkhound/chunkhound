@@ -4,11 +4,13 @@ This test verifies the bug where provider/model parameters with hardcoded
 defaults prevent automatic detection of the configured embedding provider.
 """
 
+from unittest.mock import AsyncMock, Mock
+
 import pytest
-from unittest.mock import Mock, AsyncMock, patch
-from chunkhound.mcp_server.tools import search_semantic_impl
+
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
+from chunkhound.mcp_server.tools import search_semantic_impl
 
 
 @pytest.mark.asyncio
@@ -36,7 +38,9 @@ async def test_semantic_search_uses_configured_provider():
 
     # Create mock search service with async search method
     mock_search_service = Mock()
-    mock_search_service.search_semantic = AsyncMock(return_value=([], {"total": 0, "page": 1, "page_size": 10}))
+    mock_search_service.search_semantic = AsyncMock(
+        return_value=([], {"total": 0, "page": 1, "page_size": 10})
+    )
     mock_services.search_service = mock_search_service
 
     # Execute: Call search_semantic_impl WITHOUT specifying provider/model
@@ -52,14 +56,16 @@ async def test_semantic_search_uses_configured_provider():
     call_kwargs = mock_search_service.search_semantic.call_args.kwargs
 
     # CRITICAL ASSERTION: Should use configured provider, not hardcoded "openai"
-    assert call_kwargs["provider"] == "ollama", \
-        f"Expected provider='ollama' but got provider='{call_kwargs['provider']}'. " \
+    assert call_kwargs["provider"] == "ollama", (
+        f"Expected provider='ollama' but got provider='{call_kwargs['provider']}'. "
         "Semantic search should use configured provider when not explicitly specified."
+    )
 
     # CRITICAL ASSERTION: Should use configured model, not hardcoded "text-embedding-3-small"
-    assert call_kwargs["model"] == "nomic-embed-text", \
-        f"Expected model='nomic-embed-text' but got model='{call_kwargs['model']}'. " \
+    assert call_kwargs["model"] == "nomic-embed-text", (
+        f"Expected model='nomic-embed-text' but got model='{call_kwargs['model']}'. "
         "Semantic search should use configured model when not explicitly specified."
+    )
 
 
 @pytest.mark.asyncio
@@ -80,7 +86,9 @@ async def test_semantic_search_respects_explicit_provider():
     mock_services.provider = mock_provider_db
 
     mock_search_service = Mock()
-    mock_search_service.search_semantic = AsyncMock(return_value=([], {"total": 0, "page": 1, "page_size": 10}))
+    mock_search_service.search_semantic = AsyncMock(
+        return_value=([], {"total": 0, "page": 1, "page_size": 10})
+    )
     mock_services.search_service = mock_search_service
 
     # Execute: Call with EXPLICIT provider/model (should override configured provider)

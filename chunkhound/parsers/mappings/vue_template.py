@@ -268,21 +268,27 @@ class VueTemplateMapping(BaseMapping):
                 # Handle different directive types
                 if directive in ("v-if", "v-else-if"):
                     if "condition_expr" in captures:
-                        expr_text = self.get_node_text(captures["condition_expr"], source).strip()
+                        expr_text = self.get_node_text(
+                            captures["condition_expr"], source
+                        ).strip()
                         expr = self.get_expression_preview(expr_text, max_length=20)
                     else:
                         expr = "expr"
                     return f"v-if_{expr}"
                 elif directive == "v-for":
                     if "loop_expr" in captures:
-                        expr_text = self.get_node_text(captures["loop_expr"], source).strip()
+                        expr_text = self.get_node_text(
+                            captures["loop_expr"], source
+                        ).strip()
                         expr = self.get_expression_preview(expr_text, max_length=20)
                     else:
                         expr = "expr"
                     return f"v-for_{expr}"
                 elif directive == "v-model":
                     if "model_expr" in captures:
-                        expr_text = self.get_node_text(captures["model_expr"], source).strip()
+                        expr_text = self.get_node_text(
+                            captures["model_expr"], source
+                        ).strip()
                         expr = self.get_expression_preview(expr_text, max_length=20)
                     else:
                         expr = "expr"

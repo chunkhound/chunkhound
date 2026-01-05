@@ -34,7 +34,9 @@ def test_exclude_list_defaults_to_combined_sources() -> None:
 
 
 def test_exclude_list_can_force_config_only_mode() -> None:
-    cfg = Config(**{"indexing": {"exclude": ["**/dist/**"], "exclude_mode": "config_only"}})
+    cfg = Config(
+        **{"indexing": {"exclude": ["**/dist/**"], "exclude_mode": "config_only"}}
+    )
     sources = cfg.indexing.resolve_ignore_sources()  # type: ignore[attr-defined]
     assert sources == ["config"]
 

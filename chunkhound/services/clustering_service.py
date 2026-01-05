@@ -112,9 +112,7 @@ class ClusteringService:
         # Phase 1: HDBSCAN discovery of natural clusters
         logger.debug("Phase 1: Discovering natural clusters with HDBSCAN")
         embeddings_array = np.array(embeddings)
-        labels, phase1_meta = self._discover_natural_clusters(
-            embeddings_array
-        )
+        labels, phase1_meta = self._discover_natural_clusters(embeddings_array)
 
         # Partition files by cluster labels
         native_clusters: dict[int, list[str]] = {}
@@ -306,7 +304,20 @@ class ClusteringService:
         }  # Maps group_id to list of native cluster_ids in that group
         group_tokens: dict[int, int] = cluster_tokens.copy()  # group_id -> token_count
 
+        # Loop safety: max possible merges is N-1 (each merge reduces groups by 1)
+        # Use 2x as safety margin in case of edge cases
+        max_iterations = max(len(cluster_ids) * 2, 100)
+        merge_iterations = 0
+
         while True:
+            merge_iterations += 1
+            if merge_iterations > max_iterations:
+                logger.warning(
+                    f"Merge loop safety limit reached after {merge_iterations} iterations "
+                    f"(max_iterations={max_iterations}, clusters={len(cluster_ids)})"
+                )
+                break
+
             # Find closest pair of unmerged groups that can be merged
             best_pair = self._find_best_merge_candidate(
                 cluster_ids, merged_groups, group_tokens, distances

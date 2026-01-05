@@ -5,17 +5,11 @@ Test fixtures for MCP server functionality.
 import asyncio
 import os
 import subprocess
-import tempfile
-import time
-import pytest
 from pathlib import Path
-from typing import Dict, List, Optional, AsyncGenerator
-from unittest.mock import Mock, patch
-from contextlib import asynccontextmanager
+
+import pytest
 
 from chunkhound.core.config.config import Config
-from chunkhound.database_factory import create_database_with_dependencies
-from chunkhound.embeddings import EmbeddingManager
 
 
 class MCPServerTestFixture:
@@ -24,7 +18,7 @@ class MCPServerTestFixture:
     def __init__(self, project_dir: Path, config: Config):
         self.project_dir = project_dir
         self.config = config
-        self.process: Optional[subprocess.Popen] = None
+        self.process: subprocess.Popen | None = None
         self.db_path = Path(config.database.path)
 
     async def start_mcp_server(self, transport: str = "stdio") -> bool:
@@ -83,17 +77,15 @@ class MCPServerTestFixture:
         """Wait for process to exit using proper asyncio subprocess waiting."""
         if not self.process:
             return
-        
+
         # Use a more efficient waiting approach
         loop = asyncio.get_event_loop()
-        
+
         def check_process():
             return self.process.poll() is not None
-        
+
         while not check_process():
             await asyncio.sleep(0.05)  # Reduced polling interval
-
-
 
 
 class FileOperationSimulator:
@@ -101,7 +93,7 @@ class FileOperationSimulator:
 
     def __init__(self, project_dir: Path):
         self.project_dir = project_dir
-        self.created_files: List[Path] = []
+        self.created_files: list[Path] = []
 
     def create_file(self, name: str, content: str) -> Path:
         """Create a test file."""

@@ -1,14 +1,17 @@
-import pytest
 from pathlib import Path
+
+import pytest
 
 from chunkhound.utils.file_patterns import should_exclude_path
 
 
 @pytest.mark.unit
 def test_exclude_pattern_with_double_star_prefix_matches_anywhere_in_tree():
-    base = Path('.')
+    base = Path(".")
     # Simulate repo path
-    target = Path('monorepo/workflows-engine/camunda-cockpit-plugins/instance-route-history.js')
+    target = Path(
+        "monorepo/workflows-engine/camunda-cockpit-plugins/instance-route-history.js"
+    )
 
     # User-specified exclude; should match regardless of leading segments
     patterns = ["**/workflows-engine/camunda-cockpit-plugins/instance-route-history.js"]
@@ -18,8 +21,10 @@ def test_exclude_pattern_with_double_star_prefix_matches_anywhere_in_tree():
 
 @pytest.mark.unit
 def test_exclude_pattern_without_double_star_needs_exact_prefix():
-    base = Path('.')
-    target = Path('monorepo/workflows-engine/camunda-cockpit-plugins/instance-route-history.js')
+    base = Path(".")
+    target = Path(
+        "monorepo/workflows-engine/camunda-cockpit-plugins/instance-route-history.js"
+    )
 
     patterns = ["workflows-engine/camunda-cockpit-plugins/instance-route-history.js"]
 
@@ -28,4 +33,3 @@ def test_exclude_pattern_without_double_star_needs_exact_prefix():
     # the file at any depth, while the bare relative form should not match
     # when there's a leading segment like 'monorepo/'.
     assert should_exclude_path(target, base, patterns, {}) is False
-

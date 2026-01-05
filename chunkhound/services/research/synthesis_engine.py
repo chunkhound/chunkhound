@@ -17,7 +17,6 @@ The synthesis engine uses:
     - Citation management for source tracking
 """
 
-import asyncio
 import time
 from typing import Any
 
@@ -33,7 +32,6 @@ from chunkhound.services.research.models import (
     MAX_TOKENS_PER_CLUSTER,
     MAX_TOKENS_PER_FILE_REPR,
     SINGLE_PASS_TIMEOUT_SECONDS,
-    _CITATION_PATTERN,
 )
 
 
@@ -335,7 +333,9 @@ class SynthesisEngine:
         # Filter chunks to only include those from budgeted files
         # This ensures consistency between reference map, citations, and footer
         original_chunk_count = len(chunks)
-        budgeted_chunks = self._parent._citation_manager.filter_chunks_to_files(chunks, files)
+        budgeted_chunks = self._parent._citation_manager.filter_chunks_to_files(
+            chunks, files
+        )
 
         logger.info(
             f"Starting single-pass synthesis with {len(files)} files, "
@@ -404,7 +404,9 @@ class SynthesisEngine:
         code_context = "\n\n".join(code_sections)
 
         # Build file reference map for numbered citations
-        file_reference_map = self._parent._build_file_reference_map(budgeted_chunks, files)
+        file_reference_map = self._parent._build_file_reference_map(
+            budgeted_chunks, files
+        )
         reference_table = self._parent._format_reference_table(file_reference_map)
 
         # Default: curated but still detailed analysis.
@@ -473,7 +475,9 @@ class SynthesisEngine:
 
         # Append sources footer with file and chunk information
         try:
-            footer = self._parent._build_sources_footer(budgeted_chunks, files, file_reference_map)
+            footer = self._parent._build_sources_footer(
+                budgeted_chunks, files, file_reference_map
+            )
             if footer:
                 answer = f"{answer}\n\n{footer}"
         except Exception as e:
@@ -548,7 +552,9 @@ class SynthesisEngine:
         # Filter chunks to only those in this cluster's files
         # This ensures consistency between reference map, citations, and cluster content
         original_chunk_count = len(chunks)
-        cluster_chunks = self._parent._citation_manager.filter_chunks_to_files(chunks, cluster.files_content)
+        cluster_chunks = self._parent._citation_manager.filter_chunks_to_files(
+            chunks, cluster.files_content
+        )
 
         logger.debug(
             f"Synthesizing cluster {cluster.cluster_id} "
@@ -593,7 +599,9 @@ class SynthesisEngine:
 
         # Build file reference map for numbered citations (cluster-specific)
         cluster_files = cluster.files_content
-        file_reference_map = self._parent._build_file_reference_map(cluster_chunks, cluster_files)
+        file_reference_map = self._parent._build_file_reference_map(
+            cluster_chunks, cluster_files
+        )
         reference_table = self._parent._format_reference_table(file_reference_map)
 
         # Build cluster-specific synthesis prompt
@@ -696,7 +704,9 @@ Provide a comprehensive analysis focusing on the query."""
         # Filter chunks to only include those from synthesized files
         # This ensures consistency between reference map, citations, and footer
         original_chunk_count = len(all_chunks)
-        budgeted_chunks = self._parent._citation_manager.filter_chunks_to_files(all_chunks, all_files)
+        budgeted_chunks = self._parent._citation_manager.filter_chunks_to_files(
+            all_chunks, all_files
+        )
 
         logger.info(
             f"Reducing {len(cluster_results)} cluster summaries into final answer "
@@ -707,7 +717,9 @@ Provide a comprehensive analysis focusing on the query."""
         max_output_tokens = synthesis_budgets["output_tokens"]
 
         # Build global file reference map for all clusters
-        file_reference_map = self._parent._build_file_reference_map(budgeted_chunks, all_files)
+        file_reference_map = self._parent._build_file_reference_map(
+            budgeted_chunks, all_files
+        )
         reference_table = self._parent._format_reference_table(file_reference_map)
 
         # Remap cluster-local citations to global reference numbers
@@ -805,17 +817,25 @@ Provide a complete, integrated analysis that addresses the original query."""
             )
 
         # Validate citation references are valid
-        invalid_citations = self._parent._validate_citation_references(answer, file_reference_map)
+        invalid_citations = self._parent._validate_citation_references(
+            answer, file_reference_map
+        )
         if invalid_citations:
             logger.warning(
                 f"Found {len(invalid_citations)} invalid citation references after reduce: "
                 f"{invalid_citations[:10]}"
-                + (f" ... and {len(invalid_citations) - 10} more" if len(invalid_citations) > 10 else "")
+                + (
+                    f" ... and {len(invalid_citations) - 10} more"
+                    if len(invalid_citations) > 10
+                    else ""
+                )
             )
 
         # Append sources footer (aggregate all sources from all clusters)
         try:
-            footer = self._parent._build_sources_footer(budgeted_chunks, all_files, file_reference_map)
+            footer = self._parent._build_sources_footer(
+                budgeted_chunks, all_files, file_reference_map
+            )
             if footer:
                 answer = f"{answer}\n\n{footer}"
         except Exception as e:

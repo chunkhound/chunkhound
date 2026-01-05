@@ -42,7 +42,9 @@ def test_eval_search_regex_smoke(tmp_path: Path) -> None:
         env=get_safe_subprocess_env(),
     )
 
-    assert result.returncode == 0, f"eval_search failed: {result.stderr or result.stdout}"
+    assert result.returncode == 0, (
+        f"eval_search failed: {result.stderr or result.stdout}"
+    )
     assert output_path.is_file()
 
     payload = json.loads(output_path.read_text(encoding="utf-8"))

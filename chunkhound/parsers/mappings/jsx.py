@@ -8,22 +8,15 @@ components, hooks, and JSX expressions.
 from typing import TYPE_CHECKING
 
 from chunkhound.core.types.common import Language
+from chunkhound.parsers.mappings._shared.js_query_patterns import (
+    COMMONJS_EXPORTS_SHORTHAND,
+    COMMONJS_MODULE_EXPORTS,
+    COMMONJS_NESTED_EXPORTS,
+    TOP_LEVEL_LEXICAL_CONFIG,
+    TOP_LEVEL_VAR_CONFIG,
+)
 from chunkhound.parsers.mappings.javascript import JavaScriptMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-from chunkhound.parsers.mappings._shared.js_query_patterns import (
-    TOP_LEVEL_LEXICAL_CONFIG,
-    TOP_LEVEL_VAR_CONFIG,
-    COMMONJS_MODULE_EXPORTS,
-    COMMONJS_NESTED_EXPORTS,
-    COMMONJS_EXPORTS_SHORTHAND,
-)
-from chunkhound.parsers.mappings._shared.js_query_patterns import (
-    TOP_LEVEL_LEXICAL_CONFIG,
-    TOP_LEVEL_VAR_CONFIG,
-    COMMONJS_MODULE_EXPORTS,
-    COMMONJS_NESTED_EXPORTS,
-    COMMONJS_EXPORTS_SHORTHAND,
-)
 
 if TYPE_CHECKING:
     from tree_sitter import Node as TSNode
@@ -191,8 +184,9 @@ class JSXMapping(JavaScriptMapping):
     # Universal Concept integration: override to TSX-friendly patterns
     def get_query_for_concept(self, concept: "UniversalConcept") -> str | None:  # type: ignore[override]
         if concept == UniversalConcept.DEFINITION:
-            return ("\n".join([
-                """
+            return "\n".join(
+                [
+                    """
                 ; Functions and classes (TSX class name uses type_identifier)
                 (function_declaration
                     name: (identifier) @name
@@ -205,10 +199,10 @@ class JSXMapping(JavaScriptMapping):
                 ; Exports
                 (export_statement) @definition
                 """,
-                TOP_LEVEL_LEXICAL_CONFIG,
-                TOP_LEVEL_VAR_CONFIG,
-                # Top-level const/let function/arrow
-                """
+                    TOP_LEVEL_LEXICAL_CONFIG,
+                    TOP_LEVEL_VAR_CONFIG,
+                    # Top-level const/let function/arrow
+                    """
                 (program
                     (lexical_declaration
                         (variable_declarator
@@ -226,10 +220,11 @@ class JSXMapping(JavaScriptMapping):
                     )
                 )
                 """,
-                COMMONJS_MODULE_EXPORTS,
-                COMMONJS_NESTED_EXPORTS,
-                COMMONJS_EXPORTS_SHORTHAND,
-            ]))
+                    COMMONJS_MODULE_EXPORTS,
+                    COMMONJS_NESTED_EXPORTS,
+                    COMMONJS_EXPORTS_SHORTHAND,
+                ]
+            )
         elif concept == UniversalConcept.COMMENT:
             return """
             (comment) @definition

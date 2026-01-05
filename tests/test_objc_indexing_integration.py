@@ -6,8 +6,6 @@ Tests the complete workflow: file detection → parsing → chunking → search.
 import tempfile
 from pathlib import Path
 
-import pytest
-
 from chunkhound.core.detection import detect_language
 from chunkhound.core.types.common import FileId, Language
 from chunkhound.parsers.parser_factory import get_parser_factory
@@ -27,14 +25,13 @@ class TestObjectiveCDetection:
 - (void)greet;
 @end
 """
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.m', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".m", delete=False) as f:
             f.write(objc_code)
             temp_path = Path(f.name)
 
         try:
             language = detect_language(temp_path)
-            assert language == Language.OBJC, \
-                f"Expected OBJC but got {language}"
+            assert language == Language.OBJC, f"Expected OBJC but got {language}"
         finally:
             temp_path.unlink()
 
@@ -49,14 +46,13 @@ class TestObjectiveCDetection:
 
 @end
 """
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.m', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".m", delete=False) as f:
             f.write(objc_code)
             temp_path = Path(f.name)
 
         try:
             language = detect_language(temp_path)
-            assert language == Language.OBJC, \
-                f"Expected OBJC but got {language}"
+            assert language == Language.OBJC, f"Expected OBJC but got {language}"
         finally:
             temp_path.unlink()
 
@@ -69,14 +65,13 @@ void someFunction() {
     // Code here
 }
 """
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.m', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".m", delete=False) as f:
             f.write(objc_code)
             temp_path = Path(f.name)
 
         try:
             language = detect_language(temp_path)
-            assert language == Language.OBJC, \
-                f"Expected OBJC but got {language}"
+            assert language == Language.OBJC, f"Expected OBJC but got {language}"
         finally:
             temp_path.unlink()
 
@@ -87,14 +82,13 @@ function result = calculate(x, y)
     result = x + y;
 end
 """
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.m', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".m", delete=False) as f:
             f.write(matlab_code)
             temp_path = Path(f.name)
 
         try:
             language = detect_language(temp_path)
-            assert language == Language.MATLAB, \
-                f"Expected MATLAB but got {language}"
+            assert language == Language.MATLAB, f"Expected MATLAB but got {language}"
         finally:
             temp_path.unlink()
 
@@ -106,14 +100,13 @@ int main() {
     return 0;
 }
 """
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.mm', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".mm", delete=False) as f:
             f.write(objc_code)
             temp_path = Path(f.name)
 
         try:
             language = detect_language(temp_path)
-            assert language == Language.OBJC, \
-                f"Expected OBJC but got {language}"
+            assert language == Language.OBJC, f"Expected OBJC but got {language}"
         finally:
             temp_path.unlink()
 
@@ -154,7 +147,7 @@ class TestObjectiveCParsing:
 
 @end
 """
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.m', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".m", delete=False) as f:
             f.write(objc_code)
             temp_path = Path(f.name)
 
@@ -196,7 +189,7 @@ class TestObjectiveCBatchProcessing:
 }
 @end
 """
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.m', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".m", delete=False) as f:
             f.write(objc_code)
             temp_path = Path(f.name)
 
@@ -207,12 +200,11 @@ class TestObjectiveCBatchProcessing:
             assert len(results) == 1, "Should process one file"
             result = results[0]
 
-            assert result.status == "success", \
-                f"File processing failed: {result.error}"
-            assert result.language == Language.OBJC, \
+            assert result.status == "success", f"File processing failed: {result.error}"
+            assert result.language == Language.OBJC, (
                 f"Expected OBJC but got {result.language}"
-            assert len(result.chunks) > 0, \
-                "Should create at least one chunk"
+            )
+            assert len(result.chunks) > 0, "Should create at least one chunk"
 
             print(f"Batch processor created {len(result.chunks)} chunks")
             print(f"Language detected: {result.language}")
@@ -231,7 +223,7 @@ function result = fibonacci(n)
     end
 end
 """
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.m', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".m", delete=False) as f:
             f.write(matlab_code)
             temp_path = Path(f.name)
 
@@ -243,8 +235,9 @@ end
             result = results[0]
 
             # MATLAB files should be processed successfully
-            assert result.status == "success" or result.language == Language.MATLAB, \
+            assert result.status == "success" or result.language == Language.MATLAB, (
                 f"MATLAB file should be handled: status={result.status}, lang={result.language}"
+            )
 
             print(f"Language detected: {result.language}")
 

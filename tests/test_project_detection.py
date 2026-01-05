@@ -1,7 +1,6 @@
 """Test project root detection logic."""
 
 import os
-import sys
 import tempfile
 from pathlib import Path
 

@@ -12,7 +12,6 @@ from loguru import logger
 
 from chunkhound.core.config.embedding_config import (
     RERANK_BASE_URL_REQUIRED,
-    RERANK_MODEL_REQUIRED_COHERE,
     validate_rerank_configuration,
 )
 from chunkhound.core.exceptions.core import ValidationError
@@ -583,7 +582,7 @@ class OpenAIEmbeddingProvider:
                         f"[{datetime.now().isoformat()}] OPENAI-PROVIDER ERROR: texts={len(validated_texts)}, max_chars={max_chars}, error={e}\n"
                     )
                     f.flush()
-            except (IOError, OSError):
+            except OSError:
                 pass  # Debug logging is best-effort, OK to fail silently
 
             raise

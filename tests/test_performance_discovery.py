@@ -5,8 +5,10 @@ sequential file discovery, documenting actual speedup on different directory str
 """
 
 import time
-import pytest
 from pathlib import Path
+
+import pytest
+
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.parser_factory import create_parser_for_language
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
@@ -37,7 +39,9 @@ def create_large_repo(base_path: Path, num_dirs: int, files_per_dir: int):
 
         for j in range(files_per_dir):
             file_path = dir_path / f"file_{j}.py"
-            file_path.write_text(f"# Module {i}, File {j}\ndef func_{i}_{j}():\n    pass\n")
+            file_path.write_text(
+                f"# Module {i}, File {j}\ndef func_{i}_{j}():\n    pass\n"
+            )
 
 
 @pytest.mark.asyncio
@@ -70,7 +74,7 @@ async def test_small_repo_performance(coordinator, tmp_path):
     assert set(sequential_files) == set(parallel_files)
     assert len(sequential_files) == 50
 
-    print(f"\nSmall repo (50 files, 2 dirs):")
+    print("\nSmall repo (50 files, 2 dirs):")
     print(f"  Sequential: {sequential_time:.4f}s")
     print(f"  Parallel:   {parallel_time:.4f}s (auto-fallback to sequential)")
 
@@ -107,7 +111,7 @@ async def test_medium_repo_performance(coordinator, tmp_path):
 
     speedup = sequential_time / parallel_time if parallel_time > 0 else 0
 
-    print(f"\nMedium repo (500 files, 10 dirs):")
+    print("\nMedium repo (500 files, 10 dirs):")
     print(f"  Sequential: {sequential_time:.4f}s")
     print(f"  Parallel:   {parallel_time:.4f}s")
     print(f"  Speedup:    {speedup:.2f}x")
@@ -148,7 +152,7 @@ async def test_large_repo_performance(coordinator, tmp_path):
 
     speedup = sequential_time / parallel_time if parallel_time > 0 else 0
 
-    print(f"\nLarge repo (2000 files, 20 dirs):")
+    print("\nLarge repo (2000 files, 20 dirs):")
     print(f"  Sequential: {sequential_time:.4f}s")
     print(f"  Parallel:   {parallel_time:.4f}s")
     print(f"  Speedup:    {speedup:.2f}x")
@@ -167,7 +171,9 @@ async def test_config_driven_discovery(coordinator, tmp_path):
 
     # Test with config defaults (parallel_discovery=True by default)
     files_default = await coordinator._discover_files(
-        tmp_path, patterns, exclude_patterns  # Uses config setting
+        tmp_path,
+        patterns,
+        exclude_patterns,  # Uses config setting
     )
 
     # Test explicit override

@@ -1,6 +1,5 @@
 """Unit tests for chunk deduplication module."""
 
-import pytest
 
 from chunkhound.core.models.chunk import Chunk
 from chunkhound.core.types.common import ChunkType, FileId, Language, LineNumber

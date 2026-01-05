@@ -23,11 +23,10 @@ import platform
 import statistics
 import subprocess
 import sys
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
-from typing import Callable, Iterable, Sequence
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -69,30 +68,28 @@ def _render_service_block(
         lines.extend(
             [
                 f"{pad}service_{svc}:",
-                f"{pad*2}image: ghcr.io/example/service:{svc % 7}",
-                f"{pad*2}restart: always",
-                f"{pad*2}deploy:",
-                f"{pad*3}replicas: {(svc % 5) + 1}",
-                f"{pad*3}resources:",
-                f"{pad*4}limits:",
-                f"{pad*5}cpus: '{0.5 + (svc % 4) / 10:.1f}'",
-                f"{pad*5}memory: '{256 + (svc % 8) * 32}Mi'",
-                f"{pad*3}placement:",
-                f"{pad*4}constraints:",
-                f"{pad*5}- 'node.labels.dc=={svc % 3}'",
-                f"{pad*2}environment:",
+                f"{pad * 2}image: ghcr.io/example/service:{svc % 7}",
+                f"{pad * 2}restart: always",
+                f"{pad * 2}deploy:",
+                f"{pad * 3}replicas: {(svc % 5) + 1}",
+                f"{pad * 3}resources:",
+                f"{pad * 4}limits:",
+                f"{pad * 5}cpus: '{0.5 + (svc % 4) / 10:.1f}'",
+                f"{pad * 5}memory: '{256 + (svc % 8) * 32}Mi'",
+                f"{pad * 3}placement:",
+                f"{pad * 4}constraints:",
+                f"{pad * 5}- 'node.labels.dc=={svc % 3}'",
+                f"{pad * 2}environment:",
             ]
         )
         for env in range(env_vars):
-            lines.append(
-                f"{pad*3}SERVICE_{svc}_VAR_{env}: value_{svc}_{env}"
-            )
-        lines.append(f"{pad*2}volumes:")
+            lines.append(f"{pad * 3}SERVICE_{svc}_VAR_{env}: value_{svc}_{env}")
+        lines.append(f"{pad * 2}volumes:")
         for vol in range(volumes):
             lines.append(
-                f"{pad*3}- type: bind\n"
-                f"{pad*4}source: /data/service_{svc}/vol_{vol}\n"
-                f"{pad*4}target: /app/data/vol_{vol}"
+                f"{pad * 3}- type: bind\n"
+                f"{pad * 4}source: /data/service_{svc}/vol_{vol}\n"
+                f"{pad * 4}target: /app/data/vol_{vol}"
             )
     return "\n".join(lines)
 
@@ -457,7 +454,7 @@ def print_summary(results: list[dict], warnings: list[str]) -> None:
     for case in results:
         print(
             f"Case '{case['name']}' "
-            f"({case['size_bytes']/1024:.1f} KiB, sha256={case['sha256'][:8]}…)"
+            f"({case['size_bytes'] / 1024:.1f} KiB, sha256={case['sha256'][:8]}…)"
         )
         print(f"  {case['description']} (origin: {case['origin']})")
         for entry in sorted(case["results"], key=lambda r: r["mean_ms"]):

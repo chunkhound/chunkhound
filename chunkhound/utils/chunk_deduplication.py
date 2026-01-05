@@ -7,9 +7,9 @@ Implements two-stage deduplication:
 Preserves language-specific exemptions for Vue and Haskell.
 """
 
-from typing import Sequence
-
 from collections import defaultdict
+from collections.abc import Sequence
+
 import xxhash
 
 from chunkhound.core.models.chunk import Chunk

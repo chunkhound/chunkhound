@@ -12,8 +12,16 @@ from pathlib import Path
 import pytest
 
 
-def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 15) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["uv", "run", *cmd], cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
+def _run(
+    cmd: list[str], cwd: Path | None = None, timeout: int = 15
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["uv", "run", *cmd],
+        cwd=str(cwd) if cwd else None,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
 
 
 def test_index_simulate_help() -> None:
@@ -35,4 +43,6 @@ async def test_index_simulate_lists_files(tmp_path: Path) -> None:
 
     out = proc.stdout.strip().splitlines()
     # Output is a sorted list of relative paths; ensure a.py appears
-    assert any(line.endswith("src/a.py") for line in out), f"Unexpected simulate output: {out!r}"
+    assert any(line.endswith("src/a.py") for line in out), (
+        f"Unexpected simulate output: {out!r}"
+    )

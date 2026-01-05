@@ -4,8 +4,16 @@ import subprocess
 from pathlib import Path
 
 
-def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 20) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["uv", "run", *cmd], cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
+def _run(
+    cmd: list[str], cwd: Path | None = None, timeout: int = 20
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["uv", "run", *cmd],
+        cwd=str(cwd) if cwd else None,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
 
 
 def test_simulate_skips_gitignore_in_excluded_subtrees(tmp_path: Path) -> None:
@@ -25,4 +33,3 @@ def test_simulate_skips_gitignore_in_excluded_subtrees(tmp_path: Path) -> None:
     assert "node_modules/in_mod.txt" not in out
     # README.md should still appear (root not excluded)
     assert "README.md" in out
-

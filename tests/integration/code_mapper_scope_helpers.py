@@ -53,11 +53,20 @@ async def index_repo(
 def build_config(repo_root: Path, provider: str) -> Config:
     return Config(
         target_dir=repo_root,
-        database={"path": repo_root / ".chunkhound" / "db", "provider": provider},
+        database={
+            "path": repo_root / ".chunkhound" / "db",
+            "provider": provider,
+            # Explicitly disable multi-repo mode to ensure per-repo behavior
+            # (relative paths) regardless of environment variables.
+            "multi_repo": {"enabled": False},
+        },
         embedding={
             "provider": "openai",
             "api_key": "test",
             "model": "text-embedding-3-small",
+            # Explicitly disable reranking to avoid env var leakage
+            # (CHUNKHOUND_EMBEDDING__RERANK_MODEL from env would otherwise apply)
+            "rerank_model": None,
         },
         llm={"provider": "openai", "api_key": "test"},
     )

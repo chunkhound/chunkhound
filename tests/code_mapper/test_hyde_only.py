@@ -19,7 +19,9 @@ class _FakeProvider:
         self.raise_error = raise_error
         self.calls: list[tuple[str, int]] = []
 
-    async def complete(self, *, prompt: str, max_completion_tokens: int) -> _FakeResponse:
+    async def complete(
+        self, *, prompt: str, max_completion_tokens: int
+    ) -> _FakeResponse:
         self.calls.append((prompt, max_completion_tokens))
         if self.raise_error:
             raise RuntimeError("boom")

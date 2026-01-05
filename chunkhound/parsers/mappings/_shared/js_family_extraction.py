@@ -91,4 +91,3 @@ class JSFamilyExtraction:
         source = content.decode("utf-8", errors="replace")
         node = captures.get("definition") or next(iter(captures.values()), None)
         return self.get_node_text(node, source) if node is not None else ""  # type: ignore[attr-defined]
-

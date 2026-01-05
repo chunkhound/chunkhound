@@ -6,8 +6,9 @@ the service leaves patterns starting with "**/" unchanged when delegating to
 the coordinator.
 """
 
-import pytest
 from pathlib import Path
+
+import pytest
 
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
@@ -53,4 +54,3 @@ async def test_patterns_not_double_prefixed(tmp_path: Path):
 
     # And a sanity check: python pattern should remain exactly "**/*.py"
     assert "**/*.py" in patts, "Expected default python pattern '**/*.py'"
-

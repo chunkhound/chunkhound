@@ -5,7 +5,6 @@ in search results. These suffixes are added during chunk splitting and need to b
 hidden from consumers like deep research to ensure regex searches work correctly.
 """
 
-import pytest
 
 from chunkhound.services.search.result_enhancer import _strip_chunk_part_suffix
 
@@ -15,11 +14,17 @@ class TestStripChunkPartSuffix:
 
     def test_strip_binary_split_part1(self):
         """Should strip _part1 suffix from binary split."""
-        assert _strip_chunk_part_suffix("DeepResearchService_part1") == "DeepResearchService"
+        assert (
+            _strip_chunk_part_suffix("DeepResearchService_part1")
+            == "DeepResearchService"
+        )
 
     def test_strip_binary_split_part2(self):
         """Should strip _part2 suffix from binary split."""
-        assert _strip_chunk_part_suffix("IndexingCoordinator_part2") == "IndexingCoordinator"
+        assert (
+            _strip_chunk_part_suffix("IndexingCoordinator_part2")
+            == "IndexingCoordinator"
+        )
 
     def test_strip_multi_part_split(self):
         """Should strip _partN suffix from multi-part emergency split."""
@@ -29,18 +34,23 @@ class TestStripChunkPartSuffix:
 
     def test_strip_nested_split(self):
         """Should strip nested _part1_part2 suffixes from recursive splitting."""
-        assert _strip_chunk_part_suffix("VeryLargeService_part1_part1") == "VeryLargeService"
-        assert _strip_chunk_part_suffix("VeryLargeService_part1_part2") == "VeryLargeService"
-        assert _strip_chunk_part_suffix("VeryLargeService_part2_part1") == "VeryLargeService"
+        assert (
+            _strip_chunk_part_suffix("VeryLargeService_part1_part1")
+            == "VeryLargeService"
+        )
+        assert (
+            _strip_chunk_part_suffix("VeryLargeService_part1_part2")
+            == "VeryLargeService"
+        )
+        assert (
+            _strip_chunk_part_suffix("VeryLargeService_part2_part1")
+            == "VeryLargeService"
+        )
 
     def test_strip_deeply_nested_split(self):
         """Should strip deeply nested _partN_partM_partK suffixes."""
-        assert (
-            _strip_chunk_part_suffix("HugeClass_part1_part2_part1") == "HugeClass"
-        )
-        assert (
-            _strip_chunk_part_suffix("HugeClass_part2_part3_part4") == "HugeClass"
-        )
+        assert _strip_chunk_part_suffix("HugeClass_part1_part2_part1") == "HugeClass"
+        assert _strip_chunk_part_suffix("HugeClass_part2_part3_part4") == "HugeClass"
 
     def test_preserve_symbol_with_part_in_name(self):
         """Should preserve symbols that legitimately contain 'part' in their name."""
@@ -79,21 +89,38 @@ class TestStripChunkPartSuffix:
 
     def test_strip_with_underscores_in_name(self):
         """Should strip _partN even when symbol has many underscores."""
-        assert _strip_chunk_part_suffix("_extract_symbols_from_chunks_part1") == "_extract_symbols_from_chunks"
-        assert _strip_chunk_part_suffix("__private__method_part2") == "__private__method"
+        assert (
+            _strip_chunk_part_suffix("_extract_symbols_from_chunks_part1")
+            == "_extract_symbols_from_chunks"
+        )
+        assert (
+            _strip_chunk_part_suffix("__private__method_part2") == "__private__method"
+        )
 
     def test_real_world_examples(self):
         """Test with real-world symbol names from ChunkHound codebase."""
         # From deep_research_service.py
-        assert _strip_chunk_part_suffix("DeepResearchService_part33") == "DeepResearchService"
-        assert _strip_chunk_part_suffix("_extract_symbols_from_chunks_part2") == "_extract_symbols_from_chunks"
+        assert (
+            _strip_chunk_part_suffix("DeepResearchService_part33")
+            == "DeepResearchService"
+        )
+        assert (
+            _strip_chunk_part_suffix("_extract_symbols_from_chunks_part2")
+            == "_extract_symbols_from_chunks"
+        )
 
         # From universal_parser.py
         assert _strip_chunk_part_suffix("UniversalParser_part1") == "UniversalParser"
-        assert _strip_chunk_part_suffix("_apply_cast_algorithm_part2") == "_apply_cast_algorithm"
+        assert (
+            _strip_chunk_part_suffix("_apply_cast_algorithm_part2")
+            == "_apply_cast_algorithm"
+        )
 
         # Malformed cases from database
-        assert _strip_chunk_part_suffix("ract_symbols_from_chunks(_part2") == "ract_symbols_from_chunks("
+        assert (
+            _strip_chunk_part_suffix("ract_symbols_from_chunks(_part2")
+            == "ract_symbols_from_chunks("
+        )
 
 
 class TestSearchResultEnhancement:
@@ -101,8 +128,9 @@ class TestSearchResultEnhancement:
 
     def test_enhance_result_cleans_symbol(self):
         """Should clean symbol and preserve original in metadata."""
-        from chunkhound.services.search_service import SearchService
         from unittest.mock import MagicMock
+
+        from chunkhound.services.search_service import SearchService
 
         # Create mock service
         mock_db = MagicMock()
@@ -129,8 +157,9 @@ class TestSearchResultEnhancement:
 
     def test_enhance_result_preserves_clean_symbol(self):
         """Should not modify symbols without suffixes."""
-        from chunkhound.services.search_service import SearchService
         from unittest.mock import MagicMock
+
+        from chunkhound.services.search_service import SearchService
 
         mock_db = MagicMock()
         service = SearchService(mock_db, embedding_provider=None)
@@ -155,8 +184,9 @@ class TestSearchResultEnhancement:
 
     def test_enhance_result_preserves_existing_metadata(self):
         """Should preserve existing metadata when adding original_symbol."""
-        from chunkhound.services.search_service import SearchService
         from unittest.mock import MagicMock
+
+        from chunkhound.services.search_service import SearchService
 
         mock_db = MagicMock()
         service = SearchService(mock_db, embedding_provider=None)
@@ -185,8 +215,9 @@ class TestSearchResultEnhancement:
 
     def test_enhance_result_handles_nested_suffixes(self):
         """Should handle deeply nested _partN suffixes."""
-        from chunkhound.services.search_service import SearchService
         from unittest.mock import MagicMock
+
+        from chunkhound.services.search_service import SearchService
 
         mock_db = MagicMock()
         service = SearchService(mock_db, embedding_provider=None)
@@ -201,12 +232,16 @@ class TestSearchResultEnhancement:
 
         # Should strip all nested suffixes
         assert enhanced["symbol"] == "VeryLargeClass"
-        assert enhanced["metadata"]["original_symbol"] == "VeryLargeClass_part1_part2_part1"
+        assert (
+            enhanced["metadata"]["original_symbol"]
+            == "VeryLargeClass_part1_part2_part1"
+        )
 
     def test_enhance_result_handles_none_symbol(self):
         """Should handle results without symbol field gracefully."""
-        from chunkhound.services.search_service import SearchService
         from unittest.mock import MagicMock
+
+        from chunkhound.services.search_service import SearchService
 
         mock_db = MagicMock()
         service = SearchService(mock_db, embedding_provider=None)
@@ -224,8 +259,9 @@ class TestSearchResultEnhancement:
 
     def test_enhance_result_handles_empty_symbol(self):
         """Should handle empty symbol field gracefully."""
-        from chunkhound.services.search_service import SearchService
         from unittest.mock import MagicMock
+
+        from chunkhound.services.search_service import SearchService
 
         mock_db = MagicMock()
         service = SearchService(mock_db, embedding_provider=None)

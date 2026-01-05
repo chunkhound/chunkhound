@@ -5,8 +5,8 @@ Tests two-phase clustering: HDBSCAN discovery + greedy grouping to token budget.
 
 import pytest
 
-from chunkhound.services.clustering_service import ClusteringService, ClusterGroup
-from tests.fixtures.fake_providers import FakeLLMProvider, FakeEmbeddingProvider
+from chunkhound.services.clustering_service import ClusterGroup, ClusteringService
+from tests.fixtures.fake_providers import FakeEmbeddingProvider, FakeLLMProvider
 
 
 class TestHDBSCANClustering:
@@ -24,7 +24,9 @@ class TestHDBSCANClustering:
 
     @pytest.fixture
     def clustering_service(
-        self, fake_llm_provider: FakeLLMProvider, fake_embedding_provider: FakeEmbeddingProvider
+        self,
+        fake_llm_provider: FakeLLMProvider,
+        fake_embedding_provider: FakeEmbeddingProvider,
     ) -> ClusteringService:
         """Create clustering service with fake providers."""
         return ClusteringService(
@@ -56,9 +58,7 @@ class TestHDBSCANClustering:
     ) -> None:
         """Test that files under token budget create single cluster."""
         # Files with total ~200 tokens (well under 30k limit)
-        files = {
-            f"file{i}.py": "def test(): pass\n" * 10 for i in range(5)
-        }
+        files = {f"file{i}.py": "def test(): pass\n" * 10 for i in range(5)}
 
         clusters, metadata = await clustering_service.cluster_files(files)
 
@@ -266,7 +266,9 @@ class TestHDBSCANClustering:
 
     @pytest.mark.asyncio
     async def test_min_cluster_size_parameter(
-        self, fake_llm_provider: FakeLLMProvider, fake_embedding_provider: FakeEmbeddingProvider
+        self,
+        fake_llm_provider: FakeLLMProvider,
+        fake_embedding_provider: FakeEmbeddingProvider,
     ) -> None:
         """Test that min_cluster_size parameter is used."""
         # Create service with custom min_cluster_size
@@ -302,7 +304,9 @@ class TestHDBSCANClustering:
 
         # Average should be reasonable
         expected_avg = metadata["total_tokens"] / len(clusters)
-        assert abs(metadata["avg_tokens_per_cluster"] - expected_avg) <= 1  # Allow rounding error
+        assert (
+            abs(metadata["avg_tokens_per_cluster"] - expected_avg) <= 1
+        )  # Allow rounding error
 
 
 class TestClusterGroup:
@@ -350,6 +354,7 @@ class TestOutlierMergingEdgeCases:
         Scenario: 3 natural clusters get merged + outliers need absorption
         Verifies that outliers use correct cluster indices after merging.
         """
+
         class MergeScenarioEmbeddingProvider:
             async def embed(self, texts: list[str]) -> list[list[float]]:
                 embeddings = []
@@ -400,6 +405,7 @@ class TestOutlierMergingEdgeCases:
 
         Scenario: Merged clusters fill budget, outliers form separate cluster
         """
+
         class CapacityEmbeddingProvider:
             async def embed(self, texts: list[str]) -> list[list[float]]:
                 embeddings = []
@@ -444,6 +450,7 @@ class TestOutlierMergingEdgeCases:
 
         Scenario: Outliers positioned near specific clusters should merge there
         """
+
         class DistanceEmbeddingProvider:
             async def embed(self, texts: list[str]) -> list[list[float]]:
                 embeddings = []
@@ -490,6 +497,7 @@ class TestOutlierMergingEdgeCases:
 
         Scenario: No natural clusters, all files are outliers
         """
+
         class AllOutliersEmbeddingProvider:
             async def embed(self, texts: list[str]) -> list[list[float]]:
                 # All widely separated -> all outliers
@@ -525,6 +533,7 @@ class TestOutlierMergingEdgeCases:
 
         Scenario: Native clusters merge, outliers use merged centroid for distance
         """
+
         class MergedCentroidEmbeddingProvider:
             async def embed(self, texts: list[str]) -> list[list[float]]:
                 embeddings = []

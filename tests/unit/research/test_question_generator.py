@@ -8,10 +8,8 @@ import pytest
 
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services.research.models import (
-    BFSNode,
-    FOLLOWUP_OUTPUT_TOKENS_MAX,
-    FOLLOWUP_OUTPUT_TOKENS_MIN,
     MAX_FOLLOWUP_QUESTIONS,
+    BFSNode,
     ResearchContext,
 )
 from chunkhound.services.research.question_generator import QuestionGenerator
@@ -212,7 +210,9 @@ class TestGenerateFollowUpQuestions:
         assert all(q.strip() for q in result), "All questions should be non-empty"
 
     @pytest.mark.asyncio
-    async def test_limits_to_max_followup_questions(self, question_generator, monkeypatch):
+    async def test_limits_to_max_followup_questions(
+        self, question_generator, monkeypatch
+    ):
         """Should limit results to MAX_FOLLOWUP_QUESTIONS."""
         # Create provider with more questions than max
         many_questions = [f"Question {i}" for i in range(10)]
@@ -248,12 +248,14 @@ class TestGenerateFollowUpQuestions:
             max_depth=3,
         )
 
-        assert (
-            len(result) <= MAX_FOLLOWUP_QUESTIONS
-        ), f"Should limit to {MAX_FOLLOWUP_QUESTIONS} questions"
+        assert len(result) <= MAX_FOLLOWUP_QUESTIONS, (
+            f"Should limit to {MAX_FOLLOWUP_QUESTIONS} questions"
+        )
 
     @pytest.mark.asyncio
-    async def test_graceful_failure_returns_empty(self, question_generator, monkeypatch):
+    async def test_graceful_failure_returns_empty(
+        self, question_generator, monkeypatch
+    ):
         """Should return empty list on LLM failure."""
         # Create failing provider
         failing_provider = FakeLLMProvider(responses={})
@@ -295,11 +297,21 @@ class TestSynthesizeQuestions:
         """Should skip synthesis when nodes <= target_count."""
         context = ResearchContext(root_query="root", ancestors=[])
         nodes = [
-            BFSNode(query="How does authentication work in the API layer?", depth=1, node_id=1),
-            BFSNode(query="How does session management persist across requests?", depth=1, node_id=2),
+            BFSNode(
+                query="How does authentication work in the API layer?",
+                depth=1,
+                node_id=1,
+            ),
+            BFSNode(
+                query="How does session management persist across requests?",
+                depth=1,
+                node_id=2,
+            ),
         ]
 
-        result = await question_generator.synthesize_questions(nodes, context, target_count=3)
+        result = await question_generator.synthesize_questions(
+            nodes, context, target_count=3
+        )
 
         assert result == nodes, "Should return original nodes when count <= target"
 
@@ -308,32 +320,44 @@ class TestSynthesizeQuestions:
         """Should create fresh BFSNode objects with synthesized queries."""
         context = ResearchContext(root_query="root", ancestors=[])
         nodes = [
-            BFSNode(query=f"How does component {i} handle data flow?", depth=2, node_id=i)
+            BFSNode(
+                query=f"How does component {i} handle data flow?", depth=2, node_id=i
+            )
             for i in range(5)
         ]
 
-        result = await question_generator.synthesize_questions(nodes, context, target_count=2)
+        result = await question_generator.synthesize_questions(
+            nodes, context, target_count=2
+        )
 
         assert len(result) <= 2, "Should reduce to target count"
-        assert all(isinstance(node, BFSNode) for node in result), "Should return BFSNodes"
+        assert all(isinstance(node, BFSNode) for node in result), (
+            "Should return BFSNodes"
+        )
         # Synthesized nodes should have empty chunks/file_contents
         for node in result:
             if node.query.startswith("Combined"):  # Our fake response
                 assert node.chunks == [], "Synthesized nodes should have empty chunks"
-                assert (
-                    node.file_contents == {}
-                ), "Synthesized nodes should have empty file_contents"
+                assert node.file_contents == {}, (
+                    "Synthesized nodes should have empty file_contents"
+                )
 
     @pytest.mark.asyncio
     async def test_synthesis_creates_merge_parent(self, question_generator):
         """Should create synthetic merge parent linking all input nodes."""
         context = ResearchContext(root_query="root", ancestors=[])
         nodes = [
-            BFSNode(query=f"How does the authentication layer validate credentials?", depth=2, node_id=i)
+            BFSNode(
+                query="How does the authentication layer validate credentials?",
+                depth=2,
+                node_id=i,
+            )
             for i in range(4)
         ]
 
-        result = await question_generator.synthesize_questions(nodes, context, target_count=2)
+        result = await question_generator.synthesize_questions(
+            nodes, context, target_count=2
+        )
 
         # Synthesized nodes should have parent
         for node in result:
@@ -348,18 +372,24 @@ class TestSynthesizeQuestions:
         nodes = [
             BFSNode(query="Short", depth=2, node_id=1),  # Too short
             BFSNode(query="What is authentication?", depth=2, node_id=2),  # Yes/no
-            BFSNode(query="How does the caching system work?", depth=2, node_id=3),  # Good
+            BFSNode(
+                query="How does the caching system work?", depth=2, node_id=3
+            ),  # Good
             BFSNode(query="Is there a database?", depth=2, node_id=4),  # Yes/no
             BFSNode(query="Does it have tests?", depth=2, node_id=5),  # Yes/no
         ]
 
-        result = await question_generator.synthesize_questions(nodes, context, target_count=2)
+        result = await question_generator.synthesize_questions(
+            nodes, context, target_count=2
+        )
 
         # After filtering bad questions, might skip synthesis if <= target
         assert len(result) <= len(nodes), "Should not increase question count"
 
     @pytest.mark.asyncio
-    async def test_synthesis_fallback_on_empty_response(self, question_generator, monkeypatch):
+    async def test_synthesis_fallback_on_empty_response(
+        self, question_generator, monkeypatch
+    ):
         """Should fallback to truncated list when LLM returns empty."""
         empty_provider = FakeLLMProvider(
             responses={
@@ -380,7 +410,9 @@ class TestSynthesizeQuestions:
         context = ResearchContext(root_query="root", ancestors=[])
         # Use realistic questions that won't be filtered by quality check
         nodes = [
-            BFSNode(query="How does authentication work in the system?", depth=2, node_id=i)
+            BFSNode(
+                query="How does authentication work in the system?", depth=2, node_id=i
+            )
             for i in range(5)
         ]
 
@@ -388,10 +420,14 @@ class TestSynthesizeQuestions:
 
         assert len(result) <= 2, "Should fallback to truncated list"
         if result:
-            assert "authentication" in result[0].query.lower(), "Should preserve original nodes"
+            assert "authentication" in result[0].query.lower(), (
+                "Should preserve original nodes"
+            )
 
     @pytest.mark.asyncio
-    async def test_synthesis_fallback_on_llm_failure(self, question_generator, monkeypatch):
+    async def test_synthesis_fallback_on_llm_failure(
+        self, question_generator, monkeypatch
+    ):
         """Should fallback to truncated list on LLM exception."""
         failing_provider = FakeLLMProvider(responses={})
 
@@ -408,7 +444,11 @@ class TestSynthesizeQuestions:
         context = ResearchContext(root_query="root", ancestors=[])
         # Use realistic questions that won't be filtered by quality check
         nodes = [
-            BFSNode(query="How does the caching system handle invalidation?", depth=2, node_id=i)
+            BFSNode(
+                query="How does the caching system handle invalidation?",
+                depth=2,
+                node_id=i,
+            )
             for i in range(5)
         ]
 
@@ -452,7 +492,9 @@ class TestFilterRelevantFollowups:
         assert len(result) <= MAX_FOLLOWUP_QUESTIONS, "Should limit to max"
 
     @pytest.mark.asyncio
-    async def test_handles_comma_separated_indices(self, question_generator, monkeypatch):
+    async def test_handles_comma_separated_indices(
+        self, question_generator, monkeypatch
+    ):
         """Should parse comma-separated indices."""
         comma_provider = FakeLLMProvider(responses={"filter": "1, 2, 4"})
 
@@ -498,7 +540,9 @@ class TestFilterRelevantFollowups:
         )
 
         # Should only include valid index (1 -> index 0)
-        assert all(q in questions for q in result), "Should only include valid questions"
+        assert all(q in questions for q in result), (
+            "Should only include valid questions"
+        )
 
     @pytest.mark.asyncio
     async def test_fallback_on_filtering_failure(self, question_generator, monkeypatch):
@@ -522,9 +566,9 @@ class TestFilterRelevantFollowups:
             questions, context.root_query, "current", context
         )
 
-        assert (
-            len(result) <= MAX_FOLLOWUP_QUESTIONS
-        ), "Should return max questions on failure"
+        assert len(result) <= MAX_FOLLOWUP_QUESTIONS, (
+            "Should return max questions on failure"
+        )
 
 
 class TestNodeCounter:

@@ -106,7 +106,12 @@ def seed_data(conn: Any, rows: int, dims: int, provider: str, model: str) -> lis
         for j in range(take):
             cid = cur + j + 1
             ids.append(cid)
-            vec = np.random.default_rng(42 + cid).normal(size=dims).astype("float32").tolist()
+            vec = (
+                np.random.default_rng(42 + cid)
+                .normal(size=dims)
+                .astype("float32")
+                .tolist()
+            )
             data.append(
                 (
                     cid,  # id
@@ -185,7 +190,12 @@ def reader_worker(
 
             fresh = 0
             for row_id, row_provider, row_model in res:
-                if row_provider == provider and row_model == model and isinstance(row_id, int) and row_id > seed_rows:
+                if (
+                    row_provider == provider
+                    and row_model == model
+                    and isinstance(row_id, int)
+                    and row_id > seed_rows
+                ):
                     fresh += 1
 
             if fresh > 0:
@@ -385,7 +395,9 @@ def main() -> None:
     args.db.parent.mkdir(parents=True, exist_ok=True)
 
     t0 = time.time()
-    stats = run_probe(args.db, args.dims, args.rows, args.readers, args.writers, args.duration)
+    stats = run_probe(
+        args.db, args.dims, args.rows, args.readers, args.writers, args.duration
+    )
     elapsed = time.time() - t0
 
     print(

@@ -21,9 +21,7 @@ def test_registry_lazily_instantiates_language_parsers(monkeypatch):
             return f"parser-{language.value}"
 
     fake_factory = FakeParserFactory()
-    monkeypatch.setattr(
-        "chunkhound.registry.get_parser_factory", lambda: fake_factory
-    )
+    monkeypatch.setattr("chunkhound.registry.get_parser_factory", lambda: fake_factory)
 
     registry = ProviderRegistry()
     registry._language_parsers.clear()

@@ -32,7 +32,9 @@ def iter_yaml_files(root: Path):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("path", type=Path, help="Root directory to scan for YAML files")
-    ap.add_argument("--limit", type=int, default=0, help="Optional limit of files to parse")
+    ap.add_argument(
+        "--limit", type=int, default=0, help="Optional limit of files to parse"
+    )
     args = ap.parse_args()
 
     if not args.path.exists() or not args.path.is_dir():
@@ -40,7 +42,9 @@ def main() -> int:
         return 2
 
     # Configure stdlib logging so RapidYamlParser INFO logs are visible
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
+    )
 
     factory = ParserFactory()
     parser = factory.create_parser(Language.YAML)
@@ -77,4 +81,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

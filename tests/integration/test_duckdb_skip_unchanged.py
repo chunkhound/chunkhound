@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-
 duckdb = pytest.importorskip("duckdb")
 
 
@@ -37,7 +36,9 @@ def test_duckdb_as_model_mtime_roundtrip(tmp_path: Path):
     assert abs(rec.mtime - float(st.st_mtime)) < 1e-3
 
 
-def test_indexing_coordinator_skips_with_duckdb(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_indexing_coordinator_skips_with_duckdb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     # Heavy but valuable end-to-end check when duckdb is available
     from chunkhound.core.models.file import File
     from chunkhound.core.types.common import Language
@@ -73,7 +74,9 @@ def test_indexing_coordinator_skips_with_duckdb(tmp_path: Path, monkeypatch: pyt
     # Avoid parsing: record what would be parsed
     called = []
 
-    async def _fake(files, config_file_size_threshold_kb=20, parse_task=None, on_batch=None):
+    async def _fake(
+        files, config_file_size_threshold_kb=20, parse_task=None, on_batch=None
+    ):
         called.append(list(files))
         return []
 
@@ -81,7 +84,10 @@ def test_indexing_coordinator_skips_with_duckdb(tmp_path: Path, monkeypatch: pyt
 
     result = asyncio.run(
         coord.process_directory(
-            tmp_path, patterns=["**/*.txt"], exclude_patterns=[], config_file_size_threshold_kb=20
+            tmp_path,
+            patterns=["**/*.txt"],
+            exclude_patterns=[],
+            config_file_size_threshold_kb=20,
         )
     )
 
@@ -117,7 +123,9 @@ def test_checksums_saved_on_first_index(tmp_path: Path):
     )
 
     assert result1["files_processed"] == 3, "Should process 3 new files"
-    assert result1.get("skipped_unchanged", 0) == 0, "No files should be skipped on first pass"
+    assert result1.get("skipped_unchanged", 0) == 0, (
+        "No files should be skipped on first pass"
+    )
 
     # Verify checksums were saved in database
     for p in test_files:
@@ -131,7 +139,9 @@ def test_checksums_saved_on_first_index(tmp_path: Path):
 
         # Verify checksum matches actual file content
         expected_hash = compute_file_hash(p)
-        assert db_hash == expected_hash, f"Checksum for {rel_path} should match actual content"
+        assert db_hash == expected_hash, (
+            f"Checksum for {rel_path} should match actual content"
+        )
 
     # Second indexing pass - files unchanged
     result2 = asyncio.run(
@@ -139,8 +149,12 @@ def test_checksums_saved_on_first_index(tmp_path: Path):
     )
 
     # With the fix, files should be skipped on second pass (not third!)
-    assert result2["files_processed"] == 0, "No files should be processed on second pass"
-    assert result2.get("skipped_unchanged", 0) == 3, "All 3 files should be skipped on second pass"
+    assert result2["files_processed"] == 0, (
+        "No files should be processed on second pass"
+    )
+    assert result2.get("skipped_unchanged", 0) == 3, (
+        "All 3 files should be skipped on second pass"
+    )
 
 
 def test_hash_computed_only_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -168,7 +182,10 @@ def test_hash_computed_only_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         return original_compute_hash(path)
 
     # Patch where it's imported in indexing_coordinator
-    monkeypatch.setattr("chunkhound.services.indexing_coordinator.compute_file_hash", tracked_compute_hash)
+    monkeypatch.setattr(
+        "chunkhound.services.indexing_coordinator.compute_file_hash",
+        tracked_compute_hash,
+    )
 
     coord = IndexingCoordinator(database_provider=provider, base_directory=tmp_path)
 
@@ -187,8 +204,12 @@ def test_hash_computed_only_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         coord.process_directory(tmp_path, patterns=["**/*.py"], exclude_patterns=[])
     )
     assert result2["files_processed"] == 0, "File should be skipped on second run"
-    assert result2.get("skipped_unchanged", 0) == 1, "File should be marked as unchanged"
-    assert len(hash_calls) == 0, "Hash should NOT be recomputed on second run (performance optimization)"
+    assert result2.get("skipped_unchanged", 0) == 1, (
+        "File should be marked as unchanged"
+    )
+    assert len(hash_calls) == 0, (
+        "Hash should NOT be recomputed on second run (performance optimization)"
+    )
 
 
 def test_hash_change_triggers_reindex(tmp_path: Path):
@@ -234,11 +255,17 @@ def test_hash_change_triggers_reindex(tmp_path: Path):
     result2 = asyncio.run(
         coord.process_directory(tmp_path, patterns=["**/*.py"], exclude_patterns=[])
     )
-    assert result2["files_processed"] == 0, "File skipped when mtime+size match (even if content changed)"
-    assert result2.get("skipped_unchanged", 0) == 1, "Edge case: trusts mtime+size over content hash"
+    assert result2["files_processed"] == 0, (
+        "File skipped when mtime+size match (even if content changed)"
+    )
+    assert result2.get("skipped_unchanged", 0) == 1, (
+        "Edge case: trusts mtime+size over content hash"
+    )
 
 
-def test_hash_failure_does_not_block_indexing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_hash_failure_does_not_block_indexing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Verify that files are still indexed even if hash computation fails."""
     import asyncio
 
@@ -258,7 +285,9 @@ def test_hash_failure_does_not_block_indexing(tmp_path: Path, monkeypatch: pytes
         raise OSError("Simulated hash failure")
 
     # Patch where it's imported in indexing_coordinator
-    monkeypatch.setattr("chunkhound.services.indexing_coordinator.compute_file_hash", failing_hash)
+    monkeypatch.setattr(
+        "chunkhound.services.indexing_coordinator.compute_file_hash", failing_hash
+    )
 
     coord = IndexingCoordinator(database_provider=provider, base_directory=tmp_path)
 
@@ -266,12 +295,16 @@ def test_hash_failure_does_not_block_indexing(tmp_path: Path, monkeypatch: pytes
     result1 = asyncio.run(
         coord.process_directory(tmp_path, patterns=["**/*.py"], exclude_patterns=[])
     )
-    assert result1["files_processed"] == 1, "File should be indexed despite hash failure"
+    assert result1["files_processed"] == 1, (
+        "File should be indexed despite hash failure"
+    )
 
     # Verify file was indexed with None hash
     db_file = provider.get_file_by_path("test.py", as_model=False)
     assert db_file is not None
-    assert db_file.get("content_hash") is None, "Hash should be None when computation fails"
+    assert db_file.get("content_hash") is None, (
+        "Hash should be None when computation fails"
+    )
 
 
 def test_changed_file_gets_hash_computed(tmp_path: Path):
@@ -324,7 +357,9 @@ def test_changed_file_gets_hash_computed(tmp_path: Path):
     db_file2 = provider.get_file_by_path("test.py", as_model=False)
     assert db_file2 is not None
     hash2 = db_file2.get("content_hash")
-    assert hash2 is not None, "Hash should be computed for changed file (bug fix verification)"
+    assert hash2 is not None, (
+        "Hash should be computed for changed file (bug fix verification)"
+    )
     assert hash2 != hash1, "Hash should be different after content change"
     assert hash2 == compute_file_hash(test_file), "Hash should match new file content"
 
@@ -333,11 +368,12 @@ def test_changed_file_gets_hash_computed(tmp_path: Path):
         coord.process_directory(tmp_path, patterns=["**/*.py"], exclude_patterns=[])
     )
     assert result3["files_processed"] == 0, "Should skip unchanged file"
-    assert result3.get("skipped_unchanged", 0) == 1, "File should be skipped using cached hash"
+    assert result3.get("skipped_unchanged", 0) == 1, (
+        "File should be skipped using cached hash"
+    )
 
     # Verify hash is still the same (no unnecessary recomputation)
     db_file3 = provider.get_file_by_path("test.py", as_model=False)
     assert db_file3 is not None
     hash3 = db_file3.get("content_hash")
     assert hash3 == hash2, "Hash should remain unchanged when file is unchanged"
-

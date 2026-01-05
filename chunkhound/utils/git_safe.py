@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 
 
 @dataclass
@@ -74,7 +74,9 @@ def get_global_excludes_file() -> Path | None:
     return None
 
 
-def run_git(args: Sequence[str], cwd: Path | None, timeout_s: float | None = None) -> subprocess.CompletedProcess:
+def run_git(
+    args: Sequence[str], cwd: Path | None, timeout_s: float | None = None
+) -> subprocess.CompletedProcess:
     cmd = ["git", *list(args)]
     env = _build_git_env()
     try:
@@ -85,7 +87,9 @@ def run_git(args: Sequence[str], cwd: Path | None, timeout_s: float | None = Non
             stderr=subprocess.PIPE,
             check=False,
             env=env,
-            timeout=timeout_s if timeout_s is not None else float(os.environ.get("CHUNKHOUND_GIT_TIMEOUT_SECONDS", "15")),
+            timeout=timeout_s
+            if timeout_s is not None
+            else float(os.environ.get("CHUNKHOUND_GIT_TIMEOUT_SECONDS", "15")),
             text=True,
         )
         return proc
@@ -93,4 +97,3 @@ def run_git(args: Sequence[str], cwd: Path | None, timeout_s: float | None = Non
         raise GitCommandError("git command timeout", None, None) from te
     except Exception as e:
         raise GitCommandError(f"git command failed: {e}") from e
-

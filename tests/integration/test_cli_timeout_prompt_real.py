@@ -1,10 +1,8 @@
-import asyncio
 import json
 from argparse import Namespace
 from pathlib import Path
 
 import pytest
-
 
 duckdb = pytest.importorskip("duckdb")
 
@@ -13,12 +11,11 @@ duckdb = pytest.importorskip("duckdb")
 async def test_cli_timeout_prompt_real(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """End-to-end: low timeout forces a skip, and the prompt adds it to exclude."""
     from chunkhound.api.cli.commands import run as run_mod
-    import chunkhound.services.batch_processor as bp
-    from chunkhound.services.indexing_coordinator import IndexingCoordinator
     from chunkhound.core.config.config import Config as CoreConfig
     from chunkhound.core.config.database_config import DatabaseConfig
     from chunkhound.core.types.common import Language
     from chunkhound.services.batch_processor import ParsedFileResult
+    from chunkhound.services.indexing_coordinator import IndexingCoordinator
 
     # Create a relatively larger .py file to exercise timeout reliably
     f = tmp_path / "slow.py"
@@ -38,10 +35,10 @@ async def test_cli_timeout_prompt_real(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setenv("CHUNKHOUND_INDEXING__FORCE_REINDEX", "true")
 
     # Deterministically simulate a timeout at the coordinator seam to avoid ProcessPool in CI
-    from chunkhound.services.batch_processor import ParsedFileResult
-    from chunkhound.core.types.common import Language
 
-    async def _stub_batches(self, files, config_file_size_threshold_kb=20, parse_task=None, on_batch=None):
+    async def _stub_batches(
+        self, files, config_file_size_threshold_kb=20, parse_task=None, on_batch=None
+    ):
         results = []
         for p in files:
             st = p.stat()

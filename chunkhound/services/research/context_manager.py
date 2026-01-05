@@ -8,12 +8,9 @@ This module handles tracking explored context during BFS traversal:
 - Detecting new information vs previously explored content
 """
 
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from loguru import logger
-
-from chunkhound.services.research.models import BFSNode, ResearchContext
+from chunkhound.services.research.models import BFSNode
 
 if TYPE_CHECKING:
     from chunkhound.services.deep_research_service import DeepResearchService

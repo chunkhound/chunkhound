@@ -27,7 +27,9 @@ def test_lancedb_scope_stats_handles_errors() -> None:
     provider._files_table = _ExplodingFilesTable()
     provider._chunks_table = _ExplodingChunksTable()
 
-    total_files, total_chunks = provider._executor_get_scope_stats(object(), {}, "scope/")
+    total_files, total_chunks = provider._executor_get_scope_stats(
+        object(), {}, "scope/"
+    )
     assert total_files == 0
     assert total_chunks == 0
 
@@ -38,4 +40,3 @@ def test_lancedb_scope_paths_handles_errors() -> None:
 
     paths = provider._executor_get_scope_file_paths(object(), {}, "scope/")
     assert paths == []
-

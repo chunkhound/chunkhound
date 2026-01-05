@@ -101,6 +101,15 @@ class SerialDatabaseProvider(ABC):
         return self._executor is not None
 
     @property
+    def supports_multi_repo(self) -> bool:
+        """Check if provider supports multi-repository features.
+
+        Multi-repo features include: indexed roots, tags, watcher status.
+        All SerialDatabaseProvider implementations support these features.
+        """
+        return True
+
+    @property
     def last_activity_time(self) -> float | None:
         """Get the last database activity time.
 

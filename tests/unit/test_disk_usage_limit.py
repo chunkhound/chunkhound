@@ -5,23 +5,19 @@ This module tests the disk usage limiting feature that prevents ChunkHound
 from exceeding configured database size limits during indexing operations.
 """
 
-import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-import pytest
+from unittest.mock import MagicMock
 
 from chunkhound.core.config.database_config import DatabaseConfig
 from chunkhound.core.exceptions import DiskUsageLimitExceededError
-from chunkhound.services.indexing_coordinator import IndexingCoordinator
-from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.core.types.common import Language
+from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.services.batch_processor import ParsedFileResult
+from chunkhound.services.indexing_coordinator import IndexingCoordinator
 
 
 def _create_parsed_file_result(
-    file_path: Path,
-    chunks: list[dict] | None = None,
-    status: str = "ok"
+    file_path: Path, chunks: list[dict] | None = None, status: str = "ok"
 ) -> ParsedFileResult:
     """Helper to create ParsedFileResult for testing."""
     return ParsedFileResult(
@@ -85,19 +81,13 @@ class TestDiskUsageLimitExceededError:
 
     def test_exception_creation(self):
         """Test creating the exception with required parameters."""
-        error = DiskUsageLimitExceededError(
-            current_size_mb=2150.4,
-            limit_mb=2048.0
-        )
+        error = DiskUsageLimitExceededError(current_size_mb=2150.4, limit_mb=2048.0)
         assert error.current_size_mb == 2150.4
         assert error.limit_mb == 2048.0
 
     def test_exception_message(self):
         """Test the exception message format."""
-        error = DiskUsageLimitExceededError(
-            current_size_mb=1536.0,
-            limit_mb=1024.0
-        )
+        error = DiskUsageLimitExceededError(current_size_mb=1536.0, limit_mb=1024.0)
         expected_msg = "Database disk usage limit exceeded: 1536.0 MB >= 1024.0 MB"
         assert str(error) == expected_msg
 
@@ -125,9 +115,7 @@ class TestIndexingCoordinatorDiskUsage:
         db = DuckDBProvider(db_path=tmp_path / "db", base_directory=tmp_path)
         config = DatabaseConfig(max_disk_usage_mb=None)
         coord = IndexingCoordinator(
-            database_provider=db,
-            base_directory=tmp_path,
-            config=config
+            database_provider=db, base_directory=tmp_path, config=config
         )
 
         # Should not raise any exception
@@ -144,9 +132,7 @@ class TestIndexingCoordinatorDiskUsage:
         db = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
         config = DatabaseConfig(max_disk_usage_mb=1024.0)  # 1 GB limit
         coord = IndexingCoordinator(
-            database_provider=db,
-            base_directory=tmp_path,
-            config=config
+            database_provider=db, base_directory=tmp_path, config=config
         )
 
         # File is much smaller than 1GB, should not raise
@@ -163,9 +149,7 @@ class TestIndexingCoordinatorDiskUsage:
         db = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
         config = DatabaseConfig(max_disk_usage_mb=0.0)  # Zero limit - any file exceeds
         coord = IndexingCoordinator(
-            database_provider=db,
-            base_directory=tmp_path,
-            config=config
+            database_provider=db, base_directory=tmp_path, config=config
         )
 
         error = coord._check_disk_usage_limit()
@@ -181,9 +165,7 @@ class TestIndexingCoordinatorDiskUsage:
         db = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
         config = DatabaseConfig(max_disk_usage_mb=1024.0)
         coord = IndexingCoordinator(
-            database_provider=db,
-            base_directory=tmp_path,
-            config=config
+            database_provider=db, base_directory=tmp_path, config=config
         )
 
         # Should not raise exception for non-existent file
@@ -200,9 +182,7 @@ class TestIndexingCoordinatorDiskUsage:
         db = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
         config = DatabaseConfig(max_disk_usage_mb=1024.0)
         coord = IndexingCoordinator(
-            database_provider=db,
-            base_directory=tmp_path,
-            config=config
+            database_provider=db, base_directory=tmp_path, config=config
         )
 
         # Mock stat to raise OSError (after provider initialization)
@@ -226,9 +206,7 @@ class TestIndexingCoordinatorDiskUsage:
         db = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
         config = DatabaseConfig(max_disk_usage_mb=1.0)  # 1MB limit
         coord = IndexingCoordinator(
-            database_provider=db,
-            base_directory=tmp_path,
-            config=config
+            database_provider=db, base_directory=tmp_path, config=config
         )
 
         error = coord._check_disk_usage_limit()
@@ -258,9 +236,7 @@ class TestIndexingCoordinatorDiskUsage:
         db = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
         config = DatabaseConfig(max_disk_usage_mb=2.0)  # 2MB limit
         coord = IndexingCoordinator(
-            database_provider=db,
-            base_directory=tmp_path,
-            config=config
+            database_provider=db, base_directory=tmp_path, config=config
         )
 
         error = coord._check_disk_usage_limit()
@@ -286,9 +262,7 @@ class TestIndexingCoordinatorDiskUsage:
             db = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
             config = DatabaseConfig(max_disk_usage_mb=1.0)  # 1MB limit
             coord = IndexingCoordinator(
-                database_provider=db,
-                base_directory=tmp_path,
-                config=config
+                database_provider=db, base_directory=tmp_path, config=config
             )
 
             # Should work normally - calculates size of all files in directory
@@ -296,6 +270,7 @@ class TestIndexingCoordinatorDiskUsage:
         finally:
             # Clean up test directory
             import shutil
+
             if test_dir.exists():
                 shutil.rmtree(test_dir)
 
@@ -308,9 +283,7 @@ class TestIndexingCoordinatorDiskUsage:
         db = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
         config = DatabaseConfig(max_disk_usage_mb=1024.0)
         coord = IndexingCoordinator(
-            database_provider=db,
-            base_directory=tmp_path,
-            config=config
+            database_provider=db, base_directory=tmp_path, config=config
         )
 
         # Mock rglob to raise PermissionError
@@ -335,9 +308,7 @@ class TestIndexingCoordinatorIntegration:
         db.connect()
         config = DatabaseConfig(max_disk_usage_mb=0.0)  # Zero limit
         coord = IndexingCoordinator(
-            database_provider=db,
-            base_directory=tmp_path,
-            config=config
+            database_provider=db, base_directory=tmp_path, config=config
         )
 
         # Create a test file to process
@@ -345,6 +316,7 @@ class TestIndexingCoordinatorIntegration:
         test_file.write_text("print('hello')")
 
         import asyncio
+
         result = asyncio.run(coord.process_directory(tmp_path, patterns=["*.py"]))
 
         assert result["status"] == "disk_limit_exceeded"
@@ -361,9 +333,7 @@ class TestIndexingCoordinatorIntegration:
         db.connect()
         config = DatabaseConfig(max_disk_usage_mb=0.0)  # Zero limit
         coord = IndexingCoordinator(
-            database_provider=db,
-            base_directory=tmp_path,
-            config=config
+            database_provider=db, base_directory=tmp_path, config=config
         )
 
         # Create a parsed result
@@ -371,6 +341,7 @@ class TestIndexingCoordinatorIntegration:
         result = _create_parsed_file_result(test_file, [])
 
         import asyncio
+
         stats = asyncio.run(coord._store_parsed_results([result]))
 
         # Check that disk limit error is in the errors
@@ -391,9 +362,7 @@ class TestIndexingCoordinatorIntegration:
         db = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
         config = DatabaseConfig(max_disk_usage_mb=1024.0)  # 1GB limit
         coord = IndexingCoordinator(
-            database_provider=db,
-            base_directory=tmp_path,
-            config=config
+            database_provider=db, base_directory=tmp_path, config=config
         )
 
         # Create a test file to process
@@ -401,6 +370,7 @@ class TestIndexingCoordinatorIntegration:
         test_file.write_text("print('hello')")
 
         import asyncio
+
         result = asyncio.run(coord.process_directory(tmp_path, patterns=["*.py"]))
 
         # Should succeed normally

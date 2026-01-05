@@ -77,4 +77,3 @@ COMMONJS_EXPORTS_SHORTHAND = """
     )
 )
 """
-

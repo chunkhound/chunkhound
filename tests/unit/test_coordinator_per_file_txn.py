@@ -1,9 +1,9 @@
 from pathlib import Path
 
-from chunkhound.services.indexing_coordinator import IndexingCoordinator
-from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.core.types.common import Language
+from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.services.batch_processor import ParsedFileResult
+from chunkhound.services.indexing_coordinator import IndexingCoordinator
 
 
 def _pfr(path: Path, chunks: list[dict], ok: bool = True) -> ParsedFileResult:
@@ -64,9 +64,12 @@ def test_per_file_transaction_isolated(tmp_path: Path):
     ]
 
     import asyncio
+
     res = asyncio.run(coord._store_parsed_results(results))  # type: ignore[arg-type]
     stats = res[0] if isinstance(res, tuple) else res
 
     # Good file should be stored; bad file should be in errors
     assert stats["total_files"] == 1
-    assert stats["errors"] and any("boom" in e.get("error", "") for e in stats["errors"])  # noqa: SIM115
+    assert stats["errors"] and any(
+        "boom" in e.get("error", "") for e in stats["errors"]
+    )  # noqa: SIM115

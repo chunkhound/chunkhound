@@ -4,9 +4,9 @@ Tests that regex search functionality works correctly with the LanceDB backend,
 matching the semantic search test coverage patterns.
 """
 
-from pathlib import Path
 
 import pytest
+
 
 def test_regex_basic(lancedb_provider, tmp_path):
     """Basic regex pattern finds matching content."""
@@ -110,18 +110,24 @@ def test_regex_pagination(lancedb_provider, tmp_path):
     lancedb_provider.insert_chunks_batch(chunks)
 
     # First page
-    results1, pagination1 = lancedb_provider.search_regex("common_pattern", page_size=2, offset=0)
+    results1, pagination1 = lancedb_provider.search_regex(
+        "common_pattern", page_size=2, offset=0
+    )
     assert len(results1) == 2, "First page should have 2 results"
     assert pagination1["has_more"] is True
     assert pagination1["total"] == 5
 
     # Second page
-    results2, pagination2 = lancedb_provider.search_regex("common_pattern", page_size=2, offset=2)
+    results2, pagination2 = lancedb_provider.search_regex(
+        "common_pattern", page_size=2, offset=2
+    )
     assert len(results2) == 2, "Second page should have 2 results"
     assert pagination2["has_more"] is True
 
     # Third page (partial)
-    results3, pagination3 = lancedb_provider.search_regex("common_pattern", page_size=2, offset=4)
+    results3, pagination3 = lancedb_provider.search_regex(
+        "common_pattern", page_size=2, offset=4
+    )
     assert len(results3) == 1, "Third page should have 1 result"
     assert pagination3["has_more"] is False
 

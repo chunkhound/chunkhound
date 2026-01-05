@@ -10,13 +10,14 @@ This module tests the PDF parsing implementation to verify:
 6. Basic PDF parsing integrates with ChunkHound's universal parser
 """
 
-import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-from chunkhound.core.types.common import Language, FileId, ChunkType
+import pytest
+
+from chunkhound.core.types.common import ChunkType, FileId, Language
+from chunkhound.parsers.mappings.pdf import PYMUPDF_AVAILABLE, PDFMapping
 from chunkhound.parsers.parser_factory import create_parser_for_language
-from chunkhound.parsers.mappings.pdf import PDFMapping, PYMUPDF_AVAILABLE
 from chunkhound.parsers.universal_parser import UniversalParser
 
 
@@ -49,7 +50,9 @@ class TestPDFLanguageDetection:
 
         for file_path in test_cases:
             language = Language.from_file_extension(file_path)
-            assert language != Language.PDF, f"Incorrectly detected PDF for: {file_path}"
+            assert language != Language.PDF, (
+                f"Incorrectly detected PDF for: {file_path}"
+            )
 
     def test_pdf_in_supported_extensions(self):
         """Test that .pdf is recognized through from_file_extension method."""
@@ -63,15 +66,21 @@ class TestPDFLanguageDetection:
         """Test that PDF files are supported even if not in default patterns."""
         # PDF is supported but might not be in default patterns since it doesn't use tree-sitter
         # Test that is_supported_file works correctly instead
-        assert Language.is_supported_file("document.pdf"), "PDF files should be supported"
-        assert Language.is_supported_file(Path("report.pdf")), "PDF Path objects should be supported"
+        assert Language.is_supported_file("document.pdf"), (
+            "PDF files should be supported"
+        )
+        assert Language.is_supported_file(Path("report.pdf")), (
+            "PDF Path objects should be supported"
+        )
 
     def test_is_supported_file_for_pdf(self):
         """Test that PDF files are recognized as supported."""
         test_files = ["test.pdf", "report.PDF", Path("document.pdf")]
 
         for file_path in test_files:
-            assert Language.is_supported_file(file_path), f"PDF file should be supported: {file_path}"
+            assert Language.is_supported_file(file_path), (
+                f"PDF file should be supported: {file_path}"
+            )
 
 
 class TestPDFMapping:
@@ -85,7 +94,7 @@ class TestPDFMapping:
     def test_pdf_mapping_tree_sitter_queries(self):
         """Test that PDF mapping returns empty queries (doesn't use tree-sitter)."""
         mapping = PDFMapping()
-        
+
         # PDF doesn't use tree-sitter, so queries should be empty
         assert mapping.get_function_query() == ""
         assert mapping.get_class_query() == ""
@@ -94,7 +103,7 @@ class TestPDFMapping:
     def test_pdf_mapping_name_extraction(self):
         """Test that PDF mapping returns empty names for tree-sitter nodes."""
         mapping = PDFMapping()
-        
+
         # PDF doesn't use tree-sitter nodes, so names should be empty
         assert mapping.extract_function_name(None, "") == ""
         assert mapping.extract_class_name(None, "") == ""
@@ -127,7 +136,7 @@ class TestPDFParsingWithPyMuPDF:
         chunks = pdf_parser.parse_file(pdf_path, FileId(1))
 
         assert len(chunks) > 0, "Should produce at least one chunk"
-        
+
         # All chunks should be PDF type
         for chunk in chunks:
             assert chunk.language == Language.PDF
@@ -187,14 +196,13 @@ class TestPDFParsingWithPyMuPDF:
 
         for chunk in chunks:
             symbol = chunk.symbol
-            
+
             # Should contain page information
             assert "page_" in symbol, f"Symbol should contain page info: {symbol}"
-            
+
             # Should contain either paragraph or content identifier
             assert any(
-                keyword in symbol 
-                for keyword in ["paragraph", "content", "unavailable"]
+                keyword in symbol for keyword in ["paragraph", "content", "unavailable"]
             ), f"Symbol should contain content type: {symbol}"
 
     @pytest.mark.skipif(not PYMUPDF_AVAILABLE, reason="PyMuPDF not installed")
@@ -223,13 +231,15 @@ class TestPDFParsingWithPyMuPDF:
 
         for chunk in chunks:
             content = chunk.code
-            
+
             # Content should not be empty
             assert content.strip(), f"Chunk content should not be empty: {chunk.symbol}"
-            
+
             # Should not have excessive whitespace
-            assert not content.startswith("   "), "Should not have excessive leading whitespace"
-            
+            assert not content.startswith("   "), (
+                "Should not have excessive leading whitespace"
+            )
+
             # Should contain readable text
             assert len(content.split()) > 0, "Should contain words"
 
@@ -241,15 +251,15 @@ class TestPDFParsingErrorHandling:
     def test_pdf_parsing_without_pymupdf(self):
         """Test PDF parsing when PyMuPDF is not available."""
         # Mock PyMuPDF as unavailable
-        with patch('chunkhound.parsers.universal_parser.PYMUPDF_AVAILABLE', False):
+        with patch("chunkhound.parsers.universal_parser.PYMUPDF_AVAILABLE", False):
             parser = create_parser_for_language(Language.PDF)
-            
+
             # Mock the path existence and content
-            with patch('pathlib.Path.exists', return_value=True):
-                with patch('pathlib.Path.read_bytes', return_value=b'fake pdf content'):
+            with patch("pathlib.Path.exists", return_value=True):
+                with patch("pathlib.Path.read_bytes", return_value=b"fake pdf content"):
                     fake_pdf_path = Path("fake.pdf")
                     chunks = parser.parse_file(fake_pdf_path, FileId(7))
-                    
+
                     # Should return a single error chunk
                     assert len(chunks) == 1
                     chunk = chunks[0]
@@ -261,7 +271,7 @@ class TestPDFParsingErrorHandling:
         """Test PDF parsing with non-existent file."""
         parser = create_parser_for_language(Language.PDF)
         nonexistent_path = Path("nonexistent.pdf")
-        
+
         with pytest.raises(FileNotFoundError):
             parser.parse_file(nonexistent_path, FileId(8))
 
@@ -269,15 +279,15 @@ class TestPDFParsingErrorHandling:
     def test_pdf_parsing_corrupted_content(self):
         """Test PDF parsing with corrupted PDF content."""
         parser = create_parser_for_language(Language.PDF)
-        
+
         # Mock a corrupted PDF using patch for Path methods
         corrupted_content = b"This is not a valid PDF content"
-        
-        with patch('pathlib.Path.exists', return_value=True):
-            with patch('pathlib.Path.read_bytes', return_value=corrupted_content):
+
+        with patch("pathlib.Path.exists", return_value=True):
+            with patch("pathlib.Path.read_bytes", return_value=corrupted_content):
                 fake_pdf_path = Path("corrupted.pdf")
                 chunks = parser.parse_file(fake_pdf_path, FileId(9))
-                
+
                 # Should handle the error gracefully
                 # Exact behavior may vary, but should not crash
                 assert isinstance(chunks, list)
@@ -289,7 +299,7 @@ class TestPDFParserFactory:
     def test_create_pdf_parser(self):
         """Test that PDF parser can be created through factory."""
         parser = create_parser_for_language(Language.PDF)
-        
+
         assert parser is not None
         assert isinstance(parser, UniversalParser)
         assert parser.language_name == "pdf"
@@ -297,7 +307,7 @@ class TestPDFParserFactory:
     def test_pdf_parser_mapping(self):
         """Test that PDF parser uses correct mapping."""
         parser = create_parser_for_language(Language.PDF)
-        
+
         # Should use PDF mapping
         assert isinstance(parser.base_mapping, PDFMapping)
         assert parser.base_mapping.language == Language.PDF
@@ -309,9 +319,9 @@ class TestPDFIntegration:
     def test_pdf_in_universal_parser(self):
         """Test that PDF is properly integrated in universal parser."""
         from chunkhound.parsers.parser_factory import LANGUAGE_CONFIGS
-        
+
         assert Language.PDF in LANGUAGE_CONFIGS, "PDF should be in language configs"
-        
+
         pdf_config = LANGUAGE_CONFIGS[Language.PDF]
         assert pdf_config.available, "PDF should be available"
         assert pdf_config.language_name == "pdf"
@@ -321,7 +331,7 @@ class TestPDFIntegration:
         # Test the actual extension mapping that exists
         language = Language.from_file_extension("test.pdf")
         assert language == Language.PDF, "PDF extension should map to Language.PDF"
-        
+
         # Test that the parser factory can create a PDF parser
         parser = create_parser_for_language(Language.PDF)
         assert parser is not None, "Should be able to create PDF parser"

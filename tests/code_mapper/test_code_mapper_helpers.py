@@ -33,7 +33,9 @@ def test_extract_points_of_interest_dedupes_and_respects_limit() -> None:
 
 
 def test_derive_heading_from_point_strips_formatting() -> None:
-    heading = code_mapper_pipeline._derive_heading_from_point("**Heading**: details here")
+    heading = code_mapper_pipeline._derive_heading_from_point(
+        "**Heading**: details here"
+    )
 
     assert heading == "Heading"
 

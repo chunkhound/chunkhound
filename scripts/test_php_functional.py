@@ -1,8 +1,9 @@
 """Functional test for PHP parser - end-to-end verification."""
 
 from pathlib import Path
-from chunkhound.parsers.parser_factory import ParserFactory
+
 from chunkhound.core.types.common import Language
+from chunkhound.parsers.parser_factory import ParserFactory
 
 # Test 1: Parser availability
 factory = ParserFactory()
@@ -10,7 +11,9 @@ assert factory.is_language_available(Language.PHP), "PHP not available"
 print("✅ Test 1: PHP parser is available")
 
 # Test 2: Extension detection
-assert factory.detect_language(Path("test.php")) == Language.PHP, "Extension detection failed"
+assert factory.detect_language(Path("test.php")) == Language.PHP, (
+    "Extension detection failed"
+)
 print("✅ Test 2: Extension detection works")
 
 # Test 3: Parser creation

@@ -6,7 +6,7 @@ string/env-like tokens are embedded and discoverable.
 
 from pathlib import Path
 
-from chunkhound.core.types.common import Language, ChunkType
+from chunkhound.core.types.common import Language
 from chunkhound.parsers.parser_factory import ParserFactory
 
 
@@ -55,11 +55,7 @@ def test_js_module_exports_object_literal_chunked():
 
 
 def test_js_named_export_const_object_literal_chunked():
-    code = (
-        "export const config = {\n"
-        "  serviceUrl: process.env.SERVICE_URL\n"
-        "};\n"
-    )
+    code = "export const config = {\n  serviceUrl: process.env.SERVICE_URL\n};\n"
     chunks = _parse(code, "config.js", Language.JAVASCRIPT)
     assert len(chunks) > 0
     assert any("SERVICE_URL" in c.code for c in chunks)
@@ -67,8 +63,7 @@ def test_js_named_export_const_object_literal_chunked():
 
 def test_js_const_then_export_named_binding_chunked():
     code = (
-        "const config = { serviceUrl: process.env.SERVICE_URL };\n"
-        "export { config };\n"
+        "const config = { serviceUrl: process.env.SERVICE_URL };\nexport { config };\n"
     )
     chunks = _parse(code, "config.js", Language.JAVASCRIPT)
     assert len(chunks) > 0
@@ -76,12 +71,7 @@ def test_js_const_then_export_named_binding_chunked():
 
 
 def test_js_export_default_array_literal_chunked():
-    code = (
-        "export default [\n"
-        "  process.env.SERVICE_URL,\n"
-        "  'other'\n"
-        "];\n"
-    )
+    code = "export default [\n  process.env.SERVICE_URL,\n  'other'\n];\n"
     chunks = _parse(code, "config.js", Language.JAVASCRIPT)
     assert len(chunks) > 0
     assert any("SERVICE_URL" in c.code for c in chunks)

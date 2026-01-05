@@ -1,7 +1,7 @@
 """Unit tests for chunk ID generation using content-based hashing."""
 
+
 import pytest
-from pathlib import Path
 
 from chunkhound.core.models.chunk import Chunk
 from chunkhound.core.types.common import ChunkType, Language
@@ -80,7 +80,9 @@ class TestChunkHashing:
 
         # Python's int is unbounded, but we want to ensure it fits in int64
         # int64 range: -2^63 to 2^63-1
-        assert -(2**63) <= chunk_id <= (2**63 - 1), "Chunk ID should fit in 64-bit signed integer"
+        assert -(2**63) <= chunk_id <= (2**63 - 1), (
+            "Chunk ID should fit in 64-bit signed integer"
+        )
 
     def test_chunk_id_empty_content(self):
         """Verify empty content is handled correctly."""
@@ -90,7 +92,9 @@ class TestChunkHashing:
         id2 = generate_chunk_id(file_id, "")
 
         assert id1 == id2, "Empty content should produce consistent IDs"
-        assert isinstance(id1, int), "Empty content should still produce valid integer ID"
+        assert isinstance(id1, int), (
+            "Empty content should still produce valid integer ID"
+        )
 
     def test_chunk_id_large_content(self):
         """Verify large content is handled efficiently."""
@@ -100,7 +104,9 @@ class TestChunkHashing:
 
         chunk_id = generate_chunk_id(file_id, large_code)
 
-        assert isinstance(chunk_id, int), "Large content should produce valid integer ID"
+        assert isinstance(chunk_id, int), (
+            "Large content should produce valid integer ID"
+        )
 
     def test_chunk_id_unicode_content(self):
         """Verify Unicode content is handled correctly."""
@@ -126,7 +132,9 @@ class TestChunkHashing:
             chunk_ids.add(chunk_id)
 
         # All IDs should be unique
-        assert len(chunk_ids) == 1000, "No collisions expected for 1000 different chunks"
+        assert len(chunk_ids) == 1000, (
+            "No collisions expected for 1000 different chunks"
+        )
 
     def test_chunk_id_different_concepts_different_ids(self):
         """Verify same content with different concepts produces different IDs."""
@@ -136,8 +144,9 @@ class TestChunkHashing:
         id_definition = generate_chunk_id(file_id, code, concept="DEFINITION")
         id_block = generate_chunk_id(file_id, code, concept="BLOCK")
 
-        assert id_definition != id_block, \
+        assert id_definition != id_block, (
             "Same content with different concepts should have different IDs"
+        )
 
     def test_chunk_id_concept_optional(self):
         """Verify concept parameter is optional (backward compatibility)."""
@@ -147,8 +156,9 @@ class TestChunkHashing:
         id_without = generate_chunk_id(file_id, code)
         id_with_none = generate_chunk_id(file_id, code, concept=None)
 
-        assert id_without == id_with_none, \
+        assert id_without == id_with_none, (
             "Calling without concept should be same as concept=None"
+        )
 
     def test_chunk_id_deterministic_with_concept(self):
         """Verify same inputs produce same ID (determinism with concept)."""
@@ -158,8 +168,9 @@ class TestChunkHashing:
         id1 = generate_chunk_id(file_id, code, concept="DEFINITION")
         id2 = generate_chunk_id(file_id, code, concept="DEFINITION")
 
-        assert id1 == id2, \
+        assert id1 == id2, (
             "Same file_id + content + concept should produce identical IDs"
+        )
 
 
 class TestLanceDBProviderChunkIDGeneration:

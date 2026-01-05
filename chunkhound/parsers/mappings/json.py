@@ -252,7 +252,7 @@ class JsonMapping(BaseMapping):
             # Store formatted version in metadata for cases where pretty-printed JSON is needed
             try:
                 metadata["formatted_json"] = json.dumps(data, indent=2)
-            except:
+            except Exception:
                 pass  # Skip if formatting fails
 
         return metadata

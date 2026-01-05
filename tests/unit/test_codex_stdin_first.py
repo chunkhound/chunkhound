@@ -39,8 +39,11 @@ class _DummyProc:
 async def test_codex_stdin_is_default(monkeypatch, tmp_path: Path):
     """By default, provider should use stdin (argument '-' after 'exec')."""
     from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
+
     # Force availability
-    monkeypatch.setattr(CodexCLIProvider, "_codex_available", lambda self: True, raising=True)
+    monkeypatch.setattr(
+        CodexCLIProvider, "_codex_available", lambda self: True, raising=True
+    )
 
     # Deterministic overlay path
     overlay_dir = tmp_path / "overlay-home"
@@ -51,7 +54,9 @@ async def test_codex_stdin_is_default(monkeypatch, tmp_path: Path):
         requested_model["value"] = model_override
         return str(overlay_dir)
 
-    monkeypatch.setattr(CodexCLIProvider, "_build_overlay_home", _fake_overlay_home, raising=True)
+    monkeypatch.setattr(
+        CodexCLIProvider, "_build_overlay_home", _fake_overlay_home, raising=True
+    )
 
     captured_args = {}
 
@@ -61,10 +66,14 @@ async def test_codex_stdin_is_default(monkeypatch, tmp_path: Path):
         captured_args["kwargs"] = dict(kwargs)
         return _DummyProc(rc=0, out=b"OK", err=b"")
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True)
+    monkeypatch.setattr(
+        asyncio, "create_subprocess_exec", _fake_create_subprocess_exec, raising=True
+    )
 
     prov = CodexCLIProvider(model="codex")
-    out = await prov._run_exec("ping", cwd=None, max_tokens=32, timeout=10, model="codex")  # type: ignore[attr-defined]
+    out = await prov._run_exec(
+        "ping", cwd=None, max_tokens=32, timeout=10, model="codex"
+    )  # type: ignore[attr-defined]
     assert out.strip() == "OK"
 
     # Validate that the provider invoked: codex exec -

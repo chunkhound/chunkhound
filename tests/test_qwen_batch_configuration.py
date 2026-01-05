@@ -134,9 +134,9 @@ class TestQwenModelConfig:
         }
 
         for model_name, config in QWEN_MODEL_CONFIG.items():
-            assert all(
-                field in config for field in required_fields
-            ), f"Model {model_name} missing required fields"
+            assert all(field in config for field in required_fields), (
+                f"Model {model_name} missing required fields"
+            )
 
     def test_qwen_reranker_models_exist(self):
         """Verify Qwen reranker models are in config."""
@@ -173,18 +173,18 @@ class TestQwenModelConfig:
         qwen_8b = QWEN_MODEL_CONFIG.get("qwen3-embedding-8b")
 
         if qwen_0_6b and qwen_8b:
-            assert (
-                qwen_0_6b["max_texts_per_batch"] > qwen_8b["max_texts_per_batch"]
-            ), "Smaller model should have larger batch size"
+            assert qwen_0_6b["max_texts_per_batch"] > qwen_8b["max_texts_per_batch"], (
+                "Smaller model should have larger batch size"
+            )
 
         # Reranker models
         rerank_0_6b = QWEN_MODEL_CONFIG.get("qwen3-reranker-0.6b")
         rerank_8b = QWEN_MODEL_CONFIG.get("qwen3-reranker-8b")
 
         if rerank_0_6b and rerank_8b:
-            assert (
-                rerank_0_6b["max_rerank_batch"] > rerank_8b["max_rerank_batch"]
-            ), "Smaller reranker should have larger batch size"
+            assert rerank_0_6b["max_rerank_batch"] > rerank_8b["max_rerank_batch"], (
+                "Smaller reranker should have larger batch size"
+            )
 
 
 @pytest.mark.asyncio
@@ -210,7 +210,9 @@ class TestQwenBatchSplitting:
             # Return mock results
             from chunkhound.interfaces.embedding_provider import RerankResult
 
-            results = [RerankResult(index=i, score=1.0 - i * 0.1) for i in range(len(docs))]
+            results = [
+                RerankResult(index=i, score=1.0 - i * 0.1) for i in range(len(docs))
+            ]
             # Respect top_k if provided
             if top_k is not None:
                 return results[:top_k]
@@ -248,7 +250,9 @@ class TestQwenBatchSplitting:
 
             from chunkhound.interfaces.embedding_provider import RerankResult
 
-            return [RerankResult(index=i, score=1.0 - i * 0.01) for i in range(len(docs))]
+            return [
+                RerankResult(index=i, score=1.0 - i * 0.01) for i in range(len(docs))
+            ]
 
         provider._rerank_single_batch = mock_rerank
 
@@ -417,17 +421,23 @@ class TestRerankErrorHandling:
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
         # Patch httpx.AsyncClient in the provider module (after client is initialized)
-        with patch("chunkhound.providers.embeddings.openai_provider.httpx.AsyncClient", return_value=mock_client):
+        with patch(
+            "chunkhound.providers.embeddings.openai_provider.httpx.AsyncClient",
+            return_value=mock_client,
+        ):
             with pytest.raises(ValueError) as exc_info:
                 await provider.rerank("test query", ["doc1", "doc2"])
 
             # Verify error message contains server error details
             assert "Validation" in str(exc_info.value)
-            assert "batch size 64 > maximum allowed batch size 32" in str(exc_info.value)
+            assert "batch size 64 > maximum allowed batch size 32" in str(
+                exc_info.value
+            )
 
     async def test_error_json_response_http_413(self):
         """Test that HTTP 413 errors are properly raised."""
         from unittest.mock import AsyncMock, MagicMock, patch
+
         import httpx
 
         provider = OpenAIEmbeddingProvider(
@@ -461,7 +471,10 @@ class TestRerankErrorHandling:
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
         # Patch httpx.AsyncClient in the provider module (after client is initialized)
-        with patch("chunkhound.providers.embeddings.openai_provider.httpx.AsyncClient", return_value=mock_client):
+        with patch(
+            "chunkhound.providers.embeddings.openai_provider.httpx.AsyncClient",
+            return_value=mock_client,
+        ):
             with pytest.raises(httpx.HTTPStatusError) as exc_info:
                 await provider.rerank("test query", ["doc1", "doc2"])
 

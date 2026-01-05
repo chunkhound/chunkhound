@@ -255,17 +255,19 @@ class VoyageAIEmbeddingProvider:
                 error_module = type(e).__module__
 
                 # Network errors that should be retried
-                is_network_error = any([
-                    "APIConnectionError" in error_type,
-                    "ConnectionError" in error_type,
-                    "RemoteDisconnected" in error_type,
-                    "Timeout" in error_type,
-                    "TimeoutError" in error_type,
-                ])
+                is_network_error = any(
+                    [
+                        "APIConnectionError" in error_type,
+                        "ConnectionError" in error_type,
+                        "RemoteDisconnected" in error_type,
+                        "Timeout" in error_type,
+                        "TimeoutError" in error_type,
+                    ]
+                )
 
                 if is_network_error and attempt < self._retry_attempts - 1:
                     # Exponential backoff for network errors
-                    delay = self._retry_delay * (2 ** attempt)
+                    delay = self._retry_delay * (2**attempt)
                     logger.warning(
                         f"VoyageAI embedding failed with {error_module}.{error_type} "
                         f"(attempt {attempt + 1}/{self._retry_attempts}): {e}. "
@@ -280,11 +282,15 @@ class VoyageAIEmbeddingProvider:
                             f"VoyageAI embedding failed after {self._retry_attempts} attempts: {e}"
                         )
                     else:
-                        logger.error(f"VoyageAI embedding failed with non-retryable error: {e}")
+                        logger.error(
+                            f"VoyageAI embedding failed with non-retryable error: {e}"
+                        )
                     raise RuntimeError(f"Embedding generation failed: {e}") from e
 
         # Should never reach here, but provide clear error if we do
-        raise RuntimeError(f"Embedding generation failed after {self._retry_attempts} attempts")
+        raise RuntimeError(
+            f"Embedding generation failed after {self._retry_attempts} attempts"
+        )
 
     async def embed_single(self, text: str) -> list[float]:
         """Generate embedding for a single text."""
@@ -509,17 +515,19 @@ class VoyageAIEmbeddingProvider:
                 error_module = type(e).__module__
 
                 # Network errors that should be retried
-                is_network_error = any([
-                    "APIConnectionError" in error_type,
-                    "ConnectionError" in error_type,
-                    "RemoteDisconnected" in error_type,
-                    "Timeout" in error_type,
-                    "TimeoutError" in error_type,
-                ])
+                is_network_error = any(
+                    [
+                        "APIConnectionError" in error_type,
+                        "ConnectionError" in error_type,
+                        "RemoteDisconnected" in error_type,
+                        "Timeout" in error_type,
+                        "TimeoutError" in error_type,
+                    ]
+                )
 
                 if is_network_error and attempt < self._retry_attempts - 1:
                     # Exponential backoff for network errors
-                    delay = self._retry_delay * (2 ** attempt)
+                    delay = self._retry_delay * (2**attempt)
                     logger.warning(
                         f"VoyageAI reranking failed with {error_module}.{error_type} "
                         f"(attempt {attempt + 1}/{self._retry_attempts}): {e}. "
@@ -534,7 +542,9 @@ class VoyageAIEmbeddingProvider:
                             f"VoyageAI reranking failed after {self._retry_attempts} attempts: {e}"
                         )
                     else:
-                        logger.error(f"VoyageAI reranking failed with non-retryable error: {e}")
+                        logger.error(
+                            f"VoyageAI reranking failed with non-retryable error: {e}"
+                        )
                     raise RuntimeError(f"Reranking failed: {e}") from e
 
         # Should never reach here, but provide clear error if we do

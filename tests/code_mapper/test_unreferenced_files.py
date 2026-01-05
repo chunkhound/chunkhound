@@ -1,4 +1,3 @@
-from typing import Any
 
 from chunkhound.code_mapper.coverage import compute_unreferenced_scope_files
 
