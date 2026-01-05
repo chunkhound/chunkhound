@@ -375,6 +375,11 @@ class ClusteringService:
 
         Raises:
             ValueError: If files dict is empty
+
+        Note:
+            Single files exceeding max_tokens_per_cluster cannot be split further.
+            Such files are returned as-is in their own cluster, potentially
+            exceeding the configured bound. A warning is logged when this occurs.
         """
         if not files:
             raise ValueError("Cannot cluster empty files dictionary")
@@ -471,6 +476,12 @@ class ClusteringService:
 
             # Base case: fits in budget or single file (can't split further)
             fits_budget = cluster_tokens <= max_tokens_per_cluster
+            if not fits_budget and len(file_paths_to_split) == 1:
+                logger.warning(
+                    f"Single file exceeds max_tokens_per_cluster "
+                    f"({cluster_tokens} > {max_tokens_per_cluster}): "
+                    f"{file_paths_to_split[0]}"
+                )
             if fits_budget or len(file_paths_to_split) <= 1:
                 return [file_paths_to_split]
 
