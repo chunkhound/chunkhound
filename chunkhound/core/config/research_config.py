@@ -42,7 +42,12 @@ class ResearchConfig(BaseSettings):
     # Feature Flag
     algorithm: Literal["v1", "v2", "v3"] = Field(
         default="v3",
-        description="Research algorithm version (v1=BFS exploration, v2=hybrid v1 synthesis + wide coverage exploration, v3=parallel BFS + wide coverage)",
+        description=(
+            "Research algorithm version (v1=BFS exploration, v2=hybrid v1 "
+            "synthesis + wide coverage exploration, v3=parallel BFS + wide "
+            "coverage). Note: v3 (default) runs parallel exploration and uses "
+            "more LLM tokens than v1/v2."
+        ),
     )
 
     # Phase 1: Coverage Parameters
