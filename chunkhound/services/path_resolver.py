@@ -141,8 +141,14 @@ class PathResolver(BaseService):
         Returns:
             Absolute path constructed from base_directory + relative path
         """
+        # Canonicalize CWD to handle symlinks (e.g., /home → /System/Volumes/Data/home on macOS)
+        try:
+            canonical_cwd = os.path.realpath(cwd)
+        except (OSError, ValueError):
+            canonical_cwd = cwd  # Fallback to original if canonicalization fails
+
         # Find base_directory that contains the CWD
-        cwd_base = self._find_base_for_path(cwd)
+        cwd_base = self._find_base_for_path(canonical_cwd)
 
         if cwd_base is None:
             logger.warning(
