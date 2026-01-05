@@ -49,7 +49,7 @@ async def test_mcp_server_uses_positional_directory_argument():
             "run",
             "chunkhound",
             "mcp",
-            "--stdio",
+            "stdio",
             str(project_dir),
             cwd=str(home_dir),  # Run from different directory
             env=mcp_env,
@@ -133,7 +133,7 @@ async def test_mcp_server_handles_empty_directory_gracefully():
             "run",
             "chunkhound",
             "mcp",
-            "--stdio",
+            "stdio",
             str(project_dir),
             cwd=str(home_dir),
             stdin=PIPE,

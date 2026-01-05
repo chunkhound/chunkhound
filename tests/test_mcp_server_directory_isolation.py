@@ -227,7 +227,7 @@ Run the application with proper configuration.
                     print(f"  {key} = {value}")
 
             # Critical: Start from test_cwd, not project_dir - pass target path as argument
-            mcp_cmd = ["uv", "run", "chunkhound", "mcp", "--stdio", str(project_dir)]
+            mcp_cmd = ["uv", "run", "chunkhound", "mcp", "stdio", str(project_dir)]
             print(f"Running command: {' '.join(mcp_cmd)} from cwd: {test_cwd}")
             mcp_process = await create_subprocess_exec_safe(
                 *mcp_cmd,
