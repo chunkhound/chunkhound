@@ -265,9 +265,9 @@ async def test_json_filtering_in_directory_processing(tmp_path, real_components)
     coordinator = real_components["coordinator"]
     db = real_components["db"]
 
-    # Create mixed directory structure
-    project_dir = tmp_path / "project"
-    project_dir.mkdir()
+    # Create files directly in tmp_path (must match the base_directory used by fixture)
+    # This ensures path normalization is consistent between storage and lookup.
+    project_dir = tmp_path
 
     # Small config files (should be indexed)
     (project_dir / "tsconfig.json").write_text(
