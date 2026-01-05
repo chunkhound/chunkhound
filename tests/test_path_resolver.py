@@ -20,6 +20,8 @@ class TestPathResolver:
     @pytest.fixture
     def mock_db_provider(self):
         """Create mock database provider with indexed roots."""
+        import os
+
         provider = Mock()
 
         # Mock indexed roots: two projects
@@ -36,12 +38,16 @@ class TestPathResolver:
             },
         ]
 
+        # Canonicalize test paths for comparison (handles macOS symlinks)
+        project1_base = os.path.realpath("/home/user/project1")
+        project2_base = os.path.realpath("/home/user/project2")
+
         # Mock find_base_for_path: returns containing base or None
         def find_base(path: str) -> str | None:
-            if path.startswith("/home/user/project1"):
-                return "/home/user/project1"
-            elif path.startswith("/home/user/project2"):
-                return "/home/user/project2"
+            if path.startswith(project1_base):
+                return project1_base
+            elif path.startswith(project2_base):
+                return project2_base
             return None
 
         provider.find_base_for_path = Mock(side_effect=find_base)
@@ -58,11 +64,15 @@ class TestPathResolver:
         path = "/home/user/project1/src/main.py"
         result = resolver.resolve_path(path)
 
-        # Should return path unchanged (it's already absolute and valid)
-        assert result == path
+        # Should return canonicalized path (symlinks resolved)
+        # On macOS, /home → /System/Volumes/Data/home
+        import os
 
-        # Should have queried database
-        mock_db_provider.find_base_for_path.assert_called_once_with(path)
+        expected = os.path.realpath(path)
+        assert result == expected
+
+        # Should have queried database with canonical path
+        mock_db_provider.find_base_for_path.assert_called_once_with(expected)
 
     def test_resolve_absolute_path_not_in_indexed_base(
         self, resolver, mock_db_provider
@@ -71,11 +81,14 @@ class TestPathResolver:
         path = "/home/user/project3/file.py"
         result = resolver.resolve_path(path)
 
-        # Should return path unchanged (best effort)
-        assert result == path
+        # Should return canonicalized path (symlinks resolved)
+        import os
 
-        # Should have queried database
-        mock_db_provider.find_base_for_path.assert_called_once_with(path)
+        expected = os.path.realpath(path)
+        assert result == expected
+
+        # Should have queried database with canonical path
+        mock_db_provider.find_base_for_path.assert_called_once_with(expected)
 
     def test_resolve_relative_path_with_cwd_in_indexed_base(self, resolver):
         """Test resolving relative path when CWD is in indexed base."""
@@ -163,11 +176,14 @@ class TestPathResolver:
         self, resolver, mock_db_provider
     ):
         """Test resolve_path() handles provider without find_base_for_path."""
+        import os
+
         # Remove method to simulate legacy provider
         delattr(mock_db_provider, "find_base_for_path")
 
         path = "/home/user/project1/src/main.py"
         result = resolver.resolve_path(path)
 
-        # Should return path unchanged (fallback behavior)
-        assert result == path
+        # Should return canonicalized path (fallback behavior)
+        # Path is still resolved for consistency
+        assert result == os.path.realpath(path)

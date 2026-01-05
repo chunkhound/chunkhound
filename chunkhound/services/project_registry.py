@@ -322,13 +322,15 @@ class ProjectRegistry(BaseService):
             self._refresh_cache()
 
             # Try as absolute path first
-            path_key = (
-                str(Path(name_or_path).resolve())
-                if name_or_path.startswith("/")
-                else None
-            )
-            if path_key and path_key in self._cache:
-                return self._cache[path_key]
+            if name_or_path.startswith("/"):
+                # Try both resolved and unresolved paths
+                # (handles symlinks like macOS /home → /System/Volumes/Data/home)
+                resolved_key = str(Path(name_or_path).resolve())
+                if resolved_key in self._cache:
+                    return self._cache[resolved_key]
+                # Also try the original path (for mock/test compatibility)
+                if name_or_path in self._cache:
+                    return self._cache[name_or_path]
 
             # Try as project name
             for project in self._cache.values():

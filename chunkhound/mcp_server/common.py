@@ -71,20 +71,25 @@ def validate_and_join_path(base: str | Path, relative: str) -> str | None:
         relative: The relative path to join
 
     Returns:
-        The joined path string if safe, None if path traversal detected
+        The joined path string if safe, None if path traversal detected.
+        Returns the path using the original base (not symlink-resolved)
+        to preserve caller's path format.
     """
     if not is_safe_relative_path(relative):
         return None
 
+    # Resolve for security check (follows symlinks to detect escapes)
     base_path = Path(base).resolve()
-    joined = base_path / relative
+    joined_resolved = (base_path / relative).resolve()
 
     # Double-check: ensure the resolved path is still under base
     try:
-        joined_resolved = joined.resolve()
         # Check that the joined path starts with the base path
         joined_resolved.relative_to(base_path)
-        return str(joined)
+        # Return using original base to preserve caller's path format
+        # (without symlink resolution)
+        original_base = Path(base)
+        return str(original_base / relative)
     except ValueError:
         # relative_to raises ValueError if not a subpath
         return None

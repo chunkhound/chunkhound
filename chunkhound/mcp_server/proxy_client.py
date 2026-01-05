@@ -52,6 +52,7 @@ class MCPProxyClient:
     DEFAULT_TIMEOUT = 120.0  # 2 minutes for long operations (used when no config)
     MAX_RETRIES = 3
     RETRY_BACKOFF_BASE = 0.5  # Base delay for exponential backoff (seconds)
+    PROTOCOL_VERSION = CURRENT_PROTOCOL_VERSION  # Expose as class attribute for tests
 
     def __init__(
         self,

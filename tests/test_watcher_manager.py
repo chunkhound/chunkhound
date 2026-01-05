@@ -75,7 +75,9 @@ class TestProjectEventHandler:
 
         callback.assert_called_once()
         args = callback.call_args[0]
-        assert args[0] == Path("/home/user/project/src/new.py")
+        # Compare resolved paths for cross-platform consistency
+        # (macOS resolves /home → /System/Volumes/Data/home)
+        assert args[0] == Path("/home/user/project/src/new.py").resolve()
         assert args[1] == "created"
 
     def test_on_created_directory_ignored(self):

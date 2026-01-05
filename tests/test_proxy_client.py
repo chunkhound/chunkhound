@@ -10,6 +10,7 @@ import pytest
 
 from chunkhound.mcp_server.proxy_client import (
     MCPProxyClient,
+    ProxyDecision,
     create_proxy_client_if_available,
     should_use_proxy,
 )
@@ -471,7 +472,9 @@ class TestCreateProxyClientIfAvailable:
         with patch(
             "chunkhound.mcp_server.proxy_client.should_use_proxy"
         ) as mock_should:
-            mock_should.return_value = (True, "http://127.0.0.1:5173")
+            mock_should.return_value = ProxyDecision(
+                use_proxy=True, daemon_url="http://127.0.0.1:5173"
+            )
 
             # Mock the proxy initialization
             with patch.object(
@@ -493,7 +496,7 @@ class TestCreateProxyClientIfAvailable:
         with patch(
             "chunkhound.mcp_server.proxy_client.should_use_proxy"
         ) as mock_should:
-            mock_should.return_value = (False, None)
+            mock_should.return_value = ProxyDecision(use_proxy=False, daemon_url=None)
 
             proxy = await create_proxy_client_if_available()
 
@@ -505,7 +508,9 @@ class TestCreateProxyClientIfAvailable:
         with patch(
             "chunkhound.mcp_server.proxy_client.should_use_proxy"
         ) as mock_should:
-            mock_should.return_value = (True, "http://127.0.0.1:5173")
+            mock_should.return_value = ProxyDecision(
+                use_proxy=True, daemon_url="http://127.0.0.1:5173"
+            )
 
             with patch.object(
                 MCPProxyClient, "initialize", new_callable=AsyncMock
@@ -526,7 +531,9 @@ class TestCreateProxyClientIfAvailable:
         with patch(
             "chunkhound.mcp_server.proxy_client.should_use_proxy"
         ) as mock_should:
-            mock_should.return_value = (True, "http://127.0.0.1:5173")
+            mock_should.return_value = ProxyDecision(
+                use_proxy=True, daemon_url="http://127.0.0.1:5173"
+            )
 
             with patch.object(
                 MCPProxyClient, "initialize", new_callable=AsyncMock

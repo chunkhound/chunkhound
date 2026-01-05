@@ -969,6 +969,14 @@ def _resolve_paths(
     tags: list[str] | None = arguments.get("tags")
     client_project = client_context.get("project") if client_context else None
 
+    # Normalize path to list (handle string input defensively)
+    if isinstance(path_list, str):
+        logger.warning(
+            f"path should be list[str], got string: {path_list!r}. "
+            "Wrapping in list for compatibility."
+        )
+        path_list = [path_list]
+
     # Handle tags - expand to matching project directories
     if tags and project_registry:
         matching_projects = project_registry.get_projects_by_tags(tags)

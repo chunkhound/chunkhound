@@ -140,8 +140,10 @@ class TestUpdateQueue:
 
         batch = queue.dequeue_batch(limit=2)
 
-        assert batch[0] == file1
-        assert batch[1] == file2
+        # Compare resolved paths (enqueue resolves symlinks for consistency)
+        # On macOS, /var → /private/var
+        assert batch[0] == file1.resolve()
+        assert batch[1] == file2.resolve()
 
     def test_peek_does_not_remove_items(self, queue, temp_project_dir):
         """Test peek() views items without removing them."""

@@ -146,7 +146,7 @@ async def test_code_research_forwards_path_argument_to_impl(
         tool_name="code_research",
         services=services,
         embedding_manager=em,
-        arguments={"query": "dummy question", "path": "repo-a"},
+        arguments={"query": "dummy question", "path": ["repo-a"]},
         scan_progress=None,
         llm_manager=llm,
     )
@@ -154,4 +154,4 @@ async def test_code_research_forwards_path_argument_to_impl(
     # execute_tool flattens code_research dict responses to raw markdown string
     assert result == "PATH_OK"
     assert captured.get("query") == "dummy question"
-    assert captured.get("path") == "repo-a"
+    assert captured.get("path") == ["repo-a"]
