@@ -260,6 +260,17 @@ sys.exit(asyncio.run(test()))
             mcp_env = get_safe_subprocess_env(os.environ)
             mcp_env["CHUNKHOUND_MCP_MODE"] = "1"
 
+            # Clear any CHUNKHOUND_EMBEDDING__ env vars to prevent test environment
+            # from overriding the test's embedding config (pydantic-settings merges env)
+            for key in list(mcp_env.keys()):
+                if key.startswith("CHUNKHOUND_EMBEDDING"):
+                    del mcp_env[key]
+
+            # Also clear multi-repo env vars to ensure per-repo mode
+            for key in list(mcp_env.keys()):
+                if key.startswith("CHUNKHOUND_DATABASE__MULTI_REPO"):
+                    del mcp_env[key]
+
             proc = await create_subprocess_exec_safe(
                 "uv",
                 "run",

@@ -199,6 +199,11 @@ class DatabaseConfig(BaseModel):
         elif self.provider == "lancedb":
             # LanceDB adds .lancedb suffix to prevent naming collisions
             # and clarify storage structure (see lancedb_provider.py:111-113)
+            # Guard against double-suffixing when path was already transformed
+            # (e.g., when create_services() sets config.database.path to an
+            # already-transformed path and registry calls get_db_path() again)
+            if str(db_dir).endswith(".lancedb"):
+                return db_dir
             lancedb_base = db_dir / "lancedb"
             return lancedb_base.parent / f"{lancedb_base.stem}.lancedb"
         else:

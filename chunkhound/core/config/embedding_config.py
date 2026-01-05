@@ -243,6 +243,30 @@ class EmbeddingConfig(BaseSettings):
         else:  # openai
             return "text-embedding-3-small"
 
+    def _has_openai_api_key(self) -> bool:
+        """Check if OpenAI API key is available from config or environment.
+
+        The OpenAI provider supports OPENAI_API_KEY as a fallback, so we should
+        consider the provider configured if either config api_key or the env var
+        is set. This matches the behavior of the actual OpenAI provider.
+        """
+        if self.api_key is not None:
+            return True
+        # Check standard OpenAI env var as fallback
+        return bool(os.environ.get("OPENAI_API_KEY"))
+
+    def _has_voyageai_api_key(self) -> bool:
+        """Check if VoyageAI API key is available from config or environment.
+
+        The VoyageAI provider supports VOYAGE_API_KEY as a fallback, so we should
+        consider the provider configured if either config api_key or the env var
+        is set. This matches the behavior of the actual VoyageAI provider.
+        """
+        if self.api_key is not None:
+            return True
+        # Check standard VoyageAI env var as fallback
+        return bool(os.environ.get("VOYAGE_API_KEY"))
+
     def is_provider_configured(self) -> bool:
         """
         Check if the selected provider is properly configured.
@@ -253,12 +277,14 @@ class EmbeddingConfig(BaseSettings):
         if self.provider == "openai":
             # For OpenAI provider, only require API key for official endpoints
             if is_official_openai_endpoint(self.base_url):
-                return self.api_key is not None
+                return self._has_openai_api_key()
             else:
                 # Custom endpoints don't require API key
                 return True
+        elif self.provider == "voyageai":
+            return self._has_voyageai_api_key()
         else:
-            # For other providers (voyageai, etc.), always require API key
+            # For other providers, always require API key in config
             return self.api_key is not None
 
     def get_missing_config(self) -> list[str]:
@@ -272,10 +298,13 @@ class EmbeddingConfig(BaseSettings):
 
         if self.provider == "openai":
             # For OpenAI provider, only require API key for official endpoints
-            if is_official_openai_endpoint(self.base_url) and not self.api_key:
-                missing.append("api_key (set CHUNKHOUND_EMBEDDING_API_KEY)")
+            if is_official_openai_endpoint(self.base_url) and not self._has_openai_api_key():
+                missing.append("api_key (set CHUNKHOUND_EMBEDDING_API_KEY or OPENAI_API_KEY)")
+        elif self.provider == "voyageai":
+            if not self._has_voyageai_api_key():
+                missing.append("api_key (set CHUNKHOUND_EMBEDDING_API_KEY or VOYAGE_API_KEY)")
         else:
-            # For other providers (voyageai, etc.), always require API key
+            # For other providers, always require API key in config
             if not self.api_key:
                 missing.append("api_key (set CHUNKHOUND_EMBEDDING_API_KEY)")
 
