@@ -137,12 +137,11 @@ class SearchService(BaseService):
             # Resolve path_filter for multi-repo mode
             # NOTE: For MCP tools, paths are pre-resolved by
             # _resolve_search_scope() in tools.py using client context.
-            # This PathResolver call is a fallback for:
-            #   1. Per-repo mode (no client context)
-            #   2. Direct SDK usage bypassing MCP tools
-            # WARNING: os.getcwd() is daemon's directory in global mode.
-            # For multi-repo, use projects/tags/search_all or absolute paths.
-            if path_filter:
+            # Path resolution for multi-repo mode is handled at the MCP tools layer
+            # via _resolve_paths(). Here we only resolve ABSOLUTE paths to canonical
+            # form. Relative paths like "services/engine" are used as substring
+            # filters for database LIKE queries and should NOT be resolved.
+            if path_filter and os.path.isabs(path_filter):
                 resolved_path = self._path_resolver.resolve_path(
                     path_filter, current_working_dir=os.getcwd()
                 )
@@ -269,10 +268,11 @@ class SearchService(BaseService):
                 )
                 return enhanced_results, pagination
 
-            # Resolve path_filter for multi-repo mode
-            # (see semantic search for details on fallback behavior)
+            # Path resolution for multi-repo mode is handled at the MCP tools layer.
+            # Only resolve ABSOLUTE paths to canonical form. Relative paths like
+            # "utils/" are used as substring filters for database LIKE queries.
             resolved_path_filter = path_filter
-            if path_filter:
+            if path_filter and os.path.isabs(path_filter):
                 resolved_path = self._path_resolver.resolve_path(
                     path_filter, current_working_dir=os.getcwd()
                 )
@@ -360,10 +360,11 @@ class SearchService(BaseService):
                 )
                 return enhanced_results, pagination
 
-            # Resolve path_filter for multi-repo mode
-            # (see semantic search for details on fallback behavior)
+            # Path resolution for multi-repo mode is handled at the MCP tools layer.
+            # Only resolve ABSOLUTE paths to canonical form. Relative paths like
+            # "utils/" are used as substring filters for database LIKE queries.
             resolved_path_filter = path_filter
-            if path_filter:
+            if path_filter and os.path.isabs(path_filter):
                 resolved_path = self._path_resolver.resolve_path(
                     path_filter, current_working_dir=os.getcwd()
                 )
