@@ -3,101 +3,362 @@
 This module contains components used across multiple research implementations
 (v1 BFS and future versions). Components that are v1-specific remain in the
 parent directory.
+
+Uses lazy imports to defer import costs until symbols are actually accessed.
 """
 
-# Core models
-# Services
-from chunkhound.services.research.shared.budget_calculator import BudgetCalculator
-from chunkhound.services.research.shared.chunk_context_builder import (
-    ChunkContextBuilder,
-)
-from chunkhound.services.research.shared.chunk_dedup import (
-    deduplicate_chunks,
-    get_chunk_id,
-    merge_chunk_lists,
-)
-from chunkhound.services.research.shared.citation_manager import CitationManager
-from chunkhound.services.research.shared.context_manager import ContextManager
-from chunkhound.services.research.shared.depth_exploration import (
-    DepthExplorationService,
-)
-from chunkhound.services.research.shared.elbow_detection import find_elbow_kneedle
-from chunkhound.services.research.shared.evidence_ledger import (
-    CONSTANTS_INSTRUCTION_FULL,
-    CONSTANTS_INSTRUCTION_SHORT,
-    FACT_EXTRACTION_SYSTEM,
-    FACT_EXTRACTION_USER,
-    FACTS_MAP_INSTRUCTION,
-    FACTS_REDUCE_INSTRUCTION,
-    ConfidenceLevel,
-    ConstantEntry,
-    EntityLink,
-    EvidenceLedger,
-    EvidenceType,
-    FactConflict,
-    FactEntry,
-    FactExtractor,
-)
-from chunkhound.services.research.shared.file_reader import FileReader
-from chunkhound.services.research.shared.gap_detection import GapDetectionService
-from chunkhound.services.research.shared.gap_models import GapCandidate, UnifiedGap
-from chunkhound.services.research.shared.import_context import ImportContextService
-from chunkhound.services.research.shared.import_resolution_helper import (
-    resolve_and_fetch_imports,
-)
-from chunkhound.services.research.shared.import_resolver import ImportResolverService
-from chunkhound.services.research.shared.models import (
-    _CITATION_PATTERN,
-    _CITATION_SEQUENCE_PATTERN,
-    CLUSTER_OUTPUT_TOKEN_BUDGET,
-    ENABLE_ADAPTIVE_BUDGETS,
-    ENABLE_SMART_BOUNDARIES,
-    EXTRA_CONTEXT_TOKENS,
-    FACT_EXTRACTION_TOKENS,
-    FACTS_LEDGER_MAX_ENTRIES,
-    FILE_CONTENT_TOKENS_MAX,
-    FILE_CONTENT_TOKENS_MIN,
-    FOLLOWUP_OUTPUT_TOKENS_MAX,
-    FOLLOWUP_OUTPUT_TOKENS_MIN,
-    IMPORT_DEFAULT_SCORE,
-    IMPORT_SYNTHESIS_SCORE,
-    INTERNAL_MAX_TOKENS,
-    INTERNAL_ROOT_TARGET,
-    LEAF_ANSWER_TOKENS_BASE,
-    LEAF_ANSWER_TOKENS_BONUS,
-    LLM_INPUT_TOKENS_MAX,
-    LLM_INPUT_TOKENS_MIN,
-    MAX_BOUNDARY_EXPANSION_LINES,
-    MAX_CHUNKS_PER_FILE_REPR,
-    MAX_FACTS_PER_CLUSTER,
-    MAX_FILE_CONTENT_TOKENS,
-    MAX_FOLLOWUP_QUESTIONS,
-    MAX_LEAF_ANSWER_TOKENS,
-    MAX_LLM_INPUT_TOKENS,
-    MAX_SYMBOLS_TO_SEARCH,
-    MAX_SYNTHESIS_TOKENS,
-    MAX_TOKENS_PER_CLUSTER,
-    MAX_TOKENS_PER_FILE_REPR,
-    NODE_SIMILARITY_THRESHOLD,
-    NUM_LLM_EXPANDED_QUERIES,
-    OUTPUT_TOKENS_WITH_REASONING,
-    QUERY_EXPANSION_ENABLED,
-    QUERY_EXPANSION_TOKENS,
-    QUESTION_FILTERING_TOKENS,
-    QUESTION_SYNTHESIS_TOKENS,
-    RELEVANCE_THRESHOLD,
-    REQUIRE_CITATIONS,
-    SINGLE_PASS_MAX_TOKENS,
-    SINGLE_PASS_OVERHEAD_TOKENS,
-    SINGLE_PASS_TIMEOUT_SECONDS,
-    TARGET_OUTPUT_TOKENS,
-    TOKEN_BUDGET_PER_FILE,
-    BFSNode,
-    ResearchContext,
-    build_output_guidance,
-)
-from chunkhound.services.research.shared.query_expander import QueryExpander
-from chunkhound.services.research.shared.unified_search import UnifiedSearch
+import importlib
+from typing import Any
+
+# Mapping of symbol names to (module_path, attribute_name)
+# When attribute_name is None, it means the symbol name matches the attribute name
+_LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
+    # Services
+    "BudgetCalculator": (
+        "chunkhound.services.research.shared.budget_calculator",
+        None,
+    ),
+    "ChunkContextBuilder": (
+        "chunkhound.services.research.shared.chunk_context_builder",
+        None,
+    ),
+    "CitationManager": (
+        "chunkhound.services.research.shared.citation_manager",
+        None,
+    ),
+    "ContextManager": (
+        "chunkhound.services.research.shared.context_manager",
+        None,
+    ),
+    "DepthExplorationService": (
+        "chunkhound.services.research.shared.depth_exploration",
+        None,
+    ),
+    "FileReader": (
+        "chunkhound.services.research.shared.file_reader",
+        None,
+    ),
+    "GapDetectionService": (
+        "chunkhound.services.research.shared.gap_detection",
+        None,
+    ),
+    "ImportContextService": (
+        "chunkhound.services.research.shared.import_context",
+        None,
+    ),
+    "ImportResolverService": (
+        "chunkhound.services.research.shared.import_resolver",
+        None,
+    ),
+    "QueryExpander": (
+        "chunkhound.services.research.shared.query_expander",
+        None,
+    ),
+    "UnifiedSearch": (
+        "chunkhound.services.research.shared.unified_search",
+        None,
+    ),
+    # Chunk deduplication
+    "deduplicate_chunks": (
+        "chunkhound.services.research.shared.chunk_dedup",
+        None,
+    ),
+    "get_chunk_id": (
+        "chunkhound.services.research.shared.chunk_dedup",
+        None,
+    ),
+    "merge_chunk_lists": (
+        "chunkhound.services.research.shared.chunk_dedup",
+        None,
+    ),
+    # Elbow detection
+    "find_elbow_kneedle": (
+        "chunkhound.services.research.shared.elbow_detection",
+        None,
+    ),
+    # Evidence ledger
+    "CONSTANTS_INSTRUCTION_FULL": (
+        "chunkhound.services.research.shared.evidence_ledger",
+        None,
+    ),
+    "CONSTANTS_INSTRUCTION_SHORT": (
+        "chunkhound.services.research.shared.evidence_ledger",
+        None,
+    ),
+    "FACT_EXTRACTION_SYSTEM": (
+        "chunkhound.services.research.shared.evidence_ledger",
+        None,
+    ),
+    "FACT_EXTRACTION_USER": (
+        "chunkhound.services.research.shared.evidence_ledger",
+        None,
+    ),
+    "FACTS_MAP_INSTRUCTION": (
+        "chunkhound.services.research.shared.evidence_ledger",
+        None,
+    ),
+    "FACTS_REDUCE_INSTRUCTION": (
+        "chunkhound.services.research.shared.evidence_ledger",
+        None,
+    ),
+    "ConfidenceLevel": (
+        "chunkhound.services.research.shared.evidence_ledger",
+        None,
+    ),
+    "ConstantEntry": (
+        "chunkhound.services.research.shared.evidence_ledger",
+        None,
+    ),
+    "EntityLink": (
+        "chunkhound.services.research.shared.evidence_ledger",
+        None,
+    ),
+    "EvidenceLedger": (
+        "chunkhound.services.research.shared.evidence_ledger",
+        None,
+    ),
+    "EvidenceType": (
+        "chunkhound.services.research.shared.evidence_ledger",
+        None,
+    ),
+    "FactConflict": (
+        "chunkhound.services.research.shared.evidence_ledger",
+        None,
+    ),
+    "FactEntry": (
+        "chunkhound.services.research.shared.evidence_ledger",
+        None,
+    ),
+    "FactExtractor": (
+        "chunkhound.services.research.shared.evidence_ledger",
+        None,
+    ),
+    # Gap models
+    "GapCandidate": (
+        "chunkhound.services.research.shared.gap_models",
+        None,
+    ),
+    "UnifiedGap": (
+        "chunkhound.services.research.shared.gap_models",
+        None,
+    ),
+    # Import resolution helper
+    "resolve_and_fetch_imports": (
+        "chunkhound.services.research.shared.import_resolution_helper",
+        None,
+    ),
+    # Models - all symbols from the models module
+    "_CITATION_PATTERN": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "_CITATION_SEQUENCE_PATTERN": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "CLUSTER_OUTPUT_TOKEN_BUDGET": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "ENABLE_ADAPTIVE_BUDGETS": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "ENABLE_SMART_BOUNDARIES": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "EXTRA_CONTEXT_TOKENS": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "FACT_EXTRACTION_TOKENS": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "FACTS_LEDGER_MAX_ENTRIES": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "FILE_CONTENT_TOKENS_MAX": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "FILE_CONTENT_TOKENS_MIN": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "FOLLOWUP_OUTPUT_TOKENS_MAX": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "FOLLOWUP_OUTPUT_TOKENS_MIN": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "IMPORT_DEFAULT_SCORE": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "IMPORT_SYNTHESIS_SCORE": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "INTERNAL_MAX_TOKENS": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "INTERNAL_ROOT_TARGET": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "LEAF_ANSWER_TOKENS_BASE": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "LEAF_ANSWER_TOKENS_BONUS": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "LLM_INPUT_TOKENS_MAX": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "LLM_INPUT_TOKENS_MIN": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "MAX_BOUNDARY_EXPANSION_LINES": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "MAX_CHUNKS_PER_FILE_REPR": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "MAX_FACTS_PER_CLUSTER": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "MAX_FILE_CONTENT_TOKENS": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "MAX_FOLLOWUP_QUESTIONS": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "MAX_LEAF_ANSWER_TOKENS": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "MAX_LLM_INPUT_TOKENS": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "MAX_SYMBOLS_TO_SEARCH": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "MAX_SYNTHESIS_TOKENS": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "MAX_TOKENS_PER_CLUSTER": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "MAX_TOKENS_PER_FILE_REPR": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "NODE_SIMILARITY_THRESHOLD": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "NUM_LLM_EXPANDED_QUERIES": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "OUTPUT_TOKENS_WITH_REASONING": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "QUERY_EXPANSION_ENABLED": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "QUERY_EXPANSION_TOKENS": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "QUESTION_FILTERING_TOKENS": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "QUESTION_SYNTHESIS_TOKENS": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "RELEVANCE_THRESHOLD": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "REQUIRE_CITATIONS": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "SINGLE_PASS_MAX_TOKENS": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "SINGLE_PASS_OVERHEAD_TOKENS": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "SINGLE_PASS_TIMEOUT_SECONDS": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "TARGET_OUTPUT_TOKENS": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "TOKEN_BUDGET_PER_FILE": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "BFSNode": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "ResearchContext": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+    "build_output_guidance": (
+        "chunkhound.services.research.shared.models",
+        None,
+    ),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy import handler for module attributes."""
+    if name in _LAZY_IMPORTS:
+        module_path, attr_name = _LAZY_IMPORTS[name]
+        module = importlib.import_module(module_path)
+        attr = getattr(module, attr_name if attr_name else name)
+        # Cache in globals for future access
+        globals()[name] = attr
+        return attr
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    """Return list of available attributes for IDE support."""
+    return list(__all__)
+
 
 __all__ = [
     # Models
