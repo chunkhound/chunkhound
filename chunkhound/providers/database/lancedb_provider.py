@@ -1139,39 +1139,6 @@ class LanceDBProvider(SerialDatabaseProvider):
         # LanceDB doesn't support in-place updates, need to implement via delete/insert
         pass
 
-    def update_chunk_status(self, chunk_id: int, status: str) -> None:
-        """Update the embedding status of a chunk."""
-        return self._execute_in_db_thread_sync("update_chunk_status", chunk_id, status)
-
-    def _executor_update_chunk_status(
-        self, conn: Any, state: dict[str, Any], chunk_id: int, status: str
-    ) -> None:
-        """Executor method for update_chunk_status - runs in DB thread."""
-        if not self._chunks_table:
-            return
-
-        try:
-            # Get existing chunk data
-            existing_chunks = self._chunks_table.search().where(f"id = {chunk_id}").to_list()
-            if not existing_chunks:
-                return
-
-            existing_chunk = existing_chunks[0]
-
-            # Update the status
-            updated_chunk = dict(existing_chunk)
-            updated_chunk["embedding_status"] = status
-            updated_chunk["created_time"] = time.time()  # Update timestamp
-
-            # Use merge_insert to update the record
-            self._chunks_table.merge_insert("id").when_matched_update_all().execute([updated_chunk])
-
-            # Clear caches since chunk data changed
-            self._clear_query_caches()
-
-        except Exception as e:
-            logger.error(f"Error updating chunk status {chunk_id}: {e}")
-
     # Embedding Operations
     def insert_embedding(self, embedding: Embedding) -> int:
         """Insert embedding record and return embedding ID."""
@@ -1363,16 +1330,16 @@ class LanceDBProvider(SerialDatabaseProvider):
             chunks_lookup = {chunk["id"]: chunk for chunk in chunks_data}
 
             # Process in batches for better memory management
-            for i in range(0, len(embeddings_data), batch_size):
-                batch = embeddings_data[i : i + batch_size]
+            for i in range(0, len(chunks_data), batch_size):
+                batch = chunks_data[i : i + batch_size]
 
                 # Build merge data for this batch using provided chunks_data
                 merge_data = []
-                for e in batch:
-                    chunk_id = e["chunk_id"]
-                    chunk = chunks_lookup.get(chunk_id)
-                    if chunk and chunk_id in embedding_lookup:
-                        emb_data = embedding_lookup[chunk_id]
+                for chunk in batch:
+                    chunk_id = chunk["id"]
+                    emb_data = embedding_lookup.get(chunk_id)
+                    if emb_data:
+                        # Chunk has embedding data
                         status = emb_data.get("status")
                         if status is None:
                             # Log callstack for debugging missing status field
@@ -1394,6 +1361,26 @@ class LanceDBProvider(SerialDatabaseProvider):
                                 "model": emb_data["model"],
                                 "embedding_signature": f"{emb_data['provider']}-{emb_data['model']}",
                                 "embedding_status": status,
+                                "created_time": chunk.get("created_time", time.time()),
+                            }
+                        )
+                    else:
+                        # Chunk has no embedding (failed chunk), include only status update
+                        merge_data.append(
+                            {
+                                "id": chunk["id"],
+                                "file_id": chunk["file_id"],
+                                "content": chunk.get("content", chunk.get("code", "")),
+                                "start_line": chunk.get("start_line", 0),
+                                "end_line": chunk.get("end_line", 0),
+                                "chunk_type": chunk.get("chunk_type", ""),
+                                "language": chunk.get("language", ""),
+                                "name": chunk.get("name", chunk.get("symbol", "")),
+                                "embedding": None,
+                                "provider": "",
+                                "model": "",
+                                "embedding_signature": None,
+                                "embedding_status": chunk.get("embedding_status", "failed"),
                                 "created_time": chunk.get("created_time", time.time()),
                             }
                         )

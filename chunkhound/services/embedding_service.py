@@ -939,16 +939,8 @@ class EmbeddingService(BaseService):
                     "embedding": vector,
                     "status": "success",
                 })
-                successful_chunks_total += 1
 
-            # Update chunk statuses for failed chunks
-            for chunk_id, text, classification in batch_result.failed_chunks:
-                if classification == EmbeddingErrorClassification.PERMANENT:
-                    self._db.update_chunk_status(chunk_id, "permanent_failure")
-                    permanent_failures += 1
-                else:
-                    self._db.update_chunk_status(chunk_id, "failed")
-                failed_chunks_total += 1
+
 
             # Merge error statistics
             for error_type, count in batch_result.error_stats.items():
@@ -960,16 +952,34 @@ class EmbeddingService(BaseService):
                     all_error_samples[error_type] = []
                 all_error_samples[error_type].extend(samples[:self._error_sample_limit - len(all_error_samples[error_type])])
 
+        # Update chunks_data with failed statuses
+        chunk_id_to_status = {}
+        for batch_result in batch_results:
+            if isinstance(batch_result, Exception):
+                continue
+            for chunk_id, text, classification in batch_result.failed_chunks:
+                status = "permanent_failure" if classification == EmbeddingErrorClassification.PERMANENT else "failed"
+                chunk_id_to_status[chunk_id] = status
+        if chunks_data:
+            for chunk in chunks_data:
+                if chunk["id"] in chunk_id_to_status:
+                    chunk["embedding_status"] = chunk_id_to_status[chunk["id"]]
+
+        # Derive counters from batch results
+        for batch_result in batch_results:
+            if isinstance(batch_result, Exception):
+                continue
+            successful_chunks_total += len(batch_result.successful_chunks)
+            for chunk_id, text, classification in batch_result.failed_chunks:
+                if classification == EmbeddingErrorClassification.PERMANENT:
+                    permanent_failures += 1
+                failed_chunks_total += 1
+
         # Insert successful embeddings in one batch
         if all_embeddings_data:
             logger.debug(f"Inserting {len(all_embeddings_data)} embeddings in one batch")
 
-            # Filter chunks_data to only include successful chunks
-            embedding_chunk_ids = set(e["chunk_id"] for e in all_embeddings_data)
-            relevant_chunks_data = [
-                chunk for chunk in (chunks_data or [])
-                if chunk.get("id") in embedding_chunk_ids
-            ]
+            relevant_chunks_data = chunks_data or []
 
             try:
                 inserted_count = self._db.insert_embeddings_batch(

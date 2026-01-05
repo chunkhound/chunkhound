@@ -42,6 +42,7 @@ from chunkhound.providers.database.serial_executor import (
     _executor_local,
     track_operation,
 )
+from chunkhound.utils.chunk_hashing import generate_chunk_id
 
 # Type hinting only
 if TYPE_CHECKING:
@@ -113,6 +114,28 @@ class DuckDBProvider(SerialDatabaseProvider):
         # Class-level synchronization for WAL cleanup
         self._wal_cleanup_lock = threading.Lock()
         self._wal_cleanup_done = False
+
+    def _generate_chunk_id_safe(self, chunk: Chunk) -> int:
+        """Generate chunk ID with fallback to hash-based ID.
+
+        Returns chunk.id if present, otherwise generates deterministic
+        hash-based ID from file_id, content, and chunk type.
+
+        Args:
+            chunk: Chunk object to generate ID for
+
+        Returns:
+            Chunk ID (existing or generated)
+        """
+        return chunk.id or generate_chunk_id(
+            chunk.file_id,
+            chunk.code or "",
+            concept=str(
+                chunk.chunk_type.value
+                if hasattr(chunk.chunk_type, "value")
+                else chunk.chunk_type
+            ),
+        )
 
         # Initialize connection manager (will be simplified later)
         self._connection_manager = DuckDBConnectionManager(db_path, config)

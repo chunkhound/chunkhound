@@ -192,6 +192,8 @@ class EmbeddingErrorClassifier:
             "content too large",
             "maximum file size exceeded",
             "chunk size exceeds maximum",
+            "text too large",
+            "oversized chunks found",
             # Authentication/configuration errors
             "invalid api key",
             "authentication failed",
