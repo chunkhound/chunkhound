@@ -421,6 +421,15 @@ class DuckDBProvider(SerialDatabaseProvider):
         logger.info("Creating DuckDB schema")
 
         try:
+            # Create schema_version table for tracking schema versions
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS schema_version (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    description TEXT
+                )
+            """)
+
             # Create sequence for files table
             conn.execute("CREATE SEQUENCE IF NOT EXISTS files_id_seq")
 
@@ -506,6 +515,15 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Handle schema migrations for existing databases
             self._executor_migrate_schema(conn, state)
 
+            # Track schema version
+            current_version = self._get_schema_version(conn)
+            if current_version == 0:
+                conn.execute("""
+                    INSERT INTO schema_version (version, description)
+                    VALUES (1, 'Initial schema')
+                """)
+                logger.info("Schema version initialized to 1")
+
             logger.info(
                 "DuckDB schema created successfully with multi-dimension support"
             )
@@ -582,6 +600,27 @@ class DuckDBProvider(SerialDatabaseProvider):
         except Exception as e:
             logger.error(f"Failed to migrate schema: {e}")
             raise
+
+    def _get_schema_version(self, conn: Any) -> int:
+        """Get current schema version from database.
+
+        Returns 0 if schema_version table doesn't exist or is empty.
+        """
+        try:
+            # Check if table exists
+            result = conn.execute("""
+                SELECT COUNT(*) FROM information_schema.tables
+                WHERE table_name = 'schema_version'
+            """).fetchone()
+
+            if not result or result[0] == 0:
+                return 0
+
+            # Get max version
+            result = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+            return result[0] if result and result[0] is not None else 0
+        except Exception:
+            return 0
 
     def _get_all_embedding_tables(self) -> list[str]:
         """Get list of all embedding tables (dimension-specific) - delegate to connection manager."""
