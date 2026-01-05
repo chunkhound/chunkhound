@@ -238,6 +238,7 @@ Run the application with proper configuration.
                 stderr=asyncio.subprocess.PIPE,
             )
 
+            mcp_client = None  # Initialize for finally block
             try:
                 # Check if process started successfully (extended for Ollama compatibility)
                 await asyncio.sleep(3)
@@ -508,8 +509,9 @@ def should_not_appear():
                 print("All MCP stdio communication tests passed!")
 
             finally:
-                # Clean shutdown of client
-                await mcp_client.close()
+                # Clean shutdown of client (if initialized)
+                if mcp_client is not None:
+                    await mcp_client.close()
 
         finally:
             # Use Windows-safe cleanup

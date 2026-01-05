@@ -59,7 +59,8 @@ class DaemonStatus:
             "port": self.port,
             "url": self.url,
             "uptime_seconds": self.uptime_seconds,
-            "pid_file": str(self.pid_file) if self.pid_file else None,
+            # Use as_posix() for consistent path format across platforms
+            "pid_file": self.pid_file.as_posix() if self.pid_file else None,
         }
 
 
