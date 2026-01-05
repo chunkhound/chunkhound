@@ -92,6 +92,8 @@ class TestPathResolver:
 
     def test_resolve_relative_path_with_cwd_in_indexed_base(self, resolver):
         """Test resolving relative path when CWD is in indexed base."""
+        import os
+
         query_path = "src/main.py"
         cwd = "/home/user/project1/subdir"
 
@@ -99,7 +101,9 @@ class TestPathResolver:
 
         # Should resolve to base + relative path (not CWD + relative)
         # PathResolver finds base for CWD, then joins relative path
-        assert result == "/home/user/project1/src/main.py"
+        # Use realpath to get canonical path (handles macOS symlinks like /home → /System/Volumes/Data/home)
+        expected = os.path.realpath("/home/user/project1") + "/src/main.py"
+        assert result == expected
 
     def test_resolve_relative_path_without_cwd_raises_error(self, resolver):
         """Test that relative path without CWD raises ValueError."""
