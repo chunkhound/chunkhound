@@ -12,7 +12,6 @@ The service coordinates:
 """
 
 import asyncio
-import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -31,8 +30,6 @@ from chunkhound.services.research.shared.evidence_ledger import (
 )
 from chunkhound.services.research.shared.exploration import ExplorationStrategy
 from chunkhound.services.research.shared.models import (
-    _CITATION_PATTERN,
-    _CITATION_SEQUENCE_PATTERN,
     ENABLE_ADAPTIVE_BUDGETS,
     ENABLE_SMART_BOUNDARIES,
     EXTRA_CONTEXT_TOKENS,
@@ -55,13 +52,11 @@ from chunkhound.services.research.shared.models import (
     OUTPUT_TOKENS_WITH_REASONING,
     QUERY_EXPANSION_ENABLED,
     QUERY_EXPANSION_TOKENS,
-    REQUIRE_CITATIONS,
     TOKEN_BUDGET_PER_FILE,
     ResearchContext,
 )
 from chunkhound.services.research.shared.unified_search import UnifiedSearch
 from chunkhound.services.research.v1.quality_validator import QualityValidator
-from chunkhound.services.research.v1.question_generator import QuestionGenerator
 from chunkhound.services.research.v1.synthesis_engine import SynthesisEngine
 
 if TYPE_CHECKING:
@@ -110,7 +105,6 @@ class PluggableResearchService:
         self.progress = progress  # Store progress instance for event emission
         self._progress_lock: asyncio.Lock = asyncio.Lock()
         self._synthesis_engine = SynthesisEngine(llm_manager, database_services, self)
-        self._question_generator = QuestionGenerator(llm_manager)
         self._citation_manager = CitationManager()
         self._quality_validator = QualityValidator(llm_manager)
         self._path_filter = path_filter
