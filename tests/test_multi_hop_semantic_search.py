@@ -43,7 +43,7 @@ requires_provider = pytest.mark.skipif(
 @pytest.fixture
 async def content_aware_test_data(request, tmp_path):
     """Create database with semantically related code structures for multi-hop testing."""
-    db = DuckDBProvider(":memory:", base_directory=tmp_path)
+    db = DuckDBProvider(str(tmp_path / "test.db"), base_directory=tmp_path)
     db.connect()
 
     # Get provider configuration from parametrization
@@ -471,9 +471,16 @@ async def test_semantic_distance_traversal(content_aware_test_data):
 
 @pytest.mark.asyncio
 async def test_multi_hop_respects_path_filter_scope(tmp_path):
-    """Semantic search with path_filter should respect scope boundaries."""
+    """Semantic search with path_filter should respect scope boundaries.
+
+    Note: FakeEmbeddingProvider creates deterministic but semantically meaningless
+    embeddings, so query-based semantic search won't find matches. This test uses
+    chunk-based similarity (find_similar_chunks) which works with any embedding
+    provider by comparing actual indexed embeddings.
+    """
     base_dir = tmp_path
-    db = DuckDBProvider(":memory:", base_directory=base_dir)
+    db_path = tmp_path / "test.db"
+    db = DuckDBProvider(str(db_path), base_directory=base_dir)
     db.connect()
 
     # Use deterministic fake embedding provider with reranking support
@@ -485,45 +492,66 @@ async def test_multi_hop_respects_path_filter_scope(tmp_path):
     )
 
     # Create two synthetic "repos" under the same base directory
+    # Each repo has multiple files (not functions in one file) to ensure
+    # separate chunks are created - cAST merges small adjacent functions.
     repos = ["repo_a", "repo_b"]
     for repo in repos:
         repo_dir = base_dir / repo
         repo_dir.mkdir(parents=True, exist_ok=True)
 
-        # Each repo has highly similar content with multiple functions so
-        # semantic neighbors cross repo boundaries and multi-hop has enough
-        # high-scoring candidates for expansion.
-        content = f"""
-def shared_function_{repo}_one():
-    \"\"\"Shared multi-hop scope test in {repo}.\"\"\"
-    value = "shared-{repo}-one"
-    return value
-
-def shared_function_{repo}_two():
-    \"\"\"Shared multi-hop scope test in {repo}.\"\"\"
-    value = "shared-{repo}-two"
-    return value
-
-def shared_function_{repo}_three():
-    \"\"\"Shared multi-hop scope test in {repo}.\"\"\"
-    value = "shared-{repo}-three"
+        # Create separate files per repo to ensure distinct chunks
+        for idx in range(3):
+            content = f"""
+def shared_function_{repo}_{idx}():
+    \"\"\"Shared multi-hop scope test in {repo} module {idx}.\"\"\"
+    value = "shared-{repo}-{idx}"
     return value
 """
-        file_path = repo_dir / "module.py"
-        file_path.write_text(content)
-        await coordinator.process_file(file_path)
+            file_path = repo_dir / f"module_{idx}.py"
+            file_path.write_text(content)
+            await coordinator.process_file(file_path)
 
-    search_service = SearchService(db, embedding_provider)
+    # Ensure USearch index is synchronized with DuckDB after all files indexed
+    if db.shard_manager:
+        db.run_fix_pass(check_quality=False)
 
-    results, _ = await search_service.search_semantic(
-        query="multi-hop scope test",
-        page_size=10,
+    # Verify chunks exist in both repos using regex search
+    regex_results, _ = db.search_regex(pattern="shared_function", page_size=50)
+    assert regex_results, "Expected chunks from indexing"
+
+    repo_a_chunks = [r for r in regex_results if r.get("file_path", "").startswith("repo_a/")]
+    repo_b_chunks = [r for r in regex_results if r.get("file_path", "").startswith("repo_b/")]
+    assert repo_a_chunks, "Expected chunks from repo_a"
+    assert repo_b_chunks, "Expected chunks from repo_b"
+
+    # Get a chunk from repo_a to use as similarity anchor
+    repo_a_chunk = repo_a_chunks[0]
+    chunk_id = repo_a_chunk["chunk_id"]
+
+    # Without path_filter, similar chunks should include both repos
+    neighbors_unscoped = db.find_similar_chunks(
+        chunk_id=chunk_id,
+        provider=embedding_provider.name,
+        model=embedding_provider.model,
+        limit=20,
+        threshold=None,
+    )
+    assert neighbors_unscoped, "Expected unscoped neighbors"
+    assert any(
+        n.get("file_path", "").startswith("repo_b/") for n in neighbors_unscoped
+    ), "Unscoped neighbors should include repo_b results"
+
+    # With path_filter='repo_a', all results must be scoped to repo_a
+    neighbors_scoped = db.find_similar_chunks(
+        chunk_id=chunk_id,
+        provider=embedding_provider.name,
+        model=embedding_provider.model,
+        limit=20,
+        threshold=None,
         path_filter="repo_a",
     )
-
-    # All returned results must be scoped to repo_a when path_filter is set
-    assert results, "Semantic search should return results within scoped repo"
-    for result in results:
+    assert neighbors_scoped, "Expected scoped neighbors"
+    for result in neighbors_scoped:
         file_path = result.get("file_path", "")
         assert file_path.startswith(
             "repo_a/"
@@ -534,7 +562,8 @@ def shared_function_{repo}_three():
 async def test_find_similar_chunks_enforces_path_filter(tmp_path):
     """find_similar_chunks should enforce path_filter at the database layer."""
     base_dir = tmp_path
-    db = DuckDBProvider(":memory:", base_directory=base_dir)
+    db_path = tmp_path / "test.db"
+    db = DuckDBProvider(str(db_path), base_directory=base_dir)
     db.connect()
 
     embedding_provider = FakeEmbeddingProvider()

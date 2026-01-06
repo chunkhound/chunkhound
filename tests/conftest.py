@@ -33,3 +33,59 @@ def clean_environment(monkeypatch):
     for k in to_clear:
         monkeypatch.delenv(k, raising=False)
     yield
+
+
+def _cleanup_registry():
+    """Clean up registry and database connections between tests.
+
+    Based on pattern from test_config_integration.py. This prevents
+    registry state pollution where :memory: database providers leak
+    into subsequent tests that expect file-based databases.
+    """
+    try:
+        from chunkhound.registry import get_registry
+        registry = get_registry()
+
+        # Try to close database provider if registered
+        try:
+            db_provider = registry.get_provider("database")
+            if hasattr(db_provider, 'close'):
+                db_provider.close()
+            elif hasattr(db_provider, 'disconnect'):
+                db_provider.disconnect()
+            elif hasattr(db_provider, '_executor') and hasattr(db_provider._executor, '_connection'):
+                if hasattr(db_provider._executor._connection, 'close'):
+                    db_provider._executor._connection.close()
+        except (ValueError, AttributeError):
+            # No database provider or connection to clean up
+            pass
+
+        # Clear registry state
+        registry._providers.clear()
+        registry._language_parsers.clear()
+        registry._config = None
+
+    except Exception:
+        # Best effort cleanup - don't fail tests if cleanup fails
+        pass
+
+
+@pytest.fixture(autouse=True)
+def reset_registry():
+    """Reset global registry state between tests.
+
+    This autouse fixture ensures test isolation by clearing the global
+    registry singleton before and after each test. This prevents state
+    pollution where providers registered by one test affect subsequent tests.
+
+    Critical for tests that create their own DuckDBProvider instances,
+    as SerialDatabaseProvider.connect() automatically registers with
+    the global registry via _initialize_shared_instances().
+    """
+    # Clean before test to ensure clean slate
+    _cleanup_registry()
+
+    yield
+
+    # Clean after test to prevent pollution
+    _cleanup_registry()

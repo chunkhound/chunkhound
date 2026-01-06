@@ -852,16 +852,16 @@ async def test_complete_multi_hop_semantic_chains(indexed_codebase):
             'semantic_domains': ['factory', 'validation', 'provider', 'search']
         },
         {
-            'name': 'hnsw_optimization_chain',
-            'query': 'vector index batch optimization performance database',
+            'name': 'vector_indexing_chain',
+            'query': 'vector index batch optimization performance database shard',
             'expected_components': [
                 ('embedding_repository.py', 'insert_embeddings_batch'),
-                ('duckdb_provider.py', 'create_vector_index'),
+                ('duckdb_provider.py', 'insert_embeddings_batch'),
                 ('indexing_coordinator.py', 'process_file'),
                 ('search_service.py', 'search_semantic')
             ],
             'min_hops': 1,  # Relaxed from 2: Limited corpus may not have all semantic connections
-            'semantic_domains': ['hnsw', 'batch', 'optimization', 'vector', 'index']
+            'semantic_domains': ['batch', 'optimization', 'vector', 'index', 'shard']
         },
         {
             'name': 'mcp_integration_chain',

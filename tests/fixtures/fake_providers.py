@@ -175,6 +175,10 @@ class FakeEmbeddingProvider:
 
     Generates consistent embeddings based on text content hash,
     allowing reproducible tests without API calls.
+
+    NOTE: Because each text gets a unique hash-based vector, query embeddings
+    won't match stored embeddings. For tests requiring semantic search matches,
+    use ConstantEmbeddingProvider instead.
     """
 
     def __init__(
@@ -439,3 +443,16 @@ class FakeEmbeddingProvider:
             results = results[:top_k]
 
         return results
+
+
+class ConstantEmbeddingProvider(FakeEmbeddingProvider):
+    """Embedding provider that returns identical vectors for all inputs.
+
+    Use this for tests that require semantic search to find matches, since
+    any query will match any stored embedding with perfect similarity.
+    """
+
+    def _generate_deterministic_vector(self, text: str) -> list[float]:
+        """Return constant unit vector (all components equal)."""
+        value = 1.0 / (self._dims**0.5)
+        return [value] * self._dims
