@@ -639,7 +639,7 @@ class EmbeddingService(BaseService):
             chunks_data: Optional chunk metadata for database operations
 
         Returns:
-            Dictionary with detailed results including success/failure statistics
+            Dictionary with detailed results including success/failure statistics. All processed chunks receive status updates in the database.
         """
         import time
         from dataclasses import dataclass, field
@@ -965,6 +965,8 @@ class EmbeddingService(BaseService):
                 if chunk["id"] in chunk_id_to_status:
                     chunk["embedding_status"] = chunk_id_to_status[chunk["id"]]
 
+        logger.debug(f"Prepared status updates for {len(chunk_id_to_status)} failed chunks")
+
         # Derive counters from batch results
         for batch_result in batch_results:
             if isinstance(batch_result, Exception):
@@ -976,8 +978,8 @@ class EmbeddingService(BaseService):
                 failed_chunks_total += 1
 
         # Insert successful embeddings in one batch
-        if all_embeddings_data:
-            logger.debug(f"Inserting {len(all_embeddings_data)} embeddings in one batch")
+        if all_embeddings_data or failed_chunks_total > 0:
+            logger.debug(f"Inserting {len(all_embeddings_data)} embeddings and updating status for {failed_chunks_total} failed chunks in one batch")
 
             relevant_chunks_data = chunks_data or []
 
@@ -1008,7 +1010,7 @@ class EmbeddingService(BaseService):
 
         logger.debug(
             f"_generate_embeddings_in_batches: completed, generated={total_generated}, "
-            f"processed={total_processed}, failed={failed_chunks_total}, "
+            f"processed={total_processed} (all with status updates), failed={failed_chunks_total}, "
             f"permanent_failures={permanent_failures}, retries={retry_attempts}"
         )
 

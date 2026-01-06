@@ -1164,24 +1164,28 @@ class LanceDBProvider(SerialDatabaseProvider):
         chunks_data: list[dict],
     ) -> int:
         """Executor method for insert_embeddings_batch - runs in DB thread."""
-        if not embeddings_data or not self._chunks_table:
+        if not chunks_data or not self._chunks_table:
             return 0
 
         try:
             # PERFORMANCE PROFILING: Track total batch operation time
             batch_processing_start = time.time()
 
-            # Determine embedding dimensions from the first embedding
-            first_embedding = embeddings_data[0].get(
-                "embedding", embeddings_data[0].get("vector")
-            )
-            if not first_embedding:
-                logger.error("No embedding data found in first record")
-                return 0
+            # Determine embedding dimensions from the first embedding (only if embeddings exist)
+            embedding_dims = None
+            provider = ""
+            model = ""
+            if embeddings_data:
+                first_embedding = embeddings_data[0].get(
+                    "embedding", embeddings_data[0].get("vector")
+                )
+                if not first_embedding:
+                    logger.error("No embedding data found in first record")
+                    return 0
 
-            embedding_dims = len(first_embedding)
-            provider = embeddings_data[0]["provider"]
-            model = embeddings_data[0]["model"]
+                embedding_dims = len(first_embedding)
+                provider = embeddings_data[0]["provider"]
+                model = embeddings_data[0]["model"]
 
             # PERFORMANCE PROFILING: Schema validation and setup
             schema_setup_start = time.time()
@@ -1194,9 +1198,9 @@ class LanceDBProvider(SerialDatabaseProvider):
                     embedding_field = field
                     break
 
-            # Check if we need to recreate the table due to schema mismatch
+            # Check if we need to recreate the table due to schema mismatch (only if we have embeddings)
             needs_recreation = False
-            if embedding_field:
+            if embeddings_data and embedding_field:
                 # Check if it's a fixed-size list with correct dimensions
                 if not pa.types.is_fixed_size_list(embedding_field.type):
                     logger.info(
@@ -1303,7 +1307,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                 )
 
             # Determine optimal batch size for processing
-            batch_size = min(500, len(embeddings_data))
+            batch_size = min(500, len(chunks_data))
 
             total_updated = 0
 
@@ -1412,16 +1416,17 @@ class LanceDBProvider(SerialDatabaseProvider):
             batch_processing_time = time.time() - batch_processing_start
             logger.debug(
                 f"Batch processing completed in {batch_processing_time:.3f}s "
-                f"(total_embeddings={len(embeddings_data)}, "
+                f"(total_chunks={len(chunks_data)}, "
+                f"successful_embeddings={len(embeddings_data)}, "
                 f"provider={provider}, model={model})"
             )
 
             # PERFORMANCE PROFILING: Vector index creation
             index_creation_start = time.time()
 
-            # Create vector index if we have enough embeddings
+            # Create vector index if we have enough embeddings and actually inserted some
             total_rows = self._chunks_table.count_rows()
-            if total_rows >= 256:  # LanceDB minimum for index creation
+            if embeddings_data and total_rows >= 256:  # LanceDB minimum for index creation
                 try:
                     # Check if we need to create an index
                     # LanceDB will handle this efficiently if index already exists
