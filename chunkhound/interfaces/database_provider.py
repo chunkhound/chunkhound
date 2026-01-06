@@ -71,18 +71,6 @@ class DatabaseProvider(Protocol):
         """Create database indexes for performance optimization."""
         ...
 
-    def create_vector_index(
-        self, provider: str, model: str, dims: int, metric: str = "cosine"
-    ) -> None:
-        """Create vector index for specific provider/model/dims combination."""
-        ...
-
-    def drop_vector_index(
-        self, provider: str, model: str, dims: int, metric: str = "cosine"
-    ) -> str:
-        """Drop vector index for specific provider/model/dims combination."""
-        ...
-
     # File Operations
     def insert_file(self, file: File) -> int:
         """Insert file record and return file ID."""
@@ -347,18 +335,10 @@ class DatabaseProvider(Protocol):
         ...
 
     def optimize_tables(self) -> None:
-        """Optimize tables by compacting fragments and rebuilding indexes.
+        """Optimize tables by compacting fragments.
 
-        For DuckDB: CHECKPOINT + PRAGMA hnsw_compact_index for each index
+        For DuckDB: CHECKPOINT for WAL durability and space reclamation
         For LanceDB: Fragment compaction via table.optimize()
-        """
-        ...
-
-    def create_deferred_indexes(self) -> None:
-        """Create any deferred vector indexes.
-
-        Called at end of indexing to create HNSW indexes that were deferred
-        during first-time indexing for performance.
         """
         ...
 

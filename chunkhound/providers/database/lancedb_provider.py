@@ -407,14 +407,6 @@ class LanceDBProvider(SerialDatabaseProvider):
                     f"Check LanceDB version supports create_scalar_index()."
                 )
 
-    def create_vector_index(
-        self, provider: str, model: str, dims: int, metric: str = "cosine"
-    ) -> None:
-        """Create vector index for specific provider/model/dims combination."""
-        return self._execute_in_db_thread_sync(
-            "create_vector_index", provider, model, dims, metric
-        )
-
     def _executor_create_vector_index(
         self,
         conn: Any,
@@ -474,13 +466,6 @@ class LanceDBProvider(SerialDatabaseProvider):
             )
         except Exception as e:
             logger.debug(f"Failed to create vector index for {provider}/{model}: {e}")
-
-    def drop_vector_index(
-        self, provider: str, model: str, dims: int, metric: str = "cosine"
-    ) -> str:
-        """Drop vector index for specific provider/model/dims combination."""
-        # LanceDB handles index management automatically
-        return "Index management handled automatically by LanceDB"
 
     def _generate_chunk_id_safe(self, chunk: Chunk) -> int:
         """Generate chunk ID with fallback to hash-based ID.
