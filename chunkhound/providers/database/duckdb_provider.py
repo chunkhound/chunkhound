@@ -2,12 +2,11 @@
 
 # FILE_CONTEXT: High-performance analytical database provider
 # CRITICAL: Single-threaded access enforced by SerialDatabaseProvider
-# PERFORMANCE: HNSW indexes for vector search, bulk operations optimized
+# PERFORMANCE: Vector search via ShardManager/USearch, bulk operations optimized
 
 ## PERFORMANCE_CHARACTERISTICS
 - Bulk inserts: 5000 rows optimal batch size
-- Vector search: HNSW index with cosine similarity
-- Index optimization: Drop/recreate for >50 embeddings (12x speedup)
+- Vector search: ShardManager with USearch HNSW indexes (external files)
 - WAL mode: Automatic checkpointing, 1GB limit
 """
 
@@ -26,6 +25,7 @@ from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.core.utils import normalize_path_for_lookup
 
 # Import existing components that will be used by the provider
+from chunkhound.core.config.sharding_config import ShardingConfig
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.providers.database.duckdb.chunk_repository import DuckDBChunkRepository
 from chunkhound.providers.database.duckdb.connection_manager import (
@@ -43,10 +43,12 @@ from chunkhound.providers.database.serial_database_provider import (
 from chunkhound.providers.database.serial_executor import (
     _executor_local,
 )
+from chunkhound.providers.database.shard_manager import ShardManager
 
 # Type hinting only
 if TYPE_CHECKING:
     from chunkhound.core.config.database_config import DatabaseConfig
+    from chunkhound.providers.database.bulk_indexer import BulkIndexer
 
 
 class DuckDBProvider(SerialDatabaseProvider):
@@ -63,6 +65,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         base_directory: Path,
         embedding_manager: "EmbeddingManager | None" = None,
         config: "DatabaseConfig | None" = None,
+        sharding_config: ShardingConfig | None = None,
     ):
         """Initialize DuckDB provider.
 
@@ -71,11 +74,18 @@ class DuckDBProvider(SerialDatabaseProvider):
             base_directory: Base directory for path normalization
             embedding_manager: Optional embedding manager for vector generation
             config: Database configuration for provider-specific settings
+            sharding_config: Configuration for USearch shard management
         """
         # Initialize base class
         super().__init__(db_path, base_directory, embedding_manager, config)
 
         self.provider_type = "duckdb"  # Identify this as DuckDB provider
+
+        # Store sharding config for ShardManager initialization
+        self._sharding_config = sharding_config or ShardingConfig()
+
+        # ShardManager will be initialized in connect() after schema creation
+        self.shard_manager: ShardManager | None = None
 
         # Class-level synchronization for WAL cleanup
         self._wal_cleanup_lock = threading.Lock()
@@ -94,7 +104,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         self._embedding_repository = DuckDBEmbeddingRepository(
             self._connection_manager, self
         )
-        self._embedding_repository.set_provider_instance(self)
 
         # Lightweight performance metrics for chunk writes (per-provider lifecycle)
         self._metrics: dict[str, dict[str, float | int]] = {
@@ -130,11 +139,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         # This ensures thread safety - only this thread will use this connection
         conn = duckdb.connect(str(self._connection_manager.db_path))
 
-        # Load required extensions
-        conn.execute("INSTALL vss")
-        conn.execute("LOAD vss")
-        conn.execute("SET hnsw_enable_experimental_persistence = true")
-
         logger.debug(
             f"Created new DuckDB connection in executor thread {threading.get_ident()}"
         )
@@ -150,23 +154,12 @@ class DuckDBProvider(SerialDatabaseProvider):
         return None
 
     @property
-    def connection(self) -> Any | None:
-        """Database connection - delegate to connection manager.
-
-        Note: This property is maintained for backward compatibility but should not
-        be used directly. All database operations should go through executor methods.
-        """
-        return self._connection_manager.connection
-
-    @property
     def db_path(self) -> Path | str:
         """Database connection path or identifier - delegate to connection manager."""
         return self._connection_manager.db_path
 
-    @property
-    def is_connected(self) -> bool:
-        """Check if database connection is active - delegate to connection manager."""
-        return self._connection_manager.is_connected
+    # NOTE: connection property was removed - use executor methods instead.
+    # is_connected is inherited from SerialDatabaseProvider (checks executor existence)
 
     def _extract_file_id(self, file_record: dict[str, Any] | File) -> int | None:
         """Safely extract file ID from either dict or File model - delegate to file repository."""
@@ -207,11 +200,67 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Migrate legacy embeddings table if needed
             self._executor_migrate_legacy_embeddings_table(conn, state)
 
+            # Initialize ShardManager after schema creation
+            self._initialize_shard_manager(conn)
+
             logger.info("Database initialization complete in executor thread")
 
         except Exception as e:
             logger.error(f"Database initialization failed: {e}")
             raise
+
+    def _initialize_shard_manager(self, conn: Any) -> None:
+        """Initialize ShardManager and run fix_pass for index reconciliation.
+
+        Creates ShardManager with configured thresholds and runs fix_pass
+        to ensure USearch indexes are consistent with DuckDB state.
+
+        Args:
+            conn: Database connection (passed from executor)
+        """
+        if str(self._connection_manager.db_path) == ":memory:":
+            # Skip ShardManager for in-memory databases
+            logger.debug("Skipping ShardManager for in-memory database")
+            return
+
+        # Determine shard directory (sibling to database file)
+        db_path = Path(self._connection_manager.db_path)
+        shard_dir = db_path.parent / "shards"
+
+        # Initialize ShardManager
+        self.shard_manager = ShardManager(
+            db_provider=self,
+            shard_dir=shard_dir,
+            config=self._sharding_config,
+        )
+
+        # Run fix_pass to reconcile USearch indexes with DuckDB state
+        # This ensures indexes are valid before serving reads
+        logger.info("Running ShardManager fix_pass for index reconciliation...")
+        try:
+            self.shard_manager.fix_pass(conn, check_quality=True)
+        except Exception as e:
+            logger.warning(f"ShardManager fix_pass failed: {e}")
+            # Continue - database is still usable, just without shard optimization
+
+    def get_bulk_indexer(self) -> "BulkIndexer | None":
+        """Get BulkIndexer for batch operations with deferred quality checks.
+
+        Returns BulkIndexer context manager if ShardManager is available,
+        None otherwise (e.g., in-memory databases).
+
+        Usage:
+            with provider.get_bulk_indexer() as bulk:
+                for batch in batches:
+                    provider.insert_embeddings_batch(batch)
+                    bulk.on_batch_completed()
+        """
+        if self.shard_manager is None:
+            return None
+
+        from chunkhound.providers.database.bulk_indexer import BulkIndexer
+
+        return BulkIndexer(self, self._sharding_config)
 
     def _perform_wal_cleanup_in_executor(self, conn: Any) -> None:
         """Perform WAL cleanup within the executor thread.
@@ -304,11 +353,15 @@ class DuckDBProvider(SerialDatabaseProvider):
                 logger.info("DuckDB connection closed in executor thread")
 
     def health_check(self) -> dict[str, Any]:
-        """Perform health check and return status information - delegate to connection manager."""
-        return self._connection_manager.health_check()
+        """Perform health check and return status information."""
+        return self._execute_in_db_thread_sync("health_check")
+
+    def _executor_health_check(self, conn: Any, state: dict[str, Any]) -> dict[str, Any]:
+        """Executor method for health_check - runs in DB thread."""
+        return self._connection_manager.health_check(conn)
 
     def get_connection_info(self) -> dict[str, Any]:
-        """Get information about the database connection - delegate to connection manager."""
+        """Get information about the database configuration."""
         return self._connection_manager.get_connection_info()
 
     def _table_exists(self, table_name: str) -> bool:
@@ -345,7 +398,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         logger.info(f"Creating embedding table for {dims} dimensions: {table_name}")
 
         try:
-            # Create table with fixed dimensions for HNSW compatibility
+            # Create table with fixed dimensions
             conn.execute(f"""
                 CREATE TABLE {table_name} (
                     id INTEGER PRIMARY KEY DEFAULT nextval('embeddings_id_seq'),
@@ -354,37 +407,13 @@ class DuckDBProvider(SerialDatabaseProvider):
                     model TEXT NOT NULL,
                     embedding FLOAT[{dims}],
                     dims INTEGER NOT NULL DEFAULT {dims},
+                    shard_id UUID REFERENCES vector_shards(shard_id),
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
 
-            # Check if this is first indexing (no HNSW indexes exist yet)
-            # If so, defer HNSW index creation until end of indexing for performance
-            existing_hnsw = conn.execute("""
-                SELECT COUNT(*) FROM duckdb_indexes()
-                WHERE table_name LIKE 'embeddings_%'
-                AND (index_name LIKE 'hnsw_%' OR index_name LIKE 'idx_hnsw_%')
-            """).fetchone()[0]
-
-            hnsw_index_name = f"idx_hnsw_{dims}"
-            if existing_hnsw == 0:
-                # First indexing: defer HNSW index creation for bulk performance
-                logger.debug(
-                    f"Deferring HNSW index creation for {table_name} "
-                    "(first indexing detected)"
-                )
-                if "deferred_hnsw_indexes" not in state:
-                    state["deferred_hnsw_indexes"] = set()
-                state["deferred_hnsw_indexes"].add(table_name)
-            else:
-                # Indexes exist: create HNSW index immediately
-                conn.execute(f"""
-                    CREATE INDEX {hnsw_index_name} ON {table_name}
-                    USING HNSW (embedding)
-                    WITH (metric = 'cosine')
-                """)
-
-            # Create regular indexes for fast lookups (always create these)
+            # Create regular indexes for fast lookups
+            # Note: Vector search is handled by ShardManager with USearch
             conn.execute(
                 f"CREATE INDEX IF NOT EXISTS idx_{dims}_chunk_id "
                 f"ON {table_name}(chunk_id)"
@@ -393,17 +422,12 @@ class DuckDBProvider(SerialDatabaseProvider):
                 f"CREATE INDEX IF NOT EXISTS idx_{dims}_provider_model "
                 f"ON {table_name}(provider, model)"
             )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_embeddings_{dims}_shard "
+                f"ON {table_name}(shard_id)"
+            )
 
-            if existing_hnsw > 0:
-                logger.info(
-                    f"Created {table_name} with HNSW index {hnsw_index_name} "
-                    "and regular indexes"
-                )
-            else:
-                logger.info(
-                    f"Created {table_name} with regular indexes "
-                    "(HNSW index deferred)"
-                )
+            logger.info(f"Created {table_name} with regular indexes")
             return table_name
 
         except Exception as e:
@@ -441,60 +465,61 @@ class DuckDBProvider(SerialDatabaseProvider):
             return True
 
     def optimize_tables(self) -> None:
-        """Optimize tables by checkpointing and compacting HNSW indexes.
+        """Optimize tables by checkpointing.
 
         Performs:
         1. CHECKPOINT - sync WAL to main database, reclaim deleted row space
-        2. PRAGMA hnsw_compact_index for each HNSW index - prune deleted items
         """
         self._execute_in_db_thread_sync("optimize_tables")
 
     def _executor_optimize_tables(self, conn: Any, state: dict[str, Any]) -> None:
         """Executor method for optimize_tables - runs in DB thread."""
         try:
-            # Step 1: Checkpoint for WAL durability and space reclamation
+            # Checkpoint for WAL durability and space reclamation
             logger.debug("Running CHECKPOINT for optimization...")
             conn.execute("CHECKPOINT")
             logger.debug("CHECKPOINT completed")
 
-            # Step 2: Compact all HNSW indexes to prune deleted items
-            self._compact_hnsw_indexes(conn)
+            # Emit bulk metrics for chunk inserts
+            try:
+                m = self._metrics.get("chunks", {})
+                if m.get("files", 0) > 0:
+                    logger.info(
+                        f"DuckDB chunks bulk metrics: "
+                        f"files={m.get('files', 0)} "
+                        f"rows={m.get('rows', 0)} "
+                        f"batches={m.get('batches', 0)} "
+                        f"temp_create_s={m.get('temp_create_s', 0.0):.3f} "
+                        f"temp_insert_s={m.get('temp_insert_s', 0.0):.3f} "
+                        f"main_insert_s={m.get('main_insert_s', 0.0):.3f} "
+                        f"temp_clear_s={m.get('temp_clear_s', 0.0):.3f}"
+                    )
+            except Exception:
+                pass  # Silent failure - don't crash on metrics logging
 
         except Exception as e:
             logger.warning(f"Optimization failed: {e}")
 
-    def _compact_hnsw_indexes(self, conn: Any) -> None:
-        """Compact all HNSW indexes by pruning deleted items.
+    def run_fix_pass(self, check_quality: bool = True) -> None:
+        """Run ShardManager fix_pass for index maintenance.
 
-        Uses PRAGMA hnsw_compact_index('index_name') for each index.
-        Non-fatal: continues on individual index failures.
+        Triggers shard reconciliation including:
+        - Orphaned file cleanup
+        - Missing index rebuilds
+        - Split/merge operations based on thresholds
+        - Centroid cache population
+
+        Args:
+            check_quality: If True, measure self-recall for each shard
         """
-        try:
-            # Get all existing HNSW indexes
-            results = conn.execute("""
-                SELECT index_name
-                FROM duckdb_indexes()
-                WHERE table_name LIKE 'embeddings_%'
-                AND (index_name LIKE 'hnsw_%' OR index_name LIKE 'idx_hnsw_%')
-            """).fetchall()
+        self._execute_in_db_thread_sync("run_fix_pass", check_quality)
 
-            if not results:
-                logger.debug("No HNSW indexes to compact")
-                return
-
-            compacted = 0
-            for (index_name,) in results:
-                try:
-                    conn.execute(f"PRAGMA hnsw_compact_index('{index_name}')")
-                    compacted += 1
-                except Exception as e:
-                    logger.debug(f"Could not compact index {index_name}: {e}")
-
-            if compacted > 0:
-                logger.debug(f"Compacted {compacted} HNSW index(es)")
-
-        except Exception as e:
-            logger.debug(f"HNSW index compaction skipped: {e}")
+    def _executor_run_fix_pass(
+        self, conn: Any, state: dict[str, Any], check_quality: bool
+    ) -> None:
+        """Executor method for run_fix_pass - runs in DB thread."""
+        if self.shard_manager is not None:
+            self.shard_manager.fix_pass(conn, check_quality=check_quality)
 
     def get_storage_stats(self) -> dict[str, Any]:
         """Get DuckDB storage statistics including fragmentation.
@@ -601,56 +626,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         free_ratio = free / total if total > 0 else 0.0
         return free_ratio >= threshold, stats
 
-    def create_deferred_indexes(self) -> None:
-        """Create any deferred vector indexes.
-
-        Called at end of indexing to create HNSW indexes that were deferred
-        during first-time indexing for performance.
-        """
-        self._execute_in_db_thread_sync("create_deferred_indexes")
-
-    def _executor_create_deferred_indexes(
-        self, conn: Any, state: dict[str, Any]
-    ) -> None:
-        """Executor method for create_deferred_indexes - runs in DB thread."""
-        if not state.get("deferred_hnsw_indexes"):
-            logger.debug("No deferred HNSW indexes to create")
-            return
-
-        deferred_tables = state.get("deferred_hnsw_indexes", set())
-        logger.info(f"Creating deferred HNSW indexes for {len(deferred_tables)} table(s)")
-
-        for table_name in deferred_tables:
-            try:
-                # Extract dims from table name (embeddings_{dims})
-                dims = int(table_name.replace("embeddings_", ""))
-                hnsw_index_name = f"idx_hnsw_{dims}"
-
-                # Check if index already exists
-                existing = conn.execute(f"""
-                    SELECT index_name FROM duckdb_indexes()
-                    WHERE table_name = '{table_name}'
-                    AND index_name = '{hnsw_index_name}'
-                """).fetchone()
-
-                if existing:
-                    logger.debug(f"Index {hnsw_index_name} already exists, skipping")
-                    continue
-
-                logger.info(f"Creating HNSW index {hnsw_index_name} on {table_name}")
-                conn.execute(f"""
-                    CREATE INDEX {hnsw_index_name} ON {table_name}
-                    USING HNSW (embedding)
-                    WITH (metric = 'cosine')
-                """)
-                logger.info(f"Created deferred HNSW index {hnsw_index_name}")
-
-            except Exception as e:
-                logger.error(f"Failed to create deferred index on {table_name}: {e}")
-
-        # Clear the deferred list
-        state["deferred_hnsw_indexes"] = set()
-
     def create_schema(self) -> None:
         """Create database schema for files, chunks, and embeddings - delegate to connection manager."""
         self._execute_in_db_thread_sync("create_schema")
@@ -660,6 +635,28 @@ class DuckDBProvider(SerialDatabaseProvider):
         logger.info("Creating DuckDB schema")
 
         try:
+            # Create vector_shards table for tracking embedding shards
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS vector_shards (
+                    shard_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    dims INTEGER NOT NULL,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    quantization TEXT NOT NULL DEFAULT 'i8',
+                    file_path TEXT,
+                    file_size_bytes BIGINT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    CHECK (quantization IN ('f32', 'f16', 'i8'))
+                )
+            """)
+
+            # Create index for vector_shards lookups
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_shards_dims_provider_model
+                    ON vector_shards(dims, provider, model)
+            """)
+
             # Create sequence for files table
             conn.execute("CREATE SEQUENCE IF NOT EXISTS files_id_seq")
 
@@ -717,32 +714,27 @@ class DuckDBProvider(SerialDatabaseProvider):
                     model TEXT NOT NULL,
                     embedding FLOAT[1536],
                     dims INTEGER NOT NULL DEFAULT 1536,
+                    shard_id UUID REFERENCES vector_shards(shard_id),
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
 
-            # Create indexes for 1536-dimensional embeddings
-            try:
-                conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_hnsw_1536 ON embeddings_1536
-                    USING HNSW (embedding)
-                    WITH (metric = 'cosine')
-                """)
-                logger.info(
-                    "HNSW index for 1536-dimensional embeddings created successfully"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to create HNSW index for 1536-dimensional embeddings: {e}"
-                )
+            # Handle schema migrations for existing databases
+            # MUST run before shard index creation since migration adds shard_id column
+            self._executor_migrate_schema(conn, state)
+
+            # Create regular indexes for 1536-dimensional embeddings
+            # Note: Vector search is handled by ShardManager with USearch
 
             # Create index on chunk_id for efficient deletions
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_embeddings_1536_chunk_id ON embeddings_1536(chunk_id)
             """)
 
-            # Handle schema migrations for existing databases
-            self._executor_migrate_schema(conn, state)
+            # Create index on shard_id for shard-based queries
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_embeddings_1536_shard ON embeddings_1536(shard_id)
+            """)
 
             logger.info(
                 "DuckDB schema created successfully with multi-dimension support"
@@ -811,8 +803,36 @@ class DuckDBProvider(SerialDatabaseProvider):
                 # Recreate indexes (will be done in _executor_create_indexes)
                 logger.info("Successfully migrated chunks table schema")
 
+            # Migrate embedding tables to add shard_id column for sharding support
+            embedding_tables = conn.execute("""
+                SELECT table_name FROM information_schema.tables
+                WHERE table_name LIKE 'embeddings_%'
+            """).fetchall()
+
+            for (table_name,) in embedding_tables:
+                # Check if shard_id column exists
+                has_shard_id = conn.execute(f"""
+                    SELECT COUNT(*) FROM information_schema.columns
+                    WHERE table_name = '{table_name}' AND column_name = 'shard_id'
+                """).fetchone()[0] > 0
+
+                if not has_shard_id:
+                    logger.info(f"Adding shard_id column to {table_name} for sharding support")
+                    # Note: DuckDB doesn't support ADD COLUMN with constraints,
+                    # so we add the column without FK constraint. The FK is
+                    # enforced at the application level via ShardManager.
+                    conn.execute(f"""
+                        ALTER TABLE {table_name}
+                        ADD COLUMN shard_id UUID
+                    """)
+                    conn.execute(f"""
+                        CREATE INDEX IF NOT EXISTS idx_{table_name}_shard
+                        ON {table_name}(shard_id)
+                    """)
+
         except Exception as e:
-            logger.warning(f"Failed to migrate schema: {e}")
+            logger.error(f"Failed to migrate schema: {e}")
+            raise
 
     def _get_all_embedding_tables(self) -> list[str]:
         """Get list of all embedding tables (dimension-specific) - delegate to connection manager."""
@@ -923,287 +943,6 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         except Exception as e:
             logger.error(f"Failed to migrate legacy embeddings table: {e}")
-            raise
-
-    def create_vector_index(
-        self, provider: str, model: str, dims: int, metric: str = "cosine"
-    ) -> None:
-        """Create HNSW vector index for specific provider/model/dims combination.
-
-        # INDEX_TYPE: HNSW (Hierarchical Navigable Small World)
-        # METRIC: Cosine similarity (normalized vectors)
-        # BUILD_TIME: ~10s for 100k vectors
-        """
-        logger.info(f"Creating HNSW index for {provider}/{model} ({dims}D, {metric})")
-
-        # Use synchronous executor for non-async method
-        self._execute_in_db_thread_sync(
-            "create_vector_index", provider, model, dims, metric
-        )
-
-    def _executor_create_vector_index(
-        self,
-        conn: Any,
-        state: dict[str, Any],
-        provider: str,
-        model: str,
-        dims: int,
-        metric: str,
-    ) -> None:
-        """Executor method for create_vector_index - runs in DB thread."""
-        try:
-            # Get the correct table name for the dimensions
-            table_name = f"embeddings_{dims}"
-
-            # Ensure the table exists before creating the index
-            self._executor_ensure_embedding_table_exists(conn, state, dims)
-
-            index_name = f"hnsw_{provider}_{model}_{dims}_{metric}".replace(
-                "-", "_"
-            ).replace(".", "_")
-
-            # Create HNSW index using VSS extension on the dimension-specific table
-            conn.execute(f"""
-                CREATE INDEX {index_name} ON {table_name}
-                USING HNSW (embedding)
-                WITH (metric = '{metric}')
-            """)
-
-            logger.info(f"HNSW index {index_name} created successfully on {table_name}")
-
-        except Exception as e:
-            logger.error(f"Failed to create HNSW index: {e}")
-            raise
-
-    def drop_vector_index(
-        self, provider: str, model: str, dims: int, metric: str = "cosine"
-    ) -> str:
-        """Drop HNSW vector index for specific provider/model/dims combination."""
-        return self._execute_in_db_thread_sync(
-            "drop_vector_index", provider, model, dims, metric
-        )
-
-    def _executor_drop_vector_index(
-        self,
-        conn: Any,
-        state: dict[str, Any],
-        provider: str,
-        model: str,
-        dims: int,
-        metric: str,
-    ) -> str:
-        """Executor method for drop_vector_index - runs in DB thread."""
-        index_name = f"hnsw_{provider}_{model}_{dims}_{metric}".replace(
-            "-", "_"
-        ).replace(".", "_")
-
-        try:
-            conn.execute(f"DROP INDEX IF EXISTS {index_name}")
-            logger.info(f"HNSW index {index_name} dropped successfully")
-            return index_name
-
-        except Exception as e:
-            logger.error(f"Failed to drop HNSW index {index_name}: {e}")
-            raise
-
-    def get_existing_vector_indexes(self) -> list[dict[str, Any]]:
-        """Get list of existing HNSW vector indexes on all embedding tables."""
-        return self._execute_in_db_thread_sync("get_existing_vector_indexes")
-
-    def _executor_get_existing_vector_indexes(
-        self, conn: Any, state: dict[str, Any]
-    ) -> list[dict[str, Any]]:
-        """Executor method for get_existing_vector_indexes - runs in DB thread."""
-        try:
-            # Query DuckDB system tables for indexes on all embedding tables
-            # Look for both legacy 'hnsw_' and standard 'idx_hnsw_' index patterns
-            results = conn.execute("""
-                SELECT index_name, table_name
-                FROM duckdb_indexes()
-                WHERE table_name LIKE 'embeddings_%'
-                AND (index_name LIKE 'hnsw_%' OR index_name LIKE 'idx_hnsw_%')
-            """).fetchall()
-
-            indexes = []
-            for result in results:
-                index_name = result[0]
-                table_name = result[1]
-
-                # Handle different index naming patterns
-                if index_name.startswith("hnsw_"):
-                    # Parse custom index name: hnsw_{provider}_{model}_{dims}_{metric}
-                    parts = index_name[5:].split("_")  # Remove 'hnsw_' prefix
-                    if len(parts) >= 4:
-                        # Reconstruct provider/model from parts (they may contain underscores)
-                        metric = parts[-1]
-                        dims_str = parts[-2]
-                        try:
-                            dims = int(dims_str)
-                            # Join remaining parts as provider_model, then split on last underscore
-                            provider_model = "_".join(parts[:-2])
-                            # Find last underscore to separate provider and model
-                            last_underscore = provider_model.rfind("_")
-                            if last_underscore > 0:
-                                provider = provider_model[:last_underscore]
-                                model = provider_model[last_underscore + 1 :]
-                            else:
-                                provider = provider_model
-                                model = ""
-
-                            indexes.append(
-                                {
-                                    "index_name": index_name,
-                                    "provider": provider,
-                                    "model": model,
-                                    "dims": dims,
-                                    "metric": metric,
-                                }
-                            )
-                        except ValueError:
-                            logger.warning(
-                                f"Could not parse dims from custom index name: {index_name}"
-                            )
-
-                elif index_name.startswith("idx_hnsw_"):
-                    # Parse standard index name: idx_hnsw_{dims}
-                    # Extract dims from table name: embeddings_{dims}
-                    try:
-                        if table_name.startswith("embeddings_"):
-                            dims = int(table_name[11:])  # Remove 'embeddings_' prefix
-                            indexes.append(
-                                {
-                                    "index_name": index_name,
-                                    "provider": "generic",  # Standard index doesn't specify provider
-                                    "model": "generic",  # Standard index doesn't specify model
-                                    "dims": dims,
-                                    "metric": "cosine",  # Default metric for standard indexes
-                                }
-                            )
-                    except ValueError:
-                        logger.warning(
-                            f"Could not parse dims from standard index: {index_name} on {table_name}"
-                        )
-
-            return indexes
-
-        except Exception as e:
-            logger.error(f"Failed to get existing vector indexes: {e}")
-            return []
-
-    def bulk_operation_with_index_management(self, operation_func, *args, **kwargs):
-        """Execute bulk operation with automatic HNSW index management and transaction safety.
-
-        # PATTERN: Drop indexes → Bulk operation → Recreate indexes
-        # THRESHOLD: Operations with >50 rows benefit
-        # PERFORMANCE: 10-20x speedup for large batches
-        """
-        # Delegate to executor for proper thread safety
-        return self._execute_in_db_thread_sync(
-            "bulk_operation_with_index_management_executor",
-            operation_func,
-            args,
-            kwargs,
-        )
-
-    def _executor_bulk_operation_with_index_management_executor(
-        self, conn: Any, state: dict[str, Any], operation_func, args, kwargs
-    ):
-        """Executor method for bulk operations with index management - runs in DB thread."""
-        # Get existing indexes before starting
-        existing_indexes = self._executor_get_existing_vector_indexes(conn, state)
-        dropped_indexes = []
-
-        try:
-            # Start transaction for atomic operation
-            conn.execute("BEGIN TRANSACTION")
-            state["transaction_active"] = True
-
-            # Optimize settings for bulk loading
-            conn.execute("SET preserve_insertion_order = false")
-
-            # Drop existing HNSW vector indexes to improve bulk performance
-            if existing_indexes:
-                logger.info(
-                    f"Dropping {len(existing_indexes)} HNSW indexes for bulk operation"
-                )
-                for index_info in existing_indexes:
-                    try:
-                        self._executor_drop_vector_index(
-                            conn,
-                            state,
-                            index_info["provider"],
-                            index_info["model"],
-                            index_info["dims"],
-                            index_info["metric"],
-                        )
-                        dropped_indexes.append(index_info)
-                    except Exception as e:
-                        logger.warning(
-                            f"Could not drop index {index_info['index_name']}: {e}"
-                        )
-
-            # Execute the bulk operation
-            result = operation_func(*args, **kwargs)
-
-            # Recreate dropped indexes
-            if dropped_indexes:
-                logger.info(
-                    f"Recreating {len(dropped_indexes)} HNSW indexes after bulk operation"
-                )
-                for index_info in dropped_indexes:
-                    try:
-                        self._executor_create_vector_index(
-                            conn,
-                            state,
-                            index_info["provider"],
-                            index_info["model"],
-                            index_info["dims"],
-                            index_info["metric"],
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to recreate index {index_info['index_name']}: {e}"
-                        )
-                        # Continue with other indexes
-
-            # Commit transaction
-            conn.execute("COMMIT")
-            state["transaction_active"] = False
-
-            # Force checkpoint after bulk operations to ensure durability
-            conn.execute("CHECKPOINT")
-
-            logger.info("Bulk operation completed successfully with index management")
-            return result
-
-        except Exception as e:
-            # Rollback transaction on any error
-            try:
-                conn.execute("ROLLBACK")
-                state["transaction_active"] = False
-                logger.info("Transaction rolled back due to error")
-            except Exception:
-                pass
-
-            # Attempt to recreate dropped indexes on failure
-            if dropped_indexes:
-                logger.info("Attempting to recreate dropped indexes after failure")
-                for index_info in dropped_indexes:
-                    try:
-                        self._executor_create_vector_index(
-                            conn,
-                            state,
-                            index_info["provider"],
-                            index_info["model"],
-                            index_info["dims"],
-                            index_info["metric"],
-                        )
-                    except Exception as recreate_error:
-                        logger.error(
-                            f"Failed to recreate index {index_info['index_name']}: {recreate_error}"
-                        )
-
-            logger.error(f"Bulk operation failed: {e}")
             raise
 
     def insert_file(self, file: File) -> int:
@@ -1761,11 +1500,11 @@ class DuckDBProvider(SerialDatabaseProvider):
         batch_size: int | None = None,
         connection=None,
     ) -> int:
-        """Insert multiple embedding vectors with HNSW index optimization - delegate to embedding repository.
+        """Insert multiple embedding vectors with ShardManager coordination.
 
-        # OPTIMIZATION: Drops HNSW indexes for batches >50
-        # PERFORMANCE: 60s → 5s for 10k embeddings (12x speedup)
-        # RECOVERY: Indexes recreated after bulk insert
+        Uses external USearch indexes for vector search. Coordinates with
+        ShardManager for shard assignment and triggers fix_pass when thresholds
+        are crossed.
         """
         # Note: connection parameter is ignored in executor pattern
         return self._execute_in_db_thread_sync(
@@ -1834,6 +1573,33 @@ class DuckDBProvider(SerialDatabaseProvider):
                 )
                 total_inserted += len(batch_data)
 
+            # Wire to ShardManager for shard assignment and index building
+            if self.shard_manager is not None:
+                provider = dim_embeddings[0]["provider"]
+                model = dim_embeddings[0]["model"]
+
+                # Get IDs of just-inserted embeddings
+                emb_ids_result = conn.execute(
+                    f"""
+                    SELECT id FROM {table_name}
+                    WHERE provider = ? AND model = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                """,
+                    [provider, model, len(dim_embeddings)],
+                ).fetchall()
+
+                emb_dicts = [{"id": row[0]} for row in emb_ids_result]
+
+                # ShardManager assigns shard_id and creates shard record if needed
+                success, needs_fix = self.shard_manager.insert_embeddings(
+                    emb_dicts, dims, provider, model, conn
+                )
+
+                # Build USearch index if threshold crossed or new shard created
+                if needs_fix:
+                    self.shard_manager.fix_pass(conn, check_quality=False)
+
         return total_inserted
 
     def get_embedding_by_chunk_id(
@@ -1887,9 +1653,192 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         return existing_chunks
 
+    def _executor_insert_embedding(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        embedding: Embedding,
+    ) -> int:
+        """Executor method for insert_embedding - runs in DB thread.
+
+        Args:
+            conn: Database connection
+            state: Thread-local state dictionary
+            embedding: Embedding model to insert
+
+        Returns:
+            The ID of the inserted embedding
+        """
+        dims = embedding.dims
+
+        # Ensure table exists for these dimensions
+        table_name = self._executor_ensure_embedding_table_exists(conn, state, dims)
+
+        # Insert the embedding
+        conn.execute(
+            f"""
+            INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                embedding.chunk_id,
+                embedding.provider,
+                embedding.model,
+                list(embedding.vector),
+                dims,
+            ],
+        )
+
+        # Get the ID of the just-inserted embedding
+        result = conn.execute(
+            f"SELECT id FROM {table_name} WHERE chunk_id = ? AND provider = ? AND model = ? ORDER BY id DESC LIMIT 1",
+            [embedding.chunk_id, embedding.provider, embedding.model],
+        ).fetchone()
+
+        embedding_id = result[0] if result else 0
+
+        # Wire to ShardManager if available
+        if self.shard_manager is not None:
+            emb_dicts = [{"id": embedding_id}]
+            success, needs_fix = self.shard_manager.insert_embeddings(
+                emb_dicts, dims, embedding.provider, embedding.model, conn
+            )
+            if needs_fix:
+                self.shard_manager.fix_pass(conn, check_quality=False)
+
+        return embedding_id
+
+    def _executor_get_embedding_by_chunk_id(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        chunk_id: int,
+        provider: str,
+        model: str,
+    ) -> Embedding | None:
+        """Executor method for get_embedding_by_chunk_id - runs in DB thread.
+
+        Args:
+            conn: Database connection
+            state: Thread-local state dictionary
+            chunk_id: ID of the chunk to find embedding for
+            provider: Embedding provider name
+            model: Model name used for embedding
+
+        Returns:
+            Embedding model if found, None otherwise
+        """
+        # Get all embedding tables
+        embedding_tables = self._executor_get_all_embedding_tables(conn, state)
+
+        for table_name in embedding_tables:
+            result = conn.execute(
+                f"""
+                SELECT chunk_id, provider, model, embedding, dims, created_at
+                FROM {table_name}
+                WHERE chunk_id = ? AND provider = ? AND model = ?
+                LIMIT 1
+                """,
+                [chunk_id, provider, model],
+            ).fetchone()
+
+            if result:
+                return Embedding(
+                    chunk_id=result[0],
+                    provider=result[1],
+                    model=result[2],
+                    vector=result[3],
+                    dims=result[4],
+                    created_at=result[5],
+                )
+
+        return None
+
     def delete_embeddings_by_chunk_id(self, chunk_id: int) -> None:
-        """Delete all embeddings for a specific chunk - delegate to embedding repository."""
-        self._embedding_repository.delete_embeddings_by_chunk_id(chunk_id)
+        """Delete all embeddings for a specific chunk with ShardManager coordination."""
+        self._execute_in_db_thread_sync("delete_embeddings_by_chunk_id", chunk_id)
+
+    def _executor_delete_embeddings_by_chunk_id(
+        self, conn: Any, state: dict[str, Any], chunk_id: int
+    ) -> None:
+        """Executor method for delete_embeddings_by_chunk_id - runs in DB thread.
+
+        Coordinates with ShardManager to track shard state changes and trigger
+        fix_pass if any affected shard falls below merge threshold.
+        """
+        try:
+            # Get all embedding tables
+            embedding_tables = self._executor_get_all_embedding_tables(conn, state)
+
+            # Track affected shards BEFORE deletion
+            affected_shards: dict[tuple[str, int], int] = {}
+            for table_name in embedding_tables:
+                dims = int(table_name.split("_")[1])
+                result = conn.execute(
+                    f"SELECT shard_id FROM {table_name} WHERE chunk_id = ?",
+                    [chunk_id],
+                ).fetchall()
+                for row in result:
+                    if row[0] is not None:
+                        key = (str(row[0]), dims)
+                        affected_shards[key] = affected_shards.get(key, 0) + 1
+
+            # Delete from all embedding tables
+            for table_name in embedding_tables:
+                conn.execute(
+                    f"DELETE FROM {table_name} WHERE chunk_id = ?", [chunk_id]
+                )
+
+            # Coordinate with ShardManager if available
+            if self.shard_manager is not None and affected_shards:
+                needs_fix = False
+                for (shard_id_str, dims), _deleted_count in affected_shards.items():
+                    table_name = f"embeddings_{dims}"
+                    result = conn.execute(
+                        f"SELECT COUNT(*) FROM {table_name} WHERE shard_id = ?",
+                        [shard_id_str],
+                    ).fetchone()
+                    remaining = result[0] if result else 0
+                    if (
+                        remaining < self.shard_manager.config.merge_threshold
+                        or remaining == 0
+                    ):
+                        needs_fix = True
+                        logger.debug(
+                            f"Shard {shard_id_str[:8]}... has {remaining} embeddings "
+                            f"after deletion (threshold: "
+                            f"{self.shard_manager.config.merge_threshold})"
+                        )
+
+                if needs_fix:
+                    logger.debug(
+                        f"Deletion of chunk {chunk_id} triggered shard fix_pass"
+                    )
+                    self.shard_manager.fix_pass(conn, check_quality=False)
+
+        except Exception as e:
+            logger.error(f"Failed to delete embeddings for chunk {chunk_id}: {e}")
+            raise
+
+    def run_fix_pass(self, check_quality: bool = True) -> None:
+        """Run ShardManager fix_pass via executor thread.
+
+        This is the public API for triggering fix_pass from outside the executor,
+        such as from BulkIndexer for deferred quality checks.
+
+        Args:
+            check_quality: If True, measure self-recall for each shard
+        """
+        if self.shard_manager is None:
+            return
+        self._execute_in_db_thread_sync("run_fix_pass", check_quality)
+
+    def _executor_run_fix_pass(
+        self, conn: Any, state: dict[str, Any], check_quality: bool
+    ) -> None:
+        """Executor method for running ShardManager fix_pass - runs in DB thread."""
+        if self.shard_manager:
+            self.shard_manager.fix_pass(conn, check_quality=check_quality)
 
     def get_all_chunks_with_metadata(self) -> list[dict[str, Any]]:
         """Get all chunks with their metadata including file paths - delegate to chunk repository."""
@@ -2094,7 +2043,16 @@ class DuckDBProvider(SerialDatabaseProvider):
         threshold: float | None,
         path_filter: str | None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Executor method for search_semantic - runs in DB thread."""
+        """Executor method for search_semantic - runs in DB thread.
+
+        Uses ShardManager for USearch-based search. Returns empty results
+        if ShardManager is not available or has no shards.
+        """
+        empty_result: tuple[list[dict[str, Any]], dict[str, Any]] = (
+            [],
+            {"offset": offset, "page_size": page_size, "has_more": False, "total": 0},
+        )
+
         try:
             # Validate and normalize path filter
             normalized_path = self._validate_and_normalize_path_filter(path_filter)
@@ -2108,14 +2066,39 @@ class DuckDBProvider(SerialDatabaseProvider):
                 logger.warning(
                     f"No embeddings table found for {query_dims} dimensions ({table_name})"
                 )
-                return [], {
-                    "offset": offset,
-                    "page_size": page_size,
-                    "has_more": False,
-                    "total": 0,
-                }
+                return empty_result
 
-            # Build query with dimension-specific table
+            # ShardManager is required for vector search
+            if self.shard_manager is None:
+                logger.warning("ShardManager not initialized - vector search unavailable")
+                return empty_result
+
+            if not self.shard_manager.centroids:
+                logger.debug("No shards available for search - returning empty results")
+                return empty_result
+
+            # Perform ShardManager search
+            try:
+                # Request more results to account for filtering
+                shard_results = self.shard_manager.search(
+                    query=query_embedding,
+                    k=page_size + offset + 100,  # Fetch extra for filtering
+                    dims=query_dims,
+                    provider=provider,
+                    model=model,
+                    conn=conn,
+                )
+                # Extract embedding IDs (keys) from search results
+                embedding_ids = [r.key for r in shard_results]
+            except Exception as e:
+                logger.error(f"ShardManager search failed: {e}")
+                return empty_result
+
+            if not embedding_ids:
+                return empty_result
+
+            # Query DuckDB for chunk metadata using embedding IDs
+            placeholders = ",".join(["?"] * len(embedding_ids))
             query = f"""
                 SELECT
                     c.id as chunk_id,
@@ -2126,14 +2109,15 @@ class DuckDBProvider(SerialDatabaseProvider):
                     c.end_line,
                     f.path as file_path,
                     f.language,
-                    array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) as similarity
+                    array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) as similarity,
+                    e.id as embedding_id
                 FROM {table_name} e
                 JOIN chunks c ON e.chunk_id = c.id
                 JOIN files f ON c.file_id = f.id
-                WHERE e.provider = ? AND e.model = ?
+                WHERE e.id IN ({placeholders})
+                AND e.provider = ? AND e.model = ?
             """
-
-            params = [query_embedding, provider, model]
+            params: list[Any] = [query_embedding] + embedding_ids + [provider, model]
 
             path_like: str | None = None
             if normalized_path is not None:
@@ -2147,37 +2131,14 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             if path_like is not None:
                 query += " AND f.path LIKE ? ESCAPE '\\'"
-                # Use substring match so callers can pass repo-relative paths
-                # even when the database base_directory is higher (e.g., monorepo root).
                 params.append(path_like)
 
-            # Get total count for pagination
-            # Build count query separately to avoid string replacement issues
-            count_query = f"""
-                SELECT COUNT(*)
-                FROM {table_name} e
-                JOIN chunks c ON e.chunk_id = c.id
-                JOIN files f ON c.file_id = f.id
-                WHERE e.provider = ? AND e.model = ?
-            """
-
-            count_params = [provider, model]
-
-            if threshold is not None:
-                count_query += f" AND array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) >= ?"
-                count_params.extend([query_embedding, threshold])
-
-            if path_like is not None:
-                count_query += " AND f.path LIKE ? ESCAPE '\\'"
-                # Substring match for consistency with main query
-                count_params.append(path_like)
-
-            total_count = conn.execute(count_query, count_params).fetchone()[0]
-
-            query += " ORDER BY similarity DESC LIMIT ? OFFSET ?"
-            params.extend([page_size, offset])
-
+            query += " ORDER BY similarity DESC"
             results = conn.execute(query, params).fetchall()
+
+            # Apply pagination
+            total_count = len(results)
+            results = results[offset : offset + page_size]
 
             result_list = [
                 {
@@ -2528,40 +2489,57 @@ class DuckDBProvider(SerialDatabaseProvider):
         threshold: float | None,
         path_filter: str | None,
     ) -> list[dict[str, Any]]:
-        """Executor method for search_by_embedding - runs in DB thread."""
+        """Executor method for search_by_embedding - runs in DB thread.
+
+        Uses ShardManager for USearch-based search. Returns empty results
+        if ShardManager is not available or has no shards.
+        """
         try:
-            # Detect dimensions from query embedding (reuse pattern from search_semantic)
+            # Detect dimensions from query embedding
             query_dims = len(query_embedding)
             table_name = f"embeddings_{query_dims}"
-            embedding_type = f"FLOAT[{query_dims}]"
 
-            # Check if table exists for these dimensions (reuse existing validation pattern)
+            # Check if table exists for these dimensions
             if not self._executor_table_exists(conn, state, table_name):
                 logger.warning(
                     f"No embeddings table found for {query_dims} dimensions ({table_name})"
                 )
                 return []
 
-            # Build path filter condition
+            # ShardManager is required for vector search
+            if self.shard_manager is None:
+                logger.warning("ShardManager not initialized - vector search unavailable")
+                return []
+
+            if not self.shard_manager.centroids:
+                logger.warning("No shard centroids available - vector search will return empty results")
+                return []
+
+            # Perform ShardManager search
+            try:
+                # Request more results to account for filtering (uses configured overfetch)
+                shard_results = self.shard_manager.search(
+                    query=query_embedding,
+                    k=limit * self._sharding_config.overfetch_multiplier,
+                    dims=query_dims,
+                    provider=provider,
+                    model=model,
+                    conn=conn,
+                )
+                # Extract embedding IDs (keys) from search results
+                embedding_ids = [r.key for r in shard_results]
+            except Exception as e:
+                logger.error(f"ShardManager search failed: {e}")
+                return []
+
+            if not embedding_ids:
+                return []
+
+            # Query DuckDB for chunk metadata using embedding IDs
             normalized_path = self._validate_and_normalize_path_filter(path_filter)
-            path_condition = ""
-            query_params = [query_embedding, provider, model, limit]
-
-            if normalized_path is not None:
-                # Convert relative path to SQL pattern
-                escaped_path = escape_like_pattern(normalized_path)
-                path_pattern = f"%{escaped_path}%"
-                path_condition = "AND f.path LIKE ? ESCAPE '\\'"
-                query_params.insert(-1, path_pattern)  # Insert before limit
-
-            # Build threshold condition
-            threshold_condition = (
-                f"AND distance <= {threshold}" if threshold is not None else ""
-            )
-
-            # Query for similar chunks using the provided embedding
+            placeholders = ",".join(["?"] * len(embedding_ids))
             query = f"""
-                SELECT 
+                SELECT
                     c.id as chunk_id,
                     c.symbol as name,
                     c.code as content,
@@ -2570,19 +2548,31 @@ class DuckDBProvider(SerialDatabaseProvider):
                     c.end_line,
                     f.path as file_path,
                     f.language,
-                    array_cosine_distance(e.embedding, ?::{embedding_type}) as distance
+                    array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) as similarity
                 FROM {table_name} e
                 JOIN chunks c ON e.chunk_id = c.id
                 JOIN files f ON c.file_id = f.id
-                WHERE e.provider = ?
-                AND e.model = ?
-                {path_condition}
-                {threshold_condition}
-                ORDER BY distance ASC
-                LIMIT ?
+                WHERE e.id IN ({placeholders})
+                AND e.provider = ? AND e.model = ?
             """
+            params: list[Any] = [query_embedding] + embedding_ids + [provider, model]
 
-            results = conn.execute(query, query_params).fetchall()
+            if threshold is not None:
+                query += f" AND array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) >= ?"
+                params.append(query_embedding)
+                params.append(threshold)
+
+            if normalized_path is not None:
+                escaped_path = escape_like_pattern(normalized_path)
+                path_like = f"%{escaped_path}%"
+                query += " AND f.path LIKE ? ESCAPE '\\'"
+                params.append(path_like)
+
+            query += " ORDER BY similarity DESC"
+            results = conn.execute(query, params).fetchall()
+
+            # Apply limit
+            results = results[:limit]
 
             # Format results
             result_list = [
@@ -2595,7 +2585,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     "end_line": result[5],
                     "file_path": result[6],  # Keep stored format
                     "language": result[7],
-                    "score": 1.0 - result[8],  # Convert distance to similarity score
+                    "score": result[8],  # Similarity score (already 0-1)
                 }
                 for result in results
             ]
@@ -2994,8 +2984,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         # Export with read-only connection
         conn = duckdb.connect(str(db_path), read_only=True)
         try:
-            conn.execute("INSTALL vss")
-            conn.execute("LOAD vss")
             conn.execute(f"EXPORT DATABASE '{export_dir}' (FORMAT PARQUET)")
         finally:
             conn.close()
@@ -3011,37 +2999,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         conn = duckdb.connect(str(new_db_path))
         try:
-            conn.execute("INSTALL vss")
-            conn.execute("LOAD vss")
-            self._enable_hnsw_persistence_on_conn(conn)
             conn.execute(f"IMPORT DATABASE '{export_dir}'")
         finally:
             conn.close()
-
-    def _enable_hnsw_persistence_on_conn(self, conn: Any) -> None:
-        """Enable HNSW index persistence with fallback for future versions."""
-        # Primary flag (current DuckDB versions)
-        try:
-            conn.execute("SET hnsw_enable_experimental_persistence = true")
-            return
-        except Exception:
-            pass
-
-        # Fallback alternatives for potential future API changes
-        alternatives = [
-            "SET hnsw_persistence = true",
-            "SET vss_persistence = true",
-        ]
-        for alt in alternatives:
-            try:
-                conn.execute(alt)
-                logger.debug(f"Used alternative HNSW persistence flag: {alt}")
-                return
-            except Exception:
-                continue
-
-        logger.warning(
-            "HNSW persistence flag not available. "
-            "Vector indexes will rebuild on first query after compaction."
-        )
 
