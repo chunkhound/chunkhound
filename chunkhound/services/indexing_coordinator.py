@@ -1383,7 +1383,7 @@ class IndexingCoordinator(BaseService):
             # Note: Embedding generation is handled separately via generate_missing_embeddings()
             # to provide a unified progress experience
 
-            # FINAL: Unified optimization (CHECKPOINT + HNSW compact + full compaction)
+            # FINAL: Unified optimization (CHECKPOINT + compaction)
             # Only run if fragmentation warrants it
             if hasattr(self._db, "should_optimize") and self._db.should_optimize(operation="post-indexing"):
                 if hasattr(self._db, "optimize"):
@@ -1392,10 +1392,6 @@ class IndexingCoordinator(BaseService):
                 elif hasattr(self._db, "optimize_tables"):
                     logger.debug("Final optimization pass at end of indexing...")
                     self._db.optimize_tables()
-
-            # Create deferred HNSW indexes (if any were deferred during first indexing)
-            if hasattr(self._db, "create_deferred_indexes"):
-                self._db.create_deferred_indexes()
 
             # Check for disk limit exceeded errors
             for error in agg_errors:
@@ -1612,9 +1608,23 @@ class IndexingCoordinator(BaseService):
                 progress=self.progress,
             )
 
-            return await embedding_service.generate_missing_embeddings(
-                exclude_patterns=exclude_patterns
-            )
+            # Get bulk_indexer if available for deferred quality checks
+            bulk_indexer = None
+            if hasattr(self._db, "get_bulk_indexer"):
+                bulk_indexer = self._db.get_bulk_indexer()
+
+            if bulk_indexer is not None:
+                with bulk_indexer:
+                    result = await embedding_service.generate_missing_embeddings(
+                        exclude_patterns=exclude_patterns
+                    )
+                    # Signal batch completion for deferred quality check
+                    bulk_indexer.on_batch_completed()
+                    return result
+            else:
+                return await embedding_service.generate_missing_embeddings(
+                    exclude_patterns=exclude_patterns
+                )
 
         except Exception as e:
             # Debug log to trace if this is the mystery error source
