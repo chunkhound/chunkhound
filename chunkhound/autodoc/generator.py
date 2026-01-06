@@ -4,6 +4,7 @@ from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 
+from chunkhound.autodoc.audience import _normalize_audience
 from chunkhound.autodoc.cleanup import _cleanup_with_llm
 from chunkhound.autodoc.ia import _synthesize_homepage_overview, _synthesize_site_ia
 from chunkhound.autodoc.index_loader import (
@@ -33,7 +34,6 @@ from chunkhound.autodoc.references import (
     strip_references_section,
 )
 from chunkhound.autodoc.site_writer import write_astro_site
-from chunkhound.autodoc.audience import _normalize_audience
 from chunkhound.llm_manager import LLMManager
 
 
@@ -167,7 +167,10 @@ async def _maybe_synthesize_global_ia(
         provider = llm_manager.get_synthesis_provider()
     except Exception as exc:  # noqa: BLE001
         if log_warning:
-            log_warning(f"Global IA synthesis provider unavailable; skipping. Error: {exc}")
+            log_warning(
+                "Global IA synthesis provider unavailable; skipping. "
+                f"Error: {exc}"
+            )
         return None, None, None
 
     homepage_overview: str | None = None
@@ -197,7 +200,10 @@ async def _maybe_synthesize_global_ia(
         )
     except Exception as exc:  # noqa: BLE001
         if log_warning:
-            log_warning(f"Global navigation/glossary synthesis failed; skipping. Error: {exc}")
+            log_warning(
+                "Global navigation/glossary synthesis failed; skipping. "
+                f"Error: {exc}"
+            )
 
     return nav_groups, glossary_terms, homepage_overview
 

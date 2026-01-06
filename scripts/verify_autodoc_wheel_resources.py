@@ -22,6 +22,13 @@ _REQUIRED_WHEEL_PATHS: tuple[str, ...] = (
     "chunkhound/autodoc/assets/src/layouts/DocLayout.astro",
     "chunkhound/autodoc/assets/src/styles/global.css",
     "chunkhound/autodoc/assets/public/favicon.ico",
+    "chunkhound/autodoc/assets/public/fonts/SourceSans3VF-Upright.ttf.woff2",
+    "chunkhound/autodoc/assets/public/fonts/SourceSans3VF-Italic.ttf.woff2",
+    "chunkhound/autodoc/assets/public/fonts/DMSerifDisplay-Regular.ttf",
+    "chunkhound/autodoc/assets/public/fonts/DMSerifDisplay-Italic.ttf",
+    "chunkhound/autodoc/assets/public/fonts/licenses/SourceSans3-LICENSE.md",
+    "chunkhound/autodoc/assets/public/fonts/licenses/DMSerif-OFL.txt",
+    "chunkhound/autodoc/assets/public/fonts/licenses/DMSerif-LICENSE.txt",
 )
 
 
@@ -52,6 +59,13 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                 'assert "navData" in load_text("src/layouts/DocLayout.astro")',
                 'assert load_text("src/styles/global.css").strip()',
                 'assert load_bytes("public/favicon.ico")',
+                'assert load_bytes("public/fonts/SourceSans3VF-Upright.ttf.woff2")',
+                'assert load_bytes("public/fonts/SourceSans3VF-Italic.ttf.woff2")',
+                'assert load_bytes("public/fonts/DMSerifDisplay-Regular.ttf")',
+                (
+                    'assert load_text("public/fonts/licenses/SourceSans3-LICENSE.md")'
+                    ".strip()"
+                ),
                 "",
                 f"_build_cleanup_prompt(title='T', body='{body}', audience='balanced')",
                 f"_build_cleanup_prompt(title='T', body='{body}', audience='end-user')",

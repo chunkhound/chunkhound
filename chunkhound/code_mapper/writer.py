@@ -12,7 +12,7 @@ from chunkhound.code_mapper.render import (
     render_combined_document,
     render_index_document,
 )
-from chunkhound.code_mapper.utils import safe_scope_label
+from chunkhound.utils.text import safe_scope_label
 
 
 @dataclass

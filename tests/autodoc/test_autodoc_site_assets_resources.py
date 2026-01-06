@@ -10,10 +10,17 @@ def test_template_loader_reads_packaged_assets() -> None:
     layout = load_text("src/layouts/DocLayout.astro")
     css = load_text("src/styles/global.css")
     favicon = load_bytes("public/favicon.ico")
+    source_sans_upright = load_bytes("public/fonts/SourceSans3VF-Upright.ttf.woff2")
+    source_sans_italic = load_bytes("public/fonts/SourceSans3VF-Italic.ttf.woff2")
+    dm_serif_display = load_bytes("public/fonts/DMSerifDisplay-Regular.ttf")
 
     assert "navData" in layout
     assert css.strip()
+    assert "fonts.googleapis.com" not in css
     assert favicon
+    assert source_sans_upright
+    assert source_sans_italic
+    assert dm_serif_display
 
 
 def test_template_loader_rejects_path_traversal() -> None:
@@ -53,6 +60,15 @@ def test_write_astro_assets_only_writes_packaged_favicon_bytes(tmp_path: Path) -
     assert (output_dir / "public" / "favicon.ico").read_bytes() == load_bytes(
         "public/favicon.ico"
     )
+    assert (
+        output_dir / "public" / "fonts" / "SourceSans3VF-Upright.ttf.woff2"
+    ).read_bytes() == load_bytes("public/fonts/SourceSans3VF-Upright.ttf.woff2")
+    assert (
+        output_dir / "public" / "fonts" / "SourceSans3VF-Italic.ttf.woff2"
+    ).read_bytes() == load_bytes("public/fonts/SourceSans3VF-Italic.ttf.woff2")
+    assert (
+        output_dir / "public" / "fonts" / "DMSerifDisplay-Regular.ttf"
+    ).read_bytes() == load_bytes("public/fonts/DMSerifDisplay-Regular.ttf")
 
     readme = (output_dir / "README.md").read_text(encoding="utf-8")
     package_json = (output_dir / "package.json").read_text(encoding="utf-8")

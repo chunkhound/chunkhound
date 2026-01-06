@@ -11,7 +11,7 @@ from chunkhound.llm_manager import LLMManager
 
 from . import autodoc_autorun as autorun
 from . import autodoc_prompts as prompts
-from .autodoc_errors import AutoDocCLIExit
+from .autodoc_errors import AutoDocCLIExitError
 
 
 @dataclass(frozen=True)
@@ -75,11 +75,11 @@ async def generate_docsite_with_optional_autorun(
             )
         except FileNotFoundError as exc:
             if attempt == 1:
-                raise AutoDocCLIExit(exit_code=1, errors=(str(exc),))
+                raise AutoDocCLIExitError(exit_code=1, errors=(str(exc),))
 
             formatter.warning(str(exc))
             if not prompts.is_interactive():
-                raise AutoDocCLIExit(
+                raise AutoDocCLIExitError(
                     exit_code=1,
                     errors=(
                         "AutoDoc index not found in map-in directory, and "

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +11,7 @@ from chunkhound.code_mapper.models import AgentDocMetadata
 from chunkhound.core.config.config import Config
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.llm_manager import LLMManager
+from chunkhound.utils.git_safe import GitCommandError, run_git
 
 
 @dataclass
@@ -37,15 +37,11 @@ class CodeMapperMetadataBundle:
 def _get_head_sha(project_root: Path) -> str:
     """Return the current HEAD SHA for the project or a stable placeholder."""
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(project_root),
-            text=True,
-            capture_output=True,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except (OSError, subprocess.SubprocessError, ValueError):
+        result = run_git(["rev-parse", "HEAD"], cwd=project_root, timeout_s=5.0)
+        stdout = (result.stdout or "").strip()
+        if result.returncode == 0 and stdout:
+            return stdout
+    except (GitCommandError, OSError, ValueError):
         pass
     return "NO_GIT_HEAD"
 

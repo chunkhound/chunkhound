@@ -5,8 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from chunkhound.api.cli.commands.autodoc_cleanup import resolve_cleanup_config_and_llm_manager
-from chunkhound.api.cli.commands.autodoc_errors import AutoDocCLIExit
+from chunkhound.api.cli.commands.autodoc_cleanup import (
+    resolve_cleanup_config_and_llm_manager,
+)
+from chunkhound.api.cli.commands.autodoc_errors import AutoDocCLIExitError
 from chunkhound.core.config.config import Config
 
 
@@ -34,9 +36,15 @@ def test_autodoc_cleanup_requires_explicit_llm_config(tmp_path: Path) -> None:
         audience="balanced",
     )
 
-    with pytest.raises(AutoDocCLIExit) as excinfo:
-        resolve_cleanup_config_and_llm_manager(args=args, config=cfg, formatter=formatter)  # type: ignore[arg-type]
+    with pytest.raises(AutoDocCLIExitError) as excinfo:
+        resolve_cleanup_config_and_llm_manager(  # type: ignore[arg-type]
+            args=args,
+            config=cfg,
+            formatter=formatter,
+        )
 
     assert excinfo.value.exit_code == 2
-    assert any("AutoDoc cleanup requires an LLM provider" in msg for msg in excinfo.value.errors)
-
+    assert any(
+        "AutoDoc cleanup requires an LLM provider" in msg
+        for msg in excinfo.value.errors
+    )

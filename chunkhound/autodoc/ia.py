@@ -5,12 +5,12 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from chunkhound.autodoc.audience import _normalize_audience
 from chunkhound.autodoc.markdown_utils import (
     _strip_first_heading,
     _strip_markdown_for_search,
 )
 from chunkhound.autodoc.models import DocsitePage, GlossaryTerm, NavGroup
-from chunkhound.autodoc.audience import _normalize_audience
 from chunkhound.interfaces.llm_provider import LLMProvider
 
 _SITE_IA_INPUT_LINE = (

@@ -27,19 +27,20 @@ from chunkhound.code_mapper import llm as code_mapper_llm
 from chunkhound.code_mapper import pipeline as code_mapper_pipeline
 from chunkhound.code_mapper.coverage import compute_unreferenced_scope_files
 from chunkhound.code_mapper.metadata import build_generation_stats_with_coverage
+from chunkhound.code_mapper.models import CodeMapperPOI
 from chunkhound.code_mapper.orchestrator import CodeMapperOrchestrator
 from chunkhound.code_mapper.render import render_overview_document
 from chunkhound.code_mapper.service import (
     CodeMapperNoPointsError,
     run_code_mapper_pipeline,
 )
-from chunkhound.code_mapper.utils import safe_scope_label
 from chunkhound.code_mapper.writer import write_code_mapper_outputs
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.database_factory import create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
+from chunkhound.utils.text import safe_scope_label
 
 from ..utils.rich_output import RichOutputFormatter
 from ..utils.tree_progress import TreeProgressDisplay
@@ -47,11 +48,11 @@ from ..utils.tree_progress import TreeProgressDisplay
 P = ParamSpec("P")
 
 
-async def _run_code_mapper_overview_hyde(
+async def run_code_mapper_overview_hyde(
     *args: P.args, **kwargs: P.kwargs
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[CodeMapperPOI]]:
     """Delegate to pipeline helper (wrapper for test monkeypatching)."""
-    return await code_mapper_pipeline._run_code_mapper_overview_hyde(*args, **kwargs)
+    return await code_mapper_pipeline.run_code_mapper_overview_hyde(*args, **kwargs)
 
 
 # Re-export for tests that monkeypatch HyDE provider metadata wiring.
@@ -123,7 +124,7 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
         )
 
         try:
-            overview_answer, points_of_interest = await _run_code_mapper_overview_hyde(
+            overview_answer, points_of_interest = await run_code_mapper_overview_hyde(
                 llm_manager=llm_manager,
                 target_dir=scope.target_dir,
                 scope_path=scope.scope_path,

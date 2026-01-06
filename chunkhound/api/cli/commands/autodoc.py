@@ -15,10 +15,10 @@ from . import autodoc_autorun as autorun
 from . import autodoc_cleanup as cleanup
 from . import autodoc_generate as generate
 from . import autodoc_git as git_utils
-from .autodoc_errors import AutoDocCLIExit
+from .autodoc_errors import AutoDocCLIExitError
 
 
-def _render_exit(formatter: RichOutputFormatter, exc: AutoDocCLIExit) -> None:
+def _render_exit(formatter: RichOutputFormatter, exc: AutoDocCLIExitError) -> None:
     for message in exc.warnings:
         formatter.warning(message)
     for message in exc.errors:
@@ -37,7 +37,7 @@ async def autodoc_command(args, config: Config) -> None:
 
         if bool(getattr(args, "assets_only", False)):
             if not output_dir.exists():
-                raise AutoDocCLIExit(
+                raise AutoDocCLIExitError(
                     exit_code=1,
                     errors=(
                         "Output directory not found for --assets-only: "
@@ -85,7 +85,7 @@ async def autodoc_command(args, config: Config) -> None:
             inputs=inputs,
         )
 
-    except AutoDocCLIExit as exc:
+    except AutoDocCLIExitError as exc:
         _render_exit(formatter, exc)
         sys.exit(exc.exit_code)
     except Exception as exc:  # noqa: BLE001
@@ -101,4 +101,3 @@ async def autodoc_command(args, config: Config) -> None:
             "Missing topic files referenced in index: "
             + ", ".join(result.missing_topics)
         )
-

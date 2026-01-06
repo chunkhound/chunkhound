@@ -32,9 +32,14 @@ def test_build_cleanup_prompt_end_user_uses_end_user_template() -> None:
 
 
 def test_cleanup_prompt_loading_fails_fast_when_prompt_files_missing(
-    tmp_path, monkeypatch
+    monkeypatch,
 ) -> None:
-    monkeypatch.setattr(cleanup, "_PROMPTS_DIR", tmp_path)
+    def _raise_missing_prompt(_filename: str) -> str:
+        raise FileNotFoundError(
+            "AutoDoc prompt file missing: chunkhound.autodoc:prompts/missing.txt"
+        )
+
+    monkeypatch.setattr(cleanup, "_read_prompt_file", _raise_missing_prompt)
     try:
         _build_cleanup_prompt(
             title="My Title",

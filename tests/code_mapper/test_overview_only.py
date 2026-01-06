@@ -14,7 +14,7 @@ async def test_run_code_mapper_overview_only_raises_when_no_points(
         return "overview", []
 
     monkeypatch.setattr(
-        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
+        code_mapper_service, "run_code_mapper_overview_hyde", fake_overview
     )
 
     with pytest.raises(code_mapper_service.CodeMapperNoPointsError):
@@ -39,7 +39,7 @@ async def test_run_code_mapper_overview_only_returns_answer_and_points(
         return "overview", [CodeMapperPOI(mode="architectural", text="Point")]
 
     monkeypatch.setattr(
-        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
+        code_mapper_service, "run_code_mapper_overview_hyde", fake_overview
     )
 
     result = await code_mapper_service.run_code_mapper_overview_only(

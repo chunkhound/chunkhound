@@ -31,7 +31,7 @@ async def test_dual_hyde_overview_returns_both_maps_and_injects_quickstart(
         code_mapper_pipeline, "run_hyde_only_query", fake_run_hyde_only_query
     )
 
-    overview, pois = await code_mapper_pipeline._run_code_mapper_overview_hyde(
+    overview, pois = await code_mapper_pipeline.run_code_mapper_overview_hyde(
         llm_manager=None,
         target_dir=tmp_path,
         scope_path=tmp_path,

@@ -18,11 +18,19 @@ from chunkhound.autodoc.models import (
 from chunkhound.autodoc.references import strip_references_section
 from chunkhound.autodoc.site_writer_metadata import _render_index_metadata
 from chunkhound.autodoc.template_loader import load_bytes, load_text
-from chunkhound.code_mapper.utils import safe_scope_label
+from chunkhound.utils.text import safe_scope_label
 
 
 def _render_favicon_bytes() -> bytes:
     return load_bytes("public/favicon.ico")
+
+
+def _render_font_bytes(filename: str) -> bytes:
+    return load_bytes(f"public/fonts/{filename}")
+
+
+def _render_font_license_text(filename: str) -> str:
+    return load_text(f"public/fonts/licenses/{filename}")
 
 
 def _render_package_json(site: DocsiteSite) -> str:

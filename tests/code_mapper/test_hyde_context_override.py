@@ -32,7 +32,7 @@ async def test_overview_hyde_skips_scope_collection_when_context_provided(
         code_mapper_pipeline, "run_hyde_only_query", fake_run_hyde_only_query
     )
 
-    overview, pois = await code_mapper_pipeline._run_code_mapper_overview_hyde(
+    overview, pois = await code_mapper_pipeline.run_code_mapper_overview_hyde(
         llm_manager=None,
         target_dir=tmp_path,
         scope_path=tmp_path,

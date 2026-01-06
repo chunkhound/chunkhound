@@ -29,7 +29,7 @@ async def test_run_code_mapper_pipeline_raises_when_no_points(
         return "overview", []
 
     monkeypatch.setattr(
-        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
+        code_mapper_service, "run_code_mapper_overview_hyde", fake_overview
     )
 
     with pytest.raises(code_mapper_service.CodeMapperNoPointsError):
@@ -77,7 +77,7 @@ async def test_run_code_mapper_pipeline_skips_empty_results(
         }
 
     monkeypatch.setattr(
-        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
+        code_mapper_service, "run_code_mapper_overview_hyde", fake_overview
     )
     monkeypatch.setattr(
         code_mapper_service, "run_deep_research", fake_deep_research_impl
@@ -131,7 +131,7 @@ async def test_run_code_mapper_pipeline_uses_mode_aware_queries(
         }
 
     monkeypatch.setattr(
-        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
+        code_mapper_service, "run_code_mapper_overview_hyde", fake_overview
     )
     monkeypatch.setattr(
         code_mapper_service, "run_deep_research", fake_deep_research_impl

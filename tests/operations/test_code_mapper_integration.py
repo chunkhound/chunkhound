@@ -105,8 +105,14 @@ async def _run_code_mapper_with_stubs(
             "2. **Error Handling**: How failures are surfaced.\n"
         )
         points = [
-            CodeMapperPOI(mode="architectural", text="Core Flow: High-level data flow."),
-            CodeMapperPOI(mode="architectural", text="Error Handling: How failures are surfaced."),
+            CodeMapperPOI(
+                mode="architectural",
+                text="Core Flow: High-level data flow.",
+            ),
+            CodeMapperPOI(
+                mode="architectural",
+                text="Error Handling: How failures are surfaced.",
+            ),
         ]
         return overview, points[:max_points]
 
@@ -158,7 +164,7 @@ async def _run_code_mapper_with_stubs(
     monkeypatch.setattr(code_mapper_mod, "LLMManager", DummyLLMManager)
     monkeypatch.setattr(
         code_mapper_service,
-        "_run_code_mapper_overview_hyde",
+        "run_code_mapper_overview_hyde",
         fake_overview,
         raising=True,
     )

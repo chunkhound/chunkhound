@@ -85,14 +85,28 @@ def patch_code_mapper_dependencies(
         indexing_cfg: Any | None = None,
     ) -> tuple[str, list[CodeMapperPOI]]:
         _ = (llm_manager, target_dir, scope_path, scope_label)
-        _ = (meta, context, comprehensiveness, out_dir, persist_prompt, map_hyde_provider, indexing_cfg)
+        _ = (
+            meta,
+            context,
+            comprehensiveness,
+            out_dir,
+            persist_prompt,
+            map_hyde_provider,
+            indexing_cfg,
+        )
         overview = (
             "1. **Core Flow**: High-level data flow.\n"
             "2. **Error Handling**: How failures are surfaced.\n"
         )
         points = [
-            CodeMapperPOI(mode="architectural", text="Core Flow: High-level data flow."),
-            CodeMapperPOI(mode="architectural", text="Error Handling: How failures are surfaced."),
+            CodeMapperPOI(
+                mode="architectural",
+                text="Core Flow: High-level data flow.",
+            ),
+            CodeMapperPOI(
+                mode="architectural",
+                text="Error Handling: How failures are surfaced.",
+            ),
         ]
         return overview, points[:max_points]
 
@@ -124,7 +138,7 @@ def patch_code_mapper_dependencies(
     monkeypatch.setattr(LLMManager, "_create_provider", _fake_create_provider)
     monkeypatch.setattr(
         code_mapper_service,
-        "_run_code_mapper_overview_hyde",
+        "run_code_mapper_overview_hyde",
         fake_overview,
         raising=True,
     )

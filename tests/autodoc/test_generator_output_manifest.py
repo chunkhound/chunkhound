@@ -128,6 +128,27 @@ _LLM_EXPECTED_MANIFEST: dict[str, str] = {
     "public/favicon.ico": (
         "d014edc031656dd8a5cb7740ed900d658ba3108ff6fcb977fc3ff4f758c10f0b"
     ),
+    "public/fonts/DMSerifDisplay-Italic.ttf": (
+        "df74c0ac387baeaeb0fe4f2324e1668e6a3ed8c09cd9796fe162c71753e19e45"
+    ),
+    "public/fonts/DMSerifDisplay-Regular.ttf": (
+        "8cc3643535edf039aa5d95440a8542735e9197e4f4b8d9303e980fefbf5ab616"
+    ),
+    "public/fonts/SourceSans3VF-Italic.ttf.woff2": (
+        "b4959abc0569392f87c6c6ac612f90e3fe0104d283724189b7d8b6f61af347d3"
+    ),
+    "public/fonts/SourceSans3VF-Upright.ttf.woff2": (
+        "5f16566f7a40d39b339ad26be151fa5a1ab1f0c2574c7a2e619765584a1acbd8"
+    ),
+    "public/fonts/licenses/DMSerif-LICENSE.txt": (
+        "aa49c876a28d8c0b0a3027d6c25b9c607eee8c0fb96165011d42a6ace1408fe1"
+    ),
+    "public/fonts/licenses/DMSerif-OFL.txt": (
+        "403e1c31512c5670150365359f133dcf7e5e7a172e906d2a56493922bdf70796"
+    ),
+    "public/fonts/licenses/SourceSans3-LICENSE.md": (
+        "56af9b9c6715597e458284a474dc118a50a4150e9d547c70f7b4a33c3e6a9328"
+    ),
     "src/data/nav.json": (
         "e6b5c6c9ebfd335199f501c1c88c11afde89671f89a7bd672c543b318c323af1"
     ),
@@ -150,7 +171,7 @@ _LLM_EXPECTED_MANIFEST: dict[str, str] = {
         "84639b72b3b8d55111d100aebbe06323a8493771e77cf0d1b46c0ad6f206fa4f"
     ),
     "src/styles/global.css": (
-        "cc160bacd9f2702fa7b305fe798f380f25135639426451bbd886e276220bc565"
+        "0b1e07098d5f256c40b73551cb703c05787e0afdc9092d84a4412a0bad891764"
     ),
     "tsconfig.json": "ec0d7fbe45c5b2efb1c617eec3a7ee249d72974163c5309843420904703ee0a4",
 }

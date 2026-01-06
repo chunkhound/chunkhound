@@ -30,11 +30,19 @@ async def test_code_mapper_comprehensiveness_minimal_maps_to_one_poi(
         indexing_cfg: Any | None = None,
     ) -> tuple[str, list[CodeMapperPOI]]:
         _ = (llm_manager, target_dir, scope_path, scope_label)
-        _ = (meta, context, comprehensiveness, out_dir, persist_prompt, map_hyde_provider, indexing_cfg)
+        _ = (
+            meta,
+            context,
+            comprehensiveness,
+            out_dir,
+            persist_prompt,
+            map_hyde_provider,
+            indexing_cfg,
+        )
         seen_max_points.append(max_points)
         return "1. Example\n", [CodeMapperPOI(mode="architectural", text="Example")]
 
-    monkeypatch.setattr(code_mapper_mod, "_run_code_mapper_overview_hyde", fake_overview)
+    monkeypatch.setattr(code_mapper_mod, "run_code_mapper_overview_hyde", fake_overview)
     monkeypatch.setattr(
         code_mapper_mod,
         "build_llm_metadata_and_map_hyde",

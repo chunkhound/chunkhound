@@ -33,7 +33,7 @@ async def test_hyde_prompt_persistence_is_opt_in(
     arch_prompt_path = tmp_path / f"hyde_scope_prompt_arch_{scope_label}.md"
     ops_prompt_path = tmp_path / f"hyde_scope_prompt_ops_{scope_label}.md"
 
-    await code_mapper_pipeline._run_code_mapper_overview_hyde(
+    await code_mapper_pipeline.run_code_mapper_overview_hyde(
         llm_manager=None,
         target_dir=tmp_path,
         scope_path=tmp_path,
@@ -50,7 +50,7 @@ async def test_hyde_prompt_persistence_is_opt_in(
 
     monkeypatch.setenv("CH_CODE_MAPPER_WRITE_HYDE_PROMPT", "1")
 
-    await code_mapper_pipeline._run_code_mapper_overview_hyde(
+    await code_mapper_pipeline.run_code_mapper_overview_hyde(
         llm_manager=None,
         target_dir=tmp_path,
         scope_path=tmp_path,
@@ -95,7 +95,7 @@ async def test_hyde_prompt_persistence_when_persist_prompt_enabled(
     arch_prompt_path = tmp_path / f"hyde_scope_prompt_arch_{scope_label}.md"
     ops_prompt_path = tmp_path / f"hyde_scope_prompt_ops_{scope_label}.md"
 
-    await code_mapper_pipeline._run_code_mapper_overview_hyde(
+    await code_mapper_pipeline.run_code_mapper_overview_hyde(
         llm_manager=None,
         target_dir=tmp_path,
         scope_path=tmp_path,

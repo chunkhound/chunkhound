@@ -11,7 +11,7 @@ from chunkhound.core.config.llm_config import LLMConfig
 from chunkhound.llm_manager import LLMManager
 from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
 
-from .autodoc_errors import AutoDocCLIExit
+from .autodoc_errors import AutoDocCLIExitError
 
 
 def _has_llm_env() -> bool:
@@ -47,7 +47,9 @@ def _build_cleanup_provider_configs(
     return utility_config, synthesis_config
 
 
-def _try_load_llm_config_from_env(*, formatter: RichOutputFormatter) -> LLMConfig | None:
+def _try_load_llm_config_from_env(
+    *, formatter: RichOutputFormatter
+) -> LLMConfig | None:
     if not _has_llm_env():
         return None
     try:
@@ -112,7 +114,8 @@ def _log_cleanup_model_selection(
 
     effort_display = f", reasoning_effort={effort}" if effort else ""
     formatter.info(
-        f"Cleanup model selection: provider={provider}, model={model}{effort_display}{suffix}"
+        f"Cleanup model selection: provider={provider}, model={model}"
+        f"{effort_display}{suffix}"
     )
 
 
@@ -154,7 +157,7 @@ def resolve_cleanup_config_and_llm_manager(
 ) -> tuple[CleanupConfig, LLMManager]:
     cleanup_mode = getattr(args, "cleanup_mode", "llm")
     if cleanup_mode != "llm":
-        raise AutoDocCLIExit(
+        raise AutoDocCLIExitError(
             exit_code=2,
             errors=(
                 "Unsupported AutoDoc cleanup mode: "
@@ -164,7 +167,7 @@ def resolve_cleanup_config_and_llm_manager(
 
     llm_manager = resolve_llm_manager(config=config, formatter=formatter)
     if llm_manager is None:
-        raise AutoDocCLIExit(
+        raise AutoDocCLIExitError(
             exit_code=2,
             errors=(
                 "AutoDoc cleanup requires an LLM provider, but none is configured. "
@@ -180,4 +183,3 @@ def resolve_cleanup_config_and_llm_manager(
         audience=getattr(args, "audience", "balanced"),
     )
     return cleanup_config, llm_manager
-

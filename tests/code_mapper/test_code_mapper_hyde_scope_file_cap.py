@@ -32,7 +32,7 @@ async def test_code_mapper_hyde_scope_file_cap_scales_with_comprehensiveness(
         code_mapper_pipeline, "run_hyde_only_query", fake_run_hyde_only_query
     )
 
-    await code_mapper_pipeline._run_code_mapper_overview_hyde(
+    await code_mapper_pipeline.run_code_mapper_overview_hyde(
         llm_manager=None,
         target_dir=tmp_path,
         scope_path=tmp_path,
@@ -43,7 +43,7 @@ async def test_code_mapper_hyde_scope_file_cap_scales_with_comprehensiveness(
         map_hyde_provider=None,
         indexing_cfg=None,
     )
-    await code_mapper_pipeline._run_code_mapper_overview_hyde(
+    await code_mapper_pipeline.run_code_mapper_overview_hyde(
         llm_manager=None,
         target_dir=tmp_path,
         scope_path=tmp_path,

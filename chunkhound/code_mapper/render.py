@@ -4,8 +4,11 @@ from typing import Any
 
 from chunkhound.code_mapper.metadata import format_metadata_block
 from chunkhound.code_mapper.models import AgentDocMetadata, CodeMapperPOI
-from chunkhound.code_mapper.pipeline import _derive_heading_from_point, _slugify_heading
-from chunkhound.code_mapper.utils import safe_scope_label
+from chunkhound.code_mapper.public_utils import (
+    derive_heading_from_point,
+    slugify_heading,
+)
+from chunkhound.utils.text import safe_scope_label
 
 
 def render_overview_document(
@@ -61,7 +64,7 @@ def render_combined_document(
         lines.append("## Architectural Map")
         lines.append("")
         for idx, (poi, result) in enumerate(arch_sections, start=1):
-            heading = _derive_heading_from_point(poi.text)
+            heading = derive_heading_from_point(poi.text)
             lines.append(f"### {idx}. {heading}")
             lines.append("")
             lines.append(str(result.get("answer", "")).strip())
@@ -71,7 +74,7 @@ def render_combined_document(
         lines.append("## Operational Map")
         lines.append("")
         for idx, (poi, result) in enumerate(ops_sections, start=1):
-            heading = _derive_heading_from_point(poi.text)
+            heading = derive_heading_from_point(poi.text)
             lines.append(f"### {idx}. {heading}")
             lines.append("")
             lines.append(str(result.get("answer", "")).strip())
@@ -96,8 +99,8 @@ def build_topic_artifacts(
     ops_idx = 0
 
     for poi, result in poi_sections:
-        heading = _derive_heading_from_point(poi.text)
-        slug = _slugify_heading(heading)
+        heading = derive_heading_from_point(poi.text)
+        slug = slugify_heading(heading)
         if poi.mode == "operational":
             ops_idx += 1
             filename = f"{safe_scope}_ops_topic_{ops_idx:02d}_{slug}.md"

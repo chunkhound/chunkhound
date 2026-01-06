@@ -8,17 +8,17 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from chunkhound.code_mapper.coverage import compute_db_scope_stats
-from chunkhound.code_mapper.models import CodeMapperPOI
-from chunkhound.code_mapper.pipeline import (
-    _derive_heading_from_point,
-    _is_empty_research_result,
-    _merge_sources_metadata,
-    _run_code_mapper_overview_hyde,
+from chunkhound.code_mapper.models import AgentDocMetadata, CodeMapperPOI
+from chunkhound.code_mapper.pipeline import run_code_mapper_overview_hyde
+from chunkhound.code_mapper.public_utils import (
+    derive_heading_from_point,
+    is_empty_research_result,
+    merge_sources_metadata,
 )
+from chunkhound.core.audience import normalize_audience
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
-from chunkhound.core.audience import normalize_audience
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services.deep_research_service import run_deep_research
@@ -58,8 +58,14 @@ def _audience_guidance_lines(*, audience: str) -> list[str]:
     if normalized == "end-user":
         return [
             "Audience: end-user (less technical).",
-            "Prefer practical workflows and plain language; explain code identifiers briefly when needed.",
-            "De-emphasize internal implementation details unless essential to user outcomes.",
+            (
+                "Prefer practical workflows and plain language; explain code "
+                "identifiers briefly when needed."
+            ),
+            (
+                "De-emphasize internal implementation details unless essential to user "
+                "outcomes."
+            ),
         ]
     return []
 
@@ -79,7 +85,7 @@ async def run_code_mapper_overview_only(
     indexing_cfg: IndexingConfig | None,
 ) -> tuple[str, list[CodeMapperPOI]]:
     """Run overview-only Code Mapper and return the answer + points."""
-    overview_answer, points_of_interest = await _run_code_mapper_overview_hyde(
+    overview_answer, points_of_interest = await run_code_mapper_overview_hyde(
         llm_manager=llm_manager,
         target_dir=target_dir,
         scope_path=scope_path,
@@ -123,7 +129,7 @@ async def run_code_mapper_pipeline(
     log_error: Callable[[str], None] | None = None,
 ) -> CodeMapperPipelineResult:
     """Run Code Mapper overview + per-point deep research and compute coverage."""
-    overview_answer, points_of_interest = await _run_code_mapper_overview_hyde(
+    overview_answer, points_of_interest = await run_code_mapper_overview_hyde(
         llm_manager=llm_manager,
         target_dir=target_dir,
         scope_path=scope_path,
@@ -161,7 +167,7 @@ async def run_code_mapper_pipeline(
     )
     for idx, poi in enumerate(points_of_interest, start=1):
         poi_text = poi.text
-        heading = _derive_heading_from_point(poi_text)
+        heading = derive_heading_from_point(poi_text)
         if log_info:
             log_info(
                 f"[Code Mapper] Processing point of interest {idx}/"
@@ -213,7 +219,7 @@ async def run_code_mapper_pipeline(
                 progress=progress,
                 path=path_filter,
             )
-            if _is_empty_research_result(result):
+            if is_empty_research_result(result):
                 if log_warning:
                     log_warning(
                         f"[Code Mapper] Skipping point of interest {idx} because "
@@ -234,7 +240,7 @@ async def run_code_mapper_pipeline(
         unified_chunks_dedup,
         total_files_global,
         total_chunks_global,
-    ) = _merge_sources_metadata(all_results)
+    ) = merge_sources_metadata(all_results)
 
     scope_total_files, scope_total_chunks, _scoped_files = compute_db_scope_stats(
         services, scope_label

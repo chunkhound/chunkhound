@@ -22,6 +22,8 @@ from chunkhound.autodoc.site_writer_renderers import (
     _render_astro_config,
     _render_doc_layout,
     _render_favicon_bytes,
+    _render_font_bytes,
+    _render_font_license_text,
     _render_global_css,
     _render_glossary_page,
     _render_index_page,
@@ -136,6 +138,25 @@ def _write_common_assets(
     _write_text(layouts_dir / "DocLayout.astro", _render_doc_layout())
     _write_text(styles_dir / "global.css", _render_global_css())
     _write_bytes(public_dir / "favicon.ico", _render_favicon_bytes())
+
+    fonts_dir = public_dir / "fonts"
+    licenses_dir = fonts_dir / "licenses"
+    licenses_dir.mkdir(parents=True, exist_ok=True)
+
+    for filename in (
+        "SourceSans3VF-Upright.ttf.woff2",
+        "SourceSans3VF-Italic.ttf.woff2",
+        "DMSerifDisplay-Regular.ttf",
+        "DMSerifDisplay-Italic.ttf",
+    ):
+        _write_bytes(fonts_dir / filename, _render_font_bytes(filename))
+
+    for filename in (
+        "SourceSans3-LICENSE.md",
+        "DMSerif-OFL.txt",
+        "DMSerif-LICENSE.txt",
+    ):
+        _write_text(licenses_dir / filename, _render_font_license_text(filename))
 
 
 def _load_site_from_existing(output_dir: Path) -> DocsiteSite | None:

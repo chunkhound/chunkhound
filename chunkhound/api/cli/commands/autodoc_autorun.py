@@ -8,7 +8,7 @@ from chunkhound.api.cli.utils.rich_output import RichOutputFormatter
 from chunkhound.core.config.config import Config
 
 from . import autodoc_prompts as prompts
-from .autodoc_errors import AutoDocCLIExit
+from .autodoc_errors import AutoDocCLIExitError
 
 
 @dataclass(frozen=True)
@@ -251,7 +251,7 @@ def code_mapper_autorun_prereq_summary(
 
 
 def _autorun_prereq_failure_exit(*, details: list[str], exit_code: int) -> None:
-    raise AutoDocCLIExit(
+    raise AutoDocCLIExitError(
         exit_code=exit_code,
         errors=(
             "AutoDoc can auto-run Code Mapper, but required prerequisites are missing.",
@@ -295,7 +295,7 @@ def confirm_autorun_and_validate_prereqs(
         f"{question}{warning_suffix}",
         default=default,
     ):
-        raise AutoDocCLIExit(exit_code=decline_exit_code, errors=(decline_error,))
+        raise AutoDocCLIExitError(exit_code=decline_exit_code, errors=(decline_error,))
 
     preflight_ok, _missing, details = code_mapper_autorun_prereq_summary(
         config=config,
@@ -346,7 +346,7 @@ async def run_code_mapper_for_autodoc(
         await code_mapper_command(map_args, config)
     except SystemExit as exc:
         code = exc.code if isinstance(exc.code, int) else 1
-        raise AutoDocCLIExit(
+        raise AutoDocCLIExitError(
             exit_code=code,
             errors=("Map generation failed; aborting AutoDoc.",),
         )
@@ -399,7 +399,7 @@ async def ensure_map_dir(
     map_in_arg = getattr(args, "map_in", None)
     if map_in_arg is None:
         if not prompts.is_interactive():
-            raise AutoDocCLIExit(
+            raise AutoDocCLIExitError(
                 exit_code=2,
                 errors=(
                     "Missing required input: map-in (Code Mapper outputs directory). "
@@ -424,7 +424,7 @@ async def ensure_map_dir(
 
     map_dir = Path(map_in_arg).resolve()
     if not map_dir.exists():
-        raise AutoDocCLIExit(
+        raise AutoDocCLIExitError(
             exit_code=1,
             errors=(f"Map outputs directory not found: {map_dir}",),
         )
@@ -445,7 +445,7 @@ def resolve_allow_delete_topics_dir(
         return True
 
     if not prompts.is_interactive():
-        raise AutoDocCLIExit(
+        raise AutoDocCLIExitError(
             exit_code=2,
             errors=(
                 "Output directory already contains topic pages at "
@@ -459,6 +459,6 @@ def resolve_allow_delete_topics_dir(
         f"{topics_dir}. Delete and re-generate them?",
         default=False,
     ):
-        raise AutoDocCLIExit(exit_code=2, errors=("Aborted.",))
+        raise AutoDocCLIExitError(exit_code=2, errors=("Aborted.",))
 
     return True
