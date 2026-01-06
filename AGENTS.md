@@ -14,7 +14,6 @@ Purpose: Transform codebases into searchable knowledge bases for AI assistants
 **ALWAYS:**
 - ALWAYS Run smoke tests before committing: `uv run pytest tests/test_smoke.py`
 - ALWAYS Batch embeddings (min: 100, max: provider_limit)
-- ALWAYS Drop HNSW indexes for bulk inserts > 50 rows
 - ALWAYS Use uv for all Python operations
 - ALWAYS Update version via: `uv run scripts/update_version.py`
 
