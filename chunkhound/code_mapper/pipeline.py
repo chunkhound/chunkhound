@@ -14,6 +14,7 @@ from chunkhound.code_mapper.utils import safe_scope_label
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.llm_manager import LLMManager
+from chunkhound.utils.text import slugify_kebab
 
 
 class CodeMapperHyDEError(RuntimeError):
@@ -84,24 +85,7 @@ def _derive_heading_from_point(point: str) -> str:
 
 def _slugify_heading(heading: str) -> str:
     """Convert a heading into a filesystem-friendly slug."""
-    text = heading.strip().lower()
-    # Replace non-alphanumeric characters with dashes
-    slug_chars: list[str] = []
-    prev_dash = False
-    for ch in text:
-        if ch.isalnum():
-            slug_chars.append(ch)
-            prev_dash = False
-        else:
-            if not prev_dash:
-                slug_chars.append("-")
-                prev_dash = True
-    slug = "".join(slug_chars).strip("-")
-    if not slug:
-        slug = "topic"
-    if len(slug) > 60:
-        slug = slug[:60].rstrip("-")
-    return slug
+    return slugify_kebab(heading, max_length=60)
 
 
 def _merge_sources_metadata(
@@ -519,18 +503,21 @@ async def _run_code_mapper_overview_hyde(
     ops_points = _extract_points_of_interest(ops_overview_answer, max_points=ops_budget)
     ops_points = _ensure_operational_quickstart(ops_points, ops_budget)
 
-    combined_overview_answer = "\n".join(
-        [
-            "## Architectural Map (HyDE)",
-            "",
-            arch_overview_answer.strip(),
-            "",
-            "## Operational Map (HyDE)",
-            "",
-            ops_overview_answer.strip(),
-            "",
-        ]
-    ).strip() + "\n"
+    combined_overview_answer = (
+        "\n".join(
+            [
+                "## Architectural Map (HyDE)",
+                "",
+                arch_overview_answer.strip(),
+                "",
+                "## Operational Map (HyDE)",
+                "",
+                ops_overview_answer.strip(),
+                "",
+            ]
+        ).strip()
+        + "\n"
+    )
 
     points_of_interest: list[CodeMapperPOI] = [
         *[CodeMapperPOI(mode="architectural", text=p) for p in arch_points],

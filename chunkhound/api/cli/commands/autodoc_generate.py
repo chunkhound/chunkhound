@@ -5,12 +5,13 @@ from pathlib import Path
 
 from chunkhound.api.cli.utils.rich_output import RichOutputFormatter
 from chunkhound.autodoc.docsite import CleanupConfig, generate_docsite
+from chunkhound.autodoc.models import DocsiteResult
 from chunkhound.core.config.config import Config
 from chunkhound.llm_manager import LLMManager
 
-from .autodoc_errors import AutoDocCLIExit
-from . import autodoc_prompts as prompts
 from . import autodoc_autorun as autorun
+from . import autodoc_prompts as prompts
+from .autodoc_errors import AutoDocCLIExit
 
 
 @dataclass(frozen=True)
@@ -36,7 +37,7 @@ async def call_generate_docsite(
     index_patterns: list[str] | None,
     site_title: str | None,
     site_tagline: str | None,
-):
+) -> DocsiteResult:
     return await generate_docsite(
         input_dir=input_dir,
         output_dir=output_dir,
@@ -57,7 +58,7 @@ async def generate_docsite_with_optional_autorun(
     config: Config,
     formatter: RichOutputFormatter,
     inputs: DocsiteGenerationInputs,
-):
+) -> DocsiteResult:
     current_map_dir = inputs.map_dir
     for attempt in range(2):
         try:
@@ -81,10 +82,11 @@ async def generate_docsite_with_optional_autorun(
                 raise AutoDocCLIExit(
                     exit_code=1,
                     errors=(
-                        "AutoDoc index not found in map-in directory, and non-interactive "
-                        "mode cannot prompt to auto-generate maps. Run `chunkhound map` "
-                        "first (then re-run `chunkhound autodoc` with map-in), or ensure "
-                        "the map-in folder contains a `*_code_mapper_index.md`.",
+                        "AutoDoc index not found in map-in directory, and "
+                        "non-interactive mode cannot prompt to auto-generate maps. "
+                        "Run `chunkhound map` first (then re-run `chunkhound autodoc` "
+                        "with map-in), or ensure the map-in folder contains a "
+                        "`*_code_mapper_index.md`.",
                     ),
                 )
 
@@ -94,10 +96,11 @@ async def generate_docsite_with_optional_autorun(
                 formatter=formatter,
                 output_dir=inputs.output_dir,
                 question=(
-                    "Generate the codemap first by running `chunkhound map`, then retry "
-                    "AutoDoc?"
+                    "Generate the codemap first by running `chunkhound map`, "
+                    "then retry AutoDoc?"
                 ),
                 decline_error=str(exc),
                 decline_exit_code=1,
             )
 
+    raise RuntimeError("AutoDoc autorun retry loop exhausted without returning.")

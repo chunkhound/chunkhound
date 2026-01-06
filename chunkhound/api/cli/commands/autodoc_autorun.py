@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from argparse import Namespace
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,8 +7,8 @@ from pathlib import Path
 from chunkhound.api.cli.utils.rich_output import RichOutputFormatter
 from chunkhound.core.config.config import Config
 
-from .autodoc_errors import AutoDocCLIExit
 from . import autodoc_prompts as prompts
+from .autodoc_errors import AutoDocCLIExit
 
 
 @dataclass(frozen=True)
@@ -146,7 +145,9 @@ def _effective_config_for_code_mapper_autorun(
     return effective
 
 
-def _code_mapper_autorun_database_prereqs(effective: Config) -> tuple[list[str], list[str]]:
+def _code_mapper_autorun_database_prereqs(
+    effective: Config,
+) -> tuple[list[str], list[str]]:
     missing: list[str] = []
     details: list[str] = []
     try:
@@ -301,7 +302,9 @@ def confirm_autorun_and_validate_prereqs(
         config_path=config_path,
     )
     if not preflight_ok:
-        _autorun_prereq_failure_exit(details=details, exit_code=prereq_failure_exit_code)
+        _autorun_prereq_failure_exit(
+            details=details, exit_code=prereq_failure_exit_code
+        )
 
 
 async def run_code_mapper_for_autodoc(

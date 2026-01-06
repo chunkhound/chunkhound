@@ -4,16 +4,11 @@ import argparse
 from pathlib import Path
 from typing import Any, cast
 
-from chunkhound.core.audience import parse_audience
-
-from .common_arguments import add_common_arguments, add_config_arguments
-
-
-def _parse_audience(value: str) -> str:
-    try:
-        return parse_audience(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(str(exc)) from exc
+from .common_arguments import (
+    _parse_audience,
+    add_common_arguments,
+    add_config_arguments,
+)
 
 
 def add_autodoc_subparser(subparsers: Any) -> argparse.ArgumentParser:
@@ -181,9 +176,9 @@ def add_autodoc_subparser(subparsers: Any) -> argparse.ArgumentParser:
         type=_parse_audience,
         default=None,
         help=(
-            "When AutoDoc offers to run Code Mapper automatically, controls the intended "
-            "audience for generated map topics. If omitted, AutoDoc will prompt "
-            "(TTY only). Accepted: 1|2|3 or technical|balanced|end-user."
+            "When AutoDoc offers to run Code Mapper automatically, controls the "
+            "intended audience for generated map topics. If omitted, AutoDoc will "
+            "prompt (TTY only). Accepted: 1|2|3 or technical|balanced|end-user."
         ),
     )
 

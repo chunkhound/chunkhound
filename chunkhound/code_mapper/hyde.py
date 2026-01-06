@@ -32,13 +32,14 @@ def load_hyde_scope_template(
 def load_hyde_scope_context_template(
     *, mode: Literal["architectural", "operational"] = "architectural"
 ) -> str:
-    """Load the packaged HyDE scope prompt template for --context mode."""
+    """Load the packaged HyDE scope prompt template for --context mode.
+
+    Note: The context-mode scope prompt is currently shared across both
+    architectural and operational maps, so `mode` does not affect the loaded
+    template.
+    """
     package = "chunkhound.code_mapper.prompts"
-    filename = (
-        "hyde_scope_prompt_context.md"
-        if mode == "architectural"
-        else "hyde_scope_prompt_context_operational.md"
-    )
+    filename = "hyde_scope_prompt_context.md"
     with (
         importlib.resources.files(package)
         .joinpath(filename)

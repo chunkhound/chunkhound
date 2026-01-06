@@ -4,7 +4,10 @@ import re
 from collections.abc import Iterable
 from typing import TypeVar
 
+from chunkhound.utils.text import slugify_kebab
+
 T = TypeVar("T")
+
 
 def _strip_markdown_for_search(markdown: str) -> str:
     text = re.sub(r"```.*?```", " ", markdown, flags=re.DOTALL)
@@ -158,18 +161,16 @@ def _default_site_title(scope_label: str) -> str:
 
 
 def _slugify_title(title: str, order: int) -> str:
-    text = re.sub(r"[^a-zA-Z0-9]+", "-", title.strip().lower()).strip("-")
-    if not text:
-        text = "topic"
-    return f"{order:02d}-{text}"
+    slug = slugify_kebab(title, ascii_only=True)
+    return f"{order:02d}-{slug}"
 
 
 def _escape_yaml(value: str) -> str:
-    return value.replace('\"', '\\\"')
+    return value.replace('"', '\\"')
 
 
 def _escape_json(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('\"', '\\\"')
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _chunked(items: Iterable[T], size: int) -> list[list[T]]:

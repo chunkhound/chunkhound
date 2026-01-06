@@ -3,6 +3,15 @@
 import argparse
 from pathlib import Path
 
+from chunkhound.core.audience import parse_audience
+
+
+def _parse_audience(value: str) -> str:
+    try:
+        return parse_audience(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
 
 def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     """Add arguments common to all commands.

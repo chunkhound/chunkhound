@@ -1,21 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.resources
 import random
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 
+from chunkhound.autodoc.audience import _normalize_audience
 from chunkhound.autodoc.markdown_utils import (
     _chunked,
     _ensure_overview_heading,
     _strip_first_heading,
 )
 from chunkhound.autodoc.models import CleanupConfig, CodeMapperTopic
-from chunkhound.autodoc.audience import _normalize_audience
 from chunkhound.interfaces.llm_provider import LLMProvider
 
-_PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+_PROMPTS_PACKAGE = "chunkhound.autodoc"
 _CLEANUP_SYSTEM_PROMPT_FILE = "cleanup_system_v2.txt"
 _CLEANUP_USER_PROMPT_FILE = "cleanup_user_v2.txt"
 _CLEANUP_USER_PROMPT_FILE_END_USER = "cleanup_user_end_user_v1.txt"
@@ -176,16 +176,25 @@ def _build_cleanup_prompt(title: str, body: str, *, audience: str = "balanced") 
 
 
 def _read_prompt_file(filename: str) -> str:
-    path = _PROMPTS_DIR / filename
+    resource_path = importlib.resources.files(_PROMPTS_PACKAGE).joinpath(
+        "prompts", filename
+    )
     try:
-        content = path.read_text(encoding="utf-8").strip()
+        with resource_path.open("r", encoding="utf-8") as handle:
+            content = handle.read().strip()
     except FileNotFoundError as exc:
-        raise FileNotFoundError(f"AutoDoc prompt file missing: {path}") from exc
+        raise FileNotFoundError(
+            f"AutoDoc prompt file missing: {_PROMPTS_PACKAGE}:prompts/{filename}"
+        ) from exc
     except OSError as exc:
-        raise OSError(f"AutoDoc prompt file unreadable: {path}") from exc
+        raise OSError(
+            f"AutoDoc prompt file unreadable: {_PROMPTS_PACKAGE}:prompts/{filename}"
+        ) from exc
 
     if not content:
-        raise ValueError(f"AutoDoc prompt file empty: {path}")
+        raise ValueError(
+            f"AutoDoc prompt file empty: {_PROMPTS_PACKAGE}:prompts/{filename}"
+        )
     return content
 
 
@@ -194,6 +203,7 @@ def _normalize_llm_output(text: str) -> str:
     cleaned = _strip_first_heading(cleaned)
     cleaned = _ensure_overview_heading(cleaned)
     return cleaned.strip()
+
 
 def _is_transient_llm_error(exc: BaseException) -> bool:
     error_type = type(exc).__name__
@@ -258,7 +268,10 @@ async def _batch_complete_with_backoff(
             return outputs
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
-            if not _is_transient_llm_error(exc) or attempt >= _CLEANUP_RETRY_MAX_ATTEMPTS - 1:
+            if (
+                not _is_transient_llm_error(exc)
+                or attempt >= _CLEANUP_RETRY_MAX_ATTEMPTS - 1
+            ):
                 raise
             base = _CLEANUP_RETRY_BASE_DELAY_SECONDS * (2**attempt)
             delay = min(_CLEANUP_RETRY_MAX_DELAY_SECONDS, base)
@@ -267,8 +280,8 @@ async def _batch_complete_with_backoff(
             if log_warning:
                 log_warning(
                     f"Transient LLM error during {operation}; retrying in "
-                    f"{sleep_seconds:.2f}s (attempt {attempt + 1}/{_CLEANUP_RETRY_MAX_ATTEMPTS}). "
-                    f"Error: {exc}"
+                    f"{sleep_seconds:.2f}s (attempt {attempt + 1}/"
+                    f"{_CLEANUP_RETRY_MAX_ATTEMPTS}). Error: {exc}"
                 )
             if sleep_seconds > 0:
                 await asyncio.sleep(sleep_seconds)
