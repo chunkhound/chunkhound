@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypedDict
 
 
 @dataclass
@@ -67,12 +66,14 @@ class CleanupConfig:
     audience: str = "balanced"
 
 
-class NavGroup(TypedDict):
+@dataclass
+class NavGroup:
     title: str
     slugs: list[str]
 
 
-class GlossaryTerm(TypedDict):
+@dataclass
+class GlossaryTerm:
     term: str
     definition: str
     pages: list[str]

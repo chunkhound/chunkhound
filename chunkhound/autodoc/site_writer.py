@@ -89,7 +89,7 @@ def write_astro_site(
     if nav_groups:
         nav_payload = nav_groups
     else:
-        nav_payload = [{"title": "Topics", "slugs": [page.slug for page in pages]}]
+        nav_payload = [NavGroup(title="Topics", slugs=[page.slug for page in pages])]
     _write_text(site_dirs.data_dir / "nav.json", _render_nav_json(nav_payload))
 
     _write_text(

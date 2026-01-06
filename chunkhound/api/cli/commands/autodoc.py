@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -19,15 +20,15 @@ from .autodoc_errors import AutoDocCLIExitError
 
 
 def _render_exit(formatter: RichOutputFormatter, exc: AutoDocCLIExitError) -> None:
+    for message in exc.infos:
+        formatter.info(message)
     for message in exc.warnings:
         formatter.warning(message)
     for message in exc.errors:
         formatter.error(message)
-    for message in exc.infos:
-        formatter.info(message)
 
 
-async def autodoc_command(args, config: Config) -> None:
+async def autodoc_command(args: argparse.Namespace, config: Config) -> None:
     """Generate an Astro docs site from AutoDoc outputs."""
     formatter = RichOutputFormatter(verbose=bool(getattr(args, "verbose", False)))
     output_dir = Path(getattr(args, "out_dir")).resolve()

@@ -9,6 +9,8 @@ from chunkhound.autodoc.models import (
     CodeMapperIndex,
     DocsitePage,
     DocsiteSite,
+    GlossaryTerm,
+    NavGroup,
 )
 from chunkhound.autodoc.site_writer import write_astro_site
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
@@ -176,9 +178,9 @@ def test_write_astro_site_writes_nav_and_glossary_when_present(
         pages=pages,
         index=index,
         allow_delete_topics_dir=False,
-        nav_groups=[{"title": "Group", "slugs": ["topic-one"]}],
+        nav_groups=[NavGroup(title="Group", slugs=["topic-one"])],
         glossary_terms=[
-            {"term": "Term", "definition": "Definition.", "pages": ["topic-one"]}
+            GlossaryTerm(term="Term", definition="Definition.", pages=["topic-one"])
         ],
     )
 

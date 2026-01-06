@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from argparse import Namespace
 
 from loguru import logger
 
@@ -151,7 +152,7 @@ def resolve_llm_manager(
 
 def resolve_cleanup_config_and_llm_manager(
     *,
-    args: object,
+    args: Namespace,
     config: Config,
     formatter: RichOutputFormatter,
 ) -> tuple[CleanupConfig, LLMManager]:

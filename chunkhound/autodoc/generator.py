@@ -4,7 +4,6 @@ from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from chunkhound.autodoc.audience import _normalize_audience
 from chunkhound.autodoc.cleanup import _cleanup_with_llm
 from chunkhound.autodoc.ia import _synthesize_homepage_overview, _synthesize_site_ia
 from chunkhound.autodoc.index_loader import (
@@ -34,6 +33,7 @@ from chunkhound.autodoc.references import (
     strip_references_section,
 )
 from chunkhound.autodoc.site_writer import write_astro_site
+from chunkhound.core.audience import normalize_audience
 from chunkhound.llm_manager import LLMManager
 
 
@@ -120,7 +120,7 @@ def _default_site_tagline(*, audience: str, llm_cleanup_active: bool) -> str:
     base = "Approachable documentation generated from AutoDoc output."
     if not llm_cleanup_active:
         return base
-    normalized = _normalize_audience(audience)
+    normalized = normalize_audience(audience)
     if normalized == "technical":
         return "Engineering-focused documentation generated from AutoDoc output."
     if normalized == "end-user":

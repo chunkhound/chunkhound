@@ -25,3 +25,18 @@ def test_render_topic_page_emits_v2_frontmatter_when_present() -> None:
     assert 'scope: "/repo"' in output
     assert "referencesCount: 1" in output
     assert "tags:" not in output
+
+
+def test_render_topic_page_escapes_newlines_in_frontmatter() -> None:
+    page = DocsitePage(
+        order=1,
+        title='Topic "One"\nSecond line',
+        slug="topic",
+        description="Desc\r\nLine2",
+        body_markdown="## Overview\nHello.\n",
+    )
+
+    output = _render_topic_page(page)
+
+    assert 'title: "Topic \\"One\\"\\nSecond line"' in output
+    assert 'description: "Desc\\r\\nLine2"' in output

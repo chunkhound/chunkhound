@@ -82,7 +82,9 @@ def _render_search_index(pages: list[DocsitePage]) -> str:
 
 
 def _render_nav_json(groups: list[NavGroup]) -> str:
-    payload: dict[str, Any] = {"groups": groups}
+    payload: dict[str, Any] = {
+        "groups": [{"title": group.title, "slugs": group.slugs} for group in groups]
+    }
     return json.dumps(payload, ensure_ascii=True, indent=2)
 
 
@@ -92,16 +94,16 @@ def _render_glossary_page(terms: list[GlossaryTerm]) -> str:
         "",
     ]
     for entry in terms:
-        term = entry.get("term", "").strip()
-        definition = entry.get("definition", "").strip()
-        pages = entry.get("pages", [])
+        term = entry.term.strip()
+        definition = entry.definition.strip()
+        pages = entry.pages
         if not term or not definition:
             continue
         body_lines.append(f"## {term}")
         body_lines.append("")
         body_lines.append(definition)
         body_lines.append("")
-        if isinstance(pages, list) and pages:
+        if pages:
             links = ", ".join([f"[{slug}](/topics/{slug}/)" for slug in pages])
             body_lines.append(f"- Pages: {links}")
             body_lines.append("")

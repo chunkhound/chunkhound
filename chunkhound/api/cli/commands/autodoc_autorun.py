@@ -55,7 +55,7 @@ def _build_auto_map_plan(
     )
 
 
-def _resolve_map_out_dir(*, args: object, output_dir: Path) -> Path:
+def _resolve_map_out_dir(*, args: Namespace, output_dir: Path) -> Path:
     map_out_dir_arg = getattr(args, "map_out_dir", None)
     default_plan = _build_auto_map_plan(output_dir=output_dir)
     map_out_dir_hint = (
@@ -76,7 +76,7 @@ def _resolve_map_out_dir(*, args: object, output_dir: Path) -> Path:
     return map_out_dir
 
 
-def _resolve_map_comprehensiveness(*, args: object) -> str:
+def _resolve_map_comprehensiveness(*, args: Namespace) -> str:
     map_comprehensiveness_arg = getattr(args, "map_comprehensiveness", None)
     comprehensiveness = (
         map_comprehensiveness_arg
@@ -92,7 +92,7 @@ def _resolve_map_comprehensiveness(*, args: object) -> str:
     return comprehensiveness
 
 
-def _resolve_map_audience(*, args: object) -> str:
+def _resolve_map_audience(*, args: Namespace) -> str:
     map_audience_arg = getattr(args, "map_audience", None)
     map_audience = map_audience_arg if isinstance(map_audience_arg, str) else None
     if map_audience is None:
@@ -105,7 +105,7 @@ def _resolve_map_audience(*, args: object) -> str:
     return map_audience
 
 
-def _resolve_map_context(*, args: object) -> Path | None:
+def _resolve_map_context(*, args: Namespace) -> Path | None:
     map_context_arg = getattr(args, "map_context", None)
     map_context: Path | None = (
         Path(map_context_arg).expanduser() if map_context_arg is not None else None
@@ -119,7 +119,7 @@ def _resolve_map_context(*, args: object) -> Path | None:
     return map_context
 
 
-def resolve_auto_map_options(*, args: object, output_dir: Path) -> AutoMapOptions:
+def resolve_auto_map_options(*, args: Namespace, output_dir: Path) -> AutoMapOptions:
     return AutoMapOptions(
         map_out_dir=_resolve_map_out_dir(args=args, output_dir=output_dir),
         comprehensiveness=_resolve_map_comprehensiveness(args=args),
@@ -356,7 +356,7 @@ async def run_code_mapper_for_autodoc(
 
 async def autorun_code_mapper_for_autodoc(
     *,
-    args: object,
+    args: Namespace,
     config: Config,
     formatter: RichOutputFormatter,
     output_dir: Path,
@@ -391,7 +391,7 @@ async def autorun_code_mapper_for_autodoc(
 
 async def ensure_map_dir(
     *,
-    args: object,
+    args: Namespace,
     config: Config,
     formatter: RichOutputFormatter,
     output_dir: Path,
@@ -433,7 +433,7 @@ async def ensure_map_dir(
 
 def resolve_allow_delete_topics_dir(
     *,
-    args: object,
+    args: Namespace,
     output_dir: Path,
 ) -> bool:
     topics_dir = output_dir / "src" / "pages" / "topics"

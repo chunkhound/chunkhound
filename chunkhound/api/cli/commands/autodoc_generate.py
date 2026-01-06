@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from argparse import Namespace
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,7 +55,7 @@ async def call_generate_docsite(
 
 async def generate_docsite_with_optional_autorun(
     *,
-    args: object,
+    args: Namespace,
     config: Config,
     formatter: RichOutputFormatter,
     inputs: DocsiteGenerationInputs,

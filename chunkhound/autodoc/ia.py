@@ -5,12 +5,12 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from chunkhound.autodoc.audience import _normalize_audience
 from chunkhound.autodoc.markdown_utils import (
     _strip_first_heading,
     _strip_markdown_for_search,
 )
 from chunkhound.autodoc.models import DocsitePage, GlossaryTerm, NavGroup
+from chunkhound.core.audience import normalize_audience
 from chunkhound.interfaces.llm_provider import LLMProvider
 
 _SITE_IA_INPUT_LINE = (
@@ -110,7 +110,7 @@ def _site_ia_schema() -> dict[str, Any]:
 
 
 def _build_site_ia_prompt(*, context: list[dict[str, Any]], audience: str) -> str:
-    normalized = _normalize_audience(audience)
+    normalized = normalize_audience(audience)
     audience_lines: list[str] = []
     if normalized == "technical":
         audience_lines = [
@@ -258,7 +258,7 @@ async def _synthesize_homepage_overview(
         return None
 
     context = _build_site_context(pages)
-    normalized = _normalize_audience(audience)
+    normalized = normalize_audience(audience)
 
     audience_line = "Audience: balanced."
     goal_lines = [
@@ -382,16 +382,16 @@ def _validate_nav_groups(
             seen.add(slug)
         if not cleaned_slugs:
             continue
-        output.append({"title": title.strip() or "Group", "slugs": cleaned_slugs})
+        output.append(NavGroup(title=title.strip() or "Group", slugs=cleaned_slugs))
 
     missing = [
         slug for slug in ordered_slugs if slug in valid_slugs and slug not in seen
     ]
     if missing:
         if output:
-            output.append({"title": "More", "slugs": missing})
+            output.append(NavGroup(title="More", slugs=missing))
         else:
-            output.append({"title": "Topics", "slugs": missing})
+            output.append(NavGroup(title="Topics", slugs=missing))
     return output
 
 
@@ -423,10 +423,10 @@ def _validate_glossary_terms(
             slug for slug in pages if isinstance(slug, str) and slug in valid_slugs
         ]
         output.append(
-            {
-                "term": term.strip(),
-                "definition": definition.strip(),
-                "pages": cleaned_pages,
-            }
+            GlossaryTerm(
+                term=term.strip(),
+                definition=definition.strip(),
+                pages=cleaned_pages,
+            )
         )
-    return [item for item in output if item["term"] and item["definition"]]
+    return [item for item in output if item.term and item.definition]

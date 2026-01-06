@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 
+__all__ = ["is_interactive", "prompt_yes_no", "prompt_text", "prompt_choice"]
+
 
 def is_interactive() -> bool:
     try:
@@ -70,4 +72,3 @@ def prompt_choice(
         resolved = (answer or "").strip().lower()
         if resolved in choices:
             return resolved
-

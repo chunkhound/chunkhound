@@ -6,13 +6,13 @@ import random
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from chunkhound.autodoc.audience import _normalize_audience
 from chunkhound.autodoc.markdown_utils import (
     _chunked,
     _ensure_overview_heading,
     _strip_first_heading,
 )
 from chunkhound.autodoc.models import CleanupConfig, CodeMapperTopic
+from chunkhound.core.audience import normalize_audience
 from chunkhound.interfaces.llm_provider import LLMProvider
 
 _PROMPTS_PACKAGE = "chunkhound.autodoc"
@@ -34,7 +34,7 @@ class _IndexedCleanupInput:
 
 
 def _audience_cleanup_system_guidance(audience: str) -> str:
-    normalized = _normalize_audience(audience)
+    normalized = normalize_audience(audience)
     if normalized == "technical":
         return "\n".join(
             [
@@ -159,7 +159,7 @@ async def _cleanup_with_llm(
 
 
 def _build_cleanup_prompt(title: str, body: str, *, audience: str = "balanced") -> str:
-    normalized = _normalize_audience(audience)
+    normalized = normalize_audience(audience)
     template_file = (
         _CLEANUP_USER_PROMPT_FILE_END_USER
         if normalized == "end-user"
@@ -176,8 +176,10 @@ def _build_cleanup_prompt(title: str, body: str, *, audience: str = "balanced") 
 
 
 def _read_prompt_file(filename: str) -> str:
-    resource_path = importlib.resources.files(_PROMPTS_PACKAGE).joinpath(
-        "prompts", filename
+    resource_path = (
+        importlib.resources.files(_PROMPTS_PACKAGE)
+        .joinpath("prompts")
+        .joinpath(filename)
     )
     try:
         with resource_path.open("r", encoding="utf-8") as handle:

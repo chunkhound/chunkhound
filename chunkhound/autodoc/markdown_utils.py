@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable
 from typing import TypeVar
@@ -166,11 +167,8 @@ def _slugify_title(title: str, order: int) -> str:
 
 
 def _escape_yaml(value: str) -> str:
-    return value.replace('"', '\\"')
-
-
-def _escape_json(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = json.dumps(value, ensure_ascii=True)
+    return escaped[1:-1]
 
 
 def _chunked(items: Iterable[T], size: int) -> list[list[T]]:
