@@ -14,15 +14,19 @@ Uses small thresholds (split=100, merge=10) for efficient testing without
 requiring 100K vectors.
 """
 
+import time
 from pathlib import Path
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import numpy as np
+import numpy.core.multiarray  # noqa: F401  # Prevent DuckDB threading segfault
 import pytest
 
+from chunkhound.api.cli.utils.rich_output import RichOutputFormatter
 from chunkhound.core.config.sharding_config import ShardingConfig
 from chunkhound.providers.database import usearch_wrapper
+from chunkhound.providers.database.compaction_utils import compact_database
 from chunkhound.providers.database.shard_manager import ShardManager
 from chunkhound.providers.database.shard_state import get_shard_state
 from tests.fixtures.synthetic_embeddings import (
@@ -34,6 +38,16 @@ from tests.fixtures.synthetic_embeddings import (
 TEST_DIMS = 128  # Smaller dims for faster tests
 TEST_SPLIT_THRESHOLD = 100
 TEST_MERGE_THRESHOLD = 20
+
+# Stress test configuration (production thresholds)
+STRESS_DIMS = 128
+STRESS_SPLIT_THRESHOLD = 100_000
+STRESS_MERGE_THRESHOLD = 10_000
+STRESS_TOTAL_VECTORS = 1_000_000
+STRESS_BATCH_MIN = 900
+STRESS_BATCH_MAX = 1100
+STRESS_SEED = 42
+STRESS_CHECKPOINT_INTERVAL = 100
 
 
 class MockDBProvider:
@@ -114,8 +128,22 @@ class MockDBProvider:
         if hasattr(self, "shard_manager") and self.shard_manager is not None:
             self.shard_manager.fix_pass(self._conn, check_quality=check_quality)
 
+    def optimize(self) -> bool:
+        """Full compaction via shared utility - uses production thresholds.
+
+        Mirrors DuckDBProvider.optimize() behavior with same thresholds
+        (compaction_threshold=0.5, compaction_min_size_mb=100).
+        """
+        success, new_conn = compact_database(
+            db_path=self.db_path,
+            conn=self._conn,
+        )
+        self._conn = new_conn
+        return success
+
     def disconnect(self) -> None:
-        """Close connection."""
+        """Close connection with checkpoint for durability."""
+        self._conn.execute("CHECKPOINT")
         self._conn.close()
 
 
@@ -172,15 +200,85 @@ def insert_embeddings_to_db(
         vec_list = vec.tolist()
         result = conn.execute(
             f"""
-            INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims, shard_id)
+            INSERT INTO {table_name}
+                (chunk_id, provider, model, embedding, dims, shard_id)
             VALUES (?, ?, ?, ?, ?, ?)
             RETURNING id
             """,
-            [i, provider, model, vec_list, TEST_DIMS, str(shard_id) if shard_id else None],
+            [
+                i,
+                provider,
+                model,
+                vec_list,
+                TEST_DIMS,
+                str(shard_id) if shard_id else None,
+            ],
         ).fetchone()
         ids.append(result[0])
 
     return ids
+
+
+def batch_insert_embeddings_to_db(
+    db_provider: MockDBProvider,
+    vectors: list[np.ndarray],
+    dims: int,
+    shard_id: UUID | None = None,
+    provider: str = "test",
+    model: str = "test-model",
+    start_chunk_id: int = 0,
+) -> list[int]:
+    """Batch insert embeddings into DuckDB. Returns IDs.
+
+    Uses executemany for performance per AGENTS.md rules.
+    Supports arbitrary dimensions unlike insert_embeddings_to_db.
+
+    Args:
+        db_provider: Database provider
+        vectors: List of embedding vectors
+        dims: Vector dimensions
+        shard_id: Optional shard assignment (None = unassigned)
+        provider: Embedding provider name
+        model: Embedding model name
+        start_chunk_id: Starting chunk_id for this batch
+
+    Returns:
+        List of inserted embedding IDs
+    """
+    conn = db_provider.connection
+    table_name = f"embeddings_{dims}"
+
+    # Prepare batch data as tuples
+    rows = [
+        (
+            start_chunk_id + i,
+            provider,
+            model,
+            vec.tolist(),
+            dims,
+            str(shard_id) if shard_id else None,
+        )
+        for i, vec in enumerate(vectors)
+    ]
+
+    # Batch insert using executemany
+    conn.executemany(
+        f"""
+        INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims, shard_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+
+    # Retrieve inserted IDs
+    result = conn.execute(
+        f"""SELECT id FROM {table_name}
+            WHERE chunk_id >= ? AND chunk_id < ?
+            ORDER BY chunk_id""",
+        [start_chunk_id, start_chunk_id + len(vectors)],
+    ).fetchall()
+
+    return [row[0] for row in result]
 
 
 def get_all_shard_ids(db_provider: MockDBProvider) -> list[UUID]:
@@ -192,9 +290,7 @@ def get_all_shard_ids(db_provider: MockDBProvider) -> list[UUID]:
     return [row[0] if isinstance(row[0], UUID) else UUID(row[0]) for row in result]
 
 
-def get_shard_embedding_count(
-    db_provider: MockDBProvider, shard_id: UUID
-) -> int:
+def get_shard_embedding_count(db_provider: MockDBProvider, shard_id: UUID) -> int:
     """Get count of embeddings in a shard."""
     table_name = f"embeddings_{TEST_DIMS}"
     result = db_provider.connection.execute(
@@ -214,8 +310,7 @@ def get_shard_counts(db_provider: MockDBProvider) -> dict[UUID, int]:
         GROUP BY shard_id
     """).fetchall()
     return {
-        row[0] if isinstance(row[0], UUID) else UUID(row[0]): row[1]
-        for row in result
+        row[0] if isinstance(row[0], UUID) else UUID(row[0]): row[1] for row in result
     }
 
 
@@ -227,16 +322,22 @@ def delete_from_shard(
     """Delete `count` embeddings from specific shard. Returns deleted IDs."""
     table_name = f"embeddings_{TEST_DIMS}"
     # Get IDs to delete
-    result = db_provider.connection.execute(f"""
+    result = db_provider.connection.execute(
+        f"""
         SELECT id FROM {table_name} WHERE shard_id = ? LIMIT ?
-    """, [str(shard_id), count]).fetchall()
+    """,
+        [str(shard_id), count],
+    ).fetchall()
     deleted_ids = [row[0] for row in result]
 
     if deleted_ids:
         placeholders = ", ".join("?" * len(deleted_ids))
-        db_provider.connection.execute(f"""
+        db_provider.connection.execute(
+            f"""
             DELETE FROM {table_name} WHERE id IN ({placeholders})
-        """, deleted_ids)
+        """,
+            deleted_ids,
+        )
 
     return deleted_ids
 
@@ -274,7 +375,7 @@ def verify_invariant_i4_no_orphan_files(
     for shard in db_provider.connection.execute(
         "SELECT shard_id FROM vector_shards"
     ).fetchall():
-        db_shard_ids.add(shard[0])
+        db_shard_ids.add(str(shard[0]))
 
     orphans = []
     for usearch_file in shard_dir.glob("*.usearch"):
@@ -301,6 +402,86 @@ def verify_invariant_i5_no_ghost_records(
             ghosts.append(shard_id)
 
     return ghosts
+
+
+def verify_shard_counts_in_range(
+    db_provider: MockDBProvider,
+    merge_threshold: int,
+    split_threshold: int,
+    dims: int,
+) -> tuple[bool, str]:
+    """Verify merge_threshold <= each shard_count <= split_threshold.
+
+    Args:
+        db_provider: Database provider
+        merge_threshold: Minimum acceptable shard size
+        split_threshold: Maximum acceptable shard size
+        dims: Vector dimensions
+
+    Returns:
+        (passed, message) tuple
+    """
+    table_name = f"embeddings_{dims}"
+    result = db_provider.connection.execute(f"""
+        SELECT shard_id, COUNT(*) as cnt
+        FROM {table_name}
+        WHERE shard_id IS NOT NULL
+        GROUP BY shard_id
+    """).fetchall()
+
+    violations = []
+    for row in result:
+        shard_id = row[0]
+        count = row[1]
+        if count < merge_threshold:
+            violations.append(f"{shard_id}: {count} < {merge_threshold}")
+        if count > split_threshold:
+            violations.append(f"{shard_id}: {count} > {split_threshold}")
+
+    if violations:
+        return False, "; ".join(violations)
+    return True, "OK"
+
+
+def verify_shard_balance(
+    db_provider: MockDBProvider,
+    dims: int,
+    max_ratio: float = 2.0,
+) -> tuple[bool, str]:
+    """Verify statistical balance: max_count < max_ratio * min_count.
+
+    Args:
+        db_provider: Database provider
+        dims: Vector dimensions
+        max_ratio: Maximum allowed ratio between largest and smallest shard
+
+    Returns:
+        (passed, message) tuple
+    """
+    table_name = f"embeddings_{dims}"
+    result = db_provider.connection.execute(f"""
+        SELECT shard_id, COUNT(*) as cnt
+        FROM {table_name}
+        WHERE shard_id IS NOT NULL
+        GROUP BY shard_id
+    """).fetchall()
+
+    if len(result) < 2:
+        return True, "Single shard or fewer"
+
+    counts = [row[1] for row in result]
+    min_count = min(counts)
+    max_count = max(counts)
+
+    if min_count == 0:
+        return False, "Empty shard found"
+
+    ratio = max_count / min_count
+    if ratio >= max_ratio:
+        msg = f"Balance violated: {max_count}/{min_count} = {ratio:.2f}"
+        return False, msg
+
+    return True, f"ratio={ratio:.2f}"
 
 
 class TestFullLifecycle:
@@ -605,8 +786,7 @@ class TestSplitAtThreshold:
         # Insert exactly split_threshold vectors to test k-means fallback path
         vector_count = TEST_SPLIT_THRESHOLD
         vectors = [
-            generator.generate_hash_seeded(f"doc_{i}")
-            for i in range(vector_count)
+            generator.generate_hash_seeded(f"doc_{i}") for i in range(vector_count)
         ]
         insert_embeddings_to_db(tmp_db, vectors, shard_id)
 
@@ -653,8 +833,7 @@ class TestSplitAtThreshold:
         # Insert below threshold (use smaller count for faster test)
         test_count = min(200, TEST_SPLIT_THRESHOLD - 1)
         vectors = [
-            generator.generate_hash_seeded(f"doc_{i}")
-            for i in range(test_count)
+            generator.generate_hash_seeded(f"doc_{i}") for i in range(test_count)
         ]
         insert_embeddings_to_db(tmp_db, vectors, shard_id)
 
@@ -701,16 +880,14 @@ class TestMergeAndCascade:
         # Insert small count (below merge threshold) to small shard
         small_count = TEST_MERGE_THRESHOLD - 1  # 99
         small_vectors = [
-            generator.generate_hash_seeded(f"small_{i}")
-            for i in range(small_count)
+            generator.generate_hash_seeded(f"small_{i}") for i in range(small_count)
         ]
         insert_embeddings_to_db(tmp_db, small_vectors, small_shard_id)
 
         # Insert normal count to normal shard (above merge threshold)
         normal_count = TEST_MERGE_THRESHOLD + 50  # 150
         normal_vectors = [
-            generator.generate_hash_seeded(f"normal_{i}")
-            for i in range(normal_count)
+            generator.generate_hash_seeded(f"normal_{i}") for i in range(normal_count)
         ]
         insert_embeddings_to_db(tmp_db, normal_vectors, normal_shard_id)
 
@@ -751,8 +928,7 @@ class TestMergeAndCascade:
         # Insert below merge threshold
         small_count = TEST_MERGE_THRESHOLD - 1  # 99
         vectors = [
-            generator.generate_hash_seeded(f"doc_{i}")
-            for i in range(small_count)
+            generator.generate_hash_seeded(f"doc_{i}") for i in range(small_count)
         ]
         insert_embeddings_to_db(tmp_db, vectors, shard_id)
 
@@ -788,8 +964,7 @@ class TestMergeAndCascade:
         # Small shard: below merge threshold
         small_count = TEST_MERGE_THRESHOLD - 1
         small_vectors = [
-            generator.generate_hash_seeded(f"small_{i}")
-            for i in range(small_count)
+            generator.generate_hash_seeded(f"small_{i}") for i in range(small_count)
         ]
         insert_embeddings_to_db(tmp_db, small_vectors, small_shard_id)
 
@@ -797,8 +972,7 @@ class TestMergeAndCascade:
         # After merge, combined count should exceed split threshold
         large_count = TEST_SPLIT_THRESHOLD - TEST_MERGE_THRESHOLD + 2
         large_vectors = [
-            generator.generate_hash_seeded(f"large_{i}")
-            for i in range(large_count)
+            generator.generate_hash_seeded(f"large_{i}") for i in range(large_count)
         ]
         insert_embeddings_to_db(tmp_db, large_vectors, large_shard_id)
 
@@ -807,8 +981,6 @@ class TestMergeAndCascade:
         # Run fix_pass - should merge small into large, then split
         shard_manager.fix_pass(tmp_db.connection, check_quality=False)
 
-        # Verify cascade: merged then split results in 2+ shards
-        shards = get_all_shard_ids(tmp_db)
         # Either stays merged (if split logic doesn't trigger) or splits
         # The key is total embeddings are preserved
         total = tmp_db.connection.execute(
@@ -921,9 +1093,7 @@ class TestSearchRecallWithCentroids:
             )
             assert len(results) >= 1
             # Top result should be the query vector itself
-            assert results[0].key == emb_ids[i], (
-                f"Vector {i} not found as top result"
-            )
+            assert results[0].key == emb_ids[i], f"Vector {i} not found as top result"
 
 
 class TestCompactionAndQuality:
@@ -1037,8 +1207,6 @@ class TestCompactionAndQuality:
         generator: SyntheticEmbeddingGenerator,
     ) -> None:
         """Verify fix_pass rebuilds when self_recall < quality_threshold (0.95)."""
-        import time
-
         # Create shard with 50 vectors
         shard_id = uuid4()
         shard_path = shard_manager._shard_path(shard_id)
@@ -1056,7 +1224,8 @@ class TestCompactionAndQuality:
         for i, emb in enumerate(vectors):
             tmp_db.connection.execute(
                 f"""
-                INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims, shard_id)
+                INSERT INTO {table_name}
+                    (chunk_id, provider, model, embedding, dims, shard_id)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 [i, "test", "test-model", emb.tolist(), TEST_DIMS, str(shard_id)],
@@ -1077,7 +1246,9 @@ class TestCompactionAndQuality:
 
         # Verify: file was rebuilt (mtime changed)
         new_mtime = shard_path.stat().st_mtime
-        assert new_mtime > initial_mtime, "Index should be rebuilt when quality < threshold"
+        assert new_mtime > initial_mtime, (
+            "Index should be rebuilt when quality < threshold"
+        )
 
         # Verify: shard still has correct count after rebuild
         state = get_shard_state(
@@ -1105,8 +1276,6 @@ class TestScaleToTarget:
         vector_count: int,
     ) -> None:
         """System handles larger vector counts efficiently."""
-        import time
-
         shard_id = uuid4()
         shard_path = shard_manager._shard_path(shard_id)
 
@@ -1130,7 +1299,9 @@ class TestScaleToTarget:
         fix_time = time.perf_counter() - start
 
         # Should complete reasonably fast
-        assert fix_time < 30.0, f"fix_pass took {fix_time:.2f}s for {vector_count} vectors"
+        assert fix_time < 30.0, (
+            f"fix_pass took {fix_time:.2f}s for {vector_count} vectors"
+        )
 
         # Measure search time
         query = vectors[0]
@@ -1332,22 +1503,22 @@ class TestInvariantVerification:
             assert dist_i <= dist_next + 1e-6, "Results not sorted by distance"
 
 
-class TestNativeUSearchClustering:
-    """Test native USearch clustering path with high split threshold.
+class TestKMeansSplitClustering:
+    """Test K-means clustering for shard splitting with high split threshold.
 
-    Uses split_threshold=2000 which requires ~1681+ vectors (41^2 for HDBSCAN
-    minimum sample calculation) to trigger native USearch clustering instead
-    of the k-means fallback path.
+    Uses split_threshold=2000 to verify K-means creates balanced clusters.
+    K-means is used exclusively for splitting to guarantee cluster size
+    constraints and prevent split->merge cycles.
 
     Exercises invariants: I1, I2
     """
 
-    def test_native_usearch_split(
+    def test_kmeans_balanced_split(
         self,
         tmp_path: Path,
         generator: SyntheticEmbeddingGenerator,
     ) -> None:
-        """Shard splits using native USearch clustering with 2500 vectors."""
+        """Shard splits using K-means clustering creates balanced children."""
         # Create fresh DB provider for this test
         db_path = tmp_path / "native_usearch_test.duckdb"
         db_provider = MockDBProvider(db_path)
@@ -1385,8 +1556,8 @@ class TestNativeUSearchClustering:
                 [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
             )
 
-            # Insert 2500 vectors - enough to trigger native USearch clustering
-            # (requires ~1681+ vectors, threshold >= 2000)
+            # Insert 2500 vectors - above split_threshold of 2000
+            # K-means will create 2 balanced clusters of ~1250 each
             vector_count = 2500
             vectors = [
                 generator.generate_hash_seeded(f"native_usearch_doc_{i}")
@@ -1399,7 +1570,7 @@ class TestNativeUSearchClustering:
             assert len(initial_shards) == 1
             assert initial_shards[0] == shard_id
 
-            # Run fix_pass - should trigger split via native USearch clustering
+            # Run fix_pass - should trigger split via K-means clustering
             shard_manager.fix_pass(db_provider.connection, check_quality=False)
 
             # Verify split occurred - should now have 2+ shards
@@ -1487,8 +1658,13 @@ class TestNPAAfterMerge:
             INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
             VALUES (?, ?, ?, ?, ?)
             """,
-            [str(source_shard_id), TEST_DIMS, "test", "test-model",
-             str(source_shard_path)],
+            [
+                str(source_shard_id),
+                TEST_DIMS,
+                "test",
+                "test-model",
+                str(source_shard_path),
+            ],
         )
 
         # Create source vectors close to each of the 3 target centroids
@@ -1622,10 +1798,11 @@ class TestCentroidFilterCorrectness:
 
         # With proper centroid filtering, recall should be high
         # We use a threshold of 0.7 to account for ANN approximation
+        n_found = len(found_ground_truth)
+        n_total = len(ground_truth_keys)
         assert recall >= 0.7, (
             f"Low recall {recall:.2f}: centroid filtering may have excluded "
-            f"shards containing true top-k results. "
-            f"Found {len(found_ground_truth)}/{len(ground_truth_keys)} ground truth items"
+            f"shards containing true top-k results. Found {n_found}/{n_total}"
         )
 
         # Additionally verify that the query vector itself is found
@@ -2339,8 +2516,9 @@ class TestShardSplitAndJoinLifecycle:
         )
 
         # Verify I9: LIRE bound (shards <= embeddings)
-        assert len(shards_phase3) <= total_embeddings, (
-            f"LIRE bound violated: {len(shards_phase3)} shards > {total_embeddings} embeddings"
+        n_shards = len(shards_phase3)
+        assert n_shards <= total_embeddings, (
+            f"LIRE bound violated: {n_shards} shards > {total_embeddings} embeddings"
         )
 
         # Store shard IDs after third split for Phase 4
@@ -2423,3 +2601,397 @@ class TestShardSplitAndJoinLifecycle:
         # Verify I5: No ghost records
         ghosts = verify_invariant_i5_no_ghost_records(tmp_db, shard_manager.shard_dir)
         assert len(ghosts) == 0, f"Found ghost records: {ghosts}"
+
+
+def _generate_batch_sizes(
+    rng: np.random.Generator,
+    total: int,
+    min_size: int,
+    max_size: int,
+) -> list[int]:
+    """Generate list of randomized batch sizes summing to total.
+
+    Uses seeded RNG for reproducibility. Last batch adjusts to hit exact total.
+
+    Args:
+        rng: Seeded numpy random generator
+        total: Target total vectors
+        min_size: Minimum batch size (e.g., 900)
+        max_size: Maximum batch size (e.g., 1100)
+
+    Returns:
+        List of batch sizes, e.g., [1032, 945, 1087, ...]
+    """
+    batches = []
+    remaining = total
+    while remaining > max_size:
+        size = int(rng.integers(min_size, max_size + 1))
+        batches.append(size)
+        remaining -= size
+    if remaining > 0:
+        batches.append(remaining)
+    return batches
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(1200)  # 20 minutes for full insert+delete lifecycle
+class TestMillionVectorStress:
+    """Stress test: 1M vectors with production thresholds.
+
+    Exercises shard lifecycle at scale with:
+    - 1M artificial vectors loaded in randomized ~1k batches
+    - Deletions in randomized ~1k batches
+    - Production thresholds (split=100,000, merge=10,000)
+    - Full invariant verification after each batch
+
+    Run with:
+        uv run pytest tests/test_sharding.py::TestMillionVectorStress \\
+            --run-slow -v -s
+    """
+
+    def test_million_vector_lifecycle(self, tmp_path: Path) -> None:
+        """Full lifecycle: insert 1M vectors, delete in batches, verify invariants."""
+        # Setup seeded RNG for reproducibility
+        rng = np.random.default_rng(STRESS_SEED)
+        generator = SyntheticEmbeddingGenerator(dims=STRESS_DIMS, seed=STRESS_SEED)
+
+        # Create DB with stress test dimensions table
+        db_path = tmp_path / "stress_test.duckdb"
+        db_provider = MockDBProvider(db_path)
+        db_provider._create_embeddings_table(STRESS_DIMS)
+
+        shard_dir = tmp_path / "shards"
+        shard_dir.mkdir(exist_ok=True)
+
+        # Show test paths
+        formatter = RichOutputFormatter()
+        formatter.info(f"Test DB: {db_path}")
+        formatter.info(f"Shard dir: {shard_dir}")
+
+        config = ShardingConfig(
+            split_threshold=STRESS_SPLIT_THRESHOLD,
+            merge_threshold=STRESS_MERGE_THRESHOLD,
+            compaction_threshold=0.20,
+            incremental_sync_threshold=0.10,
+            quality_threshold=0.95,
+            shard_similarity_threshold=0.1,
+        )
+
+        shard_manager = ShardManager(
+            db_provider=db_provider,
+            shard_dir=shard_dir,
+            config=config,
+        )
+
+        try:
+            # Use ProgressManager to suppress loguru INFO/DEBUG logs and show progress
+            with formatter.create_progress_display() as progress:
+                # ===== PHASE 1: INSERT =====
+                insert_batches = _generate_batch_sizes(
+                    rng, STRESS_TOTAL_VECTORS, STRESS_BATCH_MIN, STRESS_BATCH_MAX
+                )
+
+                progress.add_task(
+                    "insert",
+                    "Inserting vectors",
+                    total=STRESS_TOTAL_VECTORS,
+                )
+
+                total_inserted = 0
+                phase_start = time.perf_counter()
+
+                for batch_idx, batch_size in enumerate(insert_batches):
+                    # Generate vectors for this batch
+                    batch_name = f"stress_{batch_idx}"
+                    vectors = generator.generate_batch(batch_size, batch_name)
+
+                    # Insert embeddings to DuckDB (without shard assignment)
+                    emb_ids = batch_insert_embeddings_to_db(
+                        db_provider,
+                        vectors,
+                        dims=STRESS_DIMS,
+                        shard_id=None,
+                        start_chunk_id=total_inserted,
+                    )
+
+                    # Build embedding dicts for shard assignment
+                    emb_dicts = [
+                        {"id": emb_id, "embedding": vec.tolist()}
+                        for emb_id, vec in zip(emb_ids, vectors)
+                    ]
+
+                    # Assign embeddings to shards (creates shard if needed)
+                    success, needs_fix = shard_manager.insert_embeddings(
+                        emb_dicts,
+                        dims=STRESS_DIMS,
+                        provider="test",
+                        model="test-model",
+                        conn=db_provider.connection,
+                    )
+
+                    total_inserted += batch_size
+
+                    # Build USearch index if shard created or threshold crossed
+                    if needs_fix:
+                        shard_manager.fix_pass(
+                            db_provider.connection, check_quality=False
+                        )
+
+                    # ===== VERIFICATION AFTER EACH BATCH =====
+
+                    # I1: Single assignment
+                    assert verify_invariant_i1_single_assignment(db_provider), (
+                        f"I1 violated at insert batch {batch_idx}"
+                    )
+
+                    # I2: Shard existence
+                    assert verify_invariant_i2_shard_existence(db_provider), (
+                        f"I2 violated at insert batch {batch_idx}"
+                    )
+
+                    # Update progress
+                    elapsed = time.perf_counter() - phase_start
+                    rate = total_inserted / elapsed if elapsed > 0 else 0
+                    shard_count = len(get_all_shard_ids(db_provider))
+                    progress.update_task(
+                        "insert",
+                        advance=batch_size,
+                        speed=f"{rate:.0f} vec/s",
+                        info=f"{shard_count} shards",
+                    )
+
+                progress.finish_task("insert")
+
+            # Verify expected shard count after full insert
+            final_shard_count = len(get_all_shard_ids(db_provider))
+            min_expected_shards = STRESS_TOTAL_VECTORS // STRESS_SPLIT_THRESHOLD
+            max_expected_shards = STRESS_TOTAL_VECTORS // STRESS_MERGE_THRESHOLD
+            assert min_expected_shards <= final_shard_count <= max_expected_shards, (
+                f"Expected {min_expected_shards}-{max_expected_shards} shards, "
+                f"got {final_shard_count}"
+            )
+
+            # Use ProgressManager for DELETE phase
+            with formatter.create_progress_display() as progress:
+                # ===== PHASE 2: DELETE =====
+                delete_batches = _generate_batch_sizes(
+                    rng, STRESS_TOTAL_VECTORS, STRESS_BATCH_MIN, STRESS_BATCH_MAX
+                )
+
+                # Get all IDs and shuffle for random deletion order
+                all_ids = db_provider.connection.execute(
+                    f"SELECT id FROM embeddings_{STRESS_DIMS}"
+                ).fetchall()
+                all_ids = [row[0] for row in all_ids]
+                rng.shuffle(all_ids)
+
+                progress.add_task(
+                    "delete",
+                    "Deleting vectors",
+                    total=STRESS_TOTAL_VECTORS,
+                )
+
+                total_deleted = 0
+                phase_start = time.perf_counter()
+                id_cursor = 0
+                table = f"embeddings_{STRESS_DIMS}"
+
+                for batch_idx, batch_size in enumerate(delete_batches):
+                    # Get IDs to delete
+                    ids_to_delete = all_ids[id_cursor : id_cursor + batch_size]
+                    id_cursor += batch_size
+
+                    if not ids_to_delete:
+                        break
+
+                    # Batch delete from DB
+                    placeholders = ", ".join("?" * len(ids_to_delete))
+                    db_provider.connection.execute(
+                        f"DELETE FROM {table} WHERE id IN ({placeholders})",
+                        ids_to_delete,
+                    )
+                    total_deleted += len(ids_to_delete)
+                    remaining = STRESS_TOTAL_VECTORS - total_deleted
+
+                    # Check if any shard fell below merge threshold
+                    min_count_result = db_provider.connection.execute(
+                        f"""
+                        SELECT MIN(cnt) FROM (
+                            SELECT COUNT(*) as cnt FROM {table}
+                            GROUP BY shard_id
+                        )
+                        """
+                    ).fetchone()
+                    min_shard_count = min_count_result[0] if min_count_result[0] else 0
+
+                    # Run fix_pass only when threshold crossed (like insertion)
+                    needs_fix = min_shard_count < STRESS_MERGE_THRESHOLD
+                    if needs_fix:
+                        shard_manager.fix_pass(
+                            db_provider.connection, check_quality=False
+                        )
+
+                    # ===== VERIFICATION AFTER EACH DELETE BATCH =====
+
+                    # I1: Single assignment (DB-only, always check)
+                    assert verify_invariant_i1_single_assignment(db_provider), (
+                        f"I1 violated at delete batch {batch_idx}"
+                    )
+
+                    # I2: Shard existence (DB-only, always check)
+                    assert verify_invariant_i2_shard_existence(db_provider), (
+                        f"I2 violated at delete batch {batch_idx}"
+                    )
+
+                    # I4/I5: File invariants only valid after fix_pass
+                    if needs_fix:
+                        orphans = verify_invariant_i4_no_orphan_files(
+                            db_provider, shard_dir
+                        )
+                        assert len(orphans) == 0, (
+                            f"I4 violated: {len(orphans)} orphans at batch {batch_idx}"
+                        )
+
+                        ghosts = verify_invariant_i5_no_ghost_records(
+                            db_provider, shard_dir
+                        )
+                        assert len(ghosts) == 0, (
+                            f"I5 violated: {len(ghosts)} ghosts at batch {batch_idx}"
+                        )
+
+                    # Update progress
+                    elapsed = time.perf_counter() - phase_start
+                    rate = total_deleted / elapsed if elapsed > 0 else 0
+                    shard_count = len(get_all_shard_ids(db_provider))
+                    progress.update_task(
+                        "delete",
+                        advance=len(ids_to_delete),
+                        speed=f"{rate:.0f}/s",
+                        info=f"{remaining:,} left, {shard_count} shards",
+                    )
+
+                progress.finish_task("delete")
+
+            # Final fix_pass to clean up any remaining empty shards
+            shard_manager.fix_pass(db_provider.connection, check_quality=False)
+
+            # Match production: full compaction to reclaim deleted row space
+            # Uses shared compaction_utils with production thresholds (50%/100MB)
+            db_provider.optimize()
+
+            # Final assertions
+            final_count = db_provider.connection.execute(
+                f"SELECT COUNT(*) FROM embeddings_{STRESS_DIMS}"
+            ).fetchone()[0]
+            final_shards = len(get_all_shard_ids(db_provider))
+
+            assert final_count == 0, f"Expected 0 vectors, found {final_count}"
+            assert final_shards == 0, f"Expected 0 shards, found {final_shards}"
+
+            # Final invariant checks
+            orphans = verify_invariant_i4_no_orphan_files(db_provider, shard_dir)
+            assert len(orphans) == 0, f"Final: {len(orphans)} orphan files"
+
+            ghosts = verify_invariant_i5_no_ghost_records(db_provider, shard_dir)
+            assert len(ghosts) == 0, f"Final: {len(ghosts)} ghost records"
+
+        finally:
+            db_provider.disconnect()
+
+
+class TestSplitMergeCycleProtection:
+    """Test protection against infinite split->merge cycles.
+
+    Verifies that splitting creates child shards above merge_threshold,
+    preventing immediate merge operations that would recreate the cycle.
+
+    This tests the fix for a bug where USearch's native clustering could
+    create many tiny clusters, triggering merges that led to infinite loops.
+    """
+
+    def test_split_creates_viable_children(
+        self,
+        tmp_path: Path,
+        generator: SyntheticEmbeddingGenerator,
+    ) -> None:
+        """Split must create children >= merge_threshold to avoid cycles."""
+        # Create fresh DB provider for this test
+        db_path = tmp_path / "cycle_protection_test.duckdb"
+        db_provider = MockDBProvider(db_path)
+
+        # Create shard directory
+        shard_dir = tmp_path / "shards"
+        shard_dir.mkdir(exist_ok=True)
+
+        # Use small thresholds for faster testing
+        config = ShardingConfig(
+            split_threshold=TEST_SPLIT_THRESHOLD,  # 100
+            merge_threshold=TEST_MERGE_THRESHOLD,  # 20
+            compaction_threshold=0.20,
+            incremental_sync_threshold=0.10,
+            quality_threshold=0.95,
+            shard_similarity_threshold=0.1,
+        )
+
+        shard_manager = ShardManager(
+            db_provider=db_provider,
+            shard_dir=shard_dir,
+            config=config,
+        )
+
+        try:
+            # Create initial shard
+            shard_id = uuid4()
+            shard_path = shard_manager._shard_path(shard_id)
+
+            db_provider.connection.execute(
+                """
+                INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+            )
+
+            # Insert exactly split_threshold vectors to trigger split
+            vectors = [
+                generator.generate_hash_seeded(f"cycle_test_{i}")
+                for i in range(TEST_SPLIT_THRESHOLD)
+            ]
+            insert_embeddings_to_db(db_provider, vectors, shard_id)
+
+            # Run fix_pass - should split into 2 balanced shards
+            shard_manager.fix_pass(db_provider.connection, check_quality=False)
+
+            # Verify all child shards are >= merge_threshold
+            shards = get_all_shard_ids(db_provider)
+            assert len(shards) >= 2, f"Expected split into 2+ shards, got {len(shards)}"
+
+            for child_shard_id in shards:
+                count = db_provider.connection.execute(
+                    f"SELECT COUNT(*) FROM embeddings_{TEST_DIMS} WHERE shard_id = ?",
+                    [str(child_shard_id)],
+                ).fetchone()[0]
+                assert count >= TEST_MERGE_THRESHOLD, (
+                    f"Child shard {child_shard_id} has {count} vectors, "
+                    f"below merge_threshold {TEST_MERGE_THRESHOLD}"
+                )
+
+            # Record shard count before second fix_pass
+            shard_count_before = len(shards)
+
+            # Run fix_pass again - should NOT trigger any merges
+            shard_manager.fix_pass(db_provider.connection, check_quality=False)
+
+            # Shard count should remain stable (no merge occurred)
+            final_shards = get_all_shard_ids(db_provider)
+            n_final = len(final_shards)
+            assert n_final == shard_count_before, (
+                f"Shard count: {shard_count_before} -> {n_final} (unwanted merge)"
+            )
+
+            # Verify invariants still hold
+            assert verify_invariant_i1_single_assignment(db_provider)
+            assert verify_invariant_i2_shard_existence(db_provider)
+
+        finally:
+            db_provider.disconnect()
