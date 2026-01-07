@@ -353,9 +353,9 @@ class TestSearchDeduplication:
         )
 
         # Verify total count matches unique results
-        assert pagination["total"] == len(
-            results
-        ), f"Total count {pagination['total']} != actual results {len(results)}"
+        total = pagination.get("total")
+        assert total == 10, f"Expected total 10, got {total}"
+        assert total == len(results), f"Total count {total} != actual results {len(results)}"
         assert len(results) == 10, f"Expected 10 unique chunks, got {len(results)}"
 
         # Verify all chunk_ids are unique

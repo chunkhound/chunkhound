@@ -281,9 +281,11 @@ class SerialDatabaseProvider(ABC):
         if not hasattr(self, "_executor_search_regex"):
             return [], {"error": "Regex search not supported by this provider"}
 
-        return self._execute_in_db_thread_sync(
+        results, total_count = self._execute_in_db_thread_sync(
             "search_regex", pattern, page_size, offset, path_filter
         )
+        pagination = {"has_more": len(results) == page_size, "total": total_count}
+        return results, pagination
 
     async def search_regex_async(
         self,

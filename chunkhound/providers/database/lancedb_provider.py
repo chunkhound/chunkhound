@@ -1919,7 +1919,7 @@ class LanceDBProvider(SerialDatabaseProvider):
         page_size: int,
         offset: int,
         path_filter: str | None,
-    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], int | None]:
         """Executor method for search_regex - runs in DB thread.
 
         Optimized for large datasets: uses native LanceDB LIKE/regex queries instead of pandas filtering.
@@ -2007,14 +2007,13 @@ class LanceDBProvider(SerialDatabaseProvider):
                 # Get file paths for results (batch operation for efficiency)
                 formatted = self._add_file_paths_to_results(formatted_results)
 
-                pagination = {
-                    "offset": offset,
-                    "page_size": len(formatted),
-                    "has_more": len(results) > offset + page_size,
-                    "total": len(results),
-                }
+                num_results = len(results)
+                if num_results < page_size:
+                    total_count = offset + num_results
+                else:
+                    total_count = None
 
-                return formatted, pagination
+                return formatted, total_count
 
             except Exception as native_error:
                 logger.error(f"Regex search failed: {native_error}")
