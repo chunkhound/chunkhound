@@ -115,27 +115,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         self._wal_cleanup_lock = threading.Lock()
         self._wal_cleanup_done = False
 
-    def _generate_chunk_id_safe(self, chunk: Chunk) -> int:
-        """Generate chunk ID with fallback to hash-based ID.
 
-        Returns chunk.id if present, otherwise generates deterministic
-        hash-based ID from file_id, content, and chunk type.
-
-        Args:
-            chunk: Chunk object to generate ID for
-
-        Returns:
-            Chunk ID (existing or generated)
-        """
-        return chunk.id or generate_chunk_id(
-            chunk.file_id,
-            chunk.code or "",
-            concept=str(
-                chunk.chunk_type.value
-                if hasattr(chunk.chunk_type, "value")
-                else chunk.chunk_type
-            ),
-        )
 
         # Initialize connection manager (will be simplified later)
         self._connection_manager = DuckDBConnectionManager(db_path, config)
@@ -1267,7 +1247,29 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         logger.debug(f"File {file_path} and all associated data deleted")
         return True
+    
+    def _generate_chunk_id_safe(self, chunk: Chunk) -> int:
+        """Generate chunk ID with fallback to hash-based ID.
 
+        Returns chunk.id if present, otherwise generates deterministic
+        hash-based ID from file_id, content, and chunk type.
+
+        Args:
+            chunk: Chunk object to generate ID for
+
+        Returns:
+            Chunk ID (existing or generated)
+        """
+        return chunk.id or generate_chunk_id(
+            chunk.file_id,
+            chunk.code or "",
+            concept=str(
+                chunk.chunk_type.value
+                if hasattr(chunk.chunk_type, "value")
+                else chunk.chunk_type
+            ),
+        )
+    
     def insert_chunk(self, chunk: Chunk) -> int:
         """Insert chunk record and return chunk ID - delegate to chunk repository."""
         return self._chunk_repository.insert_chunk(chunk)
@@ -1511,17 +1513,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Update the embedding status of a chunk."""
         self._execute_in_db_thread_sync("update_chunk_status", chunk_id, status)
 
-    def _executor_update_chunk_status(
-        self, conn: Any, state: dict[str, Any], chunk_id: int, status: str
-    ) -> None:
-        """Executor method for update_chunk_status - runs in DB thread."""
-        # Track operation for checkpoint management
-        track_operation(state)
 
-        conn.execute(
-            "UPDATE chunks SET embedding_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            [status, chunk_id],
-        )
 
     def _executor_insert_chunk_single(
         self, conn: Any, state: dict[str, Any], chunk: Chunk
@@ -1747,7 +1739,6 @@ class DuckDBProvider(SerialDatabaseProvider):
                         emb["model"],
                         emb["embedding"],
                         dims,
-                        status,
                     )
                 )
 
@@ -1760,11 +1751,42 @@ class DuckDBProvider(SerialDatabaseProvider):
                 batch_data,
             )
 
-            # Update chunk statuses
-            for emb in dim_embeddings:
-                status = emb["status"]  # Status is now required
-                self._executor_update_chunk_status(conn, {}, emb["chunk_id"], status)
             total_inserted += len(batch_data)
+
+        # Collect all chunk statuses from embeddings_data and chunks_data
+        chunk_statuses = {}
+
+        # Statuses from successful embeddings
+        for emb in embeddings_data:
+            chunk_statuses[emb["chunk_id"]] = emb["status"]
+
+        # Statuses from chunks_data (failed chunks)
+        for chunk in chunks_data:
+            if "embedding_status" in chunk:
+                chunk_statuses[chunk["id"]] = chunk["embedding_status"]
+
+        # Batch update all chunk statuses
+        if chunk_statuses:
+            # Build CASE statement for batch update
+            when_clauses = []
+            params = []
+            chunk_ids = []
+
+            for chunk_id, status in chunk_statuses.items():
+                when_clauses.append("WHEN ? THEN ?")
+                params.extend([chunk_id, status])
+                chunk_ids.append(chunk_id)
+
+            # Create the SQL query
+            query = f"""
+                UPDATE chunks
+                SET embedding_status = CASE id {' '.join(when_clauses)} END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id IN ({','.join(['?'] * len(chunk_ids))})
+            """
+            params.extend(chunk_ids)
+
+            conn.execute(query, params)
 
         return total_inserted
 

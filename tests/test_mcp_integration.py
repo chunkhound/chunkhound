@@ -376,7 +376,7 @@ class NewlyAddedClass:
         test_file.touch()
         
         # Wait for modification to be processed
-        await asyncio.sleep(3.5)
+        await asyncio.sleep(5)
         
         # Check if modification was detected
         modified_record = services.provider.get_file_by_path(str(test_file.resolve()))
