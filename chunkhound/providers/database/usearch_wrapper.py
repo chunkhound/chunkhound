@@ -6,7 +6,7 @@ quality measurement, and medoid computation.
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 from usearch.eval import self_recall
@@ -169,7 +169,8 @@ def cluster(
         centroid_keys, cluster_sizes = native_clustering.centroids_popularity
 
         # Build key-to-position mapping (keys are embedding IDs, not 0..N-1)
-        keys = list(index.keys)
+        # Use slice [:] to get keys efficiently via get_keys_in_slice()
+        keys = cast(np.ndarray, index.keys[:])
         key_to_pos = {int(k): i for i, k in enumerate(keys)}
 
         # Build labels array from native clustering
@@ -364,9 +365,11 @@ def measure_quality(
 
 
 def get_medoid(index: Index) -> tuple[int, np.ndarray]:
-    """Find the medoid of an index (most central vector).
+    """Find approximate medoid via sample-mean nearest neighbor search.
 
-    The medoid is the vector with minimum average distance to all other vectors.
+    Uses USearch's efficient key slicing and HNSW search to find an
+    approximate medoid in O(sample_size + log n) time, avoiding the
+    O(n) iteration over all keys that blocks on large indexes.
 
     Args:
         index: USearch index
@@ -378,35 +381,21 @@ def get_medoid(index: Index) -> tuple[int, np.ndarray]:
         ValueError: If index is empty
     """
     n_vectors = len(index)
-
     if n_vectors == 0:
         raise ValueError("Cannot find medoid of empty index")
 
-    # Get all keys and their vectors (use actual keys, not positional indices)
-    keys = list(index.keys)
-    vectors = np.zeros((n_vectors, index.ndim), dtype=np.float32)
-    for i, key in enumerate(keys):
-        vectors[i] = index[key]
+    # Sample vectors efficiently - keys[:n] uses get_keys_in_slice() which is O(n)
+    # not the O(n) iterator that calls get_key_at_offset() for each key
+    sample_size = min(100, n_vectors)
+    sample_keys = cast(np.ndarray, index.keys[:sample_size])
 
-    # Compute pairwise distances and find medoid
-    # For large indexes, use sampling to approximate
-    if n_vectors > 10000:
-        # Sample-based approximation
-        sample_size = min(1000, n_vectors)
-        sample_indices = np.random.choice(n_vectors, size=sample_size, replace=False)
-        sample_vectors = vectors[sample_indices]
+    # Get sample vectors and compute mean
+    sample_vecs = np.array([index[k] for k in sample_keys], dtype=np.float32)
+    mean_vec = sample_vecs.mean(axis=0)
 
-        # Compute average distance to sample for all vectors
-        avg_distances = np.zeros(n_vectors)
-        for i, vec in enumerate(vectors):
-            distances = np.linalg.norm(sample_vectors - vec, axis=1)
-            avg_distances[i] = distances.mean()
-    else:
-        # Exact computation for small indexes
-        avg_distances = np.zeros(n_vectors)
-        for i in range(n_vectors):
-            distances = np.linalg.norm(vectors - vectors[i], axis=1)
-            avg_distances[i] = distances.mean()
+    # Search for nearest actual vector to mean - O(log n) via HNSW
+    results = index.search(mean_vec, count=1)
+    medoid_key = int(results.keys[0])
+    medoid_vec = cast(np.ndarray, index[medoid_key])
 
-    medoid_idx = int(np.argmin(avg_distances))
-    return int(keys[medoid_idx]), vectors[medoid_idx]
+    return medoid_key, medoid_vec
