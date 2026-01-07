@@ -204,6 +204,43 @@ def get_shard_embedding_count(
     return result[0]
 
 
+def get_shard_counts(db_provider: MockDBProvider) -> dict[UUID, int]:
+    """Get embedding count per shard."""
+    table_name = f"embeddings_{TEST_DIMS}"
+    result = db_provider.connection.execute(f"""
+        SELECT shard_id, COUNT(*) as cnt
+        FROM {table_name}
+        WHERE shard_id IS NOT NULL
+        GROUP BY shard_id
+    """).fetchall()
+    return {
+        row[0] if isinstance(row[0], UUID) else UUID(row[0]): row[1]
+        for row in result
+    }
+
+
+def delete_from_shard(
+    db_provider: MockDBProvider,
+    shard_id: UUID,
+    count: int,
+) -> list[int]:
+    """Delete `count` embeddings from specific shard. Returns deleted IDs."""
+    table_name = f"embeddings_{TEST_DIMS}"
+    # Get IDs to delete
+    result = db_provider.connection.execute(f"""
+        SELECT id FROM {table_name} WHERE shard_id = ? LIMIT ?
+    """, [str(shard_id), count]).fetchall()
+    deleted_ids = [row[0] for row in result]
+
+    if deleted_ids:
+        placeholders = ", ".join("?" * len(deleted_ids))
+        db_provider.connection.execute(f"""
+            DELETE FROM {table_name} WHERE id IN ({placeholders})
+        """, deleted_ids)
+
+    return deleted_ids
+
+
 def verify_invariant_i1_single_assignment(db_provider: MockDBProvider) -> bool:
     """I1: Each embedding has exactly one shard assignment."""
     table_name = f"embeddings_{TEST_DIMS}"
@@ -2138,3 +2175,251 @@ class TestBulkIndexer:
 
         finally:
             db_provider.disconnect()
+
+
+class TestShardSplitAndJoinLifecycle:
+    """Test full shard lifecycle: 3 splits then merge back to empty.
+
+    Exercises invariants: I1, I2, I4, I5, I9
+
+    Lifecycle phases:
+    1. Empty -> 100 vectors -> first split (2 shards)
+    2. +60 vectors -> second split (3 shards)
+    3. +70 vectors -> third split (4 shards)
+    4. Delete to <20 per shard -> merges
+    5. Delete all remaining -> empty (0 shards)
+    """
+
+    def test_split_and_join_lifecycle(
+        self,
+        tmp_db: MockDBProvider,
+        shard_manager: ShardManager,
+        generator: SyntheticEmbeddingGenerator,
+    ) -> None:
+        """Complete lifecycle: empty -> 3 splits -> delete all -> empty."""
+        # Phase 1: First split
+        # Verify starting state: 0 shards, 0 embeddings
+        initial_shards = get_all_shard_ids(tmp_db)
+        assert len(initial_shards) == 0, "Expected 0 shards at start"
+
+        initial_embeddings = tmp_db.connection.execute(
+            f"SELECT COUNT(*) FROM embeddings_{TEST_DIMS}"
+        ).fetchone()[0]
+        assert initial_embeddings == 0, "Expected 0 embeddings at start"
+
+        # Create initial shard (shard_0) with UUID
+        shard_0_id = uuid4()
+        shard_0_path = shard_manager._shard_path(shard_0_id)
+
+        tmp_db.connection.execute(
+            """
+            INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [str(shard_0_id), TEST_DIMS, "test", "test-model", str(shard_0_path)],
+        )
+
+        # Insert exactly TEST_SPLIT_THRESHOLD (100) vectors to shard_0
+        vectors = [
+            generator.generate_hash_seeded(f"lifecycle_doc_{i}")
+            for i in range(TEST_SPLIT_THRESHOLD)
+        ]
+        insert_embeddings_to_db(tmp_db, vectors, shard_0_id)
+
+        # Run fix_pass() -> triggers first split
+        shard_manager.fix_pass(tmp_db.connection, check_quality=False)
+
+        # Verify: 2 shards exist (original shard_id deleted, replaced by 2 new shards)
+        shards_after_split = get_all_shard_ids(tmp_db)
+        assert len(shards_after_split) == 2, (
+            f"Expected 2 shards after first split, got {len(shards_after_split)}"
+        )
+
+        # Original shard should be deleted
+        assert shard_0_id not in shards_after_split, (
+            "Original shard should be deleted after split"
+        )
+
+        # Verify: Total embeddings == 100
+        total_embeddings = tmp_db.connection.execute(
+            f"SELECT COUNT(*) FROM embeddings_{TEST_DIMS}"
+        ).fetchone()[0]
+        assert total_embeddings == TEST_SPLIT_THRESHOLD, (
+            f"Expected {TEST_SPLIT_THRESHOLD} embeddings, got {total_embeddings}"
+        )
+
+        # Verify: I1 invariant (single assignment) holds
+        assert verify_invariant_i1_single_assignment(tmp_db), (
+            "I1 violated: embeddings have multiple shard assignments"
+        )
+
+        # Verify: I2 invariant (shard existence) holds
+        assert verify_invariant_i2_shard_existence(tmp_db), (
+            "I2 violated: embeddings reference non-existent shards"
+        )
+
+        # ========================================
+        # Phase 2: Second split (+70 vectors)
+        # ========================================
+
+        # Pick shard with more vectors to ensure we exceed split threshold
+        shard_counts = get_shard_counts(tmp_db)
+        target_shard = max(shard_counts.keys(), key=lambda s: shard_counts[s])
+
+        # Insert 70 vectors to guarantee split (even if shard only has 30, 30+70=100)
+        phase2_vectors = [
+            generator.generate_hash_seeded(f"lifecycle_phase2_doc_{i}")
+            for i in range(70)
+        ]
+        insert_embeddings_to_db(tmp_db, phase2_vectors, target_shard)
+
+        # Run fix_pass - should trigger second split
+        shard_manager.fix_pass(tmp_db.connection, check_quality=False)
+
+        # Verify second split
+        shards_phase2 = get_all_shard_ids(tmp_db)
+        assert len(shards_phase2) >= 3, (
+            f"Expected >= 3 shards after second split, got {len(shards_phase2)}"
+        )
+
+        # Verify total embeddings preserved (100 + 70 = 170)
+        total_embeddings = tmp_db.connection.execute(
+            f"SELECT COUNT(*) FROM embeddings_{TEST_DIMS}"
+        ).fetchone()[0]
+        assert total_embeddings == 170, (
+            f"Expected 170 embeddings, got {total_embeddings}"
+        )
+
+        # Verify invariants
+        assert verify_invariant_i1_single_assignment(tmp_db), (
+            "I1 violated after phase 2: embeddings have multiple shard assignments"
+        )
+        assert verify_invariant_i2_shard_existence(tmp_db), (
+            "I2 violated after phase 2: embeddings reference non-existent shards"
+        )
+
+        # ========================================
+        # Phase 3: Third split (+70 vectors)
+        # ========================================
+
+        # Pick shard with most vectors to guarantee split
+        shard_counts = get_shard_counts(tmp_db)
+        target_shard = max(shard_counts.keys(), key=lambda s: shard_counts[s])
+
+        # Insert 70 more vectors to trigger third split
+        phase3_vectors = [
+            generator.generate_hash_seeded(f"lifecycle_phase3_doc_{i}")
+            for i in range(70)
+        ]
+        insert_embeddings_to_db(tmp_db, phase3_vectors, target_shard)
+
+        # Run fix_pass - should trigger third split
+        shard_manager.fix_pass(tmp_db.connection, check_quality=False)
+
+        # Verify third split
+        shards_phase3 = get_all_shard_ids(tmp_db)
+        assert len(shards_phase3) >= 4, (
+            f"Expected >= 4 shards after third split, got {len(shards_phase3)}"
+        )
+
+        # Verify total embeddings preserved (100 + 70 + 70 = 240)
+        total_embeddings = tmp_db.connection.execute(
+            f"SELECT COUNT(*) FROM embeddings_{TEST_DIMS}"
+        ).fetchone()[0]
+        assert total_embeddings == 240, (
+            f"Expected 240 embeddings, got {total_embeddings}"
+        )
+
+        # Verify invariants
+        assert verify_invariant_i1_single_assignment(tmp_db), (
+            "I1 violated after phase 3: embeddings have multiple shard assignments"
+        )
+        assert verify_invariant_i2_shard_existence(tmp_db), (
+            "I2 violated after phase 3: embeddings reference non-existent shards"
+        )
+
+        # Verify I9: LIRE bound (shards <= embeddings)
+        assert len(shards_phase3) <= total_embeddings, (
+            f"LIRE bound violated: {len(shards_phase3)} shards > {total_embeddings} embeddings"
+        )
+
+        # Store shard IDs after third split for Phase 4
+        # shards_phase3 is used in Phase 4 below
+
+        # ========================================
+        # Phase 4: Delete to trigger merges
+        # ========================================
+
+        # Get shard counts before deletion
+        shard_counts_before = get_shard_counts(tmp_db)
+        shards_before_merge = set(shard_counts_before.keys())
+
+        # Delete vectors to bring each shard below merge_threshold
+        for shard_id, count in shard_counts_before.items():
+            # Leave enough below merge threshold to trigger merge
+            to_delete = count - (TEST_MERGE_THRESHOLD - 5)
+            if to_delete > 0:
+                delete_from_shard(tmp_db, shard_id, to_delete)
+
+        # Verify all shards now below merge threshold
+        shard_counts_after_delete = get_shard_counts(tmp_db)
+        for shard_id, count in shard_counts_after_delete.items():
+            assert count < TEST_MERGE_THRESHOLD, (
+                f"Shard {shard_id} has {count} vectors, "
+                f"should be < {TEST_MERGE_THRESHOLD}"
+            )
+
+        # Run fix_pass - should trigger merges
+        shard_manager.fix_pass(tmp_db.connection, check_quality=False)
+
+        # Get state after merge
+        shards_after_merge = set(get_all_shard_ids(tmp_db))
+
+        # Verify shard count decreased (merges occurred)
+        assert len(shards_after_merge) < len(shards_before_merge), (
+            f"Expected shard count to decrease: {len(shards_before_merge)} -> "
+            f"{len(shards_after_merge)}"
+        )
+
+        # Verify invariants
+        assert verify_invariant_i1_single_assignment(tmp_db), (
+            "I1 violated after phase 4: embeddings have multiple shard assignments"
+        )
+        assert verify_invariant_i2_shard_existence(tmp_db), (
+            "I2 violated after phase 4: embeddings reference non-existent shards"
+        )
+
+        # ========================================
+        # Phase 5: Delete all remaining to empty
+        # ========================================
+
+        # Get remaining embeddings and delete all of them
+        remaining_counts = get_shard_counts(tmp_db)
+        for shard_id, count in remaining_counts.items():
+            if count > 0:
+                delete_from_shard(tmp_db, shard_id, count)
+
+        # Verify all embeddings deleted
+        total_embeddings = tmp_db.connection.execute(
+            f"SELECT COUNT(*) FROM embeddings_{TEST_DIMS}"
+        ).fetchone()[0]
+        assert total_embeddings == 0, (
+            f"Expected 0 embeddings after delete all, got {total_embeddings}"
+        )
+
+        # Run fix_pass - should clean up empty shards
+        shard_manager.fix_pass(tmp_db.connection, check_quality=False)
+
+        # Verify final empty state
+        final_shards = get_all_shard_ids(tmp_db)
+        assert len(final_shards) == 0, (
+            f"Expected 0 shards at end, got {len(final_shards)}"
+        )
+
+        # Verify I4: No orphan files
+        orphans = verify_invariant_i4_no_orphan_files(tmp_db, shard_manager.shard_dir)
+        assert len(orphans) == 0, f"Found orphan files: {orphans}"
+
+        # Verify I5: No ghost records
+        ghosts = verify_invariant_i5_no_ghost_records(tmp_db, shard_manager.shard_dir)
+        assert len(ghosts) == 0, f"Found ghost records: {ghosts}"

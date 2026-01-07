@@ -711,10 +711,16 @@ class ShardManager:
         embeddings = self._get_shard_embedding_ids(shard_id, dims, conn)
 
         if not embeddings:
-            logger.warning(f"Shard {shard_id} has no embeddings, skipping rebuild")
+            logger.info(f"Shard {shard_id} has no embeddings, removing empty shard")
             # Remove empty shard file if exists
             if file_path.exists():
                 file_path.unlink()
+            # Delete the shard record from DB
+            conn.execute(
+                "DELETE FROM vector_shards WHERE shard_id = ?",
+                [str(shard_id)],
+            )
+            self.centroids.pop(shard_id, None)
             return
 
         logger.info(f"Rebuilding shard {shard_id} with {len(embeddings)} vectors")
