@@ -49,6 +49,21 @@ class SyntheticEmbeddingGenerator:
             vec = vec / norm
         return vec
 
+    def generate_batch(self, count: int, prefix: str = "doc") -> list[np.ndarray]:
+        """Generate batch of deterministic vectors.
+
+        Each vector is seeded by f"{prefix}_{i}" for reproducibility.
+        Useful for stress tests requiring large volumes of vectors.
+
+        Args:
+            count: Number of vectors to generate
+            prefix: Text prefix for seeding (default: "doc")
+
+        Returns:
+            List of normalized unit vectors
+        """
+        return [self.generate_hash_seeded(f"{prefix}_{i}") for i in range(count)]
+
     def generate_clustered(
         self,
         num_clusters: int,

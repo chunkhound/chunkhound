@@ -1,19 +1,49 @@
 import os
+
 import pytest
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-slow",
+        action="store_true",
+        default=False,
+        help="Run slow stress tests",
+    )
+
+
 def pytest_configure(config):
-    config.addinivalue_line("markers", "heavy: mark tests that generate large synthetic trees (skipped by default)")
+    config.addinivalue_line(
+        "markers", "heavy: mark tests with large synthetic trees (skipped by default)"
+    )
+    config.addinivalue_line(
+        "markers", "slow: mark slow stress tests (use --run-slow)"
+    )
 
 
 def pytest_collection_modifyitems(config, items):
+    # Heavy tests - env var only
     run_heavy = os.getenv("CHUNKHOUND_RUN_HEAVY_TESTS") == "1"
-    if run_heavy:
-        return
-    skip_heavy = pytest.mark.skip(reason="heavy tests skipped by default (set CHUNKHOUND_RUN_HEAVY_TESTS=1 to run)")
-    for item in items:
-        if "heavy" in item.keywords:
-            item.add_marker(skip_heavy)
+    if not run_heavy:
+        skip_heavy = pytest.mark.skip(
+            reason="heavy tests skipped (set CHUNKHOUND_RUN_HEAVY_TESTS=1)"
+        )
+        for item in items:
+            if "heavy" in item.keywords:
+                item.add_marker(skip_heavy)
+
+    # Slow tests - CLI flag or env var
+    run_slow = (
+        config.getoption("--run-slow")
+        or os.getenv("CHUNKHOUND_RUN_SLOW_TESTS") == "1"
+    )
+    if not run_slow:
+        skip_slow = pytest.mark.skip(
+            reason="slow tests skipped (use --run-slow or CHUNKHOUND_RUN_SLOW_TESTS=1)"
+        )
+        for item in items:
+            if "slow" in item.keywords:
+                item.add_marker(skip_slow)
 
 
 @pytest.fixture
