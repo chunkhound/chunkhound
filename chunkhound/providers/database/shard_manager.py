@@ -5,7 +5,7 @@ Uses derived state architecture - metrics computed from DuckDB and USearch files
 """
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import numpy as np
@@ -451,8 +451,8 @@ class ShardManager:
                         measure_quality=check_quality,
                     )
                 except FileNotFoundError:
-                    # Missing file requires rebuild
-                    logger.warning(f"Shard {shard_id} missing file, rebuilding")
+                    # Missing file requires rebuild (normal for newly created shards)
+                    logger.info(f"Shard {shard_id} missing file, rebuilding")
                     self._rebuild_index_from_duckdb(shard, conn)
                     changes_made += 1
                     continue
@@ -655,9 +655,9 @@ class ShardManager:
         dims = shard["dims"]
         file_path = self._shard_path(shard_id)
 
-        # Get current index keys
+        # Get current index keys efficiently using slice (avoids O(n) iterator)
         index = usearch_wrapper.open_view(file_path)
-        index_keys = set(int(k) for k in index.keys)
+        index_keys = set(int(k) for k in cast(np.ndarray, index.keys[:]))
 
         # Get embedding IDs from DB for this shard
         db_ids = self._get_shard_embedding_ids(shard_id, dims, conn)
@@ -888,8 +888,7 @@ class ShardManager:
     def _split_shard(self, shard: dict[str, Any], conn: Any) -> bool:
         """Split a shard when db_count >= split_threshold.
 
-        Uses usearch_wrapper.cluster for clustering if index file available,
-        falls back to sklearn KMeans if not.
+        Uses K-means clustering to create exactly 2 balanced child shards.
 
         DuckDB transaction:
         - Create child shards in vector_shards
@@ -911,34 +910,11 @@ class ShardManager:
 
         logger.info(f"Splitting shard {shard_id}")
 
-        # Get clustering assignments
-        cluster_assignments: dict[int, int]
-
-        if file_path.exists():
-            try:
-                index = usearch_wrapper.open_view(file_path)
-                # Use split_threshold // 2 as min_count, split_threshold as max_count
-                clustering = usearch_wrapper.cluster(
-                    index,
-                    min_count=self.config.split_threshold // 2,
-                    max_count=self.config.split_threshold,
-                )
-
-                # Build embedding_id -> cluster_label mapping
-                # clustering.labels indexed by position in index.keys order
-                index_keys = list(index.keys)
-
-                cluster_assignments = {}
-                for idx, label in enumerate(clustering.labels):
-                    if idx < len(index_keys):
-                        cluster_assignments[int(index_keys[idx])] = int(label)
-
-            except Exception as e:
-                logger.warning(f"USearch clustering failed, using KMeans fallback: {e}")
-                cluster_assignments = self._kmeans_fallback(shard, conn, n_clusters=2)
-        else:
-            logger.debug("Shard file missing, using KMeans fallback for split")
-            cluster_assignments = self._kmeans_fallback(shard, conn, n_clusters=2)
+        # Always use K-means for splitting - guarantees exactly 2 balanced clusters.
+        # USearch's native clustering uses HNSW graph structure which does NOT
+        # guarantee min_count/max_count constraints, leading to many small clusters
+        # that trigger merge operations and cause infinite split->merge cycles.
+        cluster_assignments = self._kmeans_fallback(shard, conn, n_clusters=2)
 
         if not cluster_assignments:
             logger.warning(f"No embeddings to split for shard {shard_id}")
@@ -948,6 +924,15 @@ class ShardManager:
         clusters: dict[int, list[int]] = {}
         for emb_id, label in cluster_assignments.items():
             clusters.setdefault(label, []).append(emb_id)
+
+        # Validate cluster sizes to prevent immediate merge cycles
+        min_cluster_size = min(len(ids) for ids in clusters.values()) if clusters else 0
+        if min_cluster_size < self.config.merge_threshold:
+            logger.warning(
+                f"Shard {shard_id} split would create cluster with {min_cluster_size} "
+                f"vectors (< merge_threshold {self.config.merge_threshold}), skipping"
+            )
+            return False
 
         # Need at least 2 clusters to split
         if len(clusters) < 2:
