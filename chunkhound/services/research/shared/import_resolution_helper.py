@@ -92,8 +92,11 @@ async def resolve_and_fetch_imports(
             for resolved_path in resolved[: config.import_resolution_max_files]:
                 # Apply path filter if set
                 if path_filter:
-                    resolved_str = str(resolved_path)
-                    if not resolved_str.startswith(path_filter):
+                    try:
+                        relative_str = str(resolved_path.relative_to(base_dir))
+                    except ValueError:
+                        continue  # Path not under base_dir
+                    if not relative_str.startswith(path_filter):
                         continue
                 import_files.add(resolved_path)
 
