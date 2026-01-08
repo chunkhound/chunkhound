@@ -549,45 +549,67 @@ class DuckDBProvider(SerialDatabaseProvider):
                 )
 
                 # SQLite/DuckDB doesn't support DROP COLUMN directly, need to recreate table
-                # First, create a temporary table with the new schema
-                conn.execute("""
-                    CREATE TEMP TABLE chunks_new AS
-                    SELECT id, file_id, chunk_type, symbol, code,
-                           start_line, end_line, start_byte, end_byte,
-                           language, NULL AS metadata, created_at, updated_at
-                    FROM chunks
-                """)
+                # Wrap in transaction to prevent data loss on failure
+                try:
+                    conn.execute("BEGIN TRANSACTION")
+                    state["transaction_active"] = True
 
-                # Drop the old table
-                conn.execute("DROP TABLE chunks")
+                    # First, create a temporary table with the new schema
+                    conn.execute("""
+                        CREATE TEMP TABLE chunks_new AS
+                        SELECT id, file_id, chunk_type, symbol, code,
+                               start_line, end_line, start_byte, end_byte,
+                               language, NULL AS metadata, created_at, updated_at
+                        FROM chunks
+                    """)
 
-                # Create the new table with correct schema
-                conn.execute("""
-                    CREATE TABLE chunks (
-                        id INTEGER PRIMARY KEY DEFAULT nextval('chunks_id_seq'),
-                        file_id INTEGER REFERENCES files(id),
-                        chunk_type TEXT NOT NULL,
-                        symbol TEXT,
-                        code TEXT NOT NULL,
-                        start_line INTEGER,
-                        end_line INTEGER,
-                        start_byte INTEGER,
-                        end_byte INTEGER,
-                        language TEXT,
-                        metadata TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
+                    # Drop the old table
+                    conn.execute("DROP TABLE chunks")
 
-                # Copy data back
-                conn.execute("""
-                    INSERT INTO chunks 
-                    SELECT * FROM chunks_new
-                """)
+                    # Create the new table with correct schema
+                    conn.execute("""
+                        CREATE TABLE chunks (
+                            id INTEGER PRIMARY KEY DEFAULT nextval('chunks_id_seq'),
+                            file_id INTEGER REFERENCES files(id),
+                            chunk_type TEXT NOT NULL,
+                            symbol TEXT,
+                            code TEXT NOT NULL,
+                            start_line INTEGER,
+                            end_line INTEGER,
+                            start_byte INTEGER,
+                            end_byte INTEGER,
+                            language TEXT,
+                            metadata TEXT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
 
-                # Drop the temporary table
-                conn.execute("DROP TABLE chunks_new")
+                    # Copy data back with explicit column list for safety
+                    conn.execute("""
+                        INSERT INTO chunks (
+                            id, file_id, chunk_type, symbol, code,
+                            start_line, end_line, start_byte, end_byte,
+                            language, metadata, created_at, updated_at
+                        )
+                        SELECT id, file_id, chunk_type, symbol, code,
+                               start_line, end_line, start_byte, end_byte,
+                               language, metadata, created_at, updated_at
+                        FROM chunks_new
+                    """)
+
+                    # Drop the temporary table
+                    conn.execute("DROP TABLE chunks_new")
+
+                    conn.execute("COMMIT")
+                    state["transaction_active"] = False
+                except Exception:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except Exception as rollback_error:
+                        logger.error(f"ROLLBACK failed during migration: {rollback_error}")
+                    state["transaction_active"] = False
+                    raise
 
                 # Recreate indexes (will be done in _executor_create_indexes)
                 logger.info("Successfully migrated chunks table schema")
