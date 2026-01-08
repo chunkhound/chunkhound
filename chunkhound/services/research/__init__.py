@@ -44,7 +44,6 @@ __all__ = [
     # Factory and protocol (primary interface)
     "ResearchServiceFactory",
     "ResearchServiceProtocol",
-    "ResearchResult",
     # Shared components
     "BudgetCalculator",
     "ContextManager",
