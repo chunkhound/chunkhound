@@ -988,6 +988,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     "start_byte": None,  # LanceDB chunks table doesn't store byte offsets
                     "end_byte": None,
                     "language": result.get("language", ""),
+                    "metadata": _deserialize_metadata(result.get("metadata")),
                     "created_at": result.get("created_time"),
                     "updated_at": None,  # LanceDB chunks table doesn't track updates
                 }
