@@ -297,7 +297,7 @@ class PluggableResearchService:
                 },
             }
 
-        # Filter and prioritize files using elbow detection
+        # Pass pre-filtered chunks to synthesis (elbow detection done in exploration strategies)
         (
             prioritized_chunks,
             budgeted_files,
