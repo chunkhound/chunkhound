@@ -19,6 +19,325 @@ from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 from .base_service import BaseService
 
 
+class EmbeddingBatchProcessor:
+    """Handles the complex batch processing loop for generating missing embeddings."""
+
+    def __init__(
+        self,
+        service: "EmbeddingService",
+        error_handler: "EmbeddingErrorHandler",
+        progress_manager: "EmbeddingProgressManager",
+    ):
+        """Initialize the batch processor.
+
+        Args:
+            service: The embedding service instance
+            error_handler: Error handler for tracking failures
+            progress_manager: Progress manager for UI updates
+        """
+        self.service = service
+        self.error_handler = error_handler
+        self.progress_manager = progress_manager
+
+    async def process_all_batches(
+        self,
+        target_provider: str,
+        target_model: str,
+        initial_batch_size: int,
+        min_batch_size: int,
+        max_batch_size: int,
+        target_batch_time: float,
+        slow_threshold: float,
+        fast_threshold: float,
+        embed_task: TaskID | None,
+    ) -> dict[str, Any]:
+        """Process all batches of chunks without embeddings.
+
+        Args:
+            target_provider: Provider name for embeddings
+            target_model: Model name for embeddings
+            initial_batch_size: Starting batch size
+            min_batch_size: Minimum batch size
+            max_batch_size: Maximum batch size
+            target_batch_time: Target time per batch
+            slow_threshold: Threshold for slow batches
+            fast_threshold: Threshold for fast batches
+            embed_task: Progress task ID
+
+        Returns:
+            Dictionary with aggregated batch processing results
+        """
+        import time as time_module
+
+        current_batch_size = initial_batch_size
+        total_generated = 0
+        total_attempted = 0
+        total_failed = 0
+        total_permanent_failures = 0
+        batch_count = 0
+
+        while True:
+            batch_count += 1
+
+            # Measure time for chunk ID retrieval
+            start_time = time_module.time()
+
+            try:
+                logger.debug(f"Retrieving chunks batch: provider={target_provider}, model={target_model}, limit={current_batch_size}")
+                # Get next batch of chunks without embeddings
+                chunks_data = self.service._db.get_chunks_without_embeddings_paginated(
+                    target_provider, target_model, limit=current_batch_size
+                )
+                logger.debug(f"Retrieved {len(chunks_data) if chunks_data else 0} chunks")
+            except Exception as e:
+                # If batch fails, reduce batch size and retry once
+                if current_batch_size > min_batch_size:
+                    old_batch_size = current_batch_size
+                    current_batch_size = max(min_batch_size, current_batch_size // 2)
+                    logger.warning(f"Batch retrieval failed (size={old_batch_size}), reducing to {current_batch_size}: {e}")
+                    continue
+                else:
+                    logger.error(f"Batch retrieval failed permanently after reducing batch size: {e}")
+                    raise  # Re-raise if already at minimum
+
+            retrieval_time = time_module.time() - start_time
+
+            if not chunks_data:  # temp remove for testing: or len(chunks_data) < current_batch_size:
+                # No more chunks to process
+                logger.info("No more chunks to process, exiting batch loop")
+                break
+
+            logger.debug(f"Batch {batch_count}: size={len(chunks_data)}, retrieval_time={retrieval_time:.2f}s")
+
+            # Adjust batch size based on retrieval time (only if dynamic sizing enabled)
+            if target_batch_time != float('inf'):
+                if retrieval_time > slow_threshold and current_batch_size > min_batch_size:
+                    # Too slow, reduce batch size
+                    old_batch_size = current_batch_size
+                    current_batch_size = max(min_batch_size, current_batch_size // 2)
+                    logger.info(f"Batch too slow ({retrieval_time:.2f}s > {slow_threshold}s), reducing batch size: {old_batch_size} -> {current_batch_size}")
+                elif retrieval_time < fast_threshold and current_batch_size < max_batch_size:
+                    # Very fast, can increase batch size more aggressively
+                    old_batch_size = current_batch_size
+                    current_batch_size = min(max_batch_size, int(current_batch_size * 2.0))
+                    logger.debug(f"Batch very fast ({retrieval_time:.2f}s < {fast_threshold}s), increasing batch size: {old_batch_size} -> {current_batch_size}")
+                elif retrieval_time < target_batch_time and current_batch_size < max_batch_size:
+                    # Reasonably fast, small increase
+                    old_batch_size = current_batch_size
+                    current_batch_size = min(max_batch_size, int(current_batch_size * 1.5))
+                    logger.debug(f"Batch reasonably fast ({retrieval_time:.2f}s), small increase: {old_batch_size} -> {current_batch_size}")
+
+            # Extract chunk IDs and texts from retrieved chunks
+            chunk_id_list = [chunk["id"] for chunk in chunks_data]
+            chunk_texts = [chunk["code"] for chunk in chunks_data]
+            logger.debug(f"Extracted content for {len(chunks_data)} chunks")
+
+            total_attempted += len(chunks_data)
+
+            # Update progress total with attempted chunks
+            self.progress_manager.increment_total(embed_task, len(chunks_data))
+
+            # Generate embeddings for this batch
+            logger.debug(f"Calling generate_embeddings_for_chunks with {len(chunk_id_list)} chunks, provider={self.service._embedding_provider}")
+            batch_result = await self.service.generate_embeddings_for_chunks(
+                chunk_id_list, chunk_texts, show_progress=True, embed_task=embed_task, chunks_data=chunks_data
+            )
+            logger.debug(f"generate_embeddings_for_chunks returned {batch_result}")
+
+            # Track transient failures for flow control
+            self.error_handler.track_batch_failures(batch_result)
+            if self.error_handler.should_abort_generation():
+                break
+
+            total_generated += batch_result["total_generated"]
+            total_failed += batch_result["failed_chunks"]
+            total_permanent_failures += batch_result["permanent_failures"]
+
+            # Update progress info with current statistics
+            info = f"success: {total_generated}, failed: {total_failed}, permanent: {total_permanent_failures}"
+            self.progress_manager.update_info(embed_task, info)
+
+            # Enhanced progress logging with error statistics
+            error_breakdown = []
+            for error_type, count in batch_result.get("error_stats", {}).items():
+                error_breakdown.append(f"{error_type}: {count}")
+            error_breakdown_str = "; ".join(error_breakdown) if error_breakdown else "none"
+
+            # Batch-level error reporting with specific format
+            total_chunks_in_batch = len(chunks_data)
+            successful_in_batch = batch_result['total_generated']
+            failed_in_batch = batch_result['failed_chunks'] + batch_result['permanent_failures']
+
+            error_breakdown_formatted = []
+            for i, (error_type, count) in enumerate(batch_result.get("error_stats", {}).items(), 1):
+                error_breakdown_formatted.append(f"{i}. {error_type}: {count}")
+            error_breakdown_formatted_str = ". ".join(error_breakdown_formatted) if error_breakdown_formatted else "none"
+
+            logger.info(f"embedding batch processed {total_chunks_in_batch}/{total_chunks_in_batch} chunks. success: {successful_in_batch} failed {failed_in_batch} failure reason breakdown: {error_breakdown_formatted_str}")
+
+            logger.info(f"Embedding batch {batch_count} processed {len(chunks_data)} chunks: success: {batch_result['total_generated']}, failed: {batch_result['failed_chunks']}, permanent: {batch_result['permanent_failures']}, error breakdown: {error_breakdown_str}")
+
+            logger.info(f"Total progress: attempted={total_attempted}, generated={total_generated}, failed={total_failed}, permanent={total_permanent_failures}, current_batch_size={current_batch_size}")
+
+            # Check for fragmentation optimization after each page
+            if self.service._db.should_optimize_fragments(operation="during-embedding-page"):
+                logger.info("Running fragmentation optimization during embedding generation...")
+                try:
+                    self.service._db.optimize_tables()
+                    logger.info("Fragmentation optimization completed")
+                except Exception as opt_error:
+                    logger.warning(f"Fragmentation optimization failed: {opt_error}")
+
+        return {
+            "total_generated": total_generated,
+            "total_attempted": total_attempted,
+            "total_failed": total_failed,
+            "total_permanent_failures": total_permanent_failures,
+        }
+
+
+class EmbeddingErrorHandler:
+    """Handles transient failure tracking for embedding generation."""
+
+    def __init__(
+        self,
+        max_consecutive_failures: int = 5,
+        transient_error_window_seconds: int = 300,
+    ):
+        """Initialize the error handler.
+
+        Args:
+            max_consecutive_failures: Maximum consecutive transient failures before aborting
+            transient_error_window_seconds: Time window in seconds for tracking consecutive transient failures
+        """
+        self._max_consecutive_failures = max_consecutive_failures
+        self._transient_error_window_seconds = transient_error_window_seconds
+        self._transient_failure_timestamps: list[float] = []
+
+    def track_batch_failures(self, batch_result: dict[str, Any]) -> None:
+        """Track transient failures from a batch result.
+
+        Args:
+            batch_result: Result dictionary from embedding generation batch
+        """
+        transient_failures_in_batch = batch_result.get("failed_chunks", 0) - batch_result.get("permanent_failures", 0)
+        if transient_failures_in_batch > 0:
+            current_time = time.time()
+            self._transient_failure_timestamps.append(current_time)
+            # Remove timestamps outside the window
+            self._transient_failure_timestamps = [
+                t for t in self._transient_failure_timestamps
+                if current_time - t <= self._transient_error_window_seconds
+            ]
+        else:
+            # Successful batch, reset failure tracking
+            self._transient_failure_timestamps.clear()
+
+    def should_abort_generation(self) -> bool:
+        """Check if generation should abort due to excessive transient failures.
+
+        Returns:
+            True if should abort, False otherwise
+        """
+        consecutive = len(self._transient_failure_timestamps)
+        if consecutive >= self._max_consecutive_failures:
+            logger.error(
+                f"Aborting embedding generation due to {consecutive} consecutive transient failures "
+                f"within {self._transient_error_window_seconds}s window"
+            )
+            return True
+        elif consecutive >= self._max_consecutive_failures * 0.8:
+            logger.warning(
+                f"Approaching transient failure threshold: {consecutive}/{self._max_consecutive_failures} "
+                f"consecutive failures within {self._transient_error_window_seconds}s"
+            )
+        return False
+
+
+class EmbeddingProgressManager:
+    """Manages progress tracking for embedding generation operations."""
+
+    def __init__(self, progress: Progress | None):
+        """Initialize the progress manager.
+
+        Args:
+            progress: Optional Rich Progress instance for hierarchical progress display
+        """
+        self.progress = progress
+
+    def create_task(self, description: str = "Generating embeddings") -> TaskID | None:
+        """Create a new progress task.
+
+        Args:
+            description: Description for the progress task
+
+        Returns:
+            TaskID if progress is enabled, None otherwise
+        """
+        if not self.progress:
+            return None
+
+        task = self.progress.add_task(description, total=0, info="")
+        # Store initial completed count on the task for speed calculation
+        self.progress.tasks[task].initial_completed = 0
+        return task
+
+    def update_total(self, task: TaskID | None, total: int) -> None:
+        """Update the total count for a progress task.
+
+        Args:
+            task: Progress task ID
+            total: New total count
+        """
+        if task and self.progress:
+            self.progress.update(task, total=total)
+
+    def increment_total(self, task: TaskID | None, increment: int) -> None:
+        """Increment the total count for a progress task.
+
+        Args:
+            task: Progress task ID
+            increment: Amount to increment the total by
+        """
+        if task and self.progress:
+            current_total = self.progress.tasks[task].total
+            self.progress.update(task, total=current_total + increment)
+
+    def update_info(self, task: TaskID | None, info: str) -> None:
+        """Update the info string for a progress task.
+
+        Args:
+            task: Progress task ID
+            info: Info string to display
+        """
+        if task and self.progress:
+            self.progress.update(task, info=info)
+
+    def advance(self, task: TaskID | None, advance: int) -> None:
+        """Advance the progress by a given amount.
+
+        Args:
+            task: Progress task ID
+            advance: Number of steps to advance
+        """
+        if task and self.progress:
+            self.progress.advance(task, advance)
+
+    def update_speed(self, task: TaskID | None) -> None:
+        """Calculate and update the speed display for a progress task.
+
+        Args:
+            task: Progress task ID
+        """
+        if task and self.progress:
+            task_obj = self.progress.tasks[task]
+            initial_completed = getattr(task_obj, 'initial_completed', 0)
+            newly_processed = task_obj.completed - initial_completed
+            if task_obj.elapsed > 0:
+                speed = newly_processed / task_obj.elapsed
+                self.progress.update(task, speed=f"{speed:.1f} chunks/s")
+
+
 class EmbeddingService(BaseService):
     """Service for managing embedding generation, caching, and optimization."""
 
@@ -98,7 +417,7 @@ class EmbeddingService(BaseService):
                 )
 
         self._optimization_batch_frequency = optimization_batch_frequency
-        self.progress = progress
+        self._progress_manager = EmbeddingProgressManager(progress)
 
         # Dynamic batch size configuration
         self._missing_embeddings_initial_batch_size = missing_embeddings_initial_batch_size
@@ -108,9 +427,16 @@ class EmbeddingService(BaseService):
         self._missing_embeddings_slow_threshold = missing_embeddings_slow_threshold
         self._missing_embeddings_fast_threshold = missing_embeddings_fast_threshold
         self._error_sample_limit = error_sample_limit
-        self._max_consecutive_transient_failures = max_consecutive_transient_failures
-        self._transient_error_window_seconds = transient_error_window_seconds
-        self._transient_failure_timestamps: list[float] = []
+        self._error_handler = EmbeddingErrorHandler(
+            max_consecutive_failures=max_consecutive_transient_failures,
+            transient_error_window_seconds=transient_error_window_seconds,
+        )
+
+        self._batch_processor = EmbeddingBatchProcessor(
+            service=self,
+            error_handler=self._error_handler,
+            progress_manager=self._progress_manager,
+        )
 
     def set_embedding_provider(self, provider: EmbeddingProvider) -> None:
         """Set or update the embedding provider.
@@ -159,7 +485,7 @@ class EmbeddingService(BaseService):
 
             # Generate embeddings in batches
             result = await self._generate_embeddings_in_batches(
-                filtered_chunks, show_progress, embed_task, chunks_data
+                filtered_chunks, show_progress, self._progress_manager, embed_task, chunks_data
             )
 
             logger.debug(
@@ -242,8 +568,7 @@ class EmbeddingService(BaseService):
                 slow_threshold = float('inf')
                 fast_threshold = 0.0
 
-            current_batch_size = initial_batch_size
-            logger.info(f"Starting missing embeddings generation (initial_batch_size={current_batch_size})")
+            logger.info(f"Starting missing embeddings generation (initial_batch_size={initial_batch_size})")
 
             # Get initial stats for progress tracking
             initial_stats = self._db.get_stats()
@@ -251,156 +576,25 @@ class EmbeddingService(BaseService):
             current_embeddings = initial_stats.get('embeddings', 0)
 
             # Create progress task for embedding generation
-            embed_task: TaskID | None = None
-            if self.progress:
-                embed_task = self.progress.add_task(
-                    "Generating embeddings", total=0, info=""
-                )
-                # Store initial completed count on the task for speed calculation
-                self.progress.tasks[embed_task].initial_completed = 0
+            embed_task = self._progress_manager.create_task("Generating embeddings")
 
-            total_generated = 0
-            total_attempted = 0
-            total_failed = 0
-            total_permanent_failures = 0
-            batch_count = 0
+            # Process all batches using the dedicated processor
+            batch_results = await self._batch_processor.process_all_batches(
+                target_provider=target_provider,
+                target_model=target_model,
+                initial_batch_size=initial_batch_size,
+                min_batch_size=min_batch_size,
+                max_batch_size=max_batch_size,
+                target_batch_time=target_batch_time,
+                slow_threshold=slow_threshold,
+                fast_threshold=fast_threshold,
+                embed_task=embed_task,
+            )
 
-            while True:
-                batch_count += 1
-                import time as time_module
-
-                # Measure time for chunk ID retrieval
-                start_time = time_module.time()
-
-                try:
-                    logger.debug(f"Retrieving chunks batch: provider={target_provider}, model={target_model}, limit={current_batch_size}")
-                    # Get next batch of chunks without embeddings
-                    chunks_data = self._db.get_chunks_without_embeddings_paginated(
-                        target_provider, target_model, limit=current_batch_size
-                    )
-                    logger.debug(f"Retrieved {len(chunks_data) if chunks_data else 0} chunks")
-                except Exception as e:
-                    # If batch fails, reduce batch size and retry once
-                    if current_batch_size > min_batch_size:
-                        old_batch_size = current_batch_size
-                        current_batch_size = max(min_batch_size, current_batch_size // 2)
-                        logger.warning(f"Batch retrieval failed (size={old_batch_size}), reducing to {current_batch_size}: {e}")
-                        continue
-                    else:
-                        logger.error(f"Batch retrieval failed permanently after reducing batch size: {e}")
-                        raise  # Re-raise if already at minimum
-
-                retrieval_time = time_module.time() - start_time
-
-                if not chunks_data: # temp remove for testing: or len(chunks_data) < current_batch_size:
-                    # No more chunks to process
-                    logger.info("No more chunks to process, exiting batch loop")
-                    break
-
-                logger.debug(f"Batch {batch_count}: size={len(chunks_data)}, retrieval_time={retrieval_time:.2f}s")
-
-                # Adjust batch size based on retrieval time (only if dynamic sizing enabled)
-                if target_batch_time != float('inf'):
-                    if retrieval_time > slow_threshold and current_batch_size > min_batch_size:
-                        # Too slow, reduce batch size
-                        old_batch_size = current_batch_size
-                        current_batch_size = max(min_batch_size, current_batch_size // 2)
-                        logger.info(f"Batch too slow ({retrieval_time:.2f}s > {slow_threshold}s), reducing batch size: {old_batch_size} -> {current_batch_size}")
-                    elif retrieval_time < fast_threshold and current_batch_size < max_batch_size:
-                        # Very fast, can increase batch size more aggressively
-                        old_batch_size = current_batch_size
-                        current_batch_size = min(max_batch_size, int(current_batch_size * 2.0))
-                        logger.debug(f"Batch very fast ({retrieval_time:.2f}s < {fast_threshold}s), increasing batch size: {old_batch_size} -> {current_batch_size}")
-                    elif retrieval_time < target_batch_time and current_batch_size < max_batch_size:
-                        # Reasonably fast, small increase
-                        old_batch_size = current_batch_size
-                        current_batch_size = min(max_batch_size, int(current_batch_size * 1.5))
-                        logger.debug(f"Batch reasonably fast ({retrieval_time:.2f}s), small increase: {old_batch_size} -> {current_batch_size}")
-
-                # Extract chunk IDs and texts from retrieved chunks
-                chunk_id_list = [chunk["id"] for chunk in chunks_data]
-                chunk_texts = [chunk["code"] for chunk in chunks_data]
-                logger.debug(f"Extracted content for {len(chunks_data)} chunks")
-
-                total_attempted += len(chunks_data)
-
-                # Update progress total with attempted chunks
-                if embed_task and self.progress:
-                    current_total = self.progress.tasks[embed_task].total
-                    self.progress.update(embed_task, total=current_total + len(chunks_data))
-
-                # Generate embeddings for this batch
-                logger.debug(f"Calling generate_embeddings_for_chunks with {len(chunk_id_list)} chunks, provider={self._embedding_provider}")
-                batch_result = await self.generate_embeddings_for_chunks(
-                    chunk_id_list, chunk_texts, show_progress=True, embed_task=embed_task, chunks_data=chunks_data
-                )
-                logger.debug(f"generate_embeddings_for_chunks returned {batch_result}")
-
-                # Track transient failures for flow control
-                transient_failures_in_batch = batch_result.get("failed_chunks", 0) - batch_result.get("permanent_failures", 0)
-                if transient_failures_in_batch > 0:
-                    current_time = time.time()
-                    self._transient_failure_timestamps.append(current_time)
-                    # Remove timestamps outside the window
-                    self._transient_failure_timestamps = [
-                        t for t in self._transient_failure_timestamps
-                        if current_time - t <= self._transient_error_window_seconds
-                    ]
-                    consecutive = len(self._transient_failure_timestamps)
-                    if consecutive >= self._max_consecutive_transient_failures:
-                        logger.error(
-                            f"Aborting embedding generation due to {consecutive} consecutive transient failures "
-                            f"within {self._transient_error_window_seconds}s window"
-                        )
-                        break
-                    elif consecutive >= self._max_consecutive_transient_failures * 0.8:
-                        logger.warning(
-                            f"Approaching transient failure threshold: {consecutive}/{self._max_consecutive_transient_failures} "
-                            f"consecutive failures within {self._transient_error_window_seconds}s"
-                        )
-                else:
-                    # Successful batch, reset failure tracking
-                    self._transient_failure_timestamps.clear()
-
-                total_generated += batch_result["total_generated"]
-                total_failed += batch_result["failed_chunks"]
-                total_permanent_failures += batch_result["permanent_failures"]
-
-                # Update progress info with current statistics
-                if embed_task and self.progress:
-                    info = f"success: {total_generated}, failed: {total_failed}, permanent: {total_permanent_failures}"
-                    self.progress.update(embed_task, info=info)
-
-                # Enhanced progress logging with error statistics
-                error_breakdown = []
-                for error_type, count in batch_result.get("error_stats", {}).items():
-                    error_breakdown.append(f"{error_type}: {count}")
-                error_breakdown_str = "; ".join(error_breakdown) if error_breakdown else "none"
-
-                # Batch-level error reporting with specific format
-                total_chunks_in_batch = len(chunks_data)
-                successful_in_batch = batch_result['total_generated']
-                failed_in_batch = batch_result['failed_chunks'] + batch_result['permanent_failures']
-
-                error_breakdown_formatted = []
-                for i, (error_type, count) in enumerate(batch_result.get("error_stats", {}).items(), 1):
-                    error_breakdown_formatted.append(f"{i}. {error_type}: {count}")
-                error_breakdown_formatted_str = ". ".join(error_breakdown_formatted) if error_breakdown_formatted else "none"
-
-                logger.info(f"embedding batch processed {total_chunks_in_batch}/{total_chunks_in_batch} chunks. success: {successful_in_batch} failed {failed_in_batch} failure reason breakdown: {error_breakdown_formatted_str}")
-
-                logger.info(f"Embedding batch {batch_count} processed {len(chunks_data)} chunks: success: {batch_result['total_generated']}, failed: {batch_result['failed_chunks']}, permanent: {batch_result['permanent_failures']}, error breakdown: {error_breakdown_str}")
-
-                logger.info(f"Total progress: attempted={total_attempted}, generated={total_generated}, failed={total_failed}, permanent={total_permanent_failures}, current_batch_size={current_batch_size}")
-
-                # Check for fragmentation optimization after each page
-                if self._db.should_optimize_fragments(operation="during-embedding-page"):
-                    logger.info("Running fragmentation optimization during embedding generation...")
-                    try:
-                        self._db.optimize_tables()
-                        logger.info("Fragmentation optimization completed")
-                    except Exception as opt_error:
-                        logger.warning(f"Fragmentation optimization failed: {opt_error}")
+            total_generated = batch_results["total_generated"]
+            total_attempted = batch_results["total_attempted"]
+            total_failed = batch_results["total_failed"]
+            total_permanent_failures = batch_results["total_permanent_failures"]
 
             # Optimize if fragmentation high after embedding generation
             optimize_tables = getattr(self._db, "optimize_tables", None)
@@ -628,7 +822,7 @@ class EmbeddingService(BaseService):
         return filtered_chunks
 
     async def _generate_embeddings_in_batches(
-        self, chunk_data: list[tuple[ChunkId, str]], show_progress: bool = True, embed_task: TaskID | None = None, chunks_data: list[dict[str, Any]] | None = None
+        self, chunk_data: list[tuple[ChunkId, str]], show_progress: bool = True, progress_manager: EmbeddingProgressManager | None = None, task: TaskID | None = None, chunks_data: list[dict[str, Any]] | None = None
     ) -> dict[str, Any]:
         """Generate embeddings for chunks in optimized batches with granular failure handling.
 
@@ -891,22 +1085,12 @@ class EmbeddingService(BaseService):
             result = await process_batch_with_retries(batch, batch_num)
 
             # Thread-safe progress update
-            if show_progress:
+            if show_progress and progress_manager:
                 with update_lock:
-                    if embed_task and self.progress:
-                        # Only count successful chunks for progress
-                        successful_count = len(result.successful_chunks)
-                        self.progress.advance(embed_task, successful_count)
-
-                        # Calculate and display speed
-                        task_obj = self.progress.tasks[embed_task]
-                        initial_completed = getattr(task_obj, 'initial_completed', 0)
-                        newly_processed = task_obj.completed - initial_completed
-                        if task_obj.elapsed > 0:
-                            speed = newly_processed / task_obj.elapsed
-                            self.progress.update(
-                                embed_task, speed=f"{speed:.1f} chunks/s"
-                            )
+                    # Only count successful chunks for progress
+                    successful_count = len(result.successful_chunks)
+                    progress_manager.advance(task, successful_count)
+                    progress_manager.update_speed(task)
 
             return result
 
