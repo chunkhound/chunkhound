@@ -125,6 +125,10 @@ class DatabaseProvider(Protocol):
         """Delete a single chunk by ID."""
         ...
 
+    def delete_chunks_batch(self, chunk_ids: list[int]) -> None:
+        """Delete multiple chunks by ID with proper cascade to embeddings."""
+        ...
+
     def update_chunk(self, chunk_id: int, **kwargs: Any) -> None:
         """Update chunk record with new values."""
         ...
