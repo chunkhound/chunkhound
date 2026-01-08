@@ -87,9 +87,17 @@ class MultiHopStrategy:
         """
         start_time = time.perf_counter()
 
-        # Apply defaults
-        effective_time_limit = time_limit if time_limit is not None else 5.0
-        effective_result_limit = result_limit if result_limit is not None else 500
+        # Apply defaults - consult config if available
+        effective_time_limit = (
+            time_limit if time_limit is not None
+            else self._config.get_effective_time_limit() if self._config
+            else 5.0
+        )
+        effective_result_limit = (
+            result_limit if result_limit is not None
+            else self._config.get_effective_result_limit() if self._config
+            else 500
+        )
 
         # Step 1: Initial search + rerank
         # Select cap based on exhaustive mode
