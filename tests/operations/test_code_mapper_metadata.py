@@ -1,11 +1,11 @@
-from chunkhound.code_mapper.pipeline import (
-    _is_empty_research_result,
-    _merge_sources_metadata,
+from chunkhound.code_mapper.public_utils import (
+    is_empty_research_result,
+    merge_sources_metadata,
 )
 
 
 def test_merge_sources_metadata_deduplicates_files_and_chunks() -> None:
-    """_merge_sources_metadata should deduplicate files and chunk ranges."""
+    """merge_sources_metadata should deduplicate files and chunk ranges."""
     results = [
         {
             "metadata": {
@@ -35,7 +35,7 @@ def test_merge_sources_metadata_deduplicates_files_and_chunks() -> None:
         },
     ]
 
-    unified_files, unified_chunks, total_files, total_chunks = _merge_sources_metadata(
+    unified_files, unified_chunks, total_files, total_chunks = merge_sources_metadata(
         results
     )
 
@@ -66,7 +66,7 @@ def test_merge_sources_metadata_deduplicates_files_and_chunks() -> None:
 
 
 def test_is_empty_research_result_detects_skipped_synthesis() -> None:
-    """_is_empty_research_result should detect DeepResearch 'no context' responses."""
+    """is_empty_research_result should detect DeepResearch 'no context' responses."""
     result = {
         "answer": (
             "No relevant code context found for: 'foo'.\n\n"
@@ -81,10 +81,10 @@ def test_is_empty_research_result_detects_skipped_synthesis() -> None:
         },
     }
 
-    assert _is_empty_research_result(result)
+    assert is_empty_research_result(result)
 
     non_empty = {
         "answer": "# Heading\n\nSome real content.",
         "metadata": {},
     }
-    assert not _is_empty_research_result(non_empty)
+    assert not is_empty_research_result(non_empty)

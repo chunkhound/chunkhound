@@ -5,6 +5,7 @@ import pytest
 
 import chunkhound.api.cli.commands.code_mapper as code_mapper_mod
 from chunkhound.code_mapper import service as code_mapper_service
+from chunkhound.code_mapper.models import CodeMapperPOI
 from chunkhound.core.config.config import Config
 
 
@@ -87,30 +88,38 @@ async def _run_code_mapper_with_stubs(
         target_dir: Path,
         scope_path: Path,
         scope_label: str,
+        meta: Any | None = None,
+        context: str | None = None,
         max_points: int = 10,
         comprehensiveness: str = "medium",
         out_dir: Path | None = None,
-        assembly_provider: Any | None = None,
+        map_hyde_provider: Any | None = None,
         indexing_cfg: Any | None = None,
-    ) -> tuple[str, list[str]]:
+    ) -> tuple[str, list[CodeMapperPOI]]:
+        _ = (llm_manager, target_dir, scope_path, scope_label)
+        _ = (meta, context, comprehensiveness, out_dir, map_hyde_provider, indexing_cfg)
         # Record the requested max_points so we can assert comprehensiveness mapping.
         seen_max_points.append(max_points)
         overview = (
             "1. **Core Flow**: High-level data flow.\n"
             "2. **Error Handling**: How failures are surfaced.\n"
         )
-        return overview, [
-            "Core Flow: High-level data flow.",
-            "Error Handling: How failures are surfaced.",
-        ][:max_points]
+        points = [
+            CodeMapperPOI(
+                mode="architectural",
+                text="Core Flow: High-level data flow.",
+            ),
+            CodeMapperPOI(
+                mode="architectural",
+                text="Error Handling: How failures are surfaced.",
+            ),
+        ]
+        return overview, points[:max_points]
 
-    async def fake_deep_research_impl(
-        services: Any,
-        embedding_manager: Any,
-        llm_manager: Any,
+    async def fake_run_deep_research(
+        *,
         query: str,
-        progress: Any,
-        path: str | None = None,
+        **__: Any,
     ) -> dict[str, Any]:
         # Return a minimal answer and sources metadata for coverage.
         # For one of the bullets, simulate an empty answer so it is skipped.
@@ -155,12 +164,12 @@ async def _run_code_mapper_with_stubs(
     monkeypatch.setattr(code_mapper_mod, "LLMManager", DummyLLMManager)
     monkeypatch.setattr(
         code_mapper_service,
-        "_run_code_mapper_overview_hyde",
+        "run_code_mapper_overview_hyde",
         fake_overview,
         raising=True,
     )
     monkeypatch.setattr(
-        code_mapper_service, "deep_research_impl", fake_deep_research_impl, raising=True
+        code_mapper_service, "run_deep_research", fake_run_deep_research, raising=True
     )
 
     if set_combined:

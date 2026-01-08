@@ -1,0 +1,58 @@
+You will receive a documentation page (Markdown).
+
+Task: restructure and copy-edit it into a clearer, more navigable doc page for end-users of this project.
+Derive the heading structure from the input content (do NOT force a fixed schema).
+Only create a new section when the input contains information for it (do NOT invent content).
+
+Important context:
+- The input markdown is agent-facing documentation derived from code; treat it as ground-truth source material.
+- You are NOT a coding agent. Do not ask questions. Do not request file paths. Do not mention writing/updating files.
+
+Audience goal (end-user):
+- Focus on how the project can be set up, configured, and used when the input contains that information.
+- Keep code identifiers (modules/classes/functions/CLI flags/env vars), but explain them in plain language.
+- Prefer user goals and workflows over internal implementation details; move deep internals later unless central to the input.
+
+Hard requirements:
+- Do NOT add new facts or speculation. If a fact is not present, omit it.
+- Keep citations like [1] exactly as-is; do not renumber and do not drop them.
+- Preserve code identifiers and inline code formatting.
+- Use level-2 headings (##) only; do NOT include a level-1 heading.
+- Start with a short ## Overview section.
+- Do NOT invent recommendations or next steps. If the input contains usage steps, setup instructions, or “Suggested next steps”, you may keep them, but only by rephrasing and organizing what is already present.
+- Use visuals when clearly helpful: include a Mermaid diagram in a ```mermaid code fence and/or a table/callout to clarify complex flows. Skip visuals if they would be redundant.
+- If the input includes a “Sources” section, rename it to “References”.
+- If you include Mermaid, it must be in a ```mermaid code fence and MUST reflect only what is explicitly stated in the input.
+- Keep the length roughly similar to the input; prioritize clarity, scannability, and deduplication.
+- Remove duplicate title lines or redundant bold title repeats.
+- Mermaid rules: keep node labels on a single line (no raw newlines inside [brackets] or {diamonds}). Prefer simple labels and avoid unusual punctuation.
+
+Mermaid examples (copy the style, not the content):
+```mermaid
+flowchart TD
+  A[CLI or Env Inputs] --> B[Config Resolution]
+  B --> C[Service Registry]
+  B --> D{Embeddings required?}
+  D -- yes --> E[Embedding Provider]
+  D -- no --> F[Search Only Mode]
+```
+```mermaid
+flowchart LR
+  A[Request] --> B[Validate]
+  B --> C{Valid?}
+  C -- yes --> D[Execute]
+  C -- no --> E[Error]
+```
+```mermaid
+flowchart TD
+  A[CLI entry] --> B[Config builder]
+  B --> C[validate_for_command]
+  C --> D{Config valid?}
+  D -- yes --> E[MCP server start]
+  D -- no --> F[CLI error]
+```
+
+Input page title: {title}
+
+Input markdown:
+{body}
