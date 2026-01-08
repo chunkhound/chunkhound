@@ -502,13 +502,32 @@ class ClusteringService:
             ]
 
             # Guard: k-means may return all files in one cluster (identical embeddings)
-            # This prevents infinite recursion when splitting is impossible
+            # Use deterministic fallback to guarantee splitting for bounded prompts
             if not cluster_0 or not cluster_1:
-                logger.debug(
+                logger.warning(
                     f"K-means could not split {len(file_paths_to_split)} files "
-                    "(identical embeddings?), returning as single cluster"
+                    "(identical embeddings?), using token-balanced fallback"
                 )
-                return [file_paths_to_split]
+                # Deterministic fallback: greedy bin-packing by token count
+                # Sort by tokens descending for better balance
+                sorted_files = sorted(
+                    file_paths_to_split,
+                    key=lambda fp: file_tokens[fp],
+                    reverse=True,
+                )
+                bin_0: list[str] = []
+                bin_1: list[str] = []
+                bin_0_tokens = 0
+                bin_1_tokens = 0
+                for fp in sorted_files:
+                    tokens = file_tokens[fp]
+                    if bin_0_tokens <= bin_1_tokens:
+                        bin_0.append(fp)
+                        bin_0_tokens += tokens
+                    else:
+                        bin_1.append(fp)
+                        bin_1_tokens += tokens
+                cluster_0, cluster_1 = bin_0, bin_1
 
             # Recursively split any oversized subclusters
             result: list[list[str]] = []
