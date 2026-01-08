@@ -822,18 +822,34 @@ class DuckDBProvider(SerialDatabaseProvider):
         dims: int,
         metric: str,
     ) -> str:
-        """Executor method for drop_vector_index - runs in DB thread."""
-        index_name = f"hnsw_{provider}_{model}_{dims}_{metric}".replace(
+        """Executor method for drop_vector_index - runs in DB thread.
+
+        Handles both naming patterns:
+        - Custom: hnsw_{provider}_{model}_{dims}_{metric} (from create_vector_index)
+        - Standard: idx_hnsw_{dims} (from initial table creation)
+        """
+        # Custom index name pattern (from create_vector_index)
+        custom_index_name = f"hnsw_{provider}_{model}_{dims}_{metric}".replace(
             "-", "_"
         ).replace(".", "_")
+        # Standard index name pattern (from table creation)
+        standard_index_name = f"idx_hnsw_{dims}"
 
+        dropped_indexes = []
         try:
-            conn.execute(f"DROP INDEX IF EXISTS {index_name}")
-            logger.info(f"HNSW index {index_name} dropped successfully")
-            return index_name
+            # Try to drop custom index first
+            conn.execute(f"DROP INDEX IF EXISTS {custom_index_name}")
+            dropped_indexes.append(custom_index_name)
+
+            # Also try to drop standard index (created during table initialization)
+            conn.execute(f"DROP INDEX IF EXISTS {standard_index_name}")
+            dropped_indexes.append(standard_index_name)
+
+            logger.info(f"HNSW index drop attempted: {', '.join(dropped_indexes)}")
+            return custom_index_name  # Return primary index name for API consistency
 
         except Exception as e:
-            logger.error(f"Failed to drop HNSW index {index_name}: {e}")
+            logger.error(f"Failed to drop HNSW indexes: {e}")
             raise
 
     def get_existing_vector_indexes(self) -> list[dict[str, Any]]:
