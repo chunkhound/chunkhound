@@ -7,6 +7,7 @@ import pytest
 from chunkhound.code_mapper import service as code_mapper_service
 from chunkhound.code_mapper.coverage import compute_db_scope_stats
 from chunkhound.code_mapper.metadata import build_generation_stats_with_coverage
+from chunkhound.code_mapper.models import CodeMapperPOI
 from chunkhound.core.types.common import Language
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
@@ -25,11 +26,11 @@ from tests.integration.code_mapper_scope_helpers import write_scope_repo_layout
 async def test_run_code_mapper_pipeline_raises_when_no_points(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_overview(**_: Any) -> tuple[str, list[str]]:
+    async def fake_overview(**_: Any) -> tuple[str, list[CodeMapperPOI]]:
         return "overview", []
 
     monkeypatch.setattr(
-        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
+        code_mapper_service, "run_code_mapper_overview_hyde", fake_overview
     )
 
     with pytest.raises(code_mapper_service.CodeMapperNoPointsError):
@@ -44,7 +45,7 @@ async def test_run_code_mapper_pipeline_raises_when_no_points(
             comprehensiveness="low",
             max_points=5,
             out_dir=None,
-            assembly_provider=None,
+            map_hyde_provider=None,
             indexing_cfg=None,
             poi_jobs=None,
             progress=None,
@@ -55,8 +56,11 @@ async def test_run_code_mapper_pipeline_raises_when_no_points(
 async def test_run_code_mapper_pipeline_skips_empty_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_overview(**_: Any) -> tuple[str, list[str]]:
-        return "overview", ["Core Flow", "Error Handling"]
+    async def fake_overview(**_: Any) -> tuple[str, list[CodeMapperPOI]]:
+        return "overview", [
+            CodeMapperPOI(mode="architectural", text="Core Flow"),
+            CodeMapperPOI(mode="architectural", text="Error Handling"),
+        ]
 
     async def fake_deep_research_impl(*, query: str, **__: Any) -> dict[str, Any]:
         if "Core Flow" in query:
@@ -75,10 +79,10 @@ async def test_run_code_mapper_pipeline_skips_empty_results(
         }
 
     monkeypatch.setattr(
-        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
+        code_mapper_service, "run_code_mapper_overview_hyde", fake_overview
     )
     monkeypatch.setattr(
-        code_mapper_service, "deep_research_impl", fake_deep_research_impl
+        code_mapper_service, "run_deep_research", fake_deep_research_impl
     )
     monkeypatch.setattr(
         code_mapper_service,
@@ -97,7 +101,7 @@ async def test_run_code_mapper_pipeline_skips_empty_results(
         comprehensiveness="low",
         max_points=5,
         out_dir=None,
-        assembly_provider=None,
+        map_hyde_provider=None,
         indexing_cfg=None,
         poi_jobs=None,
         progress=None,
@@ -108,6 +112,57 @@ async def test_run_code_mapper_pipeline_skips_empty_results(
     assert "scope/a.py" in result.unified_source_files
     assert result.total_files_global == 3
     assert result.total_chunks_global == 4
+
+
+@pytest.mark.asyncio
+async def test_run_code_mapper_pipeline_uses_mode_aware_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_overview(**_: Any) -> tuple[str, list[CodeMapperPOI]]:
+        return "overview", [
+            CodeMapperPOI(mode="architectural", text="Core Flow"),
+            CodeMapperPOI(mode="operational", text="Quickstart / Local run"),
+        ]
+
+    seen_queries: list[str] = []
+
+    async def fake_deep_research_impl(*, query: str, **__: Any) -> dict[str, Any]:
+        seen_queries.append(query)
+        return {
+            "answer": "content",
+            "metadata": {"sources": {"files": [], "chunks": []}},
+        }
+
+    monkeypatch.setattr(
+        code_mapper_service, "run_code_mapper_overview_hyde", fake_overview
+    )
+    monkeypatch.setattr(
+        code_mapper_service, "run_deep_research", fake_deep_research_impl
+    )
+    monkeypatch.setattr(
+        code_mapper_service,
+        "compute_db_scope_stats",
+        lambda *_: (0, 0, set()),
+    )
+
+    await code_mapper_service.run_code_mapper_pipeline(
+        services=object(),
+        embedding_manager=object(),
+        llm_manager=object(),
+        target_dir=object(),
+        scope_path=object(),
+        scope_label="scope",
+        path_filter=None,
+        comprehensiveness="low",
+        max_points=5,
+        out_dir=None,
+        map_hyde_provider=None,
+        indexing_cfg=None,
+        progress=None,
+    )
+
+    assert any("ARCHITECTURAL point of interest" in q for q in seen_queries)
+    assert any("OPERATIONAL point of interest" in q for q in seen_queries)
 
 
 @pytest.mark.asyncio

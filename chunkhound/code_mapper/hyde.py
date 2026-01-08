@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.resources
 from pathlib import Path
+from typing import Literal
 
 from loguru import logger
 
@@ -10,12 +11,38 @@ from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.llm_manager import LLMManager
 
 
-def load_hyde_scope_template() -> str:
+def load_hyde_scope_template(
+    *, mode: Literal["architectural", "operational"] = "architectural"
+) -> str:
     """Load the packaged HyDE scope prompt template."""
     package = "chunkhound.code_mapper.prompts"
+    filename = (
+        "hyde_scope_prompt.md"
+        if mode == "architectural"
+        else "hyde_scope_prompt_operational.md"
+    )
     with (
         importlib.resources.files(package)
-        .joinpath("hyde_scope_prompt.md")
+        .joinpath(filename)
+        .open("r", encoding="utf-8") as f
+    ):
+        return f.read().strip()
+
+
+def load_hyde_scope_context_template(
+    *, mode: Literal["architectural", "operational"] = "architectural"
+) -> str:
+    """Load the packaged HyDE scope prompt template for --context mode.
+
+    Note: The context-mode scope prompt is currently shared across both
+    architectural and operational maps, so `mode` does not affect the loaded
+    template.
+    """
+    package = "chunkhound.code_mapper.prompts"
+    filename = "hyde_scope_prompt_context.md"
+    with (
+        importlib.resources.files(package)
+        .joinpath(filename)
         .open("r", encoding="utf-8") as f
     ):
         return f.read().strip()
@@ -70,6 +97,8 @@ def build_hyde_scope_prompt(
     scope_label: str,
     file_paths: list[str],
     hyde_cfg: HydeConfig,
+    context: str | None = None,
+    mode: Literal["architectural", "operational"] = "architectural",
     template: str | None = None,
     project_root: Path | None = None,
 ) -> str:
@@ -80,7 +109,30 @@ def build_hyde_scope_prompt(
         project_root = Path.cwd()
 
     if template is None:
-        template = load_hyde_scope_template()
+        template = (
+            load_hyde_scope_context_template(mode=mode)
+            if context is not None and context.strip()
+            else load_hyde_scope_template(mode=mode)
+        )
+
+    if context is not None and context.strip():
+        mode_label = "architectural" if mode == "architectural" else "operational"
+        files_block = ""
+        context_body = context.strip()
+        code_context_block = (
+            f"User-provided context (authoritative; {mode_label} planning):\n\n"
+            "````markdown\n"
+            f"{context_body}\n"
+            "````"
+        )
+        return template.format(
+            created=meta.created_from_sha,
+            previous=meta.previous_target_sha,
+            target=meta.target_sha,
+            scope_display=scope_display,
+            files_block=files_block,
+            code_context_block=code_context_block,
+        ).strip()
 
     files_block = (
         "\n".join(f"- {p}" for p in file_paths)

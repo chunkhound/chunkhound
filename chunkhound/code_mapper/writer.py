@@ -6,13 +6,13 @@ from typing import Any
 
 from loguru import logger
 
-from chunkhound.code_mapper.models import AgentDocMetadata
+from chunkhound.code_mapper.models import AgentDocMetadata, CodeMapperPOI
 from chunkhound.code_mapper.render import (
     build_topic_artifacts,
     render_combined_document,
     render_index_document,
 )
-from chunkhound.code_mapper.utils import safe_scope_label
+from chunkhound.utils.text import safe_scope_label
 
 
 @dataclass
@@ -29,9 +29,9 @@ def write_code_mapper_outputs(
     scope_label: str,
     meta: AgentDocMetadata,
     overview_answer: str,
-    poi_sections: list[tuple[str, dict[str, Any]]],
-    poi_sections_indexed: list[tuple[int, str, dict[str, Any]]],
-    failed_poi_sections: list[tuple[int, str, str]] | None,
+    poi_sections: list[tuple[CodeMapperPOI, dict[str, Any]]],
+    poi_sections_indexed: list[tuple[int, CodeMapperPOI, dict[str, Any]]],
+    failed_poi_sections: list[tuple[int, CodeMapperPOI, str]] | None,
     coverage_lines: list[str],
     include_topics: bool,
     include_combined: bool,
@@ -64,7 +64,7 @@ def write_code_mapper_outputs(
                     f"Code Mapper: failed to attach unreferenced file artifact: {exc}"
                 )
 
-        topic_files, index_entries = build_topic_artifacts(
+        topic_files, index_entries_by_mode = build_topic_artifacts(
             scope_label=scope_label,
             poi_sections_indexed=poi_sections_indexed,
             failed_poi_sections=failed_poi_sections,
@@ -77,7 +77,7 @@ def write_code_mapper_outputs(
         index_doc = render_index_document(
             meta=meta,
             scope_label=scope_label,
-            index_entries=index_entries,
+            index_entries_by_mode=index_entries_by_mode,
             unref_filename=unref_filename,
         )
         index_path = out_dir / f"{safe_scope}_code_mapper_index.md"

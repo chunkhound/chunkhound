@@ -16,11 +16,10 @@ from typing import Any
 
 from loguru import logger
 
-from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
-from chunkhound.utils.json_extraction import extract_json_from_response
+from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
 
 
-class CodexCLIProvider(LLMProvider):
+class CodexCLIProvider(BaseCLIProvider):
     """Provider that shells out to `codex exec`.
 
     Notes
@@ -45,16 +44,8 @@ class CodexCLIProvider(LLMProvider):
         max_retries: int = 3,
         reasoning_effort: str | None = None,
     ) -> None:
-        self._model = model
-        self._timeout = timeout
-        self._max_retries = max_retries
+        super().__init__(api_key, model, base_url, timeout, max_retries)
         self._reasoning_effort = self._resolve_reasoning_effort(reasoning_effort)
-
-        # Usage accounting (estimates)
-        self._requests_made = 0
-        self._estimated_tokens_used = 0
-        self._estimated_prompt_tokens = 0
-        self._estimated_completion_tokens = 0
 
         if not self._codex_available():
             logger.warning("Codex CLI not found in PATH (codex)")
@@ -72,35 +63,60 @@ class CodexCLIProvider(LLMProvider):
 
     def _resolve_model_name(self, requested: str | None) -> str:
         """Resolve requested model name to Codex CLI model identifier."""
+        resolved, _source = self.describe_model_resolution(requested)
+        return resolved
+
+    @classmethod
+    def describe_model_resolution(cls, requested: str | None) -> tuple[str, str]:
+        """Return (resolved_model, source) for Codex CLI model selection.
+
+        Notes:
+        - The special value "codex" means "use ChunkHound's default".
+        - Override defaults via CHUNKHOUND_CODEX_DEFAULT_MODEL.
+        """
         env_override = os.getenv("CHUNKHOUND_CODEX_DEFAULT_MODEL")
-        # Default to the current Codex reasoning model unless explicitly overridden
+        # Default to a Codex-optimized reasoning model unless explicitly overridden.
         default_model = env_override.strip() if env_override else "gpt-5.1-codex"
+        default_source = (
+            "env:CHUNKHOUND_CODEX_DEFAULT_MODEL" if env_override else "default"
+        )
 
         if not requested:
-            return default_model
+            return default_model, default_source
 
         model_name = requested.strip()
         if not model_name or model_name.lower() == "codex":
-            return default_model
+            return default_model, default_source
 
-        return model_name
+        return model_name, "explicit"
 
     def _resolve_reasoning_effort(self, requested: str | None) -> str:
         """Resolve reasoning effort override."""
+        effort, _source = self.describe_reasoning_effort_resolution(requested)
+        return effort
+
+    @classmethod
+    def describe_reasoning_effort_resolution(cls, requested: str | None) -> tuple[str, str]:
+        """Return (resolved_effort, source) for Codex CLI reasoning effort selection."""
         env_override = os.getenv("CHUNKHOUND_CODEX_REASONING_EFFORT")
         candidate = requested or env_override
         allowed = {"minimal", "low", "medium", "high", "xhigh"}
 
         if not candidate:
-            return "low"
+            return "low", "default"
 
         effort = candidate.strip().lower()
         if effort not in allowed:
             logger.warning(
                 "Unknown Codex reasoning effort '%s'; falling back to 'low'", candidate
             )
-            return "low"
-        return effort
+            return "low", "fallback"
+
+        if requested:
+            return effort, "explicit"
+        if env_override:
+            return effort, "env:CHUNKHOUND_CODEX_REASONING_EFFORT"
+        return effort, "default"
 
     def _resolve_sandbox_mode(self, requested: str | None = None) -> str:
         """Resolve sandbox mode for codex exec command execution."""
@@ -595,138 +611,27 @@ class CodexCLIProvider(LLMProvider):
         )
         return any(marker in lowered for marker in unsupported_markers)
 
-    # ----- LLMProvider interface -----
+    # ----- BaseCLIProvider hooks -----
 
-    @property
-    def name(self) -> str:  # pragma: no cover - trivial
+    def _get_provider_name(self) -> str:
         return "codex-cli"
 
-    @property
-    def model(self) -> str:  # pragma: no cover - trivial
-        return self._model
-
-    async def complete(
+    async def _run_cli_command(
         self,
         prompt: str,
         system: str | None = None,
-        max_completion_tokens: int = 4096,
+        max_completion_tokens: int | None = None,
         timeout: int | None = None,
-    ) -> LLMResponse:
+    ) -> str:
         text = self._merge_prompts(prompt, system)
-        output = await self._run_exec(
+        max_tokens = max_completion_tokens if max_completion_tokens is not None else 4096
+        return await self._run_exec(
             text,
             cwd=None,
-            max_tokens=max_completion_tokens,
+            max_tokens=max_tokens,
             timeout=timeout,
             model=self._model,
         )
-
-        if not output or not output.strip():
-            raise RuntimeError("Codex CLI returned empty output")
-
-        self._requests_made += 1
-        p_tokens = self.estimate_tokens(text)
-        c_tokens = self.estimate_tokens(output)
-        total = p_tokens + c_tokens
-        self._estimated_prompt_tokens += p_tokens
-        self._estimated_completion_tokens += c_tokens
-        self._estimated_tokens_used += total
-
-        return LLMResponse(
-            content=output,
-            tokens_used=total,
-            model=self._model,
-            finish_reason="stop",
-        )
-
-    async def complete_structured(
-        self,
-        prompt: str,
-        json_schema: dict[str, Any],
-        system: str | None = None,
-        max_completion_tokens: int = 4096,
-        timeout: int | None = None,
-    ) -> dict[str, Any]:
-        import json
-
-        schema_block = json.dumps(json_schema, indent=2)
-        structured_prompt = (
-            "Please respond with ONLY valid JSON that conforms to this schema:\n\n"
-            + schema_block
-            + "\n\nUser request: "
-            + prompt
-            + "\n\nRespond with JSON only, no additional text."
-        )
-
-        text = self._merge_prompts(structured_prompt, system)
-        output = await self._run_exec(
-            text,
-            cwd=None,
-            max_tokens=max_completion_tokens,
-            timeout=timeout,
-            model=self._model,
-        )
-
-        if not output or not output.strip():
-            raise RuntimeError("Codex CLI structured completion returned empty output")
-
-        self._requests_made += 1
-        p_tokens = self.estimate_tokens(text)
-        c_tokens = self.estimate_tokens(output)
-        total = p_tokens + c_tokens
-        self._estimated_prompt_tokens += p_tokens
-        self._estimated_completion_tokens += c_tokens
-        self._estimated_tokens_used += total
-
-        debug_structured = os.getenv("CHUNKHOUND_CODEX_DEBUG_STRUCTURED_OUTPUT", "0") == "1"
-        json_str: str | None = None
-        try:
-            json_str = extract_json_from_response(output)
-            parsed = json.loads(json_str)
-            if not isinstance(parsed, dict):
-                raise ValueError("Expected top-level JSON object")
-            # Minimal required-field check if provided
-            if "required" in json_schema:
-                missing = [f for f in json_schema["required"] if f not in parsed]
-                if missing:
-                    raise ValueError(f"Missing required fields: {missing}")
-            return parsed
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"Codex CLI structured output parse failed: {e}")
-            if debug_structured:
-                try:
-                    max_len = int(os.getenv("CHUNKHOUND_CODEX_LOG_MAX_STRUCTURED", "4000"))
-                except Exception:
-                    max_len = 4000
-                raw_preview = self._sanitize_text(output, max_len=max_len)
-                logger.debug("Codex CLI structured raw output (sanitized): %s", raw_preview)
-                if json_str is not None:
-                    json_preview = self._sanitize_text(json_str, max_len=max_len)
-                    logger.debug(
-                        "Codex CLI structured extracted JSON candidate (sanitized): %s",
-                        json_preview,
-                    )
-                raise RuntimeError(
-                    f"Invalid JSON in structured output: {e}. "
-                    f"Sanitized output preview: {raw_preview}"
-                ) from e
-            raise RuntimeError(f"Invalid JSON in structured output: {e}") from e
-
-    async def batch_complete(
-        self,
-        prompts: list[str],
-        system: str | None = None,
-        max_completion_tokens: int = 4096,
-    ) -> list[LLMResponse]:
-        results: list[LLMResponse] = []
-        for p in prompts:
-            results.append(
-                await self.complete(p, system=system, max_completion_tokens=max_completion_tokens)
-            )
-        return results
-
-    def estimate_tokens(self, text: str) -> int:
-        return len(text) // self.TOKEN_CHARS_RATIO
 
     async def health_check(self) -> dict[str, Any]:
         if not self._codex_available():
@@ -741,14 +646,6 @@ class CodexCLIProvider(LLMProvider):
             }
         except Exception as e:  # noqa: BLE001
             return {"status": "unhealthy", "provider": self.name, "error": str(e)}
-
-    def get_usage_stats(self) -> dict[str, Any]:
-        return {
-            "requests_made": self._requests_made,
-            "total_tokens_estimated": self._estimated_tokens_used,
-            "prompt_tokens_estimated": self._estimated_prompt_tokens,
-            "completion_tokens_estimated": self._estimated_completion_tokens,
-        }
 
     def get_synthesis_concurrency(self) -> int:
         """Get recommended concurrency for parallel synthesis operations.

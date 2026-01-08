@@ -3,17 +3,16 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from loguru import logger
 
 from chunkhound.code_mapper.hyde import build_hyde_scope_prompt, run_hyde_only_query
-from chunkhound.code_mapper.models import AgentDocMetadata, HydeConfig
+from chunkhound.code_mapper.models import AgentDocMetadata, CodeMapperPOI, HydeConfig
 from chunkhound.code_mapper.scope import collect_scope_files
-from chunkhound.code_mapper.utils import safe_scope_label
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.llm_manager import LLMManager
+from chunkhound.utils.text import safe_scope_label
 
 
 class CodeMapperHyDEError(RuntimeError):
@@ -60,124 +59,6 @@ def _extract_points_of_interest(text: str, max_points: int = 10) -> list[str]:
     return unique_points[:max_points]
 
 
-def _derive_heading_from_point(point: str) -> str:
-    """Derive a short section heading from a point-of-interest bullet."""
-    text = point.strip()
-
-    # Strip leading markdown emphasis markers
-    if text.startswith("**") and "**" in text[2:]:
-        end = text.find("**", 2)
-        if end != -1:
-            text = text[2:end].strip()
-
-    # Split on colon or dash if present
-    for sep in (":", " - ", " — "):
-        if sep in text:
-            text = text.split(sep, 1)[0].strip()
-            break
-
-    # Fallback: truncate long headings
-    if len(text) > 80:
-        text = text[:77].rstrip() + "..."
-    return text or "Point of Interest"
-
-
-def _slugify_heading(heading: str) -> str:
-    """Convert a heading into a filesystem-friendly slug."""
-    text = heading.strip().lower()
-    # Replace non-alphanumeric characters with dashes
-    slug_chars: list[str] = []
-    prev_dash = False
-    for ch in text:
-        if ch.isalnum():
-            slug_chars.append(ch)
-            prev_dash = False
-        else:
-            if not prev_dash:
-                slug_chars.append("-")
-                prev_dash = True
-    slug = "".join(slug_chars).strip("-")
-    if not slug:
-        slug = "topic"
-    if len(slug) > 60:
-        slug = slug[:60].rstrip("-")
-    return slug
-
-
-def _merge_sources_metadata(
-    results: list[dict[str, Any]],
-) -> tuple[dict[str, str], list[dict[str, Any]], int | None, int | None]:
-    """Merge sources metadata from multiple deep-research calls."""
-    unified_source_files: dict[str, str] = {}
-    chunk_keys: set[tuple[str, int | None, int | None]] = set()
-    unified_chunks_dedup: list[dict[str, Any]] = []
-
-    # Track best-effort database totals (we use the last non-zero stats)
-    total_files_indexed: int | None = None
-    total_chunks_indexed: int | None = None
-
-    for result in results:
-        metadata = result.get("metadata") or {}
-        sources = metadata.get("sources") or {}
-
-        for file_path in sources.get("files") or []:
-            if file_path:
-                unified_source_files.setdefault(str(file_path), "")
-
-        for chunk in sources.get("chunks") or []:
-            file_path = chunk.get("file_path")
-            if not file_path:
-                continue
-            start_line = chunk.get("start_line")
-            end_line = chunk.get("end_line")
-            key = (
-                str(file_path),
-                int(start_line) if isinstance(start_line, int) else None,
-                int(end_line) if isinstance(end_line, int) else None,
-            )
-            if key not in chunk_keys:
-                chunk_keys.add(key)
-                unified_chunks_dedup.append(
-                    {
-                        "file_path": str(file_path),
-                        "start_line": key[1],
-                        "end_line": key[2],
-                    }
-                )
-
-        stats = metadata.get("aggregation_stats") or {}
-        files_total = stats.get("files_total")
-        chunks_total = stats.get("chunks_total")
-        if isinstance(files_total, int) and files_total > 0:
-            total_files_indexed = files_total
-        if isinstance(chunks_total, int) and chunks_total > 0:
-            total_chunks_indexed = chunks_total
-
-    return (
-        unified_source_files,
-        unified_chunks_dedup,
-        total_files_indexed,
-        total_chunks_indexed,
-    )
-
-
-def _is_empty_research_result(result: dict[str, Any]) -> bool:
-    """Return True when a deep-research result carries no useful content."""
-    answer = str(result.get("answer") or "").strip()
-    if not answer:
-        return True
-
-    metadata = result.get("metadata") or {}
-    if metadata.get("skipped_synthesis"):
-        return True
-
-    first_line = answer.splitlines()[0].strip()
-    if first_line.startswith("No relevant code context found for:"):
-        return True
-
-    return False
-
-
 def _coverage_summary_lines(
     *,
     referenced_files: int,
@@ -216,17 +97,52 @@ def _coverage_summary_lines(
     return lines
 
 
-async def _run_code_mapper_overview_hyde(
+def _operational_poi_budget(comprehensiveness: str) -> int:
+    if comprehensiveness == "minimal":
+        return 1
+    if comprehensiveness == "low":
+        return 2
+    if comprehensiveness == "medium":
+        return 3
+    if comprehensiveness == "high":
+        return 4
+    if comprehensiveness == "ultra":
+        return 5
+    return 3
+
+
+def _ensure_operational_quickstart(points: list[str], max_points: int) -> list[str]:
+    normalized = [p.strip().lower() for p in points if p.strip()]
+    for item in normalized:
+        if (
+            "quickstart" in item
+            or "getting started" in item
+            or "local run" in item
+            or "run locally" in item
+        ):
+            return points[:max_points]
+
+    injected = (
+        "**Quickstart / Local run**: How to install, configure, and run this "
+        "project end-to-end in a local development environment."
+    )
+    return [injected, *points][:max_points]
+
+
+async def run_code_mapper_overview_hyde(
     llm_manager: LLMManager | None,
     target_dir: Path,
     scope_path: Path,
     scope_label: str,
+    meta: AgentDocMetadata | None = None,
+    context: str | None = None,
     max_points: int = 10,
     comprehensiveness: str = "medium",
     out_dir: Path | None = None,
-    assembly_provider: LLMProvider | None = None,
+    persist_prompt: bool = False,
+    map_hyde_provider: LLMProvider | None = None,
     indexing_cfg: IndexingConfig | None = None,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[CodeMapperPOI]]:
     """Run a HyDE-style overview pass to identify points of interest."""
     hyde_cfg = HydeConfig.from_env()
 
@@ -314,18 +230,22 @@ async def _run_code_mapper_overview_hyde(
         gitignore_backend = "python"
         workspace_root_only_gitignore = None
 
-    file_paths = collect_scope_files(
-        scope_path=scope_path,
-        project_root=target_dir,
-        hyde_cfg=hyde_cfg,
-        include_patterns=include_patterns,
-        indexing_excludes=indexing_excludes,
-        ignore_sources=ignore_sources,
-        gitignore_backend=gitignore_backend,
-        workspace_root_only_gitignore=workspace_root_only_gitignore,
-    )
+    context_text = context.strip() if context is not None else ""
 
-    meta = AgentDocMetadata(
+    file_paths: list[str] = []
+    if not context_text:
+        file_paths = collect_scope_files(
+            scope_path=scope_path,
+            project_root=target_dir,
+            hyde_cfg=hyde_cfg,
+            include_patterns=include_patterns,
+            indexing_excludes=indexing_excludes,
+            ignore_sources=ignore_sources,
+            gitignore_backend=gitignore_backend,
+            workspace_root_only_gitignore=workspace_root_only_gitignore,
+        )
+
+    prompt_meta = meta or AgentDocMetadata(
         created_from_sha="CODE_MAPPER",
         previous_target_sha="CODE_MAPPER",
         target_sha="CODE_MAPPER",
@@ -335,79 +255,169 @@ async def _run_code_mapper_overview_hyde(
     )
 
     hyde_scope_prompt = build_hyde_scope_prompt(
-        meta=meta,
+        meta=prompt_meta,
         scope_label=scope_label,
         file_paths=file_paths,
         hyde_cfg=hyde_cfg,
+        context=context_text or None,
         project_root=target_dir,
+        mode="architectural",
     )
 
-    # Provide an explicit, comprehensiveness-aware target for the number of
-    # points of interest so HyDE can bias its list length accordingly.
-    poi_target_line = (
-        f"- Identify up to {max_points} points of interest for this scoped project. "
-        "Prioritize the most important architectural or operational areas first, "
-        "but you may include slightly less critical topics to use the full budget "
-        "when appropriate.\n"
+    ops_hyde_scope_prompt = build_hyde_scope_prompt(
+        meta=prompt_meta,
+        scope_label=scope_label,
+        file_paths=file_paths,
+        hyde_cfg=hyde_cfg,
+        context=context_text or None,
+        project_root=target_dir,
+        mode="operational",
     )
 
-    overview_prompt = (
-        f"{hyde_scope_prompt}\n\n"
-        "HyDE objective (override for Code Mapper):\n"
-        "- Instead of writing a full deep-wiki style documentation, focus on a "
-        "concise\n"
-        "  planning pass for deep code research.\n"
-        f"{poi_target_line}\n"
-        "Output format:\n"
-        "- Produce ONLY a numbered markdown list (1., 2., 3., ...).\n"
-        "- For each item, include:\n"
-        "  - A short heading (you may use bold), and\n"
-        "  - 1–2 sentences summarizing why this area is important.\n"
-        "- Do not include any other sections or prose; just the numbered list.\n"
+    ops_budget = _operational_poi_budget(comprehensiveness)
+
+    def _build_overview_prompt(*, scope_prompt: str, mode: str, budget: int) -> str:
+        focus = (
+            "architectural areas first"
+            if mode == "architectural"
+            else "operational workflows (setup, local run, troubleshooting) first"
+        )
+        poi_target_line = (
+            f"- Identify up to {budget} points of interest for this scoped project. "
+            f"Prioritize the most important {focus}, but you may include slightly "
+            "less critical topics to use the full budget when appropriate.\n"
+        )
+        context_guard = ""
+        if context_text:
+            context_guard = (
+                "- Use ONLY the user-provided context above; do not infer or assume "
+                "details from repository code.\n"
+            )
+        return (
+            f"{scope_prompt}\n\n"
+            "HyDE objective (override for Code Mapper):\n"
+            "- Ignore any earlier 'HyDE objective' and 'Output format' instructions "
+            "in the scope prompt.\n"
+            f"{context_guard}"
+            "- Instead of writing a full documentation, do a concise planning pass "
+            "for deep code research.\n"
+            f"{poi_target_line}\n"
+            "Output format:\n"
+            "- Produce ONLY a numbered markdown list (1., 2., 3., ...).\n"
+            "- Each item MUST follow this exact shape:\n"
+            "  - `N. **Short Title** — 1–2 sentences. Key files: `path`, `path` "
+            "(optional).`\n"
+            "- Requirements for `**Short Title**`:\n"
+            "  - 3–8 words (max 60 characters).\n"
+            "  - MUST be human-readable and general (no file paths, no module "
+            "names-as-titles).\n"
+            "  - MUST NOT include backticks, parentheses, slashes, or file "
+            "extensions like `.py`.\n"
+            "- If you include key files:\n"
+            "  - Put them after the 1–2 sentence summary as `Key files: ...`.\n"
+            "  - Use backticks around each path and include at most 3 files.\n"
+            "- Do not include any other sections or prose; just the numbered list.\n"
+        )
+
+    arch_overview_prompt = _build_overview_prompt(
+        scope_prompt=hyde_scope_prompt,
+        mode="architectural",
+        budget=max_points,
+    )
+    ops_overview_prompt = _build_overview_prompt(
+        scope_prompt=ops_hyde_scope_prompt,
+        mode="operational",
+        budget=ops_budget,
     )
 
     # Optional debugging/traceability: when out_dir is provided and explicitly
     # enabled via CH_CODE_MAPPER_WRITE_HYDE_PROMPT, persist the exact PoI-generation
     # prompt (scope + HyDE objective).
-    write_prompt = os.getenv(
-        "CH_CODE_MAPPER_WRITE_HYDE_PROMPT", "0"
-    ).strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "y",
-        "on",
+    write_prompt = persist_prompt or (
+        os.getenv("CH_CODE_MAPPER_WRITE_HYDE_PROMPT", "").strip().lower()
+        in (
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        )
     )
     if out_dir is not None and write_prompt:
         try:
             safe_scope = safe_scope_label(scope_label)
-            prompt_path = out_dir / f"hyde_scope_prompt_{safe_scope}.md"
-            prompt_path.parent.mkdir(parents=True, exist_ok=True)
-            prompt_path.write_text(overview_prompt, encoding="utf-8")
+            arch_prompt_path = out_dir / f"hyde_scope_prompt_arch_{safe_scope}.md"
+            arch_prompt_path.parent.mkdir(parents=True, exist_ok=True)
+            arch_prompt_path.write_text(arch_overview_prompt, encoding="utf-8")
+
+            ops_prompt_path = out_dir / f"hyde_scope_prompt_ops_{safe_scope}.md"
+            ops_prompt_path.parent.mkdir(parents=True, exist_ok=True)
+            ops_prompt_path.write_text(ops_overview_prompt, encoding="utf-8")
         except OSError as exc:
             logger.debug(f"Code Mapper: failed to persist HyDE prompt: {exc}")
 
-    overview_answer, ok = await run_hyde_only_query(
+    arch_overview_answer, ok = await run_hyde_only_query(
         llm_manager=llm_manager,
-        prompt=overview_prompt,
-        provider_override=assembly_provider,
+        prompt=arch_overview_prompt,
+        provider_override=map_hyde_provider,
         hyde_cfg=hyde_cfg,
     )
     if not ok:
-        raise CodeMapperHyDEError(overview_answer)
+        raise CodeMapperHyDEError(arch_overview_answer)
+
+    ops_overview_answer, ok = await run_hyde_only_query(
+        llm_manager=llm_manager,
+        prompt=ops_overview_prompt,
+        provider_override=map_hyde_provider,
+        hyde_cfg=hyde_cfg,
+    )
+    if not ok:
+        raise CodeMapperHyDEError(ops_overview_answer)
 
     # Persist the HyDE overview plan itself (the PoI list and any surrounding
     # context) alongside the prompt when an output directory is available.
-    if out_dir is not None and overview_answer and overview_answer.strip():
+    if out_dir is not None and arch_overview_answer and arch_overview_answer.strip():
         try:
             safe_scope = safe_scope_label(scope_label)
-            plan_path = out_dir / f"hyde_plan_{safe_scope}.md"
-            plan_path.parent.mkdir(parents=True, exist_ok=True)
-            plan_path.write_text(overview_answer, encoding="utf-8")
+            arch_plan_path = out_dir / f"hyde_plan_arch_{safe_scope}.md"
+            arch_plan_path.parent.mkdir(parents=True, exist_ok=True)
+            arch_plan_path.write_text(arch_overview_answer, encoding="utf-8")
         except OSError as exc:
             logger.debug(f"Code Mapper: failed to persist HyDE plan: {exc}")
 
-    points_of_interest = _extract_points_of_interest(
-        overview_answer, max_points=max_points
+    if out_dir is not None and ops_overview_answer and ops_overview_answer.strip():
+        try:
+            safe_scope = safe_scope_label(scope_label)
+            ops_plan_path = out_dir / f"hyde_plan_ops_{safe_scope}.md"
+            ops_plan_path.parent.mkdir(parents=True, exist_ok=True)
+            ops_plan_path.write_text(ops_overview_answer, encoding="utf-8")
+        except OSError as exc:
+            logger.debug(f"Code Mapper: failed to persist HyDE plan: {exc}")
+
+    arch_points = _extract_points_of_interest(
+        arch_overview_answer, max_points=max_points
     )
-    return overview_answer, points_of_interest
+    ops_points = _extract_points_of_interest(ops_overview_answer, max_points=ops_budget)
+    ops_points = _ensure_operational_quickstart(ops_points, ops_budget)
+
+    combined_overview_answer = (
+        "\n".join(
+            [
+                "## Architectural Map (HyDE)",
+                "",
+                arch_overview_answer.strip(),
+                "",
+                "## Operational Map (HyDE)",
+                "",
+                ops_overview_answer.strip(),
+                "",
+            ]
+        ).strip()
+        + "\n"
+    )
+
+    points_of_interest: list[CodeMapperPOI] = [
+        *[CodeMapperPOI(mode="architectural", text=p) for p in arch_points],
+        *[CodeMapperPOI(mode="operational", text=p) for p in ops_points],
+    ]
+    return combined_overview_answer, points_of_interest

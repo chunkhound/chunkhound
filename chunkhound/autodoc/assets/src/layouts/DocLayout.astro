@@ -1,0 +1,535 @@
+---
+import '../styles/global.css';
+import site from '../data/site.json';
+import searchIndexData from '../data/search.json';
+import navData from '../data/nav.json';
+const { title, description } = Astro.props;
+const pages = await Astro.glob('../pages/topics/*.md');
+const topics = pages
+  .map((page) => ({
+    slug: page.url.split('/').filter(Boolean).pop(),
+    title: page.frontmatter.title ?? page.url.split('/').pop(),
+    order: page.frontmatter.order ?? 9999,
+    url: page.url,
+  }))
+  .sort((a, b) => a.order - b.order);
+const topicsBySlug = new Map(topics.map((item) => [item.slug, item]));
+let navGroups = null;
+if (navData && Array.isArray(navData.groups)) {
+  const groups = navData.groups
+    .filter((group) => group && typeof group.title === 'string' && Array.isArray(group.slugs))
+    .map((group) => ({
+      title: group.title,
+      items: group.slugs.map((slug) => topicsBySlug.get(slug)).filter(Boolean),
+    }))
+    .filter((group) => group.items.length);
+  navGroups = groups.length ? groups : null;
+}
+const nav = navGroups ? navGroups.flatMap((group) => group.items) : topics;
+const glossaryPages = await Astro.glob('../pages/glossary.md');
+const hasGlossary = glossaryPages.length > 0;
+const pageTitle = title ? `${title} - ${site.title}` : site.title;
+const normalizePath = (value) => {
+  if (!value || value === '/') return '/';
+  return value.replace(/\/+$/, '');
+};
+const current = normalizePath(Astro.url.pathname);
+const isActive = (url) => current === normalizePath(url);
+const activeTopic = nav.find((item) => isActive(item.url));
+const currentIndex = nav.findIndex((item) => isActive(item.url));
+const prevTopic = currentIndex > 0 ? nav[currentIndex - 1] : null;
+const nextTopic =
+  currentIndex >= 0 && currentIndex < nav.length - 1
+    ? nav[currentIndex + 1]
+    : null;
+const breadcrumb = activeTopic ? `Topics / ${activeTopic.title}` : 'Overview';
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="/favicon.ico" />
+    <title>{pageTitle}</title>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="site-header">
+        <div class="header-grid">
+          <button
+            class="nav-toggle"
+            type="button"
+            data-nav-toggle
+            aria-controls="site-nav"
+            aria-expanded="false"
+          >
+            <span class="nav-toggle-icon" aria-hidden="true"></span>
+            Menu
+          </button>
+          <div class="header-titles">
+            <span class="site-kicker">AutoDoc Docs</span>
+            <h1 class="site-title">{site.title}</h1>
+            <p class="site-tagline">{site.tagline}</p>
+          </div>
+          <div class="header-search">
+            <label class="sr-only" for="global-search">Search docs</label>
+            <input
+              id="global-search"
+              class="search-input"
+              type="search"
+              placeholder="Search docs"
+              autocomplete="off"
+              data-search-input
+            />
+            <div class="search-results" data-search-results hidden></div>
+          </div>
+        </div>
+      </header>
+      <div class="site-body">
+        <div class="nav-scrim" data-nav-scrim></div>
+        <aside class="site-nav" id="site-nav" aria-label="Topics">
+          <div class="nav-title">Topics</div>
+          <label class="sr-only" for="nav-filter">Filter topics</label>
+          <input
+            id="nav-filter"
+            class="nav-filter"
+            type="search"
+            placeholder="Filter topics"
+            autocomplete="off"
+            data-nav-filter
+          />
+          <nav>
+            <a
+              href="/"
+              class={isActive('/') ? 'active' : ''}
+              aria-current={isActive('/') ? 'page' : undefined}
+            >
+              Overview
+            </a>
+            {hasGlossary && (
+              <a
+                href="/glossary/"
+                class={isActive('/glossary/') ? 'active' : ''}
+                aria-current={isActive('/glossary/') ? 'page' : undefined}
+              >
+                Glossary
+              </a>
+            )}
+            {navGroups ? (
+              navGroups.map((group) => (
+                <div class="nav-group">
+                  <div class="nav-group-title">{group.title}</div>
+                  {group.items.map((item) => (
+                    <a
+                      href={item.url}
+                      class={isActive(item.url) ? 'active' : ''}
+                      aria-current={isActive(item.url) ? 'page' : undefined}
+                      data-topic
+                    >
+                      {item.title}
+                    </a>
+                  ))}
+                </div>
+              ))
+            ) : (
+              nav.map((item) => (
+                <a
+                  href={item.url}
+                  class={isActive(item.url) ? 'active' : ''}
+                  aria-current={isActive(item.url) ? 'page' : undefined}
+                  data-topic
+                >
+                  {item.title}
+                </a>
+              ))
+            )}
+          </nav>
+        </aside>
+        <main class="site-main">
+          <div class="breadcrumbs">{breadcrumb}</div>
+          <div class="page-header">
+            {title && <h2>{title}</h2>}
+            {description && <p>{description}</p>}
+          </div>
+          {(activeTopic && (prevTopic || nextTopic)) && (
+            <div class="page-nav page-nav-top">
+              {prevTopic ? (
+                <a class="nav-prev" href={prevTopic.url}>
+                  &larr; Previous: {prevTopic.title}
+                </a>
+              ) : (
+                <span></span>
+              )}
+              {nextTopic ? (
+                <a class="nav-next" href={nextTopic.url}>
+                  Next: {nextTopic.title} &rarr;
+                </a>
+              ) : (
+                <span></span>
+              )}
+            </div>
+          )}
+          <article class="page-content">
+            <slot />
+          </article>
+          {(activeTopic && (prevTopic || nextTopic)) && (
+            <div class="page-nav page-nav-bottom">
+              {prevTopic ? (
+                <a class="nav-prev" href={prevTopic.url}>
+                  &larr; Previous: {prevTopic.title}
+                </a>
+              ) : (
+                <span></span>
+              )}
+              {nextTopic ? (
+                <a class="nav-next" href={nextTopic.url}>
+                  Next: {nextTopic.title} &rarr;
+                </a>
+              ) : (
+                <span></span>
+              )}
+            </div>
+          )}
+        </main>
+        <aside class="page-toc" aria-label="On this page">
+          <div class="toc-title">On this page</div>
+          <nav class="toc-list" data-toc></nav>
+        </aside>
+      </div>
+      <footer class="site-footer">
+        <span>
+          Generated by{' '}
+          <a
+            class="footer-link"
+            href="https://github.com/chunkhound/chunkhound"
+            target="_blank"
+            rel="noreferrer"
+          >
+            ChunkHound
+          </a>
+        </span>
+        <span>Updated {new Date(site.generatedAt).toLocaleString()}</span>
+      </footer>
+    </div>
+    <script
+      type="application/json"
+      id="search-index"
+      set:html={JSON.stringify(searchIndexData).replace(/</g, '\\u003c')}
+    ></script>
+    <script type="module">
+      const searchIndex = (() => {
+        const raw = document.getElementById('search-index');
+        if (!raw) return [];
+        try {
+          return JSON.parse(raw.textContent || '[]');
+        } catch (err) {
+          return [];
+        }
+      })();
+      const navFilter = document.querySelector('[data-nav-filter]');
+      const navLinks = Array.from(
+        document.querySelectorAll('.site-nav nav a[data-topic]')
+      );
+      const navGroups = Array.from(
+        document.querySelectorAll('.site-nav nav .nav-group')
+      );
+      const updateGroupVisibility = () => {
+        navGroups.forEach((group) => {
+          const links = Array.from(group.querySelectorAll('a[data-topic]'));
+          const anyVisible = links.some((link) => !link.hidden);
+          group.hidden = !anyVisible;
+        });
+      };
+      if (navFilter) {
+        navFilter.addEventListener('input', (event) => {
+          const query = event.target.value.trim().toLowerCase();
+          navLinks.forEach((link) => {
+            const text = link.textContent?.toLowerCase() ?? '';
+            link.hidden = query.length > 0 && !text.includes(query);
+          });
+          updateGroupVisibility();
+        });
+      }
+      const searchInput = document.querySelector('[data-search-input]');
+      const searchResults = document.querySelector('[data-search-results]');
+      const searchLimit = 8;
+      const clearResults = () => {
+        if (!searchResults) return;
+        searchResults.replaceChildren();
+        searchResults.hidden = true;
+      };
+      const renderResults = (items, query) => {
+        if (!searchResults) return;
+        searchResults.replaceChildren();
+        if (!items.length) {
+          const empty = document.createElement('div');
+          empty.className = 'search-empty';
+          empty.textContent = `No results for "${query}"`;
+          searchResults.appendChild(empty);
+          searchResults.hidden = false;
+          return;
+        }
+        items.forEach((item) => {
+          const entry = document.createElement('a');
+          entry.className = 'search-result';
+          entry.href = item.url;
+          const titleSpan = document.createElement('span');
+          titleSpan.textContent = item.title;
+          const snippetSpan = document.createElement('span');
+          snippetSpan.textContent = item.snippet;
+          entry.append(titleSpan, snippetSpan);
+          searchResults.appendChild(entry);
+        });
+        searchResults.hidden = false;
+      };
+      const buildSnippet = (text, tokens) => {
+        if (!text) return '';
+        const lower = text.toLowerCase();
+        let index = -1;
+        for (const token of tokens) {
+          const match = lower.indexOf(token);
+          if (match !== -1) {
+            index = match;
+            break;
+          }
+        }
+        if (index === -1) return text.slice(0, 140);
+        const start = Math.max(0, index - 40);
+        return text.slice(start, start + 140);
+      };
+      if (searchInput && searchResults) {
+        searchInput.addEventListener('input', (event) => {
+          const query = event.target.value.trim().toLowerCase();
+          if (!query) {
+            clearResults();
+            return;
+          }
+          const tokens = query.split(/\s+/).filter(Boolean);
+          const matches = searchIndex.filter((item) => {
+            const haystack = `${item.title} ${item.description} ${item.body}`.toLowerCase();
+            return tokens.every((token) => haystack.includes(token));
+          });
+          const results = matches.slice(0, searchLimit).map((item) => ({
+            ...item,
+            snippet: buildSnippet(item.body || item.description || '', tokens)
+          }));
+          renderResults(results, event.target.value.trim());
+        });
+        document.addEventListener('click', (event) => {
+          if (!searchResults.contains(event.target) && event.target !== searchInput) {
+            clearResults();
+          }
+        });
+        if (searchInput.value.trim()) {
+          searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+        } else {
+          clearResults();
+        }
+      }
+      updateGroupVisibility();
+      const tocContainer = document.querySelector('[data-toc]');
+      const tocNodes = Array.from(
+        document.querySelectorAll('.page-content h2')
+      );
+      const slugify = (text) =>
+        text
+          .toLowerCase()
+          .trim()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '');
+      const usedIds = new Set();
+      const ensureUniqueId = (base) => {
+        let candidate = base;
+        let count = 1;
+        while (usedIds.has(candidate) || !candidate) {
+          candidate = `${base}-${count}`;
+          count += 1;
+        }
+        usedIds.add(candidate);
+        return candidate;
+      };
+      if (tocContainer && tocNodes.length) {
+        tocNodes.forEach((node) => {
+          let text = '';
+          let allowCopy = false;
+          if (node.tagName === 'H2' || node.tagName === 'H3') {
+            text = node.textContent?.trim() ?? '';
+            allowCopy = true;
+          } else {
+            return;
+          }
+          if (!text) {
+            return;
+          }
+          const baseId = node.id || slugify(text);
+          const id = ensureUniqueId(baseId);
+          node.id = id;
+          const tocLink = document.createElement('a');
+          tocLink.href = `#${id}`;
+          tocLink.textContent = text || 'Section';
+          tocLink.className = 'toc-link';
+          tocContainer.appendChild(tocLink);
+          if (!allowCopy) {
+            return;
+          }
+          const copyButton = document.createElement('button');
+          copyButton.type = 'button';
+          copyButton.className = 'heading-link';
+          copyButton.setAttribute('aria-label', 'Copy link to section');
+          copyButton.textContent = '#';
+          copyButton.addEventListener('click', async () => {
+            const url = `${window.location.origin}${window.location.pathname}#${id}`;
+            try {
+              await navigator.clipboard.writeText(url);
+              copyButton.textContent = '✓';
+              setTimeout(() => {
+                copyButton.textContent = '#';
+              }, 1200);
+            } catch (err) {
+              window.location.hash = id;
+            }
+          });
+          node.appendChild(copyButton);
+        });
+      } else if (tocContainer) {
+        const empty = document.createElement('span');
+        empty.className = 'toc-empty';
+        empty.textContent = 'No sections';
+        tocContainer.replaceChildren(empty);
+      }
+      const navToggle = document.querySelector('[data-nav-toggle]');
+      const navScrim = document.querySelector('[data-nav-scrim]');
+      const toggleNav = (open) => {
+        document.body.classList.toggle('nav-open', open);
+        if (navToggle) {
+          navToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        }
+      };
+      if (navToggle) {
+        navToggle.addEventListener('click', () => {
+          toggleNav(!document.body.classList.contains('nav-open'));
+        });
+      }
+      if (navScrim) {
+        navScrim.addEventListener('click', () => toggleNav(false));
+      }
+      document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+          toggleNav(false);
+        }
+      });
+      const loadMermaid = async () => {
+        try {
+          const mod = await import('mermaid');
+          return mod.default ?? mod;
+        } catch (err) {
+          console.error('Failed to load Mermaid', err);
+          return null;
+        }
+      };
+      const initMermaid = async () => {
+        const blocks = Array.from(
+          document.querySelectorAll('pre[data-language="mermaid"]')
+        );
+        if (!blocks.length) return;
+        const mermaid = await loadMermaid();
+        if (!mermaid) return;
+        blocks.forEach((block) => {
+          const code = block.querySelector('code');
+          const container = document.createElement('div');
+          container.className = 'mermaid';
+          const raw = code?.textContent || block.textContent || '';
+          let sanitized = raw.trim().replace(/\r\n/g, '\n');
+          const normalizeLabelNewlines = (input) => {
+            let out = '';
+            let inLabel = false;
+            for (let i = 0; i < input.length; i += 1) {
+              const ch = input[i];
+              if (ch === '[' || ch === '{') inLabel = true;
+              if ((ch === ']' || ch === '}') && inLabel) inLabel = false;
+              if (ch === '\n' && inLabel) {
+                out += ' ';
+                continue;
+              }
+              out += ch;
+            }
+            return out;
+          };
+          const stripParensInLabels = (input) => {
+            let out = '';
+            let inLabel = false;
+            for (let i = 0; i < input.length; i += 1) {
+              const ch = input[i];
+              if (ch === '[' || ch === '{') inLabel = true;
+              if ((ch === ']' || ch === '}') && inLabel) inLabel = false;
+              if (inLabel && (ch === '(' || ch === ')')) {
+                continue;
+              }
+              out += ch;
+            }
+            return out;
+          };
+          const convertNodeParens = (input) => {
+            return input.replace(/(^|\s|-->\s*|--\s*|==>\s*)([A-Za-z0-9_]+)\(([^)]*)\)/g, '$1$2[$3]');
+          };
+          sanitized = normalizeLabelNewlines(sanitized);
+          sanitized = stripParensInLabels(sanitized);
+          sanitized = convertNodeParens(sanitized);
+          sanitized = sanitized.replace(/&&/g, 'and');
+          sanitized = sanitized.replace(/&/g, 'and');
+          sanitized = sanitized.replace(/\//g, ' or ');
+          sanitized = sanitized.replace(/[()]/g, '');
+          container.textContent = sanitized.trim();
+          block.replaceWith(container);
+        });
+        const enhanceMermaid = () => {
+          const diagrams = Array.from(document.querySelectorAll('.mermaid'));
+          diagrams.forEach((diagram) => {
+            if (diagram.closest('figure')) {
+              return;
+            }
+            const figure = document.createElement('figure');
+            figure.className = 'mermaid-figure';
+            figure.setAttribute('role', 'img');
+            figure.setAttribute('aria-label', 'Diagram');
+            const caption = document.createElement('figcaption');
+            caption.textContent = 'Diagram';
+            diagram.parentNode?.insertBefore(figure, diagram);
+            figure.appendChild(diagram);
+            figure.appendChild(caption);
+            figure.addEventListener('click', () => {
+              const svg = diagram.querySelector('svg');
+              if (!svg) return;
+              const serializer = new XMLSerializer();
+              const svgText = serializer.serializeToString(svg);
+              const blob = new Blob([svgText], { type: 'image/svg+xml' });
+              const url = URL.createObjectURL(blob);
+              window.open(url, '_blank', 'noopener');
+              setTimeout(() => URL.revokeObjectURL(url), 1000);
+            });
+          });
+        };
+        mermaid.initialize({
+          startOnLoad: false,
+          theme: 'base',
+          themeVariables: {
+            primaryColor: '#fff3e9',
+            primaryTextColor: '#1c1c1c',
+            primaryBorderColor: '#b56a46',
+            lineColor: '#8b3d1c',
+            secondaryColor: '#f2d6c5',
+            tertiaryColor: '#f2efe9'
+          }
+        });
+        mermaid.run({ querySelector: '.mermaid' });
+        setTimeout(enhanceMermaid, 0);
+      };
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initMermaid);
+      } else {
+        initMermaid();
+      }
+    </script>
+  </body>
+</html>

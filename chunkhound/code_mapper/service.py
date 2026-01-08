@@ -12,18 +12,20 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from chunkhound.code_mapper.coverage import compute_db_scope_stats
-from chunkhound.code_mapper.pipeline import (
-    _derive_heading_from_point,
-    _is_empty_research_result,
-    _merge_sources_metadata,
-    _run_code_mapper_overview_hyde,
+from chunkhound.code_mapper.models import AgentDocMetadata, CodeMapperPOI
+from chunkhound.code_mapper.pipeline import run_code_mapper_overview_hyde
+from chunkhound.code_mapper.public_utils import (
+    derive_heading_from_point,
+    is_empty_research_result,
+    merge_sources_metadata,
 )
+from chunkhound.core.audience import normalize_audience
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.llm_manager import LLMManager
-from chunkhound.mcp_server.tools import deep_research_impl
+from chunkhound.services.deep_research_service import run_deep_research
 
 if TYPE_CHECKING:
     from chunkhound.api.cli.utils.tree_progress import TreeProgressDisplay
@@ -40,9 +42,9 @@ class CodeMapperNoPointsError(RuntimeError):
 @dataclass
 class CodeMapperPipelineResult:
     overview_result: dict[str, Any]
-    poi_sections: list[tuple[str, dict[str, Any]]]
-    poi_sections_indexed: list[tuple[int, str, dict[str, Any]]]
-    failed_poi_sections: list[tuple[int, str, str]]
+    poi_sections: list[tuple[CodeMapperPOI, dict[str, Any]]]
+    poi_sections_indexed: list[tuple[int, CodeMapperPOI, dict[str, Any]]]
+    failed_poi_sections: list[tuple[int, CodeMapperPOI, str]]
     total_points_of_interest: int
     unified_source_files: dict[str, str]
     unified_chunks_dedup: list[dict[str, Any]]
@@ -50,6 +52,28 @@ class CodeMapperPipelineResult:
     total_chunks_global: int | None
     scope_total_files: int
     scope_total_chunks: int
+
+
+def _audience_guidance_lines(*, audience: str) -> list[str]:
+    normalized = normalize_audience(audience)
+    if normalized == "technical":
+        return [
+            "Audience: technical (software engineers).",
+            "Prefer implementation details, key types, and precise terminology.",
+        ]
+    if normalized == "end-user":
+        return [
+            "Audience: end-user (less technical).",
+            (
+                "Prefer practical workflows and plain language; explain code "
+                "identifiers briefly when needed."
+            ),
+            (
+                "De-emphasize internal implementation details unless essential to user "
+                "outcomes."
+            ),
+        ]
+    return []
 
 
 def _resolve_poi_concurrency(total_points: int) -> int:
@@ -119,22 +143,27 @@ async def run_code_mapper_overview_only(
     target_dir: Path,
     scope_path: Path,
     scope_label: str,
+    meta: AgentDocMetadata | None = None,
+    context: str | None = None,
     max_points: int,
     comprehensiveness: str,
     out_dir: Path | None,
-    assembly_provider: LLMProvider | None,
+    map_hyde_provider: LLMProvider | None,
     indexing_cfg: IndexingConfig | None,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[CodeMapperPOI]]:
     """Run overview-only Code Mapper and return the answer + points."""
-    overview_answer, points_of_interest = await _run_code_mapper_overview_hyde(
+    overview_answer, points_of_interest = await run_code_mapper_overview_hyde(
         llm_manager=llm_manager,
         target_dir=target_dir,
         scope_path=scope_path,
         scope_label=scope_label,
+        meta=meta,
+        context=context,
         max_points=max_points,
         comprehensiveness=comprehensiveness,
         out_dir=out_dir,
-        assembly_provider=assembly_provider,
+        persist_prompt=True,
+        map_hyde_provider=map_hyde_provider,
         indexing_cfg=indexing_cfg,
     )
 
@@ -153,27 +182,32 @@ async def run_code_mapper_pipeline(
     scope_path: Path,
     scope_label: str,
     path_filter: str | None,
+    meta: AgentDocMetadata | None = None,
+    context: str | None = None,
     comprehensiveness: str,
     max_points: int,
     out_dir: Path | None,
-    assembly_provider: LLMProvider | None,
+    map_hyde_provider: LLMProvider | None,
     indexing_cfg: IndexingConfig | None,
     poi_jobs: int | None,
     progress: TreeProgressDisplay | None,
+    audience: str = "balanced",
     log_info: Callable[[str], None] | None = None,
     log_warning: Callable[[str], None] | None = None,
     log_error: Callable[[str], None] | None = None,
 ) -> CodeMapperPipelineResult:
     """Run Code Mapper overview + per-point deep research and compute coverage."""
-    overview_answer, points_of_interest = await _run_code_mapper_overview_hyde(
+    overview_answer, points_of_interest = await run_code_mapper_overview_hyde(
         llm_manager=llm_manager,
         target_dir=target_dir,
         scope_path=scope_path,
         scope_label=scope_label,
+        meta=meta,
+        context=context,
         max_points=max_points,
         comprehensiveness=comprehensiveness,
         out_dir=out_dir,
-        assembly_provider=assembly_provider,
+        map_hyde_provider=map_hyde_provider,
         indexing_cfg=indexing_cfg,
     )
 
@@ -192,6 +226,13 @@ async def run_code_mapper_pipeline(
         raise CodeMapperNoPointsError(overview_answer)
 
     total_points_of_interest = len(points_of_interest)
+
+    audience_lines = _audience_guidance_lines(audience=audience)
+    audience_block = (
+        ("\n".join(f"- {line}" for line in audience_lines) + "\n\n")
+        if audience_lines
+        else ""
+    )
 
     progress_failures: set[str] = set()
 
@@ -245,7 +286,7 @@ async def run_code_mapper_pipeline(
     def _failure_markdown(
         *,
         idx: int,
-        poi: str,
+        poi: CodeMapperPOI,
         heading: str,
         first_error: str,
         retry_error: str | None,
@@ -255,7 +296,9 @@ async def run_code_mapper_pipeline(
             "This point of interest failed to generate content after a retry."
         )
         lines.append("")
-        lines.append(f"- Point of interest ({idx}/{total_points_of_interest}): {poi}")
+        lines.append(
+            f"- Point of interest ({idx}/{total_points_of_interest}): {poi.text}"
+        )
         lines.append(f"- First attempt: {first_error}")
         if retry_error is not None:
             lines.append(f"- Retry attempt: {retry_error}")
@@ -265,16 +308,16 @@ async def run_code_mapper_pipeline(
     backoff_to_serial = asyncio.Event()
     pending = deque(
         [
-            (idx, poi, _derive_heading_from_point(poi))
+            (idx, poi, derive_heading_from_point(poi.text))
             for idx, poi in enumerate(points_of_interest, start=1)
         ]
     )
     pending_lock = asyncio.Lock()
     pending_cond = asyncio.Condition(pending_lock)
     in_flight = 0
-    successful_sections: list[tuple[int, str, dict[str, Any]]] = []
-    retry_candidates: dict[int, tuple[str, str, str]] = {}
-    failed_poi_sections: list[tuple[int, str, str]] = []
+    successful_sections: list[tuple[int, CodeMapperPOI, dict[str, Any]]] = []
+    retry_candidates: dict[int, tuple[CodeMapperPOI, str, str]] = {}
+    failed_poi_sections: list[tuple[int, CodeMapperPOI, str]] = []
 
     def _poi_node_id(idx: int) -> int:
         return idx * 1_000_000
@@ -314,7 +357,7 @@ async def run_code_mapper_pipeline(
             depth=0,
         )
 
-    async def _next_pending(worker_id: int) -> tuple[int, str, str] | None:
+    async def _next_pending(worker_id: int) -> tuple[int, CodeMapperPOI, str] | None:
         nonlocal in_flight
         async with pending_cond:
             while True:
@@ -339,24 +382,45 @@ async def run_code_mapper_pipeline(
     async def _run_point_once(
         *,
         idx: int,
-        poi: str,
+        poi: CodeMapperPOI,
         heading: str,
         poi_progress: Any,
     ) -> tuple[str, dict[str, Any] | None, str | None, bool]:
-        section_query = (
-            "Expand the following point of interest into a detailed, "
-            "agent-facing documentation section for the scoped folder "
-            f"'{scope_label}'. Explain how the relevant code and "
-            "configuration implement this behavior, including "
-            "responsibilities, key types, "
-            "important flows, and operational constraints.\n\n"
-            "Point of interest:\n"
-            f"{poi}\n\n"
-            "Use markdown headings and bullet lists as needed. It is "
-            "acceptable for this section to be long and detailed as "
-            "long as it remains "
-            "grounded in the code."
-        )
+        poi_text = poi.text
+        if poi.mode == "operational":
+            section_query = (
+                "Expand the following OPERATIONAL point of interest into a "
+                "detailed, operator/runbook-style documentation section for the "
+                f"scoped folder '{scope_label}'.\n\n"
+                f"{audience_block}"
+                "Focus on step-by-step workflows and 'how to run this end-to-end' "
+                "guidance grounded in the code:\n"
+                "- Setup and local run path (commands only when supported by repo "
+                "evidence)\n"
+                "- Configuration (env vars, config files) only when supported by "
+                "repo evidence\n"
+                "- Common workflows/recipes\n"
+                "- Troubleshooting/common failure modes and fixes\n\n"
+                "Point of interest:\n"
+                f"{poi_text}\n\n"
+                "Use markdown headings and bullet lists as needed. It is acceptable "
+                "for this section to be long and detailed as long as it remains "
+                "grounded in the code."
+            )
+        else:
+            section_query = (
+                "Expand the following ARCHITECTURAL point of interest into a "
+                "detailed, agent-facing documentation section for the scoped folder "
+                f"'{scope_label}'. Explain how the relevant code and configuration "
+                "implement this behavior, including responsibilities, key types, "
+                "important flows, and operational constraints.\n\n"
+                f"{audience_block}"
+                "Point of interest:\n"
+                f"{poi_text}\n\n"
+                "Use markdown headings and bullet lists as needed. It is acceptable "
+                "for this section to be long and detailed as long as it remains "
+                "grounded in the code."
+            )
 
         try:
             if log_info:
@@ -364,15 +428,16 @@ async def run_code_mapper_pipeline(
                     f"[Code Mapper] Processing point of interest {idx}/"
                     f"{len(points_of_interest)}: {heading}"
                 )
-            result = await deep_research_impl(
+            result = await run_deep_research(
                 services=services,
                 embedding_manager=embedding_manager,
                 llm_manager=llm_manager,
                 query=section_query,
+                tool_name="code_research",
                 progress=poi_progress,
                 path=path_filter,
             )
-            if _is_empty_research_result(result):
+            if is_empty_research_result(result):
                 if log_warning:
                     log_warning(
                         f"[Code Mapper] Point of interest {idx} returned no usable "
@@ -386,7 +451,7 @@ async def run_code_mapper_pipeline(
             logger.exception(f"Code Mapper deep research failed for point {idx}.")
             return heading, None, f"{type(exc).__name__}: {exc}", True
 
-    async def _process_item(idx: int, poi: str, heading: str) -> None:
+    async def _process_item(idx: int, poi: CodeMapperPOI, heading: str) -> None:
         await _emit_poi_start(idx, heading)
         poi_progress = _poi_progress(idx)
         heading, result, error_summary, should_backoff = await _run_point_once(
@@ -498,7 +563,7 @@ async def run_code_mapper_pipeline(
         unified_chunks_dedup,
         total_files_global,
         total_chunks_global,
-    ) = _merge_sources_metadata(all_results)
+    ) = merge_sources_metadata(all_results)
 
     scope_total_files, scope_total_chunks, _scoped_files = compute_db_scope_stats(
         services, scope_label

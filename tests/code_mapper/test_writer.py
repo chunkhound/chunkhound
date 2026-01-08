@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from chunkhound.code_mapper.models import AgentDocMetadata
+from chunkhound.code_mapper.models import CodeMapperPOI
 from chunkhound.code_mapper.writer import write_code_mapper_outputs
 
 
@@ -43,10 +44,22 @@ def test_write_code_mapper_outputs_with_topics_and_unreferenced(tmp_path: Path) 
         scope_label="scope",
         meta=meta,
         overview_answer="Overview",
-        poi_sections=[("Core Flow", {"answer": "Section body"})],
-        poi_sections_indexed=[(1, "Core Flow", {"answer": "Section body"})],
+        poi_sections=[
+            (CodeMapperPOI(mode="architectural", text="Core Flow"), {"answer": "Section body"})
+        ],
+        poi_sections_indexed=[
+            (
+                1,
+                CodeMapperPOI(mode="architectural", text="Core Flow"),
+                {"answer": "Section body"},
+            )
+        ],
         failed_poi_sections=[
-            (2, "Error Handling", "# Error Handling (failed)\n\nDetails\n")
+            (
+                2,
+                CodeMapperPOI(mode="architectural", text="Error Handling"),
+                "# Error Handling (failed)\n\nDetails\n",
+            )
         ],
         coverage_lines=["## Coverage Summary", ""],
         include_topics=True,
