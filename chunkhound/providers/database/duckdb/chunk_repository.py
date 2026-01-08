@@ -1,5 +1,6 @@
 """DuckDB chunk repository implementation - handles chunk CRUD operations."""
 
+import json
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -47,8 +48,8 @@ class DuckDBChunkRepository:
                 result = self._connection_manager.connection.execute(
                     """
                     INSERT INTO chunks (file_id, chunk_type, symbol, code, start_line, end_line,
-                                      start_byte, end_byte, language)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      start_byte, end_byte, language, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     RETURNING id
                 """,
                     [
@@ -61,6 +62,7 @@ class DuckDBChunkRepository:
                         chunk.start_byte,
                         chunk.end_byte,
                         chunk.language.value if chunk.language else None,
+                        json.dumps(chunk.metadata) if chunk.metadata else None,
                     ],
                 ).fetchone()
 
@@ -84,7 +86,7 @@ class DuckDBChunkRepository:
             params = []
 
             for chunk in chunks:
-                values_clauses.append("(?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                values_clauses.append("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                 params.extend(
                     [
                         chunk.file_id,
@@ -96,6 +98,7 @@ class DuckDBChunkRepository:
                         chunk.start_byte,
                         chunk.end_byte,
                         chunk.language.value if chunk.language else None,
+                        json.dumps(chunk.metadata) if chunk.metadata else None,
                     ]
                 )
 
@@ -103,7 +106,7 @@ class DuckDBChunkRepository:
             values_sql = ", ".join(values_clauses)
             query = f"""
                 INSERT INTO chunks (file_id, chunk_type, symbol, code, start_line, end_line,
-                                  start_byte, end_byte, language)
+                                  start_byte, end_byte, language, metadata)
                 VALUES {values_sql}
                 RETURNING id
             """
@@ -142,7 +145,7 @@ class DuckDBChunkRepository:
                 result = self._connection_manager.connection.execute(
                     """
                     SELECT id, file_id, chunk_type, symbol, code, start_line, end_line,
-                           start_byte, end_byte, language, created_at, updated_at
+                           start_byte, end_byte, language, created_at, updated_at, metadata
                     FROM chunks WHERE id = ?
                 """,
                     [chunk_id],
@@ -164,6 +167,7 @@ class DuckDBChunkRepository:
                 "language": result[9],
                 "created_at": result[10],
                 "updated_at": result[11],
+                "metadata": json.loads(result[12]) if result[12] else {},
             }
 
             if as_model:
@@ -177,6 +181,7 @@ class DuckDBChunkRepository:
                     start_byte=result[7],
                     end_byte=result[8],
                     language=Language(result[9]) if result[9] else Language.UNKNOWN,
+                    metadata=chunk_dict["metadata"],
                 )
 
             return chunk_dict
@@ -201,7 +206,7 @@ class DuckDBChunkRepository:
                 results = self._connection_manager.connection.execute(
                     """
                     SELECT id, file_id, chunk_type, symbol, code, start_line, end_line,
-                           start_byte, end_byte, language, created_at, updated_at
+                           start_byte, end_byte, language, created_at, updated_at, metadata
                     FROM chunks WHERE file_id = ?
                     ORDER BY start_line
                 """,
@@ -223,6 +228,7 @@ class DuckDBChunkRepository:
                     "language": result[9],
                     "created_at": result[10],
                     "updated_at": result[11],
+                    "metadata": json.loads(result[12]) if result[12] else {},
                 }
 
                 if as_model:
@@ -241,6 +247,7 @@ class DuckDBChunkRepository:
                             language=Language(result[9])
                             if result[9]
                             else Language.UNKNOWN,
+                            metadata=chunk_dict["metadata"],
                         )
                     )
                 else:
@@ -335,6 +342,76 @@ class DuckDBChunkRepository:
             logger.error(f"Failed to update chunk {chunk_id}: {e}")
             raise
 
+    def get_chunks_in_range(
+        self, file_id: int, start_line: int, end_line: int
+    ) -> list[dict]:
+        """Get all chunks overlapping a line range (pattern from context_retriever.py).
+
+        Args:
+            file_id: ID of the file to search within
+            start_line: Start line of the range
+            end_line: End line of the range
+
+        Returns:
+            List of chunk dictionaries overlapping the range, ordered by start_line
+        """
+        if self.connection is None:
+            raise RuntimeError("No database connection")
+
+        try:
+            # Overlap condition: chunk overlaps if any of:
+            # - chunk start_line is within range
+            # - chunk end_line is within range
+            # - chunk spans the entire range
+            query = """
+                SELECT id, file_id, chunk_type, symbol, code, start_line, end_line,
+                       start_byte, end_byte, language, created_at, updated_at, metadata
+                FROM chunks
+                WHERE file_id = ?
+                AND (
+                    (start_line BETWEEN ? AND ?) OR
+                    (end_line BETWEEN ? AND ?) OR
+                    (start_line <= ? AND end_line >= ?)
+                )
+                ORDER BY start_line
+            """
+
+            if self._provider:
+                results = self._provider._execute_in_db_thread_sync(
+                    "get_chunks_in_range_query", file_id, start_line, end_line, query
+                )
+            else:
+                results = self._connection_manager.connection.execute(
+                    query,
+                    [file_id, start_line, end_line, start_line, end_line, start_line, end_line],
+                ).fetchall()
+
+            chunks = []
+            for result in results:
+                metadata_json = result[12]
+                chunk_dict = {
+                    "id": result[0],
+                    "file_id": result[1],
+                    "chunk_type": result[2],
+                    "symbol": result[3],
+                    "code": result[4],
+                    "start_line": result[5],
+                    "end_line": result[6],
+                    "start_byte": result[7],
+                    "end_byte": result[8],
+                    "language": result[9],
+                    "created_at": result[10],
+                    "updated_at": result[11],
+                    "metadata": json.loads(metadata_json) if metadata_json else {},
+                }
+                chunks.append(chunk_dict)
+
+            return chunks
+
+        except Exception as e:
+            logger.error(f"Failed to get chunks in range for file {file_id}: {e}")
+            return []
+
     def get_all_chunks_with_metadata(self) -> list[dict[str, Any]]:
         """Get all chunks with their metadata including file paths (provider-agnostic)."""
         if self.connection is None:
@@ -343,8 +420,9 @@ class DuckDBChunkRepository:
         try:
             # Use SQL to get chunks with file paths (DuckDB approach)
             query = """
-                SELECT c.id, c.file_id, f.path as file_path, c.code, 
-                       c.start_line, c.end_line, c.chunk_type, c.language, c.symbol
+                SELECT c.id, c.file_id, f.path as file_path, c.code,
+                       c.start_line, c.end_line, c.chunk_type, c.language, c.symbol,
+                       c.metadata
                 FROM chunks c
                 JOIN files f ON c.file_id = f.id
                 ORDER BY c.id
@@ -371,6 +449,7 @@ class DuckDBChunkRepository:
                         "chunk_type": row[6],
                         "language": row[7],
                         "name": row[8],
+                        "metadata": json.loads(row[9]) if row[9] else {},
                     }
                 )
 

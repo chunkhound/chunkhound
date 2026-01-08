@@ -50,7 +50,7 @@ class MappingAdapter(LanguageMapping):
 
         # Fallback to adapter behavior
         if concept == UniversalConcept.DEFINITION:
-            # Combine function and class queries
+            # Combine function, class, and definition queries
             function_query = self.base_mapping.get_function_query()
             class_query = self.base_mapping.get_class_query()
 
@@ -60,6 +60,12 @@ class MappingAdapter(LanguageMapping):
                 queries.append(function_query.strip())
             if class_query.strip():
                 queries.append(class_query.strip())
+
+            # Check for additional definition patterns (e.g., field_declaration for Java)
+            if hasattr(self.base_mapping, "get_definition_query"):
+                definition_query = self.base_mapping.get_definition_query()
+                if definition_query and definition_query.strip():
+                    queries.append(definition_query.strip())
 
             if queries:
                 return "\n\n".join(queries)
@@ -349,3 +355,20 @@ class MappingAdapter(LanguageMapping):
             return True
 
         return False
+
+    def extract_constants(
+        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constants from captures by delegating to base_mapping.
+
+        Args:
+            concept: Universal concept being extracted
+            captures: Dictionary of captured nodes from query
+            content: Source code as bytes
+
+        Returns:
+            List of constant dictionaries or None
+        """
+        if hasattr(self.base_mapping, "extract_constants"):
+            return self.base_mapping.extract_constants(concept, captures, content)
+        return None

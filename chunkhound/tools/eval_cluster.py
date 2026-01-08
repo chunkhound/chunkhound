@@ -158,7 +158,6 @@ def _build_config(
 async def _cluster_and_evaluate(
     bench_id: str,
     config_path: str | None,
-    max_tokens_per_cluster: int,
     bench_root: Path | None,
 ) -> dict[str, Any]:
     """Run clustering on a bench corpus and compute metrics."""
@@ -210,10 +209,13 @@ async def _cluster_and_evaluate(
     clustering_service = ClusteringService(
         embedding_provider=embedding_manager.get_provider(),
         llm_provider=llm_provider,
-        max_tokens_per_cluster=max_tokens_per_cluster,
     )
 
-    cluster_groups, metadata = await clustering_service.cluster_files(files)
+    # Use number of unique ground truth labels as target n_clusters for evaluation
+    n_clusters = len(set(true_labels))
+    n_clusters = max(1, min(n_clusters, len(files)))  # Clamp to valid range
+
+    cluster_groups, metadata = await clustering_service.cluster_files(files, n_clusters)
 
     # Map file paths to cluster IDs
     cluster_id_by_path: dict[str, int] = {}
@@ -378,12 +380,6 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         help="Optional path to a ChunkHound config file.",
     )
     parser.add_argument(
-        "--max-tokens-per-cluster",
-        type=int,
-        default=30000,
-        help="Maximum tokens allowed per cluster (default: 30000).",
-    )
-    parser.add_argument(
         "--output",
         type=str,
         default=None,
@@ -403,7 +399,6 @@ async def _async_main(argv: Iterable[str] | None = None) -> int:
         payload = await _cluster_and_evaluate(
             bench_id=args.bench_id,
             config_path=args.config,
-            max_tokens_per_cluster=args.max_tokens_per_cluster,
             bench_root=bench_root,
         )
     except Exception as exc:

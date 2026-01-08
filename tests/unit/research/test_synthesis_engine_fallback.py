@@ -4,7 +4,7 @@ import pytest
 
 from chunkhound.interfaces.embedding_provider import RerankResult
 from chunkhound.llm_manager import LLMManager
-from chunkhound.services.research.synthesis_engine import SynthesisEngine
+from chunkhound.services.research import SynthesisEngine
 from tests.fixtures.fake_providers import FakeEmbeddingProvider, FakeLLMProvider
 
 

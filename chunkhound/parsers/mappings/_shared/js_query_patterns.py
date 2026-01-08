@@ -1,29 +1,25 @@
 """Shared tree-sitter query fragments for JS-family mappings (JS/TS/JSX)."""
 
-# Top-level const/let with object/array initializer
-TOP_LEVEL_LEXICAL_CONFIG = """
-; Top-level const/let with object/array initializer
-(program
-    (lexical_declaration
-        (variable_declarator
-            name: (identifier) @name
-            value: [(object) (array)] @init
-        ) @definition
+# const/let with any value type (any scope)
+LEXICAL_DECLARATION_CONFIG = """
+; const/let with any value type (any scope)
+(lexical_declaration
+    (variable_declarator
+        name: (identifier) @name
+        value: [(object) (array) (number) (string) (true) (false) (null) (undefined)] @init
     )
-)
+) @definition
 """
 
-# Top-level var with object/array initializer (JS/JSX only)
-TOP_LEVEL_VAR_CONFIG = """
-; Top-level var with object/array initializer
-(program
-    (variable_declaration
-        (variable_declarator
-            name: (identifier) @name
-            value: [(object) (array)] @init
-        ) @definition
+# var with any value type (JS/JSX only, any scope)
+VAR_DECLARATION_CONFIG = """
+; var with any value type (any scope)
+(variable_declaration
+    (variable_declarator
+        name: (identifier) @name
+        value: [(object) (array) (number) (string) (true) (false) (null) (undefined)] @init
     )
-)
+) @definition
 """
 
 # CommonJS patterns

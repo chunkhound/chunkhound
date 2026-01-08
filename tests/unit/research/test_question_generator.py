@@ -102,11 +102,11 @@ class TestGenerateFollowUpQuestions:
         # Depth ratio 3/3 = 1, budget = MAX
 
     @pytest.mark.asyncio
-    async def test_requires_file_contents(self, question_generator):
-        """Should return empty list when file_contents is empty."""
+    async def test_uses_chunks_when_file_contents_empty(self, question_generator):
+        """Should use chunks to build context when file_contents is empty."""
         query = "test query"
         context = ResearchContext(root_query=query, ancestors=[])
-        chunks = [{"file_path": "test.py", "content": "code"}]
+        chunks = [{"file_path": "test.py", "content": "def foo(): pass"}]
         global_explored = {}
         max_input_tokens = 10000
 
@@ -122,7 +122,31 @@ class TestGenerateFollowUpQuestions:
             max_depth=3,
         )
 
-        assert result == [], "Should return empty list when no file contents"
+        # Now uses chunks when file_contents is empty
+        assert isinstance(result, list), "Should return questions from chunk context"
+        assert len(result) >= 1, "Should generate questions from chunks"
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_content_or_chunks(self, question_generator):
+        """Should return empty list when both file_contents and chunks are empty."""
+        query = "test query"
+        context = ResearchContext(root_query=query, ancestors=[])
+        global_explored = {}
+        max_input_tokens = 10000
+
+        result = await question_generator.generate_follow_up_questions(
+            query,
+            context,
+            {},  # Empty file contents
+            [],  # Empty chunks
+            global_explored,
+            exploration_gist=None,
+            max_input_tokens=max_input_tokens,
+            depth=1,
+            max_depth=3,
+        )
+
+        assert result == [], "Should return empty list when no content available"
 
     @pytest.mark.asyncio
     async def test_requires_max_input_tokens(self, question_generator):

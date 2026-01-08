@@ -23,14 +23,17 @@ class SearchService(BaseService):
         self,
         database_provider: DatabaseProvider,
         embedding_provider: EmbeddingProvider | None = None,
+        config: Any = None,
     ):
         """Initialize search service.
 
         Args:
             database_provider: Database provider for data access
             embedding_provider: Optional embedding provider for semantic search
+            config: Optional configuration object for search strategies
         """
         super().__init__(database_provider)
+        self._config = config
         self._embedding_provider = embedding_provider
         self._result_enhancer = ResultEnhancer()
         self._context_retriever = ContextRetriever(database_provider)
@@ -44,6 +47,7 @@ class SearchService(BaseService):
                 database_provider,
                 embedding_provider,
                 self._single_hop_strategy.search,
+                config=config,
             )
         else:
             self._single_hop_strategy = None
@@ -59,6 +63,8 @@ class SearchService(BaseService):
         model: str | None = None,
         path_filter: str | None = None,
         force_strategy: str | None = None,
+        time_limit: float | None = None,
+        result_limit: int | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Perform semantic search using vector similarity.
 
@@ -77,6 +83,8 @@ class SearchService(BaseService):
             path_filter: Optional relative path to limit search scope
                 (e.g., 'src/', 'tests/')
             force_strategy: Optional strategy override ('single_hop', 'multi_hop')
+            time_limit: Optional time limit for multi-hop expansion (default: 5.0s)
+            result_limit: Optional result limit for multi-hop expansion (default: 500, None = unlimited)
 
         Returns:
             Tuple of (results, pagination_metadata)
@@ -132,6 +140,8 @@ class SearchService(BaseService):
                     provider=search_provider,
                     model=search_model,
                     path_filter=path_filter,
+                    time_limit=time_limit,
+                    result_limit=result_limit,
                 )
             else:
                 logger.debug(f"Using standard semantic search for: '{query}'")

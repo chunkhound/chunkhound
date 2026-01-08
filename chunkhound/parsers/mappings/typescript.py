@@ -11,16 +11,16 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from chunkhound.core.types.common import ChunkType, Language
-from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.mappings._shared.js_family_extraction import (
     JSFamilyExtraction,
 )
 from chunkhound.parsers.mappings._shared.js_query_patterns import (
-    TOP_LEVEL_LEXICAL_CONFIG,
+    COMMONJS_EXPORTS_SHORTHAND,
     COMMONJS_MODULE_EXPORTS,
     COMMONJS_NESTED_EXPORTS,
-    COMMONJS_EXPORTS_SHORTHAND,
+    LEXICAL_DECLARATION_CONFIG,
 )
+from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 if TYPE_CHECKING:
@@ -52,6 +52,19 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
     def __init__(self) -> None:
         """Initialize TypeScript mapping."""
         super().__init__(Language.TYPESCRIPT)
+
+    def extract_constants(
+        self,
+        concept: "UniversalConcept",
+        captures: dict[str, "TSNode"],
+        content: bytes,
+    ) -> list[dict[str, str]] | None:
+        """Extract constants using JSFamilyExtraction implementation.
+
+        This override is necessary due to Python MRO: BaseMapping.extract_constants
+        would shadow JSFamilyExtraction.extract_constants otherwise.
+        """
+        return JSFamilyExtraction.extract_constants(self, concept, captures, content)
 
     def get_function_query(self) -> str:
         """Get tree-sitter query pattern for TypeScript function definitions.
@@ -124,10 +137,14 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
                     name: (type_identifier) @name
                 ) @definition
 
+                (enum_declaration
+                    name: (identifier) @name
+                ) @definition
+
                 ; Top-level export (default or named)
                 (export_statement) @definition
                 """,
-                TOP_LEVEL_LEXICAL_CONFIG,
+                LEXICAL_DECLARATION_CONFIG,
                 # Top-level function/arrow declarators
                 """
                 (program
@@ -733,3 +750,55 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         )
 
         return chunk
+
+    def resolve_import_path(
+        self,
+        import_text: str,
+        base_dir: Path,
+        source_file: Path
+    ) -> Path | None:
+        """Resolve TypeScript import to file path.
+
+        Args:
+            import_text: The import statement text
+            base_dir: The base directory of the project
+            source_file: The file containing the import
+
+        Returns:
+            Resolved file path or None if resolution fails
+        """
+        import re
+
+        # Extract import path
+        match = re.search(r'''from\s+['"](.+?)['"]''', import_text)
+        if not match:
+            return None
+
+        import_path = match.group(1)
+        if not import_path:
+            return None
+
+        # Skip non-relative imports
+        if not import_path.startswith('.'):
+            return None
+
+        source_dir = self._resolve_source_dir(source_file, base_dir)
+        resolved = (source_dir / import_path).resolve()
+
+        # Try direct path
+        if resolved.exists() and resolved.is_file():
+            return resolved
+
+        # Try with TypeScript extensions first, then JS
+        for ext in ['.ts', '.tsx', '.d.ts', '.js', '.jsx']:
+            with_ext = resolved.with_suffix(ext)
+            if with_ext.exists():
+                return with_ext
+
+        # Try index file
+        for index in ['index.ts', 'index.tsx', 'index.js']:
+            index_path = resolved / index
+            if index_path.exists():
+                return index_path
+
+        return None

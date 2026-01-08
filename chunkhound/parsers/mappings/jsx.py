@@ -5,25 +5,20 @@ extending JavaScript functionality for React-specific patterns like JSX elements
 components, hooks, and JSX expressions.
 """
 
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from chunkhound.core.types.common import Language
+from chunkhound.parsers.mappings._shared.js_query_patterns import (
+    COMMONJS_EXPORTS_SHORTHAND,
+    COMMONJS_MODULE_EXPORTS,
+    COMMONJS_NESTED_EXPORTS,
+    LEXICAL_DECLARATION_CONFIG,
+    VAR_DECLARATION_CONFIG,
+)
 from chunkhound.parsers.mappings.javascript import JavaScriptMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-from chunkhound.parsers.mappings._shared.js_query_patterns import (
-    TOP_LEVEL_LEXICAL_CONFIG,
-    TOP_LEVEL_VAR_CONFIG,
-    COMMONJS_MODULE_EXPORTS,
-    COMMONJS_NESTED_EXPORTS,
-    COMMONJS_EXPORTS_SHORTHAND,
-)
-from chunkhound.parsers.mappings._shared.js_query_patterns import (
-    TOP_LEVEL_LEXICAL_CONFIG,
-    TOP_LEVEL_VAR_CONFIG,
-    COMMONJS_MODULE_EXPORTS,
-    COMMONJS_NESTED_EXPORTS,
-    COMMONJS_EXPORTS_SHORTHAND,
-)
 
 if TYPE_CHECKING:
     from tree_sitter import Node as TSNode
@@ -205,8 +200,8 @@ class JSXMapping(JavaScriptMapping):
                 ; Exports
                 (export_statement) @definition
                 """,
-                TOP_LEVEL_LEXICAL_CONFIG,
-                TOP_LEVEL_VAR_CONFIG,
+                LEXICAL_DECLARATION_CONFIG,
+                VAR_DECLARATION_CONFIG,
                 # Top-level const/let function/arrow
                 """
                 (program
@@ -436,3 +431,34 @@ class JSXMapping(JavaScriptMapping):
 
         # Use base JavaScript cleaning
         return self.clean_comment_text(text)
+
+    def resolve_import_path(self, import_text: str, base_dir: Path, source_file: Path) -> Path | None:
+        """Resolve relative import path to absolute file path.
+
+        Args:
+            import_text: Import statement text
+            base_dir: Base directory for resolution
+            source_file: Source file containing the import
+
+        Returns:
+            Resolved absolute path or None if not resolvable
+        """
+        match = re.search(r'''(?:from\s+['"](.+?)['"]|require\s*\(\s*['"](.+?)['"]\s*\))''', import_text)
+        if not match:
+            return None
+        import_path = match.group(1) or match.group(2)
+        if not import_path or not import_path.startswith('.'):
+            return None
+        source_dir = self._resolve_source_dir(source_file, base_dir)
+        resolved = (source_dir / import_path).resolve()
+        if resolved.exists() and resolved.is_file():
+            return resolved
+        for ext in ['.js', '.jsx', '.ts', '.tsx']:
+            with_ext = resolved.with_suffix(ext)
+            if with_ext.exists():
+                return with_ext
+        for index in ['index.js', 'index.jsx', 'index.ts', 'index.tsx']:
+            index_path = resolved / index
+            if index_path.exists():
+                return index_path
+        return None

@@ -254,6 +254,31 @@ class EmbeddingProvider(Protocol):
         """
         ...
 
+    # Reranking Operations (Optional)
+    def supports_reranking(self) -> bool:
+        """Return True if this provider supports reranking."""
+        ...
+
+    async def rerank(
+        self, query: str, documents: list[str], top_k: int | None = None
+    ) -> list[RerankResult]:
+        """Rerank documents by relevance to query.
+
+        Only called if supports_reranking() returns True.
+
+        Args:
+            query: Query text to rank against
+            documents: List of document texts to rank
+            top_k: Optional limit on number of results
+
+        Returns:
+            List of RerankResult with original index and relevance score
+
+        Raises:
+            NotImplementedError: If provider doesn't support reranking
+        """
+        ...
+
 
 class LocalEmbeddingProvider(EmbeddingProvider, Protocol):
     """Extended protocol for local embedding providers."""
