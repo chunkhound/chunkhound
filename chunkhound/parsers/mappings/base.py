@@ -458,6 +458,24 @@ class BaseMapping(ABC):
         """
         return True
 
+    def _resolve_source_dir(self, source_file: Path, base_dir: Path | None) -> Path:
+        """Resolve source directory, anchoring relative paths to base_dir.
+
+        When source_file is relative (e.g., from database), anchor it to base_dir.
+        When source_file is absolute, use it directly.
+
+        Args:
+            source_file: Source file path (may be relative or absolute)
+            base_dir: Project base directory for anchoring relative paths
+
+        Returns:
+            The directory containing the source file
+        """
+        source_dir = source_file.parent
+        if not source_file.is_absolute() and base_dir:
+            source_dir = base_dir / source_file.parent
+        return source_dir
+
     def resolve_import_path(
         self,
         import_text: str,

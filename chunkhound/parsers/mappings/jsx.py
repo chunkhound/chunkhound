@@ -449,7 +449,7 @@ class JSXMapping(JavaScriptMapping):
         import_path = match.group(1) or match.group(2)
         if not import_path or not import_path.startswith('.'):
             return None
-        source_dir = source_file.parent
+        source_dir = self._resolve_source_dir(source_file, base_dir)
         resolved = (source_dir / import_path).resolve()
         if resolved.exists() and resolved.is_file():
             return resolved

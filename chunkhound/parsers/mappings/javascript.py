@@ -616,7 +616,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
             return None
 
         # Resolve relative to source file's directory
-        source_dir = source_file.parent
+        source_dir = self._resolve_source_dir(source_file, base_dir)
         resolved = (source_dir / import_path).resolve()
 
         # Try direct path
