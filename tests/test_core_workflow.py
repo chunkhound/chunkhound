@@ -16,7 +16,9 @@ from chunkhound.services.search_service import SearchService
 @pytest.fixture
 def workflow_components(tmp_path):
     """Real components for end-to-end testing."""
-    db = DuckDBProvider(":memory:", base_directory=tmp_path)
+    # Use file-based database (not :memory:) because semantic search requires ShardManager
+    db_path = tmp_path / "test.db"
+    db = DuckDBProvider(str(db_path), base_directory=tmp_path)
     db.connect()  # Initialize database schema
     parser = create_parser_for_language(Language.PYTHON)
     coordinator = IndexingCoordinator(db, tmp_path, None, {Language.PYTHON: parser})

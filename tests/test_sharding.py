@@ -2397,10 +2397,13 @@ class TestShardSplitAndJoinLifecycle:
         )
 
         # Insert exactly TEST_SPLIT_THRESHOLD (100) vectors to shard_0
-        vectors = [
-            generator.generate_hash_seeded(f"lifecycle_doc_{i}")
-            for i in range(TEST_SPLIT_THRESHOLD)
-        ]
+        # Use clustered vectors to guarantee K-means produces balanced splits
+        clustered = generator.generate_clustered(
+            num_clusters=2,
+            per_cluster=TEST_SPLIT_THRESHOLD // 2,
+            separation=0.5,
+        )
+        vectors = [vec for vec, _ in clustered]
         insert_embeddings_to_db(tmp_db, vectors, shard_0_id)
 
         # Run fix_pass() -> triggers first split
@@ -2444,10 +2447,13 @@ class TestShardSplitAndJoinLifecycle:
         target_shard = max(shard_counts.keys(), key=lambda s: shard_counts[s])
 
         # Insert 70 vectors to guarantee split (even if shard only has 30, 30+70=100)
-        phase2_vectors = [
-            generator.generate_hash_seeded(f"lifecycle_phase2_doc_{i}")
-            for i in range(70)
-        ]
+        # Use clustered vectors to guarantee K-means produces balanced splits
+        clustered = generator.generate_clustered(
+            num_clusters=2,
+            per_cluster=35,
+            separation=0.5,
+        )
+        phase2_vectors = [vec for vec, _ in clustered]
         insert_embeddings_to_db(tmp_db, phase2_vectors, target_shard)
 
         # Run fix_pass - should trigger second split
@@ -2484,10 +2490,13 @@ class TestShardSplitAndJoinLifecycle:
         target_shard = max(shard_counts.keys(), key=lambda s: shard_counts[s])
 
         # Insert 70 more vectors to trigger third split
-        phase3_vectors = [
-            generator.generate_hash_seeded(f"lifecycle_phase3_doc_{i}")
-            for i in range(70)
-        ]
+        # Use clustered vectors to guarantee K-means produces balanced splits
+        clustered = generator.generate_clustered(
+            num_clusters=2,
+            per_cluster=35,
+            separation=0.5,
+        )
+        phase3_vectors = [vec for vec, _ in clustered]
         insert_embeddings_to_db(tmp_db, phase3_vectors, target_shard)
 
         # Run fix_pass - should trigger third split
@@ -2953,10 +2962,14 @@ class TestSplitMergeCycleProtection:
             )
 
             # Insert exactly split_threshold vectors to trigger split
-            vectors = [
-                generator.generate_hash_seeded(f"cycle_test_{i}")
-                for i in range(TEST_SPLIT_THRESHOLD)
-            ]
+            # Use clustered vectors to guarantee K-means produces balanced splits
+            # (random vectors don't naturally cluster and may produce unbalanced splits)
+            clustered = generator.generate_clustered(
+                num_clusters=2,
+                per_cluster=TEST_SPLIT_THRESHOLD // 2,
+                separation=0.5,
+            )
+            vectors = [vec for vec, _cluster_id in clustered]
             insert_embeddings_to_db(db_provider, vectors, shard_id)
 
             # Run fix_pass - should split into 2 balanced shards

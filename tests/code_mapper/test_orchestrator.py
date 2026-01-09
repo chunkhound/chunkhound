@@ -4,14 +4,14 @@ from chunkhound.code_mapper.orchestrator import CodeMapperOrchestrator
 from chunkhound.core.config.config import Config
 
 
-def test_orchestrator_run_context_max_points() -> None:
+def test_orchestrator_run_context_max_points(tmp_path: Path) -> None:
     class Args:
         def __init__(self) -> None:
             self.comprehensiveness = "low"
             self.path = "scope"
 
     config = Config(
-        target_dir=Path(".").resolve(),
+        target_dir=tmp_path,
         database={"path": Path(".") / ".chunkhound" / "db", "provider": "duckdb"},
         embedding={"provider": "openai", "api_key": "test", "model": "test"},
         llm={"provider": "openai", "api_key": "test"},
