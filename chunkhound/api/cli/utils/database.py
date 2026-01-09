@@ -1,9 +1,11 @@
 """Database utility functions for CLI commands."""
 
+from pathlib import Path
+
 from chunkhound.core.config.config import Config
 
 
-def verify_database_exists(config: Config) -> None:
+def verify_database_exists(config: Config) -> Path:
     """Verify database exists, raising if not found.
 
     Args:
@@ -13,7 +15,8 @@ def verify_database_exists(config: Config) -> None:
         FileNotFoundError: If database doesn't exist
         ValueError: If database path not configured
     """
-    if not config.database.path:
+    db_path = config.database.path
+    if not db_path:
         raise ValueError("Database path not configured")
 
     # Check existence using transformed path (includes provider-specific suffix)
@@ -23,3 +26,4 @@ def verify_database_exists(config: Config) -> None:
             f"Database not found at {actual_db_path}. "
             f"Run 'chunkhound index <directory>' to create the database first."
         )
+    return actual_db_path

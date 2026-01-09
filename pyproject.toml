@@ -42,7 +42,6 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "loguru>=0.6.0",
     "mcp>=1.0.0",
-    "fastmcp>=2.0.0",
     "psutil>=5.8.0",
     "PyYAML>=6.0.0",
     "tiktoken>=0.9.0",
@@ -117,6 +116,9 @@ version-file = "chunkhound/_version.py"
 include = [
     "chunkhound/**/*.py",
     "chunkhound/py.typed",
+    "chunkhound/code_mapper/prompts/*.md",
+    "chunkhound/autodoc/prompts/*.txt",
+    "chunkhound/autodoc/assets/**/*",
     "tests/fixtures/yaml/**/*",
 ]
 

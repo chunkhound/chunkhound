@@ -17,6 +17,8 @@ from fnmatch import translate, fnmatch
 from pathlib import Path
 from typing import Pattern, Optional
 
+from chunkhound.core.utils.path_utils import get_relative_path_safe
+
 
 @lru_cache(maxsize=4096)
 def _compile_pattern_global(pattern: str) -> Pattern[str]:
@@ -58,13 +60,25 @@ def _summarize_include_patterns(patterns: list[str]) -> tuple[set[str], set[str]
 
     def is_simple_ext(s: str) -> str | None:
         # Accept forms like "*.py" exactly (no other wildcards or path separators)
-        if s.startswith("*.") and ("*" not in s[2:]) and ("?" not in s) and ("[" not in s) and ("/" not in s):
+        if (
+            s.startswith("*.")
+            and ("*" not in s[2:])
+            and ("?" not in s)
+            and ("[" not in s)
+            and ("/" not in s)
+        ):
             return s[1:]
         return None
 
     def is_exact_name(s: str) -> str | None:
         # No wildcards and no path separators
-        if ("*" not in s) and ("?" not in s) and ("[" not in s) and ("/" not in s) and s:
+        if (
+            ("*" not in s)
+            and ("?" not in s)
+            and ("[" not in s)
+            and ("/" not in s)
+            and s
+        ):
             return s
         return None
 
@@ -86,6 +100,7 @@ def _summarize_include_patterns(patterns: list[str]) -> tuple[set[str], set[str]
 
 
 # --------------------------- Prune helpers (performance) ---------------------------
+
 
 def _extract_include_prefixes(patterns: list[str]) -> set[str]:
     """Extract anchored directory prefixes from include patterns.
@@ -133,7 +148,9 @@ def _can_prune_dir_by_prefix(include_prefixes: set[str], current_rel: str) -> bo
     return True
 
 
-def _should_prune_heavy_dir(heavy_names: set[str], include_prefixes: set[str], current_name: str) -> bool:
+def _should_prune_heavy_dir(
+    heavy_names: set[str], include_prefixes: set[str], current_name: str
+) -> bool:
     """Return True to prune a heavy directory by name when not explicitly anchored."""
     if current_name not in heavy_names:
         return False
@@ -225,8 +242,11 @@ def should_include_file(
     Returns:
         True if file should be included, False otherwise
     """
-    rel_path = file_path.relative_to(root_dir)
-    rel_path_str = rel_path.as_posix()
+    try:
+        rel_path_str = get_relative_path_safe(file_path, root_dir).as_posix()
+    except ValueError:
+        # Symlink pointing outside root_dir - use filename only for matching
+        rel_path_str = file_path.name
     filename = file_path.name
 
     for pattern in patterns:
@@ -349,7 +369,9 @@ def scan_directory_files(
                 # Check against exclude patterns or ignore engine
                 if ignore_engine is not None:
                     try:
-                        if getattr(ignore_engine, "matches", None) and ignore_engine.matches(item, is_dir=False):  # type: ignore[attr-defined]
+                        if getattr(
+                            ignore_engine, "matches", None
+                        ) and ignore_engine.matches(item, is_dir=False):  # type: ignore[attr-defined]
                             continue
                     except Exception:
                         pass
@@ -365,7 +387,9 @@ def scan_directory_files(
                     continue
 
                 # Fast include prefilter: avoid regex matching when file can't possibly match
-                allow_exts, allow_names, has_complex = _summarize_include_patterns(patterns)
+                allow_exts, allow_names, has_complex = _summarize_include_patterns(
+                    patterns
+                )
                 if not has_complex:
                     fname = item.name
                     if (fname not in allow_names) and (item.suffix not in allow_exts):
@@ -389,6 +413,7 @@ def walk_directory_tree(
     parent_gitignores: dict[Path, list[str]],
     use_inode_ordering: bool = False,
     ignore_engine: Optional[object] = None,
+    max_files: int | None = None,
 ) -> tuple[list[Path], dict[Path, list[str]]]:
     """Core directory traversal logic shared by sequential and parallel discovery.
 
@@ -421,7 +446,9 @@ def walk_directory_tree(
         return files, gitignore_patterns
 
     # Precompute include summary once for this walk
-    inc_allow_exts, inc_allow_names, inc_has_complex = _summarize_include_patterns(patterns)
+    inc_allow_exts, inc_allow_names, inc_has_complex = _summarize_include_patterns(
+        patterns
+    )
     include_prefixes = _extract_include_prefixes(patterns)
     HEAVY_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "target"}
 
@@ -468,7 +495,9 @@ def walk_directory_tree(
                 continue
             if ignore_engine is not None:
                 try:
-                    if getattr(ignore_engine, "matches", None) and ignore_engine.matches(dir_path, is_dir=True):  # type: ignore[attr-defined]
+                    if getattr(
+                        ignore_engine, "matches", None
+                    ) and ignore_engine.matches(dir_path, is_dir=True):  # type: ignore[attr-defined]
                         excluded = True
                 except Exception:
                     excluded = False
@@ -503,7 +532,9 @@ def walk_directory_tree(
 
             if ignore_engine is not None:
                 try:
-                    if getattr(ignore_engine, "matches", None) and ignore_engine.matches(file_path, is_dir=False):  # type: ignore[attr-defined]
+                    if getattr(
+                        ignore_engine, "matches", None
+                    ) and ignore_engine.matches(file_path, is_dir=False):  # type: ignore[attr-defined]
                         continue
                 except Exception:
                     pass
@@ -520,17 +551,23 @@ def walk_directory_tree(
 
             # Fast include prefilter: skip files that cannot match simple include patterns
             if not inc_has_complex:
-                if (filename not in inc_allow_names) and (file_path.suffix not in inc_allow_exts):
+                if (filename not in inc_allow_names) and (
+                    file_path.suffix not in inc_allow_exts
+                ):
                     continue
 
             if should_include_file(file_path, root_directory, patterns, pattern_cache):
                 files.append(file_path)
+                if max_files is not None and len(files) >= max_files:
+                    return files, gitignore_patterns
 
     return files, gitignore_patterns
+
 
 # ---------------------------------------------------------------------------
 # Normalization helpers (shared across services)
 # ---------------------------------------------------------------------------
+
 
 def normalize_include_pattern(pattern: str) -> str:
     """Ensure include pattern starts with "**/" prefix without double-prefixing.
@@ -587,10 +624,16 @@ def walk_subtree_worker(
                     build_repo_aware_ignore_engine,
                     build_repo_aware_ignore_engine_from_roots,
                 )  # type: ignore
-                if isinstance(ignore_engine_args, dict) and ignore_engine_args.get("mode") == "repo_aware":
+
+                if (
+                    isinstance(ignore_engine_args, dict)
+                    and ignore_engine_args.get("mode") == "repo_aware"
+                ):
                     roots = ignore_engine_args.get("roots")
                     backend = ignore_engine_args.get("backend", "python")
-                    overlay = bool(ignore_engine_args.get("workspace_nonrepo_overlay", False))
+                    overlay = bool(
+                        ignore_engine_args.get("workspace_nonrepo_overlay", False)
+                    )
                     if roots:
                         ignore_engine_obj = build_repo_aware_ignore_engine_from_roots(
                             root=ignore_engine_args["root"],
@@ -613,7 +656,10 @@ def walk_subtree_worker(
                 else:
                     root, sources, chf, cfg_ex = ignore_engine_args  # type: ignore
                     ignore_engine_obj = build_ignore_engine(
-                        root=root, sources=sources, chignore_file=chf, config_exclude=cfg_ex
+                        root=root,
+                        sources=sources,
+                        chignore_file=chf,
+                        config_exclude=cfg_ex,
                     )
             except Exception:
                 ignore_engine_obj = None

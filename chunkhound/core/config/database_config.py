@@ -96,7 +96,22 @@ class DatabaseConfig(BaseModel):
 
         # Skip directory creation for in-memory databases (":memory:" is invalid on Windows)
         is_memory = str(self.path) == ":memory:"
+
+        # Backwards-compatible handling:
+        # - Older ChunkHound versions used `database.path` as the direct DuckDB
+        #   file location (for example, `.chunkhound/db` as a file).
+        # - Newer versions treat `database.path` as a directory and store the
+        #   DuckDB file as `path/chunks.db`.
+        #
+        # When the configured path already exists as a file, we treat it as a
+        # legacy DuckDB database file and return it directly instead of trying
+        # to create a directory at that location.
+        if self.provider == "duckdb" and not is_memory:
+            if self.path.exists() and self.path.is_file():
+                return self.path
+
         if not is_memory:
+            # For directory-style layouts, ensure the base path exists.
             self.path.mkdir(parents=True, exist_ok=True)
 
         if self.provider == "duckdb":

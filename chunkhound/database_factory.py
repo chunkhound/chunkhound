@@ -18,7 +18,6 @@ INTEGRATION REQUIREMENT:
 Any changes to this factory must be tested across all execution paths:
 - CLI commands (chunkhound run)
 - MCP stdio server
-- MCP HTTP server
 - File change processing
 """
 
@@ -43,6 +42,37 @@ class DatabaseServices(NamedTuple):
     indexing_coordinator: "IndexingCoordinator"
     search_service: "SearchService"
     embedding_service: "EmbeddingService"
+
+
+def _db_root_path_for_config(db_path: Path | str, *, provider: str | None) -> Path | str:
+    """Return the directory-style database path expected by DatabaseConfig.
+
+    `DatabaseConfig.get_db_path()` derives provider-specific locations from the
+    configured `database.path` root. Some call sites pass canonical provider
+    paths (e.g. `.../chunks.db` or `.../lancedb.lancedb`) into `create_services`.
+    When we feed those canonical paths back into a `Config`, we must convert
+    them back to the root so `get_db_path()` stays stable.
+    """
+    if str(db_path) == ":memory:":
+        return db_path
+
+    path = Path(db_path)
+
+    if provider == "duckdb":
+        if path.name == "chunks.db":
+            return path.parent
+        return path
+
+    if provider == "lancedb":
+        if path.suffix == ".lancedb":
+            return path.parent
+        return path
+
+    if path.name == "chunks.db":
+        return path.parent
+    if path.suffix == ".lancedb":
+        return path.parent
+    return path
 
 
 def create_services(
@@ -76,12 +106,19 @@ def create_services(
         if isinstance(config, dict):
             effective_config = dict(config)
             db_dict = dict(effective_config.get("database", {}))
-            db_dict["path"] = Path(db_path)
             db_dict.setdefault("provider", "duckdb")
+            db_dict["path"] = _db_root_path_for_config(
+                db_path, provider=str(db_dict.get("provider") or "duckdb")
+            )
             effective_config["database"] = db_dict
         else:
             if hasattr(config, "database") and hasattr(config.database, "path"):
-                config.database.path = Path(db_path)
+                provider = getattr(config.database, "provider", None)
+                config.database.path = Path(
+                    _db_root_path_for_config(
+                        db_path, provider=str(provider or "duckdb")
+                    )
+                )
             effective_config = config
     except Exception:
         effective_config = config

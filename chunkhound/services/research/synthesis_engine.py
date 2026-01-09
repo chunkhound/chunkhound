@@ -18,6 +18,7 @@ The synthesis engine uses:
 """
 
 import asyncio
+import time
 from typing import Any
 
 from loguru import logger
@@ -191,15 +192,37 @@ class SynthesisEngine:
 
             logger.info(f"Using chunk score fallback for {len(file_priorities)} files")
         else:
-            # Build priority map from rerank scores
-            # Process results outside try block - let IndexError fail loudly if provider returns bad data
+            # Build priority map from rerank scores. Some providers may return
+            # result indexes that do not align with the documents array (for
+            # example, due to internal truncation). In that case we skip the
+            # out-of-range entries instead of raising IndexError so that
+            # deep-research callers (including MCP code_research) degrade
+            # gracefully instead of failing the entire run.
             for result in rerank_results:
-                file_path = file_paths[result.index]
-                file_priorities[file_path] = result.score
+                idx = result.index
+                if 0 <= idx < len(file_paths):
+                    file_path = file_paths[idx]
+                    file_priorities[file_path] = result.score
+                else:
+                    logger.warning(
+                        "Rerank result index %s out of range for %s files; "
+                        "skipping this entry",
+                        idx,
+                        len(file_paths),
+                    )
 
             logger.info(
                 f"Reranked {len(file_priorities)} files for synthesis budget allocation"
             )
+
+            if not file_priorities:
+                logger.warning(
+                    "All rerank results were out of range; falling back to chunk scores"
+                )
+                for file_path, file_chunks in file_to_chunks.items():
+                    file_priorities[file_path] = sum(
+                        c.get("score", 0.0) for c in file_chunks
+                    )
 
         # Sort files by priority score (highest first)
         # Works for both reranking and fallback paths
@@ -384,8 +407,7 @@ class SynthesisEngine:
         file_reference_map = self._parent._build_file_reference_map(budgeted_chunks, files)
         reference_table = self._parent._format_reference_table(file_reference_map)
 
-        # Build output guidance with fixed 25k token budget
-        # Output budget is always 25k (includes reasoning + actual output)
+        # Default: curated but still detailed analysis.
         output_guidance = (
             f"**Target Output:** Provide a thorough and detailed analysis of approximately "
             f"{max_output_tokens:,} tokens (includes reasoning). Focus on all relevant "
@@ -407,11 +429,23 @@ class SynthesisEngine:
             f"timeout={SINGLE_PASS_TIMEOUT_SECONDS}s)"
         )
 
+        await self._parent._emit_event(
+            "llm_synthesis",
+            f"Calling {llm.name}:{llm.model} for synthesis",
+            max_completion_tokens=max_output_tokens,
+        )
+        started = time.perf_counter()
         response = await llm.complete(
             prompt,
             system=system,
             max_completion_tokens=max_output_tokens,
             timeout=SINGLE_PASS_TIMEOUT_SECONDS,
+        )
+        duration_s = time.perf_counter() - started
+        await self._parent._emit_event(
+            "llm_synthesis_complete",
+            f"Synthesis LLM call completed in {duration_s:.1f}s",
+            duration=duration_s,
         )
 
         answer = response.content
@@ -596,11 +630,23 @@ Provide a comprehensive analysis focusing on the query."""
             f"timeout={SINGLE_PASS_TIMEOUT_SECONDS}s)"
         )
 
+        await self._parent._emit_event(
+            "llm_synthesis",
+            f"Calling {llm.name}:{llm.model} for cluster {cluster.cluster_id} synthesis",
+            max_completion_tokens=cluster_output_tokens,
+        )
+        started = time.perf_counter()
         response = await llm.complete(
             prompt,
             system=system,
             max_completion_tokens=cluster_output_tokens,
             timeout=SINGLE_PASS_TIMEOUT_SECONDS,
+        )
+        duration_s = time.perf_counter() - started
+        await self._parent._emit_event(
+            "llm_synthesis_complete",
+            f"Cluster {cluster.cluster_id} synthesis completed in {duration_s:.1f}s",
+            duration=duration_s,
         )
 
         # Build sources list for this cluster
@@ -724,11 +770,23 @@ Provide a complete, integrated analysis that addresses the original query."""
             f"(max_completion_tokens={max_output_tokens:,})"
         )
 
+        await self._parent._emit_event(
+            "llm_synthesis",
+            f"Calling {llm.name}:{llm.model} for reduce synthesis",
+            max_completion_tokens=max_output_tokens,
+        )
+        started = time.perf_counter()
         response = await llm.complete(
             prompt,
             system=system,
             max_completion_tokens=max_output_tokens,
             timeout=SINGLE_PASS_TIMEOUT_SECONDS,  # type: ignore[call-arg]
+        )
+        duration_s = time.perf_counter() - started
+        await self._parent._emit_event(
+            "llm_synthesis_complete",
+            f"Reduce synthesis completed in {duration_s:.1f}s",
+            duration=duration_s,
         )
 
         answer = response.content

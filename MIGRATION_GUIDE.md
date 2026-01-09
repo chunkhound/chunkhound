@@ -37,10 +37,6 @@ All new environment variables use the `CHUNKHOUND_` prefix with `__` delimiter f
 - `CHUNKHOUND_EMBEDDING__BASE_URL` - Base URL for API
 - `CHUNKHOUND_EMBEDDING__BATCH_SIZE` - Batch size for embeddings
 - `CHUNKHOUND_EMBEDDING__MAX_CONCURRENT` - Max concurrent embedding batches
-- `CHUNKHOUND_MCP__TRANSPORT` - MCP transport type (stdio/http)
-- `CHUNKHOUND_MCP__PORT` - Port for HTTP transport
-- `CHUNKHOUND_MCP__HOST` - Host for HTTP transport
-- `CHUNKHOUND_MCP__CORS` - Enable CORS for HTTP
 - `CHUNKHOUND_INDEXING__BATCH_SIZE` - Indexing batch size
 - `CHUNKHOUND_INDEXING__DB_BATCH_SIZE` - Database batch size
 - `CHUNKHOUND_INDEXING__MAX_CONCURRENT` - Max concurrent operations
@@ -61,8 +57,8 @@ chunkhound index . --database-path /path/to/db --database-provider lancedb
 # Embedding configuration
 chunkhound index . --embedding-provider openai --embedding-model text-embedding-3-small
 
-# MCP configuration
-chunkhound mcp --mcp-transport http --mcp-port 3000 --mcp-cors
+# MCP configuration (stdio only)
+chunkhound mcp
 
 # Indexing configuration
 chunkhound index . --indexing-batch-size 1000

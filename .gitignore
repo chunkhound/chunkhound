@@ -1,5 +1,4 @@
 .DS_Store
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -292,3 +291,5 @@ cluster_eval.json
 
 # benchmark reports
 *_bench_result*.md
+# AI review artifacts
+.gitignored/

@@ -6,6 +6,25 @@ from typing import Any, Callable, Protocol
 from chunkhound.core.models import Chunk, Embedding, File
 
 
+class ScopeAggregationProvider(Protocol):
+    """Optional scope aggregation helpers (used by code_mapper coverage)."""
+
+    def get_scope_stats(self, scope_prefix: str | None) -> tuple[int, int]:
+        """Return (total_files, total_chunks) under an optional scope prefix.
+
+        Implementations should avoid loading full chunk code payloads.
+        """
+        ...
+
+    def get_scope_file_paths(self, scope_prefix: str | None) -> list[str]:
+        """Return file paths under an optional scope prefix.
+
+        Returned paths should be normalized to forward slashes and be comparable
+        to `metadata.sources.files` entries.
+        """
+        ...
+
+
 class DatabaseProvider(Protocol):
     """Abstract protocol for database providers.
 

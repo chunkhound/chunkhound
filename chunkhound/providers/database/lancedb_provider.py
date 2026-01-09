@@ -2726,6 +2726,151 @@ class LanceDBProvider(SerialDatabaseProvider):
             logger.error(f"Failed to invalidate embeddings by provider/model: {e}")
             raise
 
+    def get_scope_stats(self, scope_prefix: str | None) -> tuple[int, int]:
+        """Return (total_files, total_chunks) under an optional scope prefix.
+
+        Best-effort implementation for LanceDB. This should avoid loading full
+        chunk content when possible, but LanceDB table APIs may vary across
+        versions; callers should treat failures as non-fatal.
+        """
+        return self._execute_in_db_thread_sync("get_scope_stats", scope_prefix)
+
+    def _executor_get_scope_stats(
+        self, conn: Any, state: dict[str, Any], scope_prefix: str | None
+    ) -> tuple[int, int]:
+        if not self._files_table or not self._chunks_table:
+            return 0, 0
+
+        try:
+            if scope_prefix:
+                normalized = scope_prefix.replace("\\", "/")
+                clause = self._build_path_like_clause(normalized)
+                files = self._files_table.search().where(clause).to_list()
+                file_ids: set[int] = set()
+                for row in files:
+                    try:
+                        fid = row.get("id")
+                        if fid is not None:
+                            file_ids.add(int(fid))
+                    except Exception:
+                        continue
+
+                total_files = len(file_ids)
+                if not file_ids:
+                    return 0, 0
+
+                # Slow fallback: scan the chunks table and count rows whose
+                # file_id is in the scoped file_id set.
+                #
+                # This avoids schema changes while still producing correct scoped
+                # chunk totals, but may be memory-heavy for very large databases.
+                total_chunks = 0
+
+                try:
+                    file_ids_list = sorted(file_ids)
+                    batched_total = self._count_chunks_for_file_ids(file_ids_list)
+                    if batched_total is not None:
+                        return total_files, batched_total
+                except Exception:
+                    pass
+
+                # Fallback: scan the chunks table in pages to avoid loading the
+                # entire dataset at once when pagination is supported.
+                try:
+                    chunks_count = int(self._chunks_table.count_rows())
+                except Exception:
+                    chunks_count = 0
+
+                if chunks_count <= 0:
+                    return total_files, 0
+
+                page_size = 10_000
+                file_ids_set = set(file_ids)
+
+                for offset in range(0, chunks_count, page_size):
+                    try:
+                        batch_df = self._chunks_table.to_pandas(
+                            offset=offset, limit=page_size
+                        )
+                    except TypeError:
+                        # LanceDB may not support offset/limit; fall back to a full load.
+                        if offset == 0:
+                            try:
+                                chunks_df = self._chunks_table.to_pandas()
+                            except Exception:
+                                try:
+                                    self._chunks_table.optimize()
+                                    chunks_df = self._chunks_table.to_pandas()
+                                except Exception:
+                                    return total_files, 0
+                            if "file_id" not in chunks_df.columns:
+                                return total_files, 0
+                            try:
+                                total_chunks = int(
+                                    chunks_df["file_id"].isin(list(file_ids_set)).sum()
+                                )
+                            except Exception:
+                                total_chunks = 0
+                        break
+
+                    if "file_id" not in batch_df.columns:
+                        return total_files, 0
+
+                    try:
+                        total_chunks += int(
+                            batch_df["file_id"].isin(list(file_ids_set)).sum()
+                        )
+                    except Exception:
+                        continue
+
+                return total_files, total_chunks
+
+            # Root scope: counts over full tables.
+            total_files = int(self._files_table.count_rows())
+            total_chunks = int(self._chunks_table.count_rows())
+            return total_files, total_chunks
+        except Exception:
+            return 0, 0
+
+    def get_scope_file_paths(self, scope_prefix: str | None) -> list[str]:
+        """Return file paths under an optional scope prefix."""
+        return self._execute_in_db_thread_sync("get_scope_file_paths", scope_prefix)
+
+    def _executor_get_scope_file_paths(
+        self, conn: Any, state: dict[str, Any], scope_prefix: str | None
+    ) -> list[str]:
+        if not self._files_table:
+            return []
+
+        try:
+            if scope_prefix:
+                normalized = scope_prefix.replace("\\", "/")
+                clause = self._build_path_like_clause(normalized)
+                rows = self._files_table.search().where(clause).to_list()
+            else:
+                total = int(self._files_table.count_rows())
+                rows = self._files_table.head(total).to_list()
+        except Exception:
+            return []
+
+        out: list[str] = []
+        for row in rows:
+            try:
+                path = str(row.get("path") or "").replace("\\", "/")
+            except Exception:
+                path = ""
+            if path:
+                out.append(path)
+        out.sort()
+        return out
+
+    def _executor_get_all_chunks_with_metadata(
+        self, conn: Any, state: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Executor method for get_all_chunks_with_metadata - runs in DB thread."""
+        if not self._chunks_table or not self._files_table:
+            return []
+
     def get_connection_info(self) -> dict[str, Any]:
         """Get information about the database connection."""
         return {

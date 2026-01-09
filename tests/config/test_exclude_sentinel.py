@@ -8,43 +8,46 @@ provides a resolver method.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from chunkhound.core.config.config import Config
 
 
-def test_exclude_sentinel_gitignore_maps_to_source_gitignore() -> None:
-    cfg = Config(**{"indexing": {"exclude": ".gitignore"}})
+def test_exclude_sentinel_gitignore_maps_to_source_gitignore(tmp_path: Path) -> None:
+    cfg = Config(target_dir=tmp_path, **{"indexing": {"exclude": ".gitignore"}})
 
     # New helper to resolve ignore sources from config
     sources = cfg.indexing.resolve_ignore_sources()  # type: ignore[attr-defined]
     assert sources == ["gitignore"]
 
 
-def test_exclude_sentinel_chignore_now_ignored() -> None:
+def test_exclude_sentinel_chignore_now_ignored(tmp_path: Path) -> None:
     # .chignore sentinel is no longer supported; fallback to default (.gitignore only)
-    cfg = Config(**{"indexing": {"exclude": ".chignore"}})
-    # Reset exclude_user_supplied to test sentinel behavior in isolation
-    cfg.indexing.exclude_user_supplied = False
+    cfg = Config(target_dir=tmp_path, **{"indexing": {"exclude": ".chignore"}})
     sources = cfg.indexing.resolve_ignore_sources()  # type: ignore[attr-defined]
     assert sources == ["gitignore"]
 
 
-def test_exclude_list_defaults_to_combined_sources() -> None:
-    cfg = Config(**{"indexing": {"exclude": ["**/dist/**", "**/*.min.js"]}})
+def test_exclude_list_defaults_to_combined_sources(tmp_path: Path) -> None:
+    cfg = Config(
+        target_dir=tmp_path, **{"indexing": {"exclude": ["**/dist/**", "**/*.min.js"]}}
+    )
 
     sources = cfg.indexing.resolve_ignore_sources()  # type: ignore[attr-defined]
     assert sources == ["gitignore", "config"]
 
 
-def test_exclude_list_can_force_config_only_mode() -> None:
-    cfg = Config(**{"indexing": {"exclude": ["**/dist/**"], "exclude_mode": "config_only"}})
+def test_exclude_list_can_force_config_only_mode(tmp_path: Path) -> None:
+    cfg = Config(
+        target_dir=tmp_path,
+        **{"indexing": {"exclude": ["**/dist/**"], "exclude_mode": "config_only"}},
+    )
     sources = cfg.indexing.resolve_ignore_sources()  # type: ignore[attr-defined]
     assert sources == ["config"]
 
 
-def test_exclude_missing_defaults_to_gitignore_only() -> None:
+def test_exclude_missing_defaults_to_gitignore_only(tmp_path: Path) -> None:
     # When 'exclude' not provided explicitly, default behavior should be gitignore-only
-    cfg = Config(**{"indexing": {}})
-    # Reset exclude_user_supplied to test default behavior in isolation
-    cfg.indexing.exclude_user_supplied = False
+    cfg = Config(target_dir=tmp_path, **{"indexing": {}})
     sources = cfg.indexing.resolve_ignore_sources()  # type: ignore[attr-defined]
     assert sources == ["gitignore"]

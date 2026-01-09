@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Changes
+- **HTTP MCP server removed** - ChunkHound now supports stdio transport only for MCP connections
+  - `chunkhound mcp http` command removed
+  - `--http`, `--port`, `--host` CLI flags removed
+  - FastMCP dependency removed
+  - Migration: Use `chunkhound mcp` (stdio) instead. All major MCP clients (Claude Code, Claude Desktop, VS Code) support stdio transport.
+  - Rationale: Simplified codebase, reduced dependencies, focused on primary use case (stdio is the standard for MCP)
+
 ### Added
 - OpenAI Responses API support for reasoning models (gpt-5.1, gpt-5.1-codex, o-series, gpt-5-pro) - enables deep code research with enhanced reasoning capabilities
 - Automatic API routing between Chat Completions and Responses API based on model compatibility - supports 30+ models including all GPT-5, GPT-4.1, GPT-4o, and o-series models
@@ -58,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Haskell language support for functions, types, classes, and modules (`.hs`, `.lhs`, `.hs-boot`, `.hsig`, `.hsc`)
 - HCL (HashiCorp Configuration Language) support for Terraform with nested object parsing (`.hcl`, `.tf`, `.tfvars`)
 - Vue.js Single File Component (SFC) support with specialized parsing for template, script, and style sections
+- Svelte Single File Component support with specialized parsing for template, script, and style sections (`.svelte`)
 - Vue cross-reference tracking between template elements and script definitions for enhanced semantic understanding
 - PHP language support with comprehensive parsing for classes, interfaces, traits, functions, methods, namespaces, and PHPDoc comments
 - RapidYAML parser using native bindings (10-100x faster than tree-sitter for large YAML files)

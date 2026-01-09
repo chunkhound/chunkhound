@@ -16,11 +16,10 @@ from typing import Any
 
 from loguru import logger
 
-from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
-from chunkhound.utils.json_extraction import extract_json_from_response
+from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
 
 
-class CodexCLIProvider(LLMProvider):
+class CodexCLIProvider(BaseCLIProvider):
     """Provider that shells out to `codex exec`.
 
     Notes
@@ -45,16 +44,8 @@ class CodexCLIProvider(LLMProvider):
         max_retries: int = 3,
         reasoning_effort: str | None = None,
     ) -> None:
-        self._model = model
-        self._timeout = timeout
-        self._max_retries = max_retries
+        super().__init__(api_key, model, base_url, timeout, max_retries)
         self._reasoning_effort = self._resolve_reasoning_effort(reasoning_effort)
-
-        # Usage accounting (estimates)
-        self._requests_made = 0
-        self._estimated_tokens_used = 0
-        self._estimated_prompt_tokens = 0
-        self._estimated_completion_tokens = 0
 
         if not self._codex_available():
             logger.warning("Codex CLI not found in PATH (codex)")
@@ -72,34 +63,121 @@ class CodexCLIProvider(LLMProvider):
 
     def _resolve_model_name(self, requested: str | None) -> str:
         """Resolve requested model name to Codex CLI model identifier."""
+        resolved, _source = self.describe_model_resolution(requested)
+        return resolved
+
+    @classmethod
+    def describe_model_resolution(cls, requested: str | None) -> tuple[str, str]:
+        """Return (resolved_model, source) for Codex CLI model selection.
+
+        Notes:
+        - The special value "codex" means "use ChunkHound's default".
+        - Override defaults via CHUNKHOUND_CODEX_DEFAULT_MODEL.
+        """
         env_override = os.getenv("CHUNKHOUND_CODEX_DEFAULT_MODEL")
-        default_model = env_override.strip() if env_override else "gpt-5-codex"
+        # Default to a Codex-optimized reasoning model unless explicitly overridden.
+        default_model = env_override.strip() if env_override else "gpt-5.1-codex"
+        default_source = (
+            "env:CHUNKHOUND_CODEX_DEFAULT_MODEL" if env_override else "default"
+        )
 
         if not requested:
-            return default_model
+            return default_model, default_source
 
         model_name = requested.strip()
         if not model_name or model_name.lower() == "codex":
-            return default_model
+            return default_model, default_source
 
-        return model_name
+        return model_name, "explicit"
 
     def _resolve_reasoning_effort(self, requested: str | None) -> str:
         """Resolve reasoning effort override."""
+        effort, _source = self.describe_reasoning_effort_resolution(requested)
+        return effort
+
+    @classmethod
+    def describe_reasoning_effort_resolution(cls, requested: str | None) -> tuple[str, str]:
+        """Return (resolved_effort, source) for Codex CLI reasoning effort selection."""
         env_override = os.getenv("CHUNKHOUND_CODEX_REASONING_EFFORT")
         candidate = requested or env_override
-        allowed = {"minimal", "low", "medium", "high"}
+        allowed = {"minimal", "low", "medium", "high", "xhigh"}
 
         if not candidate:
-            return "low"
+            return "low", "default"
 
         effort = candidate.strip().lower()
         if effort not in allowed:
             logger.warning(
                 "Unknown Codex reasoning effort '%s'; falling back to 'low'", candidate
             )
-            return "low"
-        return effort
+            return "low", "fallback"
+
+        if requested:
+            return effort, "explicit"
+        if env_override:
+            return effort, "env:CHUNKHOUND_CODEX_REASONING_EFFORT"
+        return effort, "default"
+
+    def _resolve_sandbox_mode(self, requested: str | None = None) -> str:
+        """Resolve sandbox mode for codex exec command execution."""
+        env_override = os.getenv("CHUNKHOUND_CODEX_SANDBOX_MODE")
+        candidate = (requested or env_override or "read-only").strip().lower()
+        allowed = {"read-only", "workspace-write", "danger-full-access"}
+        if candidate not in allowed:
+            logger.warning(
+                "Unknown Codex sandbox mode '%s'; falling back to 'read-only'", candidate
+            )
+            return "read-only"
+        return candidate
+
+    def _resolve_approval_policy(self, requested: str | None = None) -> str:
+        """Resolve approval policy for codex exec tool execution."""
+        env_override = os.getenv("CHUNKHOUND_CODEX_APPROVAL_POLICY")
+        # Default to on-request to discourage command execution in non-interactive runs.
+        candidate = (requested or env_override or "on-request").strip().lower()
+        allowed = {"untrusted", "on-failure", "on-request", "never"}
+        if candidate not in allowed:
+            logger.warning(
+                "Unknown Codex approval policy '%s'; falling back to 'on-request'",
+                candidate,
+            )
+            return "on-request"
+        return candidate
+
+    @staticmethod
+    def _toml_string(value: str) -> str:
+        # Codex parses `-c key=value` with TOML semantics. Use explicit strings to
+        # avoid ambiguity across CLI versions.
+        return '"' + value.replace('"', '\\"') + '"'
+
+    def _extract_agent_message_from_jsonl(self, stdout_text: str) -> tuple[str | None, dict[str, Any] | None]:
+        """Extract final agent message text and usage from `codex exec --json` output."""
+        import json
+
+        last_message: str | None = None
+        usage: dict[str, Any] | None = None
+
+        for line in stdout_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+
+            if obj.get("type") == "item.completed":
+                item = obj.get("item") or {}
+                if item.get("type") == "agent_message":
+                    text = item.get("text")
+                    if isinstance(text, str) and text.strip():
+                        last_message = text
+            elif obj.get("type") == "turn.completed":
+                u = obj.get("usage")
+                if isinstance(u, dict):
+                    usage = u
+
+        return last_message, usage
 
     def _copy_minimal_codex_state(self, base: Path, dest: Path) -> None:
         """Copy minimal auth/session state into destination CODEX_HOME."""
@@ -153,15 +231,14 @@ class CodexCLIProvider(LLMProvider):
             if base and base.exists():
                 self._copy_minimal_codex_state(base, overlay)
 
-            # Write our minimal config.toml ensuring no MCP and no history
             config_path = overlay / "config.toml"
-            # Many Codex builds expect top-level `model` keys (not a [model] table)
+            # Many Codex builds expect top-level `model` keys (not a [model] table).
             cfg_lines = [
-                "[history]",
-                'persistence = "none"',
-                "",
                 f'model = "{model_name}"',
                 f'model_reasoning_effort = "{self._reasoning_effort}"',
+                "",
+                "[history]",
+                'persistence = "none"',
             ]
             config_path.write_text("\n".join(cfg_lines) + "\n", encoding="utf-8")
         except Exception as e:
@@ -202,6 +279,21 @@ class CodexCLIProvider(LLMProvider):
 
         env = os.environ.copy()
         effective_model = self._resolve_model_name(model or self._model)
+        keep_overlay = os.getenv("CHUNKHOUND_CODEX_KEEP_OVERLAY", "0") == "1"
+
+        # Optional verbose diagnostics for large prompts / transport issues.
+        debug_codex = os.getenv("CHUNKHOUND_CODEX_DEBUG", "0") == "1"
+        json_mode = os.getenv("CHUNKHOUND_CODEX_JSON", "0") == "1"
+        content_chars = len(content)
+        estimated_tokens = self.estimate_tokens(content)
+        if debug_codex:
+            logger.debug(
+                "Codex CLI request: model=%s, chars=%d, est_tokens=%d, max_tokens=%d",
+                effective_model,
+                content_chars,
+                estimated_tokens,
+                max_tokens,
+            )
 
         # Helper to forward selected env keys
         def _forward_env(keys: list[str]) -> None:
@@ -223,6 +315,30 @@ class CodexCLIProvider(LLMProvider):
         env["CODEX_HOME"] = overlay_home
         config_file_path = str(Path(overlay_home) / "config.toml")
 
+        # Reduce risk of slow/hanging command execution by forcing a strict sandbox
+        # and a non-interactive approval policy.
+        sandbox_mode = self._resolve_sandbox_mode()
+        approval_policy = self._resolve_approval_policy()
+
+        # CLI flag covers sandboxing; approval policy is only configurable via -c.
+        extra_args += ["--sandbox", sandbox_mode]
+        extra_args += [
+            "-c",
+            f"approval_policy={self._toml_string(approval_policy)}",
+        ]
+
+        # Make reasoning effort explicit per-call (helps when using base Codex config overlays).
+        extra_args += [
+            "-c",
+            f"model_reasoning_effort={self._toml_string(self._reasoning_effort)}",
+        ]
+
+        # Enforce per-call output cap. Codex CLI supports config overrides via `-c key=value`.
+        # Per docs, the key is `model_max_output_tokens` (caps completion length for Responses API).
+        # This keeps ChunkHound's `max_completion_tokens` meaningful for the CLI provider and helps
+        # prevent long "think+write" runs when the prompt requests overly-large outputs.
+        extra_args += ["-c", f"model_max_output_tokens={int(max_tokens)}"]
+
         override_mode = os.getenv("CHUNKHOUND_CODEX_CONFIG_OVERRIDE", "env").strip().lower()
         if config_file_path:
             if override_mode == "flag":
@@ -234,6 +350,14 @@ class CodexCLIProvider(LLMProvider):
 
         _forward_env(auth_keys + passthrough_keys)
 
+        # Non-interactive defaults to avoid hangs in subprocess tools.
+        env.setdefault("CI", "1")
+        env.setdefault("GIT_TERMINAL_PROMPT", "0")
+        env.setdefault("PAGER", "cat")
+        env.setdefault("GIT_PAGER", "cat")
+        env.setdefault("TERM", "dumb")
+        env.setdefault("NO_COLOR", "1")
+
         request_timeout = timeout if timeout is not None else self._timeout
 
         # Privacy-first strategy: use stdin by default to avoid argv leaking prompt in process list.
@@ -243,7 +367,18 @@ class CodexCLIProvider(LLMProvider):
         MAX_ARG_CHARS = int(os.getenv("CHUNKHOUND_CODEX_ARG_LIMIT", "200000"))
         stdin_first = os.getenv("CHUNKHOUND_CODEX_STDIN_FIRST", "1") != "0"
         use_stdin = True if stdin_first else (len(content) > MAX_ARG_CHARS)
-        add_skip_git = False
+        if debug_codex:
+            logger.debug(
+                "Codex CLI transport selection: stdin_first=%s, use_stdin=%s, MAX_ARG_CHARS=%d",
+                stdin_first,
+                use_stdin,
+                MAX_ARG_CHARS,
+            )
+        # Newer Codex builds require --skip-git-repo-check; default to passing
+        # it on the first attempt to avoid noisy negotiation warnings. This
+        # can be disabled via CHUNKHOUND_CODEX_SKIP_GIT_CHECK=0 if needed for
+        # older binaries.
+        add_skip_git = os.getenv("CHUNKHOUND_CODEX_SKIP_GIT_CHECK", "1") != "0"
 
         last_error: Exception | None = None
         try:
@@ -251,10 +386,17 @@ class CodexCLIProvider(LLMProvider):
                 proc: asyncio.subprocess.Process | None = None
                 try:
                     if use_stdin:
+                        if debug_codex:
+                            logger.debug(
+                                "Codex CLI attempt %d using stdin transport (skip_git=%s)",
+                                attempt + 1,
+                                add_skip_git,
+                            )
                         proc = await asyncio.create_subprocess_exec(
                             binary,
                             "exec",
                             "-",
+                            *( ["--json"] if json_mode else [] ),
                             *extra_args,
                             *( ["--skip-git-repo-check"] if add_skip_git else [] ),
                             cwd=cwd,
@@ -272,10 +414,17 @@ class CodexCLIProvider(LLMProvider):
                         )
                     else:
                         # argv mode
+                        if debug_codex:
+                            logger.debug(
+                                "Codex CLI attempt %d using argv transport (skip_git=%s)",
+                                attempt + 1,
+                                add_skip_git,
+                            )
                         proc = await asyncio.create_subprocess_exec(
                             binary,
                             "exec",
                             content,
+                            *( ["--json"] if json_mode else [] ),
                             *extra_args,
                             *( ["--skip-git-repo-check"] if add_skip_git else [] ),
                             cwd=cwd,
@@ -290,14 +439,41 @@ class CodexCLIProvider(LLMProvider):
                     if proc.returncode != 0:
                         raw_err = stderr.decode("utf-8", errors="ignore")
                         err = self._sanitize_text(raw_err)
+                        if debug_codex:
+                            logger.debug(
+                                "Codex CLI non-zero exit (attempt %d, use_stdin=%s): %s",
+                                attempt + 1,
+                                use_stdin,
+                                err,
+                            )
+                        if add_skip_git and self._skip_git_flag_unsupported(err):
+                            add_skip_git = False
+                            logger.warning(
+                                "codex exec does not support --skip-git-repo-check; retrying without flag"
+                            )
+                            continue
+                        err_lower = err.lower()
+
                         # Skip-git repo check negotiation for newer Codex builds
                         if "skip-git-repo-check" in err and not add_skip_git:
                             add_skip_git = True
                             logger.warning("codex exec requires --skip-git-repo-check; retrying with flag")
                             continue
+                        # Some older Codex builds may reject the flag; fall back by removing it.
+                        if add_skip_git and "skip-git-repo-check" in err_lower and (
+                            "unknown option" in err_lower
+                            or "unrecognized option" in err_lower
+                            or "unknown flag" in err_lower
+                            or "unexpected argument" in err_lower
+                        ):
+                            add_skip_git = False
+                            logger.warning(
+                                "codex exec does not support --skip-git-repo-check; retrying without flag"
+                            )
+                            continue
 
                         # If stdin failed (e.g., BrokenPipe or codex not reading stdin), fall back to argv with truncation.
-                        if use_stdin and ("broken pipe" in err.lower() or "stdin" in err.lower()):
+                        if use_stdin and ("broken pipe" in err_lower or "stdin" in err_lower):
                             use_stdin = False
                             logger.warning("codex exec stdin not supported; retrying with argv mode")
                             continue
@@ -311,7 +487,15 @@ class CodexCLIProvider(LLMProvider):
                             continue
                         raise last_error
 
-                    return stdout.decode("utf-8", errors="ignore").strip()
+                    stdout_text = stdout.decode("utf-8", errors="ignore").strip()
+                    if json_mode:
+                        message, usage = self._extract_agent_message_from_jsonl(stdout_text)
+                        if debug_codex and usage:
+                            logger.debug("Codex CLI usage: %s", usage)
+                        if message and message.strip():
+                            return message.strip()
+                        # Fall back to raw output if we couldn't parse an agent message.
+                    return stdout_text
 
                 except asyncio.TimeoutError as e:
                     if proc and proc.returncode is None:
@@ -320,27 +504,49 @@ class CodexCLIProvider(LLMProvider):
                     last_error = RuntimeError(
                         f"codex exec timed out after {request_timeout}s"
                     )
+                    if debug_codex:
+                        logger.debug(
+                            "Codex CLI timeout on attempt %d after %ds",
+                            attempt + 1,
+                            request_timeout,
+                        )
                     if attempt < self._max_retries - 1:
                         logger.warning(
                             f"codex exec attempt {attempt + 1} timed out; retrying"
                         )
                         continue
                     raise last_error from e
+                except (BrokenPipeError, ConnectionResetError) as e:
+                    # Treat BrokenPipe/connection reset on stdin as "no stdin support" and fall back to argv
+                    if use_stdin:
+                        use_stdin = False
+                        if debug_codex:
+                            logger.debug(
+                                "Codex CLI stdin connection lost on attempt %d; switching to argv",
+                                attempt + 1,
+                            )
+                        if attempt < self._max_retries - 1:
+                            logger.warning(
+                                "codex exec stdin connection lost; retrying with argv mode"
+                            )
+                            continue
+                        raise RuntimeError(
+                            "codex exec failed: stdin connection lost and no retries left"
+                        ) from e
+                    raise
                 except OSError as e:
                     # Handle OS-level argv length errors by switching to stdin mode
                     if e.errno == 7:  # Argument list too long
                         if not use_stdin:
                             use_stdin = True
+                            if debug_codex:
+                                logger.debug(
+                                    "Codex CLI argv too long on attempt %d; switching to stdin",
+                                    attempt + 1,
+                                )
                             logger.warning("codex exec argv too long; retrying with stdin mode")
                             continue
                     raise
-                except BrokenPipeError as e:
-                    # Switch to argv mode on BrokenPipe
-                    use_stdin = False
-                    if attempt < self._max_retries - 1:
-                        logger.warning("codex exec BrokenPipe on stdin; retrying with argv mode")
-                        continue
-                    raise RuntimeError("codex exec failed: BrokenPipe on stdin and no retries left") from e
                 # Let unexpected exceptions propagate; overlay cleanup happens in the outer finally
                 finally:
                     # No per-attempt cleanup of overlay; cleanup performed in outer finally
@@ -350,7 +556,13 @@ class CodexCLIProvider(LLMProvider):
             # Cleanup temporary resources regardless of success or failure
             try:
                 if overlay_home and Path(overlay_home).exists():
-                    shutil.rmtree(overlay_home, ignore_errors=True)
+                    if keep_overlay:
+                        logger.warning(
+                            "CHUNKHOUND_CODEX_KEEP_OVERLAY=1; preserving Codex overlay at %s",
+                            overlay_home,
+                        )
+                    else:
+                        shutil.rmtree(overlay_home, ignore_errors=True)
             except Exception:
                 pass
 
@@ -386,119 +598,40 @@ class CodexCLIProvider(LLMProvider):
             return f"System Instructions:\n{system.strip()}\n\nUser Request:\n{prompt}"
         return prompt
 
-    # ----- LLMProvider interface -----
+    def _skip_git_flag_unsupported(self, err: str) -> bool:
+        lowered = err.lower()
+        if "--skip-git-repo-check" not in lowered:
+            return False
+        unsupported_markers = (
+            "unexpected argument",
+            "unknown option",
+            "unrecognized option",
+            "no such option",
+            "invalid option",
+        )
+        return any(marker in lowered for marker in unsupported_markers)
 
-    @property
-    def name(self) -> str:  # pragma: no cover - trivial
+    # ----- BaseCLIProvider hooks -----
+
+    def _get_provider_name(self) -> str:
         return "codex-cli"
 
-    @property
-    def model(self) -> str:  # pragma: no cover - trivial
-        return self._model
-
-    async def complete(
+    async def _run_cli_command(
         self,
         prompt: str,
         system: str | None = None,
-        max_completion_tokens: int = 4096,
+        max_completion_tokens: int | None = None,
         timeout: int | None = None,
-    ) -> LLMResponse:
+    ) -> str:
         text = self._merge_prompts(prompt, system)
-        output = await self._run_exec(
+        max_tokens = max_completion_tokens if max_completion_tokens is not None else 4096
+        return await self._run_exec(
             text,
             cwd=None,
-            max_tokens=max_completion_tokens,
+            max_tokens=max_tokens,
             timeout=timeout,
             model=self._model,
         )
-
-        if not output or not output.strip():
-            raise RuntimeError("Codex CLI returned empty output")
-
-        self._requests_made += 1
-        p_tokens = self.estimate_tokens(text)
-        c_tokens = self.estimate_tokens(output)
-        total = p_tokens + c_tokens
-        self._estimated_prompt_tokens += p_tokens
-        self._estimated_completion_tokens += c_tokens
-        self._estimated_tokens_used += total
-
-        return LLMResponse(
-            content=output,
-            tokens_used=total,
-            model=self._model,
-            finish_reason="stop",
-        )
-
-    async def complete_structured(
-        self,
-        prompt: str,
-        json_schema: dict[str, Any],
-        system: str | None = None,
-        max_completion_tokens: int = 4096,
-        timeout: int | None = None,
-    ) -> dict[str, Any]:
-        import json
-
-        schema_block = json.dumps(json_schema, indent=2)
-        structured_prompt = (
-            "Please respond with ONLY valid JSON that conforms to this schema:\n\n"
-            + schema_block
-            + "\n\nUser request: "
-            + prompt
-            + "\n\nRespond with JSON only, no additional text."
-        )
-
-        text = self._merge_prompts(structured_prompt, system)
-        output = await self._run_exec(
-            text,
-            cwd=None,
-            max_tokens=max_completion_tokens,
-            timeout=timeout,
-            model=self._model,
-        )
-
-        if not output or not output.strip():
-            raise RuntimeError("Codex CLI structured completion returned empty output")
-
-        self._requests_made += 1
-        p_tokens = self.estimate_tokens(text)
-        c_tokens = self.estimate_tokens(output)
-        total = p_tokens + c_tokens
-        self._estimated_prompt_tokens += p_tokens
-        self._estimated_completion_tokens += c_tokens
-        self._estimated_tokens_used += total
-
-        try:
-            json_str = extract_json_from_response(output)
-            parsed = json.loads(json_str)
-            if not isinstance(parsed, dict):
-                raise ValueError("Expected top-level JSON object")
-            # Minimal required-field check if provided
-            if "required" in json_schema:
-                missing = [f for f in json_schema["required"] if f not in parsed]
-                if missing:
-                    raise ValueError(f"Missing required fields: {missing}")
-            return parsed
-        except Exception as e:  # noqa: BLE001
-            logger.error(f"Codex CLI structured output parse failed: {e}")
-            raise RuntimeError(f"Invalid JSON in structured output: {e}") from e
-
-    async def batch_complete(
-        self,
-        prompts: list[str],
-        system: str | None = None,
-        max_completion_tokens: int = 4096,
-    ) -> list[LLMResponse]:
-        results: list[LLMResponse] = []
-        for p in prompts:
-            results.append(
-                await self.complete(p, system=system, max_completion_tokens=max_completion_tokens)
-            )
-        return results
-
-    def estimate_tokens(self, text: str) -> int:
-        return len(text) // self.TOKEN_CHARS_RATIO
 
     async def health_check(self) -> dict[str, Any]:
         if not self._codex_available():
@@ -514,10 +647,13 @@ class CodexCLIProvider(LLMProvider):
         except Exception as e:  # noqa: BLE001
             return {"status": "unhealthy", "provider": self.name, "error": str(e)}
 
-    def get_usage_stats(self) -> dict[str, Any]:
-        return {
-            "requests_made": self._requests_made,
-            "total_tokens_estimated": self._estimated_tokens_used,
-            "prompt_tokens_estimated": self._estimated_prompt_tokens,
-            "completion_tokens_estimated": self._estimated_completion_tokens,
-        }
+    def get_synthesis_concurrency(self) -> int:
+        """Get recommended concurrency for parallel synthesis operations.
+
+        Default aligns with Anthropic (5), but remains configurable via env var.
+        """
+        try:
+            v = int(os.getenv("CHUNKHOUND_CODEX_SYNTHESIS_CONCURRENCY", "5"))
+        except Exception:
+            return 5
+        return max(1, min(5, v))

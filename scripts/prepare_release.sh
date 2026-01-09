@@ -50,6 +50,16 @@ echo "📦 Building distributions..."
 uv build
 echo "✅ Built wheel and source distribution"
 
+# Verify AutoDoc packaged resources exist in the built wheel(s)
+echo "🔎 Verifying AutoDoc wheel resources..."
+WHEEL_PATHS=(dist/*.whl)
+if [[ ! -e "${WHEEL_PATHS[0]}" ]]; then
+    echo "❌ No wheel found in dist/. Did the build fail?"
+    exit 1
+fi
+uv run python scripts/verify_autodoc_wheel_resources.py "${WHEEL_PATHS[@]}"
+echo "✅ AutoDoc wheel resources verified"
+
 # Generate checksums for release artifacts
 echo "🔐 Generating checksums..."
 cd dist/

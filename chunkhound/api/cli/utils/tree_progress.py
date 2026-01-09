@@ -86,6 +86,9 @@ class TreeProgressDisplay:
             "main_start": "🔍",
             "main_info": "ℹ️",
             "depth_start": "📊",
+            "poi_start": "📌",
+            "poi_complete": "📍",
+            "poi_failed": "⚠️",
             "node_start": "🔹",
             "query_expand": "🔄",
             "query_expand_complete": "✨",
@@ -98,6 +101,8 @@ class TreeProgressDisplay:
             "read_files_complete": "📄",
             "llm_followup": "🤖",
             "llm_followup_complete": "💡",
+            "llm_synthesis": "🧠",
+            "llm_synthesis_complete": "✅",
             "node_complete": "✅",
             "node_terminated": "⏹️",
             "synthesis_start": "🧩",
@@ -124,6 +129,8 @@ class TreeProgressDisplay:
         for key, value in metadata.items():
             if key in ("chunks", "files", "children", "tokens", "queries", "symbols"):
                 parts.append(f"{key}={value}")
+            elif key == "max_completion_tokens":
+                parts.append(f"max_completion_tokens={value}")
             elif key == "duration":
                 parts.append(f"{value:.2f}s")
 
@@ -183,7 +190,8 @@ class TreeProgressDisplay:
             tree_prefix = build_tree_prefix(depth) if depth > 0 else ""
 
             # Format line: [timestamp] prefix symbol message (metadata)
-            line = f"[{timestamp_str}] {tree_prefix}{symbol} {event.message}{metadata_str}\n"
+            prefix = f"[{timestamp_str}] {tree_prefix}{symbol} "
+            line = f"{prefix}{event.message}{metadata_str}\n"
 
             # Write to output
             self.output.write(line)

@@ -1861,7 +1861,100 @@ class DuckDBProvider(SerialDatabaseProvider):
             "invalidate_embeddings_by_provider_model", current_provider, current_model
         )
 
+    def get_scope_stats(self, scope_prefix: str | None) -> tuple[int, int]:
+        """Return (total_files, total_chunks) under an optional scope prefix.
 
+        This is used by code_mapper coverage and must avoid loading full chunk code.
+        """
+        return self._execute_in_db_thread_sync("get_scope_stats", scope_prefix)
+
+    def _executor_get_scope_stats(
+        self, conn: Any, state: dict[str, Any], scope_prefix: str | None
+    ) -> tuple[int, int]:
+        """Executor method for get_scope_stats - runs in DB thread."""
+        try:
+            if scope_prefix:
+                normalized = scope_prefix.replace("\\", "/")
+                escaped = escape_like_pattern(normalized)
+                like = f"{escaped}%"
+                files_row = conn.execute(
+                    "SELECT COUNT(*) FROM files WHERE path LIKE ? ESCAPE '\\'",
+                    [like],
+                ).fetchone()
+                chunks_row = conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM chunks c
+                    JOIN files f ON c.file_id = f.id
+                    WHERE f.path LIKE ? ESCAPE '\\'
+                    """,
+                    [like],
+                ).fetchone()
+            else:
+                files_row = conn.execute("SELECT COUNT(*) FROM files").fetchone()
+                chunks_row = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
+
+            total_files = int(files_row[0]) if files_row else 0
+            total_chunks = int(chunks_row[0]) if chunks_row else 0
+            return total_files, total_chunks
+        except Exception as exc:
+            logger.debug(f"Failed to get scope stats: {exc}")
+            return 0, 0
+
+    def get_scope_file_paths(self, scope_prefix: str | None) -> list[str]:
+        """Return file paths under an optional scope prefix."""
+        return self._execute_in_db_thread_sync("get_scope_file_paths", scope_prefix)
+
+    def _executor_get_scope_file_paths(
+        self, conn: Any, state: dict[str, Any], scope_prefix: str | None
+    ) -> list[str]:
+        """Executor method for get_scope_file_paths - runs in DB thread."""
+        try:
+            if scope_prefix:
+                normalized = scope_prefix.replace("\\", "/")
+                escaped = escape_like_pattern(normalized)
+                like = f"{escaped}%"
+                rows = conn.execute(
+                    "SELECT path FROM files WHERE path LIKE ? ESCAPE '\\' ORDER BY path",
+                    [like],
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT path FROM files ORDER BY path").fetchall()
+
+            out: list[str] = []
+            for row in rows:
+                try:
+                    path = str(row[0] or "").replace("\\", "/")
+                except Exception:
+                    path = ""
+                if path:
+                    out.append(path)
+            return out
+        except Exception as exc:
+            logger.debug(f"Failed to get scope file paths: {exc}")
+            return []
+
+    def _executor_get_all_chunks_with_metadata(
+        self, conn: Any, state: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Executor method for get_all_chunks_with_metadata - runs in DB thread."""
+        query = """
+            SELECT
+                c.id as chunk_id,
+                c.file_id,
+                c.chunk_type,
+                c.symbol,
+                c.code,
+                c.start_line,
+                c.end_line,
+                c.language as chunk_language,
+                f.path as file_path,
+                f.language as file_language
+            FROM chunks c
+            JOIN files f ON c.file_id = f.id
+            ORDER BY f.path, c.start_line
+        """
+        return self._executor_get_all_chunks_with_metadata_query(conn, state, query)
 
     def _validate_and_normalize_path_filter(
         self, path_filter: str | None

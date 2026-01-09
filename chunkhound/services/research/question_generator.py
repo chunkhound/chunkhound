@@ -28,6 +28,10 @@ from chunkhound.services.research.models import (
     QUESTION_SYNTHESIS_TOKENS,
     ResearchContext,
 )
+from chunkhound.services.research.schemas import (
+    FollowupQuestionsResponse,
+    QuestionSynthesisResponse,
+)
 
 
 class QuestionGenerator:
@@ -92,20 +96,6 @@ class QuestionGenerator:
             return []  # Return empty list instead of invalid questions
 
         llm = self._llm_manager.get_utility_provider()
-
-        # Define JSON schema for structured output
-        schema = {
-            "type": "object",
-            "properties": {
-                "questions": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": f"Array of 0-{MAX_FOLLOWUP_QUESTIONS} follow-up questions",
-                }
-            },
-            "required": ["questions"],
-            "additionalProperties": False,
-        }
 
         # Simplified system prompt per GPT-5-Nano best practices
         system = prompts.FOLLOWUP_GENERATION_SYSTEM
@@ -196,14 +186,15 @@ class QuestionGenerator:
         )
 
         try:
-            result = await llm.complete_structured(
+            # Use typed structured output with Pydantic model
+            result = await llm.complete_structured_typed(
                 prompt=prompt,
-                json_schema=schema,
+                response_model=FollowupQuestionsResponse,
                 system=system,
                 max_completion_tokens=max_output_tokens,
             )
 
-            questions = result.get("questions", [])
+            questions = result.questions  # Type-safe access
 
             # Filter empty questions
             valid_questions = [q.strip() for q in questions if q and q.strip()]
@@ -275,24 +266,6 @@ class QuestionGenerator:
             children=synthesis_nodes,  # Reference all input nodes
         )
 
-        # Define JSON schema with explanation parameter (forces reasoning)
-        schema = {
-            "type": "object",
-            "properties": {
-                "reasoning": {
-                    "type": "string",
-                    "description": "Brief explanation of synthesis strategy and why these questions explore different unexplored aspects",
-                },
-                "questions": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": f"Array of 1 to {target_count} synthesized research questions, each exploring a distinct aspect",
-                },
-            },
-            "required": ["reasoning", "questions"],
-            "additionalProperties": False,
-        }
-
         # Direct, unambiguous prompt optimized for GPT-5-Nano instruction adherence
         system = prompts.QUESTION_SYNTHESIS_SYSTEM
 
@@ -307,15 +280,16 @@ class QuestionGenerator:
         )
 
         try:
-            result = await llm.complete_structured(
+            # Use typed structured output with Pydantic model
+            result = await llm.complete_structured_typed(
                 prompt=prompt,
-                json_schema=schema,
+                response_model=QuestionSynthesisResponse,
                 system=system,
                 max_completion_tokens=QUESTION_SYNTHESIS_TOKENS,
             )
 
-            reasoning = result.get("reasoning", "")
-            synthesized_queries = result.get("questions", [])
+            reasoning = result.reasoning  # Type-safe access
+            synthesized_queries = result.questions  # Type-safe access
 
             logger.debug(f"Synthesis reasoning: {reasoning}")
 
