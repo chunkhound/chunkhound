@@ -31,6 +31,7 @@ from chunkhound.code_mapper.models import CodeMapperPOI
 from chunkhound.code_mapper.orchestrator import CodeMapperOrchestrator
 from chunkhound.code_mapper.render import render_overview_document
 from chunkhound.code_mapper.service import (
+    CodeMapperInvalidConcurrencyError,
     CodeMapperNoPointsError,
     run_code_mapper_pipeline,
 )
@@ -266,6 +267,7 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
                 out_dir=Path(out_dir_arg),
                 map_hyde_provider=meta_bundle.map_hyde_provider,
                 indexing_cfg=getattr(config, "indexing", None),
+                poi_jobs=getattr(args, "jobs", None),
                 progress=tree_progress,
                 audience=audience,
                 log_info=formatter.info,
@@ -283,6 +285,9 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
             formatter.error("Code Mapper HyDE planning failed.")
             formatter.text_block(exc.hyde_message, title="HyDE error")
             sys.exit(1)
+        except CodeMapperInvalidConcurrencyError as exc:
+            formatter.error(str(exc))
+            sys.exit(2)
         except (OSError, RuntimeError, TypeError, ValueError) as e:
             formatter.error(f"Code Mapper research failed: {e}")
             logger.exception("Full error details:")
@@ -290,6 +295,8 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
 
     overview_result = pipeline_result.overview_result
     poi_sections = pipeline_result.poi_sections
+    poi_sections_indexed = pipeline_result.poi_sections_indexed
+    failed_poi_sections = pipeline_result.failed_poi_sections
     unified_source_files = pipeline_result.unified_source_files
     unified_chunks_dedup = pipeline_result.unified_chunks_dedup
     total_files_global = pipeline_result.total_files_global
@@ -344,11 +351,20 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
         meta=meta_bundle.meta,
         overview_answer=overview_result.get("answer", "").strip(),
         poi_sections=poi_sections,
+        poi_sections_indexed=poi_sections_indexed,
+        failed_poi_sections=failed_poi_sections,
         coverage_lines=coverage_lines,
         include_topics=not getattr(args, "overview_only", False),
         include_combined=include_combined,
         unreferenced_files=unreferenced,
     )
+
+    if failed_poi_sections:
+        formatter.warning(
+            f"{len(failed_poi_sections)}/{total_research_calls} topics failed after a "
+            "retry; see the topics index for '(failed)' entries. The combined doc "
+            "includes only successful topics."
+        )
 
     formatter.success("Code Mapper complete.")
     if write_result.doc_path is not None:

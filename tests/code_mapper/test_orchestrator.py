@@ -14,7 +14,7 @@ def test_orchestrator_run_context_max_points(tmp_path: Path) -> None:
 
     config = Config(
         target_dir=tmp_path,
-        database={"path": Path(".") / ".chunkhound" / "db", "provider": "duckdb"},
+        database={"path": tmp_path / ".chunkhound" / "db", "provider": "duckdb"},
         embedding={"provider": "openai", "api_key": "test", "model": "test"},
         llm={"provider": "openai", "api_key": "test"},
     )

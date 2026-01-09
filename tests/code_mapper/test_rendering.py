@@ -57,13 +57,17 @@ def test_render_combined_document_includes_sections_and_coverage() -> None:
 
 
 def test_build_topic_artifacts_and_index() -> None:
-    poi_sections = [
-        (CodeMapperPOI(mode="architectural", text="**Core Flow**: details"), {"answer": "Section body"})
+    poi_sections_indexed = [
+        (
+            1,
+            CodeMapperPOI(mode="architectural", text="**Core Flow**: details"),
+            {"answer": "Section body"},
+        )
     ]
 
     topic_files, index_entries_by_mode = code_mapper_render.build_topic_artifacts(
         scope_label="scope",
-        poi_sections=poi_sections,
+        poi_sections_indexed=poi_sections_indexed,
     )
 
     assert topic_files, "Expected at least one topic file"
@@ -84,3 +88,40 @@ def test_build_topic_artifacts_and_index() -> None:
     assert "## Operational Map" in index_doc
     assert "[Core Flow](scope_arch_topic_01_core-flow.md)" in index_doc
     assert "scope_scope_unreferenced_files.txt" in index_doc
+
+
+def test_build_topic_artifacts_includes_failed_entries() -> None:
+    poi_sections_indexed = [
+        (
+            1,
+            CodeMapperPOI(mode="architectural", text="Core Flow"),
+            {"answer": "Section body"},
+        )
+    ]
+    failed = [
+        (
+            2,
+            CodeMapperPOI(mode="architectural", text="Error Handling"),
+            "# Error Handling (failed)\n\nDetails\n",
+        )
+    ]
+
+    topic_files, index_entries_by_mode = code_mapper_render.build_topic_artifacts(
+        scope_label="scope",
+        poi_sections_indexed=poi_sections_indexed,
+        failed_poi_sections=failed,
+    )
+
+    filenames = [name for name, _content in topic_files]
+    assert "scope_arch_topic_01_core-flow.md" in filenames
+    assert "scope_arch_topic_02_error-handling.md" in filenames
+
+    index_doc = code_mapper_render.render_index_document(
+        meta=_meta(),
+        scope_label="scope",
+        index_entries_by_mode=index_entries_by_mode,
+        unref_filename=None,
+    )
+    assert (
+        "[Error Handling (failed)](scope_arch_topic_02_error-handling.md)" in index_doc
+    )

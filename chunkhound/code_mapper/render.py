@@ -86,7 +86,8 @@ def render_combined_document(
 def build_topic_artifacts(
     *,
     scope_label: str,
-    poi_sections: list[tuple[CodeMapperPOI, dict[str, Any]]],
+    poi_sections_indexed: list[tuple[int, CodeMapperPOI, dict[str, Any]]],
+    failed_poi_sections: list[tuple[int, CodeMapperPOI, str]] | None = None,
 ) -> tuple[list[tuple[str, str]], dict[str, list[tuple[str, str]]]]:
     """Return topic file contents plus index entries for each topic."""
     safe_scope = safe_scope_label(scope_label)
@@ -95,18 +96,9 @@ def build_topic_artifacts(
         "architectural": [],
         "operational": [],
     }
-    arch_idx = 0
-    ops_idx = 0
-
-    for poi, result in poi_sections:
+    entries: list[tuple[int, CodeMapperPOI, str, str, bool]] = []
+    for idx, poi, result in poi_sections_indexed:
         heading = derive_heading_from_point(poi.text)
-        slug = slugify_heading(heading)
-        if poi.mode == "operational":
-            ops_idx += 1
-            filename = f"{safe_scope}_ops_topic_{ops_idx:02d}_{slug}.md"
-        else:
-            arch_idx += 1
-            filename = f"{safe_scope}_arch_topic_{arch_idx:02d}_{slug}.md"
         content = "\n".join(
             [
                 f"# {heading}",
@@ -115,8 +107,30 @@ def build_topic_artifacts(
                 "",
             ]
         )
+        entries.append((idx, poi, heading, content, False))
+
+    if failed_poi_sections:
+        for idx, poi, content in failed_poi_sections:
+            heading = derive_heading_from_point(poi.text)
+            entries.append((idx, poi, heading, content.rstrip() + "\n", True))
+
+    entries.sort(key=lambda entry: entry[0])
+
+    arch_idx = 0
+    ops_idx = 0
+    for _idx, poi, heading, content, is_failed in entries:
+        slug = slugify_heading(heading)
+        mode = poi.mode
+        if mode == "operational":
+            ops_idx += 1
+            filename = f"{safe_scope}_ops_topic_{ops_idx:02d}_{slug}.md"
+        else:
+            arch_idx += 1
+            filename = f"{safe_scope}_arch_topic_{arch_idx:02d}_{slug}.md"
         topic_files.append((filename, content))
-        index_entries_by_mode.setdefault(poi.mode, []).append((heading, filename))
+
+        display_heading = f"{heading} (failed)" if is_failed else heading
+        index_entries_by_mode.setdefault(mode, []).append((display_heading, filename))
 
     return topic_files, index_entries_by_mode
 
