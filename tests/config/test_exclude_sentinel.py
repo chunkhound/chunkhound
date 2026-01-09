@@ -22,6 +22,8 @@ def test_exclude_sentinel_gitignore_maps_to_source_gitignore() -> None:
 def test_exclude_sentinel_chignore_now_ignored() -> None:
     # .chignore sentinel is no longer supported; fallback to default (.gitignore only)
     cfg = Config(**{"indexing": {"exclude": ".chignore"}})
+    # Reset exclude_user_supplied to test sentinel behavior in isolation
+    cfg.indexing.exclude_user_supplied = False
     sources = cfg.indexing.resolve_ignore_sources()  # type: ignore[attr-defined]
     assert sources == ["gitignore"]
 
@@ -42,5 +44,7 @@ def test_exclude_list_can_force_config_only_mode() -> None:
 def test_exclude_missing_defaults_to_gitignore_only() -> None:
     # When 'exclude' not provided explicitly, default behavior should be gitignore-only
     cfg = Config(**{"indexing": {}})
+    # Reset exclude_user_supplied to test default behavior in isolation
+    cfg.indexing.exclude_user_supplied = False
     sources = cfg.indexing.resolve_ignore_sources()  # type: ignore[attr-defined]
     assert sources == ["gitignore"]

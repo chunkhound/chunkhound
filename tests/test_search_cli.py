@@ -112,12 +112,13 @@ if __name__ == "__main__":
         if not (api_key and provider):
             index_cmd.append("--no-embeddings")
 
+        env = get_safe_subprocess_env()
+        env["CHUNKHOUND_NO_RICH"] = "1"  # Disable rich output to prevent buffer issues
+
         index_result = subprocess.run(
             index_cmd,
-            capture_output=True,
-            text=True,
             timeout=30,
-            env=get_safe_subprocess_env(),
+            env=env,
             cwd=project_dir,
         )
 
@@ -135,6 +136,9 @@ if __name__ == "__main__":
         """Test basic regex search via CLI."""
         project_dir = cli_project_setup
 
+        env = get_safe_subprocess_env()
+        env["CHUNKHOUND_NO_RICH"] = "1"
+
         result = subprocess.run(
             [
                 "uv",
@@ -148,7 +152,7 @@ if __name__ == "__main__":
             capture_output=True,
             text=True,
             timeout=10,
-            env=get_safe_subprocess_env(),
+            env=env,
             cwd=project_dir,
         )
 
@@ -159,6 +163,9 @@ if __name__ == "__main__":
     def test_search_regex_with_pagination(self, cli_project_setup):
         """Test regex search with pagination options."""
         project_dir = cli_project_setup
+
+        env = get_safe_subprocess_env()
+        env["CHUNKHOUND_NO_RICH"] = "1"
 
         # Test with small page size
         result = subprocess.run(
@@ -176,7 +183,7 @@ if __name__ == "__main__":
             capture_output=True,
             text=True,
             timeout=10,
-            env=get_safe_subprocess_env(),
+            env=env,
             cwd=project_dir,
         )
 
@@ -186,6 +193,9 @@ if __name__ == "__main__":
     def test_search_regex_with_path_filter(self, cli_project_setup):
         """Test regex search with path filtering."""
         project_dir = cli_project_setup
+
+        env = get_safe_subprocess_env()
+        env["CHUNKHOUND_NO_RICH"] = "1"
 
         # Search only in utils directory
         result = subprocess.run(
@@ -203,7 +213,7 @@ if __name__ == "__main__":
             capture_output=True,
             text=True,
             timeout=10,
-            env=get_safe_subprocess_env(),
+            env=env,
             cwd=project_dir,
         )
 
@@ -214,6 +224,9 @@ if __name__ == "__main__":
     def test_search_regex_empty_results(self, cli_project_setup):
         """Test regex search with no matches."""
         project_dir = cli_project_setup
+
+        env = get_safe_subprocess_env()
+        env["CHUNKHOUND_NO_RICH"] = "1"
 
         result = subprocess.run(
             [
@@ -228,7 +241,7 @@ if __name__ == "__main__":
             capture_output=True,
             text=True,
             timeout=10,
-            env=get_safe_subprocess_env(),
+            env=env,
             cwd=project_dir,
         )
 
@@ -241,6 +254,9 @@ if __name__ == "__main__":
         with tempfile.TemporaryDirectory() as temp_dir:
             empty_dir = Path(temp_dir) / "empty_project"
             empty_dir.mkdir()
+
+            env = get_safe_subprocess_env()
+            env["CHUNKHOUND_NO_RICH"] = "1"
 
             result = subprocess.run(
                 [
@@ -255,7 +271,7 @@ if __name__ == "__main__":
                 capture_output=True,
                 text=True,
                 timeout=10,
-                env=get_safe_subprocess_env(),
+                env=env,
             )
 
             # Should exit with error when no database exists
@@ -276,6 +292,9 @@ if __name__ == "__main__":
         if not api_key:
             pytest.skip("No embedding API key available for semantic search test")
 
+        env = get_safe_subprocess_env()
+        env["CHUNKHOUND_NO_RICH"] = "1"
+
         result = subprocess.run(
             [
                 "uv",
@@ -289,7 +308,7 @@ if __name__ == "__main__":
             capture_output=True,
             text=True,
             timeout=15,
-            env=get_safe_subprocess_env(),
+            env=env,
             cwd=project_dir,
         )
 
@@ -304,12 +323,15 @@ if __name__ == "__main__":
         """Test that search output has expected structure."""
         project_dir = cli_project_setup
 
+        env = get_safe_subprocess_env()
+        env["CHUNKHOUND_NO_RICH"] = "1"
+
         result = subprocess.run(
             ["uv", "run", "chunkhound", "search", "def", ".", "--regex"],
             capture_output=True,
             text=True,
             timeout=10,
-            env=get_safe_subprocess_env(),
+            env=env,
             cwd=project_dir,
         )
 
@@ -324,6 +346,9 @@ if __name__ == "__main__":
     def test_search_with_offset(self, cli_project_setup):
         """Test search with offset parameter."""
         project_dir = cli_project_setup
+
+        env = get_safe_subprocess_env()
+        env["CHUNKHOUND_NO_RICH"] = "1"
 
         # Get first page
         result1 = subprocess.run(
@@ -343,7 +368,7 @@ if __name__ == "__main__":
             capture_output=True,
             text=True,
             timeout=10,
-            env=get_safe_subprocess_env(),
+            env=env,
             cwd=project_dir,
         )
 
@@ -365,7 +390,7 @@ if __name__ == "__main__":
             capture_output=True,
             text=True,
             timeout=10,
-            env=get_safe_subprocess_env(),
+            env=env,
             cwd=project_dir,
         )
 
@@ -384,12 +409,15 @@ class TestSearchCLIArguments:
 
     def test_search_help(self):
         """Test that search help command works."""
+        env = get_safe_subprocess_env()
+        env["CHUNKHOUND_NO_RICH"] = "1"
+
         result = subprocess.run(
             ["uv", "run", "chunkhound", "search", "--help"],
             capture_output=True,
             text=True,
             timeout=5,
-            env=get_safe_subprocess_env(),
+            env=env,
         )
 
         assert result.returncode == 0, f"Help command failed: {result.stderr}"
@@ -400,25 +428,31 @@ class TestSearchCLIArguments:
 
     def test_invalid_arguments(self):
         """Test handling of invalid arguments."""
+        env = get_safe_subprocess_env()
+        env["CHUNKHOUND_NO_RICH"] = "1"
+
         # Test invalid flag
         result = subprocess.run(
             ["uv", "run", "chunkhound", "search", "query", "--invalid-flag"],
             capture_output=True,
             text=True,
             timeout=5,
-            env=get_safe_subprocess_env(),
+            env=env,
         )
 
         assert result.returncode != 0, "Should fail with invalid argument"
 
     def test_missing_query(self):
         """Test handling when query is missing."""
+        env = get_safe_subprocess_env()
+        env["CHUNKHOUND_NO_RICH"] = "1"
+
         result = subprocess.run(
             ["uv", "run", "chunkhound", "search", "--regex"],
             capture_output=True,
             text=True,
             timeout=5,
-            env=get_safe_subprocess_env(),
+            env=env,
         )
 
         assert result.returncode != 0, "Should fail when query is missing"

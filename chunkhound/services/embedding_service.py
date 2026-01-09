@@ -333,8 +333,10 @@ class EmbeddingProgressManager:
             task_obj = self.progress.tasks[task]
             initial_completed = getattr(task_obj, 'initial_completed', 0)
             newly_processed = task_obj.completed - initial_completed
-            if task_obj.elapsed > 0:
-                speed = newly_processed / task_obj.elapsed
+            # Check if elapsed attribute exists (Rich Task has it, fallback _Task doesn't)
+            elapsed = getattr(task_obj, 'elapsed', None)
+            if elapsed and elapsed > 0:
+                speed = newly_processed / elapsed
                 self.progress.update(task, speed=f"{speed:.1f} chunks/s")
 
 
