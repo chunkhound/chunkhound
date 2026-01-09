@@ -86,6 +86,9 @@ class TreeProgressDisplay:
             "main_start": "🔍",
             "main_info": "ℹ️",
             "depth_start": "📊",
+            "poi_start": "📌",
+            "poi_complete": "📍",
+            "poi_failed": "⚠️",
             "node_start": "🔹",
             "query_expand": "🔄",
             "query_expand_complete": "✨",
@@ -187,7 +190,8 @@ class TreeProgressDisplay:
             tree_prefix = build_tree_prefix(depth) if depth > 0 else ""
 
             # Format line: [timestamp] prefix symbol message (metadata)
-            line = f"[{timestamp_str}] {tree_prefix}{symbol} {event.message}{metadata_str}\n"
+            prefix = f"[{timestamp_str}] {tree_prefix}{symbol} "
+            line = f"{prefix}{event.message}{metadata_str}\n"
 
             # Write to output
             self.output.write(line)

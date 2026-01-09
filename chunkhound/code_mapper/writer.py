@@ -30,6 +30,8 @@ def write_code_mapper_outputs(
     meta: AgentDocMetadata,
     overview_answer: str,
     poi_sections: list[tuple[CodeMapperPOI, dict[str, Any]]],
+    poi_sections_indexed: list[tuple[int, CodeMapperPOI, dict[str, Any]]],
+    failed_poi_sections: list[tuple[int, CodeMapperPOI, str]] | None,
     coverage_lines: list[str],
     include_topics: bool,
     include_combined: bool,
@@ -64,7 +66,8 @@ def write_code_mapper_outputs(
 
         topic_files, index_entries_by_mode = build_topic_artifacts(
             scope_label=scope_label,
-            poi_sections=poi_sections,
+            poi_sections_indexed=poi_sections_indexed,
+            failed_poi_sections=failed_poi_sections,
         )
         for filename, content in topic_files:
             topic_path = out_dir / filename

@@ -11,6 +11,13 @@ from .common_arguments import (
 )
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return parsed
+
+
 def add_map_subparser(subparsers: Any) -> argparse.ArgumentParser:
     """Add map command subparser to the main parser.
 
@@ -122,6 +129,17 @@ def add_map_subparser(subparsers: Any) -> argparse.ArgumentParser:
                 "to CH_CODE_MAPPER_WRITE_COMBINED for backward compatibility."
             ),
         )
+
+    map_parser.add_argument(
+        "-j",
+        "--jobs",
+        type=_positive_int,
+        default=None,
+        help=(
+            "Max concurrent point-of-interest deep research jobs. Must be >= 1. "
+            "If omitted, falls back to CH_CODE_MAPPER_POI_CONCURRENCY or a default."
+        ),
+    )
 
     map_parser.set_defaults(comprehensiveness="medium")
     level_group = map_parser.add_mutually_exclusive_group()
