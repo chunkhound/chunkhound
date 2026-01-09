@@ -45,7 +45,7 @@ async def test_code_mapper_overview_only_writes_overview_artifact(
         return "1. **Core Flow**: Test overview.\n", ["Core Flow: Test overview."]
 
     monkeypatch.setattr(code_mapper_mod, "LLMManager", DummyLLMManager)
-    monkeypatch.setattr(code_mapper_mod, "_run_code_mapper_overview_hyde", fake_overview)
+    monkeypatch.setattr(code_mapper_mod, "run_code_mapper_overview_hyde", fake_overview)
 
     class Args:
         def __init__(self) -> None:

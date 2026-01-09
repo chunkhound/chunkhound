@@ -26,4 +26,4 @@ def verify_database_exists(config: Config) -> Path:
             f"Database not found at {actual_db_path}. "
             f"Run 'chunkhound index <directory>' to create the database first."
         )
-    return db_path
+    return actual_db_path

@@ -1,5 +1,7 @@
+import subprocess
 from pathlib import Path
 
+import chunkhound.code_mapper.orchestrator as orchestrator_mod
 from chunkhound.code_mapper.orchestrator import CodeMapperOrchestrator
 from chunkhound.core.config.config import Config
 
@@ -73,3 +75,39 @@ def test_orchestrator_metadata_bundle_overview_only(tmp_path: Path) -> None:
     )
 
     assert bundle.meta.generation_stats.get("overview_only") == "true"
+
+
+def test_get_head_sha_uses_git_safe_and_returns_sha(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def explode_subprocess_run(*_args, **_kwargs):
+        raise AssertionError("subprocess.run should not be called by _get_head_sha")
+
+    monkeypatch.setattr(subprocess, "run", explode_subprocess_run, raising=True)
+
+    def fake_run_git(*_args, **_kwargs) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            ["git", "rev-parse", "HEAD"], 0, stdout="abc123\n", stderr=""
+        )
+
+    monkeypatch.setattr(orchestrator_mod, "run_git", fake_run_git, raising=False)
+
+    assert orchestrator_mod._get_head_sha(tmp_path) == "abc123"
+
+
+def test_get_head_sha_returns_placeholder_when_git_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def explode_subprocess_run(*_args, **_kwargs):
+        raise AssertionError("subprocess.run should not be called by _get_head_sha")
+
+    monkeypatch.setattr(subprocess, "run", explode_subprocess_run, raising=True)
+
+    def fake_run_git(*_args, **_kwargs) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            ["git", "rev-parse", "HEAD"], 1, stdout="", stderr="fatal"
+        )
+
+    monkeypatch.setattr(orchestrator_mod, "run_git", fake_run_git, raising=False)
+
+    assert orchestrator_mod._get_head_sha(tmp_path) == "NO_GIT_HEAD"

@@ -8,18 +8,20 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from chunkhound.code_mapper.coverage import compute_db_scope_stats
-from chunkhound.code_mapper.pipeline import (
-    _derive_heading_from_point,
-    _is_empty_research_result,
-    _merge_sources_metadata,
-    _run_code_mapper_overview_hyde,
+from chunkhound.code_mapper.models import AgentDocMetadata, CodeMapperPOI
+from chunkhound.code_mapper.pipeline import run_code_mapper_overview_hyde
+from chunkhound.code_mapper.public_utils import (
+    derive_heading_from_point,
+    is_empty_research_result,
+    merge_sources_metadata,
 )
+from chunkhound.core.audience import normalize_audience
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.interfaces.llm_provider import LLMProvider
 from chunkhound.llm_manager import LLMManager
-from chunkhound.mcp_server.tools import deep_research_impl
+from chunkhound.services.deep_research_service import run_deep_research
 
 if TYPE_CHECKING:
     from chunkhound.api.cli.utils.tree_progress import TreeProgressDisplay
@@ -36,7 +38,7 @@ class CodeMapperNoPointsError(RuntimeError):
 @dataclass
 class CodeMapperPipelineResult:
     overview_result: dict[str, Any]
-    poi_sections: list[tuple[str, dict[str, Any]]]
+    poi_sections: list[tuple[CodeMapperPOI, dict[str, Any]]]
     total_points_of_interest: int
     unified_source_files: dict[str, str]
     unified_chunks_dedup: list[dict[str, Any]]
@@ -46,28 +48,55 @@ class CodeMapperPipelineResult:
     scope_total_chunks: int
 
 
+def _audience_guidance_lines(*, audience: str) -> list[str]:
+    normalized = normalize_audience(audience)
+    if normalized == "technical":
+        return [
+            "Audience: technical (software engineers).",
+            "Prefer implementation details, key types, and precise terminology.",
+        ]
+    if normalized == "end-user":
+        return [
+            "Audience: end-user (less technical).",
+            (
+                "Prefer practical workflows and plain language; explain code "
+                "identifiers briefly when needed."
+            ),
+            (
+                "De-emphasize internal implementation details unless essential to user "
+                "outcomes."
+            ),
+        ]
+    return []
+
+
 async def run_code_mapper_overview_only(
     *,
     llm_manager: LLMManager | None,
     target_dir: Path,
     scope_path: Path,
     scope_label: str,
+    meta: AgentDocMetadata | None = None,
+    context: str | None = None,
     max_points: int,
     comprehensiveness: str,
     out_dir: Path | None,
-    assembly_provider: LLMProvider | None,
+    map_hyde_provider: LLMProvider | None,
     indexing_cfg: IndexingConfig | None,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[CodeMapperPOI]]:
     """Run overview-only Code Mapper and return the answer + points."""
-    overview_answer, points_of_interest = await _run_code_mapper_overview_hyde(
+    overview_answer, points_of_interest = await run_code_mapper_overview_hyde(
         llm_manager=llm_manager,
         target_dir=target_dir,
         scope_path=scope_path,
         scope_label=scope_label,
+        meta=meta,
+        context=context,
         max_points=max_points,
         comprehensiveness=comprehensiveness,
         out_dir=out_dir,
-        assembly_provider=assembly_provider,
+        persist_prompt=True,
+        map_hyde_provider=map_hyde_provider,
         indexing_cfg=indexing_cfg,
     )
 
@@ -86,26 +115,31 @@ async def run_code_mapper_pipeline(
     scope_path: Path,
     scope_label: str,
     path_filter: str | None,
+    meta: AgentDocMetadata | None = None,
+    context: str | None = None,
     comprehensiveness: str,
     max_points: int,
     out_dir: Path | None,
-    assembly_provider: LLMProvider | None,
+    map_hyde_provider: LLMProvider | None,
     indexing_cfg: IndexingConfig | None,
     progress: TreeProgressDisplay | None,
+    audience: str = "balanced",
     log_info: Callable[[str], None] | None = None,
     log_warning: Callable[[str], None] | None = None,
     log_error: Callable[[str], None] | None = None,
 ) -> CodeMapperPipelineResult:
     """Run Code Mapper overview + per-point deep research and compute coverage."""
-    overview_answer, points_of_interest = await _run_code_mapper_overview_hyde(
+    overview_answer, points_of_interest = await run_code_mapper_overview_hyde(
         llm_manager=llm_manager,
         target_dir=target_dir,
         scope_path=scope_path,
         scope_label=scope_label,
+        meta=meta,
+        context=context,
         max_points=max_points,
         comprehensiveness=comprehensiveness,
         out_dir=out_dir,
-        assembly_provider=assembly_provider,
+        map_hyde_provider=map_hyde_provider,
         indexing_cfg=indexing_cfg,
     )
 
@@ -124,40 +158,68 @@ async def run_code_mapper_pipeline(
         raise CodeMapperNoPointsError(overview_answer)
 
     total_points_of_interest = len(points_of_interest)
-    poi_sections: list[tuple[str, dict[str, Any]]] = []
+    poi_sections: list[tuple[CodeMapperPOI, dict[str, Any]]] = []
+    audience_lines = _audience_guidance_lines(audience=audience)
+    audience_block = (
+        ("\n".join(f"- {line}" for line in audience_lines) + "\n\n")
+        if audience_lines
+        else ""
+    )
     for idx, poi in enumerate(points_of_interest, start=1):
-        heading = _derive_heading_from_point(poi)
+        poi_text = poi.text
+        heading = derive_heading_from_point(poi_text)
         if log_info:
             log_info(
                 f"[Code Mapper] Processing point of interest {idx}/"
                 f"{len(points_of_interest)}: {heading}"
             )
 
-        section_query = (
-            "Expand the following point of interest into a detailed, "
-            "agent-facing documentation section for the scoped folder "
-            f"'{scope_label}'. Explain how the relevant code and "
-            "configuration implement this behavior, including "
-            "responsibilities, key types, "
-            "important flows, and operational constraints.\n\n"
-            "Point of interest:\n"
-            f"{poi}\n\n"
-            "Use markdown headings and bullet lists as needed. It is "
-            "acceptable for this section to be long and detailed as "
-            "long as it remains "
-            "grounded in the code."
-        )
+        if poi.mode == "operational":
+            section_query = (
+                "Expand the following OPERATIONAL point of interest into a "
+                "detailed, operator/runbook-style documentation section for the "
+                f"scoped folder '{scope_label}'.\n\n"
+                f"{audience_block}"
+                "Focus on step-by-step workflows and 'how to run this end-to-end' "
+                "guidance grounded in the code:\n"
+                "- Setup and local run path (commands only when supported by repo "
+                "evidence)\n"
+                "- Configuration (env vars, config files) only when supported by "
+                "repo evidence\n"
+                "- Common workflows/recipes\n"
+                "- Troubleshooting/common failure modes and fixes\n\n"
+                "Point of interest:\n"
+                f"{poi_text}\n\n"
+                "Use markdown headings and bullet lists as needed. It is acceptable "
+                "for this section to be long and detailed as long as it remains "
+                "grounded in the code."
+            )
+        else:
+            section_query = (
+                "Expand the following ARCHITECTURAL point of interest into a "
+                "detailed, agent-facing documentation section for the scoped folder "
+                f"'{scope_label}'. Explain how the relevant code and configuration "
+                "implement this behavior, including responsibilities, key types, "
+                "important flows, and operational constraints.\n\n"
+                f"{audience_block}"
+                "Point of interest:\n"
+                f"{poi_text}\n\n"
+                "Use markdown headings and bullet lists as needed. It is acceptable "
+                "for this section to be long and detailed as long as it remains "
+                "grounded in the code."
+            )
 
         try:
-            result = await deep_research_impl(
+            result = await run_deep_research(
                 services=services,
                 embedding_manager=embedding_manager,
                 llm_manager=llm_manager,
                 query=section_query,
+                tool_name="code_research",
                 progress=progress,
                 path=path_filter,
             )
-            if _is_empty_research_result(result):
+            if is_empty_research_result(result):
                 if log_warning:
                     log_warning(
                         f"[Code Mapper] Skipping point of interest {idx} because "
@@ -178,7 +240,7 @@ async def run_code_mapper_pipeline(
         unified_chunks_dedup,
         total_files_global,
         total_chunks_global,
-    ) = _merge_sources_metadata(all_results)
+    ) = merge_sources_metadata(all_results)
 
     scope_total_files, scope_total_chunks, _scoped_files = compute_db_scope_stats(
         services, scope_label

@@ -36,8 +36,21 @@ async def test_code_mapper_overview_only_uses_config_dir_as_root_and_sets_defaul
     async def fake_overview(*_: Any, **__: Any) -> tuple[str, list[str]]:
         return "1. Example\n", ["Example"]
 
-    monkeypatch.setattr(code_mapper_pipeline, "_run_code_mapper_overview_hyde", fake_overview)
-    monkeypatch.setattr(code_mapper_mod, "verify_database_exists", lambda *_: (_ for _ in ()).throw(AssertionError("verify_database_exists should not run in overview-only")))
+    def explode_verify_database_exists(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError(
+            "verify_database_exists should not run in overview-only"
+        )
+
+    monkeypatch.setattr(
+        code_mapper_pipeline,
+        "run_code_mapper_overview_hyde",
+        fake_overview,
+    )
+    monkeypatch.setattr(
+        code_mapper_mod,
+        "verify_database_exists",
+        explode_verify_database_exists,
+    )
 
     class Args:
         def __init__(self) -> None:
@@ -80,8 +93,21 @@ async def test_code_mapper_does_not_override_explicit_db_path_from_config_file(
     async def fake_overview(*_: Any, **__: Any) -> tuple[str, list[str]]:
         return "1. Example\n", ["Example"]
 
-    monkeypatch.setattr(code_mapper_pipeline, "_run_code_mapper_overview_hyde", fake_overview)
-    monkeypatch.setattr(code_mapper_mod, "verify_database_exists", lambda *_: (_ for _ in ()).throw(AssertionError("verify_database_exists should not run in overview-only")))
+    def explode_verify_database_exists(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError(
+            "verify_database_exists should not run in overview-only"
+        )
+
+    monkeypatch.setattr(
+        code_mapper_pipeline,
+        "run_code_mapper_overview_hyde",
+        fake_overview,
+    )
+    monkeypatch.setattr(
+        code_mapper_mod,
+        "verify_database_exists",
+        explode_verify_database_exists,
+    )
 
     class Args:
         def __init__(self) -> None:
