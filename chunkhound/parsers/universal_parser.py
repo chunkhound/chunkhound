@@ -76,15 +76,6 @@ class ChunkMetrics:
         lines = len(content.split("\n"))
         return cls(non_ws, total, lines, ast_depth)
 
-    def estimated_tokens(self, ratio: float = 3.5) -> int:
-        """Estimate token count using character-based ratio.
-
-        Args:
-            ratio: Chars-to-tokens ratio (conservative default 3.5)
-        """
-        # Fallback to conservative ratio-based estimation
-        return int(self.non_whitespace_chars / ratio)
-
 
 class UniversalParser:
     """Universal parser that works with all supported languages using cAST algorithm.
