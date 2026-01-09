@@ -16,6 +16,7 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.core.utils import estimate_tokens_llm
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 from chunkhound.utils.json_extraction import extract_json_from_response
 
@@ -28,9 +29,6 @@ class CodexCLIProvider(LLMProvider):
     - Defaults to an isolated, read-only, non-interactive run (no history).
     - Never writes to stdout; only returns captured content to caller.
     """
-
-    # Token estimate (chars per token) — align with CLI providers
-    TOKEN_CHARS_RATIO = 4
 
     # Timeouts used in health checks (seconds)
     VERSION_CHECK_TIMEOUT = 5
@@ -726,7 +724,7 @@ class CodexCLIProvider(LLMProvider):
         return results
 
     def estimate_tokens(self, text: str) -> int:
-        return len(text) // self.TOKEN_CHARS_RATIO
+        return estimate_tokens_llm(text)
 
     async def health_check(self) -> dict[str, Any]:
         if not self._codex_available():
