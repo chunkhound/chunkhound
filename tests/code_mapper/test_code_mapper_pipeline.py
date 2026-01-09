@@ -275,8 +275,12 @@ async def test_code_mapper_coverage_uses_deep_research_sources(
 async def test_run_code_mapper_pipeline_runs_poi_research_in_parallel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_overview(**_: Any) -> tuple[str, list[str]]:
-        return "overview", ["Core Flow", "Error Handling", "Observability"]
+    async def fake_overview(**_: Any) -> tuple[str, list[CodeMapperPOI]]:
+        return "overview", [
+            CodeMapperPOI(mode="architectural", text="Core Flow"),
+            CodeMapperPOI(mode="architectural", text="Error Handling"),
+            CodeMapperPOI(mode="architectural", text="Observability"),
+        ]
 
     active_calls = 0
     max_active_calls = 0
@@ -300,11 +304,9 @@ async def test_run_code_mapper_pipeline_runs_poi_research_in_parallel(
             "metadata": {"sources": {"files": [], "chunks": []}},
         }
 
+    monkeypatch.setattr(code_mapper_service, "run_code_mapper_overview_hyde", fake_overview)
     monkeypatch.setattr(
-        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
-    )
-    monkeypatch.setattr(
-        code_mapper_service, "deep_research_impl", fake_deep_research_impl
+        code_mapper_service, "run_deep_research", fake_deep_research_impl
     )
     monkeypatch.setattr(
         code_mapper_service,
@@ -325,7 +327,7 @@ async def test_run_code_mapper_pipeline_runs_poi_research_in_parallel(
             comprehensiveness="low",
             max_points=5,
             out_dir=None,
-            assembly_provider=None,
+            map_hyde_provider=None,
             indexing_cfg=None,
             poi_jobs=None,
             progress=None,
@@ -347,8 +349,12 @@ async def test_run_code_mapper_pipeline_runs_poi_research_in_parallel(
 async def test_run_code_mapper_pipeline_backs_off_to_serial_on_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_overview(**_: Any) -> tuple[str, list[str]]:
-        return "overview", ["Alpha", "Boom", "Charlie"]
+    async def fake_overview(**_: Any) -> tuple[str, list[CodeMapperPOI]]:
+        return "overview", [
+            CodeMapperPOI(mode="architectural", text="Alpha"),
+            CodeMapperPOI(mode="architectural", text="Boom"),
+            CodeMapperPOI(mode="architectural", text="Charlie"),
+        ]
 
     events: list[str] = []
     alpha_started = asyncio.Event()
@@ -389,11 +395,9 @@ async def test_run_code_mapper_pipeline_backs_off_to_serial_on_exception(
             }
         raise AssertionError("unexpected query")
 
+    monkeypatch.setattr(code_mapper_service, "run_code_mapper_overview_hyde", fake_overview)
     monkeypatch.setattr(
-        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
-    )
-    monkeypatch.setattr(
-        code_mapper_service, "deep_research_impl", fake_deep_research_impl
+        code_mapper_service, "run_deep_research", fake_deep_research_impl
     )
     monkeypatch.setattr(
         code_mapper_service,
@@ -413,7 +417,7 @@ async def test_run_code_mapper_pipeline_backs_off_to_serial_on_exception(
             comprehensiveness="low",
             max_points=5,
             out_dir=None,
-            assembly_provider=None,
+            map_hyde_provider=None,
             indexing_cfg=None,
             poi_jobs=2,
             progress=None,
@@ -438,8 +442,8 @@ async def test_run_code_mapper_pipeline_backs_off_to_serial_on_exception(
 async def test_run_code_mapper_pipeline_retries_empty_result_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_overview(**_: Any) -> tuple[str, list[str]]:
-        return "overview", ["Alpha"]
+    async def fake_overview(**_: Any) -> tuple[str, list[CodeMapperPOI]]:
+        return "overview", [CodeMapperPOI(mode="architectural", text="Alpha")]
 
     attempts = 0
     sleep_calls: list[float] = []
@@ -468,11 +472,9 @@ async def test_run_code_mapper_pipeline_retries_empty_result_once(
             "metadata": {"sources": {"files": [], "chunks": []}},
         }
 
+    monkeypatch.setattr(code_mapper_service, "run_code_mapper_overview_hyde", fake_overview)
     monkeypatch.setattr(
-        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
-    )
-    monkeypatch.setattr(
-        code_mapper_service, "deep_research_impl", fake_deep_research_impl
+        code_mapper_service, "run_deep_research", fake_deep_research_impl
     )
     monkeypatch.setattr(
         code_mapper_service,
@@ -493,7 +495,7 @@ async def test_run_code_mapper_pipeline_retries_empty_result_once(
         comprehensiveness="low",
         max_points=5,
         out_dir=None,
-        assembly_provider=None,
+        map_hyde_provider=None,
         indexing_cfg=None,
         poi_jobs=2,
         progress=None,
@@ -510,8 +512,8 @@ async def test_run_code_mapper_pipeline_retries_empty_result_once(
 async def test_run_code_mapper_pipeline_emits_poi_progress_events(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_overview(**_: Any) -> tuple[str, list[str]]:
-        return "overview", ["Observability"]
+    async def fake_overview(**_: Any) -> tuple[str, list[CodeMapperPOI]]:
+        return "overview", [CodeMapperPOI(mode="architectural", text="Observability")]
 
     class FakeProgress:
         def __init__(self) -> None:
@@ -531,11 +533,9 @@ async def test_run_code_mapper_pipeline_emits_poi_progress_events(
         await progress.emit_event("node_start", "inner", node_id=1, depth=0)
         return {"answer": "ok", "metadata": {"sources": {"files": [], "chunks": []}}}
 
+    monkeypatch.setattr(code_mapper_service, "run_code_mapper_overview_hyde", fake_overview)
     monkeypatch.setattr(
-        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
-    )
-    monkeypatch.setattr(
-        code_mapper_service, "deep_research_impl", fake_deep_research_impl
+        code_mapper_service, "run_deep_research", fake_deep_research_impl
     )
     monkeypatch.setattr(
         code_mapper_service,
@@ -555,7 +555,7 @@ async def test_run_code_mapper_pipeline_emits_poi_progress_events(
         comprehensiveness="low",
         max_points=5,
         out_dir=None,
-        assembly_provider=None,
+        map_hyde_provider=None,
         indexing_cfg=None,
         poi_jobs=1,
         progress=progress,
@@ -577,8 +577,11 @@ async def test_run_code_mapper_pipeline_emits_poi_progress_events(
 async def test_run_code_mapper_pipeline_ignores_progress_emit_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_overview(**_: Any) -> tuple[str, list[str]]:
-        return "overview", ["Alpha", "Bravo"]
+    async def fake_overview(**_: Any) -> tuple[str, list[CodeMapperPOI]]:
+        return "overview", [
+            CodeMapperPOI(mode="architectural", text="Alpha"),
+            CodeMapperPOI(mode="architectural", text="Bravo"),
+        ]
 
     class FlakyProgress:
         async def emit_event(
@@ -594,11 +597,9 @@ async def test_run_code_mapper_pipeline_ignores_progress_emit_failures(
     async def fake_deep_research_impl(*, query: str, **__: Any) -> dict[str, Any]:
         return {"answer": f"ok: {query}", "metadata": {"sources": {"files": [], "chunks": []}}}
 
+    monkeypatch.setattr(code_mapper_service, "run_code_mapper_overview_hyde", fake_overview)
     monkeypatch.setattr(
-        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
-    )
-    monkeypatch.setattr(
-        code_mapper_service, "deep_research_impl", fake_deep_research_impl
+        code_mapper_service, "run_deep_research", fake_deep_research_impl
     )
     monkeypatch.setattr(
         code_mapper_service,
@@ -617,7 +618,7 @@ async def test_run_code_mapper_pipeline_ignores_progress_emit_failures(
         comprehensiveness="low",
         max_points=5,
         out_dir=None,
-        assembly_provider=None,
+        map_hyde_provider=None,
         indexing_cfg=None,
         poi_jobs=2,
         progress=FlakyProgress(),
@@ -631,8 +632,8 @@ async def test_run_code_mapper_pipeline_ignores_progress_emit_failures(
 async def test_run_code_mapper_pipeline_ignores_inner_progress_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_overview(**_: Any) -> tuple[str, list[str]]:
-        return "overview", ["Observability"]
+    async def fake_overview(**_: Any) -> tuple[str, list[CodeMapperPOI]]:
+        return "overview", [CodeMapperPOI(mode="architectural", text="Observability")]
 
     class FlakyProgress:
         async def emit_event(
@@ -649,11 +650,9 @@ async def test_run_code_mapper_pipeline_ignores_inner_progress_failures(
         await progress.emit_event("node_start", "inner", node_id=1, depth=0)
         return {"answer": "ok", "metadata": {"sources": {"files": [], "chunks": []}}}
 
+    monkeypatch.setattr(code_mapper_service, "run_code_mapper_overview_hyde", fake_overview)
     monkeypatch.setattr(
-        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
-    )
-    monkeypatch.setattr(
-        code_mapper_service, "deep_research_impl", fake_deep_research_impl
+        code_mapper_service, "run_deep_research", fake_deep_research_impl
     )
     monkeypatch.setattr(
         code_mapper_service,
@@ -672,7 +671,7 @@ async def test_run_code_mapper_pipeline_ignores_inner_progress_failures(
         comprehensiveness="low",
         max_points=5,
         out_dir=None,
-        assembly_provider=None,
+        map_hyde_provider=None,
         indexing_cfg=None,
         poi_jobs=1,
         progress=FlakyProgress(),
@@ -685,8 +684,8 @@ async def test_run_code_mapper_pipeline_ignores_inner_progress_failures(
 async def test_run_code_mapper_pipeline_emits_poi_failed_only_after_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_overview(**_: Any) -> tuple[str, list[str]]:
-        return "overview", ["Observability"]
+    async def fake_overview(**_: Any) -> tuple[str, list[CodeMapperPOI]]:
+        return "overview", [CodeMapperPOI(mode="architectural", text="Observability")]
 
     class FakeProgress:
         def __init__(self) -> None:
@@ -712,11 +711,9 @@ async def test_run_code_mapper_pipeline_emits_poi_failed_only_after_retry(
 
     monkeypatch.setattr(code_mapper_service.random, "uniform", lambda *_: 0.0)
     monkeypatch.setattr(code_mapper_service.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(code_mapper_service, "run_code_mapper_overview_hyde", fake_overview)
     monkeypatch.setattr(
-        code_mapper_service, "_run_code_mapper_overview_hyde", fake_overview
-    )
-    monkeypatch.setattr(
-        code_mapper_service, "deep_research_impl", fake_deep_research_impl
+        code_mapper_service, "run_deep_research", fake_deep_research_impl
     )
     monkeypatch.setattr(
         code_mapper_service,
@@ -736,7 +733,7 @@ async def test_run_code_mapper_pipeline_emits_poi_failed_only_after_retry(
         comprehensiveness="low",
         max_points=5,
         out_dir=None,
-        assembly_provider=None,
+        map_hyde_provider=None,
         indexing_cfg=None,
         poi_jobs=1,
         progress=progress,
