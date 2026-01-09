@@ -11,6 +11,22 @@ try:
 except ImportError:
     TIKTOKEN_AVAILABLE = False
 
+# Token estimation ratios (characters per token)
+EMBEDDING_CHARS_PER_TOKEN = 3
+LLM_CHARS_PER_TOKEN = 4
+DEFAULT_CHARS_PER_TOKEN = 3.5
+
+
+def estimate_tokens_llm(text: str) -> int:
+    """Token estimation for LLM providers (4 chars/token).
+
+    Central implementation - LLM providers should call this
+    unless they have a provider-specific tokenizer.
+    """
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
+
 
 def estimate_tokens(
     text: str,
