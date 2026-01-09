@@ -9,8 +9,8 @@ import hashlib
 from collections.abc import AsyncIterator
 from typing import Any
 
-from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
+from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 
 
 class FakeLLMProvider(LLMProvider):
@@ -456,3 +456,122 @@ class ConstantEmbeddingProvider(FakeEmbeddingProvider):
         """Return constant unit vector (all components equal)."""
         value = 1.0 / (self._dims**0.5)
         return [value] * self._dims
+
+
+class ValidatingEmbeddingProvider(FakeEmbeddingProvider):
+    """Embedding provider that validates chunk size constraints.
+
+    Intercepts all texts sent to embed() and validates they conform
+    to the min/max chunk size constraints:
+    - max_chunk_size: 1200 non-whitespace chars
+    - min_chunk_size: 25 non-whitespace chars (soft threshold)
+    - safe_token_limit: 6000 tokens (estimated as len(text) // 3)
+
+    Use this for e2e tests that verify all parsers respect chunk size limits.
+    """
+
+    def __init__(
+        self,
+        max_chunk_size: int = 1200,
+        min_chunk_size: int = 25,
+        safe_token_limit: int = 6000,
+        **kwargs: Any,
+    ):
+        """Initialize validating embedding provider.
+
+        Args:
+            max_chunk_size: Maximum non-whitespace chars per chunk (default 1200)
+            min_chunk_size: Soft threshold for suspiciously small chunks (default 25)
+            safe_token_limit: Maximum estimated tokens per chunk (default 6000)
+            **kwargs: Arguments passed to FakeEmbeddingProvider
+        """
+        super().__init__(**kwargs)
+        self.max_chunk_size = max_chunk_size
+        self.min_chunk_size = min_chunk_size
+        self.safe_token_limit = safe_token_limit
+        self.violations: list[dict[str, Any]] = []
+        self.all_texts: list[str] = []
+        self.chunk_stats: dict[str, Any] = {
+            "total": 0,
+            "min_size": float("inf"),
+            "max_size": 0,
+            "min_tokens": float("inf"),
+            "max_tokens": 0,
+        }
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        """Generate embeddings while validating chunk size constraints."""
+        import re
+
+        for text in texts:
+            self.all_texts.append(text)
+            # Measure non-whitespace chars (same as ChunkMetrics.from_content)
+            non_ws_chars = len(re.sub(r"\s", "", text))
+            # Estimate tokens (conservative: len // 3)
+            estimated_tokens = len(text) // 3
+
+            # Update stats
+            self.chunk_stats["total"] += 1
+            self.chunk_stats["min_size"] = min(
+                self.chunk_stats["min_size"], non_ws_chars
+            )
+            self.chunk_stats["max_size"] = max(
+                self.chunk_stats["max_size"], non_ws_chars
+            )
+            self.chunk_stats["min_tokens"] = min(
+                self.chunk_stats["min_tokens"], estimated_tokens
+            )
+            self.chunk_stats["max_tokens"] = max(
+                self.chunk_stats["max_tokens"], estimated_tokens
+            )
+
+            # Validate max_chunk_size (non-whitespace chars)
+            if non_ws_chars > self.max_chunk_size:
+                self.violations.append(
+                    {
+                        "type": "max_chars_exceeded",
+                        "non_ws_chars": non_ws_chars,
+                        "limit": self.max_chunk_size,
+                        "text_preview": text[:100],
+                    }
+                )
+
+            # Validate safe_token_limit
+            if estimated_tokens > self.safe_token_limit:
+                self.violations.append(
+                    {
+                        "type": "max_tokens_exceeded",
+                        "estimated_tokens": estimated_tokens,
+                        "limit": self.safe_token_limit,
+                        "text_preview": text[:100],
+                    }
+                )
+
+            # Soft threshold: flag suspiciously small chunks
+            if non_ws_chars < self.min_chunk_size:
+                self.violations.append(
+                    {
+                        "type": "suspiciously_small",
+                        "non_ws_chars": non_ws_chars,
+                        "threshold": self.min_chunk_size,
+                        "text_preview": text[:100],
+                    }
+                )
+
+        return await super().embed(texts)
+
+    def get_violations_by_type(self, violation_type: str) -> list[dict[str, Any]]:
+        """Get all violations of a specific type."""
+        return [v for v in self.violations if v["type"] == violation_type]
+
+    def reset_tracking(self) -> None:
+        """Reset all tracking data."""
+        self.violations = []
+        self.all_texts = []
+        self.chunk_stats = {
+            "total": 0,
+            "min_size": float("inf"),
+            "max_size": 0,
+            "min_tokens": float("inf"),
+            "max_tokens": 0,
+        }
