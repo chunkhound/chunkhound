@@ -4,7 +4,7 @@ import asyncio
 import os
 import random
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -37,6 +37,10 @@ class CodeMapperNoPointsError(RuntimeError):
     def __init__(self, overview_answer: str) -> None:
         super().__init__("Code Mapper overview produced no points of interest.")
         self.overview_answer = overview_answer
+
+
+class CodeMapperInvalidConcurrencyError(ValueError):
+    """Raised when concurrency configuration is invalid."""
 
 
 @dataclass
@@ -76,16 +80,59 @@ def _audience_guidance_lines(*, audience: str) -> list[str]:
     return []
 
 
+def _iter_exception_chain(exc: BaseException) -> Iterator[BaseException]:
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None:
+        key = id(current)
+        if key in seen:
+            break
+        seen.add(key)
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+_RETRYABLE_POI_ERROR_SUBSTRINGS = (
+    "llm completion failed",
+    "llm structured completion failed",
+    "llm returned empty response",
+    "llm response truncated",
+    "token limit",
+    "rate limit",
+    "429",
+    "timeout",
+    "timed out",
+    "overloaded",
+    "content filter",
+    "responses api",
+)
+
+
+def _is_retryable_poi_error(exc: Exception) -> bool:
+    for chained in _iter_exception_chain(exc):
+        if isinstance(chained, (asyncio.TimeoutError, TimeoutError, OSError)):
+            return True
+
+    message = str(exc).strip().lower()
+    if not message:
+        return False
+    return any(token in message for token in _RETRYABLE_POI_ERROR_SUBSTRINGS)
+
+
 def _resolve_poi_concurrency(total_points: int) -> int:
     raw = os.getenv("CH_CODE_MAPPER_POI_CONCURRENCY", "").strip()
     if raw:
         try:
             parsed = int(raw)
-            if parsed < 1:
-                return 1
-            return min(parsed, max(total_points, 1))
         except ValueError:
-            return 1
+            raise CodeMapperInvalidConcurrencyError(
+                "CH_CODE_MAPPER_POI_CONCURRENCY must be an integer >= 1."
+            ) from None
+        if parsed < 1:
+            raise CodeMapperInvalidConcurrencyError(
+                "CH_CODE_MAPPER_POI_CONCURRENCY must be >= 1."
+            )
+        return min(parsed, max(total_points, 1))
     if total_points <= 1:
         return 1
     return min(4, total_points)
@@ -127,6 +174,8 @@ class _PoiProgressProxy:
                 depth=mapped_depth,
                 metadata=metadata,
             )
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             if self._on_error is not None:
                 self._on_error(event_type, exc)
@@ -263,6 +312,8 @@ async def run_code_mapper_pipeline(
                 depth=depth,
                 metadata=metadata,
             )
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             _on_progress_error(event_type, exc)
 
@@ -445,7 +496,12 @@ async def run_code_mapper_pipeline(
                     )
                 return heading, None, "empty result", False
             return heading, result, None, False
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
+            if not _is_retryable_poi_error(exc):
+                raise
+
             if log_error:
                 log_error(f"Code Mapper deep research failed for point {idx}: {exc}")
             logger.exception(f"Code Mapper deep research failed for point {idx}.")
@@ -481,29 +537,13 @@ async def run_code_mapper_pipeline(
                 await _mark_item_done()
 
     workers = [asyncio.create_task(_worker(i)) for i in range(poi_concurrency)]
-    worker_results = await asyncio.gather(*workers, return_exceptions=True)
-    worker_failed = False
-    for result in worker_results:
-        if isinstance(result, asyncio.CancelledError):
-            raise result
-        if isinstance(result, BaseException):
-            worker_failed = True
-            if log_error:
-                log_error(f"[Code Mapper] Worker failed unexpectedly: {result}")
-            logger.opt(exception=result).error(
-                "[Code Mapper] Worker failed unexpectedly."
-            )
-    if worker_failed:
-        backoff_to_serial.set()
-        while True:
-            item = await _next_pending(0)
-            if item is None:
-                break
-            idx, poi, heading = item
-            try:
-                await _process_item(idx, poi, heading)
-            finally:
-                await _mark_item_done()
+    try:
+        await asyncio.gather(*workers)
+    finally:
+        for worker in workers:
+            if not worker.done():
+                worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
 
     if retry_candidates:
         for idx in sorted(retry_candidates.keys()):
@@ -517,6 +557,8 @@ async def run_code_mapper_pipeline(
                         node_id=None,
                         depth=0,
                     )
+                except asyncio.CancelledError:
+                    raise
                 except Exception:
                     pass
             retry_delay = 1.0

@@ -22,6 +22,13 @@ from tests.fixtures.fake_providers import FakeEmbeddingProvider, FakeLLMProvider
 from tests.integration.code_mapper_scope_helpers import write_scope_repo_layout
 
 
+def _retryable_llm_error(message: str = "boom") -> RuntimeError:
+    exc = RuntimeError(f"LLM completion failed: {message}")
+    exc.__cause__ = asyncio.TimeoutError("timeout")
+    exc.__suppress_context__ = True
+    return exc
+
+
 @pytest.mark.asyncio
 async def test_run_code_mapper_pipeline_raises_when_no_points(
     monkeypatch: pytest.MonkeyPatch,
@@ -272,6 +279,52 @@ async def test_code_mapper_coverage_uses_deep_research_sources(
 
 
 @pytest.mark.asyncio
+async def test_run_code_mapper_pipeline_fails_fast_on_type_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_overview(**_: Any) -> tuple[str, list[CodeMapperPOI]]:
+        return "overview", [CodeMapperPOI(mode="architectural", text="Alpha")]
+
+    attempts = 0
+
+    async def fake_deep_research_impl(*, query: str, **__: Any) -> dict[str, Any]:
+        nonlocal attempts
+        _ = query
+        attempts += 1
+        raise TypeError("bug")
+
+    monkeypatch.setattr(code_mapper_service, "run_code_mapper_overview_hyde", fake_overview)
+    monkeypatch.setattr(
+        code_mapper_service, "run_deep_research", fake_deep_research_impl
+    )
+    monkeypatch.setattr(
+        code_mapper_service,
+        "compute_db_scope_stats",
+        lambda *_: (0, 0, set()),
+    )
+
+    with pytest.raises(TypeError, match="bug"):
+        await code_mapper_service.run_code_mapper_pipeline(
+            services=object(),
+            embedding_manager=object(),
+            llm_manager=object(),
+            target_dir=object(),
+            scope_path=object(),
+            scope_label="scope",
+            path_filter=None,
+            comprehensiveness="low",
+            max_points=5,
+            out_dir=None,
+            map_hyde_provider=None,
+            indexing_cfg=None,
+            poi_jobs=1,
+            progress=None,
+        )
+
+    assert attempts == 1
+
+
+@pytest.mark.asyncio
 async def test_run_code_mapper_pipeline_runs_poi_research_in_parallel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -385,7 +438,7 @@ async def test_run_code_mapper_pipeline_backs_off_to_serial_on_exception(
         if "Boom" in query:
             events.append("boom_start")
             boom_called.set()
-            raise RuntimeError("boom")
+            raise _retryable_llm_error("boom")
         if "Charlie" in query:
             events.append("charlie_start")
             charlie_started.set()
@@ -506,6 +559,61 @@ async def test_run_code_mapper_pipeline_retries_empty_result_once(
     assert sleep_calls == [0.0]
     assert len(result.poi_sections) == 1
     assert result.failed_poi_sections == []
+
+
+@pytest.mark.asyncio
+async def test_run_code_mapper_pipeline_retries_retryable_llm_error_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_overview(**_: Any) -> tuple[str, list[CodeMapperPOI]]:
+        return "overview", [CodeMapperPOI(mode="architectural", text="Observability")]
+
+    attempts = 0
+
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(_: float) -> None:
+        await real_sleep(0)
+
+    async def fake_deep_research_impl(*, query: str, **__: Any) -> dict[str, Any]:
+        nonlocal attempts
+        _ = query
+        attempts += 1
+        raise _retryable_llm_error("rate limit")
+
+    monkeypatch.setattr(code_mapper_service.random, "uniform", lambda *_: 0.0)
+    monkeypatch.setattr(code_mapper_service.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(code_mapper_service, "run_code_mapper_overview_hyde", fake_overview)
+    monkeypatch.setattr(
+        code_mapper_service, "run_deep_research", fake_deep_research_impl
+    )
+    monkeypatch.setattr(
+        code_mapper_service,
+        "compute_db_scope_stats",
+        lambda *_: (0, 0, set()),
+    )
+
+    result = await code_mapper_service.run_code_mapper_pipeline(
+        services=object(),
+        embedding_manager=object(),
+        llm_manager=object(),
+        target_dir=object(),
+        scope_path=object(),
+        scope_label="scope",
+        path_filter=None,
+        comprehensiveness="low",
+        max_points=5,
+        out_dir=None,
+        map_hyde_provider=None,
+        indexing_cfg=None,
+        poi_jobs=1,
+        progress=None,
+    )
+
+    assert attempts == 2
+    assert result.poi_sections == []
+    assert len(result.failed_poi_sections) == 1
+    assert "LLM completion failed: rate limit" in result.failed_poi_sections[0][2]
 
 
 @pytest.mark.asyncio
@@ -707,7 +815,7 @@ async def test_run_code_mapper_pipeline_emits_poi_failed_only_after_retry(
         await real_sleep(0)
 
     async def fake_deep_research_impl(**__: Any) -> dict[str, Any]:
-        raise RuntimeError("boom")
+        raise _retryable_llm_error("boom")
 
     monkeypatch.setattr(code_mapper_service.random, "uniform", lambda *_: 0.0)
     monkeypatch.setattr(code_mapper_service.asyncio, "sleep", fake_sleep)

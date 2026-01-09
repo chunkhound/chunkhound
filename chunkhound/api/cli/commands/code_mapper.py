@@ -31,6 +31,7 @@ from chunkhound.code_mapper.models import CodeMapperPOI
 from chunkhound.code_mapper.orchestrator import CodeMapperOrchestrator
 from chunkhound.code_mapper.render import render_overview_document
 from chunkhound.code_mapper.service import (
+    CodeMapperInvalidConcurrencyError,
     CodeMapperNoPointsError,
     run_code_mapper_pipeline,
 )
@@ -284,6 +285,9 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
             formatter.error("Code Mapper HyDE planning failed.")
             formatter.text_block(exc.hyde_message, title="HyDE error")
             sys.exit(1)
+        except CodeMapperInvalidConcurrencyError as exc:
+            formatter.error(str(exc))
+            sys.exit(2)
         except (OSError, RuntimeError, TypeError, ValueError) as e:
             formatter.error(f"Code Mapper research failed: {e}")
             logger.exception("Full error details:")
@@ -354,6 +358,13 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
         include_combined=include_combined,
         unreferenced_files=unreferenced,
     )
+
+    if failed_poi_sections:
+        formatter.warning(
+            f"{len(failed_poi_sections)}/{total_research_calls} topics failed after a "
+            "retry; see the topics index for '(failed)' entries. The combined doc "
+            "includes only successful topics."
+        )
 
     formatter.success("Code Mapper complete.")
     if write_result.doc_path is not None:
