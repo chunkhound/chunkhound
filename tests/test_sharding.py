@@ -783,11 +783,10 @@ class TestSplitAtThreshold:
             [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
         )
 
-        # Insert exactly split_threshold vectors to test k-means fallback path
-        vector_count = TEST_SPLIT_THRESHOLD
-        vectors = [
-            generator.generate_hash_seeded(f"doc_{i}") for i in range(vector_count)
-        ]
+        # Insert exactly split_threshold vectors using clustered generation
+        # to ensure K-means produces balanced clusters above merge_threshold
+        cluster_data = generator.generate_clustered(num_clusters=2, per_cluster=50)
+        vectors = [vec for vec, _label in cluster_data]
         insert_embeddings_to_db(tmp_db, vectors, shard_id)
 
         # Run fix_pass - should trigger split (>= threshold)

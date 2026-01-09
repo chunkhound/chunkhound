@@ -16,7 +16,7 @@ from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 from chunkhound.mcp_server.tools import execute_tool
 from chunkhound.embeddings import EmbeddingManager
-from .test_utils import get_api_key_for_tests
+from .fixtures.fake_providers import ConstantEmbeddingProvider
 
 
 class TestMCPIntegration:
@@ -25,78 +25,54 @@ class TestMCPIntegration:
     @pytest.fixture
     async def mcp_setup(self):
         """Setup MCP server with real services and temp directory."""
-        # Get API key and provider configuration
-        api_key, provider = get_api_key_for_tests()
-        
         temp_dir = Path(tempfile.mkdtemp())
         db_path = temp_dir / ".chunkhound" / "test.db"
         watch_dir = temp_dir / "project"
         watch_dir.mkdir(parents=True)
-        
+
         # Ensure database directory exists
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Configure embedding based on available API key
-        embedding_config = None
-        if api_key and provider:
-            model = "text-embedding-3-small" if provider == "openai" else "voyage-3.5"
-            embedding_config = {
-                "provider": provider,
-                "api_key": api_key,
-                "model": model
-            }
-        
+
+        # Use ConstantEmbeddingProvider for deterministic, fast testing
+        # Returns identical vectors for all inputs, enabling semantic search to work
+        # Eliminates external API dependencies that cause timeouts
+        embedding_manager = EmbeddingManager()
+        fake_provider = ConstantEmbeddingProvider(dims=1536)
+        embedding_manager.register_provider(fake_provider, set_default=True)
+
         # Use fake args to prevent find_project_root call that fails in CI
         from types import SimpleNamespace
         fake_args = SimpleNamespace(path=temp_dir)
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
-            embedding=embedding_config,
+            embedding=None,  # Provider registered directly with embedding_manager
             indexing={"include": ["*.py", "*.js"], "exclude": ["*.log"]}
         )
-        
-        # Create embedding manager if API key is available
-        embedding_manager = None
-        if api_key and provider:
-            embedding_manager = EmbeddingManager()
-            if provider == "openai":
-                from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
-                embedding_provider = OpenAIEmbeddingProvider(api_key=api_key, model="text-embedding-3-small")
-            elif provider == "voyageai":
-                from chunkhound.providers.embeddings.voyageai_provider import VoyageAIEmbeddingProvider
-                embedding_provider = VoyageAIEmbeddingProvider(api_key=api_key, model="voyage-3.5")
-            else:
-                embedding_provider = None
-            
-            if embedding_provider:
-                embedding_manager.register_provider(embedding_provider, set_default=True)
-        
+
         # Create services - this is what MCP server uses
         services = create_services(db_path, config, embedding_manager)
         services.provider.connect()
 
-
         # Initialize realtime indexing service (what MCP server should do)
         realtime_service = RealtimeIndexingService(services, config)
         await realtime_service.start(watch_dir)
-        
+
         yield services, realtime_service, watch_dir, temp_dir, embedding_manager
-        
+
         # Cleanup
         try:
             await realtime_service.stop()
         except Exception:
             pass
-        
+
         try:
             services.provider.disconnect()
         except Exception:
             pass
-            
+
         shutil.rmtree(temp_dir, ignore_errors=True)
 
-    @pytest.mark.skipif(get_api_key_for_tests()[0] is None, reason="No API key available")
     @pytest.mark.asyncio
     async def test_mcp_semantic_search_finds_new_files(self, mcp_setup):
         """Test that MCP semantic search finds newly created files."""
