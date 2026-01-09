@@ -3,11 +3,6 @@
 from typing import Any
 
 
-def estimate_tokens_rough(text: str) -> float:
-    """Rough token estimation (1.3 tokens per word approximation)."""
-    return len(text.split()) * 1.3
-
-
 def chunk_text_by_words(text: str, max_tokens: int) -> list[str]:
     """Split text into chunks by approximate token count using word splitting."""
     words = text.split()

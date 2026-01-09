@@ -16,6 +16,7 @@ from chunkhound.core.config.embedding_config import (
     validate_rerank_configuration,
 )
 from chunkhound.core.exceptions.core import ValidationError
+from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 
 from .batch_utils import handle_token_limit_error, with_openai_token_handling
@@ -816,10 +817,13 @@ class OpenAIEmbeddingProvider:
         return validated
 
     def estimate_tokens(self, text: str) -> int:
-        """Estimate token count for a text."""
-        # Conservative estimation: ~3 characters per token for code/technical text
-        # This accounts for more punctuation and shorter tokens in code
-        return max(1, len(text) // 3)
+        """Estimate token count for a text.
+
+        Uses the standard embedding ratio (3.0 chars/token) from the central
+        utility. Could be enhanced to use tiktoken for exact OpenAI token
+        counting if precision becomes important.
+        """
+        return max(1, len(text) // EMBEDDING_CHARS_PER_TOKEN)
 
     def estimate_batch_tokens(self, texts: list[str]) -> int:
         """Estimate total token count for a batch of texts."""
