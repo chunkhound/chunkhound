@@ -97,7 +97,7 @@ class GeminiLLMProvider(LLMProvider):
         max_completion_tokens: int = 4096,
         json_schema: dict[str, Any] | None = None,
         system_instruction: str | None = None,
-    ) -> types.GenerateContentConfig:
+    ) -> "types.GenerateContentConfig":
         """Build generation configuration for Gemini API.
 
         Args:
