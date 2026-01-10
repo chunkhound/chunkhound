@@ -155,9 +155,9 @@ def unique_mcp_test_function():
         # Create initial file
         test_file = watch_dir / "modify_test.py"
         test_file.write_text("def initial_function(): pass")
-        
+
         # Wait for initial processing
-        await asyncio.sleep(2.0)
+        await realtime_service.wait_for_idle(timeout=5.0)
         
         # Verify initial content is found
         initial_results = await execute_tool(
@@ -181,9 +181,9 @@ def modified_unique_regex_pattern():
     '''Added by modification - should be found by regex'''
     return "modification_success"
 """)
-        
+
         # Wait for debounce + processing
-        await asyncio.sleep(2.0)
+        await realtime_service.wait_for_idle(timeout=5.0)
         
         # Search for modified content using MCP tool execution
         modified_results = await execute_tool(

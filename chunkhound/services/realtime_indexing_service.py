@@ -751,6 +751,9 @@ class RealtimeIndexingService:
                 if hasattr(self.services.provider, "flush"):
                     await self.services.provider.flush()
 
+                # Clear event dedup entry so future modifications aren't suppressed
+                self._recent_file_events.pop(str(file_path), None)
+
                 # If we skipped embeddings, queue for embedding generation
                 if skip_embeddings:
                     await self.add_file(file_path, priority="embed")
@@ -810,3 +813,32 @@ class RealtimeIndexingService:
         except asyncio.TimeoutError:
             logger.warning(f"Monitoring not ready after {timeout}s")
             return False
+
+    async def wait_for_idle(self, timeout: float = 10.0) -> bool:
+        """Wait until all pending work is complete.
+
+        Returns True when idle, False on timeout.
+        """
+        deadline = time.time() + timeout
+
+        while time.time() < deadline:
+            # Check if all work sources are empty
+            if (
+                self.event_queue.empty()
+                and self.file_queue.empty()
+                and len(self.pending_files) == 0
+                and len(self._debounce_tasks) == 0
+            ):
+                # Double-check after brief pause to catch in-flight work
+                await asyncio.sleep(0.1)
+                if (
+                    self.event_queue.empty()
+                    and self.file_queue.empty()
+                    and len(self.pending_files) == 0
+                    and len(self._debounce_tasks) == 0
+                ):
+                    return True
+
+            await asyncio.sleep(0.1)
+
+        return False
