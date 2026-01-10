@@ -14,8 +14,9 @@ from chunkhound.core.types.common import Language
 @pytest.fixture
 def makefile_workflow(tmp_path):
     """Setup real components for Makefile integration testing."""
-    # Real in-memory database
-    db = DuckDBProvider(":memory:", base_directory=tmp_path)
+    # Use file-based database (not :memory:) because semantic search requires ShardManager
+    db_path = tmp_path / "test.db"
+    db = DuckDBProvider(str(db_path), base_directory=tmp_path)
     db.connect()
 
     # Real parser and coordinator

@@ -26,102 +26,39 @@ class DuckDBChunkRepository:
         self._connection_manager = connection_manager
         self._provider = provider
 
-    @property
-    def connection(self) -> Any | None:
-        """Get database connection from connection manager."""
-        return self._connection_manager.connection
+    # NOTE: connection property was removed - connections are managed by the executor
+    # All operations must go through the provider's executor methods
 
     def insert_chunk(self, chunk: Chunk) -> int:
         """Insert chunk record and return chunk ID."""
-        if self.connection is None:
-            raise RuntimeError("No database connection")
+        if not self._provider:
+            raise RuntimeError("Provider required for database operations")
 
         try:
             # Delegate to provider's executor for thread safety
-            if self._provider:
-                return self._provider._execute_in_db_thread_sync(
-                    "insert_chunk_single", chunk
-                )
-            else:
-                # Fallback for tests
-                result = self._connection_manager.connection.execute(
-                    """
-                    INSERT INTO chunks (file_id, chunk_type, symbol, code, start_line, end_line,
-                                      start_byte, end_byte, language)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    RETURNING id
-                """,
-                    [
-                        chunk.file_id,
-                        chunk.chunk_type.value if chunk.chunk_type else None,
-                        chunk.symbol,
-                        chunk.code,
-                        chunk.start_line,
-                        chunk.end_line,
-                        chunk.start_byte,
-                        chunk.end_byte,
-                        chunk.language.value if chunk.language else None,
-                    ],
-                ).fetchone()
-
-                return result[0] if result else 0
-
+            return self._provider._execute_in_db_thread_sync(
+                "insert_chunk_single", chunk
+            )
         except Exception as e:
             logger.error(f"Failed to insert chunk: {e}")
             raise
 
     def insert_chunks_batch(self, chunks: list[Chunk]) -> list[int]:
-        """Insert multiple chunks in batch using optimized DuckDB bulk loading."""
-        if self.connection is None:
-            raise RuntimeError("No database connection")
+        """Insert multiple chunks in batch using optimized DuckDB bulk loading.
+
+        NOTE: This method delegates to the provider's executor for proper
+        thread-safe execution in the database thread.
+        """
+        if not self._provider:
+            raise RuntimeError("Provider required for database operations")
 
         if not chunks:
             return []
 
         try:
-            # Prepare values for bulk INSERT statement
-            values_clauses = []
-            params = []
-
-            for chunk in chunks:
-                values_clauses.append("(?, ?, ?, ?, ?, ?, ?, ?, ?)")
-                params.extend(
-                    [
-                        chunk.file_id,
-                        chunk.chunk_type.value if chunk.chunk_type else None,
-                        chunk.symbol,
-                        chunk.code,
-                        chunk.start_line,
-                        chunk.end_line,
-                        chunk.start_byte,
-                        chunk.end_byte,
-                        chunk.language.value if chunk.language else None,
-                    ]
-                )
-
-            # Use single bulk INSERT with RETURNING for optimal performance
-            values_sql = ", ".join(values_clauses)
-            query = f"""
-                INSERT INTO chunks (file_id, chunk_type, symbol, code, start_line, end_line,
-                                  start_byte, end_byte, language)
-                VALUES {values_sql}
-                RETURNING id
-            """
-
-            # Execute bulk insert and get all IDs in one operation
-            if self._provider:
-                # Provider not used for batch operations currently
-                results = self._connection_manager.connection.execute(
-                    query, params
-                ).fetchall()
-            else:
-                results = self._connection_manager.connection.execute(
-                    query, params
-                ).fetchall()
-            chunk_ids = [result[0] for result in results]
-
-            return chunk_ids
-
+            return self._provider._execute_in_db_thread_sync(
+                "insert_chunks_batch_query", chunks
+            )
         except Exception as e:
             logger.error(f"Failed to insert chunks batch: {e}")
             raise
@@ -130,23 +67,13 @@ class DuckDBChunkRepository:
         self, chunk_id: int, as_model: bool = False
     ) -> dict[str, Any] | Chunk | None:
         """Get chunk record by ID."""
-        if self.connection is None:
-            raise RuntimeError("No database connection")
+        if not self._provider:
+            raise RuntimeError("Provider required for database operations")
 
         try:
-            if self._provider:
-                result = self._provider._execute_in_db_thread_sync(
-                    "get_chunk_by_id_query", chunk_id
-                )
-            else:
-                result = self._connection_manager.connection.execute(
-                    """
-                    SELECT id, file_id, chunk_type, symbol, code, start_line, end_line,
-                           start_byte, end_byte, language, created_at, updated_at
-                    FROM chunks WHERE id = ?
-                """,
-                    [chunk_id],
-                ).fetchone()
+            result = self._provider._execute_in_db_thread_sync(
+                "get_chunk_by_id_query", chunk_id
+            )
 
             if not result:
                 return None
@@ -189,24 +116,13 @@ class DuckDBChunkRepository:
         self, file_id: int, as_model: bool = False
     ) -> list[dict[str, Any] | Chunk]:
         """Get all chunks for a specific file."""
-        if self.connection is None:
-            raise RuntimeError("No database connection")
+        if not self._provider:
+            raise RuntimeError("Provider required for database operations")
 
         try:
-            if self._provider:
-                results = self._provider._execute_in_db_thread_sync(
-                    "get_chunks_by_file_id_query", file_id
-                )
-            else:
-                results = self._connection_manager.connection.execute(
-                    """
-                    SELECT id, file_id, chunk_type, symbol, code, start_line, end_line,
-                           start_byte, end_byte, language, created_at, updated_at
-                    FROM chunks WHERE file_id = ?
-                    ORDER BY start_line
-                """,
-                    [file_id],
-                ).fetchall()
+            results = self._provider._execute_in_db_thread_sync(
+                "get_chunks_by_file_id_query", file_id
+            )
 
             chunks = []
             for result in results:
@@ -254,46 +170,30 @@ class DuckDBChunkRepository:
 
     def delete_file_chunks(self, file_id: int) -> None:
         """Delete all chunks for a file."""
-        if self.connection is None:
-            raise RuntimeError("No database connection")
+        if not self._provider:
+            raise RuntimeError("Provider required for database operations")
 
         try:
-            # Delegate to provider if available for proper executor handling
-            if self._provider:
-                self._provider._execute_in_db_thread_sync("delete_file_chunks", file_id)
-            else:
-                # Fallback for tests - simplified version without embedding cleanup
-                self._connection_manager.connection.execute(
-                    "DELETE FROM chunks WHERE file_id = ?", [file_id]
-                )
-
+            self._provider._execute_in_db_thread_sync("delete_file_chunks", file_id)
         except Exception as e:
             logger.error(f"Failed to delete chunks for file {file_id}: {e}")
             raise
 
     def delete_chunk(self, chunk_id: int) -> None:
         """Delete a single chunk by ID."""
-        if self.connection is None:
-            raise RuntimeError("No database connection")
+        if not self._provider:
+            raise RuntimeError("Provider required for database operations")
 
         try:
-            # Delegate to provider if available for proper executor handling
-            if self._provider:
-                self._provider._execute_in_db_thread_sync("delete_chunk", chunk_id)
-            else:
-                # Fallback for tests - simplified version without embedding cleanup
-                self._connection_manager.connection.execute(
-                    "DELETE FROM chunks WHERE id = ?", [chunk_id]
-                )
-
+            self._provider._execute_in_db_thread_sync("delete_chunk", chunk_id)
         except Exception as e:
             logger.error(f"Failed to delete chunk {chunk_id}: {e}")
             raise
 
     def update_chunk(self, chunk_id: int, **kwargs) -> None:
         """Update chunk record with new values."""
-        if self.connection is None:
-            raise RuntimeError("No database connection")
+        if not self._provider:
+            raise RuntimeError("Provider required for database operations")
 
         if not kwargs:
             return
@@ -324,12 +224,9 @@ class DuckDBChunkRepository:
                 values.append(chunk_id)
 
                 query = f"UPDATE chunks SET {', '.join(set_clauses)} WHERE id = ?"
-                if self._provider:
-                    self._provider._execute_in_db_thread_sync(
-                        "update_chunk_query", chunk_id, query, values
-                    )
-                else:
-                    self._connection_manager.connection.execute(query, values)
+                self._provider._execute_in_db_thread_sync(
+                    "update_chunk_query", chunk_id, query, values
+                )
 
         except Exception as e:
             logger.error(f"Failed to update chunk {chunk_id}: {e}")
@@ -337,25 +234,22 @@ class DuckDBChunkRepository:
 
     def get_all_chunks_with_metadata(self) -> list[dict[str, Any]]:
         """Get all chunks with their metadata including file paths (provider-agnostic)."""
-        if self.connection is None:
-            raise RuntimeError("No database connection")
+        if not self._provider:
+            raise RuntimeError("Provider required for database operations")
 
         try:
             # Use SQL to get chunks with file paths (DuckDB approach)
             query = """
-                SELECT c.id, c.file_id, f.path as file_path, c.code, 
+                SELECT c.id, c.file_id, f.path as file_path, c.code,
                        c.start_line, c.end_line, c.chunk_type, c.language, c.symbol
                 FROM chunks c
                 JOIN files f ON c.file_id = f.id
                 ORDER BY c.id
             """
 
-            if self._provider:
-                results = self._provider._execute_in_db_thread_sync(
-                    "get_all_chunks_with_metadata_query", query
-                )
-            else:
-                results = self._connection_manager.connection.execute(query).fetchall()
+            results = self._provider._execute_in_db_thread_sync(
+                "get_all_chunks_with_metadata_query", query
+            )
 
             # Convert to list of dictionaries
             result = []
