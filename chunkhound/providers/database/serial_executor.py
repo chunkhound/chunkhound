@@ -204,8 +204,10 @@ class SerialDatabaseExecutor:
             wait: Whether to wait for pending operations to complete
         """
         try:
-            # Force close any thread-local connections first
-            self._force_close_connections()
+            # Only try to close connections if executor is not already shutdown
+            # This prevents "cannot schedule new futures after shutdown" errors
+            if not getattr(self._db_executor, '_shutdown', False):
+                self._force_close_connections()
 
             # Shutdown the executor
             self._db_executor.shutdown(wait=wait)
@@ -227,15 +229,22 @@ class SerialDatabaseExecutor:
                     if conn and hasattr(conn, "close"):
                         conn.close()
                         logger.debug("Forced close of thread-local connection")
+                    # Also clean up the attribute to prevent stale references
+                    delattr(_executor_local, "connection")
             except Exception as e:
                 logger.error(f"Error force-closing connection: {e}")
 
         # Submit the close operation to the executor thread
         try:
+            # Check if executor is still accepting tasks before submitting
+            if getattr(self._db_executor, '_shutdown', False):
+                logger.debug("Executor already shutdown, skipping force close")
+                return
             future = self._db_executor.submit(close_connection)
             future.result(timeout=2.0)  # Short timeout for cleanup
         except Exception as e:
-            logger.error(f"Error during force connection close: {e}")
+            # Downgrade to debug - this is expected during double-cleanup scenarios
+            logger.debug(f"Force connection close skipped: {e}")
 
     def clear_thread_local(self) -> None:
         """Clear thread-local storage (for cleanup).
