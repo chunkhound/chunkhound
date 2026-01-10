@@ -278,6 +278,9 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Connection manager holds separate file locks that must also be released
             # for compaction to get exclusive access to the database file
             self._connection_manager.disconnect(skip_checkpoint=True)
+            # Reset WAL cleanup flag so it runs again on reconnect
+            # This is critical for compaction where we swap to a fresh database file
+            self._wal_cleanup_done = False
 
     def _executor_disconnect(
         self, conn: Any, state: dict[str, Any], skip_checkpoint: bool
@@ -3148,6 +3151,9 @@ class DuckDBProvider(SerialDatabaseProvider):
             conn.execute("LOAD vss")
             self._enable_hnsw_persistence_on_conn(conn)
             conn.execute(f"IMPORT DATABASE '{export_dir}'")
+            # CRITICAL: Checkpoint to persist imported data before closing
+            # Without this, the imported data may not be written to disk
+            conn.execute("CHECKPOINT")
         finally:
             conn.close()
 
