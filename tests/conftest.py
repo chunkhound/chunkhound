@@ -79,7 +79,11 @@ def _cleanup_registry():
         # Try to close database provider if registered
         try:
             db_provider = registry.get_provider("database")
-            if hasattr(db_provider, 'close'):
+            # Only disconnect if provider is still connected - prevents double-disconnect
+            # errors when test fixture already disconnected the provider
+            if hasattr(db_provider, 'is_connected') and not db_provider.is_connected:
+                pass  # Already disconnected, skip
+            elif hasattr(db_provider, 'close'):
                 db_provider.close()
             elif hasattr(db_provider, 'disconnect'):
                 db_provider.disconnect()
