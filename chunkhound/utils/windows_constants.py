@@ -72,7 +72,9 @@ def fsync_path(path: Path | str) -> None:
     path = Path(path)
 
     # Fsync the file itself
-    fd = os.open(str(path), os.O_RDONLY)
+    # Windows FlushFileBuffers() requires write access; POSIX fsync works read-only
+    flags = os.O_RDWR if IS_WINDOWS else os.O_RDONLY
+    fd = os.open(str(path), flags)
     try:
         if IS_MACOS:
             import fcntl
