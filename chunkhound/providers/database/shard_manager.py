@@ -16,6 +16,7 @@ from chunkhound.core.config.sharding_config import ShardingConfig
 from chunkhound.providers.database import usearch_wrapper
 from chunkhound.providers.database.shard_state import ShardState, get_shard_state
 from chunkhound.providers.database.usearch_wrapper import SearchResult
+from chunkhound.utils.windows_constants import fsync_path
 
 
 def _parse_uuid(value: Any) -> UUID:
@@ -688,9 +689,10 @@ class ShardManager:
             add_vectors = np.array([db_ids[k] for k in to_add], dtype=np.float32)
             index.add(add_keys, add_vectors)
 
-        # Save atomically via temp file
+        # Save atomically via temp file with fsync for mmap visibility
         tmp_path = file_path.with_suffix(".usearch.tmp")
         index.save(str(tmp_path))
+        fsync_path(tmp_path)  # Flush data before rename
         tmp_path.replace(file_path)
 
         return True
@@ -742,9 +744,10 @@ class ShardManager:
         # Ensure shard directory exists
         self.shard_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save atomically via temp file
+        # Save atomically via temp file with fsync for mmap visibility
         tmp_path = file_path.with_suffix(".usearch.tmp")
         index.save(str(tmp_path))
+        fsync_path(tmp_path)  # Flush data before rename
         tmp_path.replace(file_path)
 
         logger.debug(f"Shard {shard_id} rebuilt: {len(embeddings)} vectors")

@@ -5,9 +5,11 @@ environment variables to ensure consistent behavior across the codebase.
 """
 
 import platform
+from pathlib import Path
 
 # Platform detection (cached for performance)
 IS_WINDOWS = platform.system() == "Windows"
+IS_MACOS = platform.system() == "Darwin"
 
 # Windows-specific timing constants (in seconds)
 WINDOWS_FILE_HANDLE_DELAY = 0.1  # 100ms - Standard file handle release delay
@@ -51,3 +53,40 @@ def get_utf8_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
         env.update(WINDOWS_UTF8_ENV)
 
     return env
+
+
+def fsync_path(path: Path | str) -> None:
+    """Fsync a file and its parent directory for cross-platform durability.
+
+    Ensures data is flushed to disk before subsequent reads (especially mmap).
+
+    - Linux: fsync file + fsync parent directory
+    - macOS: F_FULLFSYNC (flushes disk internal buffers)
+    - Windows: FlushFileBuffers via os.fsync
+
+    Args:
+        path: Path to the file to sync
+    """
+    import os
+
+    path = Path(path)
+
+    # Fsync the file itself
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        if IS_MACOS:
+            import fcntl
+
+            fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
+        else:
+            os.fsync(fd)
+    finally:
+        os.close(fd)
+
+    # Fsync parent directory (POSIX only - ensures filename is durable)
+    if not IS_WINDOWS:
+        dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
