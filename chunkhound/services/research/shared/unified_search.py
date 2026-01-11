@@ -477,8 +477,11 @@ class UnifiedSearch:
                 # Use config value if available, fall back to 100 (spec default)
                 scan_page_size = self._config.regex_scan_page_size if self._config else 100
                 seen_chunk_ids = exclude_ids.copy()  # Track all seen chunk IDs (excluded + collected)
+                # Safety limit to prevent infinite loops when exclusions are large
+                max_pages = 20
 
-                while len(results) < target_per_symbol:
+                pages_fetched = 0
+                while len(results) < target_per_symbol and pages_fetched < max_pages:
                     page, _ = await search_service.search_regex_async(
                         pattern=pattern,
                         page_size=scan_page_size,
@@ -486,10 +489,7 @@ class UnifiedSearch:
                         path_filter=path_filter,
                     )
                     if not page:
-                        break  # No more results available
-
-                    # Track if we found any new chunks in this page
-                    found_new_chunk = False
+                        break  # No more results available from backend
 
                     # Filter out excluded chunk IDs and collect undiscovered chunks
                     for chunk in page:
@@ -497,15 +497,11 @@ class UnifiedSearch:
                         if chunk_id and chunk_id not in seen_chunk_ids:
                             results.append(chunk)
                             seen_chunk_ids.add(chunk_id)
-                            found_new_chunk = True
                             if len(results) >= target_per_symbol:
                                 break
 
-                    # If we didn't find any new chunks in this page, we've exhausted results
-                    if not found_new_chunk:
-                        break
-
                     offset += scan_page_size
+                    pages_fetched += 1
 
                 logger.debug(
                     f"Found {len(results)} undiscovered chunks for symbol '{symbol}' (target: {target_per_symbol})"
