@@ -1661,13 +1661,20 @@ class DuckDBProvider(SerialDatabaseProvider):
         batch_size: int | None = None,
         connection=None,
     ) -> int:
-        """Insert multiple embedding vectors with HNSW index optimization - delegate to embedding repository.
+        """Insert multiple embedding vectors using executemany.
 
-        # OPTIMIZATION: Drops HNSW indexes for batches >50
-        # PERFORMANCE: 60s → 5s for 10k embeddings (12x speedup)
-        # RECOVERY: Indexes recreated after bulk insert
+        Note: This executor-based method does NOT implement HNSW index optimization.
+        For bulk inserts with HNSW drop/recreate optimization, use
+        EmbeddingRepository.insert_embeddings_batch directly.
+
+        Args:
+            embeddings_data: List of embedding dictionaries
+            batch_size: Optional batch size for chunked inserts
+            connection: Ignored (executor pattern uses internal connection)
+
+        Returns:
+            Number of embeddings inserted
         """
-        # Note: connection parameter is ignored in executor pattern
         return self._execute_in_db_thread_sync(
             "insert_embeddings_batch", embeddings_data, batch_size
         )
@@ -1679,7 +1686,10 @@ class DuckDBProvider(SerialDatabaseProvider):
         embeddings_data: list[dict],
         batch_size: int | None,
     ) -> int:
-        """Executor method for insert_embeddings_batch - runs in DB thread."""
+        """Executor method for insert_embeddings_batch - runs in DB thread.
+
+        Uses simple executemany for inserts. Does NOT manage HNSW indexes.
+        """
         if not embeddings_data:
             return 0
 
