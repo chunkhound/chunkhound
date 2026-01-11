@@ -22,6 +22,7 @@ from chunkhound.core.types.common import ChunkType, Language
 
 # Import existing components that will be used by the provider
 from chunkhound.embeddings import EmbeddingManager
+from chunkhound.providers.database.like_utils import escape_like_pattern
 from chunkhound.providers.database.serial_database_provider import (
     SerialDatabaseProvider,
 )
@@ -2904,3 +2905,12 @@ class LanceDBProvider(SerialDatabaseProvider):
             logger.warning(
                 f"Slow {operation}: {duration:.2f}s, {record_count} records"
             )
+
+    def _build_path_like_clause(self, pattern: str) -> str:
+        """Build a safe SQL LIKE clause for path filtering.
+
+        Uses backslash as the escape character for SQL LIKE patterns.
+        """
+        escaped = escape_like_pattern(pattern)
+        like = f"{escaped}%"
+        return f"path LIKE '{like}' ESCAPE '\\\\'"

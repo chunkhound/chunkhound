@@ -2199,9 +2199,10 @@ class DuckDBProvider(SerialDatabaseProvider):
             params = [pattern]
 
             if normalized_path is not None:
-                where_conditions.append("f.path LIKE ?")
+                escaped_path = escape_like_pattern(normalized_path)
+                where_conditions.append("f.path LIKE ? ESCAPE '\\'")
                 # Allow matching repo-relative segments inside stored paths
-                params.append(f"%{normalized_path}%")
+                params.append(f"%{escaped_path}%")
 
             where_clause = " AND ".join(where_conditions)
 
