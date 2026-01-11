@@ -263,7 +263,7 @@ class BFSExplorationStrategy:
 
         # Initialize global explored data from initial chunks
         global_explored_data: dict[str, Any] = {
-            "files_fully_read": set(),
+            "files_explored": set(),
             "chunk_ranges": {},
             "chunks": list(initial_chunks),
         }
@@ -541,8 +541,8 @@ class BFSExplorationStrategy:
 
         expanded_start, expanded_end = chunk_expanded_range
 
-        # Check if file was fully read
-        if file_path in explored_data["files_fully_read"]:
+        # Check if file was already explored (50+ lines seen)
+        if file_path in explored_data["files_explored"]:
             return True
 
         # Check for 100% containment
@@ -568,9 +568,9 @@ class BFSExplorationStrategy:
             coverage = global_explored_data.setdefault("file_line_coverage", {})
             coverage.setdefault(file_path, set()).update(range(start_line, end_line + 1))
 
-            # Mark as "well covered" if substantial chunk coverage (> 50 lines)
+            # Mark as "explored" if we've seen 50+ lines (heuristic to prevent re-exploration)
             if len(coverage[file_path]) > 50:
-                global_explored_data["files_fully_read"].add(file_path)
+                global_explored_data["files_explored"].add(file_path)
 
         for chunk in node.chunks:
             file_path = chunk.get("file_path")
@@ -731,7 +731,7 @@ class BFSExplorationStrategy:
 
         # Initialize global explored data from initial chunks
         global_explored_data: dict[str, Any] = {
-            "files_fully_read": set(),
+            "files_explored": set(),
             "chunk_ranges": {},
             "chunks": list(initial_chunks),
         }
