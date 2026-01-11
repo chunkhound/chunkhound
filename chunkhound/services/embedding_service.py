@@ -805,7 +805,7 @@ class EmbeddingService(BaseService):
         # Extract chunk IDs with consistent field handling
         # DuckDB uses "chunk_id", LanceDB uses "id" - handle both
         # Import locally to avoid circular import
-        from chunkhound.services.research.shared.chunk_dedup import get_chunk_id
+        from chunkhound.core.utils.chunk_utils import get_chunk_id
 
         all_chunk_ids: list[int] = []
         for chunk in all_chunks:
@@ -893,7 +893,7 @@ class EmbeddingService(BaseService):
         filtered_chunks = []
 
         # Import locally to avoid circular import
-        from chunkhound.services.research.shared.chunk_dedup import get_chunk_id
+        from chunkhound.core.utils.chunk_utils import get_chunk_id
 
         for chunk in all_chunks_data:
             chunk_id = get_chunk_id(chunk)

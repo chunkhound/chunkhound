@@ -7,20 +7,8 @@ synthesis). The pattern is: deduplicate by chunk_id, keeping highest rerank_scor
 
 from loguru import logger
 
-
-def get_chunk_id(chunk: dict) -> int | str | None:
-    """Extract chunk ID from a chunk dictionary.
-
-    Chunks may have their ID in either 'chunk_id' or 'id' field depending
-    on the source (database vs search results).
-
-    Args:
-        chunk: Chunk dictionary
-
-    Returns:
-        Chunk ID (int from DB or str) or None if not found
-    """
-    return chunk.get("chunk_id") or chunk.get("id")
+# Import from core utils (canonical location) and re-export for backwards compatibility
+from chunkhound.core.utils.chunk_utils import get_chunk_id
 
 
 def deduplicate_chunks(
