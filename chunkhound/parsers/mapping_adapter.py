@@ -5,6 +5,7 @@ the ConceptExtractor's LanguageMapping protocol by converting traditional
 queries (get_function_query, get_class_query, etc.) to universal concepts.
 """
 
+from pathlib import Path
 from typing import Any
 
 from tree_sitter import Node
@@ -372,3 +373,23 @@ class MappingAdapter(LanguageMapping):
         if hasattr(self.base_mapping, "extract_constants"):
             return self.base_mapping.extract_constants(concept, captures, content)
         return None
+
+    def resolve_import_path(
+        self,
+        import_text: str,
+        base_dir: Path,
+        source_file: Path,
+    ) -> Path | None:
+        """Resolve import statement to file path by delegating to base mapping.
+
+        Args:
+            import_text: The import statement text to resolve
+            base_dir: Base directory for resolution
+            source_file: Path to the source file containing the import
+
+        Returns:
+            Resolved path or None if unresolvable
+        """
+        return self.base_mapping.resolve_import_path(
+            import_text, base_dir, source_file
+        )
