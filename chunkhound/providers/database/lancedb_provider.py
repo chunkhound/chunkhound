@@ -729,6 +729,82 @@ class LanceDBProvider(SerialDatabaseProvider):
         self._file_path_cache.clear()
         self._chunk_id_cache.clear()
 
+    def _fetch_file_paths_by_ids(self, file_ids: list[int]) -> dict[int, str]:
+        """Fetch file paths for given file IDs, batching queries for efficiency.
+
+        Args:
+            file_ids: List of file IDs to fetch paths for
+
+        Returns:
+            Dictionary mapping file ID to file path
+        """
+        if not file_ids or not self._files_table:
+            return {}
+
+        # Remove duplicates while preserving order
+        unique_ids = list(dict.fromkeys(file_ids))
+
+        # Batch queries to avoid SQL query length limits
+        batch_size = 1000
+        result = {}
+
+        for i in range(0, len(unique_ids), batch_size):
+            batch_ids = unique_ids[i:i + batch_size]
+            ids_str = ','.join(map(str, batch_ids))
+
+            try:
+                batch_results = self._files_table.search().where(f"id IN ({ids_str})").to_list()
+                for row in batch_results:
+                    result[row["id"]] = row["path"]
+            except Exception:
+                # Fallback: query each ID individually
+                for file_id in batch_ids:
+                    try:
+                        single_result = self._files_table.search().where(f"id = {file_id}").to_list()
+                        if single_result:
+                            result[file_id] = single_result[0]["path"]
+                    except Exception:
+                        continue
+
+        return result
+
+    def _count_chunks_for_file_ids(self, file_ids: list[int]) -> int | None:
+        """Count total chunks for given file IDs, batching queries for efficiency.
+
+        Args:
+            file_ids: List of file IDs to count chunks for
+
+        Returns:
+            Total count of chunks, or None if query fails
+        """
+        if not file_ids or not self._chunks_table:
+            return 0
+
+        # Remove duplicates while preserving order
+        unique_ids = list(dict.fromkeys(file_ids))
+
+        # Batch queries to avoid SQL query length limits
+        batch_size = 1000
+        total_count = 0
+
+        for i in range(0, len(unique_ids), batch_size):
+            batch_ids = unique_ids[i:i + batch_size]
+            ids_str = ','.join(map(str, batch_ids))
+
+            try:
+                # Use LanceDB's count_rows with filter
+                batch_count = self._chunks_table.count_rows(filter=f"file_id IN ({ids_str})")
+                total_count += batch_count
+            except Exception:
+                # Fallback: query each batch individually and sum
+                try:
+                    batch_results = self._chunks_table.search().where(f"file_id IN ({ids_str})").to_list()
+                    total_count += len(batch_results)
+                except Exception:
+                    return None
+
+        return total_count
+
     def update_file(
         self,
         file_id: int,
@@ -2093,10 +2169,13 @@ class LanceDBProvider(SerialDatabaseProvider):
             return [], {"offset": offset, "page_size": 0, "has_more": False, "total": 0}
 
         try:
+            # Escape LIKE metacharacters and quotes for safe SQL
+            escaped_query = escape_like_pattern(query, escape_quotes=True)
+
             # Use LanceDB's full-text search capabilities with native offset/limit
             results = (
                 self._chunks_table.search()
-                .where(f"content LIKE '%{query}%'")
+                .where(f"content LIKE '%{escaped_query}%' ESCAPE '\\\\'")
                 .limit(page_size)
                 .offset(offset)
                 .to_list()
