@@ -51,6 +51,7 @@ class LLMConfig(BaseSettings):
         "codex-cli",
         "gemini",
         "anthropic",
+        "grok",
         "opencode-cli",
     ] = Field(
         default="openai",
@@ -66,6 +67,7 @@ class LLMConfig(BaseSettings):
             "codex-cli",
             "anthropic",
             "gemini",
+            "grok",
             "opencode-cli",
         ]
         | None
@@ -79,12 +81,18 @@ class LLMConfig(BaseSettings):
             "codex-cli",
             "anthropic",
             "gemini",
+            "grok",
             "opencode-cli",
         ]
         | None
     ) = Field(default=None, description="Override provider for synthesis ops")
 
     # Model Configuration (dual-model architecture)
+    model: str | None = Field(
+        default=None,
+        description="Convenience field to set both utility and synthesis models to the same value",
+    )
+
     utility_model: str = Field(
         default="",  # Will be set by get_default_models() if empty
         description="Model for utility operations (query expansion, follow-ups, classification)",
@@ -120,6 +128,7 @@ class LLMConfig(BaseSettings):
             "codex-cli",
             "gemini",
             "anthropic",
+            "grok",
             "opencode-cli",
         ]
         | None
@@ -161,6 +170,7 @@ class LLMConfig(BaseSettings):
             "codex-cli",
             "gemini",
             "anthropic",
+            "grok",
             "opencode-cli",
         ]
         | None
@@ -281,6 +291,20 @@ class LLMConfig(BaseSettings):
             raise ValueError("base_url must start with http:// or https://")
 
         return v
+
+    @field_validator("model")
+    def validate_model(cls, v: str | None) -> str | None:  # noqa: N805
+        """Validate model field (no-op, handled in model_post_init)."""
+        return v
+
+    def model_post_init(self, __context: Any) -> None:
+        """Post-initialization hook to handle model field mapping."""
+        # If model is provided, set both utility_model and synthesis_model
+        if self.model is not None:
+            if not self.utility_model:
+                self.utility_model = self.model
+            if not self.synthesis_model:
+                self.synthesis_model = self.model
 
     @field_validator(
         "codex_reasoning_effort",
@@ -438,6 +462,10 @@ class LLMConfig(BaseSettings):
             # - claude-opus-4-5-20251101: Most capable model with effort control (supports effort parameter)
             # - claude-opus-4-1-20250805: Exceptional model for specialized reasoning (legacy)
             return ("claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929")
+        elif self.provider == "grok":
+            # Grok: Use the same flagship model for both utility and synthesis
+            # grok-4-1-fast-reasoning: Advanced reasoning, structured outputs, tool calling
+            return ("grok-4-1-fast-reasoning", "grok-4-1-fast-reasoning")
         else:
             return ("gpt-5-nano", "gpt-5")
 
@@ -511,6 +539,7 @@ class LLMConfig(BaseSettings):
                 "codex-cli",
                 "anthropic",
                 "gemini",
+                "grok",
                 "opencode-cli",
             ],
             help="Default LLM provider for both roles",
@@ -525,6 +554,7 @@ class LLMConfig(BaseSettings):
                 "codex-cli",
                 "anthropic",
                 "gemini",
+                "grok",
                 "opencode-cli",
             ],
             help="Override LLM provider for utility operations",
@@ -539,6 +569,7 @@ class LLMConfig(BaseSettings):
                 "codex-cli",
                 "anthropic",
                 "gemini",
+                "grok",
                 "opencode-cli",
             ],
             help="Override LLM provider for synthesis operations",
@@ -571,6 +602,7 @@ class LLMConfig(BaseSettings):
                 "codex-cli",
                 "anthropic",
                 "gemini",
+                "grok",
                 "opencode-cli",
             ],
             help="Override provider for Code Mapper HyDE planning (falls back to synthesis)",
@@ -594,6 +626,7 @@ class LLMConfig(BaseSettings):
                 "codex-cli",
                 "anthropic",
                 "gemini",
+                "grok",
                 "opencode-cli",
             ],
             help="Override provider for AutoDoc LLM cleanup (falls back to synthesis)",
