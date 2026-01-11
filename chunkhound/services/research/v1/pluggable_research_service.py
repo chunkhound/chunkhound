@@ -30,24 +30,10 @@ from chunkhound.services.research.shared.evidence_ledger import (
 )
 from chunkhound.services.research.shared.exploration import ExplorationStrategy
 from chunkhound.services.research.shared.models import (
-    ENABLE_ADAPTIVE_BUDGETS,
     ENABLE_SMART_BOUNDARIES,
     EXTRA_CONTEXT_TOKENS,
-    FILE_CONTENT_TOKENS_MAX,
-    FILE_CONTENT_TOKENS_MIN,
-    FOLLOWUP_OUTPUT_TOKENS_MAX,
-    FOLLOWUP_OUTPUT_TOKENS_MIN,
-    INTERNAL_MAX_TOKENS,
-    INTERNAL_ROOT_TARGET,
-    LEAF_ANSWER_TOKENS_BASE,
-    LEAF_ANSWER_TOKENS_BONUS,
-    LLM_INPUT_TOKENS_MAX,
-    LLM_INPUT_TOKENS_MIN,
     MAX_BOUNDARY_EXPANSION_LINES,
     MAX_FILE_CONTENT_TOKENS,
-    MAX_LEAF_ANSWER_TOKENS,
-    MAX_LLM_INPUT_TOKENS,
-    MAX_SYNTHESIS_TOKENS,
     NUM_LLM_EXPANDED_QUERIES,
     OUTPUT_TOKENS_WITH_REASONING,
     QUERY_EXPANSION_ENABLED,
@@ -1083,94 +1069,6 @@ class PluggableResearchService:
 
         return {
             "output_tokens": OUTPUT_TOKENS_WITH_REASONING,
-        }
-
-    def _get_adaptive_token_budgets(
-        self, depth: int, max_depth: int, is_leaf: bool
-    ) -> dict[str, int]:
-        """Calculate adaptive token budgets based on node depth and tree position.
-
-        Strategy (LLM×MapReduce Pyramid):
-        - Leaves: Dense implementation details (10-12k tokens) - focused analysis
-        - Internal nodes: Progressive compression toward root
-        - Root: Concise synthesis (5-8k tokens target) - practical overview
-
-        The deeper the node during expansion, the more detail needed.
-        As we collapse upward during synthesis, we compress while maintaining quality.
-
-        Args:
-            depth: Current node depth (0 = root)
-            max_depth: Maximum depth for this codebase (3-7 typically)
-            is_leaf: Whether this is a leaf node
-
-        Returns:
-            Dictionary with adaptive token budgets for this node
-        """
-        if not ENABLE_ADAPTIVE_BUDGETS:
-            # Fallback to legacy fixed budgets
-            return {
-                "file_content_tokens": MAX_FILE_CONTENT_TOKENS,
-                "llm_input_tokens": MAX_LLM_INPUT_TOKENS,
-                "answer_tokens": MAX_LEAF_ANSWER_TOKENS
-                if is_leaf
-                else MAX_SYNTHESIS_TOKENS,
-            }
-
-        # Normalize depth: 0.0 at root, 1.0 at max_depth
-        depth_ratio = depth / max(max_depth, 1)
-
-        # INPUT BUDGETS (what LLM sees - file content and total input)
-        # ==============================================================
-
-        # File content budget: Scales with depth (10k → 50k tokens)
-        # Root needs LESS raw code (synthesizing), leaves need MORE (analyzing)
-        file_content_tokens = int(
-            FILE_CONTENT_TOKENS_MIN
-            + (FILE_CONTENT_TOKENS_MAX - FILE_CONTENT_TOKENS_MIN) * depth_ratio
-        )
-
-        # LLM total input budget (query + context + code): 15k → 60k tokens
-        llm_input_tokens = int(
-            LLM_INPUT_TOKENS_MIN
-            + (LLM_INPUT_TOKENS_MAX - LLM_INPUT_TOKENS_MIN) * depth_ratio
-        )
-
-        # OUTPUT BUDGETS (what LLM generates)
-        # ====================================
-
-        if is_leaf:
-            # LEAVES: Dense, focused detail (10-12k tokens)
-            # Scale slightly with depth to handle variable max_depth (3-7)
-            answer_tokens = int(
-                LEAF_ANSWER_TOKENS_BASE + LEAF_ANSWER_TOKENS_BONUS * depth_ratio
-            )
-        else:
-            # INTERNAL NODES: Compress as we go UP the tree
-            # Root (depth 0) gets concise output (5k)
-            # Deeper internal nodes get more budget before compressing
-            answer_tokens = int(
-                INTERNAL_ROOT_TARGET
-                + (INTERNAL_MAX_TOKENS - INTERNAL_ROOT_TARGET) * depth_ratio
-            )
-
-        # Follow-up question generation budget: Scales with depth (3k → 8k)
-        # Deeper nodes have more context to analyze, need more output tokens
-        followup_output_tokens = int(
-            FOLLOWUP_OUTPUT_TOKENS_MIN
-            + (FOLLOWUP_OUTPUT_TOKENS_MAX - FOLLOWUP_OUTPUT_TOKENS_MIN) * depth_ratio
-        )
-
-        logger.debug(
-            f"Adaptive budgets for depth {depth}/{max_depth} ({'leaf' if is_leaf else 'internal'}): "
-            f"file={file_content_tokens:,}, input={llm_input_tokens:,}, output={answer_tokens:,}, "
-            f"followup={followup_output_tokens:,}"
-        )
-
-        return {
-            "file_content_tokens": file_content_tokens,
-            "llm_input_tokens": llm_input_tokens,
-            "answer_tokens": answer_tokens,
-            "followup_output_tokens": followup_output_tokens,
         }
 
     def _get_next_node_id(self) -> int:
