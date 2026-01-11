@@ -13,6 +13,19 @@ from typing import Any, Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Default values (kept in sync with chunkhound.services.research.shared.models)
+# These are duplicated here to avoid circular imports between config and services.
+# If you change these values, update the corresponding constants in models.py.
+_DEFAULT_RELEVANCE_THRESHOLD = 0.5
+_DEFAULT_MAX_SYMBOLS = 5
+_DEFAULT_REGEX_AUGMENTATION_RATIO = 0.3
+_DEFAULT_REGEX_MIN_RESULTS = 20
+_DEFAULT_MAX_BOUNDARY_EXPANSION_LINES = 300
+_DEFAULT_MAX_CHUNKS_PER_FILE_REPR = 5
+_DEFAULT_MAX_TOKENS_PER_FILE_REPR = 2000
+_DEFAULT_QUERY_EXPANSION_ENABLED = True
+_DEFAULT_NUM_EXPANDED_QUERIES = 2
+
 
 class ResearchConfig(BaseSettings):
     """
@@ -52,12 +65,12 @@ class ResearchConfig(BaseSettings):
 
     # Phase 1: Coverage Parameters
     query_expansion_enabled: bool = Field(
-        default=True,
+        default=_DEFAULT_QUERY_EXPANSION_ENABLED,
         description="Enable LLM-based query expansion for broader coverage",
     )
 
     num_expanded_queries: int = Field(
-        default=2,
+        default=_DEFAULT_NUM_EXPANDED_QUERIES,
         ge=1,
         le=5,
         description="Number of additional queries to generate from root query",
@@ -71,21 +84,21 @@ class ResearchConfig(BaseSettings):
     )
 
     relevance_threshold: float = Field(
-        default=0.5,
+        default=_DEFAULT_RELEVANCE_THRESHOLD,
         ge=0.3,
         le=0.8,
         description="Minimum rerank score for chunk inclusion",
     )
 
     max_symbols: int = Field(
-        default=5,
+        default=_DEFAULT_MAX_SYMBOLS,
         ge=1,
         le=20,
         description="Maximum symbols to extract for regex search augmentation",
     )
 
     regex_augmentation_ratio: float = Field(
-        default=0.3,
+        default=_DEFAULT_REGEX_AUGMENTATION_RATIO,
         ge=0.1,
         le=1.0,
         description=(
@@ -94,7 +107,7 @@ class ResearchConfig(BaseSettings):
     )
 
     regex_min_results: int = Field(
-        default=20,
+        default=_DEFAULT_REGEX_MIN_RESULTS,
         ge=10,
         le=100,
         description="Minimum regex results regardless of augmentation ratio",
@@ -214,21 +227,21 @@ class ResearchConfig(BaseSettings):
     )
 
     max_boundary_expansion_lines: int = Field(
-        default=300,
+        default=_DEFAULT_MAX_BOUNDARY_EXPANSION_LINES,
         ge=50,
         le=500,
         description="Maximum lines to expand for complete functions/classes",
     )
 
     max_chunks_per_file_repr: int = Field(
-        default=5,
+        default=_DEFAULT_MAX_CHUNKS_PER_FILE_REPR,
         ge=1,
         le=10,
         description="Top chunks per file for representative document creation",
     )
 
     max_tokens_per_file_repr: int = Field(
-        default=2000,
+        default=_DEFAULT_MAX_TOKENS_PER_FILE_REPR,
         ge=500,
         le=5000,
         description="Token limit per file representative document",
