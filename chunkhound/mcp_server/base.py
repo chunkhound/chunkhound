@@ -160,6 +160,12 @@ class MCPServerBase(ABC):
                 embedding_manager=self.embedding_manager,
             )
 
+            # For MCP mode, connect database immediately since no deferred background work
+            if os.getenv("CHUNKHOUND_MCP_MODE") == "1":
+                if not self.services.provider.is_connected:
+                    self.services.provider.connect()
+                    self.debug_log("Database connected for MCP mode")
+
             # Determine target path for scanning and watching
             if self.args and hasattr(self.args, "path"):
                 target_path = Path(self.args.path)
@@ -174,7 +180,9 @@ class MCPServerBase(ABC):
             self.debug_log("Service initialization complete")
 
             # Defer DB connect + realtime start to background so initialize is fast
-            asyncio.create_task(self._deferred_connect_and_start(target_path))
+            # Skip for MCP mode as database is already indexed and realtime not needed
+            if os.getenv("CHUNKHOUND_MCP_MODE") != "1":
+                asyncio.create_task(self._deferred_connect_and_start(target_path))
 
     async def _deferred_connect_and_start(self, target_path: Path) -> None:
         """Connect DB and start realtime monitoring in background."""
