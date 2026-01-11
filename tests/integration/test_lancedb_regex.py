@@ -113,17 +113,19 @@ def test_regex_pagination(lancedb_provider, tmp_path):
     results1, pagination1 = lancedb_provider.search_regex("common_pattern", page_size=2, offset=0)
     assert len(results1) == 2, "First page should have 2 results"
     assert pagination1["has_more"] is True
-    assert pagination1["total"] == 5
+    assert pagination1["total"] is None
 
     # Second page
     results2, pagination2 = lancedb_provider.search_regex("common_pattern", page_size=2, offset=2)
     assert len(results2) == 2, "Second page should have 2 results"
     assert pagination2["has_more"] is True
+    assert pagination2["total"] is None
 
     # Third page (partial)
     results3, pagination3 = lancedb_provider.search_regex("common_pattern", page_size=2, offset=4)
     assert len(results3) == 1, "Third page should have 1 result"
     assert pagination3["has_more"] is False
+    assert pagination3["total"] == 5
 
 
 def test_regex_invalid_pattern_raises(lancedb_provider, tmp_path):

@@ -12,6 +12,11 @@ from loguru import logger
 
 from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
 
+# Type hinting only
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from chunkhound.core.config.database_config import DatabaseConfig
+
 # Task-local transaction state to ensure proper isolation in async contexts
 _transaction_context = contextvars.ContextVar("transaction_active", default=False)
 
@@ -83,7 +88,7 @@ class SerialDatabaseExecutor:
     access from multiple threads.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, config: "DatabaseConfig | None" = None) -> None:
         """Initialize serial executor with single-threaded pool."""
         # Create single-threaded executor for all database operations
         # This ensures complete serialization and prevents concurrent access issues
@@ -92,10 +97,15 @@ class SerialDatabaseExecutor:
             thread_name_prefix="serial-db",
         )
 
+        # Store retry configuration
+        self._retry_on_timeout = config.retry_on_timeout if config else True
+        self._max_retries = config.max_retries if config else 3
+        self._retry_backoff = config.retry_backoff_seconds if config else 1.0
+
     def execute_sync(
         self, provider: Any, operation_name: str, *args: Any, **kwargs: Any
     ) -> Any:
-        """Execute named operation synchronously in DB thread.
+        """Execute named operation synchronously in DB thread with retry logic.
 
         All database operations MUST go through this method to ensure serialization.
         The connection and all state management happens exclusively in the executor thread.
@@ -109,24 +119,48 @@ class SerialDatabaseExecutor:
         Returns:
             The result of the operation, fully materialized
         """
+        return self._execute_with_retry(
+            lambda: self._execute_sync_once(provider, operation_name, *args, **kwargs)
+        )
+
+    def _execute_sync_once(
+        self, provider: Any, operation_name: str, *args: Any, **kwargs: Any
+    ) -> Any:
+        """Execute named operation synchronously in DB thread (single attempt)."""
 
         def executor_operation() -> Any:
-            # Get thread-local connection (created on first access)
-            conn = get_thread_local_connection(provider)
+            # PERFORMANCE PROFILING: Start timing
+            op_start_time = time.time()
 
-            # Get thread-local state
-            state = get_thread_local_state()
+            try:
+                # Get thread-local connection (created on first access)
+                conn = get_thread_local_connection(provider)
 
-            # Update last activity time for ALL operations
-            state["last_activity_time"] = time.time()
+                # Get thread-local state
+                state = get_thread_local_state()
 
-            # Include base directory if provider has it
-            if hasattr(provider, "get_base_directory"):
-                state["base_directory"] = provider.get_base_directory()
+                # Update last activity time for ALL operations
+                state["last_activity_time"] = time.time()
 
-            # Execute operation - look for method named _executor_{operation_name}
-            op_func = getattr(provider, f"_executor_{operation_name}")
-            return op_func(conn, state, *args, **kwargs)
+                # Include base directory if provider has it
+                if hasattr(provider, "get_base_directory"):
+                    state["base_directory"] = provider.get_base_directory()
+
+                # Execute operation - look for method named _executor_{operation_name}
+                op_func = getattr(provider, f"_executor_{operation_name}")
+                result = op_func(conn, state, *args, **kwargs)
+
+                # PERFORMANCE PROFILING: Log execution time
+                op_duration = time.time() - op_start_time
+                logger.debug(f"Database operation '{operation_name}' completed in {op_duration:.3f}s")
+
+                return result
+
+            except Exception as e:
+                # PERFORMANCE PROFILING: Log failed operations
+                op_duration = time.time() - op_start_time
+                logger.warning(f"Database operation '{operation_name}' failed after {op_duration:.3f}s: {e}")
+                raise
 
         # Run in executor synchronously with timeout (env override)
         future = self._db_executor.submit(executor_operation)
@@ -135,18 +169,23 @@ class SerialDatabaseExecutor:
             timeout_s = float(os.getenv("CHUNKHOUND_DB_EXECUTE_TIMEOUT", "30"))
         except Exception:
             timeout_s = 30.0
+
+        # PERFORMANCE PROFILING: Track timeout attempts
+        timeout_start = time.time()
         try:
             return future.result(timeout=timeout_s)
         except concurrent.futures.TimeoutError:
+            timeout_duration = time.time() - timeout_start
             logger.error(
-                f"Database operation '{operation_name}' timed out after {timeout_s} seconds"
+                f"Database operation '{operation_name}' timed out after {timeout_duration:.3f}s "
+                f"(configured timeout: {timeout_s}s)"
             )
-            raise TimeoutError(f"Operation '{operation_name}' timed out")
+            raise TimeoutError(f"Operation '{operation_name}' timed out after {timeout_duration:.3f}s")
 
     async def execute_async(
         self, provider: Any, operation_name: str, *args, **kwargs
     ) -> Any:
-        """Execute named operation asynchronously in DB thread.
+        """Execute named operation asynchronously in DB thread with retry logic.
 
         All database operations MUST go through this method to ensure serialization.
         The connection and all state management happens exclusively in the executor thread.
@@ -160,6 +199,14 @@ class SerialDatabaseExecutor:
         Returns:
             The result of the operation, fully materialized
         """
+        return await self._execute_with_retry_async(
+            lambda: self._execute_async_once(provider, operation_name, *args, **kwargs)
+        )
+
+    async def _execute_async_once(
+        self, provider: Any, operation_name: str, *args, **kwargs
+    ) -> Any:
+        """Execute named operation asynchronously in DB thread (single attempt)."""
         loop = asyncio.get_event_loop()
 
         def executor_operation():
@@ -187,6 +234,51 @@ class SerialDatabaseExecutor:
         return await loop.run_in_executor(
             self._db_executor, ctx.run, executor_operation
         )
+
+    def _execute_with_retry(self, operation_func: Any) -> Any:
+        """Execute operation with retry logic."""
+        last_exception = None
+
+        for attempt in range(self._max_retries + 1):
+            try:
+                return operation_func()
+            except TimeoutError as e:
+                last_exception = e
+                if not self._retry_on_timeout or attempt >= self._max_retries:
+                    logger.error(
+                        f"Database operation failed after {self._max_retries + 1} attempts: {e}"
+                    )
+                    raise
+
+                backoff_time = self._retry_backoff * (2 ** attempt)
+                logger.warning(
+                    f"Database operation timed out (attempt {attempt + 1}/{self._max_retries + 1}), "
+                    f"retrying in {backoff_time:.1f}s: {e}"
+                )
+                time.sleep(backoff_time)
+
+        raise last_exception
+
+    async def _execute_with_retry_async(self, operation_func: Any) -> Any:
+        """Async version of retry logic."""
+        last_exception = None
+
+        for attempt in range(self._max_retries + 1):
+            try:
+                return await operation_func()
+            except TimeoutError as e:
+                last_exception = e
+                if not self._retry_on_timeout or attempt >= self._max_retries:
+                    raise
+
+                backoff_time = self._retry_backoff * (2 ** attempt)
+                logger.warning(
+                    f"Database operation timed out (attempt {attempt + 1}/{self._max_retries + 1}), "
+                    f"retrying in {backoff_time:.1f}s: {e}"
+                )
+                await asyncio.sleep(backoff_time)
+
+        raise last_exception
 
     def shutdown(self, wait: bool = True) -> None:
         """Shutdown the executor with proper cleanup.

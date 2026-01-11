@@ -56,6 +56,9 @@ class _FakeDB:
     def insert_chunks_batch(self, chunks):
         return []
 
+    def should_optimize_fragments(self, threshold=None, operation=""):
+        return False
+
 
 class _Cfg:
     class _Indexing:
@@ -65,6 +68,9 @@ class _Cfg:
         min_dirs_for_parallel = 4
         max_discovery_workers = 4
         parallel_discovery = False
+
+        def get_effective_config_excludes(self):
+            return []
 
     indexing = _Indexing()
 

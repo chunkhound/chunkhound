@@ -66,6 +66,7 @@ def test_lancedb_embeddings_stored_during_indexing(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.1] * embedding_dim,
+            "status": "success",
         },
         {
             "chunk_id": chunk_ids[1],
@@ -73,11 +74,16 @@ def test_lancedb_embeddings_stored_during_indexing(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.2] * embedding_dim,
+            "status": "success",
         },
     ]
 
-    # Store embeddings
-    stored_count = lancedb_provider.insert_embeddings_batch(embeddings_data)
+    # Store embeddings (need to provide chunks_data)
+    chunks_data = [
+        {"id": chunk_ids[0], "file_id": file_id, "code": "def hello(): pass", "start_line": 1, "end_line": 1, "chunk_type": "function", "language": "python", "symbol": "hello"},
+        {"id": chunk_ids[1], "file_id": file_id, "code": "def world(): return 42", "start_line": 2, "end_line": 2, "chunk_type": "function", "language": "python", "symbol": "world"},
+    ]
+    stored_count = lancedb_provider.insert_embeddings_batch(embeddings_data, chunks_data)
     assert stored_count == 2, f"Should store 2 embeddings, got {stored_count}"
 
     # Verify embeddings are retrievable
@@ -185,12 +191,17 @@ def test_lancedb_embedding_update_finds_chunks(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [float(i) / 100] * embedding_dim,
+            "status": "success",
         }
         for i, cid in enumerate(chunk_ids)
     ]
 
-    # This should succeed with the fix
-    stored_count = lancedb_provider.insert_embeddings_batch(embeddings_data)
+    # This should succeed with the fix (need chunks_data)
+    chunks_data = [
+        {"id": cid, "file_id": file_id, "code": f"def func_{i}(): return {i}", "start_line": i + 1, "end_line": i + 1, "chunk_type": "function", "language": "python", "symbol": f"func_{i}"}
+        for i, cid in enumerate(chunk_ids)
+    ]
+    stored_count = lancedb_provider.insert_embeddings_batch(embeddings_data, chunks_data)
 
     # THE KEY ASSERTION: All embeddings should be stored
     assert stored_count == 10, (
@@ -262,6 +273,7 @@ def test_lancedb_find_similar_chunks_basic(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.9, 0.8, 0.7, 0.6, 0.1, 0.1, 0.1, 0.1],  # Auth-related
+            "status": "success",
         },
         {
             "chunk_id": chunk_ids[1],
@@ -269,6 +281,7 @@ def test_lancedb_find_similar_chunks_basic(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.8, 0.9, 0.6, 0.7, 0.1, 0.1, 0.1, 0.1],  # Similar to chunk 0
+            "status": "success",
         },
         {
             "chunk_id": chunk_ids[2],
@@ -276,10 +289,17 @@ def test_lancedb_find_similar_chunks_basic(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.1, 0.1, 0.1, 0.1, 0.9, 0.8, 0.7, 0.6],  # Different domain
+            "status": "success",
         },
     ]
 
-    lancedb_provider.insert_embeddings_batch(embeddings_data)
+    # Need chunks_data for insert_embeddings_batch
+    chunks_data = [
+        {"id": chunk_ids[0], "file_id": file_id, "code": "def authenticate_user(username, password): pass", "start_line": 1, "end_line": 1, "chunk_type": "function", "language": "python", "symbol": "authenticate_user"},
+        {"id": chunk_ids[1], "file_id": file_id, "code": "def login_user(credentials): pass", "start_line": 2, "end_line": 2, "chunk_type": "function", "language": "python", "symbol": "login_user"},
+        {"id": chunk_ids[2], "file_id": file_id, "code": "def calculate_taxes(income): pass", "start_line": 3, "end_line": 3, "chunk_type": "function", "language": "python", "symbol": "calculate_taxes"},
+    ]
+    lancedb_provider.insert_embeddings_batch(embeddings_data, chunks_data)
 
     # Find similar chunks to chunk 0
     similar = lancedb_provider.find_similar_chunks(
@@ -339,11 +359,17 @@ def test_lancedb_find_similar_chunks_excludes_source(lancedb_provider, tmp_path)
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.5] * embedding_dim,
+            "status": "success",
         }
         for cid in chunk_ids
     ]
 
-    lancedb_provider.insert_embeddings_batch(embeddings_data)
+    # Need chunks_data for insert_embeddings_batch
+    chunks_data = [
+        {"id": cid, "file_id": file_id, "code": f"def func_{i}(): pass", "start_line": i + 1, "end_line": i + 1, "chunk_type": "function", "language": "python", "symbol": f"func_{i}"}
+        for i, cid in enumerate(chunk_ids)
+    ]
+    lancedb_provider.insert_embeddings_batch(embeddings_data, chunks_data)
 
     # Find similar chunks to chunk 0
     similar = lancedb_provider.find_similar_chunks(
@@ -442,6 +468,7 @@ def test_lancedb_find_similar_chunks_threshold(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "status": "success",
         },
         {
             "chunk_id": chunk_ids[1],
@@ -449,6 +476,7 @@ def test_lancedb_find_similar_chunks_threshold(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],  # Very similar
+            "status": "success",
         },
         {
             "chunk_id": chunk_ids[2],
@@ -456,10 +484,16 @@ def test_lancedb_find_similar_chunks_threshold(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],  # Not similar
+            "status": "success",
         },
     ]
 
-    lancedb_provider.insert_embeddings_batch(embeddings_data)
+    # Need chunks_data for insert_embeddings_batch
+    chunks_data = [
+        {"id": cid, "file_id": file_id, "code": f"def func_{i}(): pass", "start_line": i + 1, "end_line": i + 1, "chunk_type": "function", "language": "python", "symbol": f"func_{i}"}
+        for i, cid in enumerate(chunk_ids)
+    ]
+    lancedb_provider.insert_embeddings_batch(embeddings_data, chunks_data)
 
     # Find with high threshold (should filter out dissimilar chunks)
     similar = lancedb_provider.find_similar_chunks(
@@ -514,11 +548,17 @@ def test_lancedb_find_similar_chunks_limit(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.5 + i * 0.01 for i in range(embedding_dim)],
+            "status": "success",
         }
         for cid in chunk_ids
     ]
 
-    lancedb_provider.insert_embeddings_batch(embeddings_data)
+    # Need chunks_data for insert_embeddings_batch
+    chunks_data = [
+        {"id": cid, "file_id": file_id, "code": f"def func_{i}(): pass", "start_line": i + 1, "end_line": i + 1, "chunk_type": "function", "language": "python", "symbol": f"func_{i}"}
+        for i, cid in enumerate(chunk_ids)
+    ]
+    lancedb_provider.insert_embeddings_batch(embeddings_data, chunks_data)
 
     # Find with small limit
     limit = 3
@@ -570,10 +610,15 @@ def test_lancedb_find_similar_chunks_wrong_provider(lancedb_provider, tmp_path):
             "model": "test-model",
             "dims": embedding_dim,
             "embedding": [0.5] * embedding_dim,
+            "status": "success",
         }
     ]
 
-    lancedb_provider.insert_embeddings_batch(embeddings_data)
+    # Need chunks_data for insert_embeddings_batch
+    chunks_data = [
+        {"id": chunk_ids[0], "file_id": file_id, "code": "def test(): pass", "start_line": 1, "end_line": 1, "chunk_type": "function", "language": "python", "symbol": "test"}
+    ]
+    lancedb_provider.insert_embeddings_batch(embeddings_data, chunks_data)
 
     # Try to find with wrong provider/model
     similar = lancedb_provider.find_similar_chunks(

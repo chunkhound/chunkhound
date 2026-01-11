@@ -84,6 +84,7 @@ distclean: clean
 
     # Index with cAST processing
     result = await makefile_workflow["coordinator"].process_file(makefile_path)
+    print(f"Result: {result}")
     assert result["status"] == "success"
     
     chunks = makefile_workflow["db"].get_chunks_by_file_id(result["file_id"], as_model=True)
@@ -127,10 +128,10 @@ distclean: clean
     install_results, _ = search.search_regex("mkdir.*DESTDIR")
     assert len(install_results) > 0, "Install commands not searchable"
     
-    print(f"✅ cAST Algorithm Results:")
-    print(f"   📦 Total chunks: {len(chunks)}")
-    print(f"   📏 Avg chunk size: {sum(len(c.code) for c in chunks) / len(chunks):.0f} chars")
-    print(f"   🔗 Variable chunks: {len(variable_chunks)} (merged efficiently)")
+    print(f"cAST Algorithm Results:")
+    print(f"   Total chunks: {len(chunks)}")
+    print(f"   Avg chunk size: {sum(len(c.code) for c in chunks) / len(chunks):.0f} chars")
+    print(f"   Variable chunks: {len(variable_chunks)} (merged efficiently)")
 
 
 async def test_makefile_end_to_end_indexing(makefile_workflow, tmp_path):
@@ -247,12 +248,12 @@ test: $(PROJECT)
     phony_results, _ = search.search_regex(r"\.PHONY.*clean")
     assert len(phony_results) > 0, "Phony targets not searchable"
     
-    print(f"✅ Successfully indexed Makefile:")
-    print(f"   📁 File ID: {file_id}")
-    print(f"   📦 Chunks: {len(chunks)}")
-    print(f"   🏷️  Symbols: {len(chunk_symbols)}")
-    print(f"   🔍 Features found: {len(found_features)}")
-    print(f"   📝 Content length: {len(all_content)} chars")
+    print(f"Successfully indexed Makefile:")
+    print(f"   File ID: {file_id}")
+    print(f"   Chunks: {len(chunks)}")
+    print(f"   Symbols: {len(chunk_symbols)}")
+    print(f"   Features found: {len(found_features)}")
+    print(f"   Content length: {len(all_content)} chars")
     
 
 

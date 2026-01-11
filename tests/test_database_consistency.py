@@ -66,13 +66,17 @@ class Class_{i}:
 """)
         test_files.append(test_file)
     
-    # Process files with embeddings
+    # Process files (parsing and chunking only)
     total_chunks_expected = 0
     for test_file in test_files:
-        result = await services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
+        result = await services.indexing_coordinator.process_file(test_file)
         assert result['status'] == 'success'
         total_chunks_expected += result['chunks']
-    
+
+    # Generate embeddings for all processed files
+    embedding_result = await services.indexing_coordinator.generate_missing_embeddings()
+    assert embedding_result['status'] in ['success', 'complete']
+
     # Wait for any async processing
     await asyncio.sleep(2.0)
     
@@ -101,10 +105,13 @@ async def test_orphaned_embeddings_cleanup(consistency_services, tmp_path):
 def orphan_test():
     return "test"
 """)
-    
-    result = await services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
+
+    result = await services.indexing_coordinator.process_file(test_file)
     assert result['status'] == 'success'
-    
+
+    # Generate embeddings
+    await services.indexing_coordinator.generate_missing_embeddings()
+
     # Wait for processing
     await asyncio.sleep(1.0)
     
@@ -160,12 +167,15 @@ class DeletionClass:
     def method(self):
         return "also deleted"
 """)
-    
+
     # Process file
-    result = await services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
+    result = await services.indexing_coordinator.process_file(test_file)
     assert result['status'] == 'success'
     chunks_created = result['chunks']
-    
+
+    # Generate embeddings
+    await services.indexing_coordinator.generate_missing_embeddings()
+
     # Wait for processing
     await asyncio.sleep(1.0)
     
@@ -202,7 +212,7 @@ async def test_database_state_after_processing(consistency_services, tmp_path):
     # Process multiple files
     processed_files = 0
     total_chunks = 0
-    
+
     for i in range(5):
         test_file = tmp_path / f"state_test_{i}.py"
         test_file.write_text(f"""
@@ -210,12 +220,15 @@ def state_function_{i}():
     '''Function {i}.'''
     return "state test {i}"
 """)
-        
-        result = await services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
+
+        result = await services.indexing_coordinator.process_file(test_file)
         if result['status'] == 'success':
             processed_files += 1
             total_chunks += result['chunks']
-    
+
+    # Generate embeddings for all files
+    await services.indexing_coordinator.generate_missing_embeddings()
+
     # Wait for processing
     await asyncio.sleep(2.0)
     
@@ -251,14 +264,17 @@ def concurrent_function_{i}():
 """)
         test_files.append(test_file)
     
-    # Process files concurrently
+    # Process files concurrently (parsing and chunking only)
     tasks = []
     for test_file in test_files:
-        task = services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
+        task = services.indexing_coordinator.process_file(test_file)
         tasks.append(task)
-    
+
     # Wait for all processing to complete
     results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Generate embeddings for all processed files
+    await services.indexing_coordinator.generate_missing_embeddings()
     
     # Count successful processing
     successful_results = [r for r in results if isinstance(r, dict) and r.get('status') == 'success']

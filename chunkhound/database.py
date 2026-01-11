@@ -186,35 +186,9 @@ class Database:
     # - Proper batching (parse→embed→store workflow)
     # =============================================================================
 
-    async def process_file(
-        self, file_path: Path, skip_embeddings: bool = False
-    ) -> dict[str, Any]:
-        """Process a file end-to-end: parse, chunk, and store in database.
 
-        # DELEGATION: IndexingCoordinator handles the complex workflow
-        # WORKFLOW: Parse(CPU) → Chunk(CPU) → Embed(IO) → Store(Serial)
-        # CONSTRAINT: One file at a time to prevent DB contention
-        # PERFORMANCE: Batching happens inside coordinator
-        """
-        return await self._indexing_coordinator.process_file(file_path, skip_embeddings)
 
-    async def process_directory(
-        self,
-        directory: Path,
-        patterns: list[str] | None = None,
-        exclude_patterns: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """Process all supported files in a directory.
 
-        Delegates to IndexingCoordinator for actual processing.
-        """
-        if patterns is None:
-            # Use centralized file patterns from Language enum
-            patterns = Language.get_file_patterns()
-
-        return await self._indexing_coordinator.process_directory(
-            directory, patterns, exclude_patterns
-        )
 
     # =============================================================================
     # Search Methods - Delegate to SearchService

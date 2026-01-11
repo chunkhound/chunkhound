@@ -48,26 +48,44 @@ from chunkhound.utils.file_patterns import (
 )
 
 
-# CRITICAL FIX: Force spawn multiprocessing start method to prevent fork + asyncio issues
-# RATIONALE: Linux defaults to 'fork' which is unsafe with asyncio event loops
-# - Forking an active asyncio event loop causes segfaults (background threads/locks copied)
-# - 'spawn' starts fresh Python interpreter, avoiding fork-related issues
-# - Windows/macOS already use 'spawn' by default
-# - Python 3.14 will make 'spawn' the default on all platforms
-# - See: https://github.com/chunkhound/chunkhound/pull/47
-desired_mp_method = os.getenv("CHUNKHOUND_MP_START_METHOD", "spawn")
-current_mp_method = multiprocessing.get_start_method(allow_none=True)
-if current_mp_method != desired_mp_method:
-    try:
-        multiprocessing.set_start_method(desired_mp_method, force=True)
-        logger.debug(
-            f"Set multiprocessing start method to '{desired_mp_method}' (was {current_mp_method})"
-        )
-    except RuntimeError:
-        # Start method may already be set elsewhere; log and continue
-        logger.debug(
-            f"Multiprocessing start method remains '{multiprocessing.get_start_method()}'; desired '{desired_mp_method}'"
-        )
+# Platform-aware multiprocessing start method setting
+# Linux needs 'spawn' to prevent segfaults with asyncio + fork
+# Windows/macOS already default to 'spawn', forcing it can cause issues
+import platform
+system = platform.system()
+if system == "Linux":
+    # Linux needs spawn to prevent fork + asyncio segfaults
+    desired_mp_method = os.getenv("CHUNKHOUND_MP_START_METHOD", "spawn")
+    current_mp_method = multiprocessing.get_start_method(allow_none=True)
+    if current_mp_method != desired_mp_method:
+        try:
+            multiprocessing.set_start_method(desired_mp_method, force=True)
+            logger.debug(
+                f"Set multiprocessing start method to '{desired_mp_method}' (was {current_mp_method})"
+            )
+        except RuntimeError:
+            # Start method may already be set elsewhere; log and continue
+            logger.debug(
+                f"Multiprocessing start method remains '{multiprocessing.get_start_method()}'; desired '{desired_mp_method}'"
+            )
+elif system in ("Windows", "Darwin"):  # Darwin = macOS
+    # Windows/macOS already default to 'spawn' - don't interfere
+    logger.debug(f"Platform {system} uses safe default multiprocessing start method")
+else:
+    # Unknown platform - default to spawn for safety
+    logger.warning(f"Unknown platform {system} - defaulting to spawn multiprocessing")
+    desired_mp_method = os.getenv("CHUNKHOUND_MP_START_METHOD", "spawn")
+    current_mp_method = multiprocessing.get_start_method(allow_none=True)
+    if current_mp_method != desired_mp_method:
+        try:
+            multiprocessing.set_start_method(desired_mp_method, force=True)
+            logger.debug(
+                f"Set multiprocessing start method to '{desired_mp_method}' (was {current_mp_method})"
+            )
+        except RuntimeError:
+            logger.debug(
+                f"Multiprocessing start method remains '{multiprocessing.get_start_method()}'; desired '{desired_mp_method}'"
+            )
 
 
 # Performance tuning constants for parallel operations
@@ -294,12 +312,12 @@ class IndexingCoordinator(BaseService):
             return None
 
     def _determine_db_batch_size(self, pending_inserts: list[Chunk]) -> int:
-        """Compute an insert batch size using env/config or dynamic memory heuristics.
+        """Compute an insert batch size using env/config or dynamic memory/fragmentation heuristics.
 
         Priority:
         - Env CHUNKHOUND_DB_BATCH_SIZE when set (>0)
         - Config indexing.db_batch_size when set (>0)
-        - Dynamic: use a fraction of available memory with sane limits.
+        - Dynamic: use a fraction of available memory with fragmentation adjustments.
         """
         # 1) Environment override
         try:
@@ -318,10 +336,11 @@ class IndexingCoordinator(BaseService):
         except Exception:
             pass
 
-        # 3) Dynamic heuristic
+        # 3) Dynamic heuristic with fragmentation adjustment
         # - Budget 10% of available RAM (min 64MB, max 512MB)
         # - Estimate average bytes per chunk from a sample (code length dominates)
-        # - Constrain final batch size to [1000, 20000]
+        # - Reduce batch size if fragmentation is high to prevent timeouts
+        # - Constrain final batch size to [500, 20000]
         def _mem_available_bytes() -> int:
             # Try psutil first
             try:
@@ -354,19 +373,44 @@ class IndexingCoordinator(BaseService):
         # Estimate bytes per chunk from a small sample (code length dominates payload)
         sample = pending_inserts[: min(200, len(pending_inserts))]
         if not sample:
-            return 5000
-        total_bytes = 0
-        for ch in sample:
-            code = getattr(ch, "code", "") or ""
-            total_bytes += (
-                len(code.encode("utf-8", errors="ignore")) + 256
-            )  # overhead estimate
-        avg = max(512, total_bytes // len(sample))
+            base_size = 5000
+        else:
+            total_bytes = 0
+            for ch in sample:
+                code = getattr(ch, "code", "") or ""
+                total_bytes += len(code.encode("utf-8", errors="ignore")) + 256  # overhead estimate
+            avg = max(512, total_bytes // len(sample))
+            # Compute base batch size and clamp
+            base_size = max(1, budget // avg)
+            base_size = max(500, min(int(base_size), 20000))
 
-        # Compute batch size and clamp
-        est = max(1, budget // avg)
-        est = max(1000, min(int(est), 20000))
-        return est
+            # Compute base batch size and clamp
+            base_size = max(1, budget // avg)
+            base_size = max(500, min(int(base_size), 20000))
+
+        # 4) Fragmentation-based adjustment (LanceDB specific)
+        # Reduce batch size if fragmentation is high to prevent timeout cascades
+        final_size = base_size
+        if hasattr(self, '_db') and hasattr(self._db, 'get_fragment_count'):
+            try:
+                counts = self._db.get_fragment_count()
+                chunks_fragments = counts.get('chunks', 0)
+
+                # Reduce batch size progressively as fragmentation increases
+                if chunks_fragments >= 200:
+                    final_size = max(500, base_size // 2)
+                elif chunks_fragments >= 500:
+                    final_size = max(200, base_size // 4)
+                elif chunks_fragments >= 100:
+                    final_size = max(1000, base_size // 1.5)
+
+                if final_size != base_size:
+                    logger.debug(f"Reduced batch size from {base_size} to {final_size} due to high fragmentation ({chunks_fragments} chunks)")
+
+            except Exception as e:
+                logger.debug(f"Could not check fragmentation for batch sizing: {e}")
+
+        return final_size
 
     async def _get_file_lock(self, file_path: Path) -> asyncio.Lock:
         """Get or create a lock for the given file path.
@@ -408,19 +452,19 @@ class IndexingCoordinator(BaseService):
             logger.debug(f"Cleaned up lock for deleted file: {file_key}")
 
     async def process_file(
-        self, file_path: Path, skip_embeddings: bool = False
+        self, file_path: Path
     ) -> dict[str, Any]:
-        """Process a single file through the complete indexing pipeline.
+        """Process a single file through the parsing and chunking pipeline.
 
         Uses the same parallel batch processing path as process_directory,
-        but with a single-file batch for consistency.
+        but with a single-file batch for consistency. Embedding generation
+        is handled separately via generate_missing_embeddings().
 
         Args:
             file_path: Path to the file to process
-            skip_embeddings: If True, skip embedding generation
 
         Returns:
-            Dictionary with processing results including status, chunks, and embeddings
+            Dictionary with processing results including status and chunks
         """
         # CRITICAL: File-level locking prevents concurrent async processing
         # PATTERN: All processing happens inside the lock
@@ -465,46 +509,10 @@ class IndexingCoordinator(BaseService):
                         limit_mb=error["limit_mb"],
                     )
 
-            # Generate embeddings if needed
-            # CRITICAL FIX: Wrap embedding generation in transaction with checkpoint
-            # RATIONALE: Embeddings must be checkpointed to be visible to semantic search
-            # BUG: Previously inserted into WAL without checkpoint, invisible to queries
-            embeddings_generated = 0
-            embedding_error = None
-            if not skip_embeddings and self._embedding_provider:
-                if stats["chunk_ids_needing_embeddings"]:
-                    # Generate embeddings
-                    # NOTE: Transaction management is handled internally by the database provider
-                    # to avoid transaction context issues during concurrent operations
-                    try:
-                        embeddings_generated = await self._generate_embeddings(
-                            stats["chunk_ids_needing_embeddings"],
-                            [chunk for r in parsed_results for chunk in r.chunks],
-                        )
-
-                        # Verify embeddings were actually generated
-                        expected_embeddings = len(stats["chunk_ids_needing_embeddings"])
-                        if embeddings_generated < expected_embeddings:
-                            embedding_error = (
-                                f"Only generated {embeddings_generated}/{expected_embeddings} embeddings. "
-                                f"Some chunks may have empty content."
-                            )
-                            logger.warning(f"[IndexCoord] {embedding_error}")
-                    except Exception as e:
-                        embedding_error = str(e)
-                        logger.error(
-                            f"Failed to generate embeddings for {file_path}: {e}"
-                        )
-                        # Don't fail the entire operation if embeddings fail
-                        # File chunks are already committed and searchable via regex
-
             return_dict = {
                 "status": "success" if not stats["errors"] else "error",
                 "chunks": stats["total_chunks"],
                 "errors": stats["errors"],
-                "embeddings_skipped": skip_embeddings,
-                "embeddings_generated": embeddings_generated,
-                "embedding_error": embedding_error,
             }
 
             # Include file_id for single-file operations
@@ -704,6 +712,15 @@ class IndexingCoordinator(BaseService):
                 # Cap concurrent timeout children to avoid resource exhaustion
                 "max_concurrent_timeouts": min(num_workers * 2, 32),
             }
+
+            # Pass logging config to worker processes
+            if self.config and getattr(self.config, 'logging', None):
+                # Performance logging
+                if self.config.logging.performance.enabled:
+                    config_dict["performance_log_path"] = self.config.logging.performance.path
+
+                # Debug logging for subprocesses (always enabled for file logging)
+                config_dict["debug_log_path"] = "chunkhound-debug.log"  # Could be made configurable later
             futures = [
                 loop.run_in_executor(executor, process_file_batch, batch, config_dict)
                 for batch in file_batches
@@ -1285,10 +1302,64 @@ class IndexingCoordinator(BaseService):
                         if (r.error or "").lower() == "timeout":
                             agg_skipped_timeout.append(str(r.file_path))
 
+                # MONITOR: Log fragment counts before batch processing
+                if hasattr(self._db, 'get_fragment_count'):
+                    try:
+                        pre_counts = self._db.get_fragment_count()
+                        logger.debug(f"Fragment counts before batch: chunks={pre_counts.get('chunks', 0)}, files={pre_counts.get('files', 0)}")
+                    except Exception as e:
+                        logger.debug(f"Could not get pre-batch fragment counts: {e}")
+
+                # PRE-BATCH: Optimize proactively to prevent fragmentation
+                optimization_ran = False
+                if self._db.should_optimize_fragments(threshold=25, operation="during-indexing"):
+                    logger.info("Running proactive optimization during indexing to maintain performance...")
+                    try:
+                        self._db.optimize_tables()
+                        optimization_ran = True
+                        # Log fragment counts after optimization
+                        if hasattr(self._db, 'get_fragment_count'):
+                            try:
+                                post_opt_counts = self._db.get_fragment_count()
+                                logger.info(f"Fragment counts after optimization: chunks={post_opt_counts.get('chunks', 0)}, files={post_opt_counts.get('files', 0)}")
+                            except Exception as e:
+                                logger.debug(f"Could not get post-optimization fragment counts: {e}")
+                    except Exception as e:
+                        logger.warning(f"Pre-batch optimization failed: {e}")
+
                 # Store this batch immediately
                 stats_part = await self._store_parsed_results(
                     batch, store_task, cumulative_counters=store_progress_counters
                 )
+
+                # POST-BATCH: Check if optimization is needed after storage
+                post_batch_optimization_ran = False
+                if self._db.should_optimize_fragments(threshold=25, operation="during-indexing"):
+                    logger.info("Running post-batch optimization during indexing to prevent fragmentation...")
+                    try:
+                        self._db.optimize_tables()
+                        post_batch_optimization_ran = True
+                        # Log fragment counts after post-batch optimization
+                        if hasattr(self._db, 'get_fragment_count'):
+                            try:
+                                post_opt_counts = self._db.get_fragment_count()
+                                logger.info(f"Fragment counts after post-batch optimization: chunks={post_opt_counts.get('chunks', 0)}, files={post_opt_counts.get('files', 0)}")
+                            except Exception as e:
+                                logger.debug(f"Could not get post-batch optimization fragment counts: {e}")
+                    except Exception as e:
+                        logger.warning(f"Post-batch optimization failed: {e}")
+
+                # POST-BATCH: Log final fragment counts after storage and any optimization
+                if hasattr(self._db, 'get_fragment_count'):
+                    try:
+                        final_counts = self._db.get_fragment_count()
+                        logger.debug(f"Final fragment counts after batch: chunks={final_counts.get('chunks', 0)}, files={final_counts.get('files', 0)}")
+                        if optimization_ran or post_batch_optimization_ran:
+                            pre_chunks = pre_counts.get('chunks', 0) if 'pre_counts' in locals() else 0
+                            reduction = pre_chunks - final_counts.get('chunks', 0)
+                            logger.info(f"Total fragment reduction from optimization: {reduction} chunks")
+                    except Exception as e:
+                        logger.debug(f"Could not get final fragment counts: {e}")
                 if isinstance(stats_part, tuple):
                     stats_part = stats_part[0]
 
@@ -1628,143 +1699,11 @@ class IndexingCoordinator(BaseService):
             )
 
         except Exception as e:
-            # Debug log to trace if this is the mystery error source
-            import os
-            from datetime import datetime
+            logger.error(f"[IndexCoord-Missing] Failed to generate missing embeddings: {e}")
 
-            debug_file = os.getenv("CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_debug.log")
-            timestamp = datetime.now().isoformat()
-            try:
-                with open(debug_file, "a") as f:
-                    f.write(
-                        f"[{timestamp}] [COORDINATOR-MISSING] Failed to generate missing embeddings: {e}\n"
-                    )
-                    f.flush()
-            except Exception:
-                pass
-
-            logger.error(
-                f"[IndexCoord-Missing] Failed to generate missing embeddings: {e}"
-            )
             return {"status": "error", "error": str(e), "generated": 0}
 
-    async def _generate_embeddings(
-        self, chunk_ids: list[int], chunks: list[dict[str, Any]], connection=None
-    ) -> int:
-        """Generate embeddings for chunks."""
-        if not self._embedding_provider:
-            return 0
 
-        # VALIDATION: Ensure chunk IDs and chunks are aligned
-        if len(chunk_ids) != len(chunks):
-            error_msg = (
-                f"Data mismatch in embedding generation: "
-                f"{len(chunk_ids)} chunk IDs but {len(chunks)} chunks. "
-                f"This indicates a bug in chunk processing."
-            )
-            logger.error(f"[IndexCoord] {error_msg}")
-            raise ValueError(error_msg)
-
-        try:
-            # Filter out chunks with empty text content before embedding
-            valid_chunk_data = []
-            empty_count = 0
-            for chunk_id, chunk in zip(chunk_ids, chunks):
-                from chunkhound.utils.normalization import normalize_content
-
-                text = normalize_content(chunk.get("code", ""))
-                if text:  # Only include chunks with actual content
-                    valid_chunk_data.append((chunk_id, chunk, text))
-                else:
-                    empty_count += 1
-
-            # Log metrics for empty chunks
-            if empty_count > 0:
-                logger.debug(
-                    f"Filtered {empty_count} empty text chunks before embedding generation"
-                )
-
-            if not valid_chunk_data:
-                logger.debug(
-                    "No valid chunks with text content for embedding generation"
-                )
-                return 0
-
-            # Extract data for embedding generation
-            valid_chunk_ids = [chunk_id for chunk_id, _, _ in valid_chunk_data]
-            texts = [text for _, _, text in valid_chunk_data]
-
-            # Generate embeddings (progress tracking handled by missing embeddings phase)
-            embedding_results = await self._embedding_provider.embed(texts)
-
-            # Store embeddings in database
-            embeddings_data = []
-            for chunk_id, vector in zip(valid_chunk_ids, embedding_results):
-                embeddings_data.append(
-                    {
-                        "chunk_id": chunk_id,
-                        "provider": self._embedding_provider.name,
-                        "model": self._embedding_provider.model,
-                        "dims": len(vector),
-                        "embedding": vector,
-                    }
-                )
-
-            # CRITICAL FIX: Ensure clean transaction state before database insertion
-            # In concurrent scenarios, the executor thread may have an aborted transaction
-            # from a previous operation. Try insertion, and if we get a transaction error,
-            # clean up and retry once.
-            try:
-                result = self._db.insert_embeddings_batch(
-                    embeddings_data, connection=connection
-                )
-                return result
-            except Exception as e:
-                if "transaction is aborted" in str(e).lower():
-                    logger.warning(
-                        f"[IndexCoord] Transaction aborted during embedding insertion, "
-                        f"attempting recovery and retry"
-                    )
-                    # Try to clean up the aborted transaction
-                    try:
-                        self._db.rollback_transaction()
-                    except Exception:
-                        pass  # Ignore errors during cleanup
-
-                    # Retry the insertion with a fresh transaction
-                    result = self._db.insert_embeddings_batch(
-                        embeddings_data, connection=connection
-                    )
-                    logger.info(
-                        f"[IndexCoord] Successfully inserted {result} embeddings after "
-                        f"transaction recovery"
-                    )
-                    return result
-                else:
-                    # Not a transaction error, re-raise
-                    raise
-
-        except Exception as e:
-            # Log chunk details for debugging oversized chunks
-            text_sizes = [len(text) for text in texts] if "texts" in locals() else []
-            max_chars = max(text_sizes) if text_sizes else 0
-            logger.error(
-                f"[IndexCoord] Failed to generate embeddings (chunks: {len(text_sizes)}, max_chars: {max_chars}): {e}"
-            )
-            return 0
-
-    async def _generate_embeddings_batch(
-        self, file_chunks: list[tuple[int, dict[str, Any]]]
-    ) -> int:
-        """Generate embeddings for chunks in optimized batches."""
-        if not self._embedding_provider or not file_chunks:
-            return 0
-
-        # Extract chunk IDs and text content
-        chunk_ids = [chunk_id for chunk_id, _ in file_chunks]
-        chunks = [chunk_data for _, chunk_data in file_chunks]
-
-        return await self._generate_embeddings(chunk_ids, chunks)
 
     async def _discover_files_parallel(
         self,

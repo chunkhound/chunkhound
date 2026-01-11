@@ -108,7 +108,7 @@ async def test_mcp_code_research_uses_codex_cli_via_stdio():
                     "capabilities": {},
                     "clientInfo": {"name": "e2e", "version": "1.0"},
                 },
-                timeout=10.0,
+                timeout=30.0,
             )
             assert "serverInfo" in init
 

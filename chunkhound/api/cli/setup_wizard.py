@@ -1,7 +1,6 @@
 """Interactive setup wizard for ChunkHound first-time configuration"""
 
 import json
-import logging
 import os
 import subprocess
 import sys
@@ -10,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from loguru import logger
 from pydantic import SecretStr
 from rich.console import Console
 from rich.live import Live
@@ -26,8 +26,6 @@ from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.core.config.openai_utils import is_official_openai_endpoint
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
 from chunkhound.version import __version__
-
-logger = logging.getLogger(__name__)
 
 # Global console for consistent colored output
 _console = Console()

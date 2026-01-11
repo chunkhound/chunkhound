@@ -64,6 +64,9 @@ async def test_semantic_search_respects_repo_relative_path_filter(tmp_path: Path
     # Index the engine file
     await coordinator.process_file(engine_file)
 
+    # Generate embeddings for all chunks
+    await coordinator.generate_missing_embeddings()
+
     # Sanity check: unscoped semantic search should find the function
     search_service = SearchService(db, embedding_provider)
     unscoped_results, _ = await search_service.search_semantic(

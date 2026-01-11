@@ -289,5 +289,7 @@ cluster_eval.json
 # Temporary documentation
 .tmp-docs/
 
+# benchmark reports
+*_bench_result*.md
 # AI review artifacts
 .gitignored/

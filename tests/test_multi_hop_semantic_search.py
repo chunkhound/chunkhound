@@ -91,7 +91,7 @@ async def content_aware_test_data(request, tmp_path):
     # Use the fixture tmp_path instead of creating a separate temp directory
     for filename, content in test_files.items():
         file_path = tmp_path / filename
-        file_path.write_text(content)
+        file_path.write_text(content, encoding='utf-8')
         await coordinator.process_file(file_path)
         
         # Verify we actually created chunks
@@ -118,11 +118,14 @@ async def content_aware_test_data(request, tmp_path):
             if len(term) > 4:
                 term_counts[term] = sum(1 for result in sample_results 
                                       if term in result.get('content', '').lower())
-        
-        content_analysis['common_themes'] = sorted(term_counts.items(), 
-                                                 key=lambda x: x[1], 
+
+        content_analysis['common_themes'] = sorted(term_counts.items(),
+                                                 key=lambda x: x[1],
                                                  reverse=True)[:20]
-        
+
+    # Generate embeddings for all indexed chunks
+    await coordinator.generate_missing_embeddings()
+
     yield db, content_analysis, (provider_name, provider_class, provider_config)
 
 
@@ -513,6 +516,9 @@ def shared_function_{repo}_three():
         file_path.write_text(content)
         await coordinator.process_file(file_path)
 
+    # Generate embeddings for all chunks
+    await coordinator.generate_missing_embeddings()
+
     search_service = SearchService(db, embedding_provider)
 
     results, _ = await search_service.search_semantic(
@@ -557,6 +563,9 @@ def repo_function_{idx}():
             file_path = repo_dir / f"module_{idx}.py"
             file_path.write_text(content)
             await coordinator.process_file(file_path)
+
+    # Generate embeddings for all chunks
+    await coordinator.generate_missing_embeddings()
 
     # Use regex search to get a chunk from repo_a
     regex_results, _ = db.search_regex(pattern="Repository-specific function", page_size=50)

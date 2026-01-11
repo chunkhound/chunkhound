@@ -55,7 +55,7 @@ class SerialDatabaseProvider(ABC):
         self._db_path = db_path
 
         # Create serial executor for all database operations
-        self._executor = SerialDatabaseExecutor()
+        self._executor = SerialDatabaseExecutor(config)
 
         # Service layer components
         self._indexing_coordinator: IndexingCoordinator | None = None
@@ -132,6 +132,23 @@ class SerialDatabaseProvider(ABC):
         This is the primary method tests and external code should use for cleanup.
         """
         self.disconnect(skip_checkpoint=False)
+
+    def reset_connection(self, skip_checkpoint: bool = True) -> None:
+        """Forcefully reset connection and executor to recover from stuck operations.
+
+        This method disconnects, recreates the executor, and reconnects to clear
+        any stuck database operations (e.g., long-running queries that have timed out).
+
+        Args:
+            skip_checkpoint: Whether to skip checkpointing during disconnect
+        """
+        logger.warning("Resetting database connection to clear potential stuck operation...")
+        self.disconnect(skip_checkpoint=skip_checkpoint)
+        # Recreate executor (original created in __init__)
+        from chunkhound.providers.database.serial_executor import SerialDatabaseExecutor
+        self._executor = SerialDatabaseExecutor(self.config)
+        self.connect()
+        logger.info("Database connection reset complete")
 
     def disconnect(self, skip_checkpoint: bool = False) -> None:
         """Close database connection with optional checkpointing."""
@@ -264,9 +281,11 @@ class SerialDatabaseProvider(ABC):
         if not hasattr(self, "_executor_search_regex"):
             return [], {"error": "Regex search not supported by this provider"}
 
-        return self._execute_in_db_thread_sync(
+        results, total_count = self._execute_in_db_thread_sync(
             "search_regex", pattern, page_size, offset, path_filter
         )
+        pagination = {"has_more": len(results) == page_size, "total": total_count}
+        return results, pagination
 
     async def search_regex_async(
         self,
@@ -365,133 +384,7 @@ class SerialDatabaseProvider(ABC):
 
     # File processing integration
 
-    async def process_file(
-        self, file_path: Path, skip_embeddings: bool = False
-    ) -> dict[str, Any]:
-        """Process a file end-to-end: parse, chunk, and store in database.
 
-        Delegates to IndexingCoordinator for actual processing.
-        """
-        try:
-            logger.info(f"Processing file: {file_path}")
-
-            # Check if file exists and is readable
-            if not file_path.exists() or not file_path.is_file():
-                raise ValueError(f"File not found or not readable: {file_path}")
-
-            # Use IndexingCoordinator to process the file
-            if not self._indexing_coordinator:
-                raise RuntimeError("IndexingCoordinator not initialized")
-
-            return await self._indexing_coordinator.process_file(
-                file_path, skip_embeddings=skip_embeddings
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to process file {file_path}: {e}")
-            return {"status": "error", "error": str(e), "chunks": 0}
-
-    async def process_directory(
-        self,
-        directory: Path,
-        patterns: list[str] | None = None,
-        exclude_patterns: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """Process all supported files in a directory."""
-        try:
-            if patterns is None:
-                patterns = [
-                    "**/*.py",
-                    "**/*.java",
-                    "**/*.cs",
-                    "**/*.ts",
-                    "**/*.js",
-                    "**/*.tsx",
-                    "**/*.jsx",
-                    "**/*.md",
-                    "**/*.markdown",
-                ]
-
-            files_processed = 0
-            total_chunks = 0
-            total_embeddings = 0
-            errors = []
-
-            # Find files matching patterns
-            all_files = []
-            for pattern in patterns:
-                files = list(directory.glob(pattern))
-                all_files.extend(files)
-
-            # Remove duplicates and filter out excluded patterns
-            unique_files = list(set(all_files))
-            if exclude_patterns:
-                filtered_files = []
-                for file_path in unique_files:
-                    exclude = False
-                    for exclude_pattern in exclude_patterns:
-                        if file_path.match(exclude_pattern):
-                            exclude = True
-                            break
-                    if not exclude:
-                        filtered_files.append(file_path)
-                unique_files = filtered_files
-
-            logger.info(f"Processing {len(unique_files)} files in {directory}")
-
-            # Process each file
-            for file_path in unique_files:
-                try:
-                    # Ensure service layer is initialized
-                    if not self._indexing_coordinator:
-                        self._initialize_shared_instances()
-
-                    if not self._indexing_coordinator:
-                        errors.append(f"{file_path}: IndexingCoordinator not available")
-                        continue
-
-                    # Delegate to IndexingCoordinator for file processing
-                    result = await self._indexing_coordinator.process_file(
-                        file_path, skip_embeddings=False
-                    )
-
-                    if result["status"] == "success":
-                        files_processed += 1
-                        total_chunks += result.get("chunks", 0)
-                        total_embeddings += result.get("embeddings", 0)
-                    elif result["status"] == "error":
-                        errors.append(
-                            f"{file_path}: {result.get('error', 'Unknown error')}"
-                        )
-                    # Skip files with status "up_to_date", "skipped", etc.
-
-                except Exception as e:
-                    error_msg = f"{file_path}: {str(e)}"
-                    errors.append(error_msg)
-                    logger.error(f"Error processing {file_path}: {e}")
-
-            result = {
-                "status": "success",
-                "files_processed": files_processed,
-                "total_files": len(unique_files),
-                "total_chunks": total_chunks,
-                "total_embeddings": total_embeddings,
-            }
-
-            if errors:
-                result["errors"] = errors
-                result["error_count"] = len(errors)
-
-            logger.info(
-                f"Directory processing complete: {files_processed}/{len(unique_files)} files, "
-                f"{total_chunks} chunks, {total_embeddings} embeddings"
-            )
-
-            return result
-
-        except Exception as e:
-            logger.error(f"Failed to process directory {directory}: {e}")
-            return {"status": "error", "error": str(e), "files_processed": 0}
 
     # Default implementations that raise NotImplementedError
     # Subclasses should implement these as _executor_* methods

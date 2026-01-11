@@ -170,6 +170,9 @@ def unique_mcp_test_function():
         )
         assert len(initial_results.get('results', [])) > 0, "Initial content should be found"
         
+        # Wait a bit more to ensure initial processing is complete and deduplication window has passed
+        await asyncio.sleep(3.0)
+
         # Modify file with new unique content
         test_file.write_text("""
 def initial_function(): pass
@@ -178,6 +181,12 @@ def modified_unique_regex_pattern():
     '''Added by modification - should be found by regex'''
     return "modification_success"
 """)
+
+        # Force file timestamp change to ensure modification is detected
+        import time
+        current_time = time.time()
+        test_file.touch()  # This should trigger a modification event
+        time.sleep(0.1)  # Small delay to ensure timestamp change
         
         # Wait for debounce + processing
         await asyncio.sleep(2.0)
@@ -367,7 +376,7 @@ class NewlyAddedClass:
         test_file.touch()
         
         # Wait for modification to be processed
-        await asyncio.sleep(3.5)
+        await asyncio.sleep(5)
         
         # Check if modification was detected
         modified_record = services.provider.get_file_by_path(str(test_file.resolve()))

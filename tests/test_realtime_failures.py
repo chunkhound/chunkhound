@@ -81,26 +81,23 @@ class TestRealtimeFailures:
         
         await service.stop()
 
-    @pytest.mark.asyncio 
-    async def test_indexing_coordinator_skip_embeddings_not_implemented(self, realtime_setup):
-        """Test that IndexingCoordinator.process_file doesn't support skip_embeddings parameter."""
+    @pytest.mark.asyncio
+    async def test_indexing_coordinator_process_file_simplified(self, realtime_setup):
+        """Test that IndexingCoordinator.process_file only does parsing and chunking."""
         service, watch_dir, _, services = realtime_setup
-        
-        # Try to call process_file with skip_embeddings directly
-        test_file = watch_dir / "skip_test.py"
-        test_file.write_text("def skip_embeddings_test(): pass")
-        
-        # This should fail because process_file signature doesn't match usage
-        try:
-            result = await services.indexing_coordinator.process_file(
-                test_file, 
-                skip_embeddings=True  # This parameter might not exist
-            )
-            # If we get here, the parameter exists but might not work correctly
-            assert result.get('embeddings_skipped') == True, \
-                "skip_embeddings parameter should actually skip embeddings"
-        except TypeError as e:
-            pytest.fail(f"IndexingCoordinator.process_file doesn't support skip_embeddings: {e}")
+
+        # Call process_file without skip_embeddings parameter
+        test_file = watch_dir / "process_test.py"
+        test_file.write_text("def process_test(): pass")
+
+        # This should work and only return parsing/chunking results
+        result = await services.indexing_coordinator.process_file(test_file)
+
+        # Verify result only contains parsing/chunking data, no embedding info
+        assert 'status' in result
+        assert 'chunks' in result
+        assert 'errors' in result
+
 
     @pytest.mark.asyncio
     async def test_file_debouncing_creates_memory_leaks(self, realtime_setup):
