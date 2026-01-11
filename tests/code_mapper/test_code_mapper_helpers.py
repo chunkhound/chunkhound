@@ -1,4 +1,8 @@
 from chunkhound.code_mapper import pipeline as code_mapper_pipeline
+from chunkhound.code_mapper.public_utils import (
+    derive_heading_from_point,
+    slugify_heading,
+)
 
 
 def test_extract_points_of_interest_parses_numbered_and_bullets() -> None:
@@ -33,27 +37,27 @@ def test_extract_points_of_interest_dedupes_and_respects_limit() -> None:
 
 
 def test_derive_heading_from_point_strips_formatting() -> None:
-    heading = code_mapper_pipeline._derive_heading_from_point("**Heading**: details here")
+    heading = derive_heading_from_point("**Heading**: details here")
 
     assert heading == "Heading"
 
 
 def test_derive_heading_from_point_truncates_long_text() -> None:
     long_text = "A" * 120
-    heading = code_mapper_pipeline._derive_heading_from_point(long_text)
+    heading = derive_heading_from_point(long_text)
 
     assert heading.endswith("...")
     assert len(heading) <= 80
 
 
 def test_slugify_heading_normalizes_text() -> None:
-    slug = code_mapper_pipeline._slugify_heading("Heading: v2.1 (beta)!")
+    slug = slugify_heading("Heading: v2.1 (beta)!")
 
     assert slug == "heading-v2-1-beta"
 
 
 def test_slugify_heading_caps_length() -> None:
-    slug = code_mapper_pipeline._slugify_heading("A" * 200)
+    slug = slugify_heading("A" * 200)
 
     assert len(slug) <= 60
 

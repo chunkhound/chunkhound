@@ -5,6 +5,7 @@ import pytest
 
 import chunkhound.api.cli.commands.code_mapper as code_mapper_mod
 from chunkhound.code_mapper import service as code_mapper_service
+from chunkhound.code_mapper.models import CodeMapperPOI
 from chunkhound.core.config.config import Config
 
 
@@ -58,6 +59,7 @@ async def _run_code_mapper_with_stubs(
     capsys: pytest.CaptureFixture[str],
     set_combined: bool,
     cli_combined: bool | None = None,
+    poi_concurrency_env: str | None = None,
     comprehensiveness: str = "low",
 ) -> tuple[Path, str, list[int]]:
     project_root = tmp_path / "repo"
@@ -87,30 +89,38 @@ async def _run_code_mapper_with_stubs(
         target_dir: Path,
         scope_path: Path,
         scope_label: str,
+        meta: Any | None = None,
+        context: str | None = None,
         max_points: int = 10,
         comprehensiveness: str = "medium",
         out_dir: Path | None = None,
-        assembly_provider: Any | None = None,
+        map_hyde_provider: Any | None = None,
         indexing_cfg: Any | None = None,
-    ) -> tuple[str, list[str]]:
+    ) -> tuple[str, list[CodeMapperPOI]]:
+        _ = (llm_manager, target_dir, scope_path, scope_label)
+        _ = (meta, context, comprehensiveness, out_dir, map_hyde_provider, indexing_cfg)
         # Record the requested max_points so we can assert comprehensiveness mapping.
         seen_max_points.append(max_points)
         overview = (
             "1. **Core Flow**: High-level data flow.\n"
             "2. **Error Handling**: How failures are surfaced.\n"
         )
-        return overview, [
-            "Core Flow: High-level data flow.",
-            "Error Handling: How failures are surfaced.",
-        ][:max_points]
+        points = [
+            CodeMapperPOI(
+                mode="architectural",
+                text="Core Flow: High-level data flow.",
+            ),
+            CodeMapperPOI(
+                mode="architectural",
+                text="Error Handling: How failures are surfaced.",
+            ),
+        ]
+        return overview, points[:max_points]
 
-    async def fake_deep_research_impl(
-        services: Any,
-        embedding_manager: Any,
-        llm_manager: Any,
+    async def fake_run_deep_research(
+        *,
         query: str,
-        progress: Any,
-        path: str | None = None,
+        **__: Any,
     ) -> dict[str, Any]:
         # Return a minimal answer and sources metadata for coverage.
         # For one of the bullets, simulate an empty answer so it is skipped.
@@ -155,18 +165,23 @@ async def _run_code_mapper_with_stubs(
     monkeypatch.setattr(code_mapper_mod, "LLMManager", DummyLLMManager)
     monkeypatch.setattr(
         code_mapper_service,
-        "_run_code_mapper_overview_hyde",
+        "run_code_mapper_overview_hyde",
         fake_overview,
         raising=True,
     )
     monkeypatch.setattr(
-        code_mapper_service, "deep_research_impl", fake_deep_research_impl, raising=True
+        code_mapper_service, "run_deep_research", fake_run_deep_research, raising=True
     )
 
     if set_combined:
         monkeypatch.setenv("CH_CODE_MAPPER_WRITE_COMBINED", "1")
     else:
         monkeypatch.delenv("CH_CODE_MAPPER_WRITE_COMBINED", raising=False)
+
+    if poi_concurrency_env is None:
+        monkeypatch.delenv("CH_CODE_MAPPER_POI_CONCURRENCY", raising=False)
+    else:
+        monkeypatch.setenv("CH_CODE_MAPPER_POI_CONCURRENCY", poi_concurrency_env)
 
     class Args:
         def __init__(self) -> None:
@@ -217,6 +232,8 @@ async def test_code_mapper_end_to_end_default_omits_combined_doc(
     combined_docs = list(out_dir.glob("*_code_mapper.md"))
     assert not combined_docs, "Combined Code Mapper doc should be disabled by default"
 
+    assert "topics failed after a retry" in captured
+
     index_files = list(out_dir.glob("*_code_mapper_index.md"))
     assert index_files, "Expected a Code Mapper index file to be written"
     index_content = index_files[0].read_text(encoding="utf-8")
@@ -227,13 +244,14 @@ async def test_code_mapper_end_to_end_default_omits_combined_doc(
     assert "scope_scope_unreferenced_files.txt" in index_content
 
     topic_files = list(out_dir.glob("*_topic_*.md"))
-    # One of the deep research calls returns an empty answer and should be skipped.
-    assert len(topic_files) == 1, "Expected only non-empty topics to be written"
-    topic_content = topic_files[0].read_text(encoding="utf-8")
-    assert (
-        topic_content.startswith("# Error Handling")
-        or "\n# Error Handling\n" in topic_content
-    )
+    # One of the deep research calls returns an empty answer and should fail after
+    # a retry, producing a (failed) topic entry that is omitted from the combined
+    # doc but still written as a topic file.
+    assert len(topic_files) == 2
+    topic_contents = [path.read_text(encoding="utf-8") for path in topic_files]
+    assert any(content.startswith("# Error Handling") for content in topic_contents)
+    assert any(content.startswith("# Core Flow (failed)") for content in topic_contents)
+    assert "Core Flow (failed)" in index_content
     unref_files = list(out_dir.glob("*_scope_unreferenced_files.txt"))
     assert unref_files, "Expected unreferenced files artifact to be written"
     unref_content = unref_files[0].read_text(encoding="utf-8")
@@ -242,6 +260,27 @@ async def test_code_mapper_end_to_end_default_omits_combined_doc(
     # Comprehensiveness=low should map to fewer max_points for the overview.
     assert seen_max_points, "Expected fake_overview to be called"
     assert seen_max_points[0] == 5
+
+
+@pytest.mark.asyncio
+async def test_code_mapper_invalid_poi_concurrency_env_exits_2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        await _run_code_mapper_with_stubs(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            capsys=capsys,
+            set_combined=False,
+            poi_concurrency_env="nope",
+        )
+
+    code = excinfo.value.code if isinstance(excinfo.value.code, int) else 1
+    assert code == 2
+    captured = capsys.readouterr().out
+    assert "CH_CODE_MAPPER_POI_CONCURRENCY" in captured
 
 
 @pytest.mark.asyncio

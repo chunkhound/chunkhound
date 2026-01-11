@@ -4,7 +4,18 @@ import argparse
 from pathlib import Path
 from typing import Any, cast
 
-from .common_arguments import add_common_arguments, add_config_arguments
+from .common_arguments import (
+    _parse_audience,
+    add_common_arguments,
+    add_config_arguments,
+)
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return parsed
 
 
 def add_map_subparser(subparsers: Any) -> argparse.ArgumentParser:
@@ -56,6 +67,28 @@ def add_map_subparser(subparsers: Any) -> argparse.ArgumentParser:
         ),
     )
 
+    map_parser.add_argument(
+        "--audience",
+        type=_parse_audience,
+        default="balanced",
+        help=(
+            "Controls the intended audience for generated map topics. "
+            "Accepted: 1|technical, 2|balanced, 3|end-user."
+        ),
+    )
+
+    map_parser.add_argument(
+        "--context",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a markdown/text file used as authoritative context for HyDE "
+            "planning. When set, this fully replaces repo-derived HyDE context "
+            "(file lists and sampled code snippets) for both architectural and "
+            "operational maps."
+        ),
+    )
+
     # Mandatory output directory for per-topic documents and index
     map_parser.add_argument(
         "--out",
@@ -96,6 +129,17 @@ def add_map_subparser(subparsers: Any) -> argparse.ArgumentParser:
                 "to CH_CODE_MAPPER_WRITE_COMBINED for backward compatibility."
             ),
         )
+
+    map_parser.add_argument(
+        "-j",
+        "--jobs",
+        type=_positive_int,
+        default=None,
+        help=(
+            "Max concurrent point-of-interest deep research jobs. Must be >= 1. "
+            "If omitted, falls back to CH_CODE_MAPPER_POI_CONCURRENCY or a default."
+        ),
+    )
 
     map_parser.set_defaults(comprehensiveness="medium")
     level_group = map_parser.add_mutually_exclusive_group()

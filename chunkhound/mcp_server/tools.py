@@ -622,14 +622,6 @@ async def deep_research_impl(
     Raises:
         Exception: If LLM or reranker not configured
     """
-    # Validate LLM is configured
-    if not llm_manager or not llm_manager.is_configured():
-        raise Exception(
-            "LLM not configured. Configure an LLM provider via:\n"
-            "1. Create .chunkhound.json with llm configuration, OR\n"
-            "2. Set CHUNKHOUND_LLM_API_KEY environment variable"
-        )
-
     # Validate reranker is configured
     if not embedding_manager or not embedding_manager.list_providers():
         raise Exception(
@@ -658,15 +650,12 @@ async def deep_research_impl(
         db_services=services,
         embedding_manager=embedding_manager,
         llm_manager=llm_manager,
-        tool_name="code_research",  # Matches tool registration below
-        progress=progress,  # Pass progress for terminal UI (None in MCP mode)
+        tool_name="code_research",
+        progress=progress,
         path_filter=path,
     )
 
-    # Perform code research with fixed depth and dynamic budgets
-    result = await research_service.deep_research(query)
-
-    return result
+    return await research_service.deep_research(query)
 
 
 # =============================================================================

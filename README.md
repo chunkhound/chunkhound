@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <strong>Don't search your code. Research it.</strong>
+  <strong>Local first codebase intelligence</strong>
 </p>
 
 <p align="center">

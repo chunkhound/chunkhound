@@ -27,19 +27,21 @@ from chunkhound.code_mapper import llm as code_mapper_llm
 from chunkhound.code_mapper import pipeline as code_mapper_pipeline
 from chunkhound.code_mapper.coverage import compute_unreferenced_scope_files
 from chunkhound.code_mapper.metadata import build_generation_stats_with_coverage
+from chunkhound.code_mapper.models import CodeMapperPOI
 from chunkhound.code_mapper.orchestrator import CodeMapperOrchestrator
 from chunkhound.code_mapper.render import render_overview_document
 from chunkhound.code_mapper.service import (
+    CodeMapperInvalidConcurrencyError,
     CodeMapperNoPointsError,
     run_code_mapper_pipeline,
 )
-from chunkhound.code_mapper.utils import safe_scope_label
 from chunkhound.code_mapper.writer import write_code_mapper_outputs
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.database_factory import create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
+from chunkhound.utils.text import safe_scope_label
 
 from ..utils.rich_output import RichOutputFormatter
 from ..utils.tree_progress import TreeProgressDisplay
@@ -47,15 +49,15 @@ from ..utils.tree_progress import TreeProgressDisplay
 P = ParamSpec("P")
 
 
-async def _run_code_mapper_overview_hyde(
+async def run_code_mapper_overview_hyde(
     *args: P.args, **kwargs: P.kwargs
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[CodeMapperPOI]]:
     """Delegate to pipeline helper (wrapper for test monkeypatching)."""
-    return await code_mapper_pipeline._run_code_mapper_overview_hyde(*args, **kwargs)
+    return await code_mapper_pipeline.run_code_mapper_overview_hyde(*args, **kwargs)
 
 
-# Re-export for tests that monkeypatch assembly metadata wiring.
-build_llm_metadata_and_assembly = code_mapper_llm.build_llm_metadata_and_assembly
+# Re-export for tests that monkeypatch HyDE provider metadata wiring.
+build_llm_metadata_and_map_hyde = code_mapper_llm.build_llm_metadata_and_map_hyde
 
 
 async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
@@ -64,6 +66,24 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
 
     # Resolve workspace root from explicit config file when provided.
     apply_code_mapper_workspace_overrides(config=config, args=args)
+
+    context_text: str | None = None
+    context_arg = getattr(args, "context", None)
+    if context_arg is not None:
+        try:
+            context_path = Path(context_arg).expanduser()
+            if not context_path.is_absolute():
+                workspace_root = getattr(config, "target_dir", None)
+                if isinstance(workspace_root, Path):
+                    context_path = workspace_root / context_path
+            context_text = context_path.read_text(encoding="utf-8")
+        except (OSError, RuntimeError, ValueError) as exc:
+            formatter.error(f"Failed to read --context file: {exc}")
+            sys.exit(2)
+
+        if not context_text.strip():
+            formatter.error("--context file is empty.")
+            sys.exit(2)
 
     # Code Mapper always writes artifacts; keep the CLI contract explicit.
     out_dir_arg = getattr(args, "out", None)
@@ -105,15 +125,18 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
         )
 
         try:
-            overview_answer, points_of_interest = await _run_code_mapper_overview_hyde(
+            overview_answer, points_of_interest = await run_code_mapper_overview_hyde(
                 llm_manager=llm_manager,
                 target_dir=scope.target_dir,
                 scope_path=scope.scope_path,
                 scope_label=scope.scope_label,
+                meta=meta_bundle.meta,
+                context=context_text,
                 max_points=run_context.max_points,
                 comprehensiveness=run_context.comprehensiveness,
                 out_dir=out_dir,
-                assembly_provider=meta_bundle.assembly_provider,
+                persist_prompt=True,
+                map_hyde_provider=meta_bundle.map_hyde_provider,
                 indexing_cfg=getattr(config, "indexing", None),
             )
         except code_mapper_pipeline.CodeMapperHyDEError as exc:
@@ -228,6 +251,7 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
 
     with TreeProgressDisplay() as tree_progress:
         try:
+            audience = str(getattr(args, "audience", "balanced") or "balanced")
             pipeline_result = await run_code_mapper_pipeline(
                 services=services,
                 embedding_manager=embedding_manager,
@@ -236,12 +260,16 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
                 scope_path=scope.scope_path,
                 scope_label=scope.scope_label,
                 path_filter=scope.path_filter,
+                meta=meta_bundle.meta,
+                context=context_text,
                 comprehensiveness=run_context.comprehensiveness,
                 max_points=run_context.max_points,
                 out_dir=Path(out_dir_arg),
-                assembly_provider=meta_bundle.assembly_provider,
+                map_hyde_provider=meta_bundle.map_hyde_provider,
                 indexing_cfg=getattr(config, "indexing", None),
+                poi_jobs=getattr(args, "jobs", None),
                 progress=tree_progress,
+                audience=audience,
                 log_info=formatter.info,
                 log_warning=formatter.warning,
                 log_error=formatter.error,
@@ -251,14 +279,15 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
                 "Code Mapper could not extract any points of interest from the "
                 "overview."
             )
-            print("\n--- Overview answer ---\n")
-            print(exc.overview_answer)
+            formatter.text_block(exc.overview_answer, title="Overview answer")
             sys.exit(1)
         except code_mapper_pipeline.CodeMapperHyDEError as exc:
             formatter.error("Code Mapper HyDE planning failed.")
-            print("\n--- HyDE error ---\n")
-            print(exc.hyde_message)
+            formatter.text_block(exc.hyde_message, title="HyDE error")
             sys.exit(1)
+        except CodeMapperInvalidConcurrencyError as exc:
+            formatter.error(str(exc))
+            sys.exit(2)
         except (OSError, RuntimeError, TypeError, ValueError) as e:
             formatter.error(f"Code Mapper research failed: {e}")
             logger.exception("Full error details:")
@@ -266,6 +295,8 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
 
     overview_result = pipeline_result.overview_result
     poi_sections = pipeline_result.poi_sections
+    poi_sections_indexed = pipeline_result.poi_sections_indexed
+    failed_poi_sections = pipeline_result.failed_poi_sections
     unified_source_files = pipeline_result.unified_source_files
     unified_chunks_dedup = pipeline_result.unified_chunks_dedup
     total_files_global = pipeline_result.total_files_global
@@ -286,6 +317,8 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
         total_chunks_global=total_chunks_global,
     )
     generation_stats["code_mapper_comprehensiveness"] = run_context.comprehensiveness
+    audience = str(getattr(args, "audience", "balanced") or "balanced")
+    generation_stats["code_mapper_audience"] = audience
     meta_bundle.meta.generation_stats = generation_stats
 
     coverage_lines = code_mapper_pipeline._coverage_summary_lines(
@@ -318,11 +351,20 @@ async def code_mapper_command(args: argparse.Namespace, config: Config) -> None:
         meta=meta_bundle.meta,
         overview_answer=overview_result.get("answer", "").strip(),
         poi_sections=poi_sections,
+        poi_sections_indexed=poi_sections_indexed,
+        failed_poi_sections=failed_poi_sections,
         coverage_lines=coverage_lines,
         include_topics=not getattr(args, "overview_only", False),
         include_combined=include_combined,
         unreferenced_files=unreferenced,
     )
+
+    if failed_poi_sections:
+        formatter.warning(
+            f"{len(failed_poi_sections)}/{total_research_calls} topics failed after a "
+            "retry; see the topics index for '(failed)' entries. The combined doc "
+            "includes only successful topics."
+        )
 
     formatter.success("Code Mapper complete.")
     if write_result.doc_path is not None:
