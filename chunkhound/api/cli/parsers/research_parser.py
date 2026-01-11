@@ -40,8 +40,8 @@ def add_research_subparser(subparsers: Any) -> argparse.ArgumentParser:
     # Add common arguments
     add_common_arguments(research_parser)
 
-    # Add config-specific arguments - database, embedding (for reranking), and llm
-    add_config_arguments(research_parser, ["database", "embedding", "llm"])
+    # Add config-specific arguments - database, embedding (for reranking), llm, and research
+    add_config_arguments(research_parser, ["database", "embedding", "llm", "research"])
 
     return cast(argparse.ArgumentParser, research_parser)
 
