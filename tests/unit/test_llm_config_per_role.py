@@ -27,6 +27,37 @@ def test_llm_config_per_role_provider_overrides():
     assert synth_conf["model"] == "codex"
 
 
+def test_llm_config_model_field_sets_both_roles():
+    """Test that the convenience 'model' field sets both utility and synthesis models."""
+    cfg = LLMConfig(
+        provider="grok",
+        model="grok-4-1-fast-reas5oning",  # intentional typo to test
+    )
+
+    util_conf, synth_conf = cfg.get_provider_configs()
+
+    assert util_conf["provider"] == "grok"
+    assert util_conf["model"] == "grok-4-1-fast-reas5oning"
+
+    assert synth_conf["provider"] == "grok"
+    assert synth_conf["model"] == "grok-4-1-fast-reas5oning"
+
+
+def test_llm_config_model_field_overridden_by_specific_models():
+    """Test that utility_model and synthesis_model override the general model field."""
+    cfg = LLMConfig(
+        provider="grok",
+        model="grok-4-1-fast-reasoning",
+        utility_model="grok-4-1-fast-reas5oning",  # different model for utility
+        synthesis_model="grok-4-1-fast-reas5oning",  # same as utility
+    )
+
+    util_conf, synth_conf = cfg.get_provider_configs()
+
+    assert util_conf["model"] == "grok-4-1-fast-reas5oning"
+    assert synth_conf["model"] == "grok-4-1-fast-reas5oning"
+
+
 def test_llm_config_codex_reasoning_effort_per_role():
     cfg = LLMConfig(
         provider="codex-cli",
