@@ -8,7 +8,6 @@ import asyncio
 import json
 import os
 import tempfile
-import time
 from pathlib import Path
 
 import pytest
@@ -21,10 +20,11 @@ class TestMCPFixVerification:
 
     @pytest.mark.asyncio
     async def test_mcp_responds_quickly_with_large_directory(self):
-        """Test that MCP server now responds quickly even with large directories.
-        
-        This verifies our fix works - the server should respond to initialize
-        within a few seconds even with a large directory.
+        """Test that MCP server initialization is non-blocking.
+
+        Verifies the architectural property: initialize returns BEFORE directory
+        scanning completes. With 100 files, if async initialization is working,
+        the scan should still be in progress when we check immediately after.
         """
         with windows_safe_tempdir() as temp_path:
             
@@ -76,9 +76,7 @@ class Class_{i}:
                 await client.start()
 
                 try:
-                    start_time = time.time()
-
-                    # Send initialize request (increase timeout for CI environments)
+                    # Send initialize request
                     init_result = await client.send_request(
                         "initialize",
                         {
@@ -89,16 +87,31 @@ class Class_{i}:
                         timeout=10.0
                     )
 
-                    response_time = time.time() - start_time
-
-                    # Verify quick response
-                    assert response_time < 5.0, f"Server took {response_time:.2f} seconds to respond (should be < 5s)"
-
                     # Verify response structure
                     assert "serverInfo" in init_result, f"No serverInfo in result: {init_result}"
                     assert init_result["serverInfo"]["name"] == "ChunkHound Code Search"
 
-                    print(f"✅ Server responded in {response_time:.2f} seconds")
+                    # Send initialized notification to trigger background scan
+                    await client.send_notification("notifications/initialized")
+
+                    # Immediately check scan state - this verifies async initialization
+                    stats_result = await client.send_request(
+                        "tools/call",
+                        {"name": "get_stats", "arguments": {}},
+                        timeout=5.0
+                    )
+                    content = stats_result["content"][0]["text"]
+                    scan_info = json.loads(content)["initial_scan"]
+
+                    # ARCHITECTURAL PROPERTY: initialize must return BEFORE scan completes
+                    # With 100 files, if async is working, scan should still be in progress
+                    # or at minimum not have processed all files yet
+                    assert scan_info["is_scanning"] or scan_info["files_processed"] < 100, (
+                        f"Initialize blocked until scan completed - async initialization is broken! "
+                        f"is_scanning={scan_info['is_scanning']}, files_processed={scan_info['files_processed']}"
+                    )
+
+                    print(f"✅ Async init verified: is_scanning={scan_info['is_scanning']}, files_processed={scan_info['files_processed']}")
 
                 finally:
                     await client.close()
