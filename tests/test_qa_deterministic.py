@@ -628,6 +628,7 @@ class RapidClass_{i}:
             assert max_search_time < 5.0, f"Max search time should be < 5s, got {max_search_time:.3f}s"
 
     @pytest.mark.asyncio
+    @pytest.mark.serial  # This test should run serially to avoid filesystem watcher conflicts
     async def test_pagination_comprehensive(self, qa_setup):
         """QA Item 8: Test pagination functionality comprehensively.
         
