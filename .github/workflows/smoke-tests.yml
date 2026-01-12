@@ -34,4 +34,4 @@ jobs:
         run: uv run pytest tests/ -v -m "not serial"
 
       - name: Run serial tests
-        run: uv run pytest tests/ -v -m serial
+        run: uv run pytest tests/ -v -m serial -n 1
