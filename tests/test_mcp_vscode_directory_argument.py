@@ -111,6 +111,7 @@ async def test_mcp_server_uses_positional_directory_argument():
 
 
 @pytest.mark.asyncio
+@pytest.mark.serial  # This test should run serially to avoid filesystem watcher conflicts
 async def test_mcp_server_handles_empty_directory_gracefully():
     """Test that MCP server handles directories without config files gracefully.
     
