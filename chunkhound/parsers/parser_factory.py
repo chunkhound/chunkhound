@@ -12,7 +12,6 @@ complexity and ensure better error handling during startup.
 """
 
 import os
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -20,18 +19,6 @@ from loguru import logger
 
 from chunkhound.core.types.common import Language
 from chunkhound.interfaces.language_parser import LanguageParser
-
-# Helper function for thread-safe language loading
-def _load_language_safely(language_name: str, get_language_func):
-    """Load a tree-sitter language with file locking to prevent race conditions."""
-    try:
-        from filelock import FileLock
-        lock_path = os.path.join(tempfile.gettempdir(), f"chunkhound_tree_sitter_{language_name}.lock")
-        with FileLock(lock_path, timeout=30):
-            return get_language_func(language_name)
-    except ImportError:
-        # Fallback if filelock not available
-        return get_language_func(language_name)
 
 # Import all language mappings
 from chunkhound.parsers.mappings import (
@@ -183,7 +170,7 @@ except ImportError:
 try:
     from tree_sitter_language_pack import get_language
 
-    _matlab_lang = _load_language_safely("matlab", get_language)
+    _matlab_lang = get_language("matlab")
     if _matlab_lang:
         # Create a module-like wrapper for compatibility with LanguageConfig
         class _MatlabLanguageWrapper:
@@ -202,7 +189,7 @@ except ImportError:
 try:
     from tree_sitter_language_pack import get_language as _get_language_objc
 
-    _objc_lang = _load_language_safely("objc", _get_language_objc)
+    _objc_lang = _get_language_objc("objc")
     if _objc_lang:
         # Create a module-like wrapper for compatibility with LanguageConfig
         class _ObjCLanguageWrapper:
@@ -229,7 +216,7 @@ except ImportError:
 try:
     from tree_sitter_language_pack import get_language as _get_language_swift
 
-    _swift_lang = _load_language_safely("swift", _get_language_swift)
+    _swift_lang = _get_language_swift("swift")
     if _swift_lang:
         # Create a module-like wrapper for compatibility with LanguageConfig
         class _SwiftLanguageWrapper:
@@ -249,7 +236,7 @@ if not HASKELL_AVAILABLE:
     try:
         from tree_sitter_language_pack import get_language as _get_language_haskell
 
-        _haskell_lang = _load_language_safely("haskell", _get_language_haskell)
+        _haskell_lang = _get_language_haskell("haskell")
         if _haskell_lang:
 
             class _HaskellLanguageWrapper:
@@ -299,7 +286,7 @@ if not HCL_AVAILABLE:
     try:
         from tree_sitter_language_pack import get_language as _get_language_hcl
 
-        _hcl_lang = _load_language_safely("hcl", _get_language_hcl)
+        _hcl_lang = _get_language_hcl("hcl")
         if _hcl_lang:
 
             class _HclLanguageWrapper:
@@ -339,7 +326,7 @@ except ImportError:
 try:
     from tree_sitter_language_pack import get_language
 
-    _dart_lang = _load_language_safely("dart", get_language)
+    _dart_lang = get_language("dart")
     if _dart_lang:
         # Create a module-like wrapper for compatibility with LanguageConfig
         class _DartLanguageWrapper:
