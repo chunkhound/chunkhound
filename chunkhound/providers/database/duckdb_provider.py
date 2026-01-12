@@ -639,6 +639,8 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         try:
             # Create vector_shards table for tracking embedding shards
+            # Note: file_path is NOT stored - derived at runtime from shard_id
+            # per portability constraint (spec I14: Path Independence)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS vector_shards (
                     shard_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -646,7 +648,6 @@ class DuckDBProvider(SerialDatabaseProvider):
                     provider TEXT NOT NULL,
                     model TEXT NOT NULL,
                     quantization TEXT NOT NULL DEFAULT 'i8',
-                    file_path TEXT,
                     file_size_bytes BIGINT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

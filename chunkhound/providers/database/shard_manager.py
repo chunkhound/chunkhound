@@ -80,7 +80,7 @@ class ShardManager:
 
         result = conn.execute(
             """
-            SELECT shard_id, file_path FROM vector_shards
+            SELECT shard_id FROM vector_shards
             WHERE dims = ? AND provider = ? AND model = ?
             """,
             [dims, provider, model],
@@ -94,7 +94,7 @@ class ShardManager:
         for row in result:
             # DuckDB returns UUID objects directly
             shard_id = _parse_uuid(row[0])
-            file_path = Path(row[1]) if row[1] else self._shard_path(shard_id)
+            file_path = self._shard_path(shard_id)  # Always derive path
 
             # Check file exists
             if not file_path.exists():
@@ -304,16 +304,15 @@ class ShardManager:
             first_id = _parse_uuid(result[0][0])
             return (first_id, False)
 
-        # Create new shard
+        # Create new shard (file_path derived at runtime per spec I14)
         new_shard_id = uuid4()
-        file_path = str(self._shard_path(new_shard_id))
 
         try:
             conn.execute(
                 """
                 INSERT INTO vector_shards
-                    (shard_id, dims, provider, model, quantization, file_path)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (shard_id, dims, provider, model, quantization)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 [
                     str(new_shard_id),
@@ -321,7 +320,6 @@ class ShardManager:
                     provider,
                     model,
                     self.config.default_quantization,
-                    file_path,
                 ],
             )
             logger.info(
@@ -792,9 +790,12 @@ class ShardManager:
 
         Args:
             conn: Database connection
+
+        Note: file_path is derived via _shard_path(), not stored in DB
+              per portability constraint (spec I14: Path Independence)
         """
         result = conn.execute("""
-            SELECT shard_id, dims, provider, model, quantization, file_path
+            SELECT shard_id, dims, provider, model, quantization
             FROM vector_shards
         """).fetchall()
 
@@ -805,7 +806,6 @@ class ShardManager:
                 "provider": row[2],
                 "model": row[3],
                 "quantization": row[4] or self.config.default_quantization,
-                "file_path": row[5],
             }
             for row in result
         ]
@@ -946,18 +946,17 @@ class ShardManager:
         try:
             table_name = f"embeddings_{dims}"
 
-            # Create child shards
+            # Create child shards (file_path derived at runtime per spec I14)
             child_ids: list[UUID] = []
             for cluster_label in sorted(clusters.keys()):
                 child_id = uuid4()
                 child_ids.append(child_id)
 
-                child_file_path = str(self._shard_path(child_id))
                 conn.execute(
                     """
                     INSERT INTO vector_shards
-                        (shard_id, dims, provider, model, quantization, file_path)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                        (shard_id, dims, provider, model, quantization)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
                     [
                         str(child_id),
@@ -965,7 +964,6 @@ class ShardManager:
                         shard["provider"],
                         shard["model"],
                         shard.get("quantization", self.config.default_quantization),
-                        child_file_path,
                     ],
                 )
 
