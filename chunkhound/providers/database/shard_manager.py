@@ -425,6 +425,12 @@ class ShardManager:
         # LIRE-style convergence loop - repeat until no changes
         max_iterations = 100  # Safety limit per spec
         iteration = 0
+
+        # Track rebuild attempts per shard to prevent infinite loops
+        # if recall never improves (e.g., degenerate identical vectors)
+        rebuild_attempts: dict[UUID, int] = {}
+        max_rebuild_attempts = 3
+
         while iteration < max_iterations:
             iteration += 1
             changes_made = 0
@@ -466,6 +472,14 @@ class ShardManager:
 
                 # Check if rebuild needed
                 if self._needs_rebuild(shard, state):
+                    attempts = rebuild_attempts.get(shard_id, 0)
+                    if attempts >= max_rebuild_attempts:
+                        logger.warning(
+                            f"Shard {shard_id} rebuilt {attempts} times "
+                            "without recall improvement, skipping"
+                        )
+                        continue
+                    rebuild_attempts[shard_id] = attempts + 1
                     reason = self._rebuild_reason(shard, state)
                     logger.info(f"Shard {shard_id} needs rebuild: {reason}")
                     self._rebuild_index_from_duckdb(shard, conn)
