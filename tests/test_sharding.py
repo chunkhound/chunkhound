@@ -1,4 +1,4 @@
-"""Sharding test suite covering all 13 invariants from spec section 11.5.
+"""Sharding test suite covering all 14 invariants from spec section 11.5.
 
 Tests use sociable approach with real DuckDB, real USearch, and real filesystem
 in temporary directories. Uses SyntheticEmbeddingGenerator for deterministic,
@@ -9,6 +9,7 @@ Invariants tested:
   no orphans, no ghosts, embedding retrievability
 - Operational (I7-I10): Fix pass idempotence, convergence, LIRE bound, NPA
 - Search (I11-I13): No false negatives, tombstone exclusion, centroid filter
+- Portability (I14): Path independence
 
 Uses small thresholds (split=100, merge=10) for efficient testing without
 requiring 100K vectors.
@@ -22,6 +23,7 @@ from uuid import UUID, uuid4
 import numpy as np
 import numpy.core.multiarray  # noqa: F401  # Prevent DuckDB threading segfault
 import pytest
+from scipy import stats
 
 from chunkhound.api.cli.utils.rich_output import RichOutputFormatter
 from chunkhound.core.config.sharding_config import ShardingConfig
@@ -49,6 +51,9 @@ STRESS_BATCH_MAX = 1100
 STRESS_SEED = 42
 STRESS_CHECKPOINT_INTERVAL = 100
 
+# Amortized O(1) validation: measure cumulative time at these intervals
+STRESS_O1_MEASUREMENT_INTERVAL = 100_000  # Every 100K vectors
+
 
 class MockDBProvider:
     """Minimal DB provider for sharding tests.
@@ -67,6 +72,7 @@ class MockDBProvider:
     def _create_schema(self) -> None:
         """Create minimal schema for sharding tests."""
         # Create vector_shards table
+        # Note: file_path NOT stored - derived at runtime per spec I14 (Path Independence)
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS vector_shards (
                 shard_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -74,7 +80,6 @@ class MockDBProvider:
                 provider TEXT NOT NULL,
                 model TEXT NOT NULL,
                 quantization TEXT NOT NULL DEFAULT 'i8',
-                file_path TEXT,
                 file_size_bytes BIGINT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -506,10 +511,10 @@ class TestFullLifecycle:
 
         tmp_db.connection.execute(
             """
-            INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
             """,
-            [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+            [str(shard_id), TEST_DIMS, "test", "test-model"],
         )
 
         # Insert embeddings with shard assignment
@@ -601,10 +606,10 @@ class TestFixPassRecovery:
 
         tmp_db.connection.execute(
             """
-            INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
             """,
-            [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+            [str(shard_id), TEST_DIMS, "test", "test-model"],
         )
 
         vectors = [generator.generate_hash_seeded(f"doc_{i}") for i in range(20)]
@@ -681,10 +686,10 @@ class TestFixPassRecovery:
 
         tmp_db.connection.execute(
             """
-            INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
             """,
-            [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+            [str(shard_id), TEST_DIMS, "test", "test-model"],
         )
 
         vectors = [generator.generate_hash_seeded(f"doc_{i}") for i in range(30)]
@@ -733,10 +738,10 @@ class TestFixPassRecovery:
 
             tmp_db.connection.execute(
                 """
-                INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
                 """,
-                [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
             )
 
             count = 20 + i * 10
@@ -777,10 +782,10 @@ class TestSplitAtThreshold:
 
         tmp_db.connection.execute(
             """
-            INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
             """,
-            [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+            [str(shard_id), TEST_DIMS, "test", "test-model"],
         )
 
         # Insert exactly split_threshold vectors using clustered generation
@@ -823,10 +828,10 @@ class TestSplitAtThreshold:
 
         tmp_db.connection.execute(
             """
-            INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
             """,
-            [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+            [str(shard_id), TEST_DIMS, "test", "test-model"],
         )
 
         # Insert below threshold (use smaller count for faster test)
@@ -870,10 +875,10 @@ class TestMergeAndCascade:
         ]:
             tmp_db.connection.execute(
                 """
-                INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
                 """,
-                [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
             )
 
         # Insert small count (below merge threshold) to small shard
@@ -918,10 +923,10 @@ class TestMergeAndCascade:
 
         tmp_db.connection.execute(
             """
-            INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
             """,
-            [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+            [str(shard_id), TEST_DIMS, "test", "test-model"],
         )
 
         # Insert below merge threshold
@@ -954,10 +959,10 @@ class TestMergeAndCascade:
             shard_path = shard_manager._shard_path(shard_id)
             tmp_db.connection.execute(
                 """
-                INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
                 """,
-                [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
             )
 
         # Small shard: below merge threshold
@@ -1018,10 +1023,10 @@ class TestSearchRecallWithCentroids:
 
         tmp_db.connection.execute(
             """
-            INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
             """,
-            [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+            [str(shard_id), TEST_DIMS, "test", "test-model"],
         )
 
         vectors = [vec for vec, _ in clustered]
@@ -1064,10 +1069,10 @@ class TestSearchRecallWithCentroids:
 
         tmp_db.connection.execute(
             """
-            INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
             """,
-            [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+            [str(shard_id), TEST_DIMS, "test", "test-model"],
         )
 
         # Use hash-seeded vectors (will have higher similarity to centroid)
@@ -1113,10 +1118,10 @@ class TestCompactionAndQuality:
 
         tmp_db.connection.execute(
             """
-            INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
             """,
-            [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+            [str(shard_id), TEST_DIMS, "test", "test-model"],
         )
 
         vectors = [generator.generate_hash_seeded(f"doc_{i}") for i in range(30)]
@@ -1165,10 +1170,10 @@ class TestCompactionAndQuality:
 
         tmp_db.connection.execute(
             """
-            INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
             """,
-            [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+            [str(shard_id), TEST_DIMS, "test", "test-model"],
         )
 
         vectors = [generator.generate_hash_seeded(f"doc_{i}") for i in range(50)]
@@ -1212,10 +1217,10 @@ class TestCompactionAndQuality:
 
         tmp_db.connection.execute(
             """
-            INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
             """,
-            [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+            [str(shard_id), TEST_DIMS, "test", "test-model"],
         )
 
         vectors = [generator.generate_hash_seeded(f"doc_{i}") for i in range(50)]
@@ -1280,10 +1285,10 @@ class TestScaleToTarget:
 
         tmp_db.connection.execute(
             """
-            INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
             """,
-            [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+            [str(shard_id), TEST_DIMS, "test", "test-model"],
         )
 
         # Generate vectors
@@ -1338,10 +1343,10 @@ class TestChaosRecovery:
 
         tmp_db.connection.execute(
             """
-            INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
             """,
-            [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+            [str(shard_id), TEST_DIMS, "test", "test-model"],
         )
 
         vectors = [generator.generate_hash_seeded(f"doc_{i}") for i in range(30)]
@@ -1380,10 +1385,10 @@ class TestChaosRecovery:
 
         tmp_db.connection.execute(
             """
-            INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
             """,
-            [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+            [str(shard_id), TEST_DIMS, "test", "test-model"],
         )
 
         vectors = [generator.generate_hash_seeded(f"doc_{i}") for i in range(20)]
@@ -1412,10 +1417,10 @@ class TestChaosRecovery:
 
         tmp_db.connection.execute(
             """
-            INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
             """,
-            [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+            [str(shard_id), TEST_DIMS, "test", "test-model"],
         )
 
         # Create empty index file
@@ -1451,10 +1456,10 @@ class TestInvariantVerification:
 
             tmp_db.connection.execute(
                 """
-                INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
                 """,
-                [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
             )
 
             # Insert reasonable count per shard
@@ -1549,10 +1554,10 @@ class TestKMeansSplitClustering:
 
             db_provider.connection.execute(
                 """
-                INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
                 """,
-                [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
             )
 
             # Insert 2500 vectors - above split_threshold of 2000
@@ -1631,10 +1636,10 @@ class TestNPAAfterMerge:
 
             tmp_db.connection.execute(
                 """
-                INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
                 """,
-                [str(target_id), TEST_DIMS, "test", "test-model", str(target_path)],
+                [str(target_id), TEST_DIMS, "test", "test-model"],
             )
 
             # Generate vectors clustered around this centroid
@@ -1654,16 +1659,10 @@ class TestNPAAfterMerge:
 
         tmp_db.connection.execute(
             """
-            INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
             """,
-            [
-                str(source_shard_id),
-                TEST_DIMS,
-                "test",
-                "test-model",
-                str(source_shard_path),
-            ],
+            [str(source_shard_id), TEST_DIMS, "test", "test-model"],
         )
 
         # Create source vectors close to each of the 3 target centroids
@@ -1753,10 +1752,10 @@ class TestCentroidFilterCorrectness:
 
             tmp_db.connection.execute(
                 """
-                INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
                 """,
-                [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
             )
 
             # Generate vectors for this shard using different seed ranges
@@ -1852,10 +1851,10 @@ class TestOverfetchMultiplier:
 
             db_provider.connection.execute(
                 """
-                INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
                 """,
-                [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
             )
 
             # Insert 50 vectors
@@ -1918,10 +1917,10 @@ class TestOverfetchMultiplier:
 
             db_provider.connection.execute(
                 """
-                INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
                 """,
-                [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
             )
 
             vectors = [generator.generate_hash_seeded(f"doc_{i}") for i in range(30)]
@@ -1992,10 +1991,10 @@ class TestHNSWConfigurableParams:
 
             db_provider.connection.execute(
                 """
-                INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
                 """,
-                [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
             )
 
             vectors = [generator.generate_hash_seeded(f"doc_{i}") for i in range(30)]
@@ -2057,10 +2056,10 @@ class TestHNSWConfigurableParams:
 
             db_provider.connection.execute(
                 """
-                INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
                 """,
-                [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
             )
 
             vectors = [generator.generate_hash_seeded(f"doc_{i}") for i in range(40)]
@@ -2135,10 +2134,10 @@ class TestBulkIndexer:
 
             db_provider.connection.execute(
                 """
-                INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
                 """,
-                [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
             )
 
             vectors = [generator.generate_hash_seeded(f"doc_{i}") for i in range(20)]
@@ -2203,10 +2202,10 @@ class TestBulkIndexer:
 
             db_provider.connection.execute(
                 """
-                INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
                 """,
-                [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
             )
 
             vectors = [generator.generate_hash_seeded(f"doc_{i}") for i in range(20)]
@@ -2265,10 +2264,10 @@ class TestBulkIndexer:
 
             db_provider.connection.execute(
                 """
-                INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
                 """,
-                [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
             )
 
             vectors = [generator.generate_hash_seeded(f"doc_{i}") for i in range(30)]
@@ -2328,10 +2327,10 @@ class TestBulkIndexer:
 
             db_provider.connection.execute(
                 """
-                INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
                 """,
-                [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
             )
 
             vectors = [generator.generate_hash_seeded(f"doc_{i}") for i in range(30)]
@@ -2389,10 +2388,10 @@ class TestShardSplitAndJoinLifecycle:
 
         tmp_db.connection.execute(
             """
-            INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
             """,
-            [str(shard_0_id), TEST_DIMS, "test", "test-model", str(shard_0_path)],
+            [str(shard_0_id), TEST_DIMS, "test", "test-model"],
         )
 
         # Insert exactly TEST_SPLIT_THRESHOLD (100) vectors to shard_0
@@ -2708,6 +2707,10 @@ class TestMillionVectorStress:
                 total_inserted = 0
                 phase_start = time.perf_counter()
 
+                # Amortized O(1) measurement: record (N, T(N)) at intervals
+                measurement_points: list[tuple[int, float]] = []
+                next_measurement = STRESS_O1_MEASUREMENT_INTERVAL
+
                 for batch_idx, batch_size in enumerate(insert_batches):
                     # Generate vectors for this batch
                     batch_name = f"stress_{batch_idx}"
@@ -2739,6 +2742,12 @@ class TestMillionVectorStress:
 
                     total_inserted += batch_size
 
+                    # Record measurement point at each 100K interval
+                    if total_inserted >= next_measurement:
+                        cumulative_time = time.perf_counter() - phase_start
+                        measurement_points.append((total_inserted, cumulative_time))
+                        next_measurement += STRESS_O1_MEASUREMENT_INTERVAL
+
                     # Build USearch index if shard created or threshold crossed
                     if needs_fix:
                         shard_manager.fix_pass(
@@ -2769,6 +2778,51 @@ class TestMillionVectorStress:
                     )
 
                 progress.finish_task("insert")
+
+            # ===== AMORTIZED O(1) VALIDATION =====
+            # Two-pronged validation per Sedgewick's empirical analysis method:
+            # 1. R² >= 0.95: Validates T(N) is linear (proves O(1) amortized)
+            # 2. Doubling ratio T(2N)/T(N) ≈ 2: Confirms linear growth rate
+            if len(measurement_points) >= 3:
+                ns = [p[0] for p in measurement_points]
+                times = [p[1] for p in measurement_points]
+
+                slope, intercept, r_value, _, _ = stats.linregress(ns, times)
+                r_squared = r_value**2
+                slope_ms_per_vec = slope * 1000  # Convert to ms/vec
+
+                formatter.info(
+                    f"Amortized O(1) validation: R²={r_squared:.4f}, "
+                    f"slope={slope_ms_per_vec:.4f}ms/vec, "
+                    f"points={len(measurement_points)}"
+                )
+
+                # R² >= 0.95 proves linearity (constant per-op cost)
+                assert r_squared >= 0.95, (
+                    f"Non-linear insertion behavior: R²={r_squared:.4f} "
+                    f"(split/merge overhead degrading O(1))"
+                )
+
+                # Doubling ratio validation: T(2N)/T(N) ≈ 2 for O(1) amortized
+                time_by_n = dict(measurement_points)
+                doubling_ratios = []
+                for n, t in measurement_points:
+                    if 2 * n in time_by_n:
+                        ratio = time_by_n[2 * n] / t
+                        doubling_ratios.append((n, 2 * n, ratio))
+
+                if doubling_ratios:
+                    avg_ratio = sum(r[2] for r in doubling_ratios) / len(doubling_ratios)
+                    formatter.info(
+                        f"Doubling ratios: avg={avg_ratio:.2f}, "
+                        f"pairs={len(doubling_ratios)}"
+                    )
+                    # For O(1) amortized, ratio should be ~2 (linear total time)
+                    # Allow 1.5-2.5 tolerance for measurement noise
+                    assert 1.5 <= avg_ratio <= 2.5, (
+                        f"Doubling ratio {avg_ratio:.2f} outside [1.5, 2.5] "
+                        f"(expected ~2 for O(1) amortized)"
+                    )
 
             # Verify expected shard count after full insert
             final_shard_count = len(get_all_shard_ids(db_provider))
@@ -2954,10 +3008,10 @@ class TestSplitMergeCycleProtection:
 
             db_provider.connection.execute(
                 """
-                INSERT INTO vector_shards (shard_id, dims, provider, model, file_path)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
                 """,
-                [str(shard_id), TEST_DIMS, "test", "test-model", str(shard_path)],
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
             )
 
             # Insert exactly split_threshold vectors to trigger split
@@ -3004,6 +3058,566 @@ class TestSplitMergeCycleProtection:
             # Verify invariants still hold
             assert verify_invariant_i1_single_assignment(db_provider)
             assert verify_invariant_i2_shard_existence(db_provider)
+
+        finally:
+            db_provider.disconnect()
+
+
+class TestPortability:
+    """I14: Database directory can be relocated and reopened.
+
+    Verifies that the database is self-contained and portable:
+    - Shard paths are derived at runtime from db_path.parent / "shards"
+    - No absolute paths stored in database
+    - Directory can be zipped and moved to any machine/OS
+    """
+
+    def test_relocation_preserves_functionality(
+        self,
+        tmp_path: Path,
+        generator: SyntheticEmbeddingGenerator,
+    ) -> None:
+        """Database directory relocation preserves all operations."""
+        import shutil
+
+        # Phase 1: Create and populate original DB
+        original_dir = tmp_path / "original"
+        original_dir.mkdir()
+        db_path = original_dir / "test.duckdb"
+        db_provider = MockDBProvider(db_path)
+        shard_dir = original_dir / "shards"
+        shard_dir.mkdir()
+
+        config = ShardingConfig(
+            split_threshold=TEST_SPLIT_THRESHOLD,
+            merge_threshold=TEST_MERGE_THRESHOLD,
+            shard_similarity_threshold=0.1,
+        )
+
+        shard_manager = ShardManager(
+            db_provider=db_provider,
+            shard_dir=shard_dir,
+            config=config,
+        )
+
+        # Insert enough vectors to create a shard with index file
+        vectors = generator.generate_batch(50, "portability_test")
+        emb_ids = insert_embeddings_to_db(db_provider, vectors)
+
+        # Assign to shards and build index
+        emb_dicts = [
+            {"id": emb_id, "embedding": vec.tolist()}
+            for emb_id, vec in zip(emb_ids, vectors)
+        ]
+        success, needs_fix = shard_manager.insert_embeddings(
+            emb_dicts,
+            dims=TEST_DIMS,
+            provider="test",
+            model="test-model",
+            conn=db_provider.connection,
+        )
+        assert success
+
+        # Build index via fix_pass
+        shard_manager.fix_pass(db_provider.connection, check_quality=False)
+
+        # Capture pre-relocation state
+        original_shard_ids = get_all_shard_ids(db_provider)
+        assert len(original_shard_ids) > 0, "Expected at least one shard"
+
+        # Perform search before relocation
+        query_vec = vectors[0].tolist()
+        pre_results = shard_manager.search(
+            query=query_vec,
+            k=5,
+            dims=TEST_DIMS,
+            provider="test",
+            model="test-model",
+            conn=db_provider.connection,
+        )
+        pre_result_keys = [r.key for r in pre_results]
+
+        # Phase 2: Relocate entire directory
+        db_provider.disconnect()
+        relocated_dir = tmp_path / "relocated"
+        shutil.copytree(original_dir, relocated_dir)
+
+        # Phase 3: Reopen from new location
+        new_db_path = relocated_dir / "test.duckdb"
+        new_provider = MockDBProvider(new_db_path)
+        new_shard_dir = relocated_dir / "shards"
+
+        new_manager = ShardManager(
+            db_provider=new_provider,
+            shard_dir=new_shard_dir,
+            config=config,
+        )
+
+        # Populate centroids for search
+        new_manager.fix_pass(new_provider.connection, check_quality=False)
+
+        # Phase 4: Verify operations work correctly
+        try:
+            # 4a: Search returns same results
+            post_results = new_manager.search(
+                query=query_vec,
+                k=5,
+                dims=TEST_DIMS,
+                provider="test",
+                model="test-model",
+                conn=new_provider.connection,
+            )
+            post_result_keys = [r.key for r in post_results]
+            assert pre_result_keys == post_result_keys, (
+                f"Search results differ after relocation: "
+                f"pre={pre_result_keys}, post={post_result_keys}"
+            )
+
+            # 4b: New inserts succeed
+            new_vectors = generator.generate_batch(10, "post_relocation")
+            new_ids = insert_embeddings_to_db(new_provider, new_vectors)
+            new_emb_dicts = [
+                {"id": emb_id, "embedding": vec.tolist()}
+                for emb_id, vec in zip(new_ids, new_vectors)
+            ]
+            insert_success, _ = new_manager.insert_embeddings(
+                new_emb_dicts,
+                dims=TEST_DIMS,
+                provider="test",
+                model="test-model",
+                conn=new_provider.connection,
+            )
+            assert insert_success, "Insert failed after relocation"
+
+            # 4c: fix_pass completes without errors
+            new_manager.fix_pass(new_provider.connection, check_quality=False)
+
+            # 4d: Invariants hold after relocation
+            orphans = verify_invariant_i4_no_orphan_files(new_provider, new_shard_dir)
+            assert len(orphans) == 0, f"I4 violated: {len(orphans)} orphan files"
+
+            ghosts = verify_invariant_i5_no_ghost_records(new_provider, new_shard_dir)
+            assert len(ghosts) == 0, f"I5 violated: {len(ghosts)} ghost records"
+
+            assert verify_invariant_i1_single_assignment(new_provider)
+            assert verify_invariant_i2_shard_existence(new_provider)
+
+        finally:
+            new_provider.disconnect()
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(600)  # 10 minutes for complexity tests
+class TestAmortizedComplexity:
+    """Tests verifying amortized O(1) insert/delete complexity.
+
+    Uses linear regression on cumulative time T(N) to verify:
+    - If amortized cost is O(1), then T(N) = aN + b (linear)
+    - High R² confirms linearity
+    - Slope a represents per-operation cost
+
+    Uses smaller thresholds (split=10000, merge=1000) to allow splits during testing.
+
+    Run with:
+        uv run pytest tests/test_sharding.py::TestAmortizedComplexity \\
+            --run-slow -v -s
+    """
+
+    # Test configuration for complexity measurements
+    COMPLEXITY_DIMS = STRESS_DIMS  # 128
+    COMPLEXITY_SPLIT_THRESHOLD = 10_000
+    COMPLEXITY_MERGE_THRESHOLD = 1_000
+    COMPLEXITY_SEED = 42
+
+    # Measurement points for linear regression
+    MEASUREMENT_POINTS = [5_000, 10_000, 15_000, 20_000, 25_000]
+
+    def test_amortized_o1_insertion(self, tmp_path: Path) -> None:
+        """Verify amortized O(1) insertion complexity using linear regression.
+
+        Methodology:
+        1. Insert vectors in batches, recording cumulative time at measurement points
+        2. Fit linear regression: T(N) = slope * N + intercept
+        3. Pass criteria: R² >= 0.95 (high linearity) and slope < 1ms/vec
+
+        If complexity were O(log n) or O(n), T(N) would be superlinear
+        and R-squared would drop.
+        """
+        generator = SyntheticEmbeddingGenerator(
+            dims=self.COMPLEXITY_DIMS, seed=self.COMPLEXITY_SEED
+        )
+
+        # Create DB with complexity test dimensions table
+        db_path = tmp_path / "complexity_insert.duckdb"
+        db_provider = MockDBProvider(db_path)
+        db_provider._create_embeddings_table(self.COMPLEXITY_DIMS)
+
+        shard_dir = tmp_path / "shards"
+        shard_dir.mkdir(exist_ok=True)
+
+        config = ShardingConfig(
+            split_threshold=self.COMPLEXITY_SPLIT_THRESHOLD,
+            merge_threshold=self.COMPLEXITY_MERGE_THRESHOLD,
+            compaction_threshold=0.20,
+            incremental_sync_threshold=0.10,
+            quality_threshold=0.95,
+            shard_similarity_threshold=0.1,
+        )
+
+        shard_manager = ShardManager(
+            db_provider=db_provider,
+            shard_dir=shard_dir,
+            config=config,
+        )
+
+        try:
+            # Measurement arrays
+            n_values: list[int] = []
+            cumulative_times: list[float] = []
+
+            total_inserted = 0
+            cumulative_time = 0.0
+            batch_size = 500  # Fixed batch size for consistent measurements
+            next_measurement_idx = 0
+
+            max_vectors = self.MEASUREMENT_POINTS[-1]
+
+            while total_inserted < max_vectors:
+                # Generate batch
+                batch_name = f"complexity_{total_inserted}"
+                vectors = generator.generate_batch(batch_size, batch_name)
+
+                # Time the insertion
+                start = time.perf_counter()
+
+                # Insert to DB
+                emb_ids = batch_insert_embeddings_to_db(
+                    db_provider,
+                    vectors,
+                    dims=self.COMPLEXITY_DIMS,
+                    shard_id=None,
+                    start_chunk_id=total_inserted,
+                )
+
+                # Assign to shards
+                emb_dicts = [
+                    {"id": emb_id, "embedding": vec.tolist()}
+                    for emb_id, vec in zip(emb_ids, vectors)
+                ]
+                success, needs_fix = shard_manager.insert_embeddings(
+                    emb_dicts,
+                    dims=self.COMPLEXITY_DIMS,
+                    provider="test",
+                    model="test-model",
+                    conn=db_provider.connection,
+                )
+                assert success, f"Insert failed at {total_inserted}"
+
+                # Run fix_pass if needed (split handling)
+                if needs_fix:
+                    shard_manager.fix_pass(db_provider.connection, check_quality=False)
+
+                elapsed = time.perf_counter() - start
+                cumulative_time += elapsed
+                total_inserted += batch_size
+
+                # Record measurement at each measurement point
+                if (
+                    next_measurement_idx < len(self.MEASUREMENT_POINTS)
+                    and total_inserted >= self.MEASUREMENT_POINTS[next_measurement_idx]
+                ):
+                    n_values.append(total_inserted)
+                    cumulative_times.append(cumulative_time)
+                    next_measurement_idx += 1
+
+            # Linear regression: T(N) = slope * N + intercept
+            result = stats.linregress(n_values, cumulative_times)
+
+            # Assert R² >= 0.95 (high linearity confirms O(1) amortized)
+            r_squared = result.rvalue**2
+            assert r_squared >= 0.95, (
+                f"Insertion complexity not O(1): R² = {r_squared:.4f} < 0.95. "
+                f"Data points: N={n_values}, T={cumulative_times}"
+            )
+
+            # Assert slope < 1ms per vector (reasonable per-op cost)
+            slope_ms_per_vec = result.slope * 1000
+            assert slope_ms_per_vec < 1.0, (
+                f"Insertion too slow: {slope_ms_per_vec:.4f}ms/vec >= 1ms/vec"
+            )
+
+        finally:
+            db_provider.disconnect()
+
+    def test_amortized_o1_deletion(self, tmp_path: Path) -> None:
+        """Verify amortized O(1) deletion complexity using linear regression.
+
+        Methodology:
+        1. Pre-populate with vectors
+        2. Delete in batches, recording cumulative time at measurement points
+        3. Fit linear regression: T(N) = slope * N + intercept
+        4. Pass criteria: R² >= 0.95 (high linearity)
+
+        Deletion complexity includes tombstone management and potential merges.
+        """
+        rng = np.random.default_rng(self.COMPLEXITY_SEED)
+        generator = SyntheticEmbeddingGenerator(
+            dims=self.COMPLEXITY_DIMS, seed=self.COMPLEXITY_SEED
+        )
+
+        # Create DB and populate
+        db_path = tmp_path / "complexity_delete.duckdb"
+        db_provider = MockDBProvider(db_path)
+        db_provider._create_embeddings_table(self.COMPLEXITY_DIMS)
+
+        shard_dir = tmp_path / "shards"
+        shard_dir.mkdir(exist_ok=True)
+
+        config = ShardingConfig(
+            split_threshold=self.COMPLEXITY_SPLIT_THRESHOLD,
+            merge_threshold=self.COMPLEXITY_MERGE_THRESHOLD,
+            compaction_threshold=0.20,
+            incremental_sync_threshold=0.10,
+            quality_threshold=0.95,
+            shard_similarity_threshold=0.1,
+        )
+
+        shard_manager = ShardManager(
+            db_provider=db_provider,
+            shard_dir=shard_dir,
+            config=config,
+        )
+
+        try:
+            # Phase 1: Pre-populate with max vectors
+            max_vectors = self.MEASUREMENT_POINTS[-1]
+            batch_size = 1000
+            total_inserted = 0
+
+            while total_inserted < max_vectors:
+                batch_name = f"prepop_{total_inserted}"
+                vectors = generator.generate_batch(batch_size, batch_name)
+
+                emb_ids = batch_insert_embeddings_to_db(
+                    db_provider,
+                    vectors,
+                    dims=self.COMPLEXITY_DIMS,
+                    shard_id=None,
+                    start_chunk_id=total_inserted,
+                )
+
+                emb_dicts = [
+                    {"id": emb_id, "embedding": vec.tolist()}
+                    for emb_id, vec in zip(emb_ids, vectors)
+                ]
+                success, needs_fix = shard_manager.insert_embeddings(
+                    emb_dicts,
+                    dims=self.COMPLEXITY_DIMS,
+                    provider="test",
+                    model="test-model",
+                    conn=db_provider.connection,
+                )
+                assert success, f"Prepopulation insert failed at {total_inserted}"
+
+                if needs_fix:
+                    shard_manager.fix_pass(db_provider.connection, check_quality=False)
+
+                total_inserted += batch_size
+
+            # Get all IDs and shuffle for random deletion order
+            table = f"embeddings_{self.COMPLEXITY_DIMS}"
+            all_ids = db_provider.connection.execute(
+                f"SELECT id FROM {table}"
+            ).fetchall()
+            all_ids = [row[0] for row in all_ids]
+            rng.shuffle(all_ids)
+
+            # Phase 2: Measure deletion complexity
+            n_values: list[int] = []
+            cumulative_times: list[float] = []
+
+            total_deleted = 0
+            cumulative_time = 0.0
+            delete_batch_size = 500
+            id_cursor = 0
+            next_measurement_idx = 0
+
+            while total_deleted < max_vectors:
+                ids_to_delete = all_ids[id_cursor : id_cursor + delete_batch_size]
+                id_cursor += delete_batch_size
+
+                if not ids_to_delete:
+                    break
+
+                # Time the deletion
+                start = time.perf_counter()
+
+                placeholders = ", ".join("?" * len(ids_to_delete))
+                db_provider.connection.execute(
+                    f"DELETE FROM {table} WHERE id IN ({placeholders})",
+                    ids_to_delete,
+                )
+
+                # Check if merge needed
+                min_count_result = db_provider.connection.execute(
+                    f"""
+                    SELECT MIN(cnt) FROM (
+                        SELECT COUNT(*) as cnt FROM {table}
+                        GROUP BY shard_id
+                    )
+                    """
+                ).fetchone()
+                min_shard_count = min_count_result[0] if min_count_result[0] else 0
+
+                if min_shard_count < self.COMPLEXITY_MERGE_THRESHOLD:
+                    shard_manager.fix_pass(db_provider.connection, check_quality=False)
+
+                elapsed = time.perf_counter() - start
+                cumulative_time += elapsed
+                total_deleted += len(ids_to_delete)
+
+                # Record measurement at each measurement point
+                if (
+                    next_measurement_idx < len(self.MEASUREMENT_POINTS)
+                    and total_deleted >= self.MEASUREMENT_POINTS[next_measurement_idx]
+                ):
+                    n_values.append(total_deleted)
+                    cumulative_times.append(cumulative_time)
+                    next_measurement_idx += 1
+
+            # Linear regression: T(N) = slope * N + intercept
+            result = stats.linregress(n_values, cumulative_times)
+
+            # Assert R² >= 0.95 (high linearity confirms O(1) amortized)
+            r_squared = result.rvalue**2
+            assert r_squared >= 0.95, (
+                f"Deletion complexity not O(1): R² = {r_squared:.4f} < 0.95. "
+                f"Data points: N={n_values}, T={cumulative_times}"
+            )
+
+        finally:
+            db_provider.disconnect()
+
+    def test_no_complexity_regression(self, tmp_path: Path) -> None:
+        """Verify no complexity degradation at scale.
+
+        Methodology:
+        1. Measure slope (time per vector) at 10K vectors
+        2. Measure slope at 50K vectors
+        3. Compare ratio: should be 0.8 <= ratio <= 1.3
+
+        If complexity degrades (e.g., O(log n) or O(n)), slope at 50K would be
+        significantly higher than at 10K.
+        """
+        generator = SyntheticEmbeddingGenerator(
+            dims=self.COMPLEXITY_DIMS, seed=self.COMPLEXITY_SEED
+        )
+
+        # Create DB
+        db_path = tmp_path / "complexity_regression.duckdb"
+        db_provider = MockDBProvider(db_path)
+        db_provider._create_embeddings_table(self.COMPLEXITY_DIMS)
+
+        shard_dir = tmp_path / "shards"
+        shard_dir.mkdir(exist_ok=True)
+
+        config = ShardingConfig(
+            split_threshold=self.COMPLEXITY_SPLIT_THRESHOLD,
+            merge_threshold=self.COMPLEXITY_MERGE_THRESHOLD,
+            compaction_threshold=0.20,
+            incremental_sync_threshold=0.10,
+            quality_threshold=0.95,
+            shard_similarity_threshold=0.1,
+        )
+
+        shard_manager = ShardManager(
+            db_provider=db_provider,
+            shard_dir=shard_dir,
+            config=config,
+        )
+
+        try:
+            # Measurement points for two regions
+            early_points = [2_000, 4_000, 6_000, 8_000, 10_000]
+            late_points = [30_000, 35_000, 40_000, 45_000, 50_000]
+            all_points = early_points + late_points
+
+            n_values: list[int] = []
+            cumulative_times: list[float] = []
+
+            total_inserted = 0
+            cumulative_time = 0.0
+            batch_size = 500
+            next_point_idx = 0
+
+            max_vectors = all_points[-1]
+
+            while total_inserted < max_vectors:
+                batch_name = f"regression_{total_inserted}"
+                vectors = generator.generate_batch(batch_size, batch_name)
+
+                start = time.perf_counter()
+
+                emb_ids = batch_insert_embeddings_to_db(
+                    db_provider,
+                    vectors,
+                    dims=self.COMPLEXITY_DIMS,
+                    shard_id=None,
+                    start_chunk_id=total_inserted,
+                )
+
+                emb_dicts = [
+                    {"id": emb_id, "embedding": vec.tolist()}
+                    for emb_id, vec in zip(emb_ids, vectors)
+                ]
+                success, needs_fix = shard_manager.insert_embeddings(
+                    emb_dicts,
+                    dims=self.COMPLEXITY_DIMS,
+                    provider="test",
+                    model="test-model",
+                    conn=db_provider.connection,
+                )
+                assert success, f"Insert failed at {total_inserted}"
+
+                if needs_fix:
+                    shard_manager.fix_pass(db_provider.connection, check_quality=False)
+
+                elapsed = time.perf_counter() - start
+                cumulative_time += elapsed
+                total_inserted += batch_size
+
+                # Record at measurement points
+                if (
+                    next_point_idx < len(all_points)
+                    and total_inserted >= all_points[next_point_idx]
+                ):
+                    n_values.append(total_inserted)
+                    cumulative_times.append(cumulative_time)
+                    next_point_idx += 1
+
+            # Split data into early (10K) and late (50K) regions
+            early_n = [n for n in n_values if n <= 10_000]
+            early_t = cumulative_times[: len(early_n)]
+
+            late_n = [n for n in n_values if n >= 30_000]
+            late_t = cumulative_times[-len(late_n) :]
+
+            # Compute slopes for each region
+            early_result = stats.linregress(early_n, early_t)
+            late_result = stats.linregress(late_n, late_t)
+
+            early_slope = early_result.slope
+            late_slope = late_result.slope
+
+            # Compute ratio: late_slope / early_slope
+            # Ratio near 1.0 means no degradation
+            ratio = late_slope / early_slope if early_slope > 0 else float("inf")
+
+            assert 0.8 <= ratio <= 1.3, (
+                f"Complexity degradation detected: slope ratio = {ratio:.4f} "
+                f"(expected 0.8-1.3). Early slope: {early_slope:.6f}s/vec, "
+                f"Late slope: {late_slope:.6f}s/vec"
+            )
 
         finally:
             db_provider.disconnect()
