@@ -334,6 +334,22 @@ class ResearchConfig(BaseSettings):
             choices=["v1", "v2", "v3"],
             help="Research algorithm version (v1=BFS exploration, v2=hybrid v1 synthesis + wide coverage exploration, v3=parallel BFS + wide coverage)",
         )
+        parser.add_argument(
+            "--exhaustive-mode",
+            action="store_true",
+            default=None,
+            help="Enable exhaustive retrieval (600s timeout, no result limit)",
+        )
+        parser.add_argument(
+            "--multi-hop-time-limit",
+            type=float,
+            help="Maximum duration for multi-hop expansion in seconds (default: 5.0)",
+        )
+        parser.add_argument(
+            "--multi-hop-result-limit",
+            type=int,
+            help="Maximum chunks accumulated during multi-hop expansion (default: 500)",
+        )
 
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
@@ -475,6 +491,21 @@ class ResearchConfig(BaseSettings):
 
         if hasattr(args, "research_algorithm") and args.research_algorithm:
             overrides["algorithm"] = args.research_algorithm
+
+        if hasattr(args, "exhaustive_mode") and args.exhaustive_mode is not None:
+            overrides["exhaustive_mode"] = args.exhaustive_mode
+
+        if (
+            hasattr(args, "multi_hop_time_limit")
+            and args.multi_hop_time_limit is not None
+        ):
+            overrides["multi_hop_time_limit"] = args.multi_hop_time_limit
+
+        if (
+            hasattr(args, "multi_hop_result_limit")
+            and args.multi_hop_result_limit is not None
+        ):
+            overrides["multi_hop_result_limit"] = args.multi_hop_result_limit
 
         return overrides
 
