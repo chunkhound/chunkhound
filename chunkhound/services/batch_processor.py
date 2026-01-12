@@ -290,6 +290,7 @@ def process_file_batch(
 
             # Parse file and generate chunks (with optional per-file timeout)
             if timeout_s > 0 and ((file_stat.st_size / 1024) >= timeout_min_kb):
+                _dbg_log(f"PARSE file={file_path} using timeout path")
                 if _timeout_semaphore is not None:
                     with _timeout_semaphore:
                         status, payload = _parse_file_with_timeout(
@@ -301,6 +302,7 @@ def process_file_batch(
                     )
                 if status == "timeout":
                     # Defer user notification to final summary; avoid live console noise
+                    _dbg_log(f"PARSE file={file_path} TIMEOUT")
                     results.append(
                         ParsedFileResult(
                             file_path=file_path,
@@ -317,6 +319,7 @@ def process_file_batch(
                     _dbg_log(f"END   file={file_path} status=skipped reason=timeout", "file_parsing", duration_ms)
                     continue
                 elif status == "error":
+                    _dbg_log(f"PARSE file={file_path} ERROR: {payload}")
                     results.append(
                         ParsedFileResult(
                             file_path=file_path,
@@ -334,10 +337,13 @@ def process_file_batch(
                     continue
                 else:
                     chunks_data = payload if isinstance(payload, list) else []
+                    _dbg_log(f"PARSE file={file_path} SUCCESS: {len(chunks_data)} chunks")
             else:
                 # No timeout path (original behavior)
+                _dbg_log(f"PARSE file={file_path} using direct parser")
                 parser = create_parser_for_language(language)
                 if not parser:
+                    _dbg_log(f"PARSE file={file_path} NO PARSER AVAILABLE")
                     results.append(
                         ParsedFileResult(
                             file_path=file_path,
@@ -352,8 +358,10 @@ def process_file_batch(
                     continue
 
                 # Note: FileId(0) is placeholder - actual ID assigned during storage
+                _dbg_log(f"PARSE file={file_path} calling parse_file")
                 chunks = parser.parse_file(file_path, FileId(0))
                 chunks_data = [chunk.to_dict() for chunk in chunks]
+                _dbg_log(f"PARSE file={file_path} PARSED: {len(chunks_data)} chunks")
 
             results.append(
                 ParsedFileResult(

@@ -49,15 +49,25 @@ class LazyLanguageParsers(MutableMapping[Language, Any]):
             return dict(self._instances)
 
     def __getitem__(self, key: Language) -> Any:
+        logger.debug(f"[LazyParsers] Getting parser for {key.value}")
         with self._lock:
             if key in self._instances:
+                logger.debug(f"[LazyParsers] Returning cached parser for {key.value}")
                 return self._instances[key]
 
         factory = self._factories.get(key)
         if factory is None:
+            logger.error(f"[LazyParsers] No factory registered for {key.value}")
             raise KeyError(key)
 
-        parser = factory()
+        logger.debug(f"[LazyParsers] Creating parser for {key.value} using factory")
+        try:
+            parser = factory()
+            logger.debug(f"[LazyParsers] Successfully created parser for {key.value}")
+        except Exception as e:
+            logger.error(f"[LazyParsers] Failed to create parser for {key.value}: {e}")
+            raise
+
         with self._lock:
             existing = self._instances.get(key)
             if existing is not None:
@@ -134,6 +144,7 @@ class ProviderRegistry:
 
     def register_language_parser(self, language: Language, parser_class: Any) -> None:
         """Register a language parser for a specific programming language."""
+        logger.debug(f"[Registry] Registering parser for {language.value}")
         # Create and setup parser instance
         parser = parser_class()
         if hasattr(parser, "setup"):
@@ -389,10 +400,14 @@ class ProviderRegistry:
 
     def _setup_language_parsers(self) -> None:
         """Register all available language parsers."""
+        logger.debug("[Registry] Setting up language parsers")
         parser_factory = get_parser_factory()
         available_languages = parser_factory.get_available_languages()
 
+        logger.debug(f"[Registry] Parser factory reports availability: {available_languages}")
+
         for language, is_available in available_languages.items():
+            logger.debug(f"[Registry] Processing {language.value}: available={is_available}")
             if is_available:
                 try:
                     self._language_parsers.register_factory(
@@ -404,10 +419,9 @@ class ProviderRegistry:
                             f"Registered parser factory for {language.value}"
                         )
                 except Exception as e:
-                    if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                        logger.warning(
-                            f"Failed to register parser for {language.value}: {e}"
-                        )
+                    logger.warning(
+                        f"Failed to register parser for {language.value}: {e}"
+                    )
 
     # Transaction management - delegates to database provider
 

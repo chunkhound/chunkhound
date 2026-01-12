@@ -409,7 +409,10 @@ class LanguageConfig:
 
     def get_tree_sitter_language(self):
         """Get the tree-sitter Language object from the module."""
+        logger.debug(f"[LanguageConfig] Getting tree-sitter language for {self.language_name}, available: {self.available}")
+
         if not self.available or not self.tree_sitter_module:
+            logger.error(f"[LanguageConfig] Tree-sitter module not available for {self.language_name}")
             raise SetupError(
                 parser=self.language_name,
                 missing_dependency=f"tree-sitter-{self.language_name.lower()}",
@@ -417,41 +420,52 @@ class LanguageConfig:
                 original_error="Tree-sitter module not available",
             )
 
-        # Special handling for TypeScript/TSX which have different attribute names
-        if self.language_name == "typescript":
-            lang_func = self.tree_sitter_module.language_typescript
-            result = lang_func() if callable(lang_func) else lang_func
-            return self._handle_language_result(result)
-        elif self.language_name == "tsx":
-            lang_func = self.tree_sitter_module.language_tsx
-            result = lang_func() if callable(lang_func) else lang_func
-            return self._handle_language_result(result)
-        elif self.language_name == "jsx":
-            lang_func = self.tree_sitter_module.language_tsx
-            result = lang_func() if callable(lang_func) else lang_func
-            return self._handle_language_result(result)
-        elif self.language_name in ["vue", "svelte"]:
-            # Vue and Svelte use TypeScript parser for script sections
-            lang_func = self.tree_sitter_module.language_typescript
-            result = lang_func() if callable(lang_func) else lang_func
-            return self._handle_language_result(result)
-        elif self.language_name == "javascript" and hasattr(
-            self.tree_sitter_module, "language_javascript"
-        ):
-            # Some versions use language_javascript
-            lang_func = self.tree_sitter_module.language_javascript
-            result = lang_func() if callable(lang_func) else lang_func
-            return self._handle_language_result(result)
-        elif self.language_name == "php":
-            # PHP uses language_php instead of language
-            lang_func = self.tree_sitter_module.language_php
-            result = lang_func() if callable(lang_func) else lang_func
-            return self._handle_language_result(result)
-        else:
-            # Standard case - most tree-sitter modules use .language function
-            lang_func = self.tree_sitter_module.language
-            result = lang_func() if callable(lang_func) else lang_func
-            return self._handle_language_result(result)
+        try:
+            # Special handling for TypeScript/TSX which have different attribute names
+            if self.language_name == "typescript":
+                logger.debug(f"[LanguageConfig] Using language_typescript for {self.language_name}")
+                lang_func = self.tree_sitter_module.language_typescript
+                result = lang_func() if callable(lang_func) else lang_func
+                return self._handle_language_result(result)
+            elif self.language_name == "tsx":
+                logger.debug(f"[LanguageConfig] Using language_tsx for {self.language_name}")
+                lang_func = self.tree_sitter_module.language_tsx
+                result = lang_func() if callable(lang_func) else lang_func
+                return self._handle_language_result(result)
+            elif self.language_name == "jsx":
+                logger.debug(f"[LanguageConfig] Using language_tsx for JSX")
+                lang_func = self.tree_sitter_module.language_tsx
+                result = lang_func() if callable(lang_func) else lang_func
+                return self._handle_language_result(result)
+            elif self.language_name in ["vue", "svelte"]:
+                # Vue and Svelte use TypeScript parser for script sections
+                logger.debug(f"[LanguageConfig] Using language_typescript for {self.language_name}")
+                lang_func = self.tree_sitter_module.language_typescript
+                result = lang_func() if callable(lang_func) else lang_func
+                return self._handle_language_result(result)
+            elif self.language_name == "javascript" and hasattr(
+                self.tree_sitter_module, "language_javascript"
+            ):
+                # Some versions use language_javascript
+                logger.debug(f"[LanguageConfig] Using language_javascript for {self.language_name}")
+                lang_func = self.tree_sitter_module.language_javascript
+                result = lang_func() if callable(lang_func) else lang_func
+                return self._handle_language_result(result)
+            elif self.language_name == "php":
+                # PHP uses language_php instead of language
+                logger.debug(f"[LanguageConfig] Using language_php for {self.language_name}")
+                lang_func = self.tree_sitter_module.language_php
+                result = lang_func() if callable(lang_func) else lang_func
+                return self._handle_language_result(result)
+            else:
+                # Standard case - most tree-sitter modules use .language function
+                logger.debug(f"[LanguageConfig] Using standard .language for {self.language_name}")
+                lang_func = self.tree_sitter_module.language
+                result = lang_func() if callable(lang_func) else lang_func
+                return self._handle_language_result(result)
+        except Exception as e:
+            logger.error(f"[LanguageConfig] Failed to get tree-sitter language for {self.language_name}: {e}")
+            raise
 
 
 # Language configuration mapping
@@ -653,28 +667,33 @@ class ParserFactory:
             SetupError: If the required tree-sitter module is not available
             ValueError: If the language is not supported
         """
+        logger.debug(f"[ParserFactory] Creating parser for language: {language.value}")
+
         # Special case: Vue uses custom parser
         if language == Language.VUE:
             from chunkhound.parsers.vue_parser import VueParser
-
+            logger.debug(f"[ParserFactory] Using custom VueParser for {language.value}")
             return VueParser(cast_config)
 
         # Special case: Svelte uses custom parser
         if language == Language.SVELTE:
             from chunkhound.parsers.svelte_parser import SvelteParser
-
+            logger.debug(f"[ParserFactory] Using custom SvelteParser for {language.value}")
             return SvelteParser(cast_config)
 
         # Use cache to avoid recreating parsers
         cache_key = self._cache_key(language)
         if cache_key in self._parser_cache:
+            logger.debug(f"[ParserFactory] Returning cached parser for {language.value}")
             return self._parser_cache[cache_key]
 
         if language not in LANGUAGE_CONFIGS:
+            logger.error(f"[ParserFactory] Unsupported language: {language}")
             raise ValueError(f"Unsupported language: {language}")
 
         config = LANGUAGE_CONFIGS[language]
         cast_config = cast_config or self.default_cast_config
+        logger.debug(f"[ParserFactory] Language config available: {config.available} for {language.value}")
         # Haskell-specific cAST tuning: avoid greedy merging of adjacent definitions
         if language == Language.HASKELL:
             from chunkhound.parsers.universal_parser import (
@@ -714,28 +733,36 @@ class ParserFactory:
             )
 
         try:
+            logger.debug(f"[ParserFactory] Getting tree-sitter language for {language.value}")
             # Get tree-sitter language object
             ts_language = config.get_tree_sitter_language()
+            logger.debug(f"[ParserFactory] Got tree-sitter language object: {type(ts_language)} for {language.value}")
 
             # Create engine and mapping
+            logger.debug(f"[ParserFactory] Creating TreeSitterEngine for {language.value}")
             engine = TreeSitterEngine(config.language_name, ts_language)
+            logger.debug(f"[ParserFactory] Created engine, creating mapping for {language.value}")
             mapping = config.mapping_class()
 
             # Create parser
+            logger.debug(f"[ParserFactory] Creating UniversalParser for {language.value}")
             universal_parser = UniversalParser(
                 engine,
                 mapping,
                 cast_config,
             )
+            logger.debug(f"[ParserFactory] Created UniversalParser, wrapping if needed for {language.value}")
 
             parser = self._maybe_wrap_yaml_parser(language, universal_parser)
 
             # Cache for future use
             self._parser_cache[cache_key] = parser
+            logger.debug(f"[ParserFactory] Successfully created and cached parser for {language.value}")
 
             return parser
 
         except Exception as e:
+            logger.error(f"[ParserFactory] Failed to create parser for {language.value}: {e}")
             raise SetupError(
                 parser=config.language_name,
                 missing_dependency=f"tree-sitter-{config.language_name.lower()}",

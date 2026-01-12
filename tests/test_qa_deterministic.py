@@ -326,7 +326,18 @@ def added_during_edit():
     async def test_language_coverage_comprehensive(self, qa_setup):
         """QA Items 5-6: Test all supported languages and file types."""
         services, realtime_service, watch_dir, _ = qa_setup
-        
+
+        # Check parser availability
+        from chunkhound.parsers.parser_factory import get_parser_factory
+        parser_factory = get_parser_factory()
+        available_languages = parser_factory.get_available_languages()
+
+        print(f"Parser availability check:")
+        for lang in Language:
+            if lang != Language.UNKNOWN:
+                available = available_languages.get(lang, False)
+                print(f"  {lang.value}: {'AVAILABLE' if available else 'NOT AVAILABLE'}")
+
         # Get all supported languages except UNKNOWN
         languages_to_test = [lang for lang in Language if lang != Language.UNKNOWN]
         
@@ -418,16 +429,17 @@ function qaTestFunction() {
                     filename = f"Makefile.qa_{language.value}"
                 else:
                     filename = f"qa_test_{language.value}{ext}"
-                
+
                 file_path = watch_dir / filename
                 content = content_templates[language]
                 unique_pattern = f"{language.value}_qa_unique"
-                
+
                 file_path.write_text(content)
                 created_files.append((file_path, language, unique_pattern))
                 search_patterns.append(unique_pattern)
-                
-                print(f"Created {language.value} test file: {filename}")
+
+                available = available_languages.get(language, False)
+                print(f"Created {language.value} test file: {filename} (parser: {'AVAILABLE' if available else 'NOT AVAILABLE'})")
         
         # Wait for all files to be processed - poll until all files are in database
         expected_file_count = len(created_files)
@@ -454,7 +466,7 @@ function qaTestFunction() {
         # Search for each language's unique content
         successful_languages = []
         failed_languages = []
-        
+
         for file_path, language, pattern in created_files:
             try:
                 # Test regex search
@@ -463,15 +475,20 @@ function qaTestFunction() {
                     "page_size": 10,
                     "offset": 0
                 })
-                
-                if len(regex_results.get('results', [])) > 0:
+
+                result_count = len(regex_results.get('results', []))
+                available = available_languages.get(language, False)
+                print(f"Search result for {language.value}: {result_count} results (parser: {'AVAILABLE' if available else 'NOT AVAILABLE'})")
+
+                if result_count > 0:
                     successful_languages.append(language.value)
                 else:
                     failed_languages.append(f"{language.value} (regex not found)")
-                    
+
             except Exception as e:
                 failed_languages.append(f"{language.value} (error: {e})")
-        
+                print(f"Search error for {language.value}: {e}")
+
         print(f"Languages successfully tested: {len(successful_languages)}")
         print(f"Successful languages: {successful_languages}")
 
