@@ -32,14 +32,14 @@ class DatabaseConfig(BaseModel):
 
     # LanceDB-specific settings
     lancedb_index_type: Literal["auto", "ivf_hnsw_sq", "ivf_rq"] | None = Field(
-        default=None,
-        description="LanceDB vector index type: auto (default), ivf_hnsw_sq, or ivf_rq (requires 0.25.3+)",
+        default="ivf_hnsw_sq",
+        description="LanceDB vector index type: auto, ivf_hnsw_sq (recommended for large datasets), or ivf_rq (requires 0.25.3+)",
     )
 
     lancedb_optimize_fragment_threshold: int = Field(
-        default=100,
+        default=50,
         ge=0,
-        description="Minimum fragment count to trigger optimization (0 = always optimize, 50 = aggressive, 100 = balanced, 500 = conservative)",
+        description="Minimum fragment count to trigger optimization (0 = always optimize, 50 = aggressive for large datasets, 100 = balanced, 500 = conservative)",
     )
 
     # Disk usage limits
@@ -48,6 +48,23 @@ class DatabaseConfig(BaseModel):
         ge=0.0,
         description="Maximum database size in MB before indexing is stopped (None = no limit)",
     )
+
+    # Retry configuration
+    retry_on_timeout: bool = Field(
+        default=True,
+        description="Enable automatic retry for database timeouts"
+    )
+    max_retries: int = Field(
+        default=3,
+        ge=0,
+        description="Maximum retry attempts for timed-out operations"
+    )
+    retry_backoff_seconds: float = Field(
+        default=1.0,
+        ge=0.0,
+        description="Base backoff time between retries (exponential)"
+    )
+
 
     @field_validator("path")
     def validate_path(cls, v: Path | None) -> Path | None:
@@ -158,6 +175,27 @@ class DatabaseConfig(BaseModel):
             except ValueError:
                 # Invalid value - silently ignore
                 pass
+
+        # Retry configuration
+        if retry_on_timeout := os.getenv("CHUNKHOUND_DATABASE__RETRY_ON_TIMEOUT"):
+            lower_value = retry_on_timeout.lower()
+            if lower_value in ("true", "1", "yes"):
+                config["retry_on_timeout"] = True
+            elif lower_value in ("false", "0", "no"):
+                config["retry_on_timeout"] = False
+            # Invalid values are silently ignored
+        if max_retries := os.getenv("CHUNKHOUND_DATABASE__MAX_RETRIES"):
+            try:
+                config["max_retries"] = int(max_retries)
+            except ValueError:
+                pass
+        if retry_backoff := os.getenv("CHUNKHOUND_DATABASE__RETRY_BACKOFF_SECONDS"):
+            try:
+                config["retry_backoff_seconds"] = float(retry_backoff)
+            except ValueError:
+                pass
+
+
         return config
 
     @classmethod

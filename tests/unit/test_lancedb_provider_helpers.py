@@ -2,7 +2,6 @@
 
 from chunkhound.providers.database.lancedb_provider import (
     LanceDBProvider,
-    _escape_like_pattern,
 )
 from chunkhound.providers.database.like_utils import escape_like_pattern
 
@@ -50,6 +49,17 @@ class _FakeChunksTable:
         count = len([item for item in ids.split(",") if item.strip()])
         return _FakeTable(count)
 
+    def count_rows(self, filter: str | None = None):  # noqa: ANN001 - test stub
+        """Fake count_rows method for testing."""
+        if filter:
+            self.filters.append(filter)
+            _, _, ids = filter.partition("file_id IN (")
+            if ids:
+                ids = ids.rstrip(")")
+                count = len([item for item in ids.split(",") if item.strip()])
+                return count
+        return 1001  # Default for large test
+
 
 class _FakeFuzzySearch:
     def __init__(self, table) -> None:
@@ -61,6 +71,9 @@ class _FakeFuzzySearch:
 
     def limit(self, limit: int):  # noqa: ANN001 - test stub
         self._table.limits.append(limit)
+        return self
+
+    def offset(self, offset: int):  # noqa: ANN001 - test stub
         return self
 
     def to_list(self) -> list[dict[str, object]]:
@@ -78,7 +91,7 @@ class _FakeChunksTableForFuzzy:
 
 
 def test_escape_like_pattern_handles_metacharacters() -> None:
-    escaped = _escape_like_pattern("scope_%[path]'\\name")
+    escaped = escape_like_pattern("scope_%[path]'\\name", escape_quotes=True)
     assert "\\%" in escaped
     assert "\\_" in escaped
     assert "\\[" in escaped

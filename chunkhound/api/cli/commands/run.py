@@ -31,6 +31,9 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
         args: Parsed command-line arguments
         config: Pre-validated configuration instance
     """
+    # Initialize Rich output formatter
+    formatter = RichOutputFormatter(verbose=args.verbose)
+
     # Ignore decision check (formerly top-level 'diagnose')
     if getattr(args, "check_ignores", False):
         # Ensure this mode doesn't require embeddings either
@@ -45,14 +48,21 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
         await _simulate_index(args, config)
         return
 
-    # Initialize Rich output formatter
-    formatter = RichOutputFormatter(verbose=args.verbose)
-
     # Check if local config was found (for logging purposes)
     project_dir = Path(args.path) if hasattr(args, "path") else Path.cwd()
     local_config_path = project_dir / ".chunkhound.json"
     if local_config_path.exists():
         formatter.info(f"Found local config: {local_config_path}")
+
+    # Check if logging is enabled and show log file locations
+    if config.logging and config.logging.is_enabled():
+        log_files = []
+        if config.logging.file.enabled:
+            log_files.append(f"main log: {config.logging.file.path}")
+        if config.logging.performance.enabled:
+            log_files.append(f"performance log: {config.logging.performance.path}")
+        if log_files:
+            formatter.info(f"Logging to: {', '.join(log_files)}")
 
     # Use database path from config
     db_path = Path(config.database.path)
@@ -62,7 +72,7 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
         version=__version__,
         directory=str(args.path),
         database=str(db_path),
-        config=config.__dict__ if hasattr(config, "__dict__") else {},
+        config=config.__dict__ if getattr(config, "__dict__", None) else {},
     )
 
     # Process and validate batch arguments (includes deprecation warnings)
@@ -79,8 +89,8 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
 
         formatter.success(f"Service layer initialized: {args.db}")
 
-        # Create progress manager for modern UI
-        with formatter.create_progress_display() as progress_manager:
+        # Create progress manager for modern UI (wraps entire indexing operation)
+        with formatter.create_progress_display(max_log_messages=config.logging.max_log_messages) as progress_manager:
             # Get the underlying Progress instance for service layers
             progress_instance = progress_manager.get_progress_instance()
 
@@ -114,6 +124,7 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
             )
 
             # Process directory - service layers will add subtasks to progress_instance
+            # This includes change scanning phase which now happens within ProgressManager context
             stats = await indexing_service.process_directory(
                 Path(args.path), no_embeddings=args.no_embeddings
             )

@@ -6,6 +6,7 @@ import asyncio
 import multiprocessing
 import sys
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -15,34 +16,52 @@ from .utils.config_factory import create_validated_config
 multiprocessing.freeze_support()
 
 
-def setup_logging(verbose: bool = False) -> None:
+def setup_logging(verbose: bool = False, config: Any = None, mcp_mode: bool = False) -> None:
     """Configure logging for the CLI.
 
     Args:
         verbose: Whether to enable verbose logging
+        config: Configuration object with logging settings
+        mcp_mode: Whether running in MCP mode (affects console logging)
     """
     logger.remove()
 
+    # Determine console logging level
+    console_level = "WARNING"  # Default
+    if config and getattr(config, 'logging', None):
+        console_level = getattr(config.logging, 'console_level', 'WARNING')
+
+    # Override console level if verbose is enabled
     if verbose:
-        logger.add(
-            sys.stderr,
-            level="DEBUG",
-            format=(
-                "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
-                "<level>{level: <8}</level> | "
-                "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
-                "<level>{message}</level>"
-            ),
-        )
+        console_level = "DEBUG"
+
+    # MCP mode: no console logging at all (breaks JSON-RPC protocol)
+    if mcp_mode:
+        console_level = "CRITICAL"  # Effectively disable console logging
     else:
+        # Console logging configuration
         logger.add(
             sys.stderr,
-            level="WARNING",
+            level=console_level,
             format=(
                 "<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | "
                 "<level>{message}</level>"
             ),
         )
+
+    # File logging (optional)
+    if config and getattr(config, 'logging', None) and config.logging.file.enabled:
+        file_config = config.logging.file
+        logger.add(
+            file_config.path,
+            level=file_config.level,
+            rotation=file_config.rotation,
+            retention=file_config.retention,
+            format=file_config.format,
+            encoding="utf-8",
+        )
+
+
     # Also set stdlib logging level to avoid mixed loggers being noisy
     _pylogging.basicConfig(level=_pylogging.DEBUG if verbose else _pylogging.ERROR)
 
@@ -88,9 +107,6 @@ async def async_main() -> None:
         parser.print_help()
         sys.exit(1)
 
-    # Setup logging for non-MCP commands (MCP already handled above)
-    setup_logging(getattr(args, "verbose", False))
-
     # Validate args and create config
     # Special-case: index subtools (--simulate, --check-ignores) never require embeddings
     if args.command == "index" and (
@@ -98,6 +114,10 @@ async def async_main() -> None:
     ):
         setattr(args, "no_embeddings", True)
     config, validation_errors = create_validated_config(args, args.command)
+
+    # Setup logging for non-MCP commands (MCP already handled above)
+    # Must be done after config creation to access logging settings
+    setup_logging(getattr(args, "verbose", False), config)
 
     if validation_errors:
         # Check if we can offer interactive setup wizard for index command

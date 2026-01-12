@@ -128,10 +128,13 @@ def very_long_function_that_might_not_be_chunked_properly():
         print(f"Content size: {len(oversized_content):,} characters")
         
         # Create mock embedding provider to avoid API calls
-        mock_provider = Mock(spec=OpenAIEmbeddingProvider)
+        mock_provider = Mock()
         mock_provider.name = "mock-openai"
         mock_provider.model = "text-embedding-3-small"
         mock_provider.dims = 1536
+        mock_provider.get_max_tokens_per_batch = Mock(return_value=300000)
+        mock_provider.get_max_documents_per_batch = Mock(return_value=100)
+        mock_provider.get_recommended_concurrency = Mock(return_value=8)
         
         # Mock the embed method to simulate the token limit error
         async def mock_embed(texts):
@@ -175,11 +178,14 @@ def very_long_function_that_might_not_be_chunked_properly():
         result = await coordinator.process_file(temp_dir / "oversized.py")
         print(f"Indexing result: {result}")
         
-        # Analyze the chunks that were created
-        chunk_data = services.provider.get_all_chunks_with_metadata()
-        # Convert to chunk objects for easier analysis
+        # Analyze the chunks that were created using alternative approach
+        # Get chunks by querying files and then getting chunks for each file
         from chunkhound.core.models.chunk import Chunk
-        chunks = [Chunk.from_dict(data) for data in chunk_data]
+        chunks = []
+        files = services.provider.execute_query("SELECT id FROM files")
+        for file_record in files:
+            file_chunks = services.provider.get_chunks_by_file_id(file_record["id"])
+            chunks.extend([Chunk.from_dict(data) for data in file_chunks])
         print(f"\n📈 Chunk Analysis:")
         print(f"Total chunks created: {len(chunks)}")
         
@@ -241,10 +247,13 @@ def very_long_function_that_might_not_be_chunked_properly():
             services.provider.execute_query("DELETE FROM chunks")
             
             # Create simple mock provider for this test
-            mock_provider = Mock(spec=OpenAIEmbeddingProvider)
+            mock_provider = Mock()
             mock_provider.name = "analysis-mock"
             mock_provider.model = "text-embedding-3-small"
             mock_provider.dims = 1536
+            mock_provider.get_max_tokens_per_batch = Mock(return_value=300000)
+            mock_provider.get_max_documents_per_batch = Mock(return_value=100)
+            mock_provider.get_recommended_concurrency = Mock(return_value=8)
             mock_provider.embed = AsyncMock(return_value=[[0.1] * 1536])
             
             # Index and analyze
@@ -255,9 +264,14 @@ def very_long_function_that_might_not_be_chunked_properly():
             )
             
             await coordinator.process_file(test_file)
-            chunk_data = services.provider.get_all_chunks_with_metadata()
+            # Get chunks using alternative approach
             from chunkhound.core.models.chunk import Chunk
-            chunks = [Chunk.from_dict(data) for data in chunk_data]
+            file_record = services.provider.get_file_by_path(str(test_file))
+            if file_record:
+                chunk_data = services.provider.get_chunks_by_file_id(file_record["id"])
+                chunks = [Chunk.from_dict(data) for data in chunk_data]
+            else:
+                chunks = []
             
             chunk_count = len(chunks)
             if chunk_count > 0:

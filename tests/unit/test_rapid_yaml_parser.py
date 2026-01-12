@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from io import StringIO
 
 import pytest
 
@@ -124,7 +125,8 @@ def test_rapid_yaml_parser_denylist_memo(tmp_path):
     os.environ.get("CHUNKHOUND_YAML_ENGINE", "").lower() == "tree",
     reason="RapidYAML disabled via environment",
 )
-def test_summary_logged_on_cleanup(caplog):
+def test_summary_logged_on_cleanup():
+    from loguru import logger
     try:
         import ryml  # noqa: F401
     except Exception:
@@ -132,10 +134,19 @@ def test_summary_logged_on_cleanup(caplog):
 
     fallback = _build_fallback_parser()
     parser = RapidYamlParser(fallback)
-    caplog.clear()
-    caplog.set_level("INFO")
-    # Trigger a small sanitized parse
-    text = "metadata:\n  labels: {{- include \"chart.labels\" . | nindent 4 }}\n"
-    parser.parse_content(text, None, FileId(9))
-    parser.cleanup()
-    assert any("RapidYAML summary:" in rec.message for rec in caplog.records)
+
+    # Capture loguru logs
+    log_capture = StringIO()
+    handler_id = logger.add(log_capture, level="INFO", format="{message}")
+
+    try:
+        # Trigger a small sanitized parse
+        text = "metadata:\n  labels: {{- include \"chart.labels\" . | nindent 4 }}\n"
+        parser.parse_content(text, None, FileId(9))
+        parser.cleanup()
+
+        # Check that the summary was logged
+        log_output = log_capture.getvalue()
+        assert "RapidYAML summary:" in log_output
+    finally:
+        logger.remove(handler_id)

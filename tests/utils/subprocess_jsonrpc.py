@@ -274,6 +274,14 @@ class SubprocessJsonRpcClient:
                 self._process.kill()
                 await self._process.wait()
 
+        # Close transport to prevent resource warnings
+        try:
+            if hasattr(self._process, '_transport') and self._process._transport:
+                self._process._transport.close()
+        except Exception:
+            # Ignore errors when closing transport
+            pass
+
     async def _read_responses(self) -> None:
         """Background task that continuously reads responses from stdout.
 

@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -8,7 +9,7 @@ from chunkhound.utils.git_discovery import list_repo_files_via_git
 
 
 pytestmark = pytest.mark.skipif(
-    subprocess.run(["which", "git"], stdout=subprocess.DEVNULL).returncode != 0,
+    shutil.which("git") is None,
     reason="git required",
 )
 

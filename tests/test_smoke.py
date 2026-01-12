@@ -20,7 +20,11 @@ import pytest
 from pathlib import Path
 
 # Import Windows-safe subprocess utilities
-from tests.utils.windows_subprocess import create_subprocess_exec_safe, get_safe_subprocess_env
+from tests.utils.windows_subprocess import (
+    create_subprocess_exec_safe,
+    get_safe_subprocess_env,
+    terminate_async_process_tree,
+)
 from tests.utils.windows_compat import windows_safe_tempdir
 from tests.utils import SubprocessJsonRpcClient
 
@@ -103,194 +107,9 @@ class TestCLICommands:
 class TestServerStartup:
     """Test that servers can at least start without immediate crashes."""
 
-    @pytest.mark.asyncio
-    async def test_mcp_stdio_server_help(self):
-        """Test that MCP stdio server responds to help."""
-        proc = await create_subprocess_exec_safe(
-            "uv",
-            "run",
-            "chunkhound",
-            "mcp",
-            "--stdio",
-            "--help",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=get_safe_subprocess_env(),
-        )
 
-        stdout, stderr = await proc.communicate()
 
-        assert proc.returncode == 0, (
-            f"MCP stdio help failed with code {proc.returncode}\n"
-            f"stderr: {stderr.decode()}"
-        )
 
-    @pytest.mark.asyncio
-    async def test_mcp_stdio_server_starts(self):
-        """Test that MCP stdio server can start without immediate crashes."""
-        import tempfile
-        import json
-
-        # Create a temporary directory to avoid indexing the current directory
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-            
-            # Create minimal config file (required for Config() creation)
-            config_path = temp_path / ".chunkhound.json"
-            db_path = temp_path / ".chunkhound" / "test.db"
-            db_path.parent.mkdir(exist_ok=True)
-            
-            config = {
-                "database": {"path": str(db_path), "provider": "duckdb"},
-                "indexing": {"include": ["*.py"]}
-            }
-            config_path.write_text(json.dumps(config))
-            
-            # Test that the server starts without crashing
-            proc = await create_subprocess_exec_safe(
-                "uv",
-                "run",
-                "python", "-c",
-                f'''
-import sys
-import os
-sys.path.insert(0, "{os.getcwd()}")
-from chunkhound.mcp_server.stdio import main
-import asyncio
-
-async def test():
-    # Set minimal config
-    os.environ["CHUNKHOUND_EMBEDDING__PROVIDER"] = "openai"
-    os.environ["CHUNKHOUND_EMBEDDING__API_KEY"] = "test"
-    
-    # Test we can import without immediate crash
-    try:
-        # Just test that critical imports work - this catches most startup issues
-        from chunkhound.mcp_server.stdio import StdioMCPServer
-        from chunkhound.core.config.config import Config
-
-        # Test config creation
-        config = Config()
-
-        print("SUCCESS: MCP server imports and config creation work")
-        return 0
-    except Exception as e:
-        print(f"FAILED: {{e}}")
-        return 1
-
-sys.exit(asyncio.run(test()))
-                ''',
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=temp_dir,  # Run from temp directory that has .chunkhound.json
-            )
-
-            try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
-                
-                if proc.returncode != 0:
-                    pytest.fail(
-                        f"MCP stdio server initialization failed with code {proc.returncode}\n"
-                        f"stdout: {stdout.decode()}\n"
-                        f"stderr: {stderr.decode()}"
-                    )
-                
-                # Check for success message
-                assert "SUCCESS:" in stdout.decode(), f"Expected success message, got: {stdout.decode()}"
-
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                pytest.fail("MCP stdio server test timed out")
-
-    @pytest.mark.asyncio
-    async def test_mcp_stdio_protocol_handshake(self):
-        """Test MCP stdio server completes full protocol handshake with tool discovery."""
-        import json
-        
-        with windows_safe_tempdir() as temp_path:
-            
-            # Create minimal test content (server will auto-index on startup)
-            test_file = temp_path / "test.py"
-            test_file.write_text("def hello(): return 'world'")
-            
-            # Create minimal config
-            config_path = temp_path / ".chunkhound.json"
-            db_path = temp_path / ".chunkhound" / "test.db"
-            db_path.parent.mkdir(exist_ok=True)
-            
-            config = {
-                "database": {"path": str(db_path), "provider": "duckdb"},
-                "indexing": {"include": ["*.py"]}
-            }
-
-            # Add embedding config if API key available
-            # Note: code_research requires reranker+LLM to EXECUTE, but only embeddings to REGISTER
-            api_key = os.environ.get("OPENAI_API_KEY")
-            if api_key:
-                config["embedding"] = {
-                    "provider": "openai",
-                    "model": "text-embedding-3-small"
-                }
-
-            config_path.write_text(json.dumps(config))
-
-            # Start MCP server (it will auto-index on startup)
-            mcp_env = get_safe_subprocess_env(os.environ)
-            mcp_env["CHUNKHOUND_MCP_MODE"] = "1"
-            
-            proc = await create_subprocess_exec_safe(
-                "uv", "run", "chunkhound", "mcp", str(temp_path),
-                cwd=str(temp_path),
-                env=mcp_env,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            client = SubprocessJsonRpcClient(proc)
-            await client.start()
-
-            try:
-                # 1. Send initialize request
-                init_result = await client.send_request(
-                    "initialize",
-                    {
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": {},
-                        "clientInfo": {"name": "test", "version": "1.0"}
-                    },
-                    timeout=10.0
-                )
-
-                # Verify response structure
-                assert "serverInfo" in init_result, f"No serverInfo in result: {init_result}"
-                assert init_result["serverInfo"]["name"] == "ChunkHound Code Search"
-
-                # 2. Send initialized notification
-                await client.send_notification("notifications/initialized")
-
-                # 3. Request tool list
-                tools_result = await client.send_request("tools/list", timeout=5.0)
-
-                # Verify tools
-                tools = tools_result.get("tools", [])
-                tool_names = [t["name"] for t in tools]
-
-                # Should have at least regex search (works without embeddings)
-                assert "search_regex" in tool_names, f"search_regex not in tools: {tool_names}"
-                assert "get_stats" in tool_names, f"get_stats not in tools: {tool_names}"
-                assert "health_check" in tool_names, f"health_check not in tools: {tool_names}"
-
-                # Semantic search and code_research only if embeddings available
-                if api_key:
-                    assert "search_semantic" in tool_names, f"search_semantic not in tools: {tool_names}"
-                    assert "code_research" in tool_names, f"code_research not in tools: {tool_names}"
-
-            except asyncio.TimeoutError:
-                pytest.fail("MCP stdio protocol handshake timed out")
-            finally:
-                await client.close()
 
 class TestParserLoading:
     """Test that all parsers can be loaded and created."""

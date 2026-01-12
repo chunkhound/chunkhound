@@ -146,6 +146,32 @@ class EmbeddingConfig(BaseSettings):
         description="Internal optimization frequency (runs every N batches during indexing)",
     )
 
+    # Dynamic batch size configuration for missing embeddings generation
+    missing_embeddings_initial_batch_size: int = Field(
+        default=1000,
+        description="Initial batch size for missing embeddings generation",
+    )
+    missing_embeddings_min_batch_size: int = Field(
+        default=50,
+        description="Minimum batch size for missing embeddings generation",
+    )
+    missing_embeddings_max_batch_size: int = Field(
+        default=30000,
+        description="Maximum batch size for missing embeddings generation",
+    )
+    missing_embeddings_target_batch_time: float = Field(
+        default=15.0,
+        description="Target time per batch in seconds for dynamic sizing",
+    )
+    missing_embeddings_slow_threshold: float = Field(
+        default=25.0,
+        description="Threshold above which batch is considered slow (seconds)",
+    )
+    missing_embeddings_fast_threshold: float = Field(
+        default=5.0,
+        description="Threshold below which batch is considered fast (seconds)",
+    )
+
     @field_validator("rerank_batch_size")
     def validate_rerank_batch_size(cls, v: int | None) -> int | None:  # noqa: N805
         """Validate rerank batch size is positive."""
