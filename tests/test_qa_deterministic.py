@@ -97,6 +97,7 @@ class TestQADeterministic:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     @pytest.mark.asyncio
+    @pytest.mark.serial  # This test should run serially to avoid filesystem watcher conflicts
     async def test_file_lifecycle_search_validation(self, qa_setup):
         """QA Items 1-4: Test file lifecycle with search validation."""
         services, realtime_service, watch_dir, _ = qa_setup
