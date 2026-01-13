@@ -18,6 +18,10 @@ from chunkhound.providers.database.shard_state import ShardState, get_shard_stat
 from chunkhound.providers.database.usearch_wrapper import SearchResult
 from chunkhound.utils.windows_constants import fsync_path
 
+# Sample size for k-means centroid discovery during shard splits.
+# Larger values improve clustering quality but increase memory usage.
+KMEANS_SAMPLE_SIZE = 512
+
 
 def _parse_uuid(value: Any) -> UUID:
     """Parse UUID from DuckDB result (handles both UUID objects and strings)."""
@@ -872,9 +876,12 @@ class ShardManager:
     def _kmeans_fallback(
         self, shard: dict[str, Any], conn: Any, n_clusters: int = 2
     ) -> dict[int, int]:
-        """Fallback clustering using sklearn KMeans when USearch file unavailable.
+        """Sample-then-assign clustering using sklearn KMeans.
 
-        Queries embeddings from DuckDB and clusters using KMeans.
+        Instead of loading all embeddings into memory:
+        1. Sample ~512 random vectors from DuckDB
+        2. Run KMeans on samples to find centroids
+        3. Assign ALL vectors via DuckDB SQL using array_cosine_distance
 
         Args:
             shard: Shard record from DB
@@ -886,21 +893,76 @@ class ShardManager:
         """
         shard_id = UUID(shard["shard_id"])
         dims = shard["dims"]
+        table_name = f"embeddings_{dims}"
 
-        # Get embeddings from DB
-        embeddings = self._get_shard_embedding_ids(shard_id, dims, conn)
-        if not embeddings:
+        # Phase 1: Sample random vectors for centroid discovery
+        sample_size = min(KMEANS_SAMPLE_SIZE, self.config.split_threshold // 10)
+        samples = conn.execute(
+            f"SELECT id, embedding FROM {table_name} "
+            f"WHERE shard_id = ? ORDER BY RANDOM() LIMIT ?",
+            [str(shard_id), sample_size],
+        ).fetchall()
+
+        if not samples:
             return {}
 
-        # Prepare data for KMeans
-        embedding_ids = list(embeddings.keys())
-        vectors = np.array(list(embeddings.values()), dtype=np.float32)
+        # Adjust n_clusters if we have fewer samples
+        actual_clusters = min(n_clusters, len(samples))
+        if actual_clusters < 2:
+            # Can't cluster with fewer than 2 points - assign all to cluster 0
+            result = conn.execute(
+                f"SELECT id FROM {table_name} WHERE shard_id = ?",
+                [str(shard_id)],
+            ).fetchall()
+            return {row[0]: 0 for row in result}
 
-        # Run KMeans
-        kmeans = KMeans(n_clusters=min(n_clusters, len(embedding_ids)), n_init="auto")
-        labels = kmeans.fit_predict(vectors)
+        # Phase 2: Run KMeans only on samples to find centroids
+        vectors = np.array([list(row[1]) for row in samples], dtype=np.float32)
+        kmeans = KMeans(n_clusters=actual_clusters, n_init="auto")
+        kmeans.fit(vectors)
+        centroids = kmeans.cluster_centers_
 
-        return dict(zip(embedding_ids, labels))
+        # Phase 3: Assign ALL vectors using DuckDB SQL with array_cosine_distance
+        # Build CASE expression to find nearest centroid for each vector
+        embedding_type = f"FLOAT[{dims}]"
+        centroid_params = [centroids[i].tolist() for i in range(actual_clusters)]
+
+        # For 2 clusters, use simple CASE WHEN
+        if actual_clusters == 2:
+            query = f"""
+                SELECT id,
+                    CASE WHEN array_cosine_distance(embedding, ?::{embedding_type})
+                              <= array_cosine_distance(embedding, ?::{embedding_type})
+                         THEN 0 ELSE 1 END AS cluster_label
+                FROM {table_name}
+                WHERE shard_id = ?
+            """
+            params = [centroid_params[0], centroid_params[1], str(shard_id)]
+        else:
+            # For n clusters, build a nested CASE or use LEAST with index tracking
+            # Generate distance columns and find argmin
+            dist_exprs = [
+                f"array_cosine_distance(embedding, ?::{embedding_type}) AS d{i}"
+                for i in range(actual_clusters)
+            ]
+            case_parts = []
+            for i in range(actual_clusters):
+                conditions = [f"d{i} <= d{j}" for j in range(actual_clusters) if j != i]
+                case_parts.append(f"WHEN {' AND '.join(conditions)} THEN {i}")
+
+            query = f"""
+                SELECT id,
+                    CASE {' '.join(case_parts)} END AS cluster_label
+                FROM (
+                    SELECT id, embedding, {', '.join(dist_exprs)}
+                    FROM {table_name}
+                    WHERE shard_id = ?
+                ) sub
+            """
+            params = centroid_params + [str(shard_id)]
+
+        result = conn.execute(query, params).fetchall()
+        return {row[0]: row[1] for row in result}
 
     def _split_shard(self, shard: dict[str, Any], conn: Any) -> bool:
         """Split a shard when db_count >= split_threshold.
