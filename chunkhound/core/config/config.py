@@ -18,6 +18,7 @@ from .database_config import DatabaseConfig
 from .embedding_config import EmbeddingConfig
 from .indexing_config import IndexingConfig
 from .llm_config import LLMConfig
+from .logging_config import LoggingConfig
 from .mcp_config import MCPConfig
 
 
@@ -31,6 +32,7 @@ class Config(BaseModel):
     llm: LLMConfig | None = Field(default=None)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     indexing: IndexingConfig = Field(default_factory=IndexingConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
     debug: bool = Field(default=False)
 
     # Private field to store the target directory from CLI args
@@ -56,6 +58,8 @@ class Config(BaseModel):
 
         # 1. Smart config file resolution (before env vars)
         config_file = None
+        command = getattr(args, "command", None) if args else None
+        is_map = command == "map"
 
         # Extract target_dir from kwargs first (for testing)
         target_dir = kwargs.pop("target_dir", None)
@@ -68,9 +72,16 @@ class Config(BaseModel):
             if hasattr(args, "config") and args.config:
                 config_file = Path(args.config)
 
-            # Get target directory from args.path (overrides kwargs)
-            if hasattr(args, "path") and args.path:
-                target_dir = Path(args.path)
+            # For most commands, args.path represents the project root used for config
+            # discovery. For map, args.path is a documentation scope and must
+            # not change config discovery.
+            if not is_map:
+                # Get target directory from args.path (overrides kwargs)
+                if hasattr(args, "path") and args.path:
+                    target_dir = Path(args.path)
+            elif target_dir is None and config_file is not None:
+                # For map, treat explicit --config as the workspace root.
+                target_dir = config_file.parent
 
         # If no config file from args, check environment variable
         if not config_file:
@@ -78,12 +89,18 @@ class Config(BaseModel):
             if env_config_file:
                 config_file = Path(env_config_file)
 
+        if is_map and target_dir is None and config_file is not None:
+            # For map, treat CHUNKHOUND_CONFIG_FILE as the workspace root.
+            target_dir = config_file.parent
+
         # Only detect project root if target_dir not provided
         if target_dir is None:
             from chunkhound.utils.project_detection import find_project_root
 
             target_dir = find_project_root(
-                getattr(args, "path", None) if args else None
+                None
+                if is_map
+                else (getattr(args, "path", None) if args else None)
             )
 
         # 2. Load config file if found
@@ -173,6 +190,11 @@ class Config(BaseModel):
             # Create LLMConfig instance with the data
             config_data["llm"] = LLMConfig(**config_data["llm"])
 
+        # Special handling for LoggingConfig
+        if "logging" in config_data and isinstance(config_data["logging"], dict):
+            # Create LoggingConfig instance with the data
+            config_data["logging"] = LoggingConfig(**config_data["logging"])
+
         # Add target_dir to config_data for initialization
         config_data["target_dir"] = target_dir
 
@@ -242,6 +264,8 @@ class Config(BaseModel):
             overrides["mcp"] = mcp_overrides
         if indexing_overrides := IndexingConfig.extract_cli_overrides(args):
             overrides["indexing"] = indexing_overrides
+        if logging_overrides := LoggingConfig.extract_cli_overrides(args):
+            overrides["logging"] = logging_overrides
 
         return overrides
 

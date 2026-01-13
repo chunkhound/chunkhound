@@ -805,12 +805,12 @@ class OpenAIEmbeddingProvider:
                     f"Text at index {i} is not a string: {type(text)}",
                 )
 
-            if not text.strip():
+            cleaned_text = text.strip()
+            if not cleaned_text:
                 logger.warning(f"Empty text at index {i}, using placeholder")
                 validated.append("[EMPTY]")
             else:
                 # Basic preprocessing
-                cleaned_text = text.strip()
                 validated.append(cleaned_text)
 
         return validated

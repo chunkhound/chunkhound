@@ -49,15 +49,25 @@ class LazyLanguageParsers(MutableMapping[Language, Any]):
             return dict(self._instances)
 
     def __getitem__(self, key: Language) -> Any:
+        logger.debug(f"[LazyParsers] Getting parser for {key.value}")
         with self._lock:
             if key in self._instances:
+                logger.debug(f"[LazyParsers] Returning cached parser for {key.value}")
                 return self._instances[key]
 
         factory = self._factories.get(key)
         if factory is None:
+            logger.error(f"[LazyParsers] No factory registered for {key.value}")
             raise KeyError(key)
 
-        parser = factory()
+        logger.debug(f"[LazyParsers] Creating parser for {key.value} using factory")
+        try:
+            parser = factory()
+            logger.debug(f"[LazyParsers] Successfully created parser for {key.value}")
+        except Exception as e:
+            logger.error(f"[LazyParsers] Failed to create parser for {key.value}: {e}")
+            raise
+
         with self._lock:
             existing = self._instances.get(key)
             if existing is not None:
@@ -134,6 +144,7 @@ class ProviderRegistry:
 
     def register_language_parser(self, language: Language, parser_class: Any) -> None:
         """Register a language parser for a specific programming language."""
+        logger.debug(f"[Registry] Registering parser for {language.value}")
         # Create and setup parser instance
         parser = parser_class()
         if hasattr(parser, "setup"):
@@ -241,13 +252,22 @@ class ProviderRegistry:
             except ValueError:
                 logger.warning("No embedding provider configured for embedding service")
 
-        # Get batch configuration from config
+        # Get batch configuration from config (defaults are built into EmbeddingConfig)
         if self._config and self._config.embedding:
-            embedding_batch_size = self._config.embedding.batch_size
-            max_concurrent = self._config.embedding.max_concurrent_batches
+            embedding_config = self._config.embedding
         else:
-            embedding_batch_size = 1000
-            max_concurrent = None
+            # Create default embedding config if none provided
+            from chunkhound.core.config.embedding_config import EmbeddingConfig
+            embedding_config = EmbeddingConfig()
+
+        embedding_batch_size = embedding_config.batch_size
+        max_concurrent = embedding_config.max_concurrent_batches
+        missing_embeddings_initial_batch_size = embedding_config.missing_embeddings_initial_batch_size
+        missing_embeddings_min_batch_size = embedding_config.missing_embeddings_min_batch_size
+        missing_embeddings_max_batch_size = embedding_config.missing_embeddings_max_batch_size
+        missing_embeddings_target_batch_time = embedding_config.missing_embeddings_target_batch_time
+        missing_embeddings_slow_threshold = embedding_config.missing_embeddings_slow_threshold
+        missing_embeddings_fast_threshold = embedding_config.missing_embeddings_fast_threshold
 
         db_batch_size = 5000
         if self._config and self._config.indexing:
@@ -260,6 +280,12 @@ class ProviderRegistry:
             db_batch_size=db_batch_size,
             max_concurrent_batches=max_concurrent,
             optimization_batch_frequency=1000,
+            missing_embeddings_initial_batch_size=missing_embeddings_initial_batch_size,
+            missing_embeddings_min_batch_size=missing_embeddings_min_batch_size,
+            missing_embeddings_max_batch_size=missing_embeddings_max_batch_size,
+            missing_embeddings_target_batch_time=missing_embeddings_target_batch_time,
+            missing_embeddings_slow_threshold=missing_embeddings_slow_threshold,
+            missing_embeddings_fast_threshold=missing_embeddings_fast_threshold,
         )
 
     # Private setup methods - explicit provider creation
@@ -374,10 +400,14 @@ class ProviderRegistry:
 
     def _setup_language_parsers(self) -> None:
         """Register all available language parsers."""
+        logger.debug("[Registry] Setting up language parsers")
         parser_factory = get_parser_factory()
         available_languages = parser_factory.get_available_languages()
 
+        logger.debug(f"[Registry] Parser factory reports availability: {available_languages}")
+
         for language, is_available in available_languages.items():
+            logger.debug(f"[Registry] Processing {language.value}: available={is_available}")
             if is_available:
                 try:
                     self._language_parsers.register_factory(
@@ -389,10 +419,9 @@ class ProviderRegistry:
                             f"Registered parser factory for {language.value}"
                         )
                 except Exception as e:
-                    if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                        logger.warning(
-                            f"Failed to register parser for {language.value}: {e}"
-                        )
+                    logger.warning(
+                        f"Failed to register parser for {language.value}: {e}"
+                    )
 
     # Transaction management - delegates to database provider
 

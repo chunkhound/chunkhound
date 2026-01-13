@@ -1,11 +1,10 @@
 """Token-aware batching utilities for embedding providers."""
 
-import logging
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Protocol, TypeVar
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 T = TypeVar("T")
 

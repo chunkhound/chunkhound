@@ -42,7 +42,6 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "loguru>=0.6.0",
     "mcp>=1.0.0",
-    "fastmcp>=2.0.0",
     "psutil>=5.8.0",
     "PyYAML>=6.0.0",
     "tiktoken>=0.9.0",
@@ -64,7 +63,7 @@ dependencies = [
     "tree-sitter-json>=0.24.8",
     "tree-sitter-php>=0.24.0",
     "tree-sitter-toml>=0.7.0",
-    "lancedb>=0.25.3",
+    "lancedb>=0.26.0",
     "pandas>=2.3.0",
     "pylance>=0.31.0",
     "voyageai>=0.2.0",
@@ -73,7 +72,7 @@ dependencies = [
     "rich>=13.0.0",
     "readchar>=4.2.1",
     "scikit-learn>=1.3.0",
-    "hdbscan>=0.8.38",
+    "hdbscan>=0.8.41",
     "numpy>=1.24.0",
     "pathspec>=0.12.1",
     "pygit2>=1.12.0",
@@ -117,6 +116,9 @@ version-file = "chunkhound/_version.py"
 include = [
     "chunkhound/**/*.py",
     "chunkhound/py.typed",
+    "chunkhound/code_mapper/prompts/*.md",
+    "chunkhound/autodoc/prompts/*.txt",
+    "chunkhound/autodoc/assets/**/*",
     "tests/fixtures/yaml/**/*",
 ]
 
@@ -179,6 +181,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
+    "serial: marks tests to run serially to avoid conflicts",
 ]
 
 [dependency-groups]

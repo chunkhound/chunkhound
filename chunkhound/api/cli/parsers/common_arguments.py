@@ -3,6 +3,15 @@
 import argparse
 from pathlib import Path
 
+from chunkhound.core.audience import parse_audience
+
+
+def _parse_audience(value: str) -> str:
+    try:
+        return parse_audience(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
 
 def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     """Add arguments common to all commands.
@@ -25,6 +34,38 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         "--debug",
         action="store_true",
         help="Enable debug mode",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        help="Enable file logging to specified path",
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set file logging level (default: INFO)",
+    )
+    parser.add_argument(
+        "--performance-log",
+        type=str,
+        help="Enable separate performance timing log to specified path",
+    )
+    parser.add_argument(
+        "--progress-display-log-level",
+        type=str,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set log level for progress display messages (default: WARNING)",
+    )
+    parser.add_argument(
+        "--max-log-messages",
+        type=int,
+        help="Maximum number of log messages to buffer for progress display (default: 100)",
+    )
+    parser.add_argument(
+        "--log-panel-ratio",
+        type=float,
+        help="Ratio of terminal height for log panel in progress display (0.0-1.0, default: 0.3)",
     )
 
 

@@ -5,13 +5,12 @@ This module provides caching for expensive filesystem operations,
 specifically glob pattern matching and file filtering.
 """
 
-import logging
 import time
 from collections import OrderedDict
 from fnmatch import fnmatch
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 
 class FileDiscoveryCache:

@@ -1,9 +1,28 @@
 """DatabaseProvider protocol for ChunkHound - abstract interface for database implementations."""
 
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from chunkhound.core.models import Chunk, Embedding, File
+
+
+class ScopeAggregationProvider(Protocol):
+    """Optional scope aggregation helpers (used by code_mapper coverage)."""
+
+    def get_scope_stats(self, scope_prefix: str | None) -> tuple[int, int]:
+        """Return (total_files, total_chunks) under an optional scope prefix.
+
+        Implementations should avoid loading full chunk code payloads.
+        """
+        ...
+
+    def get_scope_file_paths(self, scope_prefix: str | None) -> list[str]:
+        """Return file paths under an optional scope prefix.
+
+        Returned paths should be normalized to forward slashes and be comparable
+        to `metadata.sources.files` entries.
+        """
+        ...
 
 
 class DatabaseProvider(Protocol):
@@ -93,6 +112,12 @@ class DatabaseProvider(Protocol):
         """Get chunk record by ID."""
         ...
 
+    def get_chunks_by_ids(
+        self, chunk_ids: list[int], as_model: bool = False
+    ) -> list[dict[str, Any] | Chunk]:
+        """Get chunk records for multiple chunk IDs."""
+        ...
+
     def get_chunks_by_file_id(
         self, file_id: int, as_model: bool = False
     ) -> list[dict[str, Any] | Chunk]:
@@ -109,6 +134,14 @@ class DatabaseProvider(Protocol):
 
     def update_chunk(self, chunk_id: int, **kwargs: Any) -> None:
         """Update chunk record with new values."""
+
+    def update_chunk_status(self, chunk_id: int, status: str) -> None:
+        """Update the embedding status of a chunk.
+
+        Args:
+            chunk_id: ID of the chunk to update
+            status: New status ('pending', 'success', 'failed', 'permanent_failure')
+        """
         ...
 
     # Embedding Operations
@@ -119,15 +152,13 @@ class DatabaseProvider(Protocol):
     def insert_embeddings_batch(
         self,
         embeddings_data: list[dict],
-        batch_size: int | None = None,
-        connection: Any = None,
+        chunks_data: list[dict],
     ) -> int:
         """Insert multiple embedding vectors with optimization.
 
         Args:
             embeddings_data: List of embedding data dictionaries
-            batch_size: Optional batch size for database operations (uses provider default if None)
-            connection: Optional database connection to use (for transaction contexts)
+            chunks_data: List of chunk data dictionaries (to avoid redundant DB queries)
         """
         ...
 
@@ -147,8 +178,39 @@ class DatabaseProvider(Protocol):
         """Delete all embeddings for a specific chunk."""
         ...
 
-    def get_all_chunks_with_metadata(self) -> list[dict[str, Any]]:
-        """Get all chunks with their metadata including file paths (provider-agnostic)."""
+    def invalidate_embeddings_by_provider_model(
+        self, current_provider: str, current_model: str
+    ) -> None:
+        """Invalidate embeddings that don't match the current provider/model combination.
+
+        Removes all embeddings except those matching the current provider/model combination.
+        This prepares the database for new embeddings from the specified provider/model.
+
+        Args:
+            current_provider: The embedding provider name to keep
+            current_model: The embedding model name to keep
+        """
+        ...
+
+
+    def get_chunks_without_embeddings_paginated(
+        self,
+        provider: str,
+        model: str,
+        limit: int = 10000,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Get chunk data that don't have embeddings for the specified provider/model with pagination.
+
+        Args:
+            provider: Embedding provider name
+            model: Embedding model name
+            limit: Maximum number of chunks to return
+            offset: Number of chunks to skip
+
+        Returns:
+            List of chunk dictionaries without embeddings for the provider/model
+        """
         ...
 
     # Search Operations
@@ -258,14 +320,14 @@ class DatabaseProvider(Protocol):
 
     # Statistics and Monitoring
     def get_stats(self) -> dict[str, int]:
-        """Get database statistics (file count, chunk count, etc.)."""
+        """Get database statistics (file count, chunk count, etc.) for the default provider/model."""
         ...
 
     def get_file_stats(self, file_id: int) -> dict[str, Any]:
         """Get statistics for a specific file."""
         ...
 
-    def get_provider_stats(self, provider: str, model: str) -> dict[str, Any]:
+    def get_embeddings_count(self, provider: str, model: str) -> dict[str, Any]:
         """Get statistics for a specific embedding provider/model."""
         ...
 
@@ -290,9 +352,9 @@ class DatabaseProvider(Protocol):
 
     # File Processing Integration
     async def process_file(
-        self, file_path: Path, skip_embeddings: bool = False
+        self, file_path: Path
     ) -> dict[str, Any]:
-        """Process a file end-to-end: parse, chunk, and store in database."""
+        """Process a file: parse, chunk, and store in database (embeddings handled separately)."""
         ...
 
     async def process_directory(
@@ -305,6 +367,20 @@ class DatabaseProvider(Protocol):
         ...
 
     # Health and Diagnostics
+    def should_optimize_fragments(
+        self, threshold: int | None = None, operation: str = ""
+    ) -> bool:
+        """Check if fragment-based optimization is warranted.
+
+        Args:
+            threshold: Fragment count threshold. If None, uses provider's default.
+            operation: Optional operation name for logging (e.g., "post-chunking")
+
+        Returns:
+            True if fragment count exceeds threshold and optimization is needed.
+        """
+        ...
+
     def optimize_tables(self) -> None:
         """Optimize tables by compacting fragments and rebuilding indexes (provider-specific)."""
         ...

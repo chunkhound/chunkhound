@@ -27,7 +27,6 @@ def test_cli_indexes_yaml_repo(tmp_path):
         cmd,
         capture_output=True,
         text=True,
-        cwd=tmp_path,
         env=env,
         timeout=120,
     )

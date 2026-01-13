@@ -15,8 +15,9 @@ import os
 import re
 import threading
 import time
+from collections import defaultdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from loguru import logger
 
@@ -34,6 +35,7 @@ from chunkhound.providers.database.duckdb.embedding_repository import (
     DuckDBEmbeddingRepository,
 )
 from chunkhound.providers.database.duckdb.file_repository import DuckDBFileRepository
+from chunkhound.providers.database.like_utils import escape_like_pattern
 from chunkhound.providers.database.serial_database_provider import (
     SerialDatabaseProvider,
 )
@@ -41,10 +43,45 @@ from chunkhound.providers.database.serial_executor import (
     _executor_local,
     track_operation,
 )
+from chunkhound.utils.chunk_hashing import generate_chunk_id
 
 # Type hinting only
 if TYPE_CHECKING:
     from chunkhound.core.config.database_config import DatabaseConfig
+
+
+def _deduplicate_chunks_by_id(chunks: list[Chunk], generate_id_func) -> list[Chunk]:
+    """Deduplicate chunks by computed ID, preserving order and selecting best chunk.
+
+    Chunks with identical computed IDs are grouped, and the "best" chunk (longest content)
+    is selected to represent the group. Warnings are logged for debugging duplicate detection.
+
+    Args:
+        chunks: List of Chunk objects to deduplicate
+        generate_id_func: Function to generate chunk ID from chunk object
+
+    Returns:
+        Deduplicated list of chunks (first occurrence order preserved)
+    """
+    if not chunks:
+        return chunks
+
+    # Group chunks by computed ID
+    grouped_chunks = defaultdict(list)
+    for chunk in chunks:
+        chunk_id = generate_id_func(chunk)
+        grouped_chunks[chunk_id].append(chunk)
+
+    # Select best chunk from each group
+    deduped_chunks = []
+    for chunk_id, group in grouped_chunks.items():
+        if len(group) > 1:
+            logger.warning(f"Detected {len(group)} duplicate chunks for ID {chunk_id} — keeping one")
+        # Pick best: chunk with longest content
+        best_chunk = max(group, key=lambda c: len(c.code or ""))
+        deduped_chunks.append(best_chunk)
+
+    return deduped_chunks
 
 
 class DuckDBProvider(SerialDatabaseProvider):
@@ -78,6 +115,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         # Class-level synchronization for WAL cleanup
         self._wal_cleanup_lock = threading.Lock()
         self._wal_cleanup_done = False
+
+
 
         # Initialize connection manager (will be simplified later)
         self._connection_manager = DuckDBConnectionManager(db_path, config)
@@ -459,10 +498,16 @@ class DuckDBProvider(SerialDatabaseProvider):
                     start_byte INTEGER,
                     end_byte INTEGER,
                     language TEXT,
+                    embedding_status TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            # Ensure embedding_status exists for existing DBs
+            conn.execute(
+                "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS embedding_status TEXT"
+            )
 
             # Create sequence for embeddings table
             conn.execute("CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq")
@@ -531,9 +576,9 @@ class DuckDBProvider(SerialDatabaseProvider):
                 # First, create a temporary table with the new schema
                 conn.execute("""
                     CREATE TEMP TABLE chunks_new AS
-                    SELECT id, file_id, chunk_type, symbol, code, 
-                           start_line, end_line, start_byte, end_byte, 
-                           language, created_at, updated_at
+                    SELECT id, file_id, chunk_type, symbol, code,
+                           start_line, end_line, start_byte, end_byte,
+                           language, 'pending' as embedding_status, created_at, updated_at
                     FROM chunks
                 """)
 
@@ -553,6 +598,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                         start_byte INTEGER,
                         end_byte INTEGER,
                         language TEXT,
+                        embedding_status TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
@@ -612,6 +658,9 @@ class DuckDBProvider(SerialDatabaseProvider):
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_chunks_symbol ON chunks(symbol)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chunks_embedding_status ON chunks(embedding_status)"
             )
 
             # Embedding indexes are created per-table in _executor_ensure_embedding_table_exists()
@@ -1199,7 +1248,29 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         logger.debug(f"File {file_path} and all associated data deleted")
         return True
+    
+    def _generate_chunk_id_safe(self, chunk: Chunk) -> int:
+        """Generate chunk ID with fallback to hash-based ID.
 
+        Returns chunk.id if present, otherwise generates deterministic
+        hash-based ID from file_id, content, and chunk type.
+
+        Args:
+            chunk: Chunk object to generate ID for
+
+        Returns:
+            Chunk ID (existing or generated)
+        """
+        return chunk.id or generate_chunk_id(
+            chunk.file_id,
+            chunk.code or "",
+            concept=str(
+                chunk.chunk_type.value
+                if hasattr(chunk.chunk_type, "value")
+                else chunk.chunk_type
+            ),
+        )
+    
     def insert_chunk(self, chunk: Chunk) -> int:
         """Insert chunk record and return chunk ID - delegate to chunk repository."""
         return self._chunk_repository.insert_chunk(chunk)
@@ -1222,6 +1293,9 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         # Track operation for checkpoint management
         track_operation(state)
+
+        # Deduplicate chunks by computed ID to prevent duplicate insertions
+        chunks = _deduplicate_chunks_by_id(chunks, self._generate_chunk_id_safe)
 
         # Prepare data for bulk insert
         chunk_data = []
@@ -1299,6 +1373,14 @@ class DuckDBProvider(SerialDatabaseProvider):
     ) -> dict[str, Any] | Chunk | None:
         """Get chunk record by ID - delegate to chunk repository."""
         return self._chunk_repository.get_chunk_by_id(chunk_id, as_model)
+
+    def get_chunks_by_ids(
+        self, chunk_ids: list[int], as_model: bool = False
+    ) -> list[dict[str, Any] | Chunk]:
+        """Get chunk records for multiple chunk IDs - delegate to chunk repository."""
+        return self._execute_in_db_thread_sync(
+            "get_chunks_by_ids", chunk_ids, as_model
+        )
 
     def get_chunks_by_file_id(
         self, file_id: int, as_model: bool = False
@@ -1428,6 +1510,12 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Update chunk record with new values - delegate to chunk repository."""
         self._chunk_repository.update_chunk(chunk_id, **kwargs)
 
+    def update_chunk_status(self, chunk_id: int, status: str) -> None:
+        """Update the embedding status of a chunk."""
+        self._execute_in_db_thread_sync("update_chunk_status", chunk_id, status)
+
+
+
     def _executor_insert_chunk_single(
         self, conn: Any, state: dict[str, Any], chunk: Chunk
     ) -> int:
@@ -1469,6 +1557,62 @@ class DuckDBProvider(SerialDatabaseProvider):
         """,
             [chunk_id],
         ).fetchone()
+
+    def _executor_get_chunks_by_ids(
+        self, conn: Any, state: dict[str, Any], chunk_ids: list[int], as_model: bool
+    ) -> list[dict[str, Any] | Chunk]:
+        """Executor method for get_chunks_by_ids - runs in DB thread."""
+        if not chunk_ids:
+            return []
+
+        placeholders = ", ".join(["?" for _ in chunk_ids])
+        results = conn.execute(
+            f"""
+            SELECT id, file_id, chunk_type, symbol, code, start_line, end_line,
+                   start_byte, end_byte, language, created_at, updated_at
+            FROM chunks WHERE id IN ({placeholders})
+            ORDER BY id
+        """,
+            chunk_ids,
+        ).fetchall()
+
+        chunks = []
+        for row in results:
+            chunk_dict = {
+                "id": row[0],
+                "file_id": row[1],
+                "chunk_type": row[2],
+                "symbol": row[3],
+                "code": row[4],
+                "start_line": row[5],
+                "end_line": row[6],
+                "start_byte": row[7],
+                "end_byte": row[8],
+                "language": row[9],
+                "created_at": row[10],
+                "updated_at": row[11],
+            }
+
+            if as_model:
+                chunk = Chunk(
+                    id=chunk_dict["id"],
+                    file_id=chunk_dict["file_id"],
+                    chunk_type=ChunkType(chunk_dict["chunk_type"]),
+                    symbol=chunk_dict["symbol"],
+                    code=chunk_dict["code"],
+                    start_line=chunk_dict["start_line"],
+                    end_line=chunk_dict["end_line"],
+                    start_byte=chunk_dict["start_byte"],
+                    end_byte=chunk_dict["end_byte"],
+                    language=Language(chunk_dict["language"])
+                    if chunk_dict["language"]
+                    else None,
+                )
+                chunks.append(chunk)
+            else:
+                chunks.append(chunk_dict)
+
+        return chunks
 
     def _executor_get_chunks_by_file_id_query(
         self, conn: Any, state: dict[str, Any], file_id: int
@@ -1542,8 +1686,7 @@ class DuckDBProvider(SerialDatabaseProvider):
     def insert_embeddings_batch(
         self,
         embeddings_data: list[dict],
-        batch_size: int | None = None,
-        connection=None,
+        chunks_data: list[dict],
     ) -> int:
         """Insert multiple embedding vectors with HNSW index optimization - delegate to embedding repository.
 
@@ -1551,9 +1694,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         # PERFORMANCE: 60s → 5s for 10k embeddings (12x speedup)
         # RECOVERY: Indexes recreated after bulk insert
         """
-        # Note: connection parameter is ignored in executor pattern
         return self._execute_in_db_thread_sync(
-            "insert_embeddings_batch", embeddings_data, batch_size
+            "insert_embeddings_batch", embeddings_data, chunks_data
         )
 
     def _executor_insert_embeddings_batch(
@@ -1561,7 +1703,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         conn: Any,
         state: dict[str, Any],
         embeddings_data: list[dict],
-        batch_size: int | None,
+        chunks_data: list[dict],
     ) -> int:
         """Executor method for insert_embeddings_batch - runs in DB thread."""
         if not embeddings_data:
@@ -1588,6 +1730,9 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Prepare batch data
             batch_data = []
             for emb in dim_embeddings:
+                status = emb.get("status")
+                if status is None:
+                    raise ValueError(f"Missing status for embedding chunk_id {emb['chunk_id']}")
                 batch_data.append(
                     (
                         emb["chunk_id"],
@@ -1598,28 +1743,51 @@ class DuckDBProvider(SerialDatabaseProvider):
                     )
                 )
 
-            # Insert in batches if specified
-            if batch_size:
-                for i in range(0, len(batch_data), batch_size):
-                    batch = batch_data[i : i + batch_size]
-                    conn.executemany(
-                        f"""
-                        INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims)
-                        VALUES (?, ?, ?, ?, ?)
-                    """,
-                        batch,
-                    )
-                    total_inserted += len(batch)
-            else:
-                # Insert all at once
-                conn.executemany(
-                    f"""
-                    INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims)
-                    VALUES (?, ?, ?, ?, ?)
-                """,
-                    batch_data,
-                )
-                total_inserted += len(batch_data)
+            # Insert all at once (batch_size parameter removed as chunks_data is provided directly)
+            conn.executemany(
+                f"""
+                INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims)
+                VALUES (?, ?, ?, ?, ?)
+            """,
+                batch_data,
+            )
+
+            total_inserted += len(batch_data)
+
+        # Collect all chunk statuses from embeddings_data and chunks_data
+        chunk_statuses = {}
+
+        # Statuses from successful embeddings
+        for emb in embeddings_data:
+            chunk_statuses[emb["chunk_id"]] = emb["status"]
+
+        # Statuses from chunks_data (failed chunks)
+        for chunk in chunks_data:
+            if "embedding_status" in chunk:
+                chunk_statuses[chunk["id"]] = chunk["embedding_status"]
+
+        # Batch update all chunk statuses
+        if chunk_statuses:
+            # Build CASE statement for batch update
+            when_clauses = []
+            params = []
+            chunk_ids = []
+
+            for chunk_id, status in chunk_statuses.items():
+                when_clauses.append("WHEN ? THEN ?")
+                params.extend([chunk_id, status])
+                chunk_ids.append(chunk_id)
+
+            # Create the SQL query
+            query = f"""
+                UPDATE chunks
+                SET embedding_status = CASE id {' '.join(when_clauses)} END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id IN ({','.join(['?'] * len(chunk_ids))})
+            """
+            params.extend(chunk_ids)
+
+            conn.execute(query, params)
 
         return total_inserted
 
@@ -1678,16 +1846,101 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Delete all embeddings for a specific chunk - delegate to embedding repository."""
         self._embedding_repository.delete_embeddings_by_chunk_id(chunk_id)
 
-    def get_all_chunks_with_metadata(self) -> list[dict[str, Any]]:
-        """Get all chunks with their metadata including file paths - delegate to chunk repository."""
-        return self._execute_in_db_thread_sync("get_all_chunks_with_metadata")
+    def invalidate_embeddings_by_provider_model(
+        self, current_provider: str, current_model: str
+    ) -> None:
+        """Invalidate embeddings that don't match the current provider/model combination.
+
+        Removes all embeddings except those matching the current provider/model combination.
+        This prepares the database for new embeddings from the specified provider/model.
+
+        Args:
+            current_provider: The embedding provider name to keep
+            current_model: The embedding model name to keep
+        """
+        self._execute_in_db_thread_sync(
+            "invalidate_embeddings_by_provider_model", current_provider, current_model
+        )
+
+    def get_scope_stats(self, scope_prefix: str | None) -> tuple[int, int]:
+        """Return (total_files, total_chunks) under an optional scope prefix.
+
+        This is used by code_mapper coverage and must avoid loading full chunk code.
+        """
+        return self._execute_in_db_thread_sync("get_scope_stats", scope_prefix)
+
+    def _executor_get_scope_stats(
+        self, conn: Any, state: dict[str, Any], scope_prefix: str | None
+    ) -> tuple[int, int]:
+        """Executor method for get_scope_stats - runs in DB thread."""
+        try:
+            if scope_prefix:
+                normalized = scope_prefix.replace("\\", "/")
+                escaped = escape_like_pattern(normalized)
+                like = f"{escaped}%"
+                files_row = conn.execute(
+                    "SELECT COUNT(*) FROM files WHERE path LIKE ? ESCAPE '\\'",
+                    [like],
+                ).fetchone()
+                chunks_row = conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM chunks c
+                    JOIN files f ON c.file_id = f.id
+                    WHERE f.path LIKE ? ESCAPE '\\'
+                    """,
+                    [like],
+                ).fetchone()
+            else:
+                files_row = conn.execute("SELECT COUNT(*) FROM files").fetchone()
+                chunks_row = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
+
+            total_files = int(files_row[0]) if files_row else 0
+            total_chunks = int(chunks_row[0]) if chunks_row else 0
+            return total_files, total_chunks
+        except Exception as exc:
+            logger.debug(f"Failed to get scope stats: {exc}")
+            return 0, 0
+
+    def get_scope_file_paths(self, scope_prefix: str | None) -> list[str]:
+        """Return file paths under an optional scope prefix."""
+        return self._execute_in_db_thread_sync("get_scope_file_paths", scope_prefix)
+
+    def _executor_get_scope_file_paths(
+        self, conn: Any, state: dict[str, Any], scope_prefix: str | None
+    ) -> list[str]:
+        """Executor method for get_scope_file_paths - runs in DB thread."""
+        try:
+            if scope_prefix:
+                normalized = scope_prefix.replace("\\", "/")
+                escaped = escape_like_pattern(normalized)
+                like = f"{escaped}%"
+                rows = conn.execute(
+                    "SELECT path FROM files WHERE path LIKE ? ESCAPE '\\' ORDER BY path",
+                    [like],
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT path FROM files ORDER BY path").fetchall()
+
+            out: list[str] = []
+            for row in rows:
+                try:
+                    path = str(row[0] or "").replace("\\", "/")
+                except Exception:
+                    path = ""
+                if path:
+                    out.append(path)
+            return out
+        except Exception as exc:
+            logger.debug(f"Failed to get scope file paths: {exc}")
+            return []
 
     def _executor_get_all_chunks_with_metadata(
         self, conn: Any, state: dict[str, Any]
     ) -> list[dict[str, Any]]:
         """Executor method for get_all_chunks_with_metadata - runs in DB thread."""
         query = """
-            SELECT 
+            SELECT
                 c.id as chunk_id,
                 c.file_id,
                 c.chunk_type,
@@ -1702,27 +1955,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             JOIN files f ON c.file_id = f.id
             ORDER BY f.path, c.start_line
         """
-
-        results = conn.execute(query).fetchall()
-
-        chunks_with_metadata = []
-        for row in results:
-            chunks_with_metadata.append(
-                {
-                    "chunk_id": row[0],
-                    "file_id": row[1],
-                    "chunk_type": row[2],
-                    "symbol": row[3],
-                    "code": row[4],
-                    "start_line": row[5],
-                    "end_line": row[6],
-                    "chunk_language": row[7],
-                    "file_path": row[8],  # Keep stored format
-                    "file_language": row[9],
-                }
-            )
-
-        return chunks_with_metadata
+        return self._executor_get_all_chunks_with_metadata_query(conn, state, query)
 
     def _validate_and_normalize_path_filter(
         self, path_filter: str | None
@@ -1856,9 +2089,9 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             if normalized_path is not None:
                 query += " AND f.path LIKE ?"
-                params.append(
-                    f"{normalized_path}%"
-                )  # Simple prefix match on relative paths
+                # Use substring match so callers can pass repo-relative paths
+                # even when the database base_directory is higher (e.g., monorepo root).
+                params.append(f"%{normalized_path}%")
 
             # Get total count for pagination
             # Build count query separately to avoid string replacement issues
@@ -1878,9 +2111,8 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             if normalized_path is not None:
                 count_query += " AND f.path LIKE ?"
-                count_params.append(
-                    f"{normalized_path}%"
-                )  # Simple prefix match on relative paths
+                # Substring match for consistency with main query
+                count_params.append(f"%{normalized_path}%")
 
             total_count = conn.execute(count_query, count_params).fetchone()[0]
 
@@ -1967,10 +2199,10 @@ class DuckDBProvider(SerialDatabaseProvider):
             params = [pattern]
 
             if normalized_path is not None:
-                where_conditions.append("f.path LIKE ?")
-                params.append(
-                    f"{normalized_path}%"
-                )  # Simple prefix match on relative paths
+                escaped_path = escape_like_pattern(normalized_path)
+                where_conditions.append("f.path LIKE ? ESCAPE '\\'")
+                # Allow matching repo-relative segments inside stored paths
+                params.append(f"%{escaped_path}%")
 
             where_clause = " AND ".join(where_conditions)
 
@@ -2152,7 +2384,8 @@ class DuckDBProvider(SerialDatabaseProvider):
             params: list[Any] = [target_embedding, provider, model, chunk_id]
             if normalized_path is not None:
                 path_condition = "AND f.path LIKE ?"
-                params.append(f"{normalized_path}%")
+                # Substring match so repo-relative scopes still work when base_directory is higher
+                params.append(f"%{normalized_path}%")
 
             # Query for similar chunks (exclude the original chunk)
             # Cast the target embedding to match the table's embedding type
@@ -2363,64 +2596,64 @@ class DuckDBProvider(SerialDatabaseProvider):
             return []
 
     def get_stats(self) -> dict[str, int]:
-        """Get database statistics (file count, chunk count, etc.)."""
-        return self._execute_in_db_thread_sync("get_stats")
+        """Get database statistics (file count, chunk count, etc.) for the default provider/model."""
+        # Get default provider/model for stats
+        provider = ""
+        model = ""
+        if self.embedding_manager:
+            default_provider = self.embedding_manager.get_default_provider()
+            if default_provider:
+                provider = default_provider.name
+                model = default_provider.model
 
-    def _executor_get_stats(self, conn: Any, state: dict[str, Any]) -> dict[str, int]:
-        """Executor method for get_stats - runs in DB thread."""
+        return self._execute_in_db_thread_sync("get_stats", provider, model)
+
+    def _executor_get_stats(self, conn: Any, state: dict[str, Any], provider: str, model: str) -> dict[str, int]:
+        """Executor method for get_stats - runs in DB thread.
+        Returns overall statistics
+        """
         try:
             # Get counts from each table
             file_count = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
             chunk_count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
 
-            # Count embeddings across all dimension-specific tables
-            embedding_count = 0
-            embedding_tables = self._executor_get_all_embedding_tables(conn, state)
-            for table_name in embedding_tables:
-                count = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
-                embedding_count += count
+            provider_stats = self._executor_get_embeddings_count(conn, state, provider, model)
+            embedding_count = provider_stats.get("embedding_count", 0)
 
-            # Get unique providers/models across all embedding tables
-            provider_results = []
-            for table_name in embedding_tables:
-                results = conn.execute(f"""
-                    SELECT DISTINCT provider, model, COUNT(*) as count
-                    FROM {table_name}
-                    GROUP BY provider, model
-                """).fetchall()
-                provider_results.extend(results)
 
-            providers = {}
-            for result in provider_results:
-                key = f"{result[0]}/{result[1]}"
-                providers[key] = result[2]
 
-            # Convert providers dict to count for interface compliance
-            provider_count = len(providers)
             return {
                 "files": file_count,
                 "chunks": chunk_count,
                 "embeddings": embedding_count,
-                "providers": provider_count,
             }
 
         except Exception as e:
             logger.error(f"Failed to get database stats: {e}")
-            return {"files": 0, "chunks": 0, "embeddings": 0, "providers": 0}
+            return {"files": 0, "chunks": 0, "embeddings": 0}
 
     def get_file_stats(self, file_id: int) -> dict[str, Any]:
         """Get statistics for a specific file - delegate to file repository."""
         return self._file_repository.get_file_stats(file_id)
 
-    def get_provider_stats(self, provider: str, model: str) -> dict[str, Any]:
+    def get_embeddings_count(self, provider: str, model: str) -> dict[str, Any]:
         """Get statistics for a specific embedding provider/model."""
-        return self._execute_in_db_thread_sync("get_provider_stats", provider, model)
+        return self._execute_in_db_thread_sync("get_embeddings_count", provider, model)
 
-    def _executor_get_provider_stats(
+    def _executor_get_embeddings_count(
         self, conn: Any, state: dict[str, Any], provider: str, model: str
     ) -> dict[str, Any]:
-        """Executor method for get_provider_stats - runs in DB thread."""
+        """Executor method for get_embeddings_count - runs in DB thread."""
         try:
+            # Build WHERE clause based on provided parameters
+            # If provider or model is empty, count all embeddings
+            if not provider or not model:
+                where_clause = ""
+                params = []
+            else:
+                where_clause = "WHERE provider = ? AND model = ?"
+                params = [provider, model]
+
             # Get embedding count across all embedding tables
             embedding_count = 0
             file_ids = set()
@@ -2429,46 +2662,42 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             for table_name in embedding_tables:
                 # Count embeddings for this provider/model in this table
-                count = conn.execute(
-                    f"""
-                    SELECT COUNT(*) FROM {table_name}
-                    WHERE provider = ? AND model = ?
-                """,
-                    [provider, model],
-                ).fetchone()[0]
+                count_query = f"SELECT COUNT(*) FROM {table_name} {where_clause}"
+                count = conn.execute(count_query, params).fetchone()[0]
                 embedding_count += count
 
                 # Get unique file IDs for this provider/model in this table
-                file_results = conn.execute(
-                    f"""
-                    SELECT DISTINCT c.file_id
-                    FROM {table_name} e
-                    JOIN chunks c ON e.chunk_id = c.id
-                    WHERE e.provider = ? AND e.model = ?
-                """,
-                    [provider, model],
-                ).fetchall()
-                file_ids.update(result[0] for result in file_results)
-
-                # Get dimensions (should be consistent across all tables for same provider/model)
-                if count > 0 and dims == 0:
-                    dims_result = conn.execute(
+                if provider and model:  # Only get file IDs if we have specific provider/model
+                    file_results = conn.execute(
                         f"""
-                        SELECT DISTINCT dims FROM {table_name}
-                        WHERE provider = ? AND model = ?
-                        LIMIT 1
+                        SELECT DISTINCT c.file_id
+                        FROM {table_name} e
+                        JOIN chunks c ON e.chunk_id = c.id
+                        WHERE e.provider = ? AND e.model = ?
                     """,
                         [provider, model],
-                    ).fetchone()
-                    if dims_result:
-                        dims = dims_result[0]
+                    ).fetchall()
+                    file_ids.update(result[0] for result in file_results)
+
+                    # Get dimensions (should be consistent across all tables for same provider/model)
+                    if count > 0 and dims == 0:
+                        dims_result = conn.execute(
+                            f"""
+                            SELECT DISTINCT dims FROM {table_name}
+                            WHERE provider = ? AND model = ?
+                            LIMIT 1
+                        """,
+                            [provider, model],
+                        ).fetchone()
+                        if dims_result:
+                            dims = dims_result[0]
 
             file_count = len(file_ids)
 
             return {
                 "provider": provider,
                 "model": model,
-                "embeddings": embedding_count,
+                "embedding_count": embedding_count,
                 "files": file_count,
                 "dimensions": dims,
             }
@@ -2478,16 +2707,118 @@ class DuckDBProvider(SerialDatabaseProvider):
             return {
                 "provider": provider,
                 "model": model,
-                "embeddings": 0,
+                "embedding_count": 0,
                 "files": 0,
                 "dimensions": 0,
             }
+
+    def get_chunks_without_embeddings_paginated(
+        self,
+        provider: str,
+        model: str,
+        limit: int = 10000,
+    ) -> list[dict[str, Any]]:
+        """Get chunk data that don't have embeddings for the specified provider/model with pagination."""
+        return self._execute_in_db_thread_sync(
+            "get_chunks_without_embeddings_paginated",
+            provider,
+            model,
+            limit,
+        )
 
     def execute_query(
         self, query: str, params: list[Any] | None = None
     ) -> list[dict[str, Any]]:
         """Execute a SQL query and return results."""
         return self._execute_in_db_thread_sync("execute_query", query, params)
+
+    def _executor_get_chunks_without_embeddings_paginated(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        provider: str,
+        model: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Executor method for get_chunks_without_embeddings_paginated - runs in DB thread."""
+        try:
+            # Get all embedding tables
+            embedding_tables = self._executor_get_all_embedding_tables(conn, state)
+
+            if not embedding_tables:
+                # No embedding tables exist, return all chunks with pagination
+                query = """
+                    SELECT c.id, c.file_id, c.chunk_type, c.symbol, c.code, c.start_line, c.end_line,
+                           c.start_byte, c.end_byte, c.language, c.created_at, c.updated_at,
+                           f.path as file_path
+                    FROM chunks c
+                    JOIN files f ON c.file_id = f.id
+                """
+                params = []
+
+                query += " ORDER BY c.id LIMIT ?"
+                params.append(limit)
+
+                results = conn.execute(query, params).fetchall()
+                return [dict(row) for row in results]
+
+            # Build NOT EXISTS clauses for all embedding tables
+            not_exists_clauses = []
+            for table_name in embedding_tables:
+                not_exists_clauses.append(f"""
+                    NOT EXISTS (
+                        SELECT 1 FROM {table_name} e
+                        WHERE e.chunk_id = c.id
+                        AND e.provider = ?
+                        AND e.model = ?
+                    )
+                """)
+
+            # Query for chunks that don't have embeddings for this provider/model
+            query = f"""
+                SELECT c.id, c.file_id, c.chunk_type, c.symbol, c.code, c.start_line, c.end_line,
+                       c.start_byte, c.end_byte, c.language, c.created_at, c.updated_at,
+                       f.path as file_path
+                FROM chunks c
+                JOIN files f ON c.file_id = f.id
+                WHERE {" AND ".join(not_exists_clauses)} AND (c.embedding_status IS NULL OR c.embedding_status != 'permanent_failure')
+            """
+
+            # Parameters need to be repeated for each table (provider, model per table)
+            params = [provider, model] * len(embedding_tables)
+
+            query += " ORDER BY c.id LIMIT ?"
+            params.append(limit)
+
+            results = conn.execute(query, params).fetchall()
+            chunk_count = len(results)
+
+            # Convert Row objects to dictionaries
+            chunks = []
+            for row in results:
+                chunks.append({
+                    "id": row[0],
+                    "file_id": row[1],
+                    "chunk_type": row[2],
+                    "symbol": row[3],
+                    "code": row[4],
+                    "start_line": row[5],
+                    "end_line": row[6],
+                    "start_byte": row[7],
+                    "end_byte": row[8],
+                    "language": row[9],
+                    "created_at": row[10],
+                    "updated_at": row[11],
+                    "file_path": row[12],
+                })
+
+            # Return whatever amount was retrieved without retry logic
+            logger.debug(f"Retrieved {chunk_count} chunks without embeddings (limit={limit})")
+            return chunks
+
+        except Exception as e:
+            logger.error(f"Failed to get chunks without embeddings: {e}")
+            return []
 
     def _executor_execute_query(
         self, conn: Any, state: dict[str, Any], query: str, params: list[Any] | None
@@ -2552,6 +2883,49 @@ class DuckDBProvider(SerialDatabaseProvider):
         state["transaction_active"] = False
         state["deferred_checkpoint"] = False
 
+    def _executor_invalidate_embeddings_by_provider_model(
+        self, conn: Any, state: dict[str, Any], current_provider: str, current_model: str
+    ) -> None:
+        """Executor method for invalidate_embeddings_by_provider_model - runs in DB thread."""
+        try:
+            # Get all embedding tables
+            embedding_tables = self._executor_get_all_embedding_tables(conn, state)
+
+            # Delete embeddings that don't match the current provider/model from each table
+            for table_name in embedding_tables:
+                conn.execute(
+                    f"""
+                    DELETE FROM {table_name}
+                    WHERE NOT (provider = ? AND model = ?)
+                    """,
+                    [current_provider, current_model],
+                )
+
+            logger.info(
+                f"Invalidated embeddings not matching {current_provider}/{current_model} "
+                f"across {len(embedding_tables)} tables"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to invalidate embeddings by provider/model: {e}")
+            raise
+
+    def should_optimize_fragments(
+        self, threshold: int | None = None, operation: str = ""
+    ) -> bool:
+        """Check if fragment-based optimization is warranted.
+
+        DuckDB doesn't have fragmentation issues like LanceDB, so this always returns False.
+
+        Args:
+            threshold: Fragment count threshold (ignored for DuckDB).
+            operation: Optional operation name for logging (ignored for DuckDB).
+
+        Returns:
+            False - DuckDB doesn't support fragment-based optimization at this time.
+        """
+        return False
+
     def optimize_tables(self) -> None:
         """Optimize tables by compacting fragments and rebuilding indexes (provider-specific).
 
@@ -2585,3 +2959,4 @@ class DuckDBProvider(SerialDatabaseProvider):
                 )
         except Exception:
             pass
+
