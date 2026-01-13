@@ -26,6 +26,7 @@ from loguru import logger
 from rich.progress import Progress, TaskID
 
 from chunkhound.core.detection import detect_language
+from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector
 from chunkhound.core.exceptions import DiskUsageLimitExceededError
 from chunkhound.core.models import Chunk, File
 from chunkhound.core.types.common import FilePath, Language
@@ -1588,7 +1589,9 @@ class IndexingCoordinator(BaseService):
             return 0
 
     async def generate_missing_embeddings(
-        self, exclude_patterns: list[str] | None = None
+        self,
+        exclude_patterns: list[str] | None = None,
+        metrics_collector: BatchMetricsCollector | None = None,
     ) -> dict[str, Any]:
         """Generate embeddings for chunks that don't have them.
 
@@ -1621,6 +1624,7 @@ class IndexingCoordinator(BaseService):
                 embedding_provider=self._embedding_provider,
                 optimization_batch_frequency=optimization_batch_frequency,
                 progress=self.progress,
+                metrics_collector=metrics_collector,
             )
 
             return await embedding_service.generate_missing_embeddings(
