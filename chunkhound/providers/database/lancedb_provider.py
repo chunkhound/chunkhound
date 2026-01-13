@@ -1987,33 +1987,20 @@ class LanceDBProvider(SerialDatabaseProvider):
             logger.error(f"Error in regex search: {e}")
             raise RuntimeError(f"Regex search failed: {e}") from e
 
-    def search_fuzzy(
-        self,
-        query: str,
-        page_size: int = 10,
-        offset: int = 0,
-        path_filter: str | None = None,
-    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Perform fuzzy text search using LanceDB's text capabilities."""
-        return self._execute_in_db_thread_sync(
-            "search_fuzzy", query, page_size, offset, path_filter
-        )
-
-    def _executor_search_fuzzy(
+    def _executor_search_text(
         self,
         conn: Any,
         state: dict[str, Any],
         query: str,
         page_size: int = 10,
         offset: int = 0,
-        path_filter: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Executor method for search_fuzzy - runs in DB thread."""
+        """Executor method for search_text - runs in DB thread."""
         if not self._chunks_table:
             return [], {"offset": offset, "page_size": 0, "has_more": False, "total": 0}
 
         try:
-            # Use LanceDB's full-text search capabilities
+            # Use LanceDB's LIKE pattern matching for text search
             escaped_query = _escape_like_pattern(query)
             where_clause = f"content LIKE '%{escaped_query}%' ESCAPE '\\\\'"
             results = (
@@ -2026,16 +2013,13 @@ class LanceDBProvider(SerialDatabaseProvider):
             # Apply offset manually
             paginated_results = results[offset : offset + page_size]
 
-            # Format results to match DuckDB output and exclude raw embeddings
+            # Format results
             file_map = self._fetch_file_paths_by_ids(
                 [r.get("file_id") for r in paginated_results if "file_id" in r]
             )
             formatted_results = []
             for result in paginated_results:
-                # Get file path from cached batch lookup
                 file_path = file_map.get(result.get("file_id"), "")
-
-                # Format the result to match DuckDB's output (no similarity for fuzzy search)
                 formatted_result = {
                     "chunk_id": result["id"],
                     "symbol": result.get("name", ""),
@@ -2043,7 +2027,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     "chunk_type": result.get("chunk_type", ""),
                     "start_line": result.get("start_line", 0),
                     "end_line": result.get("end_line", 0),
-                    "file_path": file_path,  # Keep stored format
+                    "file_path": file_path,
                     "language": result.get("language", ""),
                 }
                 formatted_results.append(formatted_result)
@@ -2058,19 +2042,8 @@ class LanceDBProvider(SerialDatabaseProvider):
             return formatted_results, pagination
 
         except Exception as e:
-            logger.error(f"Error in fuzzy search: {e}")
+            logger.error(f"Error in text search: {e}")
             return [], {"offset": offset, "page_size": 0, "has_more": False, "total": 0}
-
-    def _executor_search_text(
-        self,
-        conn: Any,
-        state: dict[str, Any],
-        query: str,
-        page_size: int = 10,
-        offset: int = 0,
-    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Executor method for search_text - runs in DB thread."""
-        return self._executor_search_fuzzy(conn, state, query, page_size, offset, None)
 
     # Statistics and Monitoring
     def get_stats(self) -> dict[str, int]:
