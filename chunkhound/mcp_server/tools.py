@@ -23,7 +23,6 @@ from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services.research.factory import ResearchServiceFactory
-from chunkhound.version import __version__
 
 # Response size limits (tokens)
 MAX_RESPONSE_TOKENS = 20000
@@ -47,6 +46,8 @@ class Tool:
     parameters: dict[str, Any]
     implementation: Callable
     requires_embeddings: bool = False
+    requires_llm: bool = False
+    requires_reranker: bool = False
 
 
 # Tool registry - populated by @register_tool decorator
@@ -207,6 +208,8 @@ def _generate_json_schema_from_signature(func: Callable) -> dict[str, Any]:
 def register_tool(
     description: str,
     requires_embeddings: bool = False,
+    requires_llm: bool = False,
+    requires_reranker: bool = False,
     name: str | None = None,
 ) -> Callable[[Callable], Callable]:
     """Decorator to register a function as an MCP tool.
@@ -216,6 +219,8 @@ def register_tool(
     Args:
         description: Comprehensive tool description for LLM users
         requires_embeddings: Whether tool requires embedding providers
+        requires_llm: Whether tool requires LLM provider
+        requires_reranker: Whether tool requires reranking support
         name: Optional tool name (defaults to function name)
 
     Returns:
@@ -243,6 +248,8 @@ def register_tool(
             parameters=parameters,
             implementation=func,
             requires_embeddings=requires_embeddings,
+            requires_llm=requires_llm,
+            requires_reranker=requires_reranker,
         )
 
         return func
@@ -282,15 +289,6 @@ class SearchResponse(TypedDict):
 
     results: list[dict[str, Any]]
     pagination: PaginationInfo
-
-
-class HealthStatus(TypedDict):
-    """Health check response structure."""
-
-    status: str
-    version: str
-    database_connected: bool
-    embedding_providers: list[str]
 
 
 def estimate_tokens(text: str) -> int:
@@ -352,129 +350,86 @@ def limit_response_size(
     }
 
 
+# =============================================================================
+# Tool Descriptions (optimized for LLM consumption)
+# =============================================================================
+
+SEARCH_DESCRIPTION = """Search code by exact pattern (regex) or meaning (semantic).
+
+TYPE SELECTION:
+- regex: Exact pattern matching. Use for function names, variable names,
+  import statements, or known string patterns.
+  Example queries: "def authenticate", "import.*pandas", "TODO:.*fix"
+
+- semantic: Meaning-based search. Use when describing functionality
+  conceptually or unsure of exact keywords.
+  Example queries: "authentication logic", "error handling for database"
+
+WHEN TO USE: Quick lookup, finding references, exploring unfamiliar code.
+DO NOT USE: Multi-file architecture questions (use code_research instead).
+
+OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}
+COST: Fast, cheap - use liberally."""
+
+CODE_RESEARCH_DESCRIPTION = """Deep analysis for architecture and cross-file code.
+
+USE FOR:
+- Understanding how systems/features are implemented across files
+- Discovering component relationships and dependencies
+- Getting architectural explanations with code citations
+
+DO NOT USE:
+- Looking for specific code locations (use search instead)
+- Simple pattern matching (use search with type="regex")
+- You already know where the code is (read files directly)
+
+OUTPUT: Comprehensive markdown with architecture overview, key locations, relationships.
+COST: Expensive (LLM synthesis). 10-60s latency. One call often replaces 5-10 searches.
+
+ERROR RECOVERY: If incomplete, try narrower query or use path parameter to scope."""
+
+
+# =============================================================================
+# Tool Implementations
+# =============================================================================
+
+
 @register_tool(
-    description=(
-        "Find exact code patterns using regular expressions. Use when searching for "
-        "specific syntax (function definitions, variable names, import statements), "
-        "exact text matches, or code structure patterns. Best for precise searches "
-        "where you know the exact pattern."
-    ),
+    description=SEARCH_DESCRIPTION,
     requires_embeddings=False,
-    name="search_regex",
+    name="search",
 )
-async def search_regex_impl(
+async def search_impl(
     services: DatabaseServices,
-    pattern: str,
-    page_size: int = 10,
-    offset: int = 0,
-    max_response_tokens: int = 20000,
-    path: str | None = None,
-) -> SearchResponse:
-    """Core regex search implementation.
-
-    Args:
-        services: Database services bundle
-        pattern: Regex pattern to search for
-        page_size: Number of results per page (1-100)
-        offset: Starting offset for pagination
-        max_response_tokens: Maximum response size in tokens (1000-25000)
-        path: Optional path to limit search scope
-
-    Returns:
-        Dict with 'results' and 'pagination' keys
-    """
-    # Validate and constrain parameters
-    page_size = max(1, min(page_size, 100))
-    offset = max(0, offset)
-
-    # Check database connection
-    if services and not services.provider.is_connected:
-        services.provider.connect()
-
-    # Perform search using SearchService
-    results, pagination = services.search_service.search_regex(
-        pattern=pattern,
-        page_size=page_size,
-        offset=offset,
-        path_filter=path,
-    )
-
-    # Convert file paths to native platform format
-    native_results = _convert_paths_to_native(results)
-
-    # Apply response size limiting
-    response = cast(
-        SearchResponse, {"results": native_results, "pagination": pagination}
-    )
-    return limit_response_size(response, max_response_tokens)
-
-
-@register_tool(
-    description=(
-        "Find code by meaning and concept rather than exact syntax. Use when "
-        "searching by description (e.g., 'authentication logic', 'error handling'), "
-        "looking for similar functionality, or when you're unsure of exact "
-        "keywords. Understands intent and context beyond literal text matching."
-    ),
-    requires_embeddings=True,
-    name="search_semantic",
-)
-async def search_semantic_impl(
-    services: DatabaseServices,
-    embedding_manager: EmbeddingManager,
+    embedding_manager: EmbeddingManager | None,
+    type: str,
     query: str,
+    path: str | None = None,
     page_size: int = 10,
     offset: int = 0,
-    max_response_tokens: int = 20000,
-    path: str | None = None,
-    provider: str | None = None,
-    model: str | None = None,
-    threshold: float | None = None,
 ) -> SearchResponse:
-    """Core semantic search implementation.
+    """Unified search dispatching to regex or semantic based on type.
 
     Args:
         services: Database services bundle
-        embedding_manager: Embedding manager instance
-        query: Search query text
+        embedding_manager: Embedding manager (required for semantic type)
+        type: "semantic" for meaning-based, "regex" for exact pattern
+        query: Search query (natural language for semantic, regex pattern for regex)
+        path: Optional path to limit search scope (e.g., "src/auth/")
         page_size: Number of results per page (1-100)
         offset: Starting offset for pagination
-        max_response_tokens: Maximum response size in tokens (1000-25000)
-        path: Optional path to limit search scope
-        provider: Embedding provider name (optional, uses configured provider if not
-            specified)
-        model: Embedding model name (optional, uses configured model if not specified)
-        threshold: Distance threshold for filtering (optional)
 
     Returns:
         Dict with 'results' and 'pagination' keys
 
     Raises:
-        Exception: If no embedding providers available or configured
-        asyncio.TimeoutError: If embedding request times out
+        ValueError: If type is invalid or semantic search lacks embedding provider
     """
-    # Validate embedding manager and providers
-    if not embedding_manager or not embedding_manager.list_providers():
-        raise Exception(
-            "No embedding providers available. Configure an embedding provider via:\n"
-            "1. Create .chunkhound.json with embedding configuration, OR\n"
-            "2. Set CHUNKHOUND_EMBEDDING__API_KEY environment variable"
+    # Validate type parameter
+    if type not in ("semantic", "regex"):
+        raise ValueError(
+            f"Invalid search type: '{type}'. Must be 'semantic' or 'regex'."
         )
-
-    # Use explicit provider/model from arguments, otherwise get from configured provider
-    if not provider or not model:
-        try:
-            default_provider_obj = embedding_manager.get_provider()
-            if not provider:
-                provider = default_provider_obj.name
-            if not model:
-                model = default_provider_obj.model
-        except ValueError:
-            raise Exception(
-                "No default embedding provider configured. "
-                "Either specify provider and model explicitly, or configure a "
-                "default provider."
-            )
 
     # Validate and constrain parameters
     page_size = max(1, min(page_size, 100))
@@ -484,16 +439,40 @@ async def search_semantic_impl(
     if services and not services.provider.is_connected:
         services.provider.connect()
 
-    # Perform search using SearchService
-    results, pagination = await services.search_service.search_semantic(
-        query=query,
-        page_size=page_size,
-        offset=offset,
-        threshold=threshold,
-        provider=provider,
-        model=model,
-        path_filter=path,
-    )
+    if type == "semantic":
+        # Validate embedding manager for semantic search
+        if not embedding_manager or not embedding_manager.list_providers():
+            raise ValueError(
+                "Semantic search requires embedding provider. "
+                "Configure via .chunkhound.json or CHUNKHOUND_EMBEDDING__API_KEY. "
+                "Use type='regex' for pattern-based search without embeddings."
+            )
+
+        # Get default provider/model
+        try:
+            provider_obj = embedding_manager.get_provider()
+            provider_name = provider_obj.name
+            model_name = provider_obj.model
+        except ValueError:
+            raise ValueError("No default embedding provider configured.")
+
+        # Perform semantic search
+        results, pagination = await services.search_service.search_semantic(
+            query=query,
+            page_size=page_size,
+            offset=offset,
+            provider=provider_name,
+            model=model_name,
+            path_filter=path,
+        )
+    else:  # regex
+        # Perform regex search
+        results, pagination = services.search_service.search_regex(
+            pattern=query,
+            page_size=page_size,
+            offset=offset,
+            path_filter=path,
+        )
 
     # Convert file paths to native platform format
     native_results = _convert_paths_to_native(results)
@@ -502,97 +481,14 @@ async def search_semantic_impl(
     response = cast(
         SearchResponse, {"results": native_results, "pagination": pagination}
     )
-    return limit_response_size(response, max_response_tokens)
+    return limit_response_size(response)
 
 
 @register_tool(
-    description="Get database statistics including file, chunk, and embedding counts",
-    requires_embeddings=False,
-    name="get_stats",
-)
-async def get_stats_impl(
-    services: DatabaseServices, scan_progress: dict | None = None
-) -> dict[str, Any]:
-    """Core stats implementation with scan progress.
-
-    Args:
-        services: Database services bundle
-        scan_progress: Optional scan progress from MCPServerBase
-
-    Returns:
-        Dict with database statistics and scan progress
-    """
-    # Ensure DB connection for stats in lazy-connect scenarios
-    try:
-        if services and not services.provider.is_connected:
-            services.provider.connect()
-    except Exception:
-        # Best-effort: if connect fails, get_stats may still work for providers
-        # that lazy-init internally.
-        pass
-    stats: dict[str, Any] = services.provider.get_stats()
-
-    # Map provider field names to MCP API field names
-    result = {
-        "total_files": stats.get("files", 0),
-        "total_chunks": stats.get("chunks", 0),
-        "total_embeddings": stats.get("embeddings", 0),
-        "database_size_mb": stats.get("size_mb", 0),
-        "total_providers": stats.get("providers", 0),
-    }
-
-    # Add scan progress if available
-    if scan_progress:
-        result["initial_scan"] = {
-            "is_scanning": scan_progress.get("is_scanning", False),
-            "files_processed": scan_progress.get("files_processed", 0),
-            "chunks_created": scan_progress.get("chunks_created", 0),
-            "started_at": scan_progress.get("scan_started_at"),
-            "completed_at": scan_progress.get("scan_completed_at"),
-            "error": scan_progress.get("scan_error"),
-        }
-
-    return result
-
-
-@register_tool(
-    description="Check server health status",
-    requires_embeddings=False,
-    name="health_check",
-)
-async def health_check_impl(
-    services: DatabaseServices, embedding_manager: EmbeddingManager
-) -> HealthStatus:
-    """Core health check implementation.
-
-    Args:
-        services: Database services bundle
-        embedding_manager: Embedding manager instance
-
-    Returns:
-        Dict with health status information
-    """
-    health_status = {
-        "status": "healthy",
-        "version": __version__,
-        "database_connected": services is not None and services.provider.is_connected,
-        "embedding_providers": embedding_manager.list_providers()
-        if embedding_manager
-        else [],
-    }
-
-    return cast(HealthStatus, health_status)
-
-
-@register_tool(
-    description=(
-        "Perform deep code research to answer complex questions about your codebase. "
-        "Use this tool when you need to understand architecture, discover existing "
-        "implementations, trace relationships between components, or find patterns "
-        "across multiple files. Returns comprehensive markdown analysis. Synthesis "
-        "budgets scale automatically based on repository size."
-    ),
+    description=CODE_RESEARCH_DESCRIPTION,
     requires_embeddings=True,
+    requires_llm=True,
+    requires_reranker=True,
     name="code_research",
 )
 async def deep_research_impl(
