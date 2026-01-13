@@ -4,6 +4,7 @@ Coordinates shard operations including search, insert, delete, and maintenance.
 Uses derived state architecture - metrics computed from DuckDB and USearch files.
 """
 
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -26,6 +27,31 @@ KMEANS_SAMPLE_SIZE = 512
 def _parse_uuid(value: Any) -> UUID:
     """Parse UUID from DuckDB result (handles both UUID objects and strings)."""
     return value if isinstance(value, UUID) else UUID(value)
+
+
+@contextmanager
+def _transaction(conn: Any):
+    """Execute a block within an explicit DuckDB transaction.
+
+    DuckDB auto-commits each statement by default. This context manager
+    ensures atomicity for multi-statement operations like split/merge.
+
+    Args:
+        conn: DuckDB connection
+
+    Yields:
+        None
+
+    Raises:
+        Any exception from the wrapped block (after rollback)
+    """
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        yield
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
 
 
 class ShardManager:
@@ -1064,46 +1090,49 @@ class ShardManager:
             logger.debug(f"Shard {shard_id} cannot be split into multiple clusters")
             return False
 
-        # Transaction: create child shards, reassign embeddings, delete parent
+        # Two-phase split: DuckDB FK checks use committed state, so we must commit
+        # the UPDATE before DELETE will succeed. If phase 2 fails, fix_pass cleans up.
         try:
             table_name = f"embeddings_{dims}"
 
-            # Create child shards (file_path derived at runtime per spec I14)
-            child_ids: list[UUID] = []
-            for cluster_label in sorted(clusters.keys()):
-                child_id = uuid4()
-                child_ids.append(child_id)
+            # Phase 1 (transactional): Create children + reassign embeddings
+            with _transaction(conn):
+                # Create child shards (file_path derived at runtime per spec I14)
+                child_ids: list[UUID] = []
+                for cluster_label in sorted(clusters.keys()):
+                    child_id = uuid4()
+                    child_ids.append(child_id)
 
-                conn.execute(
-                    """
-                    INSERT INTO vector_shards
-                        (shard_id, dims, provider, model, quantization)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    [
-                        str(child_id),
-                        dims,
-                        shard["provider"],
-                        shard["model"],
-                        shard.get("quantization", self.config.default_quantization),
-                    ],
-                )
+                    conn.execute(
+                        """
+                        INSERT INTO vector_shards
+                            (shard_id, dims, provider, model, quantization)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        [
+                            str(child_id),
+                            dims,
+                            shard["provider"],
+                            shard["model"],
+                            shard.get("quantization", self.config.default_quantization),
+                        ],
+                    )
 
-            # Reassign embeddings to child shards
-            for cluster_label, emb_ids in clusters.items():
-                child_id = child_ids[cluster_label]
-                # Batch update for efficiency
-                placeholders = ",".join(["?"] * len(emb_ids))
-                conn.execute(
-                    f"""
-                    UPDATE {table_name}
-                    SET shard_id = ?
-                    WHERE id IN ({placeholders})
-                    """,
-                    [str(child_id)] + emb_ids,
-                )
+                # Reassign embeddings to child shards
+                for cluster_label, emb_ids in clusters.items():
+                    child_id = child_ids[cluster_label]
+                    # Batch update for efficiency
+                    placeholders = ",".join(["?"] * len(emb_ids))
+                    conn.execute(
+                        f"""
+                        UPDATE {table_name}
+                        SET shard_id = ?
+                        WHERE id IN ({placeholders})
+                        """,
+                        [str(child_id)] + emb_ids,
+                    )
 
-            # Delete parent shard record
+            # Phase 2 (post-commit): Delete parent shard now that FK references are gone
             conn.execute(
                 "DELETE FROM vector_shards WHERE shard_id = ?",
                 [str(shard_id)],
@@ -1114,7 +1143,6 @@ class ShardManager:
                 f"{[str(cid)[:8] for cid in child_ids]}"
             )
 
-            # Remove parent shard file if exists
             if file_path.exists():
                 file_path.unlink()
                 logger.debug(f"Removed parent shard file: {file_path}")
@@ -1251,27 +1279,29 @@ class ShardManager:
 
             assignments[best_target].append(emb_id)
 
-        # Transaction: batch update by target, delete source shard
+        # Two-phase merge: DuckDB FK checks use committed state, so we must commit
+        # the UPDATE before DELETE will succeed. If phase 2 fails, fix_pass cleans up.
         try:
             table_name = f"embeddings_{dims}"
 
-            # Batch update embeddings per target shard
-            for target_id, emb_ids in assignments.items():
-                if not emb_ids:
-                    continue
+            # Phase 1 (transactional): Reassign embeddings to targets
+            with _transaction(conn):
+                for target_id, emb_ids in assignments.items():
+                    if not emb_ids:
+                        continue
 
-                placeholders = ",".join(["?" for _ in emb_ids])
-                conn.execute(
-                    f"""
-                    UPDATE {table_name}
-                    SET shard_id = ?
-                    WHERE id IN ({placeholders})
-                    """,
-                    [str(target_id), *emb_ids],
-                )
-                logger.debug(f"Routed {len(emb_ids)} embeddings to target {target_id}")
+                    placeholders = ",".join(["?" for _ in emb_ids])
+                    conn.execute(
+                        f"""
+                        UPDATE {table_name}
+                        SET shard_id = ?
+                        WHERE id IN ({placeholders})
+                        """,
+                        [str(target_id), *emb_ids],
+                    )
+                    logger.debug(f"Routed {len(emb_ids)} embeddings to target {target_id}")
 
-            # Delete source shard record
+            # Phase 2 (post-commit): Delete source shard now that FK references are gone
             conn.execute(
                 "DELETE FROM vector_shards WHERE shard_id = ?",
                 [str(shard_id)],
@@ -1280,7 +1310,6 @@ class ShardManager:
             summary = {str(t)[:8]: len(ids) for t, ids in assignments.items() if ids}
             logger.info(f"Merged shard {shard_id} -> {summary}")
 
-            # Remove source shard file if exists
             file_path = self._shard_path(shard_id)
             if file_path.exists():
                 file_path.unlink()

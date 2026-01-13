@@ -27,6 +27,33 @@ DEFAULT_EXPANSION_ADD = 128
 DEFAULT_EXPANSION_SEARCH = 64
 
 
+def _prepare_query_for_cosine(query: np.ndarray) -> np.ndarray:
+    """Prepare query vector for cosine similarity search on quantized indexes.
+
+    For i8 quantization with cosine metric, usearch internally:
+    1. Normalizes vectors to unit length
+    2. Scales to [-127, 127] range
+
+    The Indexes (multi-index) class may not apply this transformation
+    consistently, so we pre-normalize and ensure proper memory layout.
+
+    Args:
+        query: Query vector (any float dtype)
+
+    Returns:
+        C-contiguous float32 array, unit normalized
+    """
+    # Ensure C-contiguous float32 (required by usearch SIMD)
+    query = np.ascontiguousarray(query, dtype=np.float32)
+
+    # Unit normalize for cosine metric alignment
+    norm = np.linalg.norm(query)
+    if norm > 0:
+        query = query / norm
+
+    return query
+
+
 def _get_scalar_kind(quantization: str) -> ScalarKind:
     """Convert quantization string to USearch ScalarKind."""
     mapping = {
@@ -133,7 +160,7 @@ def multi_search(
 
     Args:
         paths: List of paths to .usearch index files
-        query: Query vector
+        query: Query vector (will be normalized for cosine similarity)
         k: Number of nearest neighbors to return
 
     Returns:
@@ -141,6 +168,9 @@ def multi_search(
     """
     if not paths:
         return []
+
+    # Prepare query for quantized cosine search
+    query = _prepare_query_for_cosine(query)
 
     # Open indexes as views for efficient access
     # Note: usearch stubs incorrectly expect PathLike, but implementation needs str
@@ -221,6 +251,9 @@ def get_medoid(index: Index) -> tuple[int, np.ndarray]:
     # Get sample vectors and compute mean
     sample_vecs = np.array([index[k] for k in sample_keys], dtype=np.float32)
     mean_vec = sample_vecs.mean(axis=0)
+
+    # Normalize mean vector for cosine search on quantized index
+    mean_vec = _prepare_query_for_cosine(mean_vec)
 
     # Search for nearest actual vector to mean - O(log n) via HNSW
     results = index.search(mean_vec, count=1)
