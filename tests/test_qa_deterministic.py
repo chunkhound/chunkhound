@@ -24,7 +24,7 @@ from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 from chunkhound.mcp_server.tools import execute_tool
 from .test_utils import get_api_key_for_tests
-from tests.utils.windows_compat import get_fs_event_timeout
+from tests.utils.windows_compat import get_fs_event_timeout, is_windows, is_ci
 
 
 class TestQADeterministic:
@@ -72,9 +72,9 @@ class TestQADeterministic:
         services = create_services(db_path, config)
         services.provider.connect()
 
-
-        # Initialize realtime indexing service
-        realtime_service = RealtimeIndexingService(services, config)
+        # Use polling on Windows CI where watchdog's ReadDirectoryChangesW is unreliable
+        force_polling = is_windows() and is_ci()
+        realtime_service = RealtimeIndexingService(services, config, force_polling=force_polling)
         await realtime_service.start(watch_dir)
         
         # Wait for initial scan
