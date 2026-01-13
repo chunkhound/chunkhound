@@ -49,7 +49,7 @@ from chunkhound.core.config.config import Config
 from chunkhound.version import __version__
 
 from .base import MCPServerBase
-from .common import handle_tool_call
+from .common import handle_tool_call, has_reranker_support
 from .tools import TOOL_REGISTRY
 
 # CRITICAL: Disable ALL logging to prevent JSON-RPC corruption
@@ -218,6 +218,16 @@ class StdioMCPServer(MCPServerBase):
                 if tool.requires_embeddings and (
                     not self.embedding_manager
                     or not self.embedding_manager.list_providers()
+                ):
+                    continue
+
+                # Skip LLM-dependent tools if no LLM configured
+                if tool.requires_llm and not self.llm_manager:
+                    continue
+
+                # Skip reranker-dependent tools if reranker not available
+                if tool.requires_reranker and not has_reranker_support(
+                    self.embedding_manager
                 ):
                     continue
 

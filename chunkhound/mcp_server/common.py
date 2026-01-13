@@ -24,6 +24,24 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
+def has_reranker_support(embedding_manager: EmbeddingManager | None) -> bool:
+    """Check if embedding manager has reranker support available.
+
+    Args:
+        embedding_manager: Embedding manager to check
+
+    Returns:
+        True if reranker support is available, False otherwise
+    """
+    if not embedding_manager:
+        return False
+    try:
+        provider = embedding_manager.get_provider()
+        return hasattr(provider, "supports_reranking") and provider.supports_reranking()
+    except Exception:
+        return False
+
+
 class MCPError(Exception):
     """Base exception for MCP operations."""
 
@@ -169,10 +187,14 @@ async def handle_tool_call(
         if tool_name not in TOOL_REGISTRY:
             raise ValueError(f"Unknown tool: {tool_name}")
 
-        # Check embedding requirements
+        # Check capability requirements
         tool = TOOL_REGISTRY[tool_name]
         if tool.requires_embeddings and not embedding_manager:
             raise ValueError(f"Tool {tool_name} requires embedding provider")
+        if tool.requires_llm and not llm_manager:
+            raise ValueError(f"Tool {tool_name} requires LLM provider")
+        if tool.requires_reranker and not has_reranker_support(embedding_manager):
+            raise ValueError(f"Tool {tool_name} requires reranker support")
 
         # Parse arguments (handles both string and typed values)
         parsed_args = parse_mcp_arguments(arguments)
