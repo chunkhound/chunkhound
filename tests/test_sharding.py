@@ -1598,6 +1598,348 @@ class TestKMeansSplitClustering:
         finally:
             db_provider.disconnect()
 
+    def test_kmeans_uses_sample_for_large_shard(
+        self,
+        tmp_path: Path,
+        generator: SyntheticEmbeddingGenerator,
+    ) -> None:
+        """Verify that _kmeans_fallback samples vectors for centroid discovery.
+
+        With 2500 vectors and sample_size = min(512, split_threshold//10) = 200,
+        only 200 vectors should be used for KMeans fitting, not all 2500.
+        """
+        from unittest.mock import patch
+
+        # Create fresh DB provider for this test
+        db_path = tmp_path / "sample_kmeans_test.duckdb"
+        db_provider = MockDBProvider(db_path)
+
+        # Create shard directory
+        shard_dir = tmp_path / "shards"
+        shard_dir.mkdir(exist_ok=True)
+
+        # Create ShardManager with split_threshold=2000
+        # sample_size = min(512, 2000//10) = min(512, 200) = 200
+        config = ShardingConfig(
+            split_threshold=2000,
+            merge_threshold=200,
+            compaction_threshold=0.20,
+            incremental_sync_threshold=0.10,
+            quality_threshold=0.95,
+            shard_similarity_threshold=0.1,
+        )
+
+        shard_manager = ShardManager(
+            db_provider=db_provider,
+            shard_dir=shard_dir,
+            config=config,
+        )
+
+        try:
+            # Create initial shard
+            shard_id = uuid4()
+            db_provider.connection.execute(
+                """
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
+                """,
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
+            )
+
+            # Insert 2500 vectors
+            vector_count = 2500
+            vectors = [
+                generator.generate_hash_seeded(f"sample_kmeans_doc_{i}")
+                for i in range(vector_count)
+            ]
+            insert_embeddings_to_db(db_provider, vectors, shard_id)
+
+            # Patch KMeans to capture the number of vectors it's fitted on
+            original_kmeans = __import__("sklearn.cluster", fromlist=["KMeans"]).KMeans
+            fitted_samples_count = []
+
+            class MockKMeans:
+                def __init__(self, n_clusters, n_init="auto"):
+                    self._kmeans = original_kmeans(n_clusters=n_clusters, n_init=n_init)
+
+                def fit(self, data):  # noqa: N805
+                    fitted_samples_count.append(len(data))
+                    return self._kmeans.fit(data)
+
+                @property
+                def cluster_centers_(self):
+                    return self._kmeans.cluster_centers_
+
+            with patch(
+                "chunkhound.providers.database.shard_manager.KMeans", MockKMeans
+            ):
+                # Call _kmeans_fallback directly
+                shard = {
+                    "shard_id": str(shard_id),
+                    "dims": TEST_DIMS,
+                    "provider": "test",
+                    "model": "test-model",
+                }
+                result = shard_manager._kmeans_fallback(
+                    shard, db_provider.connection, n_clusters=2
+                )
+
+            # Verify KMeans was called with sample size, not full dataset
+            assert len(fitted_samples_count) == 1, "KMeans should be called once"
+            actual_sample_size = fitted_samples_count[0]
+            expected_sample_size = min(512, config.split_threshold // 10)  # 200
+            assert actual_sample_size == expected_sample_size, (
+                f"KMeans fitted on {actual_sample_size} samples, "
+                f"expected {expected_sample_size}"
+            )
+            assert actual_sample_size < vector_count, (
+                f"KMeans should use sample ({actual_sample_size}), "
+                f"not all vectors ({vector_count})"
+            )
+
+            # Verify all vectors got cluster assignments
+            assert len(result) == vector_count, (
+                f"Expected {vector_count} assignments, got {len(result)}"
+            )
+
+            # Verify assignments are valid cluster labels (0 or 1)
+            unique_labels = set(result.values())
+            assert unique_labels == {0, 1}, f"Expected labels {{0, 1}}, got {unique_labels}"
+
+        finally:
+            db_provider.disconnect()
+
+    def test_kmeans_small_shard_uses_all_vectors(
+        self,
+        tmp_path: Path,
+        generator: SyntheticEmbeddingGenerator,
+    ) -> None:
+        """Verify small shards use all vectors for centroid discovery.
+
+        When shard has fewer vectors than sample_size, all vectors should be
+        used for KMeans fitting.
+        """
+        from unittest.mock import patch
+
+        # Create fresh DB provider for this test
+        db_path = tmp_path / "small_shard_kmeans_test.duckdb"
+        db_provider = MockDBProvider(db_path)
+
+        # Create shard directory
+        shard_dir = tmp_path / "shards"
+        shard_dir.mkdir(exist_ok=True)
+
+        # Create ShardManager - sample_size = min(512, 2000//10) = 200
+        config = ShardingConfig(
+            split_threshold=2000,
+            merge_threshold=20,
+            compaction_threshold=0.20,
+            incremental_sync_threshold=0.10,
+            quality_threshold=0.95,
+            shard_similarity_threshold=0.1,
+        )
+
+        shard_manager = ShardManager(
+            db_provider=db_provider,
+            shard_dir=shard_dir,
+            config=config,
+        )
+
+        try:
+            # Create initial shard
+            shard_id = uuid4()
+            db_provider.connection.execute(
+                """
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
+                """,
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
+            )
+
+            # Insert only 50 vectors - less than sample_size of 200
+            vector_count = 50
+            vectors = [
+                generator.generate_hash_seeded(f"small_shard_doc_{i}")
+                for i in range(vector_count)
+            ]
+            insert_embeddings_to_db(db_provider, vectors, shard_id)
+
+            # Patch KMeans to capture the number of vectors it's fitted on
+            original_kmeans = __import__("sklearn.cluster", fromlist=["KMeans"]).KMeans
+            fitted_samples_count = []
+
+            class MockKMeans:
+                def __init__(self, n_clusters, n_init="auto"):
+                    self._kmeans = original_kmeans(n_clusters=n_clusters, n_init=n_init)
+
+                def fit(self, data):  # noqa: N805
+                    fitted_samples_count.append(len(data))
+                    return self._kmeans.fit(data)
+
+                @property
+                def cluster_centers_(self):
+                    return self._kmeans.cluster_centers_
+
+            with patch(
+                "chunkhound.providers.database.shard_manager.KMeans", MockKMeans
+            ):
+                # Call _kmeans_fallback directly
+                shard = {
+                    "shard_id": str(shard_id),
+                    "dims": TEST_DIMS,
+                    "provider": "test",
+                    "model": "test-model",
+                }
+                result = shard_manager._kmeans_fallback(
+                    shard, db_provider.connection, n_clusters=2
+                )
+
+            # Verify KMeans was called with ALL vectors (50), not sample_size (200)
+            assert len(fitted_samples_count) == 1, "KMeans should be called once"
+            sample_size = fitted_samples_count[0]
+            assert sample_size == vector_count, (
+                f"KMeans should use all {vector_count} vectors for small shard, "
+                f"but used {sample_size}"
+            )
+
+            # Verify all vectors got cluster assignments
+            assert len(result) == vector_count, (
+                f"Expected {vector_count} assignments, got {len(result)}"
+            )
+
+        finally:
+            db_provider.disconnect()
+
+    def test_kmeans_assignment_via_duckdb_sql(
+        self,
+        tmp_path: Path,
+        generator: SyntheticEmbeddingGenerator,
+    ) -> None:
+        """Verify cluster assignments use DuckDB SQL with array_cosine_distance.
+
+        After sampling and fitting KMeans, ALL vectors should be assigned
+        via SQL query (not Python iteration), and assignments should be
+        consistent with cosine distance to centroids.
+        """
+        # Create fresh DB provider for this test
+        db_path = tmp_path / "sql_assignment_test.duckdb"
+        db_provider = MockDBProvider(db_path)
+
+        # Create shard directory
+        shard_dir = tmp_path / "shards"
+        shard_dir.mkdir(exist_ok=True)
+
+        config = ShardingConfig(
+            split_threshold=2000,
+            merge_threshold=200,
+            compaction_threshold=0.20,
+            incremental_sync_threshold=0.10,
+            quality_threshold=0.95,
+            shard_similarity_threshold=0.1,
+        )
+
+        shard_manager = ShardManager(
+            db_provider=db_provider,
+            shard_dir=shard_dir,
+            config=config,
+        )
+
+        try:
+            # Create initial shard
+            shard_id = uuid4()
+            db_provider.connection.execute(
+                """
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
+                """,
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
+            )
+
+            # Create two distinct clusters of vectors
+            # Cluster 0: vectors close to [1, 0, 0, ...]
+            # Cluster 1: vectors close to [0, 1, 0, ...]
+            rng = np.random.default_rng(42)
+            cluster0_vectors = []
+            cluster1_vectors = []
+
+            base0 = np.zeros(TEST_DIMS, dtype=np.float32)
+            base0[0] = 1.0
+            base1 = np.zeros(TEST_DIMS, dtype=np.float32)
+            base1[1] = 1.0
+
+            for i in range(100):
+                # Cluster 0 vectors
+                noise = rng.standard_normal(TEST_DIMS).astype(np.float32) * 0.1
+                vec = base0 + noise
+                vec = vec / np.linalg.norm(vec)
+                cluster0_vectors.append(vec)
+
+                # Cluster 1 vectors
+                noise = rng.standard_normal(TEST_DIMS).astype(np.float32) * 0.1
+                vec = base1 + noise
+                vec = vec / np.linalg.norm(vec)
+                cluster1_vectors.append(vec)
+
+            # Insert all vectors
+            all_vectors = cluster0_vectors + cluster1_vectors
+            insert_embeddings_to_db(db_provider, all_vectors, shard_id)
+
+            # Get IDs for verification
+            table_name = f"embeddings_{TEST_DIMS}"
+            id_results = db_provider.connection.execute(
+                f"SELECT id FROM {table_name} WHERE shard_id = ? ORDER BY id",
+                [str(shard_id)],
+            ).fetchall()
+            all_ids = [row[0] for row in id_results]
+            cluster0_ids = set(all_ids[:100])
+            cluster1_ids = set(all_ids[100:])
+
+            # Call _kmeans_fallback
+            shard = {
+                "shard_id": str(shard_id),
+                "dims": TEST_DIMS,
+                "provider": "test",
+                "model": "test-model",
+            }
+            result = shard_manager._kmeans_fallback(
+                shard, db_provider.connection, n_clusters=2
+            )
+
+            # Verify all vectors got assignments
+            assert len(result) == 200, f"Expected 200 assignments, got {len(result)}"
+
+            # Verify clustering quality: vectors from same cluster should
+            # mostly get same label
+            cluster0_labels = [result[id_] for id_ in cluster0_ids]
+            cluster1_labels = [result[id_] for id_ in cluster1_ids]
+
+            # Count dominant label in each cluster
+            cluster0_dominant = max(set(cluster0_labels), key=cluster0_labels.count)
+            cluster1_dominant = max(set(cluster1_labels), key=cluster1_labels.count)
+
+            cluster0_purity = cluster0_labels.count(cluster0_dominant) / len(
+                cluster0_labels
+            )
+            cluster1_purity = cluster1_labels.count(cluster1_dominant) / len(
+                cluster1_labels
+            )
+
+            # With well-separated clusters, purity should be high
+            assert cluster0_purity > 0.9, (
+                f"Cluster 0 purity too low: {cluster0_purity:.2%}"
+            )
+            assert cluster1_purity > 0.9, (
+                f"Cluster 1 purity too low: {cluster1_purity:.2%}"
+            )
+
+            # Clusters should have different dominant labels
+            assert cluster0_dominant != cluster1_dominant, (
+                "Distinct clusters should have different labels"
+            )
+
+        finally:
+            db_provider.disconnect()
+
 
 class TestNPAAfterMerge:
     """Test I10: NPA (Nearest Point Assignment) After Merge.
@@ -2985,10 +3327,14 @@ class TestSplitMergeCycleProtection:
         shard_dir = tmp_path / "shards"
         shard_dir.mkdir(exist_ok=True)
 
-        # Use small thresholds for faster testing
+        # Use higher thresholds to ensure sample-based k-means works correctly.
+        # With split_threshold=2000, sample_size = min(512, 200) = 200 samples,
+        # which is sufficient for reliable centroid discovery.
+        split_threshold = 2000
+        merge_threshold = 200
         config = ShardingConfig(
-            split_threshold=TEST_SPLIT_THRESHOLD,  # 100
-            merge_threshold=TEST_MERGE_THRESHOLD,  # 20
+            split_threshold=split_threshold,
+            merge_threshold=merge_threshold,
             compaction_threshold=0.20,
             incremental_sync_threshold=0.10,
             quality_threshold=0.95,
@@ -3019,7 +3365,7 @@ class TestSplitMergeCycleProtection:
             # (random vectors don't naturally cluster and may produce unbalanced splits)
             clustered = generator.generate_clustered(
                 num_clusters=2,
-                per_cluster=TEST_SPLIT_THRESHOLD // 2,
+                per_cluster=split_threshold // 2,
                 separation=0.5,
             )
             vectors = [vec for vec, _cluster_id in clustered]
@@ -3037,9 +3383,9 @@ class TestSplitMergeCycleProtection:
                     f"SELECT COUNT(*) FROM embeddings_{TEST_DIMS} WHERE shard_id = ?",
                     [str(child_shard_id)],
                 ).fetchone()[0]
-                assert count >= TEST_MERGE_THRESHOLD, (
+                assert count >= merge_threshold, (
                     f"Child shard {child_shard_id} has {count} vectors, "
-                    f"below merge_threshold {TEST_MERGE_THRESHOLD}"
+                    f"below merge_threshold {merge_threshold}"
                 )
 
             # Record shard count before second fix_pass
