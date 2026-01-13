@@ -1,5 +1,6 @@
 """LanceDB provider implementation for ChunkHound - concrete database provider using LanceDB."""
 
+import json
 import os
 import time
 from datetime import datetime
@@ -72,6 +73,7 @@ def get_chunks_schema(embedding_dims: int | None = None) -> pa.Schema:
             ("provider", pa.string()),
             ("model", pa.string()),
             ("created_time", pa.float64()),
+            ("metadata", pa.string()),  # JSON-serialized chunk metadata (constants, etc.)
         ]
     )
 
@@ -117,6 +119,16 @@ def _deduplicate_by_id(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
             unique.append(result)
 
     return unique
+
+
+def _serialize_metadata(metadata: dict | None) -> str | None:
+    """Serialize chunk metadata dict to JSON string for storage."""
+    return json.dumps(metadata) if metadata else None
+
+
+def _deserialize_metadata(metadata_json: str | None) -> dict:
+    """Deserialize chunk metadata from JSON string."""
+    return json.loads(metadata_json) if metadata_json else {}
 
 
 def _escape_like_pattern(value: str) -> str:
@@ -744,6 +756,7 @@ class LanceDBProvider(SerialDatabaseProvider):
             "provider": "",
             "model": "",
             "created_time": time.time(),
+            "metadata": _serialize_metadata(chunk.metadata),
         }
 
         # Use PyArrow Table directly to avoid LanceDB DataFrame schema alignment bug
@@ -811,6 +824,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     "provider": "",
                     "model": "",
                     "created_time": time.time(),
+                    "metadata": _serialize_metadata(chunk.metadata),
                 }
                 chunk_data_list.append(chunk_data)
 
@@ -865,6 +879,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     chunk_type=ChunkType(result["chunk_type"]),
                     language=Language(result["language"]),
                     symbol=result["name"],
+                    metadata=_deserialize_metadata(result.get("metadata")),
                 )
             return result
         except Exception as e:
@@ -904,12 +919,85 @@ class LanceDBProvider(SerialDatabaseProvider):
                         chunk_type=ChunkType(result["chunk_type"]),
                         language=Language(result["language"]),
                         symbol=result["name"],
+                        metadata=_deserialize_metadata(result.get("metadata")),
                     )
                     for result in results
                 ]
             return results
         except Exception as e:
             logger.error(f"Error getting chunks by file ID: {e}")
+            return []
+
+    def get_chunks_in_range(
+        self, file_id: int, start_line: int, end_line: int
+    ) -> list[dict[str, Any]]:
+        """Get all chunks overlapping a line range (pattern from context_retriever.py)."""
+        return self._execute_in_db_thread_sync(
+            "get_chunks_in_range", file_id, start_line, end_line
+        )
+
+    def _executor_get_chunks_in_range(
+        self, conn: Any, state: dict[str, Any], file_id: int, start_line: int, end_line: int
+    ) -> list[dict[str, Any]]:
+        """Executor method for get_chunks_in_range - runs in DB thread.
+
+        Args:
+            file_id: ID of the file to search within
+            start_line: Start line of the range
+            end_line: End line of the range
+
+        Returns:
+            List of chunk dictionaries overlapping the range, ordered by start_line
+        """
+        if not self._chunks_table:
+            return []
+
+        try:
+            # Overlap condition: chunk overlaps if any of:
+            # - chunk start_line is within range
+            # - chunk end_line is within range
+            # - chunk spans the entire range
+            # Using LanceDB's SQL-like where clause with logical OR
+            where_clause = (
+                f"file_id = {file_id} AND ("
+                f"(start_line >= {start_line} AND start_line <= {end_line}) OR "
+                f"(end_line >= {start_line} AND end_line <= {end_line}) OR "
+                f"(start_line <= {start_line} AND end_line >= {end_line})"
+                f")"
+            )
+
+            results = self._chunks_table.search().where(where_clause).to_list()
+
+            # Deduplicate across fragments (critical for multi-result queries)
+            results = _deduplicate_by_id(results)
+
+            # Sort by start_line (LanceDB doesn't guarantee order from where clause)
+            results.sort(key=lambda x: x.get("start_line", 0))
+
+            # Convert to expected format with consistent field names
+            chunks = []
+            for result in results:
+                chunk_dict = {
+                    "id": result["id"],
+                    "file_id": result["file_id"],
+                    "chunk_type": result.get("chunk_type", ""),
+                    "symbol": result.get("name", ""),
+                    "code": result.get("content", ""),
+                    "start_line": result.get("start_line", 0),
+                    "end_line": result.get("end_line", 0),
+                    "start_byte": None,  # LanceDB chunks table doesn't store byte offsets
+                    "end_byte": None,
+                    "language": result.get("language", ""),
+                    "metadata": _deserialize_metadata(result.get("metadata")),
+                    "created_at": result.get("created_time"),
+                    "updated_at": None,  # LanceDB chunks table doesn't track updates
+                }
+                chunks.append(chunk_dict)
+
+            return chunks
+
+        except Exception as e:
+            logger.error(f"Error getting chunks in range for file {file_id}: {e}")
             return []
 
     def delete_file_chunks(self, file_id: int) -> None:
@@ -1051,6 +1139,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                             "provider": "",
                             "model": "",
                             "created_time": row.get("created_time", time.time()),
+                            "metadata": row.get("metadata"),  # Preserve existing metadata
                         }
                         chunks_to_restore.append(chunk_data)
 
@@ -1191,6 +1280,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                                 "provider": emb_data["provider"],
                                 "model": emb_data["model"],
                                 "created_time": row["created_time"],
+                                "metadata": row.get("metadata"),  # Preserve metadata
                             }
                         )
 
@@ -1534,6 +1624,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                         "chunk_type": chunk["chunk_type"],
                         "language": chunk["language"],
                         "name": chunk["name"],
+                        "metadata": _deserialize_metadata(chunk.get("metadata")),
                     }
                 )
 
@@ -1654,6 +1745,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     "file_path": file_path,  # Keep stored format
                     "language": result.get("language", ""),
                     "similarity": similarity,
+                    "metadata": _deserialize_metadata(result.get("metadata")),
                 }
                 formatted_results.append(formatted_result)
 
@@ -1813,6 +1905,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     "file_path": file_path,
                     "language": result.get("language", ""),
                     "score": similarity,  # Match DuckDB convention
+                    "metadata": _deserialize_metadata(result.get("metadata")),
                 })
 
             return formatted_results
@@ -1878,6 +1971,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     "end_line": result.get("end_line", 0),
                     "file_path": file_path,
                     "language": result.get("language", ""),
+                    "metadata": _deserialize_metadata(result.get("metadata")),
                 })
 
             pagination = {

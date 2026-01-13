@@ -110,6 +110,7 @@ class TreeProgressDisplay:
             "synthesis_complete": "✨",
             "main_complete": "🎉",
             "error": "❌",
+            "evidence_ledger": "📊",
         }
         return symbols.get(event_type, "•")
 
@@ -127,7 +128,16 @@ class TreeProgressDisplay:
 
         parts = []
         for key, value in metadata.items():
-            if key in ("chunks", "files", "children", "tokens", "queries", "symbols"):
+            if key in (
+                "chunks",
+                "files",
+                "children",
+                "tokens",
+                "queries",
+                "symbols",
+                "constants_count",
+                "facts_count",
+            ):
                 parts.append(f"{key}={value}")
             elif key == "max_completion_tokens":
                 parts.append(f"max_completion_tokens={value}")
@@ -196,6 +206,15 @@ class TreeProgressDisplay:
             # Write to output
             self.output.write(line)
             self.output.flush()
+
+            # Print evidence table on separate lines if present
+            if event.metadata.get("evidence_table"):
+                # Indent table to align with tree structure
+                table_indent = " " * (len(f"[{timestamp_str}] ") + len(tree_prefix))
+                for table_line in event.metadata["evidence_table"].split("\n"):
+                    if table_line.strip():  # Skip empty lines
+                        self.output.write(f"{table_indent}{table_line}\n")
+                self.output.flush()
 
     def __enter__(self) -> "TreeProgressDisplay":
         """Enter context manager."""

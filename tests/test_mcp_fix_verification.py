@@ -1,15 +1,12 @@
-"""Test to verify the MCP server initialization fix works correctly.
+"""Test to verify MCP server non-blocking initialization architecture.
 
-This test verifies that the server now responds quickly even with large directories,
-and that scan progress is available through the stats tool.
+Verifies that initialization returns before directory scanning completes
+(non-blocking) and that scan progress is available through the stats tool.
 """
 
 import asyncio
 import json
 import os
-import tempfile
-import time
-from pathlib import Path
 
 import pytest
 from tests.utils import SubprocessJsonRpcClient
@@ -20,19 +17,20 @@ class TestMCPFixVerification:
     """Test MCP server initialization fix."""
 
     @pytest.mark.asyncio
-    async def test_mcp_responds_quickly_with_large_directory(self):
-        """Test that MCP server now responds quickly even with large directories.
-        
-        This verifies our fix works - the server should respond to initialize
-        within a few seconds even with a large directory.
+    async def test_mcp_initialization_is_non_blocking(self):
+        """Test that MCP server initialization is non-blocking.
+
+        Verifies the architectural invariant: init must return BEFORE directory
+        scanning completes. Uses observable state (is_scanning == True) rather
+        than flaky timing assertions.
         """
         with windows_safe_tempdir() as temp_path:
-            
-            # Create a moderately large directory to test responsiveness
-            for i in range(100):  # Enough files to potentially cause delay
-                subdir = temp_path / f"module_{i // 10}"
+
+            # Create enough files that scanning takes meaningful time
+            for i in range(200):
+                subdir = temp_path / f"module_{i // 20}"
                 subdir.mkdir(exist_ok=True)
-                
+
                 test_file = subdir / f"file_{i}.py"
                 test_file.write_text(f"""
 def function_{i}():
@@ -41,22 +39,22 @@ def function_{i}():
 
 class Class_{i}:
     '''Class {i} for testing.'''
-    
+
     def method_{i}(self):
         return "result_{i}"
 """)
-            
+
             # Create minimal config
             config_path = temp_path / ".chunkhound.json"
             db_path = temp_path / ".chunkhound" / "test.db"
             db_path.parent.mkdir(exist_ok=True)
-            
+
             config = {
                 "database": {"path": str(db_path), "provider": "duckdb"},
                 "indexing": {"include": ["*.py"]}
             }
             config_path.write_text(json.dumps(config))
-            
+
             # Use database cleanup context to ensure proper resource management
             with database_cleanup_context():
                 # Start MCP server
@@ -76,9 +74,7 @@ class Class_{i}:
                 await client.start()
 
                 try:
-                    start_time = time.time()
-
-                    # Send initialize request (increase timeout for CI environments)
+                    # Initialize server
                     init_result = await client.send_request(
                         "initialize",
                         {
@@ -86,19 +82,38 @@ class Class_{i}:
                             "capabilities": {},
                             "clientInfo": {"name": "test", "version": "1.0"}
                         },
-                        timeout=10.0
+                        timeout=30.0
                     )
-
-                    response_time = time.time() - start_time
-
-                    # Verify quick response
-                    assert response_time < 5.0, f"Server took {response_time:.2f} seconds to respond (should be < 5s)"
 
                     # Verify response structure
                     assert "serverInfo" in init_result, f"No serverInfo in result: {init_result}"
                     assert init_result["serverInfo"]["name"] == "ChunkHound Code Search"
 
-                    print(f"✅ Server responded in {response_time:.2f} seconds")
+                    # Send initialized notification to enable tool calls
+                    await client.send_notification("notifications/initialized")
+
+                    # Query stats IMMEDIATELY after init to check scan state
+                    stats_result = await client.send_request(
+                        "tools/call",
+                        {"name": "get_stats", "arguments": {}},
+                        timeout=5.0
+                    )
+
+                    stats_data = json.loads(stats_result["content"][0]["text"])
+                    scan_info = stats_data["initial_scan"]
+
+                    # THE REAL INVARIANT: init returned before scan completed
+                    # Valid states proving non-blocking:
+                    # 1. Scan in progress (is_scanning=True)
+                    # 2. Scan not yet started (started_at=None) - even more non-blocking!
+                    scan_not_completed = (
+                        scan_info["is_scanning"] is True or
+                        scan_info["started_at"] is None
+                    )
+                    assert scan_not_completed, (
+                        f"Init must return before scan completes (non-blocking architecture). "
+                        f"Scan appears to have completed: {scan_info}"
+                    )
 
                 finally:
                     await client.close()

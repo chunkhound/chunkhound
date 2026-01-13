@@ -17,11 +17,10 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.database_factory import DatabaseServices
-from chunkhound.services.research.models import (
+from chunkhound.services.research.shared.models import (
     ENABLE_SMART_BOUNDARIES,
     EXTRA_CONTEXT_TOKENS,
     MAX_BOUNDARY_EXPANSION_LINES,
-    MAX_FILE_CONTENT_TOKENS,
     TOKEN_BUDGET_PER_FILE,
 )
 
@@ -40,17 +39,18 @@ class FileReader:
     async def read_files_with_budget(
         self, chunks: list[dict[str, Any]], llm_manager: Any, max_tokens: int | None = None
     ) -> dict[str, str]:
-        """Read files containing chunks within token budget (Step 8).
+        """Read files containing chunks within optional token budget.
 
-        Per algorithm: Limit overall data to adaptive budget (or legacy MAX_FILE_CONTENT_TOKENS).
+        When max_tokens is None (default), reads all files without budget constraint.
+        Use this after elbow detection has already filtered chunks by relevance.
 
         Args:
             chunks: List of chunks
             llm_manager: LLM manager for token estimation
-            max_tokens: Maximum tokens for file contents (uses adaptive budget if provided)
+            max_tokens: Maximum tokens for file contents (None = unlimited)
 
         Returns:
-            Dictionary mapping file paths to contents (limited to budget)
+            Dictionary mapping file paths to contents
         """
         # Group chunks by file
         files_to_chunks: dict[str, list[dict[str, Any]]] = {}
@@ -61,8 +61,7 @@ class FileReader:
                     files_to_chunks[file_path] = []
                 files_to_chunks[file_path].append(chunk)
 
-        # Use adaptive budget or fall back to legacy constant
-        budget_limit = max_tokens if max_tokens is not None else MAX_FILE_CONTENT_TOKENS
+        budget_limit = max_tokens  # None means unlimited
 
         # Read files with budget (track total tokens per algorithm spec)
         file_contents: dict[str, str] = {}
@@ -73,8 +72,8 @@ class FileReader:
         base_dir = self._db_services.provider.get_base_directory()
 
         for file_path, file_chunks in files_to_chunks.items():
-            # Check if we've hit the overall token limit
-            if total_tokens >= budget_limit:
+            # Check if we've hit the overall token limit (skip if unlimited)
+            if budget_limit is not None and total_tokens >= budget_limit:
                 logger.debug(
                     f"Reached token limit ({budget_limit:,}), stopping file reading"
                 )
@@ -102,8 +101,8 @@ class FileReader:
                 estimated_tokens = llm.estimate_tokens(content)
 
                 if estimated_tokens <= budget:
-                    # File fits in budget, check against overall limit
-                    if total_tokens + estimated_tokens <= budget_limit:
+                    # File fits in budget, check against overall limit (skip if unlimited)
+                    if budget_limit is None or total_tokens + estimated_tokens <= budget_limit:
                         file_contents[file_path] = content
                         total_tokens += estimated_tokens
                     else:
@@ -144,8 +143,8 @@ class FileReader:
                     combined_chunks = "\n\n...\n\n".join(chunk_contents)
                     chunk_tokens = llm.estimate_tokens(combined_chunks)
 
-                    # Check against overall token limit
-                    if total_tokens + chunk_tokens <= budget_limit:
+                    # Check against overall token limit (skip if unlimited)
+                    if budget_limit is None or total_tokens + chunk_tokens <= budget_limit:
                         file_contents[file_path] = combined_chunks
                         total_tokens += chunk_tokens
                     else:
@@ -166,19 +165,21 @@ class FileReader:
         # FAIL-FAST: Validate that at least some files were loaded if chunks were provided
         # This prevents silent data loss where searches find chunks but synthesis gets no code
         if chunks and not file_contents:
+            budget_desc = "unlimited" if budget_limit is None else f"{budget_limit:,} tokens"
             raise RuntimeError(
                 f"DATA LOSS DETECTED: Found {len(chunks)} chunks across {len(files_to_chunks)} files "
                 f"but failed to read ANY file contents. "
                 f"Possible causes: "
-                f"(1) Token budget exhausted ({budget_limit:,} tokens insufficient), "
+                f"(1) Token budget exhausted ({budget_desc}), "
                 f"(2) Files not found at base_directory: {base_dir}, "
                 f"(3) All file read operations failed. "
                 f"Check logs above for file-specific errors."
             )
 
+        limit_desc = "unlimited" if budget_limit is None else f"{budget_limit:,}"
         logger.debug(
             f"File reading complete: Loaded {len(file_contents)} files with {total_tokens:,} tokens "
-            f"(limit: {budget_limit:,})"
+            f"(limit: {limit_desc})"
         )
         return file_contents
 

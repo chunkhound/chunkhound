@@ -19,6 +19,7 @@ logic for mapping Vue template AST nodes to semantic chunks.
 - Event handler expressions are captured but not analyzed
 """
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from chunkhound.core.types.common import Language
@@ -490,3 +491,24 @@ class VueTemplateMapping(BaseMapping):
             metadata["comment_type"] = "template_comment"
 
         return metadata
+
+    def resolve_import_path(
+        self,
+        import_text: str,
+        base_dir: Path,
+        source_file: Path,
+    ) -> Path | None:
+        """Vue templates don't have imports.
+
+        Imports in Vue SFCs are in the <script> section,
+        handled by VueMapping (vue.py), not VueTemplateMapping.
+
+        Args:
+            import_text: The raw import statement text
+            base_dir: Project root directory
+            source_file: File containing the import
+
+        Returns:
+            None - templates don't have imports
+        """
+        return None

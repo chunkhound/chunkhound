@@ -37,6 +37,14 @@ class DatabaseProvider(Protocol):
         """Database connection path or identifier."""
         ...
 
+    def get_base_directory(self) -> Path:
+        """Get the base directory for path normalization.
+
+        Returns:
+            Path to the base directory used for resolving relative file paths.
+        """
+        ...
+
     @property
     def is_connected(self) -> bool:
         """Check if database connection is active."""
@@ -272,6 +280,23 @@ class DatabaseProvider(Protocol):
 
         Returns:
             Tuple of (results, pagination_metadata)
+        """
+        ...
+
+    def get_chunks_in_range(
+        self, file_id: int, start_line: int, end_line: int
+    ) -> list[dict[str, Any]]:
+        """Get chunks overlapping a line range within a file.
+
+        Used for window expansion in research to find neighboring context.
+
+        Args:
+            file_id: ID of the file to search within
+            start_line: Start of line range (1-indexed)
+            end_line: End of line range (1-indexed)
+
+        Returns:
+            List of chunk dictionaries overlapping the range
         """
         ...
 

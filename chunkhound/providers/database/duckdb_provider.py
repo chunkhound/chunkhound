@@ -11,6 +11,7 @@
 - WAL mode: Automatic checkpointing, 1GB limit
 """
 
+import json
 import os
 import re
 import threading
@@ -420,6 +421,15 @@ class DuckDBProvider(SerialDatabaseProvider):
         logger.info("Creating DuckDB schema")
 
         try:
+            # Create schema_version table for tracking schema versions
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS schema_version (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    description TEXT
+                )
+            """)
+
             # Create sequence for files table
             conn.execute("CREATE SEQUENCE IF NOT EXISTS files_id_seq")
 
@@ -460,6 +470,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     start_byte INTEGER,
                     end_byte INTEGER,
                     language TEXT,
+                    metadata TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -504,6 +515,15 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Handle schema migrations for existing databases
             self._executor_migrate_schema(conn, state)
 
+            # Track schema version
+            current_version = self._get_schema_version(conn)
+            if current_version == 0:
+                conn.execute("""
+                    INSERT INTO schema_version (version, description)
+                    VALUES (1, 'Initial schema')
+                """)
+                logger.info("Schema version initialized to 1")
+
             logger.info(
                 "DuckDB schema created successfully with multi-dimension support"
             )
@@ -529,50 +549,100 @@ class DuckDBProvider(SerialDatabaseProvider):
                 )
 
                 # SQLite/DuckDB doesn't support DROP COLUMN directly, need to recreate table
-                # First, create a temporary table with the new schema
-                conn.execute("""
-                    CREATE TEMP TABLE chunks_new AS
-                    SELECT id, file_id, chunk_type, symbol, code, 
-                           start_line, end_line, start_byte, end_byte, 
-                           language, created_at, updated_at
-                    FROM chunks
-                """)
+                # Wrap in transaction to prevent data loss on failure
+                try:
+                    conn.execute("BEGIN TRANSACTION")
+                    state["transaction_active"] = True
 
-                # Drop the old table
-                conn.execute("DROP TABLE chunks")
+                    # First, create a temporary table with the new schema
+                    conn.execute("""
+                        CREATE TEMP TABLE chunks_new AS
+                        SELECT id, file_id, chunk_type, symbol, code,
+                               start_line, end_line, start_byte, end_byte,
+                               language, NULL AS metadata, created_at, updated_at
+                        FROM chunks
+                    """)
 
-                # Create the new table with correct schema
-                conn.execute("""
-                    CREATE TABLE chunks (
-                        id INTEGER PRIMARY KEY DEFAULT nextval('chunks_id_seq'),
-                        file_id INTEGER REFERENCES files(id),
-                        chunk_type TEXT NOT NULL,
-                        symbol TEXT,
-                        code TEXT NOT NULL,
-                        start_line INTEGER,
-                        end_line INTEGER,
-                        start_byte INTEGER,
-                        end_byte INTEGER,
-                        language TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
+                    # Drop the old table
+                    conn.execute("DROP TABLE chunks")
 
-                # Copy data back
-                conn.execute("""
-                    INSERT INTO chunks 
-                    SELECT * FROM chunks_new
-                """)
+                    # Create the new table with correct schema
+                    conn.execute("""
+                        CREATE TABLE chunks (
+                            id INTEGER PRIMARY KEY DEFAULT nextval('chunks_id_seq'),
+                            file_id INTEGER REFERENCES files(id),
+                            chunk_type TEXT NOT NULL,
+                            symbol TEXT,
+                            code TEXT NOT NULL,
+                            start_line INTEGER,
+                            end_line INTEGER,
+                            start_byte INTEGER,
+                            end_byte INTEGER,
+                            language TEXT,
+                            metadata TEXT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
 
-                # Drop the temporary table
-                conn.execute("DROP TABLE chunks_new")
+                    # Copy data back with explicit column list for safety
+                    conn.execute("""
+                        INSERT INTO chunks (
+                            id, file_id, chunk_type, symbol, code,
+                            start_line, end_line, start_byte, end_byte,
+                            language, metadata, created_at, updated_at
+                        )
+                        SELECT id, file_id, chunk_type, symbol, code,
+                               start_line, end_line, start_byte, end_byte,
+                               language, metadata, created_at, updated_at
+                        FROM chunks_new
+                    """)
+
+                    # Drop the temporary table
+                    conn.execute("DROP TABLE chunks_new")
+
+                    conn.execute("COMMIT")
+                    state["transaction_active"] = False
+                except Exception:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except Exception as rollback_error:
+                        logger.error(f"ROLLBACK failed during migration: {rollback_error}")
+                    state["transaction_active"] = False
+                    raise
 
                 # Recreate indexes (will be done in _executor_create_indexes)
                 logger.info("Successfully migrated chunks table schema")
 
+            # Add metadata column if it doesn't exist (for databases without size/signature migration)
+            conn.execute(
+                "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS metadata TEXT"
+            )
+
         except Exception as e:
-            logger.warning(f"Failed to migrate schema: {e}")
+            logger.error(f"Failed to migrate schema: {e}")
+            raise
+
+    def _get_schema_version(self, conn: Any) -> int:
+        """Get current schema version from database.
+
+        Returns 0 if schema_version table doesn't exist or is empty.
+        """
+        try:
+            # Check if table exists
+            result = conn.execute("""
+                SELECT COUNT(*) FROM information_schema.tables
+                WHERE table_name = 'schema_version'
+            """).fetchone()
+
+            if not result or result[0] == 0:
+                return 0
+
+            # Get max version
+            result = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+            return result[0] if result and result[0] is not None else 0
+        except Exception:
+            return 0
 
     def _get_all_embedding_tables(self) -> list[str]:
         """Get list of all embedding tables (dimension-specific) - delegate to connection manager."""
@@ -752,18 +822,34 @@ class DuckDBProvider(SerialDatabaseProvider):
         dims: int,
         metric: str,
     ) -> str:
-        """Executor method for drop_vector_index - runs in DB thread."""
-        index_name = f"hnsw_{provider}_{model}_{dims}_{metric}".replace(
+        """Executor method for drop_vector_index - runs in DB thread.
+
+        Handles both naming patterns:
+        - Custom: hnsw_{provider}_{model}_{dims}_{metric} (from create_vector_index)
+        - Standard: idx_hnsw_{dims} (from initial table creation)
+        """
+        # Custom index name pattern (from create_vector_index)
+        custom_index_name = f"hnsw_{provider}_{model}_{dims}_{metric}".replace(
             "-", "_"
         ).replace(".", "_")
+        # Standard index name pattern (from table creation)
+        standard_index_name = f"idx_hnsw_{dims}"
 
+        dropped_indexes = []
         try:
-            conn.execute(f"DROP INDEX IF EXISTS {index_name}")
-            logger.info(f"HNSW index {index_name} dropped successfully")
-            return index_name
+            # Try to drop custom index first
+            conn.execute(f"DROP INDEX IF EXISTS {custom_index_name}")
+            dropped_indexes.append(custom_index_name)
+
+            # Also try to drop standard index (created during table initialization)
+            conn.execute(f"DROP INDEX IF EXISTS {standard_index_name}")
+            dropped_indexes.append(standard_index_name)
+
+            logger.info(f"HNSW index drop attempted: {', '.join(dropped_indexes)}")
+            return custom_index_name  # Return primary index name for API consistency
 
         except Exception as e:
-            logger.error(f"Failed to drop HNSW index {index_name}: {e}")
+            logger.error(f"Failed to drop HNSW indexes: {e}")
             raise
 
     def get_existing_vector_indexes(self) -> list[dict[str, Any]]:
@@ -1238,6 +1324,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     chunk.start_byte,
                     chunk.end_byte,
                     chunk.language.value if chunk.language else None,
+                    json.dumps(chunk.metadata) if chunk.metadata else None,
                 )
             )
 
@@ -1254,7 +1341,8 @@ class DuckDBProvider(SerialDatabaseProvider):
                 end_line INTEGER,
                 start_byte INTEGER,
                 end_byte INTEGER,
-                language TEXT
+                language TEXT,
+                metadata TEXT
             )
         """)
         _t1 = _t.perf_counter()
@@ -1263,7 +1351,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         # Bulk insert into temp table
         conn.executemany(
             """
-            INSERT INTO temp_chunks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO temp_chunks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             chunk_data,
         )
@@ -1271,7 +1359,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         # Insert from temp to main table with RETURNING
         result = conn.execute("""
             INSERT INTO chunks (file_id, chunk_type, symbol, code, start_line, end_line,
-                              start_byte, end_byte, language)
+                              start_byte, end_byte, language, metadata)
             SELECT * FROM temp_chunks
             RETURNING id
         """)
@@ -1309,6 +1397,12 @@ class DuckDBProvider(SerialDatabaseProvider):
             "get_chunks_by_file_id", file_id, as_model
         )
 
+    def get_chunks_in_range(
+        self, file_id: int, start_line: int, end_line: int
+    ) -> list[dict]:
+        """Get all chunks overlapping a line range - delegate to chunk repository."""
+        return self._chunk_repository.get_chunks_in_range(file_id, start_line, end_line)
+
     def _executor_get_chunks_by_file_id(
         self, conn: Any, state: dict[str, Any], file_id: int, as_model: bool
     ) -> list[dict[str, Any] | Chunk]:
@@ -1316,7 +1410,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         results = conn.execute(
             """
             SELECT id, file_id, chunk_type, symbol, code, start_line, end_line,
-                   start_byte, end_byte, language, created_at, updated_at
+                   start_byte, end_byte, language, created_at, updated_at, metadata
             FROM chunks
             WHERE file_id = ?
             ORDER BY start_line, start_byte
@@ -1339,6 +1433,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 "language": row[9],
                 "created_at": row[10],
                 "updated_at": row[11],
+                "metadata": json.loads(row[12]) if row[12] else {},
             }
 
             if as_model:
@@ -1355,6 +1450,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     language=Language(chunk_dict["language"])
                     if chunk_dict["language"]
                     else None,
+                    metadata=chunk_dict["metadata"],
                 )
                 chunks.append(chunk)
             else:
@@ -1439,8 +1535,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         result = conn.execute(
             """
             INSERT INTO chunks (file_id, chunk_type, symbol, code, start_line, end_line,
-                              start_byte, end_byte, language)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              start_byte, end_byte, language, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
         """,
             [
@@ -1453,6 +1549,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 chunk.start_byte,
                 chunk.end_byte,
                 chunk.language.value if chunk.language else None,
+                json.dumps(chunk.metadata) if chunk.metadata else None,
             ],
         ).fetchone()
 
@@ -1465,7 +1562,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         return conn.execute(
             """
             SELECT id, file_id, chunk_type, symbol, code, start_line, end_line,
-                   start_byte, end_byte, language, created_at, updated_at
+                   start_byte, end_byte, language, created_at, updated_at, metadata
             FROM chunks WHERE id = ?
         """,
             [chunk_id],
@@ -1478,11 +1575,29 @@ class DuckDBProvider(SerialDatabaseProvider):
         return conn.execute(
             """
             SELECT id, file_id, chunk_type, symbol, code, start_line, end_line,
-                   start_byte, end_byte, language, created_at, updated_at
+                   start_byte, end_byte, language, created_at, updated_at, metadata
             FROM chunks WHERE file_id = ?
             ORDER BY start_line
         """,
             [file_id],
+        ).fetchall()
+
+    def _executor_get_chunks_in_range_query(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        file_id: int,
+        start_line: int,
+        end_line: int,
+        query: str,
+    ) -> list:
+        """Executor method for get_chunks_in_range query - runs in DB thread.
+
+        Executes the overlap query to find chunks that intersect with a line range.
+        """
+        return conn.execute(
+            query,
+            [file_id, start_line, end_line, start_line, end_line, start_line, end_line],
         ).fetchall()
 
     def _executor_update_chunk_query(
@@ -1546,13 +1661,20 @@ class DuckDBProvider(SerialDatabaseProvider):
         batch_size: int | None = None,
         connection=None,
     ) -> int:
-        """Insert multiple embedding vectors with HNSW index optimization - delegate to embedding repository.
+        """Insert multiple embedding vectors using executemany.
 
-        # OPTIMIZATION: Drops HNSW indexes for batches >50
-        # PERFORMANCE: 60s → 5s for 10k embeddings (12x speedup)
-        # RECOVERY: Indexes recreated after bulk insert
+        Note: This executor-based method does NOT implement HNSW index optimization.
+        For bulk inserts with HNSW drop/recreate optimization, use
+        EmbeddingRepository.insert_embeddings_batch directly.
+
+        Args:
+            embeddings_data: List of embedding dictionaries
+            batch_size: Optional batch size for chunked inserts
+            connection: Ignored (executor pattern uses internal connection)
+
+        Returns:
+            Number of embeddings inserted
         """
-        # Note: connection parameter is ignored in executor pattern
         return self._execute_in_db_thread_sync(
             "insert_embeddings_batch", embeddings_data, batch_size
         )
@@ -1564,7 +1686,10 @@ class DuckDBProvider(SerialDatabaseProvider):
         embeddings_data: list[dict],
         batch_size: int | None,
     ) -> int:
-        """Executor method for insert_embeddings_batch - runs in DB thread."""
+        """Executor method for insert_embeddings_batch - runs in DB thread.
+
+        Uses simple executemany for inserts. Does NOT manage HNSW indexes.
+        """
         if not embeddings_data:
             return 0
 
@@ -1761,7 +1886,7 @@ class DuckDBProvider(SerialDatabaseProvider):
     ) -> list[dict[str, Any]]:
         """Executor method for get_all_chunks_with_metadata - runs in DB thread."""
         query = """
-            SELECT 
+            SELECT
                 c.id as chunk_id,
                 c.file_id,
                 c.chunk_type,
@@ -1771,7 +1896,8 @@ class DuckDBProvider(SerialDatabaseProvider):
                 c.end_line,
                 c.language as chunk_language,
                 f.path as file_path,
-                f.language as file_language
+                f.language as file_language,
+                c.metadata
             FROM chunks c
             JOIN files f ON c.file_id = f.id
             ORDER BY f.path, c.start_line
@@ -1793,6 +1919,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     "chunk_language": row[7],
                     "file_path": row[8],  # Keep stored format
                     "file_language": row[9],
+                    "metadata": json.loads(row[10]) if row[10] else {},
                 }
             )
 
@@ -1914,7 +2041,8 @@ class DuckDBProvider(SerialDatabaseProvider):
                     c.end_line,
                     f.path as file_path,
                     f.language,
-                    array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) as similarity
+                    array_cosine_similarity(e.embedding, ?::FLOAT[{query_dims}]) as similarity,
+                    c.metadata
                 FROM {table_name} e
                 JOIN chunks c ON e.chunk_id = c.id
                 JOIN files f ON c.file_id = f.id
@@ -1978,6 +2106,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     "file_path": result[6],  # Keep stored format
                     "language": result[7],
                     "similarity": result[8],
+                    "metadata": json.loads(result[9]) if result[9] else {},
                 }
                 for result in results
             ]
@@ -2071,7 +2200,8 @@ class DuckDBProvider(SerialDatabaseProvider):
                     c.start_line,
                     c.end_line,
                     f.path as file_path,
-                    f.language
+                    f.language,
+                    c.metadata
                 FROM chunks c
                 JOIN files f ON c.file_id = f.id
                 WHERE {where_clause}
@@ -2092,6 +2222,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     "end_line": result[5],
                     "file_path": result[6],  # Keep stored format
                     "language": result[7],
+                    "metadata": json.loads(result[8]) if result[8] else {},
                 }
                 for result in results
             ]
@@ -2237,7 +2368,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Query for similar chunks (exclude the original chunk)
             # Cast the target embedding to match the table's embedding type
             query = f"""
-                SELECT 
+                SELECT
                     c.id as chunk_id,
                     c.symbol as name,
                     c.code as content,
@@ -2246,6 +2377,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     c.end_line,
                     f.path as file_path,
                     f.language,
+                    c.metadata,
                     array_cosine_distance(e.embedding, ?::{embedding_type}) as distance
                 FROM {table_name} e
                 JOIN chunks c ON e.chunk_id = c.id
@@ -2274,7 +2406,8 @@ class DuckDBProvider(SerialDatabaseProvider):
                     "end_line": result[5],
                     "file_path": result[6],  # Keep stored format
                     "language": result[7],
-                    "score": 1.0 - result[8],  # Convert distance to similarity score
+                    "metadata": json.loads(result[8]) if result[8] else {},
+                    "score": 1.0 - result[9],  # Convert distance to similarity score
                 }
                 for result in results
             ]

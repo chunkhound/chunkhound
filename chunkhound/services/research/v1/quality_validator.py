@@ -16,10 +16,10 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.llm_manager import LLMManager
-from chunkhound.services.research.models import (
-    REQUIRE_CITATIONS,
+from chunkhound.services.research.shared.models import (
     _CITATION_PATTERN,
     _CITATION_SEQUENCE_PATTERN,
+    REQUIRE_CITATIONS,
 )
 
 
@@ -247,7 +247,7 @@ class QualityValidator:
             "Timeout [5] and threshold [1][2][3]"
         """
 
-        def sort_sequence(match):
+        def sort_sequence(match: re.Match[str]) -> str:
             """Extract numbers, sort numerically, and reconstruct."""
             sequence = match.group(0)
             numbers = re.findall(r"\d+", sequence)

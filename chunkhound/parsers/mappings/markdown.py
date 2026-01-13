@@ -5,6 +5,7 @@ for mapping Markdown AST nodes to semantic chunks. Supports CommonMark syntax
 and GitHub Flavored Markdown extensions.
 """
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from chunkhound.core.types.common import ChunkType, Language
@@ -754,4 +755,13 @@ class MarkdownMapping(BaseMapping):
         if captures:
             return list(captures.values())[0]
 
+        return None
+
+    def resolve_import_path(
+        self,
+        import_text: str,
+        base_dir: Path,
+        source_file: Path
+    ) -> Path | None:
+        """Data formats don't have imports."""
         return None
