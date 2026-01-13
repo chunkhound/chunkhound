@@ -10,6 +10,7 @@ import pytest
 import shutil
 
 from chunkhound.core.config.config import Config
+from tests.utils.windows_compat import wait_for_indexed
 from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 
@@ -171,11 +172,8 @@ class TestRealtimeFailures:
         subdir_file = subdir / "nested.py"
         subdir_file.write_text("def nested(): pass")
         
-        await asyncio.sleep(2.0)
-        
-        # Check if nested file was detected
-        file_record = services.provider.get_file_by_path(str(subdir_file.resolve()))
-        assert file_record is not None, "Nested files should be detected by recursive monitoring"
+        found = await wait_for_indexed(services.provider, subdir_file)
+        assert found, "Nested files should be detected by recursive monitoring"
         
         await service.stop()
 

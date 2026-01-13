@@ -24,6 +24,7 @@ from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 from chunkhound.mcp_server.tools import execute_tool
 from .test_utils import get_api_key_for_tests
+from tests.utils.windows_compat import get_fs_event_timeout
 
 
 class TestQADeterministic:
@@ -344,7 +345,10 @@ function qaTestFunction() {
         
         # Wait for all files to be processed - poll until all files are in database
         expected_file_count = len(created_files)
-        max_wait = 60.0  # Maximum 60 seconds (allow time for embeddings)
+        # Wait for all files with longer timeout on Windows CI where
+        # ReadDirectoryChangesW can be unreliable with many files
+        base_timeout = get_fs_event_timeout() * 3  # Triple for many files
+        max_wait = max(60.0, base_timeout * expected_file_count // 2)
         poll_interval = 0.5
         elapsed = 0.0
 
