@@ -13,6 +13,7 @@ from subprocess import PIPE
 import pytest
 
 from tests.utils import SubprocessJsonRpcClient
+from tests.utils.windows_compat import is_windows, is_ci
 
 
 @pytest.mark.asyncio
@@ -141,6 +142,7 @@ async def test_mcp_server_handles_empty_directory_gracefully():
 
         try:
             # Step 1: Send initialize request and receive response
+            init_timeout = 15.0 if (is_windows() and is_ci()) else 5.0
             init_result = await client.send_request(
                 "initialize",
                 {
@@ -148,7 +150,7 @@ async def test_mcp_server_handles_empty_directory_gracefully():
                     "capabilities": {},
                     "clientInfo": {"name": "test", "version": "1.0"}
                 },
-                timeout=5.0
+                timeout=init_timeout
             )
 
             # Verify we got a valid response with correct structure
@@ -161,7 +163,8 @@ async def test_mcp_server_handles_empty_directory_gracefully():
             await client.send_notification("notifications/initialized")
 
             # Step 3: Test that server is now ready by requesting tools list
-            tools_result = await client.send_request("tools/list", timeout=5.0)
+            tools_timeout = 10.0 if (is_windows() and is_ci()) else 5.0
+            tools_result = await client.send_request("tools/list", timeout=tools_timeout)
 
             # Verify tools response
             assert "tools" in tools_result

@@ -17,6 +17,7 @@ from chunkhound.services.realtime_indexing_service import RealtimeIndexingServic
 from chunkhound.mcp_server.tools import execute_tool
 from chunkhound.embeddings import EmbeddingManager
 from .test_utils import get_api_key_for_tests
+from tests.utils.windows_compat import get_fs_event_timeout
 
 
 class TestMCPIntegration:
@@ -227,14 +228,20 @@ class StatsTestClass_{i}:
         pass
 """)
         
-        # Wait for all files to be processed
-        await asyncio.sleep(3.0)
-        
-        # Get updated stats directly from database provider
-        updated_stats = services.provider.get_stats()
-        updated_files = updated_stats.get('files', 0)
-        updated_chunks = updated_stats.get('chunks', 0)
-        
+        # Wait for files to be processed with polling
+        timeout = get_fs_event_timeout() * 1.5  # Extra margin for multiple files
+        deadline = time.monotonic() + timeout
+        updated_stats = None
+
+        while time.monotonic() < deadline:
+            updated_stats = services.provider.get_stats()
+            if updated_stats.get('files', 0) > initial_files:
+                break
+            await asyncio.sleep(0.3)
+
+        updated_files = updated_stats.get('files', 0) if updated_stats else 0
+        updated_chunks = updated_stats.get('chunks', 0) if updated_stats else 0
+
         assert updated_files > initial_files, \
             f"File count should increase (was {initial_files}, now {updated_files})"
         assert updated_chunks > initial_chunks, \
@@ -406,10 +413,10 @@ class NewlyAddedClass:
             f.flush()
             import os
             os.fsync(f.fileno())
-        
-        # Wait for initial indexing
-        await asyncio.sleep(2.5)
-        
+
+        # Wait for initial indexing - must exceed 2.0s event dedup window
+        await asyncio.sleep(3.5)
+
         initial_results = services.provider.search_chunks_regex("func.*initial")
         assert len(initial_results) > 0, "Initial content should be indexed"
         
@@ -423,10 +430,11 @@ class NewlyAddedClass:
         import time
         current_time = time.time()
         os.utime(test_file, (current_time, current_time))
-        
-        # Wait for processing
-        await asyncio.sleep(3.5)
-        
+
+        # Wait longer for modification processing on Windows CI
+        timeout = get_fs_event_timeout()
+        await asyncio.sleep(timeout)
+
         # Verify modification was detected
         modified_results = services.provider.search_chunks_regex("func.*modified")
         new_results = services.provider.search_chunks_regex("new_func.*added")
