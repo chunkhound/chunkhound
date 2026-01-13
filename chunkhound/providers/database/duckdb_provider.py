@@ -1593,7 +1593,12 @@ class DuckDBProvider(SerialDatabaseProvider):
                     [provider, model, len(dim_embeddings)],
                 ).fetchall()
 
-                emb_dicts = [{"id": row[0]} for row in emb_ids_result]
+                # Query returns DESC (newest first), reverse to match dim_embeddings order
+                emb_ids = [row[0] for row in reversed(emb_ids_result)]
+                emb_dicts = [
+                    {"id": emb_id, "embedding": emb["embedding"]}
+                    for emb_id, emb in zip(emb_ids, dim_embeddings)
+                ]
 
                 # ShardManager assigns shard_id and creates shard record if needed
                 success, needs_fix = self.shard_manager.insert_embeddings(
@@ -1703,7 +1708,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         # Wire to ShardManager if available
         if self.shard_manager is not None:
-            emb_dicts = [{"id": embedding_id}]
+            emb_dicts = [{"id": embedding_id, "embedding": list(embedding.vector)}]
             success, needs_fix = self.shard_manager.insert_embeddings(
                 emb_dicts, dims, embedding.provider, embedding.model, conn
             )

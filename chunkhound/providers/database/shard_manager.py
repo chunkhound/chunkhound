@@ -153,9 +153,9 @@ class ShardManager:
         model: str,
         conn: Any,
     ) -> tuple[bool, bool]:
-        """Insert embeddings into appropriate shards.
+        """Insert embeddings with per-vector centroid routing.
 
-        Routes embeddings to shards based on centroid similarity.
+        Routes each embedding to its nearest shard based on centroid similarity.
         If no shards exist, creates a new shard.
         May trigger shard splits if thresholds exceeded.
 
@@ -175,52 +175,112 @@ class ShardManager:
             return (True, False)
 
         try:
-            # Find or create shard for these embeddings
-            shard_result = self._find_or_create_shard(
-                dims, provider, model, conn, embeddings
-            )
-            if shard_result is None:
+            table_name = f"embeddings_{dims}"
+            targets, was_created = self._get_target_shards(dims, provider, model, conn)
+
+            if not targets:
                 return (False, False)
 
-            target_shard_id, was_created = shard_result
+            # PHASE 1: Precompute per-vector shard assignments
+            assignments: dict[UUID, list[int]] = {t[0]: [] for t in targets}
+            vectors_by_shard: dict[UUID, dict[int, list[float]]] = {
+                t[0]: {} for t in targets
+            }
 
-            # Insert embeddings into DuckDB with shard_id
-            table_name = f"embeddings_{dims}"
+            # Single shard or no centroids: all to first target
+            if len(targets) == 1 or targets[0][1] is None:
+                target_id = targets[0][0]
+                for emb in embeddings:
+                    emb_id = emb.get("id")
+                    vector = emb.get("embedding")
+                    if emb_id is not None:
+                        assignments[target_id].append(emb_id)
+                        if vector is not None:
+                            vectors_by_shard[target_id][emb_id] = vector
+            else:
+                # PER-VECTOR ROUTING: assign each embedding to nearest centroid
+                for emb in embeddings:
+                    emb_id = emb.get("id")
+                    vector = emb.get("embedding")
+                    if emb_id is None:
+                        continue
 
-            # Batch update shard_id for all embeddings with IDs
-            emb_ids = [emb.get("id") for emb in embeddings if emb.get("id") is not None]
-            if emb_ids:
+                    if vector is None:
+                        # No vector: assign to first shard
+                        assignments[targets[0][0]].append(emb_id)
+                        continue
+
+                    vec_array = np.array(vector, dtype=np.float32)
+                    vec_norm = np.linalg.norm(vec_array)
+
+                    # Find nearest shard by cosine distance
+                    best_target = targets[0][0]
+                    best_distance = float("inf")
+
+                    for target_id, centroid in targets:
+                        if centroid is None:
+                            continue
+                        centroid_norm = np.linalg.norm(centroid)
+                        if vec_norm > 0 and centroid_norm > 0:
+                            dist = 1.0 - np.dot(vec_array, centroid) / (
+                                vec_norm * centroid_norm
+                            )
+                        else:
+                            dist = 1.0
+                        if dist < best_distance:
+                            best_distance = dist
+                            best_target = target_id
+
+                    assignments[best_target].append(emb_id)
+                    vectors_by_shard[best_target][emb_id] = vector
+
+            # PHASE 2: Batch UPDATE per shard (one SQL per shard)
+            for target_id, emb_ids in assignments.items():
+                if not emb_ids:
+                    continue
                 placeholders = ",".join(["?"] * len(emb_ids))
-                query = (
+                conn.execute(
                     f"UPDATE {table_name} SET shard_id = ? "
-                    f"WHERE id IN ({placeholders})"
+                    f"WHERE id IN ({placeholders})",
+                    [str(target_id)] + emb_ids,
                 )
-                conn.execute(query, [str(target_shard_id)] + emb_ids)
 
-            # Check if split threshold exceeded
-            post_count = self._get_shard_count(target_shard_id, dims, conn)
+            # PHASE 3: Incremental HNSW update per affected shard
+            needs_fix_pass = was_created
+            for target_id, vectors_dict in vectors_by_shard.items():
+                if not vectors_dict:
+                    continue
 
-            # Check if shard file exists - triggers fix_pass for file-less shards
-            file_path = self._shard_path(target_shard_id)
-            file_missing = not file_path.exists()
+                file_path = self._shard_path(target_id)
+                if not file_path.exists():
+                    needs_fix_pass = True
+                    continue
 
-            exceeds_split = post_count >= self.config.split_threshold
-            needs_fix_pass = was_created or file_missing or exceeds_split
-
-            if needs_fix_pass:
-                if was_created:
-                    logger.debug(
-                        f"New shard {target_shard_id} created, needs fix pass"
+                try:
+                    index = usearch_wrapper.open_writable(file_path)
+                    add_keys = np.array(list(vectors_dict.keys()), dtype=np.uint64)
+                    add_vectors = np.array(
+                        list(vectors_dict.values()), dtype=np.float32
                     )
-                elif file_missing:
+                    index.add(add_keys, add_vectors)
+
+                    # Atomic save
+                    tmp_path = file_path.with_suffix(".usearch.tmp")
+                    index.save(str(tmp_path))
+                    fsync_path(tmp_path)
+                    tmp_path.replace(file_path)
+
                     logger.debug(
-                        f"Shard {target_shard_id} missing file, needs fix pass"
+                        f"Added {len(vectors_dict)} vectors to shard {target_id}"
                     )
-                else:
-                    logger.debug(
-                        f"Shard {target_shard_id} has {post_count} embeddings, "
-                        f"exceeds split threshold {self.config.split_threshold}"
-                    )
+                except Exception as e:
+                    logger.warning(f"Failed incremental add to {target_id}: {e}")
+                    needs_fix_pass = True
+
+                # Check split threshold per shard
+                count = self._get_shard_count(target_id, dims, conn)
+                if count >= self.config.split_threshold:
+                    needs_fix_pass = True
 
             return (True, needs_fix_pass)
 
@@ -228,31 +288,27 @@ class ShardManager:
             logger.error(f"Failed to insert embeddings: {e}")
             return (False, False)
 
-    def _find_or_create_shard(
+    def _get_target_shards(
         self,
         dims: int,
         provider: str,
         model: str,
         conn: Any,
-        embeddings: list[dict] | None = None,
-    ) -> tuple[UUID, bool] | None:
-        """Find existing shard or create new one.
+    ) -> tuple[list[tuple[UUID, np.ndarray | None]], bool]:
+        """Get candidate target shards for per-vector routing.
 
-        Uses centroid-based routing to find best shard.
-        Creates new shard if none exist for dims/provider/model.
+        Returns list of shards with their cached centroids for routing decisions.
+        Creates a new shard if none exist for dims/provider/model.
 
         Args:
             dims: Embedding dimensions
             provider: Embedding provider name
             model: Embedding model name
             conn: Database connection
-            embeddings: Optional list of embedding dicts for centroid routing
 
         Returns:
-            Tuple of (shard_id, was_created) or None if creation failed.
-            was_created is True if a new shard was created.
+            Tuple of (list of (shard_id, centroid or None), was_new_shard_created)
         """
-        # Find existing shards for this dims/provider/model
         result = conn.execute(
             """
             SELECT shard_id FROM vector_shards
@@ -261,79 +317,45 @@ class ShardManager:
             [dims, provider, model],
         ).fetchall()
 
-        if result:
-            # Single shard or no centroid routing data - return first
-            if len(result) == 1 or not embeddings or not self.centroids:
-                first_id = _parse_uuid(result[0][0])
-                return (first_id, False)
-
-            # Multiple shards: use centroid routing
-            # Compute batch centroid (mean of input embeddings)
-            vectors = [emb["embedding"] for emb in embeddings if "embedding" in emb]
-            if not vectors:
-                first_id = _parse_uuid(result[0][0])
-                return (first_id, False)
-
-            batch_centroid = np.mean(vectors, axis=0, dtype=np.float32)
-            batch_norm = np.linalg.norm(batch_centroid)
-            if batch_norm == 0:
-                first_id = _parse_uuid(result[0][0])
-                return (first_id, False)
-
-            # Find shard with highest centroid similarity
-            best_shard_id: UUID | None = None
-            best_similarity = -float("inf")
-
-            for row in result:
-                shard_id = _parse_uuid(row[0])
-                centroid = self.centroids.get(shard_id)
-
-                if centroid is None:
-                    continue
-
-                centroid_norm = np.linalg.norm(centroid)
-                if centroid_norm == 0:
-                    continue
-
-                similarity = np.dot(batch_centroid, centroid) / (
-                    batch_norm * centroid_norm
+        if not result:
+            # Create new shard
+            new_shard_id = uuid4()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO vector_shards
+                        (shard_id, dims, provider, model, quantization)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    [
+                        str(new_shard_id),
+                        dims,
+                        provider,
+                        model,
+                        self.config.default_quantization,
+                    ],
                 )
-                if similarity > best_similarity:
-                    best_similarity = similarity
-                    best_shard_id = shard_id
+                logger.info(
+                    f"Created new shard {new_shard_id} for {dims}D {provider}/{model}"
+                )
+                return ([(new_shard_id, None)], True)
+            except Exception as e:
+                logger.error(f"Failed to create shard: {e}")
+                return ([], False)
 
-            # Return best match or fallback to first shard
-            if best_shard_id is not None:
-                return (best_shard_id, False)
-            first_id = _parse_uuid(result[0][0])
-            return (first_id, False)
+        # Build list with cached centroids
+        targets: list[tuple[UUID, np.ndarray | None]] = []
+        for row in result:
+            shard_id = _parse_uuid(row[0])
+            centroid = self.centroids.get(shard_id)
+            targets.append((shard_id, centroid))
 
-        # Create new shard (file_path derived at runtime per spec I14)
-        new_shard_id = uuid4()
+        # If no centroids available, only return first shard
+        if all(c is None for _, c in targets):
+            return ([targets[0]], False)
 
-        try:
-            conn.execute(
-                """
-                INSERT INTO vector_shards
-                    (shard_id, dims, provider, model, quantization)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                [
-                    str(new_shard_id),
-                    dims,
-                    provider,
-                    model,
-                    self.config.default_quantization,
-                ],
-            )
-            logger.info(
-                f"Created new shard {new_shard_id} for {dims}D {provider}/{model}"
-            )
-            return (new_shard_id, True)
-
-        except Exception as e:
-            logger.error(f"Failed to create shard: {e}")
-            return None
+        # Filter to only shards with centroids for routing
+        return ([t for t in targets if t[1] is not None], False)
 
     def _get_shard_count(self, shard_id: UUID, dims: int, conn: Any) -> int:
         """Get count of embeddings in a shard."""
@@ -352,8 +374,9 @@ class ShardManager:
     ) -> tuple[bool, bool]:
         """Delete embedding from its shard.
 
-        Hard DELETE from DuckDB (source of truth).
-        Fix pass will detect index_live != db_count and rebuild.
+        Hard DELETE from DuckDB and tombstone in USearch index.
+        Tombstoning (compact=False) marks the vector as deleted without
+        restructuring the HNSW graph, keeping deletion O(1).
 
         Args:
             embedding_id: ID of embedding to delete
@@ -385,11 +408,33 @@ class ShardManager:
                 [embedding_id],
             )
 
-            # Check remaining shard state
+            # Remove from USearch index with tombstone (no compaction)
             needs_fix_pass = False
             if shard_id is not None:
+                file_path = self._shard_path(shard_id)
+                if file_path.exists():
+                    try:
+                        index = usearch_wrapper.open_writable(file_path)
+                        index.remove([embedding_id], compact=False)
+
+                        # Atomic save
+                        tmp_path = file_path.with_suffix(".usearch.tmp")
+                        index.save(str(tmp_path))
+                        fsync_path(tmp_path)
+                        tmp_path.replace(file_path)
+
+                        logger.debug(
+                            f"Tombstoned embedding {embedding_id} in shard {shard_id}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to tombstone embedding {embedding_id} "
+                            f"in shard {shard_id}: {e}, will trigger fix_pass"
+                        )
+                        needs_fix_pass = True
+
+                # Check if below merge threshold or empty
                 db_count = self._get_shard_count(shard_id, dims, conn)
-                # Mark needs_fix_pass if below merge threshold or empty
                 if db_count < self.config.merge_threshold or db_count == 0:
                     needs_fix_pass = True
 
@@ -896,7 +941,8 @@ class ShardManager:
         table_name = f"embeddings_{dims}"
 
         # Phase 1: Sample random vectors for centroid discovery
-        sample_size = min(KMEANS_SAMPLE_SIZE, self.config.split_threshold // 10)
+        # Minimum 50 samples for reliable k=2 clustering (industry: 20-30 per cluster)
+        sample_size = min(KMEANS_SAMPLE_SIZE, max(50, self.config.split_threshold // 5))
         samples = conn.execute(
             f"SELECT id, embedding FROM {table_name} "
             f"WHERE shard_id = ? ORDER BY RANDOM() LIMIT ?",

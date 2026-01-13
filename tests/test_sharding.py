@@ -1605,8 +1605,8 @@ class TestKMeansSplitClustering:
     ) -> None:
         """Verify that _kmeans_fallback samples vectors for centroid discovery.
 
-        With 2500 vectors and sample_size = min(512, split_threshold//10) = 200,
-        only 200 vectors should be used for KMeans fitting, not all 2500.
+        With 2500 vectors and sample_size = min(512, max(50, split_threshold//5)) = 400,
+        only 400 vectors should be used for KMeans fitting, not all 2500.
         """
         from unittest.mock import patch
 
@@ -1619,7 +1619,7 @@ class TestKMeansSplitClustering:
         shard_dir.mkdir(exist_ok=True)
 
         # Create ShardManager with split_threshold=2000
-        # sample_size = min(512, 2000//10) = min(512, 200) = 200
+        # sample_size = min(512, max(50, 2000//5)) = min(512, 400) = 400
         config = ShardingConfig(
             split_threshold=2000,
             merge_threshold=200,
@@ -1687,7 +1687,7 @@ class TestKMeansSplitClustering:
             # Verify KMeans was called with sample size, not full dataset
             assert len(fitted_samples_count) == 1, "KMeans should be called once"
             actual_sample_size = fitted_samples_count[0]
-            expected_sample_size = min(512, config.split_threshold // 10)  # 200
+            expected_sample_size = min(512, max(50, config.split_threshold // 5))  # 400
             assert actual_sample_size == expected_sample_size, (
                 f"KMeans fitted on {actual_sample_size} samples, "
                 f"expected {expected_sample_size}"
@@ -1939,6 +1939,119 @@ class TestKMeansSplitClustering:
 
         finally:
             db_provider.disconnect()
+
+
+class TestPerVectorInsertionRouting:
+    """Test per-vector routing during insertion.
+
+    When multiple shards exist, each vector should route to its nearest
+    centroid shard, not all vectors to a single shard based on batch mean.
+    """
+
+    def test_vectors_route_to_nearest_shard(
+        self,
+        tmp_db: MockDBProvider,
+        shard_manager: ShardManager,
+    ) -> None:
+        """Each vector routes to its nearest centroid shard."""
+        rng = np.random.default_rng(42)
+
+        # Create 2 shards with orthogonal centroids
+        c1 = np.array([1.0] + [0.0] * (TEST_DIMS - 1), dtype=np.float32)
+        c2 = np.array([0.0, 1.0] + [0.0] * (TEST_DIMS - 2), dtype=np.float32)
+
+        shard1_id, shard2_id = uuid4(), uuid4()
+        for sid in [shard1_id, shard2_id]:
+            tmp_db.connection.execute(
+                """
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
+                """,
+                [str(sid), TEST_DIMS, "test", "test-model"],
+            )
+
+        # Build indexes with cluster vectors (above merge threshold)
+        for sid, centroid in [(shard1_id, c1), (shard2_id, c2)]:
+            vectors = [
+                (centroid + rng.standard_normal(TEST_DIMS).astype(np.float32) * 0.1)
+                for _ in range(30)
+            ]
+            insert_embeddings_to_db(tmp_db, vectors, sid)
+
+        # Run fix_pass to build indexes and populate centroid cache
+        shard_manager.fix_pass(tmp_db.connection, check_quality=False)
+
+        # Verify centroids are populated
+        assert len(shard_manager.centroids) == 2, "Both shards should have centroids"
+
+        # Create batch with vectors belonging to DIFFERENT shards
+        batch_vectors = []
+        # 10 vectors close to shard1 centroid
+        for _ in range(10):
+            vec = c1 + rng.standard_normal(TEST_DIMS).astype(np.float32) * 0.05
+            batch_vectors.append(vec / np.linalg.norm(vec))  # Normalize
+        # 10 vectors close to shard2 centroid
+        for _ in range(10):
+            vec = c2 + rng.standard_normal(TEST_DIMS).astype(np.float32) * 0.05
+            batch_vectors.append(vec / np.linalg.norm(vec))  # Normalize
+
+        # Insert to DB first (matching production flow)
+        emb_ids = []
+        for i, vec in enumerate(batch_vectors):
+            result = tmp_db.connection.execute(
+                f"""
+                INSERT INTO embeddings_{TEST_DIMS}
+                    (chunk_id, provider, model, embedding, dims)
+                VALUES (?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                [1000 + i, "test", "test-model", vec.tolist(), TEST_DIMS],
+            ).fetchone()
+            emb_ids.append(result[0])
+
+        # Route via shard_manager.insert_embeddings()
+        emb_dicts = [
+            {"id": eid, "embedding": vec.tolist()}
+            for eid, vec in zip(emb_ids, batch_vectors)
+        ]
+        success, _ = shard_manager.insert_embeddings(
+            emb_dicts, TEST_DIMS, "test", "test-model", tmp_db.connection
+        )
+        assert success, "insert_embeddings should succeed"
+
+        # Count how many of the new vectors went to each shard
+        # (filter by id to only count new vectors, not initial cluster vectors)
+        min_new_id = min(emb_ids)
+        s1_count = tmp_db.connection.execute(
+            f"""
+            SELECT COUNT(*) FROM embeddings_{TEST_DIMS}
+            WHERE shard_id = ? AND id >= ?
+            """,
+            [str(shard1_id), min_new_id],
+        ).fetchone()[0]
+        s2_count = tmp_db.connection.execute(
+            f"""
+            SELECT COUNT(*) FROM embeddings_{TEST_DIMS}
+            WHERE shard_id = ? AND id >= ?
+            """,
+            [str(shard2_id), min_new_id],
+        ).fetchone()[0]
+
+        # Per-vector routing should split ~10 to each shard
+        # Allow some tolerance for noise (at least 7 to each)
+        assert s1_count >= 7, (
+            f"Expected ~10 vectors to shard1 (c1-like), got {s1_count}. "
+            f"Distribution: shard1={s1_count}, shard2={s2_count}"
+        )
+        assert s2_count >= 7, (
+            f"Expected ~10 vectors to shard2 (c2-like), got {s2_count}. "
+            f"Distribution: shard1={s1_count}, shard2={s2_count}"
+        )
+
+        # Also verify total is correct
+        assert s1_count + s2_count == 20, (
+            f"Total should be 20, got {s1_count + s2_count}"
+        )
 
 
 class TestNPAAfterMerge:
