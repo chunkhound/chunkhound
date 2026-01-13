@@ -197,12 +197,15 @@ class RealtimeIndexingService:
         services: DatabaseServices,
         config: Config,
         debug_sink: Callable[[str], None] | None = None,
+        force_polling: bool = False,
     ):
         self.services = services
         self.config = config
         # Optional sink that writes to MCPServerBase.debug_log so events land in
         # /tmp/chunkhound_mcp_debug.log when CHUNKHOUND_DEBUG is enabled.
         self._debug_sink = debug_sink
+        # Force polling mode - useful for Windows CI where watchdog is unreliable
+        self._force_polling = force_polling
 
         # Existing asyncio queue for priority processing
         self.file_queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue()
@@ -356,6 +359,17 @@ class RealtimeIndexingService:
         self, watch_path: Path, loop: asyncio.AbstractEventLoop
     ) -> None:
         """Setup watchdog with timeout - fall back to polling if it takes too long."""
+        # Skip watchdog entirely if force_polling is enabled (e.g., Windows CI)
+        if self._force_polling:
+            logger.info(f"Polling mode forced for {watch_path}")
+            self._using_polling = True
+            self._polling_task = asyncio.create_task(self._polling_monitor(watch_path))
+            await asyncio.sleep(0.5)
+            self._monitoring_ready_time = time.time()
+            self.monitoring_ready.set()
+            self._debug("force_polling enabled; using polling mode")
+            return
+
         # run_in_executor returns an awaitable Future - no create_task needed
         watchdog_task = loop.run_in_executor(
             None, self._start_fs_monitor, watch_path, loop

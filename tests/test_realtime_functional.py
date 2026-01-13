@@ -14,6 +14,7 @@ import shutil
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from tests.utils.windows_compat import wait_for_indexed, is_windows, is_ci
 
 
 class TestRealtimeFunctional:
@@ -42,8 +43,9 @@ class TestRealtimeFunctional:
         services = create_services(db_path, config)
         services.provider.connect()
 
-
-        realtime_service = RealtimeIndexingService(services, config)
+        # Use polling on Windows CI where watchdog's ReadDirectoryChangesW is unreliable
+        force_polling = is_windows() and is_ci()
+        realtime_service = RealtimeIndexingService(services, config, force_polling=force_polling)
         
         yield realtime_service, watch_dir, temp_dir, services
         
@@ -87,13 +89,10 @@ class TestRealtimeFunctional:
         test_file.write_text("def hello_world(): pass")
         
         # Wait for filesystem event + debouncing + processing
-        await asyncio.sleep(2.0)
-        
-        # Check if file was actually processed (better than checking queues)
-        file_record = services.provider.get_file_by_path(str(test_file))
-        
+        found = await wait_for_indexed(services.provider, test_file)
+
         # This tests the full pipeline: detection -> processing -> storage
-        assert file_record is not None, "File should be detected and processed by filesystem monitoring"
+        assert found, "File should be detected and processed by filesystem monitoring"
         
         await service.stop()
 

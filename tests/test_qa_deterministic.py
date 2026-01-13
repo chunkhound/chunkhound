@@ -24,6 +24,7 @@ from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 from chunkhound.mcp_server.tools import execute_tool
 from .test_utils import get_api_key_for_tests
+from tests.utils.windows_compat import get_fs_event_timeout, is_windows, is_ci
 
 
 class TestQADeterministic:
@@ -71,9 +72,9 @@ class TestQADeterministic:
         services = create_services(db_path, config)
         services.provider.connect()
 
-
-        # Initialize realtime indexing service
-        realtime_service = RealtimeIndexingService(services, config)
+        # Use polling on Windows CI where watchdog's ReadDirectoryChangesW is unreliable
+        force_polling = is_windows() and is_ci()
+        realtime_service = RealtimeIndexingService(services, config, force_polling=force_polling)
         await realtime_service.start(watch_dir)
         
         # Wait for initial scan
@@ -113,9 +114,8 @@ class ExistingClass:
         await asyncio.sleep(3.0)  # Wait for processing (extended for Ollama)
         
         # Search for existing content
-        existing_regex = await execute_tool("search", services, None, {
-            "type": "regex",
-            "query": "existing_function",
+        existing_regex = await execute_tool("search_regex", services, None, {
+            "pattern": "existing_function",
             "page_size": 10,
             "offset": 0
         })
@@ -123,8 +123,7 @@ class ExistingClass:
         # Try semantic search if available, skip if not
         existing_semantic = None
         try:
-            existing_semantic = await execute_tool("search", services, None, {
-                "type": "semantic",
+            existing_semantic = await execute_tool("search_semantic", services, None, {
                 "query": "existing function QA testing",
                 "page_size": 10,
                 "offset": 0
@@ -151,17 +150,15 @@ class NewlyAddedClass:
         await asyncio.sleep(3.5)  # Wait for debounce + processing
         
         # Search for new content
-        new_regex = await execute_tool("search", services, None, {
-            "type": "regex",
-            "query": "newly_added_content_unique_string",
+        new_regex = await execute_tool("search_regex", services, None, {
+            "pattern": "newly_added_content_unique_string",
             "page_size": 10,
             "offset": 0
         })
         
         # Try semantic search if available
         try:
-            new_semantic = await execute_tool("search", services, None, {
-                "type": "semantic",
+            new_semantic = await execute_tool("search_semantic", services, None, {
                 "query": "newly added function QA validation",
                 "page_size": 10,
                 "offset": 0
@@ -185,9 +182,8 @@ def added_during_edit():
         existing_file.write_text(modified_content)
         await asyncio.sleep(3.5)
         
-        added_regex = await execute_tool("search", services, None, {
-            "type": "regex",
-            "query": "added_content_edit_qa",
+        added_regex = await execute_tool("search_regex", services, None, {
+            "pattern": "added_content_edit_qa",
             "page_size": 10,
             "offset": 0
         })
@@ -209,16 +205,14 @@ def added_during_edit():
         await asyncio.sleep(3.5)
         
         # Check modification worked
-        modified_regex = await execute_tool("search", services, None, {
-            "type": "regex",
-            "query": "MODIFIED_existing_content",
+        modified_regex = await execute_tool("search_regex", services, None, {
+            "pattern": "MODIFIED_existing_content",
             "page_size": 10,
             "offset": 0
         })
         # Check deletion worked - search for the actual class definition
-        deleted_regex = await execute_tool("search", services, None, {
-            "type": "regex",
-            "query": "class ExistingClass:",
+        deleted_regex = await execute_tool("search_regex", services, None, {
+            "pattern": "class ExistingClass:",
             "page_size": 10,
             "offset": 0
         })
@@ -233,9 +227,8 @@ def added_during_edit():
         await asyncio.sleep(3.5)
         
         # Search for deleted file content
-        deleted_file_regex = await execute_tool("search", services, None, {
-            "type": "regex",
-            "query": "newly_added_content_unique_string",
+        deleted_file_regex = await execute_tool("search_regex", services, None, {
+            "pattern": "newly_added_content_unique_string",
             "page_size": 10,
             "offset": 0
         })
@@ -352,13 +345,16 @@ function qaTestFunction() {
         
         # Wait for all files to be processed - poll until all files are in database
         expected_file_count = len(created_files)
-        max_wait = 60.0  # Maximum 60 seconds (allow time for embeddings)
+        # Wait for all files with longer timeout on Windows CI where
+        # ReadDirectoryChangesW can be unreliable with many files
+        base_timeout = get_fs_event_timeout() * 3  # Triple for many files
+        max_wait = max(60.0, base_timeout * expected_file_count // 2)
         poll_interval = 0.5
         elapsed = 0.0
 
         while elapsed < max_wait:
-            db_stats = await services.indexing_coordinator.get_stats()
-            indexed_files = db_stats.get('files', 0)
+            db_stats = await execute_tool("get_stats", services, None, {})
+            indexed_files = db_stats.get('total_files', 0)
 
             if indexed_files >= expected_file_count:
                 print(f"📊 All {expected_file_count} files processed in {elapsed:.1f}s")
@@ -368,8 +364,8 @@ function qaTestFunction() {
             elapsed += poll_interval
 
         # Final stats check
-        db_stats = await services.indexing_coordinator.get_stats()
-        print(f"📊 Final: {db_stats.get('files', 0)} files, {db_stats.get('chunks', 0)} chunks")
+        db_stats = await execute_tool("get_stats", services, None, {})
+        print(f"📊 Final: {db_stats.get('total_files', 0)} files, {db_stats.get('total_chunks', 0)} chunks")
 
         # QA Item 5: Test concurrent processing for all languages
         # Search for each language's unique content
@@ -379,9 +375,8 @@ function qaTestFunction() {
         for file_path, language, pattern in created_files:
             try:
                 # Test regex search
-                regex_results = await execute_tool("search", services, None, {
-                    "type": "regex",
-                    "query": pattern,
+                regex_results = await execute_tool("search_regex", services, None, {
+                    "pattern": pattern,
                     "page_size": 10,
                     "offset": 0
                 })
@@ -441,9 +436,8 @@ function qaTestFunction() {
             for i in range(10):  # Multiple searches during modifications
                 try:
                     start_time = time.time()
-                    results = await execute_tool("search", services, None, {
-                        "type": "regex",
-                        "query": "concurrent_qa_test",
+                    results = await execute_tool("search_regex", services, None, {
+                        "pattern": "concurrent_qa_test",
                         "page_size": 50,
                         "offset": 0
                     })
@@ -565,9 +559,8 @@ class RapidClass_{i}:
         # Create files with varying amounts of searchable content
         
         # 1. Search for non-existing value (should return empty)
-        non_existing_results = await execute_tool("search", services, None, {
-            "type": "regex",
-            "query": "non_existing_unique_pattern_qa_test_12345",
+        non_existing_results = await execute_tool("search_regex", services, None, {
+            "pattern": "non_existing_unique_pattern_qa_test_12345",
             "page_size": 10,
             "offset": 0
         })
@@ -582,10 +575,9 @@ class RapidClass_{i}:
 """
         single_file.write_text(single_content)
         await asyncio.sleep(3.0)
-
-        single_results = await execute_tool("search", services, None, {
-            "type": "regex",
-            "query": "single_unique_result_qa_test",
+        
+        single_results = await execute_tool("search_regex", services, None, {
+            "pattern": "single_unique_result_qa_test",
             "page_size": 10,
             "offset": 0
         })
@@ -837,9 +829,8 @@ if __name__ == "__main__":
         total_count = 0  # Track actual total from pagination metadata
 
         while page_count < max_pages:
-            page_results = await execute_tool("search", services, None, {
-                "type": "regex",
-                "query": common_pattern,
+            page_results = await execute_tool("search_regex", services, None, {
+                "pattern": common_pattern,
                 "page_size": page_size,
                 "offset": offset
             })
@@ -913,18 +904,16 @@ if __name__ == "__main__":
         # Test offset beyond available results
         # Use total_count from pagination metadata, not len(all_results) which may be partial
         actual_total = total_count if total_count > 0 else len(all_results)
-        beyond_results = await execute_tool("search", services, None, {
-            "type": "regex",
-            "query": common_pattern,
+        beyond_results = await execute_tool("search_regex", services, None, {
+            "pattern": common_pattern,
             "page_size": 10,
             "offset": actual_total + 100  # Truly beyond all results
         })
         assert len(beyond_results.get('results', [])) == 0, f"Offset {actual_total + 100} beyond total {actual_total} should return empty"
         
         # Test large page size
-        large_page_results = await execute_tool("search", services, None, {
-            "type": "regex",
-            "query": common_pattern,
+        large_page_results = await execute_tool("search_regex", services, None, {
+            "pattern": common_pattern,
             "page_size": 100,  # Larger than total results
             "offset": 0
         })
@@ -961,10 +950,9 @@ if __name__ == "__main__":
         while elapsed < max_wait:
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
-
-            search_results = await execute_tool("search", services, None, {
-                "type": "regex",
-                "query": "timing_validation_unique_content",
+            
+            search_results = await execute_tool("search_regex", services, None, {
+                "pattern": "timing_validation_unique_content",
                 "page_size": 10,
                 "offset": 0
             })
@@ -977,21 +965,20 @@ if __name__ == "__main__":
         
         # Test search performance
         search_start = time.time()
-        performance_results = await execute_tool("search", services, None, {
-            "type": "regex",
-            "query": "function",
+        performance_results = await execute_tool("search_regex", services, None, {
+            "pattern": "function",
             "page_size": 50,
             "offset": 0
         })
         search_time = time.time() - search_start
         
         # Get database stats
-        stats_results = await services.indexing_coordinator.get_stats()
-
+        stats_results = await execute_tool("get_stats", services, None, {})
+        
         print(f"📊 DATABASE STATISTICS:")
-        print(f"   Total files: {stats_results.get('files', 'Unknown')}")
-        print(f"   Total chunks: {stats_results.get('chunks', 'Unknown')}")
-        print(f"   Total embeddings: {stats_results.get('embeddings', 'Unknown')}")
+        print(f"   Total files: {stats_results.get('total_files', 'Unknown')}")
+        print(f"   Total chunks: {stats_results.get('total_chunks', 'Unknown')}")
+        print(f"   Total embeddings: {stats_results.get('total_embeddings', 'Unknown')}")
         
         print(f"\n⏱ PERFORMANCE MEASUREMENTS:")
         print(f"   File change → searchable: {indexing_time:.2f}s")
