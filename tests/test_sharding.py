@@ -4080,3 +4080,506 @@ class TestAmortizedComplexity:
 
         finally:
             db_provider.disconnect()
+
+
+# =============================================================================
+# External API Tests - Exercise sharding through DuckDBProvider public methods
+# =============================================================================
+
+
+class ExternalAPITestBase:
+    """Base class for external API tests with common fixtures and helpers.
+
+    These tests exercise the sharding system through the public DuckDBProvider
+    API (insert_embeddings_batch, search_semantic) rather than calling internal
+    methods like fix_pass directly. This ensures internal decision paths
+    (split, merge, incremental sync) are triggered organically.
+    """
+
+    # Test configuration
+    TEST_DIMS = 128
+    TEST_SPLIT_THRESHOLD = 100
+    TEST_MERGE_THRESHOLD = 20
+    PROVIDER = "test"
+    MODEL = "test-model"
+
+    @staticmethod
+    def create_db_provider(tmp_path: Path) -> "DuckDBProvider":
+        """Create DuckDBProvider with test sharding config."""
+        from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+
+        db_path = tmp_path / "external_api_test.duckdb"
+        config = ShardingConfig(
+            split_threshold=ExternalAPITestBase.TEST_SPLIT_THRESHOLD,
+            merge_threshold=ExternalAPITestBase.TEST_MERGE_THRESHOLD,
+            compaction_threshold=0.20,
+            incremental_sync_threshold=0.10,
+            quality_threshold=0.95,
+            shard_similarity_threshold=0.1,
+        )
+
+        provider = DuckDBProvider(
+            db_path=db_path,
+            base_directory=tmp_path,
+            sharding_config=config,
+        )
+        provider.connect()
+        return provider
+
+    @staticmethod
+    def create_test_file(provider: "DuckDBProvider", file_path: str = "test.py") -> int:
+        """Create a test file in the database and return its ID."""
+        from chunkhound.core.models.file import File
+        from chunkhound.core.types import Language
+
+        test_file = File(
+            path=file_path,
+            mtime=1000.0,
+            language=Language.PYTHON,
+            size_bytes=1000,
+        )
+        return provider.insert_file(test_file)
+
+    @staticmethod
+    def create_test_chunks(
+        provider: "DuckDBProvider",
+        file_id: int,
+        count: int,
+        start_id: int = 0,
+    ) -> list[int]:
+        """Create test chunks in the database and return their IDs."""
+        from chunkhound.core.models.chunk import Chunk
+        from chunkhound.core.types import ChunkType, Language
+
+        chunks = []
+        for i in range(count):
+            chunk = Chunk(
+                symbol=f"test_function_{start_id + i}",
+                start_line=i * 10 + 1,
+                end_line=i * 10 + 9,
+                code=f"def test_function_{start_id + i}():\n    pass",
+                chunk_type=ChunkType.FUNCTION,
+                file_id=file_id,
+                language=Language.PYTHON,
+            )
+            chunks.append(chunk)
+
+        return provider.insert_chunks_batch(chunks)
+
+    @staticmethod
+    def insert_embeddings_via_api(
+        provider: "DuckDBProvider",
+        chunk_ids: list[int],
+        vectors: list[np.ndarray],
+        dims: int,
+    ) -> int:
+        """Insert embeddings via the external API."""
+        embeddings_data = [
+            {
+                "chunk_id": chunk_id,
+                "provider": ExternalAPITestBase.PROVIDER,
+                "model": ExternalAPITestBase.MODEL,
+                "embedding": vec.tolist(),
+                "dims": dims,
+            }
+            for chunk_id, vec in zip(chunk_ids, vectors)
+        ]
+        return provider.insert_embeddings_batch(embeddings_data)
+
+    @staticmethod
+    def search_via_api(
+        provider: "DuckDBProvider",
+        query_vector: np.ndarray,
+        k: int,
+    ) -> list[dict]:
+        """Search via the external API and return results."""
+        results, _pagination = provider.search_semantic(
+            query_embedding=query_vector.tolist(),
+            provider=ExternalAPITestBase.PROVIDER,
+            model=ExternalAPITestBase.MODEL,
+            page_size=k,
+        )
+        return results
+
+
+class TestIncrementalSyncViaExternalAPI(ExternalAPITestBase):
+    """Verify incremental sync path maintains search correctness."""
+
+    def test_small_additions_immediately_searchable(self, tmp_path: Path) -> None:
+        """Vectors added in small batches are immediately searchable."""
+        generator = SyntheticEmbeddingGenerator(dims=self.TEST_DIMS, seed=42)
+        provider = self.create_db_provider(tmp_path)
+
+        try:
+            # Insert 100 vectors (at threshold, triggers initial build)
+            file_id = self.create_test_file(provider)
+            chunk_ids_100 = self.create_test_chunks(provider, file_id, 100, start_id=0)
+            vectors_100 = [
+                generator.generate_hash_seeded(f"doc_{i}") for i in range(100)
+            ]
+            self.insert_embeddings_via_api(
+                provider, chunk_ids_100, vectors_100, self.TEST_DIMS
+            )
+
+            # Insert 5 more vectors (5% < 10% threshold → incremental sync)
+            chunk_ids_5 = self.create_test_chunks(provider, file_id, 5, start_id=100)
+            vectors_5 = [
+                generator.generate_hash_seeded(f"doc_{i}") for i in range(100, 105)
+            ]
+            self.insert_embeddings_via_api(
+                provider, chunk_ids_5, vectors_5, self.TEST_DIMS
+            )
+
+            # All 5 new vectors should be immediately searchable
+            for chunk_id, vec in zip(chunk_ids_5, vectors_5):
+                results = self.search_via_api(provider, vec, k=10)
+                result_chunk_ids = {r["chunk_id"] for r in results}
+
+                assert chunk_id in result_chunk_ids, (
+                    f"Newly added chunk {chunk_id} not immediately searchable"
+                )
+
+        finally:
+            provider.disconnect()
+
+
+class TestEdgeCasesViaExternalAPI(ExternalAPITestBase):
+    """Test edge cases via external API."""
+
+    def test_search_with_no_embeddings(self, tmp_path: Path) -> None:
+        """Search returns empty when no embeddings exist."""
+        generator = SyntheticEmbeddingGenerator(dims=self.TEST_DIMS, seed=42)
+        provider = self.create_db_provider(tmp_path)
+
+        try:
+            # Don't insert anything
+            query = generator.generate_hash_seeded("query")
+            results = self.search_via_api(provider, query, k=10)
+
+            # Should return empty, not error
+            assert results == [], f"Expected empty results, got {len(results)}"
+
+        finally:
+            provider.disconnect()
+
+    def test_k_larger_than_total(self, tmp_path: Path) -> None:
+        """Search with k > total_vectors returns all vectors."""
+        generator = SyntheticEmbeddingGenerator(dims=self.TEST_DIMS, seed=42)
+        provider = self.create_db_provider(tmp_path)
+
+        try:
+            # Insert only 30 vectors
+            file_id = self.create_test_file(provider)
+            chunk_ids = self.create_test_chunks(provider, file_id, 30)
+            vectors = [generator.generate_hash_seeded(f"doc_{i}") for i in range(30)]
+            self.insert_embeddings_via_api(provider, chunk_ids, vectors, self.TEST_DIMS)
+
+            # Search with k=100 (larger than total)
+            query = vectors[0]
+            results = self.search_via_api(provider, query, k=100)
+
+            # Should return exactly 30 results
+            assert len(results) == 30, (
+                f"Expected 30 results for k=100 with 30 vectors, got {len(results)}"
+            )
+
+        finally:
+            provider.disconnect()
+
+
+class TestCentroidStalenessViaExternalAPI(ExternalAPITestBase):
+    """Test centroid staleness handling through normal operations."""
+
+    def test_search_correct_after_heavy_modification(self, tmp_path: Path) -> None:
+        """Search remains correct after deleting many vectors."""
+        generator = SyntheticEmbeddingGenerator(dims=self.TEST_DIMS, seed=42)
+        provider = self.create_db_provider(tmp_path)
+
+        try:
+            # Insert 200 vectors (2+ shards)
+            file_id = self.create_test_file(provider)
+            chunk_ids = self.create_test_chunks(provider, file_id, 200)
+            vectors = [generator.generate_hash_seeded(f"doc_{i}") for i in range(200)]
+            self.insert_embeddings_via_api(provider, chunk_ids, vectors, self.TEST_DIMS)
+
+            # Delete 40% of vectors (80 vectors, likely includes some centroids)
+            deleted_count = 80
+            deleted_chunk_ids = set(chunk_ids[:deleted_count])
+            remaining_chunk_ids = chunk_ids[deleted_count:]
+            remaining_vectors = vectors[deleted_count:]
+
+            # Delete via chunks (which cascades to embeddings)
+            provider.delete_chunks_batch(list(deleted_chunk_ids))
+
+            # All remaining vectors should still be findable
+            k = 120  # remaining count
+            not_found = []
+
+            for chunk_id, vec in zip(remaining_chunk_ids, remaining_vectors):
+                results = self.search_via_api(provider, vec, k)
+                result_chunk_ids = {r["chunk_id"] for r in results}
+
+                if chunk_id not in result_chunk_ids:
+                    not_found.append(chunk_id)
+
+            assert len(not_found) == 0, (
+                f"Lost {len(not_found)} embeddings after heavy deletion"
+            )
+
+        finally:
+            provider.disconnect()
+
+
+class TestCrossShardTopKCorrectnessExternal(ExternalAPITestBase):
+    """Verify search returns globally correct top-k across shards via external API."""
+
+    def test_global_topk_matches_brute_force(self, tmp_path: Path) -> None:
+        """Top-k from sharded search matches brute-force ground truth."""
+        generator = SyntheticEmbeddingGenerator(dims=self.TEST_DIMS, seed=42)
+        provider = self.create_db_provider(tmp_path)
+
+        try:
+            # Create file and chunks for 300 embeddings (triggers 3+ splits)
+            file_id = self.create_test_file(provider)
+            chunk_ids = self.create_test_chunks(provider, file_id, 300)
+
+            # Generate vectors and insert via external API
+            vectors = [generator.generate_hash_seeded(f"doc_{i}") for i in range(300)]
+            inserted = self.insert_embeddings_via_api(
+                provider, chunk_ids, vectors, self.TEST_DIMS
+            )
+            assert inserted == 300
+
+            # Test search correctness for sample queries
+            k = 10
+            sample_indices = [0, 50, 100, 150, 200, 250]
+
+            for idx in sample_indices:
+                query = vectors[idx]
+
+                # Get ground truth via brute force
+                ground_truth_indices = brute_force_search(query, vectors, k)
+                ground_truth_chunk_ids = {chunk_ids[i] for i in ground_truth_indices}
+
+                # Search via external API
+                results = self.search_via_api(provider, query, k)
+                result_chunk_ids = {r["chunk_id"] for r in results}
+
+                # Calculate recall
+                found = result_chunk_ids & ground_truth_chunk_ids
+                recall = len(found) / len(ground_truth_chunk_ids)
+
+                # Assert strict recall threshold
+                assert recall >= 0.9, (
+                    f"Low recall {recall:.2f} for query {idx}: "
+                    f"found {len(found)}/{len(ground_truth_chunk_ids)}"
+                )
+
+                # Query vector itself should be found
+                query_chunk_id = chunk_ids[idx]
+                assert query_chunk_id in result_chunk_ids, (
+                    f"Query chunk {query_chunk_id} not found in results"
+                )
+
+        finally:
+            provider.disconnect()
+
+    def test_global_topk_with_clustered_data(self, tmp_path: Path) -> None:
+        """Top-k correct when clusters span different shards."""
+        generator = SyntheticEmbeddingGenerator(dims=self.TEST_DIMS, seed=42)
+        provider = self.create_db_provider(tmp_path)
+
+        try:
+            # Generate 5 clusters with 60 vectors each (300 total, triggers splits)
+            clustered = generator.generate_clustered(
+                num_clusters=5, per_cluster=60, separation=0.4
+            )
+            vectors = [vec for vec, _label in clustered]
+            labels = [label for _vec, label in clustered]
+
+            # Create file and chunks
+            file_id = self.create_test_file(provider, "clustered_test.py")
+            chunk_ids = self.create_test_chunks(provider, file_id, len(vectors))
+
+            # Insert via external API
+            self.insert_embeddings_via_api(provider, chunk_ids, vectors, self.TEST_DIMS)
+
+            # Query from each cluster and verify results are dominated by same-cluster
+            k = 10
+            for cluster_id in range(5):
+                # Get indices for this cluster
+                cluster_indices = [i for i, l in enumerate(labels) if l == cluster_id]
+                query_idx = cluster_indices[0]
+                query = vectors[query_idx]
+
+                # Search
+                results = self.search_via_api(provider, query, k)
+                result_chunk_ids = [r["chunk_id"] for r in results]
+
+                # Count how many results are from the same cluster
+                cluster_chunk_ids = {chunk_ids[i] for i in cluster_indices}
+                same_cluster_count = sum(
+                    1 for cid in result_chunk_ids if cid in cluster_chunk_ids
+                )
+
+                # With well-separated clusters, most results should be from same cluster
+                assert same_cluster_count >= k // 2, (
+                    f"Cluster {cluster_id}: only {same_cluster_count}/{k} "
+                    f"results from same cluster"
+                )
+
+        finally:
+            provider.disconnect()
+
+
+class TestSearchConsistencyAcrossStructuralOpsExternal(ExternalAPITestBase):
+    """Search results must be stable across structural operations via external API."""
+
+    def test_search_consistency_as_data_grows(self, tmp_path: Path) -> None:
+        """Search results for existing vectors remain stable as new vectors added."""
+        generator = SyntheticEmbeddingGenerator(dims=self.TEST_DIMS, seed=42)
+        provider = self.create_db_provider(tmp_path)
+
+        try:
+            # Phase 1: Insert 50 vectors (below split threshold)
+            file_id = self.create_test_file(provider)
+            chunk_ids_50 = self.create_test_chunks(provider, file_id, 50, start_id=0)
+            vectors_50 = [generator.generate_hash_seeded(f"doc_{i}") for i in range(50)]
+            self.insert_embeddings_via_api(
+                provider, chunk_ids_50, vectors_50, self.TEST_DIMS
+            )
+
+            # Capture search results for sample queries
+            sample_queries = [0, 10, 20, 30, 40]
+            k = 5
+            results_50 = {}
+            for idx in sample_queries:
+                results = self.search_via_api(provider, vectors_50[idx], k)
+                results_50[idx] = [r["chunk_id"] for r in results]
+
+            # Phase 2: Insert 50 more (total=100, at split threshold)
+            chunk_ids_100 = self.create_test_chunks(provider, file_id, 50, start_id=50)
+            vectors_100 = [
+                generator.generate_hash_seeded(f"doc_{i}") for i in range(50, 100)
+            ]
+            self.insert_embeddings_via_api(
+                provider, chunk_ids_100, vectors_100, self.TEST_DIMS
+            )
+
+            # Capture search results after growth
+            results_100 = {}
+            for idx in sample_queries:
+                results = self.search_via_api(provider, vectors_50[idx], k)
+                results_100[idx] = [r["chunk_id"] for r in results]
+
+            # Phase 3: Insert 100 more (total=200, after splits)
+            chunk_ids_200 = self.create_test_chunks(provider, file_id, 100, start_id=100)
+            vectors_200 = [
+                generator.generate_hash_seeded(f"doc_{i}") for i in range(100, 200)
+            ]
+            self.insert_embeddings_via_api(
+                provider, chunk_ids_200, vectors_200, self.TEST_DIMS
+            )
+
+            # Capture search results after more growth
+            results_200 = {}
+            for idx in sample_queries:
+                results = self.search_via_api(provider, vectors_50[idx], k)
+                results_200[idx] = [r["chunk_id"] for r in results]
+
+            # Verify: Query vector itself should be top result at all checkpoints
+            for idx in sample_queries:
+                query_chunk_id = chunk_ids_50[idx]
+
+                # Query chunk should be in results at all stages
+                assert query_chunk_id in results_50[idx], (
+                    f"Query {idx} not found in results_50"
+                )
+                assert query_chunk_id in results_100[idx], (
+                    f"Query {idx} not found in results_100"
+                )
+                assert query_chunk_id in results_200[idx], (
+                    f"Query {idx} not found in results_200"
+                )
+
+        finally:
+            provider.disconnect()
+
+
+class TestNoFalseNegativesExternal(ExternalAPITestBase):
+    """I11: Every DB embedding must be findable via external search API."""
+
+    def test_all_embeddings_findable(self, tmp_path: Path) -> None:
+        """Every indexed embedding appears in search results."""
+        generator = SyntheticEmbeddingGenerator(dims=self.TEST_DIMS, seed=42)
+        provider = self.create_db_provider(tmp_path)
+
+        try:
+            # Insert 250 vectors (triggers multiple splits)
+            file_id = self.create_test_file(provider)
+            chunk_ids = self.create_test_chunks(provider, file_id, 250)
+            vectors = [generator.generate_hash_seeded(f"doc_{i}") for i in range(250)]
+            self.insert_embeddings_via_api(provider, chunk_ids, vectors, self.TEST_DIMS)
+
+            # For EVERY embedding, verify it's findable
+            k = 250  # k = total count
+            not_found = []
+
+            for i, (chunk_id, vec) in enumerate(zip(chunk_ids, vectors)):
+                results = self.search_via_api(provider, vec, k)
+                result_chunk_ids = {r["chunk_id"] for r in results}
+
+                if chunk_id not in result_chunk_ids:
+                    not_found.append((i, chunk_id))
+
+            # No false negatives
+            assert len(not_found) == 0, (
+                f"I11 violated: {len(not_found)} embeddings not findable: "
+                f"{not_found[:10]}..."
+            )
+
+        finally:
+            provider.disconnect()
+
+    def test_findable_after_structural_changes(self, tmp_path: Path) -> None:
+        """Embeddings remain findable after splits and incremental syncs."""
+        generator = SyntheticEmbeddingGenerator(dims=self.TEST_DIMS, seed=42)
+        provider = self.create_db_provider(tmp_path)
+
+        try:
+            # Phase 1: Insert 100 vectors (at threshold)
+            file_id = self.create_test_file(provider)
+            chunk_ids_1 = self.create_test_chunks(provider, file_id, 100, start_id=0)
+            vectors_1 = [generator.generate_hash_seeded(f"doc_{i}") for i in range(100)]
+            self.insert_embeddings_via_api(
+                provider, chunk_ids_1, vectors_1, self.TEST_DIMS
+            )
+
+            # Phase 2: Insert 50 more (triggers split)
+            chunk_ids_2 = self.create_test_chunks(provider, file_id, 50, start_id=100)
+            vectors_2 = [
+                generator.generate_hash_seeded(f"doc_{i}") for i in range(100, 150)
+            ]
+            self.insert_embeddings_via_api(
+                provider, chunk_ids_2, vectors_2, self.TEST_DIMS
+            )
+
+            # Verify all embeddings from both phases are findable
+            all_chunk_ids = chunk_ids_1 + chunk_ids_2
+            all_vectors = vectors_1 + vectors_2
+            k = 150
+
+            not_found = []
+            for chunk_id, vec in zip(all_chunk_ids, all_vectors):
+                results = self.search_via_api(provider, vec, k)
+                result_chunk_ids = {r["chunk_id"] for r in results}
+
+                if chunk_id not in result_chunk_ids:
+                    not_found.append(chunk_id)
+
+            assert len(not_found) == 0, (
+                f"Lost {len(not_found)} embeddings after structural changes"
+            )
+
+        finally:
+            provider.disconnect()
