@@ -169,6 +169,10 @@ class FakeLLMProvider(LLMProvider):
             "completion_tokens": self._completion_tokens,
         }
 
+    def get_synthesis_concurrency(self) -> int:
+        """Get recommended concurrency for parallel synthesis operations."""
+        return 3  # Conservative default matching LLMProvider interface
+
 
 class FakeEmbeddingProvider:
     """Fake embedding provider that returns deterministic vectors.

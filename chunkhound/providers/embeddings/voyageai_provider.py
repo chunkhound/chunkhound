@@ -231,6 +231,8 @@ class VoyageAIEmbeddingProvider:
             return []
 
         validated_texts = validate_text_input(texts)
+        if not validated_texts:
+            return []
 
         # Retry loop for transient network errors
         for attempt in range(self._retry_attempts):
@@ -359,6 +361,10 @@ class VoyageAIEmbeddingProvider:
         Based on actual measurements: 3.0 chars/token for VoyageAI.
         """
         return max(1, len(text) // EMBEDDING_CHARS_PER_TOKEN)
+
+    def validate_texts(self, texts: list[str]) -> list[str]:
+        """Validate and preprocess texts before embedding."""
+        return validate_text_input(texts)
 
     def chunk_text_by_tokens(self, text: str, max_tokens: int) -> list[str]:
         """Split text into chunks by token count."""

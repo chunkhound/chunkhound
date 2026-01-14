@@ -4,10 +4,12 @@ This module provides Python-specific tree-sitter queries and extraction logic
 for mapping Python AST nodes to semantic chunks.
 """
 
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from chunkhound.core.types.common import Language
-from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 if TYPE_CHECKING:
@@ -483,14 +485,13 @@ class PythonMapping(BaseMapping):
                 name: (identifier) @name
             ) @definition
 
-            ; Top-level assignment with literal RHS (dict/list)
-            (module
-                (expression_statement
-                    (assignment
-                        left: (_) @lhs
-                        right: [(dictionary) (list)] @rhs
-                    ) @definition
-                )
+            ; Assignment - captures UPPER_SNAKE_CASE constants (any scope)
+            ; extract_constants filters for constant naming patterns
+            (expression_statement
+                (assignment
+                    left: (identifier) @lhs
+                    right: (_) @rhs
+                ) @definition
             )
             """
 
@@ -791,3 +792,140 @@ class PythonMapping(BaseMapping):
                     metadata["raw_content"] = clean_text.strip()
 
         return metadata
+
+    def extract_constants(
+        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constant definitions from Python code.
+
+        Identifies UPPER_SNAKE_CASE variable assignments as constants.
+
+        Args:
+            concept: The universal concept being extracted
+            captures: Dictionary of capture names to tree-sitter nodes
+            content: Source code as bytes
+
+        Returns:
+            List of constant dictionaries with 'name' and 'value' keys, or None
+        """
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        source = content.decode("utf-8")
+
+        # Check if we have a name capture that matches UPPER_SNAKE_CASE pattern
+        if "name" in captures:
+            name_node = captures["name"]
+            name = self.get_node_text(name_node, source).strip()
+
+            # Pattern: Optional leading underscore, then uppercase letter,
+            # followed by uppercase letters, digits, and underscores
+            if name and re.match(r"^_?[A-Z][A-Z0-9_]*$", name):
+                # Look for the assignment value in the definition node
+                def_node = captures.get("definition")
+                if def_node and def_node.type in (
+                    "function_definition",
+                    "async_function_definition",
+                    "class_definition",
+                ):
+                    # Not a constant assignment, it's a function/class
+                    return None
+
+                # Try to extract the value from assignment
+                if def_node:
+                    # For assignment nodes, look for the right-hand side
+                    rhs_node = captures.get("rhs")
+                    if rhs_node:
+                        value = self.get_node_text(rhs_node, source).strip()
+                    else:
+                        # Fallback: try to find assignment value directly
+                        value_nodes = self.find_children_by_type(def_node, "assignment")
+                        if value_nodes:
+                            # Get the full assignment text and extract RHS
+                            assignment_text = self.get_node_text(
+                                value_nodes[0], source
+                            ).strip()
+                            if "=" in assignment_text:
+                                value = assignment_text.split("=", 1)[1].strip()
+                            else:
+                                value = ""
+                        else:
+                            value = ""
+
+                    # Truncate value if longer than limit
+                    if len(value) > MAX_CONSTANT_VALUE_LENGTH:
+                        value = value[:MAX_CONSTANT_VALUE_LENGTH]
+
+                    return [{"name": name, "value": value}]
+
+        # Handle top-level assignment case (lhs capture)
+        if "lhs" in captures:
+            lhs_node = captures["lhs"]
+            lhs_text = self.get_node_text(lhs_node, source).strip()
+
+            # Extract the identifier (simple case: just the variable name)
+            name = lhs_text.split()[-1].rstrip(":") if lhs_text else ""
+
+            if name and re.match(r"^_?[A-Z][A-Z0-9_]*$", name):
+                # Extract value from rhs capture
+                rhs_node = captures.get("rhs")
+                if rhs_node:
+                    value = self.get_node_text(rhs_node, source).strip()
+                else:
+                    # Fallback to definition node
+                    def_node = captures.get("definition")
+                    if def_node:
+                        def_text = self.get_node_text(def_node, source).strip()
+                        if "=" in def_text:
+                            value = def_text.split("=", 1)[1].strip()
+                        else:
+                            value = ""
+                    else:
+                        value = ""
+
+                # Truncate value if longer than limit
+                if len(value) > MAX_CONSTANT_VALUE_LENGTH:
+                    value = value[:MAX_CONSTANT_VALUE_LENGTH]
+
+                return [{"name": name, "value": value}]
+
+        return None
+
+    def resolve_import_path(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> Path | None:
+        """Resolve Python import to file path.
+
+        Args:
+            import_text: The import statement text
+                (e.g., "import x.y.z" or "from x.y import z")
+            base_dir: The base directory of the codebase
+            source_file: The file containing the import statement
+
+        Returns:
+            Path to the imported module file, or None if not found or
+            is external package
+        """
+        # Handle "from x.y.z import W" or "import x.y.z"
+        match = re.search(r"from\s+([\w.]+)\s+import|import\s+([\w.]+)", import_text)
+        if not match:
+            return None
+
+        module = match.group(1) or match.group(2)
+        if not module:
+            return None
+
+        # Convert module.path to module/path.py
+        rel_path = module.replace(".", "/") + ".py"
+        full_path = base_dir / rel_path
+        if full_path.exists():
+            return full_path
+
+        # Try as package __init__.py
+        pkg_path = module.replace(".", "/") + "/__init__.py"
+        full_path = base_dir / pkg_path
+        if full_path.exists():
+            return full_path
+
+        # External package - return None
+        return None

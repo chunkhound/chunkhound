@@ -8,9 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Coroutine
 from typing import TYPE_CHECKING, Any, TypeVar
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # type-checkers only; avoid runtime hard dep
     import mcp.types as types  # noqa: F401
@@ -135,6 +134,7 @@ async def handle_tool_call(
     debug_mode: bool = False,
     scan_progress: dict | None = None,
     llm_manager: LLMManager | None = None,
+    config: Any = None,
 ) -> list[types.TextContent]:
     """Unified tool call handler for all MCP servers.
 
@@ -150,6 +150,7 @@ async def handle_tool_call(
         debug_mode: Whether to include stack traces in error responses
         scan_progress: Optional scan progress from MCPServerBase
         llm_manager: Optional LLM manager for code_research
+        config: Optional Config instance for research service factory
 
     Returns:
         List containing a single TextContent with JSON-formatted response
@@ -161,7 +162,7 @@ async def handle_tool_call(
         # Lazy import at runtime to construct MCP content objects without
         # forcing hard dependency during module import/collection.
         import mcp.types as types  # noqa: WPS433
-        # Wait for initialization (reduced timeout since server is immediately available)
+        # Wait for initialization (reduced timeout, server is ready)
         await asyncio.wait_for(initialization_complete.wait(), timeout=5.0)
 
         # Validate tool exists
@@ -184,6 +185,7 @@ async def handle_tool_call(
             arguments=parsed_args,
             scan_progress=scan_progress,
             llm_manager=llm_manager,
+            config=config,
         )
 
         # Format response based on result type

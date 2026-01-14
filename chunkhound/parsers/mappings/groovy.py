@@ -6,13 +6,16 @@ classes, traits, methods, closures, dynamic typing, GStrings, and Groovy-specifi
 syntax while building on the Java foundation.
 """
 
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from loguru import logger
 
 from chunkhound.core.types.common import Language
+from chunkhound.parsers.universal_engine import UniversalConcept
 
-from .base import BaseMapping
+from .base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 
 if TYPE_CHECKING:
     from tree_sitter import Node as TSNode
@@ -578,3 +581,327 @@ class GroovyMapping(BaseMapping):
             logger.error(f"Failed to extract Groovy field declarations: {e}")
 
         return fields
+
+    def extract_constants(
+        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constant definitions from Groovy code.
+
+        Identifies two types of constants:
+        1. Static final fields: class-level constants (requires both 'static' and 'final')
+        2. Local final variables: method-scoped constants (requires 'final' modifier)
+
+        Supports multiple variable declarators in a single declaration.
+
+        Args:
+            concept: The universal concept being extracted
+            captures: Dictionary of capture names to tree-sitter nodes
+            content: Source code as bytes
+
+        Returns:
+            List of constant dictionaries with 'name', 'value', and optional 'type' keys,
+            or None if no constants found
+
+        Examples:
+            - Static final field: "static final int MAX = 100"
+            - Local final variable: "final String NAME = 'test'"
+            - Multiple declarators: "final int A = 1, B = 2, C = 3"
+        """
+        try:
+            from chunkhound.parsers.universal_engine import UniversalConcept
+        except ImportError:
+            return None
+
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        # Get the definition node
+        def_node = captures.get("definition")
+        if not def_node or def_node.type not in (
+            "field_declaration",
+            "local_variable_declaration",
+        ):
+            return None
+
+        source = content.decode("utf-8")
+
+        # Check for required modifiers based on declaration type
+        modifiers_node = self.find_child_by_type(def_node, "modifiers")
+        if not modifiers_node:
+            return None
+
+        modifiers_text = self.get_node_text(modifiers_node, source)
+
+        # Field declarations require both static and final
+        # Local variable declarations only require final
+        if def_node.type == "field_declaration":
+            if not ("static" in modifiers_text and "final" in modifiers_text):
+                return None
+        elif def_node.type == "local_variable_declaration":
+            if "final" not in modifiers_text:
+                return None
+
+        # Extract type from the field declaration
+        type_node = None
+        for child in self.walk_tree(def_node):
+            if child and child.type in [
+                "type_identifier",
+                "integral_type",
+                "floating_point_type",
+                "boolean_type",
+                "generic_type",
+                "array_type",
+            ]:
+                type_node = child
+                break
+
+        const_type = (
+            self.get_node_text(type_node, source).strip() if type_node else None
+        )
+
+        # Extract variable declarators
+        constants = []
+        var_nodes = self.find_children_by_type(def_node, "variable_declarator")
+        for var_node in var_nodes:
+            name_node = self.find_child_by_type(var_node, "identifier")
+            if not name_node:
+                continue
+
+            name = self.get_node_text(name_node, source).strip()
+
+            # Try to extract value
+            value = ""
+            for child in var_node.children:
+                if child.type == "=":
+                    # Next child is the value
+                    idx = var_node.children.index(child)
+                    if idx + 1 < len(var_node.children):
+                        value_node = var_node.children[idx + 1]
+                        value = self.get_node_text(value_node, source).strip()
+                        break
+
+            # Truncate long values
+            if len(value) > MAX_CONSTANT_VALUE_LENGTH:
+                value = value[:MAX_CONSTANT_VALUE_LENGTH] + "..."
+
+            # Build result dict
+            result: dict[str, str] = {"name": name, "value": value}
+            if const_type is not None:
+                result["type"] = const_type
+
+            constants.append(result)
+
+        return constants if constants else None
+
+    def resolve_import_path(
+        self,
+        import_text: str,
+        base_dir: Path,
+        source_file: Path,
+    ) -> Path | None:
+        """Resolve Groovy import to file path.
+
+        Args:
+            import_text: Import statement text (e.g., "import com.example.Foo;")
+            base_dir: Base directory of the project
+            source_file: Path to the file containing the import
+
+        Returns:
+            Path to the imported file, or None if not found
+        """
+        # Extract class path: import com.example.Foo; or import static com.example.Foo.bar;
+        match = re.search(r"import\s+(?:static\s+)?([\w.]+);?", import_text)
+        if not match:
+            return None
+
+        class_path = match.group(1)
+        if not class_path:
+            return None
+
+        # Convert to file path (last part is class name)
+        rel_path = class_path.replace(".", "/") + ".groovy"
+
+        # Try common source directories
+        for prefix in ["", "src/main/groovy/", "src/", "app/src/main/groovy/"]:
+            full_path = base_dir / prefix / rel_path
+            if full_path.exists():
+                return full_path
+
+        return None
+
+    # LanguageMapping protocol methods
+    def get_query_for_concept(self, concept: UniversalConcept) -> str | None:
+        """Get tree-sitter query for universal concept in Groovy."""
+
+        if concept == UniversalConcept.DEFINITION:
+            return """
+            (method_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (constructor_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (class_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (interface_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (enum_declaration
+                name: (identifier) @name
+            ) @definition
+
+            (closure
+            ) @definition
+
+            (field_declaration) @definition
+
+            (local_variable_declaration) @definition
+            """
+
+        elif concept == UniversalConcept.COMMENT:
+            return """
+            (line_comment) @definition
+            (block_comment) @definition
+            """
+
+        elif concept == UniversalConcept.IMPORT:
+            return """
+            (import_declaration) @definition
+            (package_declaration) @definition
+            """
+
+        elif concept == UniversalConcept.STRUCTURE:
+            return """
+            (program
+                (package_declaration)? @package
+                (import_declaration)* @imports
+            ) @definition
+            """
+
+        else:
+            # BLOCK concept not supported for Groovy
+            return None
+
+    def extract_name(
+        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+    ) -> str:
+        """Extract name from captures for this concept."""
+        source = content.decode("utf-8")
+
+        if concept == UniversalConcept.DEFINITION:
+            # Use @name capture if available
+            if "name" in captures:
+                return self.get_node_text(captures["name"], source).strip()
+
+            # For field_declaration and local_variable_declaration, extract variable name
+            def_node = captures.get("definition")
+            if def_node and def_node.type in (
+                "field_declaration",
+                "local_variable_declaration",
+            ):
+                declarator = self.find_child_by_type(def_node, "variable_declarator")
+                if declarator:
+                    var_name_node = self.find_child_by_type(declarator, "identifier")
+                    if var_name_node:
+                        return self.get_node_text(var_name_node, source).strip()
+                line = def_node.start_point[0] + 1
+                prefix = (
+                    "field" if def_node.type == "field_declaration" else "local_var"
+                )
+                return f"{prefix}_line_{line}"
+
+            # For closures, extract assigned variable name
+            if def_node and def_node.type == "closure":
+                return self.extract_function_name(def_node, source)
+
+            return "unnamed_definition"
+
+        elif concept == UniversalConcept.COMMENT:
+            if "definition" in captures:
+                node = captures["definition"]
+                line = node.start_point[0] + 1
+                comment_text = self.get_node_text(node, source)
+                if comment_text.strip().startswith("/**"):
+                    return f"groovydoc_line_{line}"
+                return f"comment_line_{line}"
+            return "unnamed_comment"
+
+        elif concept == UniversalConcept.IMPORT:
+            if "definition" in captures:
+                node = captures["definition"]
+                import_text = self.get_node_text(node, source).strip()
+
+                # Package declaration
+                if node.type == "package_declaration":
+                    if import_text.startswith("package ") and import_text.endswith(";"):
+                        pkg_name = import_text[8:-1].strip()
+                        return f"package_{pkg_name.replace('.', '_')}"
+                    elif import_text.startswith("package "):
+                        pkg_name = import_text[8:].strip()
+                        return f"package_{pkg_name.replace('.', '_')}"
+                    return "package_unknown"
+
+                # Import declaration
+                if node.type == "import_declaration":
+                    match = re.search(r"import\s+(?:static\s+)?([\w.]+);?", import_text)
+                    if match:
+                        import_path = match.group(1)
+                        parts = import_path.split(".")
+                        return f"import_{parts[-1]}"
+                    return "import_unknown"
+
+            return "unnamed_import"
+
+        elif concept == UniversalConcept.STRUCTURE:
+            return "file_structure"
+
+        return "unnamed"
+
+    def extract_content(
+        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+    ) -> str:
+        """Extract content from captures for this concept."""
+        source = content.decode("utf-8")
+
+        if "definition" in captures:
+            node = captures["definition"]
+            return self.get_node_text(node, source)
+        elif captures:
+            node = list(captures.values())[0]
+            return self.get_node_text(node, source)
+
+        return ""
+
+    def extract_metadata(
+        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+    ) -> dict[str, str]:
+        """Extract Groovy-specific metadata."""
+        source = content.decode("utf-8")
+        metadata: dict[str, str] = {}
+
+        def_node = captures.get("definition")
+        if def_node:
+            metadata["node_type"] = def_node.type
+
+            # Extract annotations for DEFINITION concept
+            if concept == UniversalConcept.DEFINITION:
+                annotations = self.extract_annotations(def_node, source)
+                if annotations:
+                    metadata["annotations"] = ", ".join(annotations)
+
+                # Extract parameters for methods/closures
+                if def_node.type in ("method_declaration", "constructor_declaration"):
+                    params = self.extract_parameters(def_node, source)
+                    if params:
+                        metadata["parameters"] = ", ".join(params)
+                elif def_node.type == "closure":
+                    params = self.extract_closure_parameters(def_node, source)
+                    if params:
+                        metadata["parameters"] = ", ".join(params)
+
+        return metadata

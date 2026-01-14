@@ -5,12 +5,14 @@ for the universal concept system. It maps Rust's AST nodes to universal
 semantic concepts used by the unified parser.
 """
 
+import re
+from pathlib import Path
 from typing import Any
 
 from tree_sitter import Node
 
 from chunkhound.core.types.common import Language
-from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 
@@ -637,3 +639,138 @@ class RustMapping(BaseMapping):
             if child and self.get_node_text(child, source).strip() == "mut":
                 return True
         return False
+
+    def extract_constants(
+        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constant definitions with their values.
+
+        Returns list of dicts with 'name', 'value', and optionally 'type' keys,
+        or None if this is not a constant definition.
+
+        In Rust, this includes:
+        - const items (const MAX: i32 = 100)
+        - static items (static COUNTER: i32 = 0)
+        - immutable let bindings (let MAX = 100) - mutable let bindings are excluded
+        """
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        # Get the definition node
+        def_node = captures.get("definition")
+        if not def_node or def_node.type not in ["const_item", "static_item", "let_declaration"]:
+            return None
+
+        source = content.decode("utf-8")
+
+        # For let_declaration, skip mutable bindings
+        if def_node.type == "let_declaration":
+            if self._is_mutable_binding(def_node, source):
+                return None
+
+        # Extract metadata to get kind and type
+        metadata = self.extract_metadata(concept, captures, content)
+        if metadata.get("kind") not in ["const", "static", "variable"]:
+            return None
+
+        # Extract constant name
+        name_node = captures.get("name")
+        if not name_node:
+            return None
+
+        const_name = self.get_node_text(name_node, source).strip()
+
+        # Extract value by finding the assignment after "="
+        const_value = None
+        found_equals = False
+        for i in range(def_node.child_count):
+            child = def_node.child(i)
+            if child is None:
+                continue
+
+            if self.get_node_text(child, source).strip() == "=":
+                found_equals = True
+            elif found_equals and child.type != ";":
+                # Extract the value, truncating to 50 chars if longer
+                value_text = self.get_node_text(child, source).strip()
+                if len(value_text) > MAX_CONSTANT_VALUE_LENGTH:
+                    const_value = value_text[:MAX_CONSTANT_VALUE_LENGTH]
+                else:
+                    const_value = value_text
+                break
+
+        # Build result dict
+        result: dict[str, str] = {"name": const_name}
+
+        if const_value is not None:
+            result["value"] = const_value
+
+        # Include type if available
+        if "type" in metadata:
+            result["type"] = metadata["type"]
+
+        # For static items, check if mutable
+        if def_node.type == "static_item":
+            # Look for 'mut' keyword
+            for child in self.walk_tree(def_node):
+                if child and self.get_node_text(child, source).strip() == "mut":
+                    result["mutable"] = "true"
+                    break
+
+        return [result]
+
+    def resolve_import_path(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> Path | None:
+        """Resolve Rust use/mod statement to file path."""
+
+        # Handle mod declarations: mod foo;
+        mod_match = re.search(r"mod\s+(\w+)\s*;", import_text)
+        if mod_match:
+            mod_name = mod_match.group(1)
+            source_dir = source_file.parent
+
+            # Try mod_name.rs
+            mod_file = source_dir / f"{mod_name}.rs"
+            if mod_file.exists():
+                return mod_file
+
+            # Try mod_name/mod.rs
+            mod_file = source_dir / mod_name / "mod.rs"
+            if mod_file.exists():
+                return mod_file
+
+            return None
+
+        # Handle use statements: use crate::foo::bar;
+        use_match = re.search(
+            r"use\s+(?:crate|self|super)::(\w+(?:::\w+)*)", import_text
+        )
+        if use_match:
+            path_parts = use_match.group(1).split("::")
+
+            # Start from src/ for crate:: imports
+            search_dir = base_dir / "src"
+            if not search_dir.exists():
+                search_dir = base_dir
+
+            # Walk the module path
+            # All but last (which might be item, not module)
+            for part in path_parts[:-1]:
+                mod_file = search_dir / f"{part}.rs"
+                if mod_file.exists():
+                    return mod_file
+                mod_dir = search_dir / part
+                if mod_dir.is_dir():
+                    search_dir = mod_dir
+
+            # Try the last part
+            last = path_parts[-1]
+            mod_file = search_dir / f"{last}.rs"
+            if mod_file.exists():
+                return mod_file
+            mod_file = search_dir / last / "mod.rs"
+            if mod_file.exists():
+                return mod_file
+
+        return None

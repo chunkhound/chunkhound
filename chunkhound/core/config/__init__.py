@@ -10,6 +10,7 @@ This package provides a unified configuration system that supports:
 
 from .embedding_config import EmbeddingConfig
 from .embedding_factory import EmbeddingProviderFactory
+from .research_config import ResearchConfig
 from .settings_sources import (
     FilteredCliSettingsSource,
     JsonConfigSettingsSource,
@@ -23,6 +24,7 @@ from .sharding_config import ShardingConfig
 __all__ = [
     "EmbeddingConfig",
     "EmbeddingProviderFactory",
+    "ResearchConfig",
     "YamlConfigSettingsSource",
     "TomlConfigSettingsSource",
     "JsonConfigSettingsSource",

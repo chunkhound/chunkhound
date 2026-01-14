@@ -5,6 +5,7 @@ the ConceptExtractor's LanguageMapping protocol by converting traditional
 queries (get_function_query, get_class_query, etc.) to universal concepts.
 """
 
+from pathlib import Path
 from typing import Any
 
 from tree_sitter import Node
@@ -50,7 +51,7 @@ class MappingAdapter(LanguageMapping):
 
         # Fallback to adapter behavior
         if concept == UniversalConcept.DEFINITION:
-            # Combine function and class queries
+            # Combine function, class, and definition queries
             function_query = self.base_mapping.get_function_query()
             class_query = self.base_mapping.get_class_query()
 
@@ -60,6 +61,12 @@ class MappingAdapter(LanguageMapping):
                 queries.append(function_query.strip())
             if class_query.strip():
                 queries.append(class_query.strip())
+
+            # Check for additional definition patterns (e.g., field_declaration for Java)
+            if hasattr(self.base_mapping, "get_definition_query"):
+                definition_query = self.base_mapping.get_definition_query()
+                if definition_query and definition_query.strip():
+                    queries.append(definition_query.strip())
 
             if queries:
                 return "\n\n".join(queries)
@@ -349,3 +356,40 @@ class MappingAdapter(LanguageMapping):
             return True
 
         return False
+
+    def extract_constants(
+        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constants from captures by delegating to base_mapping.
+
+        Args:
+            concept: Universal concept being extracted
+            captures: Dictionary of captured nodes from query
+            content: Source code as bytes
+
+        Returns:
+            List of constant dictionaries or None
+        """
+        if hasattr(self.base_mapping, "extract_constants"):
+            return self.base_mapping.extract_constants(concept, captures, content)
+        return None
+
+    def resolve_import_path(
+        self,
+        import_text: str,
+        base_dir: Path,
+        source_file: Path,
+    ) -> Path | None:
+        """Resolve import statement to file path by delegating to base mapping.
+
+        Args:
+            import_text: The import statement text to resolve
+            base_dir: Base directory for resolution
+            source_file: Path to the source file containing the import
+
+        Returns:
+            Resolved path or None if unresolvable
+        """
+        return self.base_mapping.resolve_import_path(
+            import_text, base_dir, source_file
+        )

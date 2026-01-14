@@ -1631,21 +1631,6 @@ class IndexingCoordinator(BaseService):
                 )
 
         except Exception as e:
-            # Debug log to trace if this is the mystery error source
-            import os
-            from datetime import datetime
-
-            debug_file = os.getenv("CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_debug.log")
-            timestamp = datetime.now().isoformat()
-            try:
-                with open(debug_file, "a") as f:
-                    f.write(
-                        f"[{timestamp}] [COORDINATOR-MISSING] Failed to generate missing embeddings: {e}\n"
-                    )
-                    f.flush()
-            except Exception:
-                pass
-
             logger.error(
                 f"[IndexCoord-Missing] Failed to generate missing embeddings: {e}"
             )
@@ -1673,10 +1658,20 @@ class IndexingCoordinator(BaseService):
             valid_chunk_data = []
             empty_count = 0
             for chunk_id, chunk in zip(chunk_ids, chunks):
+                from chunkhound.core.utils import format_chunk_for_embedding
                 from chunkhound.utils.normalization import normalize_content
 
-                text = normalize_content(chunk.get("code", ""))
-                if text:  # Only include chunks with actual content
+                code = normalize_content(chunk.get("code", ""))
+                if code:  # Only include chunks with actual content
+                    # Extract constants from metadata if available
+                    metadata = chunk.get("metadata") or {}
+                    constants = metadata.get("constants")
+                    text = format_chunk_for_embedding(
+                        code=code,
+                        file_path=chunk.get("file_path"),
+                        language=chunk.get("language"),
+                        constants=constants,
+                    )
                     valid_chunk_data.append((chunk_id, chunk, text))
                 else:
                     empty_count += 1
@@ -1698,7 +1693,7 @@ class IndexingCoordinator(BaseService):
             texts = [text for _, _, text in valid_chunk_data]
 
             # Generate embeddings (progress tracking handled by missing embeddings phase)
-            embedding_results = await self._embedding_provider.embed(texts)
+            embedding_results = await self._embedding_provider.embed_batch(texts)
 
             # Store embeddings in database
             embeddings_data = []

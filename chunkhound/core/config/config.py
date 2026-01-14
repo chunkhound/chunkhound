@@ -19,6 +19,7 @@ from .embedding_config import EmbeddingConfig
 from .indexing_config import IndexingConfig
 from .llm_config import LLMConfig
 from .mcp_config import MCPConfig
+from .research_config import ResearchConfig
 from .sharding_config import ShardingConfig
 
 
@@ -32,6 +33,7 @@ class Config(BaseModel):
     llm: LLMConfig | None = Field(default=None)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     indexing: IndexingConfig = Field(default_factory=IndexingConfig)
+    research: ResearchConfig = Field(default_factory=ResearchConfig)
     sharding: ShardingConfig = Field(default_factory=ShardingConfig)
     debug: bool = Field(default=False)
 
@@ -190,6 +192,11 @@ class Config(BaseModel):
             # Create LLMConfig instance with the data
             config_data["llm"] = LLMConfig(**config_data["llm"])
 
+        # Special handling for ResearchConfig
+        if "research" in config_data and isinstance(config_data["research"], dict):
+            # Create ResearchConfig instance with the data
+            config_data["research"] = ResearchConfig(**config_data["research"])
+
         # Add target_dir to config_data for initialization
         config_data["target_dir"] = target_dir
 
@@ -223,6 +230,8 @@ class Config(BaseModel):
             config["mcp"] = mcp_config
         if indexing_config := IndexingConfig.load_from_env():
             config["indexing"] = indexing_config
+        if research_config := ResearchConfig.load_from_env():
+            config["research"] = research_config
 
         return config
 
@@ -259,6 +268,8 @@ class Config(BaseModel):
             overrides["mcp"] = mcp_overrides
         if indexing_overrides := IndexingConfig.extract_cli_overrides(args):
             overrides["indexing"] = indexing_overrides
+        if research_overrides := ResearchConfig.extract_cli_overrides(args):
+            overrides["research"] = research_overrides
 
         return overrides
 

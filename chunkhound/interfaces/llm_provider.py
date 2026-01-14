@@ -109,6 +109,7 @@ class LLMProvider(ABC):
         prompt: str,
         system: str | None = None,
         max_completion_tokens: int = 4096,
+        timeout: int | None = None,
     ) -> LLMResponse:
         """
         Generate a completion for the given prompt.
@@ -117,6 +118,7 @@ class LLMProvider(ABC):
             prompt: User prompt
             system: Optional system message
             max_completion_tokens: Maximum completion tokens to generate
+            timeout: Optional timeout in seconds for the request
 
         Returns:
             LLMResponse with content and metadata

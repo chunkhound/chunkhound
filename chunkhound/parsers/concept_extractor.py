@@ -1,5 +1,6 @@
 """Universal concept extraction using language-specific mappings."""
 
+from pathlib import Path
 from typing import Any, Protocol
 
 from tree_sitter import Node, QueryCursor
@@ -37,6 +38,39 @@ class LanguageMapping(Protocol):
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
     ) -> dict[str, Any]:
         """Extract language-specific metadata."""
+        ...
+
+    def extract_constants(
+        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constants from captures.
+
+        Returns list of constant definitions with structure:
+            [{"name": "CONST_NAME", "value": "value_str", "type": "optional_type"}, ...]
+
+        Returns None if no constants found or not applicable for this concept.
+        """
+        ...
+
+    def resolve_import_path(
+        self,
+        import_text: str,
+        base_dir: Path,
+        source_file: Path,
+    ) -> Path | None:
+        """Resolve import statement to file path.
+
+        Each language implements its own import resolution logic.
+        Returns None for external/unresolvable imports.
+
+        Args:
+            import_text: The raw import statement text
+            base_dir: Project root directory
+            source_file: File containing the import
+
+        Returns:
+            Resolved file path or None if external/unresolvable
+        """
         ...
 
 
@@ -108,6 +142,11 @@ class ConceptExtractor:
         name = self.mapping.extract_name(concept, captures, content)
         chunk_content = self.mapping.extract_content(concept, captures, content)
         metadata = self.mapping.extract_metadata(concept, captures, content)
+
+        # Add constants to metadata
+        constants = self.mapping.extract_constants(concept, captures, content)
+        if constants:
+            metadata["constants"] = constants
 
         # Skip empty or whitespace-only chunks
         normalized_content = normalize_content(chunk_content or "")
