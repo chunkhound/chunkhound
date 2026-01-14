@@ -42,6 +42,7 @@ from chunkhound.providers.database.serial_database_provider import (
 )
 from chunkhound.providers.database.serial_executor import (
     _executor_local,
+    signal_heartbeat,
 )
 from chunkhound.providers.database.shard_manager import ShardManager
 
@@ -227,11 +228,12 @@ class DuckDBProvider(SerialDatabaseProvider):
         db_path = Path(self._connection_manager.db_path)
         shard_dir = db_path.parent / "shards"
 
-        # Initialize ShardManager
+        # Initialize ShardManager with heartbeat callback for timeout extension
         self.shard_manager = ShardManager(
             db_provider=self,
             shard_dir=shard_dir,
             config=self._sharding_config,
+            heartbeat_callback=signal_heartbeat,
         )
 
         # Run fix_pass to reconcile USearch indexes with DuckDB state

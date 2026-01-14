@@ -4,6 +4,7 @@ Coordinates shard operations including search, insert, delete, and maintenance.
 Uses derived state architecture - metrics computed from DuckDB and USearch files.
 """
 
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
@@ -66,6 +67,7 @@ class ShardManager:
         db_provider: Any,
         shard_dir: Path,
         config: ShardingConfig,
+        heartbeat_callback: Callable[[], None] | None = None,
     ) -> None:
         """Initialize shard manager.
 
@@ -73,11 +75,14 @@ class ShardManager:
             db_provider: Database provider for DuckDB operations
             shard_dir: Directory containing .usearch shard files
             config: Sharding configuration with thresholds
+            heartbeat_callback: Optional callback to signal progress during
+                long-running operations (prevents timeout)
         """
         self.db = db_provider
         self.shard_dir = shard_dir
         self.config = config
         self.centroids: dict[UUID, np.ndarray] = {}
+        self._heartbeat = heartbeat_callback or (lambda: None)
 
     def search(
         self,
@@ -508,6 +513,7 @@ class ShardManager:
             check_quality: If True, measure self-recall for each shard
         """
         logger.info("Starting fix_pass maintenance")
+        self._heartbeat()
 
         # Cleanup phase
         orphaned_count = self._cleanup_orphaned_files(conn)
@@ -529,6 +535,7 @@ class ShardManager:
         while iteration < max_iterations:
             iteration += 1
             changes_made = 0
+            self._heartbeat()
 
             # Get all shards from DB
             shards = self._list_shards(conn)
@@ -537,6 +544,7 @@ class ShardManager:
                 break
 
             for shard in shards:
+                self._heartbeat()
                 shard_id = UUID(shard["shard_id"])
                 dims = shard["dims"]
                 file_path = self._shard_path(shard_id)
@@ -631,6 +639,7 @@ class ShardManager:
             logger.warning(f"Fix_pass reached max iterations ({max_iterations})")
 
         # Final: populate centroid cache for routing
+        self._heartbeat()
         self._populate_centroid_cache(conn)
         logger.info("Fix_pass complete")
 
@@ -816,6 +825,8 @@ class ShardManager:
         quantization = shard.get("quantization", self.config.default_quantization)
         file_path = self._shard_path(shard_id)
 
+        self._heartbeat()
+
         # Get all embeddings for this shard from DB
         embeddings = self._get_shard_embedding_ids(shard_id, dims, conn)
 
@@ -834,6 +845,8 @@ class ShardManager:
 
         logger.info(f"Rebuilding shard {shard_id} with {len(embeddings)} vectors")
 
+        self._heartbeat()
+
         # Create new index
         index = usearch_wrapper.create(
             dims,
@@ -843,6 +856,8 @@ class ShardManager:
             expansion_search=self.config.hnsw_expansion_search,
         )
 
+        self._heartbeat()
+
         # Batch add all vectors
         keys = np.array(list(embeddings.keys()), dtype=np.uint64)
         vectors = np.array(list(embeddings.values()), dtype=np.float32)
@@ -850,6 +865,8 @@ class ShardManager:
 
         # Ensure shard directory exists
         self.shard_dir.mkdir(parents=True, exist_ok=True)
+
+        self._heartbeat()
 
         # Save atomically via temp file with fsync for mmap visibility
         tmp_path = file_path.with_suffix(".usearch.tmp")
@@ -986,6 +1003,8 @@ class ShardManager:
         dims = shard["dims"]
         table_name = f"embeddings_{dims}"
 
+        self._heartbeat()
+
         # Phase 1: Sample random vectors for centroid discovery
         # Minimum 50 samples for reliable k=2 clustering (industry: 20-30 per cluster)
         sample_size = min(KMEANS_SAMPLE_SIZE, max(50, self.config.split_threshold // 5))
@@ -1008,11 +1027,15 @@ class ShardManager:
             ).fetchall()
             return {row[0]: 0 for row in result}
 
+        self._heartbeat()
+
         # Phase 2: Run KMeans only on samples to find centroids
         vectors = np.array([list(row[1]) for row in samples], dtype=np.float32)
         kmeans = KMeans(n_clusters=actual_clusters, n_init="auto")
         kmeans.fit(vectors)
         centroids = kmeans.cluster_centers_
+
+        self._heartbeat()
 
         # Phase 3: Assign ALL vectors using DuckDB SQL with array_cosine_distance
         # Build CASE expression to find nearest centroid for each vector
@@ -1080,6 +1103,7 @@ class ShardManager:
         file_path = self._shard_path(shard_id)
 
         logger.info(f"Splitting shard {shard_id}")
+        self._heartbeat()
 
         # Always use K-means for splitting - guarantees exactly 2 balanced clusters.
         # USearch's native clustering uses HNSW graph structure which does NOT
@@ -1112,6 +1136,8 @@ class ShardManager:
 
         # Two-phase split: DuckDB FK checks use committed state, so we must commit
         # the UPDATE before DELETE will succeed. If phase 2 fails, fix_pass cleans up.
+        self._heartbeat()
+
         try:
             table_name = f"embeddings_{dims}"
 
@@ -1151,6 +1177,7 @@ class ShardManager:
                         """,
                         [str(child_id)] + emb_ids,
                     )
+                    self._heartbeat()
 
             # Phase 2 (post-commit): Delete parent shard now that FK references are gone
             conn.execute(
@@ -1195,6 +1222,7 @@ class ShardManager:
         dims = shard["dims"]
 
         logger.info(f"Merging shard {shard_id}")
+        self._heartbeat()
 
         # Get compatible shards (same dims/provider/model, different shard_id)
         result = conn.execute(
@@ -1275,7 +1303,9 @@ class ShardManager:
             return True
 
         # Per-vector routing: assign each embedding to nearest target centroid
+        self._heartbeat()
         assignments: dict[UUID, list[int]] = {t[0]: [] for t in targets}
+        routed_count = 0
         for emb_id, vector in embeddings.items():
             vec_array = np.array(vector, dtype=np.float32)
             vec_norm = np.linalg.norm(vec_array)
@@ -1298,9 +1328,14 @@ class ShardManager:
                     best_target = target_id
 
             assignments[best_target].append(emb_id)
+            routed_count += 1
+            if routed_count % 10000 == 0:
+                self._heartbeat()
 
         # Two-phase merge: DuckDB FK checks use committed state, so we must commit
         # the UPDATE before DELETE will succeed. If phase 2 fails, fix_pass cleans up.
+        self._heartbeat()
+
         try:
             table_name = f"embeddings_{dims}"
 
@@ -1319,6 +1354,7 @@ class ShardManager:
                         """,
                         [str(target_id), *emb_ids],
                     )
+                    self._heartbeat()
                     logger.debug(f"Routed {len(emb_ids)} embeddings to target {target_id}")
 
             # Phase 2 (post-commit): Delete source shard now that FK references are gone

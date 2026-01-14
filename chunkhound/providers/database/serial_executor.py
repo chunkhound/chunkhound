@@ -3,6 +3,7 @@
 import asyncio
 import concurrent.futures
 import contextvars
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +18,25 @@ _transaction_context = contextvars.ContextVar("transaction_active", default=Fals
 
 # Thread-local storage for executor thread state
 _executor_local = threading.local()
+
+# Heartbeat state for timeout extension during long-running operations
+# Shared between executor thread (writes) and main thread (reads)
+_heartbeat_time: float = 0.0
+_heartbeat_lock = threading.Lock()
+
+
+def signal_heartbeat() -> None:
+    """Signal that a long-running operation is making progress.
+
+    Call this from within executor thread during long operations
+    to prevent timeout. The main thread polling loop will extend
+    the deadline when it sees a recent heartbeat.
+
+    Thread-safe: protected by _heartbeat_lock.
+    """
+    global _heartbeat_time
+    with _heartbeat_lock:
+        _heartbeat_time = time.time()
 
 
 def get_thread_local_connection(provider: Any) -> Any:
@@ -96,6 +116,9 @@ class SerialDatabaseExecutor:
         """
 
         def executor_operation() -> Any:
+            # Reset heartbeat at operation start
+            signal_heartbeat()
+
             # Get thread-local connection (created on first access)
             conn = get_thread_local_connection(provider)
 
@@ -113,20 +136,42 @@ class SerialDatabaseExecutor:
             op_func = getattr(provider, f"_executor_{operation_name}")
             return op_func(conn, state, *args, **kwargs)
 
-        # Run in executor synchronously with timeout (env override)
+        # Run in executor with heartbeat-based timeout extension
         future = self._db_executor.submit(executor_operation)
-        import os
         try:
             timeout_s = float(os.getenv("CHUNKHOUND_DB_EXECUTE_TIMEOUT", "30"))
         except Exception:
             timeout_s = 30.0
-        try:
-            return future.result(timeout=timeout_s)
-        except concurrent.futures.TimeoutError:
-            logger.error(
-                f"Database operation '{operation_name}' timed out after {timeout_s} seconds"
-            )
-            raise TimeoutError(f"Operation '{operation_name}' timed out")
+
+        # Heartbeat polling: check every 1s, extend deadline if heartbeat is fresh
+        poll_interval = 1.0
+        deadline = time.time() + timeout_s
+
+        while True:
+            try:
+                remaining = max(0.01, min(poll_interval, deadline - time.time()))
+                return future.result(timeout=remaining)
+            except concurrent.futures.TimeoutError:
+                now = time.time()
+                with _heartbeat_lock:
+                    last_heartbeat = _heartbeat_time
+
+                # If heartbeat is recent, extend deadline (operation making progress)
+                heartbeat_age = now - last_heartbeat
+                if heartbeat_age < timeout_s:
+                    deadline = now + timeout_s
+                    logger.debug(
+                        f"Heartbeat received for '{operation_name}', extending timeout"
+                    )
+                    continue
+
+                # No recent heartbeat - truly timed out
+                if now >= deadline:
+                    logger.error(
+                        f"Database operation '{operation_name}' timed out "
+                        f"(no heartbeat for {heartbeat_age:.1f}s)"
+                    )
+                    raise TimeoutError(f"Operation '{operation_name}' timed out")
 
     async def execute_async(
         self, provider: Any, operation_name: str, *args, **kwargs
