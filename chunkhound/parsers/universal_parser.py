@@ -57,6 +57,9 @@ class CASTConfig:
     preserve_structure: bool = True  # Prioritize syntactic boundaries
     greedy_merge: bool = True  # Greedily merge adjacent sibling nodes
     safe_token_limit: int = 6000  # Conservative token limit (well under 8191 API limit)
+    # Header overhead for embedding: "# {file_path} ({language})\n" adds chars
+    # Reserve space so final text (with header) stays within max_chunk_size
+    header_overhead: int = 150  # Conservative buffer for long file paths
 
 
 @dataclass
@@ -124,6 +127,15 @@ class UniversalParser:
     def _estimate_tokens(self, content: str) -> int:
         """Helper method to estimate tokens using centralized utility."""
         return estimate_tokens(content)
+
+    @property
+    def _effective_max_chunk_size(self) -> int:
+        """Max chunk size minus header overhead for validation.
+
+        This accounts for the embedding header ("# {file_path} ({language})\n")
+        that will be added by format_chunk_for_embedding() after parsing.
+        """
+        return self.cast_config.max_chunk_size - self.cast_config.header_overhead
 
     @property
     def language_name(self) -> str:
@@ -404,28 +416,29 @@ class UniversalParser:
     def _validate_and_split_chunk(
         self, chunk: UniversalChunk, content: str
     ) -> list[UniversalChunk]:
-        """Validate chunk size and split if necessary."""
+        """Validate chunk size and split if necessary.
+
+        Uses _effective_max_chunk_size which reserves space for the embedding
+        header ("# {file_path} ({language})\n") added by format_chunk_for_embedding().
+        """
         metrics = ChunkMetrics.from_content(chunk.content)
         estimated_tokens = self._estimate_tokens(chunk.content)
 
         if (
-            metrics.non_whitespace_chars <= self.cast_config.max_chunk_size
+            metrics.non_whitespace_chars <= self._effective_max_chunk_size
             and estimated_tokens <= self.cast_config.safe_token_limit
         ):
-            # Chunk fits within both limits
+            # Chunk fits within both limits (with header overhead reserved)
             return [chunk]
         else:
             # Don't split Makefile rules unless they're excessively large
             # Splitting would break the target/recipe relationship, but extremely
             # large rules (>1.2x limit) need to be split to avoid token limit issues
             if chunk.metadata.get("kind") == "rule":
-                # Allow up to 1.2x the limit (matching cAST algorithm tolerance)
+                # Allow up to 1.2x the effective limit for Makefile rules
                 # before forcing a split to maintain consistency with other chunks
                 tolerance = 1.2
-                if (
-                    metrics.non_whitespace_chars
-                    <= self.cast_config.max_chunk_size * tolerance
-                ):
+                if metrics.non_whitespace_chars <= self._effective_max_chunk_size * tolerance:
                     # Keep moderately large rules intact for semantic coherence
                     return [chunk]
                 # For very large rules, use Makefile-specific splitting
@@ -488,7 +501,7 @@ class UniversalParser:
             test_content = "\n".join(test_lines)
             test_metrics = ChunkMetrics.from_content(test_content)
 
-            if test_metrics.non_whitespace_chars <= self.cast_config.max_chunk_size:
+            if test_metrics.non_whitespace_chars <= self._effective_max_chunk_size:
                 # Fits - add to current group
                 current_recipe_group.append(recipe_line)
             else:
@@ -657,7 +670,7 @@ class UniversalParser:
         estimated_tokens = self._estimate_tokens(chunk.content)
 
         if (
-            metrics.non_whitespace_chars <= self.cast_config.max_chunk_size
+            metrics.non_whitespace_chars <= self._effective_max_chunk_size
             and estimated_tokens <= self.cast_config.safe_token_limit
         ):
             return [chunk]  # No splitting needed
@@ -732,7 +745,7 @@ class UniversalParser:
             sub_tokens = self._estimate_tokens(sub_chunk.content)
 
             if (
-                sub_metrics.non_whitespace_chars > self.cast_config.max_chunk_size
+                sub_metrics.non_whitespace_chars > self._effective_max_chunk_size
                 or sub_tokens > self.cast_config.safe_token_limit
             ):
                 result.extend(self._recursive_split_chunk(sub_chunk, sub_chunk.content))
@@ -756,7 +769,7 @@ class UniversalParser:
 
             # If still over limit, use emergency split
             if (
-                sub_metrics.non_whitespace_chars > self.cast_config.max_chunk_size
+                sub_metrics.non_whitespace_chars > self._effective_max_chunk_size
                 or sub_tokens > self.cast_config.safe_token_limit
             ):
                 validated_result.extend(
@@ -783,11 +796,11 @@ class UniversalParser:
         else:
             # Fallback to conservative estimation
             max_chars_from_tokens = int(self.cast_config.safe_token_limit * 3.5 * 0.8)
-        max_chars = min(self.cast_config.max_chunk_size, max_chars_from_tokens)
+        max_chars = min(self._effective_max_chunk_size, max_chars_from_tokens)
 
         metrics = ChunkMetrics.from_content(chunk.content)
         if (
-            metrics.non_whitespace_chars <= self.cast_config.max_chunk_size
+            metrics.non_whitespace_chars <= self._effective_max_chunk_size
             and len(chunk.content) <= max_chars_from_tokens
         ):
             return [chunk]
@@ -807,7 +820,7 @@ class UniversalParser:
             remaining_metrics = ChunkMetrics.from_content(remaining)
             if (
                 remaining_metrics.non_whitespace_chars
-                <= self.cast_config.max_chunk_size
+                <= self._effective_max_chunk_size
             ):
                 chunks.append(
                     self._create_split_chunk(
@@ -829,7 +842,7 @@ class UniversalParser:
                     test_metrics = ChunkMetrics.from_content(test_content)
                     if (
                         test_metrics.non_whitespace_chars
-                        <= self.cast_config.max_chunk_size
+                        <= self._effective_max_chunk_size
                     ):
                         best_split = pos + 1  # Include the split character
                         break
@@ -978,7 +991,7 @@ class UniversalParser:
 
         # If combined chunk is too large, return original chunks
         if (
-            metrics.non_whitespace_chars > self.cast_config.max_chunk_size
+            metrics.non_whitespace_chars > self._effective_max_chunk_size
             or estimated_tokens > self.cast_config.safe_token_limit
         ):
             return group
@@ -1118,7 +1131,7 @@ class UniversalParser:
             # Simple merge condition: fits in size limit and close proximity
             can_merge = (
                 not semantic_mismatch
-                and metrics.non_whitespace_chars <= self.cast_config.max_chunk_size
+                and metrics.non_whitespace_chars <= self._effective_max_chunk_size
                 and estimated_tokens <= self.cast_config.safe_token_limit
                 and next_chunk.start_line - current_chunk.end_line <= max_gap
             )
