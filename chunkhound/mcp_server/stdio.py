@@ -127,6 +127,13 @@ class StdioMCPServer(MCPServerBase):
                 if os.getenv("CH_TEST_FORCE_SYNTHESIS") == "1":
                     try:
                         from chunkhound.mcp_server import tools as tools_mod  # noqa: WPS433
+                        from chunkhound.mcp_server import common as common_mod  # noqa: WPS433
+
+                        # Stub has_reranker_support to bypass validation in test mode
+                        def _stub_has_reranker_support(embedding_manager) -> bool:  # type: ignore[override]
+                            return True
+
+                        common_mod.has_reranker_support = _stub_has_reranker_support  # type: ignore[assignment]
 
                         async def _stub_deep_research_impl(*, services, embedding_manager, llm_manager, query, progress=None):
                             if llm_manager is None:
