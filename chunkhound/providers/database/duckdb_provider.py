@@ -1605,9 +1605,9 @@ class DuckDBProvider(SerialDatabaseProvider):
                     emb_dicts, dims, provider, model, conn
                 )
 
-                # Build USearch index if threshold crossed or new shard created
-                if needs_fix:
-                    self.shard_manager.fix_pass(conn, check_quality=False)
+                # Always run fix_pass to ensure centroid cache is up to date
+                # fix_pass is idempotent - it's a NOP if indexes are consistent
+                self.shard_manager.fix_pass(conn, check_quality=False)
 
         return total_inserted
 
@@ -1712,8 +1712,8 @@ class DuckDBProvider(SerialDatabaseProvider):
             success, needs_fix = self.shard_manager.insert_embeddings(
                 emb_dicts, dims, embedding.provider, embedding.model, conn
             )
-            if needs_fix:
-                self.shard_manager.fix_pass(conn, check_quality=False)
+            # Always run fix_pass to ensure centroid cache is up to date
+            self.shard_manager.fix_pass(conn, check_quality=False)
 
         return embedding_id
 
@@ -2082,11 +2082,9 @@ class DuckDBProvider(SerialDatabaseProvider):
                 logger.warning("ShardManager not initialized - vector search unavailable")
                 return empty_result
 
-            if not self.shard_manager.centroids:
-                logger.debug("No shards available for search - returning empty results")
-                return empty_result
-
             # Perform ShardManager search
+            # Note: shard_manager.search() handles empty/missing centroids gracefully
+            # by still searching shards that exist on disk
             try:
                 # Request more results to account for filtering
                 shard_results = self.shard_manager.search(

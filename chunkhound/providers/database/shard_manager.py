@@ -278,12 +278,32 @@ class ShardManager:
                     continue
 
                 file_path = self._shard_path(target_id)
-                if not file_path.exists():
-                    needs_fix_pass = True
-                    continue
 
                 try:
-                    index = usearch_wrapper.open_writable(file_path)
+                    if file_path.exists():
+                        # Open existing index for incremental add
+                        index = usearch_wrapper.open_writable(file_path)
+                    else:
+                        # Create new index for shard without file
+                        quant_result = conn.execute(
+                            "SELECT quantization FROM vector_shards WHERE shard_id = ?",
+                            [str(target_id)],
+                        ).fetchone()
+                        quantization = (
+                            quant_result[0]
+                            if quant_result
+                            else self.config.default_quantization
+                        )
+
+                        index = usearch_wrapper.create(
+                            dims,
+                            quantization,
+                            connectivity=self.config.hnsw_connectivity,
+                            expansion_add=self.config.hnsw_expansion_add,
+                            expansion_search=self.config.hnsw_expansion_search,
+                        )
+                        self.shard_dir.mkdir(parents=True, exist_ok=True)
+
                     add_keys = np.array(list(vectors_dict.keys()), dtype=np.uint64)
                     add_vectors = np.array(
                         list(vectors_dict.values()), dtype=np.float32
@@ -300,7 +320,7 @@ class ShardManager:
                         f"Added {len(vectors_dict)} vectors to shard {target_id}"
                     )
                 except Exception as e:
-                    logger.warning(f"Failed incremental add to {target_id}: {e}")
+                    logger.warning(f"Failed to add vectors to shard {target_id}: {e}")
                     needs_fix_pass = True
 
                 # Check split threshold per shard
