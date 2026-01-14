@@ -664,10 +664,12 @@ class OpenAIEmbeddingProvider:
                     model=self.model, input=texts, timeout=self._timeout
                 )
 
-                # Extract embeddings from response
-                embeddings = []
+                # Extract embeddings from response, sorted by original input order
+                # OpenAI API does not guarantee response order - each data object
+                # has an 'index' field indicating its position in the input array
+                embeddings = [None] * len(texts)
                 for data in response.data:
-                    embeddings.append(data.embedding)
+                    embeddings[data.index] = data.embedding
 
                 # Update usage statistics
                 self._usage_stats["requests_made"] += 1
