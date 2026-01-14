@@ -81,7 +81,7 @@ async def test_mcp_code_research_uses_codex_cli_via_stdio():
             "mcp",
             str(temp_dir),
             "--stdio",
-            "--llm-synthesis-provider",
+            "--llm-provider",
             "codex-cli",
             "--llm-synthesis-model",
             "codex",
