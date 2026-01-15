@@ -35,6 +35,7 @@ from chunkhound.parsers.mappings import (
     JsonMapping,
     JSXMapping,
     KotlinMapping,
+    LuaMapping,
     MakefileMapping,
     MarkdownMapping,
     MatlabMapping,
@@ -160,6 +161,14 @@ try:
 except ImportError:
     ts_kotlin = None
     KOTLIN_AVAILABLE = False
+
+try:
+    import tree_sitter_lua as ts_lua
+
+    LUA_AVAILABLE = True
+except ImportError:
+    ts_lua = None
+    LUA_AVAILABLE = False
 
 try:
     import tree_sitter_groovy as ts_groovy
@@ -483,6 +492,7 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.KOTLIN: LanguageConfig(
         ts_kotlin, KotlinMapping, KOTLIN_AVAILABLE, "kotlin"
     ),
+    Language.LUA: LanguageConfig(ts_lua, LuaMapping, LUA_AVAILABLE, "lua"),
     Language.GROOVY: LanguageConfig(
         ts_groovy, GroovyMapping, GROOVY_AVAILABLE, "groovy"
     ),
@@ -587,6 +597,7 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     # Swift
     ".swift": Language.SWIFT,
     ".swiftinterface": Language.SWIFT,
+    ".lua": Language.LUA,
     ".vue": Language.VUE,
     ".svelte": Language.SVELTE,
     # Config & Data
