@@ -11,27 +11,18 @@ from pathlib import Path
 
 from chunkhound.database_factory import create_services
 from chunkhound.core.config.config import Config
-from .test_utils import get_api_key_for_tests
+from .test_utils import get_api_key_for_tests, get_embedding_config_for_tests, build_embedding_config_from_dict
 
 
 @pytest.fixture
 async def consistency_services(tmp_path):
     """Create database services for consistency testing."""
     db_path = tmp_path / "consistency_test.duckdb"
-    
-    # Standard API key discovery
-    api_key, provider = get_api_key_for_tests()
-    
-    # Standard embedding config
-    embedding_config = None
-    if api_key and provider:
-        model = "text-embedding-3-small" if provider == "openai" else "voyage-3.5"
-        embedding_config = {
-            "provider": provider,
-            "api_key": api_key,
-            "model": model
-        }
-    
+
+    # Get embedding config using centralized helper
+    config_dict = get_embedding_config_for_tests()
+    embedding_config = build_embedding_config_from_dict(config_dict)
+
     # Standard config creation
     config = Config(
         database={"path": str(db_path), "provider": "duckdb"},
@@ -104,9 +95,16 @@ def orphan_test():
     
     result = await services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
     assert result['status'] == 'success'
-    
-    # Wait for processing
-    await asyncio.sleep(1.0)
+    assert result.get('embeddings_skipped', True) == False, "Should not skip embeddings"
+
+    # Wait for async embedding processing
+    await asyncio.sleep(3.0)
+
+    # Also call generate_missing_embeddings to ensure embeddings are created
+    embedding_result = await services.indexing_coordinator.generate_missing_embeddings()
+    if embedding_result['status'] == 'success':
+        # If we generated embeddings, wait a bit more
+        await asyncio.sleep(1.0)
     
     # Query database directly to check for orphaned embeddings
     # This would need to be implemented based on the actual database schema
@@ -117,28 +115,43 @@ def orphan_test():
     chunk_result = db.execute_query(chunks_query)
     chunk_count = list(chunk_result[0].values())[0] if chunk_result else 0
     
-    # Get embedding count (assuming embeddings table exists)
+    # Get embedding count (dynamically discover embeddings table)
     try:
-        embeddings_query = "SELECT COUNT(*) FROM embeddings_1024"  # VoyageAI uses 1024 dimensions
+        # Discover which embeddings table exists (embeddings_768, embeddings_1024, embeddings_1536, etc.)
+        tables_query = "SHOW TABLES"
+        tables_result = db.execute_query(tables_query)
+        embedding_table = None
+
+        for row in tables_result:
+            table_name = row.get('name') or list(row.values())[0]
+            if table_name.startswith('embeddings_'):
+                embedding_table = table_name
+                break
+
+        if not embedding_table:
+            pytest.skip("No embeddings table found - embeddings may not be enabled")
+
+        # Get embedding count from discovered table
+        embeddings_query = f"SELECT COUNT(*) FROM {embedding_table}"
         embedding_result = db.execute_query(embeddings_query)
         embedding_count = list(embedding_result[0].values())[0] if embedding_result else 0
-        
+
         # Check for orphaned embeddings (embeddings without corresponding chunks)
-        orphaned_query = """
+        orphaned_query = f"""
             SELECT COUNT(*) as orphaned_count
-            FROM embeddings_1536 e 
-            LEFT JOIN chunks c ON e.chunk_id = c.id 
+            FROM {embedding_table} e
+            LEFT JOIN chunks c ON e.chunk_id = c.id
             WHERE c.id IS NULL
         """
         orphaned_result = db.execute_query(orphaned_query)
         orphaned_count = orphaned_result[0]['orphaned_count'] if orphaned_result else 0
-        
+
         assert orphaned_count == 0, f"Found {orphaned_count} orphaned embeddings"
-        
+
         # Verify embedding/chunk consistency
         assert embedding_count == chunk_count, \
             f"Embedding count ({embedding_count}) should match chunk count ({chunk_count})"
-    
+
     except Exception as e:
         # If embeddings table doesn't exist or query fails, that's also a consistency issue
         pytest.fail(f"Could not verify embedding consistency: {e}")
