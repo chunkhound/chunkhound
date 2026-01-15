@@ -2,17 +2,20 @@
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERANK_MODEL
+from chunkhound.core.exceptions.embedding import (
+    ConfigurationError,
+    EmbeddingDimensionError,
+)
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 
 from .shared_utils import (
     chunk_text_by_words,
     estimate_tokens_rough,
-    get_dimensions_for_model,
     get_usage_stats_dict,
     validate_text_input,
 )
@@ -30,6 +33,20 @@ except ImportError:
 # Official VoyageAI model configuration based on API documentation
 VOYAGE_MODEL_CONFIG = {
     # Models with 120,000 token limit per batch
+    "voyage-3": {
+        "max_tokens_per_batch": 120000,
+        "max_texts_per_batch": 1000,
+        "context_length": 16000,
+        "dimensions": [1024],
+        "default_dimension": 1024,
+    },
+    "voyage-3-lite": {
+        "max_tokens_per_batch": 120000,
+        "max_texts_per_batch": 1000,
+        "context_length": 32000,
+        "dimensions": [1024],
+        "default_dimension": 1024,
+    },
     "voyage-3-large": {
         "max_tokens_per_batch": 120000,
         "max_texts_per_batch": 1000,
@@ -120,6 +137,7 @@ class VoyageAIEmbeddingProvider:
         retry_delay: float = 1.0,
         max_tokens: int | None = None,
         rerank_batch_size: int | None = None,
+        output_dims: int | None = None,
     ):
         """Initialize VoyageAI embedding provider.
 
@@ -133,6 +151,7 @@ class VoyageAIEmbeddingProvider:
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
             rerank_batch_size: Max documents per rerank batch (overrides default of 1000)
+            output_dims: Output embedding dimension (for matryoshka models)
         """
         if not VOYAGEAI_AVAILABLE:
             raise ImportError(
@@ -162,6 +181,17 @@ class VoyageAIEmbeddingProvider:
         self._api_key = api_key
         self._model_config = model_config
         self._rerank_batch_size = rerank_batch_size
+        self._output_dims = output_dims
+
+        # Validate output_dims if specified
+        if output_dims is not None:
+            default_dim = cast(int, model_config["default_dimension"])
+            supported = cast(list[int], model_config.get("dimensions", [default_dim]))
+            if output_dims not in supported:
+                raise ConfigurationError(
+                    f"output_dims {output_dims} not in supported dimensions "
+                    f"{supported} for model {model}"
+                )
 
         # Initialize client
         self._client = voyageai.Client(api_key=api_key)
@@ -189,10 +219,26 @@ class VoyageAIEmbeddingProvider:
 
     @property
     def dims(self) -> int:
-        """Embedding dimensions."""
-        return get_dimensions_for_model(
-            self._model, self._dimensions_map, default_dims=1024
-        )
+        """Actual output dimension (reflects matryoshka config if set)."""
+        if self._output_dims is not None:
+            return self._output_dims
+        return cast(int, self._model_config.get("default_dimension", 1024))
+
+    @property
+    def native_dims(self) -> int:
+        """Model's full/native embedding dimension."""
+        dims_list = cast(list[int], self._model_config.get("dimensions", [1024]))
+        return max(dims_list)
+
+    @property
+    def supported_dimensions(self) -> list[int]:
+        """List of valid output dimensions for this model."""
+        return cast(list[int], self._model_config.get("dimensions", [self.native_dims]))
+
+    def supports_matryoshka(self) -> bool:
+        """True if model supports variable output dimensions."""
+        dims = cast(list[int], self._model_config.get("dimensions", []))
+        return len(dims) > 1
 
     @property
     def distance(self) -> str:
@@ -243,13 +289,26 @@ class VoyageAIEmbeddingProvider:
                     model=self._model,
                     input_type="document",
                     truncation=True,
+                    output_dimension=self._output_dims,
                 )
 
                 self._requests_made += 1
                 self._tokens_used += result.total_tokens
                 self._embeddings_generated += len(texts)
 
-                return [embedding for embedding in result.embeddings]
+                embeddings = [embedding for embedding in result.embeddings]
+
+                # Validate embedding dimensions match expected dims (INV-1)
+                if embeddings:
+                    actual_dims = len(embeddings[0])
+                    expected_dims = self.dims
+                    if actual_dims != expected_dims:
+                        raise EmbeddingDimensionError(
+                            f"API returned embedding with {actual_dims} dims, "
+                            f"expected {expected_dims}"
+                        )
+
+                return embeddings
 
             except Exception as e:
                 # Classify error type for retry decision
