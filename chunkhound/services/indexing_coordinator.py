@@ -828,6 +828,17 @@ class IndexingCoordinator(BaseService):
         for chunk in chunks:
             metrics = ChunkMetrics.from_content(chunk.code or "")
             if metrics.non_whitespace_chars > effective_max:
+                # Log individual oversized chunk with debugging context
+                preview = (chunk.code or "")[:100].replace("\n", " ").strip()
+                if len(chunk.code or "") > 100:
+                    preview += "..."
+                logger.warning(
+                    f"Oversized chunk: {chunk.file_path}:{chunk.start_line}-{chunk.end_line} "
+                    f"[{chunk.language.value}:{chunk.chunk_type.value}] "
+                    f"symbol={chunk.symbol!r} "
+                    f"size={metrics.non_whitespace_chars} > limit={effective_max} "
+                    f"preview={preview!r}"
+                )
                 # Convert to UniversalChunk, validate/split, convert back
                 uchunk = chunk_to_universal(chunk)
                 split_uchunks = splitter.validate_and_split(uchunk)
