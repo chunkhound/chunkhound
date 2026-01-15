@@ -68,6 +68,15 @@ class DatabaseConfig(BaseModel):
         description="Minimum reclaimable space in MB to trigger compaction",
     )
 
+    duckdb_memory_limit: str = Field(
+        default="1GB",
+        description=(
+            "DuckDB buffer pool memory limit (e.g., '1GB', '2GB'). "
+            "Default is 1GB, suitable for MCP server with multiple instances. "
+            "Increase for large codebases."
+        ),
+    )
+
     @field_validator("path")
     def validate_path(cls, v: Path | None) -> Path | None:
         """Convert string paths to Path objects."""

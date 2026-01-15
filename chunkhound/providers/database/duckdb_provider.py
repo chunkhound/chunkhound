@@ -141,6 +141,13 @@ class DuckDBProvider(SerialDatabaseProvider):
         # This ensures thread safety - only this thread will use this connection
         conn = duckdb.connect(str(self._connection_manager.db_path))
 
+        # Apply memory limit from config to prevent excessive RAM usage
+        # when running multiple MCP server instances
+        if self.config is not None:
+            limit = self.config.duckdb_memory_limit
+            conn.execute(f"SET memory_limit = '{limit}'")
+            logger.debug(f"DuckDB memory limit set to {limit}")
+
         logger.debug(
             f"Created new DuckDB connection in executor thread {threading.get_ident()}"
         )
@@ -230,18 +237,21 @@ class DuckDBProvider(SerialDatabaseProvider):
         shard_dir = db_path.parent / "shards"
 
         # Initialize ShardManager with heartbeat callback for timeout extension
+        logger.info(f"Initializing ShardManager with shard_dir={shard_dir}")
         self.shard_manager = ShardManager(
             db_provider=self,
             shard_dir=shard_dir,
             config=self._sharding_config,
             heartbeat_callback=signal_heartbeat,
         )
+        logger.info("ShardManager instance created successfully")
 
         # Run fix_pass to reconcile USearch indexes with DuckDB state
         # This ensures indexes are valid before serving reads
         logger.info("Running ShardManager fix_pass for index reconciliation...")
         try:
             self.shard_manager.fix_pass(conn, check_quality=True)
+            logger.info("ShardManager fix_pass completed successfully")
         except Exception as e:
             logger.warning(f"ShardManager fix_pass failed: {e}")
             # Continue - database is still usable, just without shard optimization
@@ -1710,6 +1720,13 @@ class DuckDBProvider(SerialDatabaseProvider):
                 # Always run fix_pass to ensure centroid cache is up to date
                 # fix_pass is idempotent - it's a NOP if indexes are consistent
                 self.shard_manager.fix_pass(conn, check_quality=False)
+            else:
+                # Warn if semantic search unavailable for file-based DB
+                if str(self._connection_manager.db_path) != ":memory:":
+                    logger.warning(
+                        f"ShardManager unavailable - {len(dim_embeddings)} embeddings "
+                        f"inserted but NOT indexed for semantic search"
+                    )
 
         return total_inserted
 
