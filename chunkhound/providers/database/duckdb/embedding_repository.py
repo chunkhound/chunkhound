@@ -198,6 +198,41 @@ class DuckDBEmbeddingRepository:
                 f"({total_inserted / max(insert_time, 0.001):.1f} embeddings/sec)"
             )
 
+            # Wire embeddings to ShardManager for HNSW index updates
+            if self._provider and hasattr(self._provider, 'shard_manager'):
+                if self._provider.shard_manager is not None:
+                    # Only update HNSW for newly inserted embeddings
+                    if new_embeddings:
+                        # Get IDs of just-inserted embeddings
+                        chunk_ids_placeholders = ','.join('?' * len(new_embeddings))
+                        chunk_ids_params = [e['chunk_id'] for e in new_embeddings]
+
+                        emb_ids_result = conn.execute(f"""
+                            SELECT id, embedding FROM {table_name}
+                            WHERE chunk_id IN ({chunk_ids_placeholders})
+                              AND provider = ? AND model = ?
+                            ORDER BY id
+                        """, chunk_ids_params + [provider, model]).fetchall()
+
+                        # Build embedding dicts for shard manager
+                        emb_dicts = [
+                            {"id": row[0], "embedding": row[1]}
+                            for row in emb_ids_result
+                        ]
+
+                        # Route to shards and update HNSW indexes
+                        success, needs_fix = self._provider.shard_manager.insert_embeddings(
+                            emb_dicts, detected_dims, provider, model, conn
+                        )
+
+                        logger.debug(f"HNSW indexes updated for {len(emb_dicts)} embeddings")
+                elif str(self._provider._connection_manager.db_path) != ":memory:":
+                    # Non-memory database without ShardManager is a critical error
+                    logger.error(
+                        f"ShardManager not initialized - semantic search unavailable "
+                        f"for {total_inserted} embeddings"
+                    )
+
             return total_inserted
 
         except Exception as e:
