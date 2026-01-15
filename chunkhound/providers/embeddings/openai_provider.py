@@ -5,17 +5,20 @@ import heapq
 import math
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from loguru import logger
 
 from chunkhound.core.config.embedding_config import (
     RERANK_BASE_URL_REQUIRED,
-    RERANK_MODEL_REQUIRED_COHERE,
     validate_rerank_configuration,
 )
 from chunkhound.core.exceptions.core import ValidationError
+from chunkhound.core.exceptions.embedding import (
+    ConfigurationError,
+    EmbeddingDimensionError,
+)
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 
 from .batch_utils import handle_token_limit_error, with_openai_token_handling
@@ -203,6 +206,7 @@ class OpenAIEmbeddingProvider:
         retry_delay: float = 1.0,
         max_tokens: int | None = None,
         rerank_batch_size: int | None = None,
+        output_dims: int | None = None,
     ):
         """Initialize OpenAI embedding provider.
 
@@ -219,6 +223,7 @@ class OpenAIEmbeddingProvider:
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
             rerank_batch_size: Max documents per rerank batch (overrides model defaults, bounded by model caps)
+            output_dims: Output embedding dims for matryoshka models (None = native)
         """
         if not OPENAI_AVAILABLE:
             raise ImportError(
@@ -242,6 +247,7 @@ class OpenAIEmbeddingProvider:
         self._retry_delay = retry_delay
         self._max_tokens = max_tokens
         self._rerank_batch_size = rerank_batch_size
+        self._output_dims = output_dims
 
         # Validate rerank configuration at initialization (fail-fast)
         # Match config validation logic: check if reranking is enabled
@@ -269,20 +275,44 @@ class OpenAIEmbeddingProvider:
         self._model_config = {
             "text-embedding-3-small": {
                 "dims": 1536,
+                "native_dims": 1536,
+                "matryoshka": True,
+                "min_dims": 1,
                 "distance": "cosine",
                 "max_tokens": 8191,
             },
             "text-embedding-3-large": {
                 "dims": 3072,
+                "native_dims": 3072,
+                "matryoshka": True,
+                "min_dims": 1,
                 "distance": "cosine",
                 "max_tokens": 8191,
             },
             "text-embedding-ada-002": {
                 "dims": 1536,
+                "native_dims": 1536,
+                "matryoshka": False,
                 "distance": "cosine",
                 "max_tokens": 8191,
             },
         }
+
+        # Validate output_dims if specified
+        if output_dims is not None:
+            model_cfg = self._model_config.get(model)
+            if model_cfg:
+                if not model_cfg.get("matryoshka", False):
+                    raise ConfigurationError(
+                        f"Model {model} does not support matryoshka dimensions"
+                    )
+                min_dims = cast(int, model_cfg.get("min_dims", 1))
+                native_dims = cast(int, model_cfg["native_dims"])
+                if not (min_dims <= output_dims <= native_dims):
+                    raise ConfigurationError(
+                        f"output_dims {output_dims} out of range "
+                        f"[{min_dims}, {native_dims}] for {model}"
+                    )
 
         # Usage statistics
         self._usage_stats = {
@@ -409,10 +439,35 @@ class OpenAIEmbeddingProvider:
 
     @property
     def dims(self) -> int:
-        """Embedding dimensions."""
+        """Actual output dimension (reflects matryoshka config if set)."""
+        if self._output_dims is not None:
+            return self._output_dims
         if self._model in self._model_config:
             return self._model_config[self._model]["dims"]
-        return 1536  # Default for most OpenAI models
+        return 1536  # Default for unknown models
+
+    @property
+    def native_dims(self) -> int:
+        """Model's full/native embedding dimension."""
+        if self._model in self._model_config:
+            cfg = self._model_config[self._model]
+            return cast(int, cfg.get("native_dims", cfg["dims"]))
+        return 1536
+
+    @property
+    def supported_dimensions(self) -> list[int]:
+        """List of valid output dimensions for this model."""
+        model_cfg = self._model_config.get(self._model)
+        if model_cfg and model_cfg.get("matryoshka", False):
+            min_dims = cast(int, model_cfg.get("min_dims", 1))
+            native = cast(int, model_cfg["native_dims"])
+            return list(range(min_dims, native + 1))
+        return [self.native_dims]
+
+    def supports_matryoshka(self) -> bool:
+        """True if model supports variable output dimensions."""
+        model_cfg = self._model_config.get(self._model)
+        return bool(model_cfg.get("matryoshka", False)) if model_cfg else False
 
     @property
     def distance(self) -> str:
@@ -583,7 +638,7 @@ class OpenAIEmbeddingProvider:
                         f"[{datetime.now().isoformat()}] OPENAI-PROVIDER ERROR: texts={len(validated_texts)}, max_chars={max_chars}, error={e}\n"
                     )
                     f.flush()
-            except (IOError, OSError):
+            except OSError:
                 pass  # Debug logging is best-effort, OK to fail silently
 
             raise
@@ -660,14 +715,33 @@ class OpenAIEmbeddingProvider:
                     f"Generating embeddings for {len(texts)} texts (attempt {attempt + 1})"
                 )
 
-                response = await self._client.embeddings.create(
-                    model=self.model, input=texts, timeout=self._timeout
-                )
+                # Pass dimensions parameter for matryoshka models when output_dims is set
+                if self._output_dims is not None:
+                    response = await self._client.embeddings.create(
+                        model=self.model,
+                        input=texts,
+                        dimensions=self._output_dims,
+                        timeout=self._timeout,
+                    )
+                else:
+                    response = await self._client.embeddings.create(
+                        model=self.model, input=texts, timeout=self._timeout
+                    )
 
                 # Extract embeddings from response
                 embeddings = []
                 for data in response.data:
                     embeddings.append(data.embedding)
+
+                # Validate embedding dimensions match expected dims (INV-1)
+                if embeddings:
+                    actual_dims = len(embeddings[0])
+                    expected_dims = self.dims
+                    if actual_dims != expected_dims:
+                        raise EmbeddingDimensionError(
+                            f"API returned embedding with {actual_dims} dims, "
+                            f"expected {expected_dims}"
+                        )
 
                 # Update usage statistics
                 self._usage_stats["requests_made"] += 1
@@ -773,9 +847,18 @@ class OpenAIEmbeddingProvider:
 
         logger.debug(f"Generating embeddings for {len(texts)} texts")
 
-        response = await self._client.embeddings.create(
-            model=self.model, input=texts, timeout=self._timeout
-        )
+        # Pass dimensions parameter for matryoshka models when output_dims is set
+        if self._output_dims is not None:
+            response = await self._client.embeddings.create(
+                model=self.model,
+                input=texts,
+                dimensions=self._output_dims,
+                timeout=self._timeout,
+            )
+        else:
+            response = await self._client.embeddings.create(
+                model=self.model, input=texts, timeout=self._timeout
+            )
 
         # Extract embeddings from response
         embeddings = []
