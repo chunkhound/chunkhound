@@ -16,7 +16,7 @@ from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 from chunkhound.mcp_server.tools import execute_tool
 from chunkhound.embeddings import EmbeddingManager
-from .test_utils import get_api_key_for_tests
+from .test_utils import get_api_key_for_tests, get_embedding_config_for_tests, build_embedding_config_from_dict
 
 
 class TestMCPIntegration:
@@ -25,27 +25,18 @@ class TestMCPIntegration:
     @pytest.fixture
     async def mcp_setup(self):
         """Setup MCP server with real services and temp directory."""
-        # Get API key and provider configuration
-        api_key, provider = get_api_key_for_tests()
-        
+        # Get embedding config using centralized helper
+        config_dict = get_embedding_config_for_tests()
+        embedding_config = build_embedding_config_from_dict(config_dict)
+
         temp_dir = Path(tempfile.mkdtemp())
         db_path = temp_dir / ".chunkhound" / "test.db"
         watch_dir = temp_dir / "project"
         watch_dir.mkdir(parents=True)
-        
+
         # Ensure database directory exists
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Configure embedding based on available API key
-        embedding_config = None
-        if api_key and provider:
-            model = "text-embedding-3-small" if provider == "openai" else "voyage-3.5"
-            embedding_config = {
-                "provider": provider,
-                "api_key": api_key,
-                "model": model
-            }
-        
+
         # Use fake args to prevent find_project_root call that fails in CI
         from types import SimpleNamespace
         fake_args = SimpleNamespace(path=temp_dir)
@@ -55,20 +46,33 @@ class TestMCPIntegration:
             embedding=embedding_config,
             indexing={"include": ["*.py", "*.js"], "exclude": ["*.log"]}
         )
-        
+
         # Create embedding manager if API key is available
         embedding_manager = None
-        if api_key and provider:
+        if config_dict:
             embedding_manager = EmbeddingManager()
+            provider = config_dict.get("provider", "openai")
+            api_key = config_dict["api_key"]
+            model = config_dict.get("model")
+            base_url = config_dict.get("base_url")
+
             if provider == "openai":
                 from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
-                embedding_provider = OpenAIEmbeddingProvider(api_key=api_key, model="text-embedding-3-small")
+                kwargs = {"api_key": api_key}
+                if model:
+                    kwargs["model"] = model
+                if base_url:
+                    kwargs["base_url"] = base_url
+                embedding_provider = OpenAIEmbeddingProvider(**kwargs)
             elif provider == "voyageai":
                 from chunkhound.providers.embeddings.voyageai_provider import VoyageAIEmbeddingProvider
-                embedding_provider = VoyageAIEmbeddingProvider(api_key=api_key, model="voyage-3.5")
+                kwargs = {"api_key": api_key}
+                if model:
+                    kwargs["model"] = model
+                embedding_provider = VoyageAIEmbeddingProvider(**kwargs)
             else:
                 embedding_provider = None
-            
+
             if embedding_provider:
                 embedding_manager.register_provider(embedding_provider, set_default=True)
         
