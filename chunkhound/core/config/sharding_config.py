@@ -8,6 +8,26 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+# Bytes per dimension for each quantization type
+QUANTIZATION_BYTES: dict[str, int] = {"i8": 1, "f16": 2, "f32": 4, "f64": 8}
+
+
+def bytes_per_vector(dims: int, quantization: str, connectivity: int) -> int:
+    """Calculate bytes per vector in HNSW index including graph overhead.
+
+    Args:
+        dims: Vector dimensionality
+        quantization: Quantization type (i8, f16, f32, f64)
+        connectivity: HNSW M parameter (edges per node)
+
+    Returns:
+        Estimated bytes per vector in memory
+    """
+    vector_bytes = dims * QUANTIZATION_BYTES.get(quantization, 1)
+    # HNSW overhead: connectivity edges (uint32 each) + metadata
+    hnsw_overhead = (connectivity * 8) + 16
+    return vector_bytes + hnsw_overhead
+
 
 class ShardingConfig(BaseModel):
     """Configuration for database sharding behavior.
@@ -42,6 +62,21 @@ class ShardingConfig(BaseModel):
         description="Fragmentation ratio that triggers shard compaction",
     )
 
+    rebuild_batch_size: int = Field(
+        default=10_000,
+        ge=1000,
+        le=100_000,
+        description="Batch size for streaming embeddings during index rebuild",
+    )
+
+    enable_aggressive_gc: bool = Field(
+        default=False,
+        description=(
+            "Enable aggressive garbage collection after each shard operation "
+            "(useful for memory-constrained environments)"
+        ),
+    )
+
     incremental_sync_threshold: float = Field(
         default=0.10,
         ge=0.0,
@@ -72,7 +107,13 @@ class ShardingConfig(BaseModel):
     max_concurrent_shards: int = Field(
         default=4,
         ge=1,
-        description="Maximum number of shards to query in parallel",
+        description="Maximum number of shards to query in parallel (overridden by memory_budget_bytes)",
+    )
+
+    memory_budget_bytes: int = Field(
+        default=2 * 1024**3,  # 2GB
+        ge=256 * 1024**2,  # min 256MB
+        description="Memory budget for concurrent shard loading in bytes",
     )
 
     default_quantization: Literal["f32", "f16", "i8"] = Field(

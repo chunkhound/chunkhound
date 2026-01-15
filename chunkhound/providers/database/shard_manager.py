@@ -4,6 +4,7 @@ Coordinates shard operations including search, insert, delete, and maintenance.
 Uses derived state architecture - metrics computed from DuckDB and USearch files.
 """
 
+import gc
 from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
@@ -14,7 +15,7 @@ import numpy as np
 from loguru import logger
 from sklearn.cluster import KMeans  # type: ignore[import-untyped]
 
-from chunkhound.core.config.sharding_config import ShardingConfig
+from chunkhound.core.config.sharding_config import ShardingConfig, bytes_per_vector
 from chunkhound.providers.database import usearch_wrapper
 from chunkhound.providers.database.shard_state import ShardState, get_shard_state
 from chunkhound.providers.database.usearch_wrapper import SearchResult
@@ -84,6 +85,25 @@ class ShardManager:
         self.centroids: dict[UUID, np.ndarray] = {}
         self._heartbeat = heartbeat_callback or (lambda: None)
 
+    def _calculate_max_concurrent_shards(self, dims: int, quantization: str) -> int:
+        """Calculate max concurrent shards to stay under memory budget.
+
+        Args:
+            dims: Vector dimensionality
+            quantization: Quantization type (i8, f16, f32, f64)
+
+        Returns:
+            Number of shards that can be loaded concurrently within memory budget
+        """
+        bpv = bytes_per_vector(dims, quantization, self.config.hnsw_connectivity)
+        shard_memory = self.config.split_threshold * bpv
+
+        if shard_memory == 0:
+            return self.config.max_concurrent_shards  # fallback to config
+
+        max_shards = self.config.memory_budget_bytes // shard_memory
+        return max(1, max_shards)  # floor at 1, no artificial cap
+
     def search(
         self,
         query: list[float],
@@ -115,7 +135,7 @@ class ShardManager:
 
         result = conn.execute(
             """
-            SELECT shard_id FROM vector_shards
+            SELECT shard_id, quantization FROM vector_shards
             WHERE dims = ? AND provider = ? AND model = ?
             """,
             [dims, provider, model],
@@ -124,9 +144,16 @@ class ShardManager:
         if not result:
             return []
 
+        # Get quantization for memory calculation (use first shard's, all should match)
+        quantization = result[0][1] if result else self.config.default_quantization
+
         # Filter shards by centroid similarity
         relevant_shards: list[tuple[UUID, Path]] = []
-        for row in result:
+        for i, row in enumerate(result):
+            # Heartbeat every 100 shards to prevent timeout during large shard filtering
+            if i > 0 and i % 100 == 0:
+                self._heartbeat()
+
             # DuckDB returns UUID objects directly
             shard_id = _parse_uuid(row[0])
             file_path = self._shard_path(shard_id)  # Always derive path
@@ -153,11 +180,14 @@ class ShardManager:
         if not relevant_shards:
             return []
 
-        # Batch search across relevant shards (limit concurrent)
+        # Batch search across relevant shards (limit by memory budget)
         all_results: list[SearchResult] = []
-        max_concurrent = self.config.max_concurrent_shards
+        max_concurrent = self._calculate_max_concurrent_shards(dims, quantization)
 
         for i in range(0, len(relevant_shards), max_concurrent):
+            # Heartbeat before each batch to signal search progress
+            self._heartbeat()
+
             batch = relevant_shards[i : i + max_concurrent]
             # Use Path objects for type compatibility with usearch_wrapper
             paths: list[Path | str] = [shard[1] for shard in batch]
@@ -321,6 +351,9 @@ class ShardManager:
                     fsync_path(tmp_path)
                     tmp_path.replace(file_path)
 
+                    # Explicit cleanup to release RAM
+                    del index
+
                     logger.debug(
                         f"Added {len(vectors_dict)} vectors to shard {target_id}"
                     )
@@ -473,6 +506,9 @@ class ShardManager:
                         index.save(str(tmp_path))
                         fsync_path(tmp_path)
                         tmp_path.replace(file_path)
+
+                        # Explicit cleanup to release RAM
+                        del index
 
                         logger.debug(
                             f"Tombstoned embedding {embedding_id} in shard {shard_id}"
@@ -630,6 +666,11 @@ class ShardManager:
                     if self._merge_shard(shard, conn):
                         changes_made += 1
                         continue
+
+                # Explicit memory cleanup after processing shard
+                if self.config.enable_aggressive_gc:
+                    gc.collect()
+                    logger.debug(f"Memory cleanup after shard {shard_id}")
 
             if changes_made == 0:
                 logger.debug(f"Fix_pass converged after {iteration} iteration(s)")
@@ -811,6 +852,13 @@ class ShardManager:
         fsync_path(tmp_path)  # Flush data before rename
         tmp_path.replace(file_path)
 
+        # Explicit cleanup to release RAM
+        del index
+
+        # Force GC after sync to release memory
+        if self.config.enable_aggressive_gc:
+            gc.collect()
+
         return True
 
     def _rebuild_index_from_duckdb(self, shard: dict[str, Any], conn: Any) -> None:
@@ -827,15 +875,14 @@ class ShardManager:
 
         self._heartbeat()
 
-        # Get all embeddings for this shard from DB
+        # Get all embeddings - uses fetchall() for immediate materialization
         embeddings = self._get_shard_embedding_ids(shard_id, dims, conn)
 
         if not embeddings:
+            # Only delete if truly empty
             logger.info(f"Shard {shard_id} has no embeddings, removing empty shard")
-            # Remove empty shard file if exists
             if file_path.exists():
                 file_path.unlink()
-            # Delete the shard record from DB
             conn.execute(
                 "DELETE FROM vector_shards WHERE shard_id = ?",
                 [str(shard_id)],
@@ -874,7 +921,15 @@ class ShardManager:
         fsync_path(tmp_path)  # Flush data before rename
         tmp_path.replace(file_path)
 
-        logger.debug(f"Shard {shard_id} rebuilt: {len(embeddings)} vectors")
+        # Explicit cleanup to release RAM
+        del index
+        del embeddings  # Release the dict
+
+        # Force GC after rebuild
+        if self.config.enable_aggressive_gc:
+            gc.collect()
+
+        logger.debug(f"Shard {shard_id} rebuilt: {len(keys)} vectors")
 
     def _populate_centroid_cache(self, conn: Any) -> None:
         """Compute medoid for each shard and cache for routing.
@@ -940,6 +995,9 @@ class ShardManager:
         self, shard_id: UUID, dims: int, conn: Any
     ) -> dict[int, list[float]]:
         """Get embedding ID -> vector mapping for a shard.
+
+        Uses fetchall() for immediate materialization to avoid cursor
+        snapshot isolation issues when called within active transactions.
 
         Args:
             shard_id: Shard UUID
