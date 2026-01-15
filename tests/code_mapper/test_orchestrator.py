@@ -15,7 +15,7 @@ def test_orchestrator_run_context_max_points(tmp_path: Path, clean_environment) 
     config = Config(
         target_dir=tmp_path,
         database={"path": tmp_path / ".chunkhound" / "db", "provider": "duckdb"},
-        embedding={"provider": "openai", "api_key": "test", "model": "test"},
+        embedding={"provider": "openai", "api_key": "test", "model": "text-embedding-3-small"},
         llm={"provider": "openai", "api_key": "test"},
     )
 
@@ -39,7 +39,7 @@ def test_orchestrator_resolve_scope_label(tmp_path: Path, clean_environment) -> 
     config = Config(
         target_dir=target_dir,
         database={"path": target_dir / ".chunkhound" / "db", "provider": "duckdb"},
-        embedding={"provider": "openai", "api_key": "test", "model": "test"},
+        embedding={"provider": "openai", "api_key": "test", "model": "text-embedding-3-small"},
         llm={"provider": "openai", "api_key": "test"},
     )
 
@@ -65,7 +65,7 @@ def test_orchestrator_metadata_bundle_overview_only(
     config = Config(
         target_dir=target_dir,
         database={"path": target_dir / ".chunkhound" / "db", "provider": "duckdb"},
-        embedding={"provider": "openai", "api_key": "test", "model": "test"},
+        embedding={"provider": "openai", "api_key": "test", "model": "text-embedding-3-small"},
         llm={"provider": "openai", "api_key": "test"},
     )
 
