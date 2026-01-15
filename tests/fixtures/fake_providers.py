@@ -536,7 +536,7 @@ class ValidatingEmbeddingProvider(FakeEmbeddingProvider):
                         "type": "max_chars_exceeded",
                         "non_ws_chars": non_ws_chars,
                         "limit": self.max_chunk_size,
-                        "text_preview": text[:100],
+                        "text_preview": text[:300],
                     }
                 )
 
@@ -547,7 +547,7 @@ class ValidatingEmbeddingProvider(FakeEmbeddingProvider):
                         "type": "max_tokens_exceeded",
                         "estimated_tokens": estimated_tokens,
                         "limit": self.safe_token_limit,
-                        "text_preview": text[:100],
+                        "text_preview": text[:300],
                     }
                 )
 
@@ -558,7 +558,7 @@ class ValidatingEmbeddingProvider(FakeEmbeddingProvider):
                         "type": "suspiciously_small",
                         "non_ws_chars": non_ws_chars,
                         "threshold": self.min_chunk_size,
-                        "text_preview": text[:100],
+                        "text_preview": text[:300],
                     }
                 )
 

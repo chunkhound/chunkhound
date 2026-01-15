@@ -36,8 +36,6 @@ LANGUAGES_WITHOUT_SIZE_ENFORCEMENT = {
     Language.TEXT,  # Plaintext fallback - no semantic structure
     Language.UNKNOWN,  # Generic fallback parser
     Language.YAML,  # Line-based YAML chunking
-    Language.VUE,  # HTML template portions not split by cAST
-    Language.SVELTE,  # HTML template portions not split by cAST
 }
 
 
@@ -385,7 +383,7 @@ async def test_all_parsers_respect_chunk_size_constraints(validating_db):
     5. Logs warnings for suspiciously small chunks
     6. Separately tracks violations from parsers without size enforcement
 
-    Note: Some parsers (TEXT, UNKNOWN, YAML, VUE, SVELTE) don't use cAST
+    Note: Some parsers (TEXT, UNKNOWN, YAML) don't use cAST
     and are tracked separately as known limitations.
     """
     services, provider, tmp_path = validating_db
@@ -495,7 +493,7 @@ async def test_all_parsers_respect_chunk_size_constraints(validating_db):
     if likely_non_enforced_chars:
         print(
             f"\nNote: {len(likely_non_enforced_chars)} oversized chunks from parsers "
-            f"without size enforcement (TEXT, UNKNOWN, YAML, VUE, SVELTE)"
+            f"without size enforcement (TEXT, UNKNOWN, YAML)"
         )
 
     # Log suspiciously small chunks (soft threshold, don't fail)
