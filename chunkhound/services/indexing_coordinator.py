@@ -32,6 +32,13 @@ from chunkhound.core.types.common import FilePath, Language
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
+from chunkhound.parsers.chunk_splitter import (
+    CASTConfig,
+    ChunkMetrics,
+    ChunkSplitter,
+    chunk_to_universal,
+    universal_to_chunk,
+)
 from chunkhound.parsers.universal_parser import UniversalParser
 from chunkhound.utils.hashing import compute_file_hash
 
@@ -799,6 +806,49 @@ class IndexingCoordinator(BaseService):
             return 0.0
         return total_size / (1024**2)
 
+    def _validate_chunk_sizes(self, chunks: list[Chunk]) -> list[Chunk]:
+        """Validate and split any oversized chunks before persistence.
+
+        Central guard that catches any parser bypasses. Uses the standard
+        ChunkSplitter infrastructure to ensure chunks meet size constraints.
+
+        Args:
+            chunks: List of chunks to validate
+
+        Returns:
+            List of validated chunks (may include splits of oversized chunks)
+        """
+        config = CASTConfig()
+        effective_max = config.max_chunk_size - config.header_overhead
+        splitter = ChunkSplitter(config)
+
+        result = []
+        split_count = 0
+        for chunk in chunks:
+            metrics = ChunkMetrics.from_content(chunk.code or "")
+            if metrics.non_whitespace_chars > effective_max:
+                # Convert to UniversalChunk, validate/split, convert back
+                uchunk = chunk_to_universal(chunk)
+                split_uchunks = splitter.validate_and_split(uchunk)
+                for uc in split_uchunks:
+                    result.append(
+                        universal_to_chunk(
+                            uc,
+                            file_path=chunk.file_path,
+                            file_id=chunk.file_id,
+                            language=chunk.language,
+                        )
+                    )
+                split_count += len(split_uchunks) - 1
+            else:
+                result.append(chunk)
+
+        if split_count > 0:
+            logger.warning(
+                f"Emergency split {split_count} oversized chunks before persistence"
+            )
+        return result
+
     async def _store_parsed_results(
         self,
         results: list[ParsedFileResult],
@@ -957,6 +1007,8 @@ class IndexingCoordinator(BaseService):
 
                         # Store new/modified chunks (pass models directly)
                         chunks_to_store = chunk_diff.added + chunk_diff.modified
+                        # Validate chunk sizes before persistence (central guard)
+                        chunks_to_store = self._validate_chunk_sizes(chunks_to_store)
                         ids = (
                             self._db.insert_chunks_batch(chunks_to_store)
                             if chunks_to_store
@@ -964,9 +1016,13 @@ class IndexingCoordinator(BaseService):
                         )
                     else:
                         # No existing chunks - store all as new
+                        # Validate chunk sizes before persistence (central guard)
+                        new_chunk_models = self._validate_chunk_sizes(new_chunk_models)
                         ids = self._db.insert_chunks_batch(new_chunk_models)
                 else:
                     # New file - store all
+                    # Validate chunk sizes before persistence (central guard)
+                    new_chunk_models = self._validate_chunk_sizes(new_chunk_models)
                     ids = self._db.insert_chunks_batch(new_chunk_models)
 
                 stats["chunk_ids_needing_embeddings"].extend(ids)
@@ -1525,6 +1581,9 @@ class IndexingCoordinator(BaseService):
         """
         if not chunk_models:
             return []
+
+        # Validate chunk sizes before persistence (central guard)
+        chunk_models = self._validate_chunk_sizes(chunk_models)
 
         # Use batch insertion for optimal performance
         chunk_ids = self._db.insert_chunks_batch(chunk_models)
