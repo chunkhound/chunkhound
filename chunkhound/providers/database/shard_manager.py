@@ -5,7 +5,7 @@ Uses derived state architecture - metrics computed from DuckDB and USearch files
 """
 
 import gc
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
@@ -25,6 +25,11 @@ from chunkhound.utils.windows_constants import fsync_path
 # Larger values improve clustering quality but increase memory usage.
 KMEANS_SAMPLE_SIZE = 512
 
+# Heartbeat intervals for progress signaling during long operations.
+# Different operations have different batch sizes and performance characteristics.
+HEARTBEAT_INTERVAL_INSERT_ROUTING = 100  # Per-vector centroid routing (fine-grained)
+HEARTBEAT_INTERVAL_MERGE_ROUTING = 10_000  # Bulk reassignment (coarse-grained)
+
 
 def _parse_uuid(value: Any) -> UUID:
     """Parse UUID from DuckDB result (handles both UUID objects and strings)."""
@@ -32,7 +37,7 @@ def _parse_uuid(value: Any) -> UUID:
 
 
 @contextmanager
-def _transaction(conn: Any):
+def _transaction(conn: Any) -> Generator[None, None, None]:
     """Execute a block within an explicit DuckDB transaction.
 
     DuckDB auto-commits each statement by default. This context manager
@@ -259,12 +264,21 @@ class ShardManager:
                         if vector is not None:
                             vectors_by_shard[target_id][emb_id] = vector
             else:
+                # Signal start of per-vector routing (potentially long-running)
+                self._heartbeat()
+
                 # PER-VECTOR ROUTING: assign each embedding to nearest centroid
-                for emb in embeddings:
+                for idx, emb in enumerate(embeddings):
                     emb_id = emb.get("id")
                     vector = emb.get("embedding")
                     if emb_id is None:
                         continue
+
+                    # Heartbeat every 100 vectors to prevent timeout.
+                    # Insert uses per-vector centroid distance (CPU-intensive),
+                    # so more frequent heartbeats needed for large batches (1000+).
+                    if idx > 0 and idx % HEARTBEAT_INTERVAL_INSERT_ROUTING == 0:
+                        self._heartbeat()
 
                     if vector is None:
                         # No vector: assign to first shard
@@ -311,6 +325,9 @@ class ShardManager:
             for target_id, vectors_dict in vectors_by_shard.items():
                 if not vectors_dict:
                     continue
+
+                # Signal progress before blocking HNSW index.add() operation
+                self._heartbeat()
 
                 file_path = self._shard_path(target_id)
 
@@ -1387,7 +1404,10 @@ class ShardManager:
 
             assignments[best_target].append(emb_id)
             routed_count += 1
-            if routed_count % 10000 == 0:
+            # Heartbeat every 10,000 vectors during bulk merge.
+            # Merge processes entire shard (typically 10K-100K vectors),
+            # so less frequent heartbeats (operation is memory-bound).
+            if routed_count % HEARTBEAT_INTERVAL_MERGE_ROUTING == 0:
                 self._heartbeat()
 
         # Two-phase merge: DuckDB FK checks use committed state, so we must commit
@@ -1413,7 +1433,9 @@ class ShardManager:
                         [str(target_id), *emb_ids],
                     )
                     self._heartbeat()
-                    logger.debug(f"Routed {len(emb_ids)} embeddings to target {target_id}")
+                    logger.debug(
+                        f"Routed {len(emb_ids)} embeddings to target {target_id}"
+                    )
 
             # Phase 2 (post-commit): Delete source shard now that FK references are gone
             conn.execute(
