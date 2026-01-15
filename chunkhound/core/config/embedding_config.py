@@ -15,8 +15,37 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import Self
 
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
+from chunkhound.core.exceptions.embedding import ConfigurationError
 
 from .openai_utils import is_official_openai_endpoint
+
+# Model whitelists for official API endpoints
+OPENAI_MODEL_WHITELIST = {
+    "text-embedding-3-small",
+    "text-embedding-3-large",
+    "text-embedding-ada-002",
+}
+
+VOYAGEAI_MODEL_WHITELIST = {
+    "voyage-3",
+    "voyage-3-lite",
+    "voyage-3.5",
+    "voyage-3.5-lite",
+    "voyage-3-large",
+    "voyage-code-3",
+    "voyage-finance-2",
+    "voyage-law-2",
+    "voyage-multilingual-2",
+    "voyage-large-2-instruct",
+    "voyage-2",
+}
+
+VOYAGEAI_RERANKER_WHITELIST = {
+    "rerank-2.5",
+    "rerank-2.5-lite",
+    "rerank-2",
+    "rerank-2-lite",
+}
 
 
 # Error message constants for consistent messaging across config and provider
@@ -129,6 +158,12 @@ class EmbeddingConfig(BaseSettings):
         "'auto' for automatic format detection from response.",
     )
 
+    output_dims: int | None = Field(
+        default=None,
+        description="Output embedding dimension. If None, uses model default. "
+        "Must be in model's supported_dimensions list.",
+    )
+
     # Internal settings - not exposed to users
     batch_size: int = Field(default=100, description="Internal batch size")
     rerank_batch_size: int | None = Field(
@@ -151,6 +186,13 @@ class EmbeddingConfig(BaseSettings):
         """Validate rerank batch size is positive."""
         if v is not None and v <= 0:
             raise ValueError("rerank_batch_size must be positive")
+        return v
+
+    @field_validator("output_dims")
+    def validate_output_dims(cls, v: int | None) -> int | None:  # noqa: N805
+        """Validate output_dims is positive."""
+        if v is not None and v <= 0:
+            raise ValueError("output_dims must be positive")
         return v
 
     @field_validator("model")
@@ -192,6 +234,43 @@ class EmbeddingConfig(BaseSettings):
             rerank_url=self.rerank_url,
             base_url=self.base_url,
         )
+
+        # Validate reranker model against whitelist for VoyageAI on official API
+        if (
+            self.provider == "voyageai"
+            and self.rerank_model is not None
+            and self.base_url is None  # Skip for custom endpoints
+        ):
+            if self.rerank_model not in VOYAGEAI_RERANKER_WHITELIST:
+                raise ConfigurationError(
+                    f"Unknown reranker model '{self.rerank_model}' for VoyageAI. "
+                    f"Valid reranker models: {sorted(VOYAGEAI_RERANKER_WHITELIST)}"
+                )
+
+        return self
+
+    @model_validator(mode="after")
+    def validate_model_whitelist(self) -> Self:
+        """Validate model against whitelist for official APIs."""
+        # Skip validation for custom endpoints
+        if self.base_url is not None:
+            return self
+
+        model = self.get_default_model()
+
+        if self.provider == "openai":
+            if model not in OPENAI_MODEL_WHITELIST:
+                raise ConfigurationError(
+                    f"Unknown model '{model}' for OpenAI. "
+                    f"Valid models: {sorted(OPENAI_MODEL_WHITELIST)}"
+                )
+        elif self.provider == "voyageai":
+            if model not in VOYAGEAI_MODEL_WHITELIST:
+                raise ConfigurationError(
+                    f"Unknown model '{model}' for VoyageAI. "
+                    f"Valid models: {sorted(VOYAGEAI_MODEL_WHITELIST)}"
+                )
+
         return self
 
     def get_provider_config(self) -> dict[str, Any]:
@@ -225,6 +304,10 @@ class EmbeddingConfig(BaseSettings):
         base_config["rerank_format"] = self.rerank_format
         if self.rerank_batch_size is not None:
             base_config["rerank_batch_size"] = self.rerank_batch_size
+
+        # Add output_dims if specified
+        if self.output_dims is not None:
+            base_config["output_dims"] = self.output_dims
 
         return base_config
 
@@ -335,6 +418,17 @@ class EmbeddingConfig(BaseSettings):
                 config["rerank_batch_size"] = int(rerank_batch_size)
             except ValueError:
                 pass
+
+        if output_dims := os.getenv("CHUNKHOUND_EMBEDDING__OUTPUT_DIMS"):
+            try:
+                config["output_dims"] = int(output_dims)
+            except ValueError:
+                from loguru import logger
+
+                logger.warning(
+                    f"Invalid CHUNKHOUND_EMBEDDING__OUTPUT_DIMS='{output_dims}', "
+                    "must be a positive integer. Using default."
+                )
 
         return config
 
