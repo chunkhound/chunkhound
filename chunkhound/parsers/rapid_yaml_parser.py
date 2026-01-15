@@ -17,6 +17,12 @@ from time import perf_counter
 from chunkhound.core.models.chunk import Chunk
 from chunkhound.core.types.common import ChunkType, FileId, Language, LineNumber
 from chunkhound.interfaces.language_parser import LanguageParser, ParseResult
+from chunkhound.parsers.chunk_splitter import (
+    CASTConfig,
+    ChunkSplitter,
+    universal_to_chunk,
+)
+from chunkhound.parsers.universal_engine import UniversalChunk, UniversalConcept
 from chunkhound.parsers.universal_parser import UniversalParser
 from chunkhound.parsers.yaml_template_sanitizer import sanitize_helm_templates
 from chunkhound.utils.chunk_deduplication import deduplicate_chunks
@@ -614,6 +620,7 @@ class _RapidYamlChunkBuilder:
         self.perf = perf
         self.locator = _LineLocator(content, perf=self.perf)
         self._decoder = ryml_module.u
+        self.chunk_splitter = ChunkSplitter(CASTConfig())
 
     def build_chunks(self) -> list[Chunk]:
         self.tree.clear()
@@ -656,9 +663,7 @@ class _RapidYamlChunkBuilder:
             # path[-1] is the current node, path[-2] is the actual parent
             parent_key = path[-2] if len(path) >= 2 else None
 
-            chunk = self._create_chunk(node, node_type, symbol, depth, parent_key)
-            if chunk:
-                chunks.append(chunk)
+            chunks.extend(self._create_chunk(node, node_type, symbol, depth, parent_key))
 
         # Deduplicate chunks to prevent duplicate chunk IDs
         # (e.g., YAML files with repeated config values like "name: example-config")
@@ -668,7 +673,7 @@ class _RapidYamlChunkBuilder:
 
     def _create_chunk(
         self, node: int, node_type: str, symbol: str, depth: int, parent_key: str | None = None
-    ) -> Chunk | None:
+    ) -> list[Chunk]:
         with _suppress_c_output():
             _t0 = perf_counter()
             emitted = self.ryml.emit_yaml(self.tree, node)
@@ -689,7 +694,6 @@ class _RapidYamlChunkBuilder:
         if not file_snippet.strip():
             file_snippet = normalized or first_line
 
-        chunk_type = self._chunk_type_for(node_type)
         metadata = {
             "parser": "rapid_yaml",
             "node_type": node_type.lower(),
@@ -701,16 +705,25 @@ class _RapidYamlChunkBuilder:
         if value is not None:
             metadata["scalar_value"] = self._decoder(value)
 
-        return Chunk(
-            symbol=symbol,
-            start_line=LineNumber(start_line),
-            end_line=LineNumber(max(start_line, end_line)),
-            code=file_snippet,
-            chunk_type=chunk_type,
-            file_id=self.file_id,
-            language=Language.YAML,
+        # Create UniversalChunk for validation
+        uchunk = UniversalChunk(
+            concept=UniversalConcept.BLOCK,
+            name=symbol,
+            content=file_snippet,
+            start_line=start_line,
+            end_line=max(start_line, end_line),
             metadata=metadata,
+            language_node_type=node_type.lower(),
         )
+
+        # Validate and split if oversized
+        validated_chunks = self.chunk_splitter.validate_and_split(uchunk)
+
+        # Convert each validated chunk to Chunk
+        return [
+            universal_to_chunk(uc, file_path=None, file_id=self.file_id, language=Language.YAML)
+            for uc in validated_chunks
+        ]
 
     def _slice_content(self, start_line: int, end_line: int) -> str:
         if not self.content:
