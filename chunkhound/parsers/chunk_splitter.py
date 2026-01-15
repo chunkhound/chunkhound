@@ -556,3 +556,37 @@ def universal_to_chunk(
         file_path=FilePath(str(file_path)) if file_path else None,
         metadata=dict(uc.metadata),
     )
+
+
+def chunk_to_universal(chunk: "Chunk") -> UniversalChunk:
+    """Convert a Chunk to UniversalChunk for validation.
+
+    Used by central guard to validate chunks from any parser.
+
+    Args:
+        chunk: The Chunk to convert
+
+    Returns:
+        UniversalChunk instance for validation/splitting
+    """
+    from chunkhound.core.types.common import ChunkType
+
+    # Map ChunkType back to UniversalConcept
+    concept_map = {
+        ChunkType.FUNCTION: UniversalConcept.DEFINITION,
+        ChunkType.BLOCK: UniversalConcept.BLOCK,
+        ChunkType.COMMENT: UniversalConcept.COMMENT,
+        ChunkType.KEY_VALUE: UniversalConcept.BLOCK,
+        ChunkType.ARRAY: UniversalConcept.BLOCK,
+    }
+    concept = concept_map.get(chunk.chunk_type, UniversalConcept.BLOCK)
+
+    return UniversalChunk(
+        concept=concept,
+        name=chunk.symbol or "",
+        content=chunk.code or "",
+        start_line=int(chunk.start_line),
+        end_line=int(chunk.end_line),
+        metadata=dict(chunk.metadata) if chunk.metadata else {},
+        language_node_type=str(chunk.chunk_type.value) if chunk.chunk_type else "block",
+    )
