@@ -33,7 +33,7 @@ def detect_language(file_path: Path) -> Language:
     1. Check for ambiguous extensions (.m) → content detection
     2. Check extension mapping
     3. Check filename mapping (Makefile)
-    4. Fallback to TEXT for unknown
+    4. Return UNKNOWN for unsupported files
 
     Args:
         file_path: Path to file
@@ -52,8 +52,8 @@ def detect_language(file_path: Path) -> Language:
     if lang != Language.UNKNOWN:
         return lang
 
-    # Stage 3: Fallback to TEXT
-    return Language.TEXT
+    # Stage 3: Return UNKNOWN for unsupported files
+    return Language.UNKNOWN
 
 
 def _is_ambiguous_extension(file_path: Path) -> bool:

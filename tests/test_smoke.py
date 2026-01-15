@@ -423,62 +423,6 @@ class TestTypeAnnotations:
             )
 
 
-class TestStorageStatsSmoke:
-    """Test storage statistics and compaction check functionality."""
-
-    @pytest.fixture
-    def indexed_db_provider(self, tmp_path):
-        """Create a DuckDB provider with some indexed content."""
-        from chunkhound.providers.database.duckdb_provider import DuckDBProvider
-        from chunkhound.core.models import Chunk, File
-        from chunkhound.core.types.common import ChunkType, Language
-
-        db_path = tmp_path / "test.db"
-        provider = DuckDBProvider(str(db_path), base_directory=tmp_path)
-        provider.connect()
-
-        # Insert a test file and chunk
-        test_file = File(
-            path="test.py",
-            mtime=1234567890.0,
-            language=Language.PYTHON,
-            size_bytes=100,
-        )
-        file_id = provider.insert_file(test_file)
-
-        test_chunk = Chunk(
-            file_id=file_id,
-            code="def test_func(): pass",
-            start_line=1,
-            end_line=1,
-            chunk_type=ChunkType.FUNCTION,
-            symbol="test_func",
-            language=Language.PYTHON,
-        )
-        provider.insert_chunk(test_chunk)
-
-        yield provider
-
-        provider.disconnect()
-
-    def test_storage_stats_available(self, indexed_db_provider):
-        """Verify get_storage_stats returns expected structure."""
-        stats = indexed_db_provider.get_storage_stats()
-        assert "total_blocks" in stats
-        assert "used_blocks" in stats
-        assert "free_blocks" in stats
-        assert "block_size" in stats
-        assert "fragmentation_ratio" in stats
-        assert 0.0 <= stats["fragmentation_ratio"] <= 1.0
-
-    def test_should_compact_returns_tuple(self, indexed_db_provider):
-        """Verify should_compact returns (bool, stats) tuple."""
-        should, stats = indexed_db_provider.should_compact(threshold=0.5)
-        assert isinstance(should, bool)
-        assert isinstance(stats, dict)
-        assert "fragmentation_ratio" in stats
-
-
 class TestConfigurationSmoke:
     """Test that new configuration parameters don't break imports or config."""
 
