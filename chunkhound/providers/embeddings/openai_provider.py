@@ -252,6 +252,7 @@ class OpenAIEmbeddingProvider:
         max_tokens: int | None = None,
         rerank_batch_size: int | None = None,
         output_dims: int | None = None,
+        client_side_truncation: bool = False,
     ):
         """Initialize OpenAI embedding provider.
 
@@ -269,6 +270,7 @@ class OpenAIEmbeddingProvider:
             max_tokens: Maximum tokens per request (if applicable)
             rerank_batch_size: Max documents per rerank batch (overrides model defaults, bounded by model caps)
             output_dims: Output embedding dims for matryoshka models (None = native)
+            client_side_truncation: Truncate embeddings client-side instead of using API dimensions parameter
         """
         if not OPENAI_AVAILABLE:
             raise ImportError(
@@ -293,6 +295,7 @@ class OpenAIEmbeddingProvider:
         self._max_tokens = max_tokens
         self._rerank_batch_size = rerank_batch_size
         self._output_dims = output_dims
+        self._client_side_truncation = client_side_truncation
 
         # Validate rerank configuration at initialization (fail-fast)
         # Match config validation logic: check if reranking is enabled
@@ -545,6 +548,14 @@ class OpenAIEmbeddingProvider:
         model_cfg = self._get_model_config()
         return bool(model_cfg.get("matryoshka", False)) if model_cfg else False
 
+    @staticmethod
+    def _l2_normalize(vector: list[float]) -> list[float]:
+        """L2-normalize vector to unit length for cosine similarity."""
+        magnitude = sum(x * x for x in vector) ** 0.5
+        if magnitude > 0:
+            return [x / magnitude for x in vector]
+        return vector
+
     @property
     def distance(self) -> str:
         """Distance metric."""
@@ -793,7 +804,8 @@ class OpenAIEmbeddingProvider:
                 )
 
                 # Pass dimensions parameter for matryoshka models when output_dims is set
-                if self._output_dims is not None:
+                # Skip dimensions param if client_side_truncation is enabled
+                if self._output_dims is not None and not self._client_side_truncation:
                     response = await self._client.embeddings.create(
                         model=self.model,
                         input=texts,
@@ -808,10 +820,15 @@ class OpenAIEmbeddingProvider:
                 # Extract embeddings from response
                 embeddings = []
                 for data in response.data:
-                    embeddings.append(data.embedding)
+                    embedding = data.embedding
+                    # Client-side truncation + L2 normalize
+                    if self._client_side_truncation and self._output_dims is not None:
+                        embedding = self._l2_normalize(embedding[: self._output_dims])
+                    embeddings.append(embedding)
 
                 # Validate embedding dimensions match expected dims (INV-1)
-                if embeddings:
+                # Skip dimension validation when using client_side_truncation
+                if embeddings and not self._client_side_truncation:
                     actual_dims = len(embeddings[0])
                     expected_dims = self.dims
                     if actual_dims != expected_dims:
@@ -925,7 +942,8 @@ class OpenAIEmbeddingProvider:
         logger.debug(f"Generating embeddings for {len(texts)} texts")
 
         # Pass dimensions parameter for matryoshka models when output_dims is set
-        if self._output_dims is not None:
+        # Skip dimensions param if client_side_truncation is enabled
+        if self._output_dims is not None and not self._client_side_truncation:
             response = await self._client.embeddings.create(
                 model=self.model,
                 input=texts,
@@ -940,7 +958,11 @@ class OpenAIEmbeddingProvider:
         # Extract embeddings from response
         embeddings = []
         for data in response.data:
-            embeddings.append(data.embedding)
+            embedding = data.embedding
+            # Client-side truncation + L2 normalize
+            if self._client_side_truncation and self._output_dims is not None:
+                embedding = self._l2_normalize(embedding[: self._output_dims])
+            embeddings.append(embedding)
 
         # Update usage statistics
         self._usage_stats["requests_made"] += 1

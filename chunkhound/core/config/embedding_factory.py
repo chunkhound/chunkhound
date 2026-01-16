@@ -84,6 +84,7 @@ class EmbeddingProviderFactory:
         rerank_format = config.get("rerank_format", "auto")
         rerank_batch_size = config.get("rerank_batch_size")
         output_dims = config.get("output_dims")
+        client_side_truncation = config.get("client_side_truncation", False)
 
         # Model should come from config, but handle None case safely
         if not model:
@@ -93,7 +94,8 @@ class EmbeddingProviderFactory:
             f"Creating OpenAI provider: model={model}, "
             f"base_url={base_url}, api_key={'***' if api_key else None}, "
             f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
-            f"rerank_batch_size={rerank_batch_size}, output_dims={output_dims}"
+            f"rerank_batch_size={rerank_batch_size}, output_dims={output_dims}, "
+            f"client_side_truncation={client_side_truncation}"
         )
 
         try:
@@ -106,6 +108,7 @@ class EmbeddingProviderFactory:
                 rerank_format=rerank_format,
                 rerank_batch_size=rerank_batch_size,
                 output_dims=output_dims,
+                client_side_truncation=client_side_truncation,
             )
         except Exception as e:
             raise ValueError(f"Failed to create OpenAI provider: {e}") from e

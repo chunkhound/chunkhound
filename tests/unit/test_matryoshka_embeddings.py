@@ -434,3 +434,96 @@ class TestDimensionValidation:
 
         error = EmbeddingDimensionError("API returned wrong dimension")
         assert "wrong dimension" in str(error)
+
+
+class TestClientSideTruncation:
+    """Test client-side truncation for APIs that don't support dimensions parameter."""
+
+    def test_requires_output_dims(self):
+        """client_side_truncation without output_dims raises ValueError."""
+        with pytest.raises(ValueError, match="requires output_dims"):
+            EmbeddingConfig(
+                base_url="http://localhost:8000", client_side_truncation=True
+            )
+
+    def test_valid_with_output_dims(self):
+        """client_side_truncation with output_dims is valid."""
+        config = EmbeddingConfig(
+            base_url="http://localhost:8000",
+            output_dims=512,
+            client_side_truncation=True,
+        )
+        assert config.client_side_truncation is True
+        assert config.output_dims == 512
+
+    def test_default_false(self):
+        """client_side_truncation defaults to False."""
+        config = EmbeddingConfig(base_url="http://localhost:8000")
+        assert config.client_side_truncation is False
+
+    def test_in_provider_config_when_true(self):
+        """client_side_truncation is included in provider config when True."""
+        config = EmbeddingConfig(
+            base_url="http://localhost:8000",
+            output_dims=512,
+            client_side_truncation=True,
+        )
+        provider_config = config.get_provider_config()
+        assert provider_config["client_side_truncation"] is True
+
+    def test_not_in_provider_config_when_false(self):
+        """client_side_truncation is not included in provider config when False."""
+        config = EmbeddingConfig(
+            base_url="http://localhost:8000",
+            output_dims=512,
+            client_side_truncation=False,
+        )
+        provider_config = config.get_provider_config()
+        assert "client_side_truncation" not in provider_config
+
+    def test_l2_normalize_unit_length(self):
+        """L2 normalize produces unit-length vectors."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        # 3-4-5 right triangle: magnitude = 5
+        normalized = OpenAIEmbeddingProvider._l2_normalize([3.0, 4.0])
+        # Check it's unit length
+        magnitude = sum(x * x for x in normalized) ** 0.5
+        assert abs(magnitude - 1.0) < 1e-9
+
+    def test_l2_normalize_zero_vector(self):
+        """L2 normalize handles zero vector gracefully."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        normalized = OpenAIEmbeddingProvider._l2_normalize([0.0, 0.0, 0.0])
+        assert normalized == [0.0, 0.0, 0.0]
+
+    def test_l2_normalize_already_unit(self):
+        """L2 normalize preserves already-normalized vectors."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        # Already unit length
+        normalized = OpenAIEmbeddingProvider._l2_normalize([1.0, 0.0])
+        assert abs(normalized[0] - 1.0) < 1e-9
+        assert abs(normalized[1] - 0.0) < 1e-9
+
+    def test_provider_stores_flag(self):
+        """OpenAIEmbeddingProvider stores client_side_truncation flag."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OpenAIEmbeddingProvider,
+        )
+
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            model="text-embedding-3-small",
+            output_dims=512,
+            client_side_truncation=True,
+        )
+        assert provider._client_side_truncation is True
+        assert provider._output_dims == 512

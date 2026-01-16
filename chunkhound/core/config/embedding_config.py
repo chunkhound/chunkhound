@@ -164,6 +164,15 @@ class EmbeddingConfig(BaseSettings):
         "Must be in model's supported_dimensions list.",
     )
 
+    client_side_truncation: bool = Field(
+        default=False,
+        description=(
+            "Truncate embeddings client-side instead of using API dimensions "
+            "parameter. Requires output_dims. Use for APIs that don't support "
+            "the dimensions parameter."
+        ),
+    )
+
     # Internal settings - not exposed to users
     batch_size: int = Field(default=100, description="Internal batch size")
     rerank_batch_size: int | None = Field(
@@ -194,6 +203,13 @@ class EmbeddingConfig(BaseSettings):
         if v is not None and v <= 0:
             raise ValueError("output_dims must be positive")
         return v
+
+    @model_validator(mode="after")
+    def validate_client_side_truncation(self) -> Self:
+        """Validate client_side_truncation requires output_dims."""
+        if self.client_side_truncation and self.output_dims is None:
+            raise ValueError("client_side_truncation requires output_dims to be set")
+        return self
 
     @field_validator("model")
     def validate_model(cls, v: str | None) -> str | None:  # noqa: N805
@@ -308,6 +324,10 @@ class EmbeddingConfig(BaseSettings):
         # Add output_dims if specified
         if self.output_dims is not None:
             base_config["output_dims"] = self.output_dims
+
+        # Add client_side_truncation if enabled
+        if self.client_side_truncation:
+            base_config["client_side_truncation"] = self.client_side_truncation
 
         return base_config
 
@@ -429,6 +449,15 @@ class EmbeddingConfig(BaseSettings):
                     f"Invalid CHUNKHOUND_EMBEDDING__OUTPUT_DIMS='{output_dims}', "
                     "must be a positive integer. Using default."
                 )
+
+        if client_side_truncation := os.getenv(
+            "CHUNKHOUND_EMBEDDING__CLIENT_SIDE_TRUNCATION"
+        ):
+            config["client_side_truncation"] = client_side_truncation.lower() in (
+                "true",
+                "1",
+                "yes",
+            )
 
         return config
 
