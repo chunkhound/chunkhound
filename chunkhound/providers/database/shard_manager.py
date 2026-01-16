@@ -614,16 +614,16 @@ class ShardManager:
                 except FileNotFoundError:
                     # Missing file requires rebuild (normal for newly created shards)
                     logger.info(f"Shard {shard_id} missing file, rebuilding")
-                    self._rebuild_index_from_duckdb(shard, conn)
-                    changes_made += 1
+                    if self._rebuild_index_from_duckdb(shard, conn):
+                        changes_made += 1
                     continue
                 except (ValueError, RuntimeError) as e:
                     # Corrupted file requires rebuild
                     logger.warning(f"Shard {shard_id} corrupted: {e}, rebuilding")
                     if file_path.exists():
                         file_path.unlink()
-                    self._rebuild_index_from_duckdb(shard, conn)
-                    changes_made += 1
+                    if self._rebuild_index_from_duckdb(shard, conn):
+                        changes_made += 1
                     continue
 
                 # Check if rebuild needed
@@ -638,8 +638,8 @@ class ShardManager:
                     rebuild_attempts[shard_id] = attempts + 1
                     reason = self._rebuild_reason(shard, state)
                     logger.info(f"Shard {shard_id} needs rebuild: {reason}")
-                    self._rebuild_index_from_duckdb(shard, conn)
-                    changes_made += 1
+                    if self._rebuild_index_from_duckdb(shard, conn):
+                        changes_made += 1
                     continue
 
                 # Try incremental sync for small deltas
@@ -651,22 +651,16 @@ class ShardManager:
                     logger.warning(
                         f"Incremental sync failed for shard {shard_id}, rebuilding"
                     )
-                    self._rebuild_index_from_duckdb(shard, conn)
-                    changes_made += 1
+                    if self._rebuild_index_from_duckdb(shard, conn):
+                        changes_made += 1
                     continue
 
                 # Structural triggers per spec: empty first, then split, then merge
                 # Check for empty shard: remove record and file
                 if state.db_count == 0:
                     logger.info(f"Removing empty shard {shard_id}")
-                    conn.execute(
-                        "DELETE FROM vector_shards WHERE shard_id = ?",
-                        [str(shard_id)],
-                    )
-                    if file_path.exists():
-                        file_path.unlink()
-                    self.centroids.pop(shard_id, None)
-                    changes_made += 1
+                    if self._safe_delete_empty_shard(shard_id, dims, conn):
+                        changes_made += 1
                     continue
 
                 # Check for split: db_count >= split_threshold
@@ -745,6 +739,51 @@ class ShardManager:
             tmp_file.unlink()
             deleted += 1
 
+        return deleted
+
+    def _safe_delete_empty_shard(
+        self, shard_id: UUID, dims: int, conn: Any
+    ) -> bool:
+        """Atomically delete shard record, file, and cache if no embeddings reference it.
+
+        Uses NOT EXISTS subquery to guard against stale MVCC snapshots that
+        may occur after system sleep/wake cycles. The DELETE is atomic within
+        a single statement, ensuring consistent snapshot for both check and delete.
+
+        Args:
+            shard_id: Shard UUID to delete
+            dims: Embedding dimensions (for table name)
+            conn: Database connection
+
+        Returns:
+            True if shard was deleted, False if embeddings still reference it
+        """
+        table_name = f"embeddings_{dims}"
+        conn.execute(
+            f"""
+            DELETE FROM vector_shards
+            WHERE shard_id = ?
+            AND NOT EXISTS (SELECT 1 FROM {table_name} WHERE shard_id = ?)
+            """,
+            [str(shard_id), str(shard_id)],
+        )
+        # Check if deletion occurred
+        result = conn.execute(
+            "SELECT 1 FROM vector_shards WHERE shard_id = ?",
+            [str(shard_id)],
+        ).fetchone()
+        deleted = result is None
+        if deleted:
+            # Cleanup file and cache (consolidated from call sites)
+            file_path = self._shard_path(shard_id)
+            if file_path.exists():
+                file_path.unlink()
+            self.centroids.pop(shard_id, None)
+        else:
+            logger.warning(
+                f"Shard {shard_id} delete skipped: embeddings exist "
+                "(possible stale MVCC snapshot)"
+            )
         return deleted
 
     def _needs_rebuild(self, shard: dict[str, Any], state: ShardState) -> bool:
@@ -878,12 +917,16 @@ class ShardManager:
 
         return True
 
-    def _rebuild_index_from_duckdb(self, shard: dict[str, Any], conn: Any) -> None:
+    def _rebuild_index_from_duckdb(self, shard: dict[str, Any], conn: Any) -> bool:
         """Build fresh USearch index from DuckDB embeddings.
 
         Args:
             shard: Shard record from DB with shard_id, dims, quantization
             conn: Database connection
+
+        Returns:
+            True if index rebuilt or empty shard deleted successfully,
+            False if empty shard deletion failed (stale MVCC snapshot)
         """
         shard_id = UUID(shard["shard_id"])
         dims = shard["dims"]
@@ -896,16 +939,10 @@ class ShardManager:
         embeddings = self._get_shard_embedding_ids(shard_id, dims, conn)
 
         if not embeddings:
-            # Only delete if truly empty
-            logger.info(f"Shard {shard_id} has no embeddings, removing empty shard")
-            if file_path.exists():
-                file_path.unlink()
-            conn.execute(
-                "DELETE FROM vector_shards WHERE shard_id = ?",
-                [str(shard_id)],
-            )
-            self.centroids.pop(shard_id, None)
-            return
+            # DuckDB shows shard is empty - delete the shard now
+            # (fix_pass can't reach deletion code due to continue after rebuild call)
+            logger.info(f"Shard {shard_id} has no embeddings, deleting empty shard")
+            return self._safe_delete_empty_shard(shard_id, dims, conn)
 
         logger.info(f"Rebuilding shard {shard_id} with {len(embeddings)} vectors")
 
@@ -947,6 +984,7 @@ class ShardManager:
             gc.collect()
 
         logger.debug(f"Shard {shard_id} rebuilt: {len(keys)} vectors")
+        return True  # Rebuild succeeded
 
     def _populate_centroid_cache(self, conn: Any) -> None:
         """Compute medoid for each shard and cache for routing.
@@ -1366,16 +1404,10 @@ class ShardManager:
         # Get all embeddings from source shard
         embeddings = self._get_shard_embedding_ids(shard_id, dims, conn)
         if not embeddings:
-            # Empty shard - just delete the record
-            conn.execute(
-                "DELETE FROM vector_shards WHERE shard_id = ?", [str(shard_id)]
-            )
-            file_path = self._shard_path(shard_id)
-            if file_path.exists():
-                file_path.unlink()
-            self.centroids.pop(shard_id, None)
-            logger.info(f"Removed empty shard {shard_id}")
-            return True
+            # Query snapshot shows empty - skip merge, deletion handled by fix_pass
+            # based on authoritative db_count state (not query snapshots)
+            logger.info(f"Shard {shard_id} has no embeddings in query, skipping merge")
+            return False
 
         # Per-vector routing: assign each embedding to nearest target centroid
         self._heartbeat()
