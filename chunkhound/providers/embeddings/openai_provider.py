@@ -37,44 +37,76 @@ except ImportError:
 # Research: https://www.baseten.co/blog/day-zero-benchmarks-for-qwen-3
 # Batch sizes optimized for throughput on GPU inference (A100 baseline)
 # Rerank limits: 32-128 per batch based on model size to prevent OOM
-QWEN_MODEL_CONFIG = {
-    # Qwen3 Embedding Models (via Ollama)
+QWEN_MODEL_CONFIG: dict[str, dict[str, Any]] = {
+    # Qwen3 Embedding Models (via Ollama/OpenAI-compatible endpoints)
+    # Native dimensions: 0.6B=1024, 4B=2560, 8B=4096
+    # All support Matryoshka Representation Learning (MRL) for dimension reduction
     # Batch sizes balanced for GPU memory and throughput
     "dengcao/Qwen3-Embedding-0.6B:Q5_K_M": {
         "max_tokens_per_batch": 200000,  # Conservative for Q5_K_M quantization
         "max_texts_per_batch": 512,  # Smallest model: highest throughput
         "context_length": 8192,
         "max_rerank_batch": 128,  # Smallest reranker: largest batches
+        "dims": 1024,
+        "native_dims": 1024,
+        "matryoshka": True,
+        "min_dims": 32,
+        "distance": "cosine",
     },
     "qwen3-embedding-0.6b": {
         "max_tokens_per_batch": 200000,
         "max_texts_per_batch": 512,
         "context_length": 8192,
         "max_rerank_batch": 128,
+        "dims": 1024,
+        "native_dims": 1024,
+        "matryoshka": True,
+        "min_dims": 32,
+        "distance": "cosine",
     },
     "dengcao/Qwen3-Embedding-4B:Q5_K_M": {
         "max_tokens_per_batch": 150000,
         "max_texts_per_batch": 256,  # Medium model: balanced speed/memory
         "context_length": 8192,
         "max_rerank_batch": 96,  # Medium reranker batch size
+        "dims": 2560,
+        "native_dims": 2560,
+        "matryoshka": True,
+        "min_dims": 32,
+        "distance": "cosine",
     },
     "qwen3-embedding-4b": {
         "max_tokens_per_batch": 150000,
         "max_texts_per_batch": 256,
         "context_length": 8192,
         "max_rerank_batch": 96,
+        "dims": 2560,
+        "native_dims": 2560,
+        "matryoshka": True,
+        "min_dims": 32,
+        "distance": "cosine",
     },
     "dengcao/Qwen3-Embedding-8B:Q5_K_M": {
         "max_tokens_per_batch": 100000,
         "max_texts_per_batch": 128,  # Largest model: conservative for memory
         "context_length": 8192,
         "max_rerank_batch": 64,  # Largest reranker: smallest batches
+        "dims": 4096,
+        "native_dims": 4096,
+        "matryoshka": True,
+        "min_dims": 32,
+        "distance": "cosine",
     },
     "qwen3-embedding-8b": {
         "max_tokens_per_batch": 100000,
         "max_texts_per_batch": 128,
         "context_length": 8192,
         "max_rerank_batch": 64,
+        "dims": 4096,
+        "native_dims": 4096,
+        "matryoshka": True,
+        "min_dims": 32,
+        "distance": "cosine",
     },
     # Qwen3 Reranker Models
     # Batch sizes based on research: 32-128 for GPU inference
@@ -300,14 +332,22 @@ class OpenAIEmbeddingProvider:
 
         # Validate output_dims if specified
         if output_dims is not None:
-            model_cfg = self._model_config.get(model)
+            # Check both OpenAI and Qwen model configs
+            model_cfg = self._model_config.get(model) or QWEN_MODEL_CONFIG.get(model)
+            # Try case-insensitive match for Qwen models
+            if not model_cfg:
+                model_lower = model.lower()
+                for key, cfg in QWEN_MODEL_CONFIG.items():
+                    if key.lower() == model_lower:
+                        model_cfg = cfg
+                        break
             if model_cfg:
                 if not model_cfg.get("matryoshka", False):
                     raise ConfigurationError(
                         f"Model {model} does not support matryoshka dimensions"
                     )
                 min_dims = cast(int, model_cfg.get("min_dims", 1))
-                native_dims = cast(int, model_cfg["native_dims"])
+                native_dims = cast(int, model_cfg.get("native_dims", model_cfg.get("dims", 1536)))
                 if not (min_dims <= output_dims <= native_dims):
                     raise ConfigurationError(
                         f"output_dims {output_dims} out of range "
@@ -437,43 +477,58 @@ class OpenAIEmbeddingProvider:
         """Model name."""
         return self._model
 
+    def _get_model_config(self) -> dict[str, Any] | None:
+        """Get model config from OpenAI models or Qwen models."""
+        if self._model in self._model_config:
+            return self._model_config[self._model]
+        if self._model in QWEN_MODEL_CONFIG:
+            return QWEN_MODEL_CONFIG[self._model]
+        # Try case-insensitive match for Qwen models
+        model_lower = self._model.lower()
+        for key, config in QWEN_MODEL_CONFIG.items():
+            if key.lower() == model_lower:
+                return config
+        return None
+
     @property
     def dims(self) -> int:
         """Actual output dimension (reflects matryoshka config if set)."""
         if self._output_dims is not None:
             return self._output_dims
-        if self._model in self._model_config:
-            return self._model_config[self._model]["dims"]
+        model_cfg = self._get_model_config()
+        if model_cfg and "dims" in model_cfg:
+            return cast(int, model_cfg["dims"])
         return 1536  # Default for unknown models
 
     @property
     def native_dims(self) -> int:
         """Model's full/native embedding dimension."""
-        if self._model in self._model_config:
-            cfg = self._model_config[self._model]
-            return cast(int, cfg.get("native_dims", cfg["dims"]))
+        model_cfg = self._get_model_config()
+        if model_cfg:
+            return cast(int, model_cfg.get("native_dims", model_cfg.get("dims", 1536)))
         return 1536
 
     @property
     def supported_dimensions(self) -> list[int]:
         """List of valid output dimensions for this model."""
-        model_cfg = self._model_config.get(self._model)
+        model_cfg = self._get_model_config()
         if model_cfg and model_cfg.get("matryoshka", False):
             min_dims = cast(int, model_cfg.get("min_dims", 1))
-            native = cast(int, model_cfg["native_dims"])
+            native = cast(int, model_cfg.get("native_dims", model_cfg.get("dims", 1536)))
             return list(range(min_dims, native + 1))
         return [self.native_dims]
 
     def supports_matryoshka(self) -> bool:
         """True if model supports variable output dimensions."""
-        model_cfg = self._model_config.get(self._model)
+        model_cfg = self._get_model_config()
         return bool(model_cfg.get("matryoshka", False)) if model_cfg else False
 
     @property
     def distance(self) -> str:
         """Distance metric."""
-        if self._model in self._model_config:
-            return self._model_config[self._model]["distance"]
+        model_cfg = self._get_model_config()
+        if model_cfg and "distance" in model_cfg:
+            return cast(str, model_cfg["distance"])
         return "cosine"
 
     @property
