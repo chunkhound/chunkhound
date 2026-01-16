@@ -24,6 +24,8 @@ Any changes to this factory must be tested across all execution paths:
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from loguru import logger
+
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.registry import configure_registry, get_registry
 
@@ -130,13 +132,20 @@ def create_services(
     # If embedding_manager is provided, register its provider with the global registry
     # to ensure services use the same provider instance
     if embedding_manager:
-        try:
-            provider = embedding_manager.get_default_provider()
-            if provider:
-                registry.register_provider("embedding", provider, singleton=True)
-        except Exception:
-            # If no provider in embedding_manager, registry will handle provider creation
-            pass
+        emb_provider = embedding_manager.get_default_provider()
+        if emb_provider:
+            registry.register_provider("embedding", emb_provider, singleton=True)
+            logger.debug(
+                f"[create_services] Registered embedding provider from manager: "
+                f"dims={emb_provider.dims}, "
+                f"output_dims={getattr(emb_provider, '_output_dims', None)}, "
+                f"client_side_truncation={getattr(emb_provider, '_client_side_truncation', False)}"
+            )
+        else:
+            logger.debug(
+                "[create_services] embedding_manager has no default provider, "
+                "using registry's provider"
+            )
 
     return DatabaseServices(
         provider=registry.get_provider("database"),
