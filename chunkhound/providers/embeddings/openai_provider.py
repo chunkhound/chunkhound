@@ -203,6 +203,19 @@ def _validate_qwen_model_config() -> None:
 _validate_qwen_model_config()
 
 
+def _normalize_qwen_model_name(model: str) -> str:
+    """Strip provider prefixes from Qwen model names for config lookup.
+
+    Handles: fireworks/qwen3-embedding-4b → qwen3-embedding-4b
+    """
+    prefixes = ("fireworks/", "ollama/", "together/")
+    model_lower = model.lower()
+    for prefix in prefixes:
+        if model_lower.startswith(prefix):
+            return model[len(prefix):]
+    return model
+
+
 class OpenAIEmbeddingProvider:
     """OpenAI embedding provider using text-embedding-3-small by default.
 
@@ -333,12 +346,13 @@ class OpenAIEmbeddingProvider:
         # Validate output_dims if specified
         if output_dims is not None:
             # Check both OpenAI and Qwen model configs
-            model_cfg = self._model_config.get(model) or QWEN_MODEL_CONFIG.get(model)
+            normalized = _normalize_qwen_model_name(model)
+            model_cfg = self._model_config.get(model) or QWEN_MODEL_CONFIG.get(normalized)
             # Try case-insensitive match for Qwen models
             if not model_cfg:
-                model_lower = model.lower()
+                normalized_lower = normalized.lower()
                 for key, cfg in QWEN_MODEL_CONFIG.items():
-                    if key.lower() == model_lower:
+                    if key.lower() == normalized_lower:
                         model_cfg = cfg
                         break
             if model_cfg:
@@ -385,18 +399,22 @@ class OpenAIEmbeddingProvider:
         model_lower = model.lower()
         rerank_model_lower = (rerank_model or "").lower()
 
+        # Normalize model names (strip provider prefixes like fireworks/)
+        normalized_model = _normalize_qwen_model_name(model)
+        normalized_rerank = _normalize_qwen_model_name(rerank_model) if rerank_model else ""
+
         # Check if embedding model is a Qwen model
-        if "qwen" in model_lower or model in QWEN_MODEL_CONFIG:
-            qwen_config = QWEN_MODEL_CONFIG.get(model)
+        if "qwen" in model_lower or normalized_model in QWEN_MODEL_CONFIG:
+            qwen_config = QWEN_MODEL_CONFIG.get(normalized_model)
             if qwen_config:
                 logger.info(f"Detected Qwen embedding model: {model}")
 
         # Check if rerank model is a Qwen model
         qwen_rerank_config = None
         if rerank_model and (
-            "qwen" in rerank_model_lower or rerank_model in QWEN_MODEL_CONFIG
+            "qwen" in rerank_model_lower or normalized_rerank in QWEN_MODEL_CONFIG
         ):
-            qwen_rerank_config = QWEN_MODEL_CONFIG.get(rerank_model)
+            qwen_rerank_config = QWEN_MODEL_CONFIG.get(normalized_rerank)
             if qwen_rerank_config:
                 logger.info(f"Detected Qwen reranker model: {rerank_model}")
 
@@ -481,12 +499,16 @@ class OpenAIEmbeddingProvider:
         """Get model config from OpenAI models or Qwen models."""
         if self._model in self._model_config:
             return self._model_config[self._model]
-        if self._model in QWEN_MODEL_CONFIG:
-            return QWEN_MODEL_CONFIG[self._model]
-        # Try case-insensitive match for Qwen models
-        model_lower = self._model.lower()
+
+        # Normalize Qwen model names (strip provider prefixes)
+        normalized = _normalize_qwen_model_name(self._model)
+
+        if normalized in QWEN_MODEL_CONFIG:
+            return QWEN_MODEL_CONFIG[normalized]
+        # Case-insensitive match for Qwen models
+        normalized_lower = normalized.lower()
         for key, config in QWEN_MODEL_CONFIG.items():
-            if key.lower() == model_lower:
+            if key.lower() == normalized_lower:
                 return config
         return None
 
