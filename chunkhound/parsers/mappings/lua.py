@@ -86,7 +86,11 @@ class LuaMapping(BaseMapping):
         if concept == UniversalConcept.DEFINITION:
             return """
             (function_declaration
-                name: (identifier) @name
+                name: [
+                    (identifier)
+                    (dot_index_expression)
+                    (method_index_expression)
+                ] @name
             ) @definition
 
             (variable_declaration) @definition
@@ -262,16 +266,18 @@ class LuaMapping(BaseMapping):
                 metadata["node_type"] = def_node.type
 
                 # For functions, extract basic info
-                if def_node.type in ["function_declaration", "local_function_declaration"]:
+                if def_node.type == "function_declaration":
                     metadata["kind"] = "function"
-                    if def_node.type == "local_function_declaration":
-                        metadata["is_local"] = True
 
                     # Extract function body size as a complexity metric
                     body_node = self.find_child_by_type(def_node, "block")
                     if body_node:
                         body_text = self.get_node_text(body_node, source)
                         metadata["body_lines"] = len(body_text.splitlines())
+
+                # For variable declarations
+                elif def_node.type == "variable_declaration":
+                    metadata["kind"] = "variable"
 
                 # For variable assignments
                 elif def_node.type == "assignment_statement":
@@ -422,5 +428,52 @@ class LuaMapping(BaseMapping):
             full_path = base_dir / path
             if full_path.exists():
                 return full_path
+
+        return None
+
+    def extract_constants(
+        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+    ) -> list[dict[str, str]] | None:
+        """Extract constant definitions from Lua code.
+
+        Identifies UPPER_SNAKE_CASE variable assignments as constants.
+        Lua constants like: local MAX_RETRIES = 3, CONFIG_VALUE = "production"
+
+        Args:
+            concept: The universal concept being extracted
+            captures: Dictionary of capture names to tree-sitter nodes
+            content: Source code as bytes
+
+        Returns:
+            List of constant dictionaries with 'name' and 'value' keys, or None
+        """
+        if concept != UniversalConcept.DEFINITION:
+            return None
+
+        source = content.decode("utf-8")
+
+        # Get the definition node to extract constant name and value
+        def_node = captures.get("definition")
+        if not def_node or def_node.type != "variable_declaration":
+            return None
+
+        # Navigate: variable_declaration -> assignment_statement -> variable_list -> identifier
+        for child in def_node.children:
+            if child.type == "assignment_statement":
+                var_list = self.find_child_by_type(child, "variable_list")
+                expr_list = self.find_child_by_type(child, "expression_list")
+
+                if var_list:
+                    for var in var_list.children:
+                        if var.type == "identifier":
+                            name = self.get_node_text(var, source).strip()
+                            # Match UPPER_SNAKE_CASE pattern
+                            if name and re.match(r"^_?[A-Z][A-Z0-9_]*$", name):
+                                value = ""
+                                if expr_list:
+                                    value = self.get_node_text(expr_list, source).strip()
+                                    if len(value) > MAX_CONSTANT_VALUE_LENGTH:
+                                        value = value[:MAX_CONSTANT_VALUE_LENGTH]
+                                return [{"name": name, "value": value}]
 
         return None
