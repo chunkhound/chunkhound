@@ -189,7 +189,9 @@ async def handle_tool_call(
 
         # Check capability requirements
         tool = TOOL_REGISTRY[tool_name]
-        if tool.requires_embeddings and not embedding_manager:
+        if tool.requires_embeddings and (
+            not embedding_manager or not embedding_manager.list_providers()
+        ):
             raise ValueError(f"Tool {tool_name} requires embedding provider")
         if tool.requires_llm and not llm_manager:
             raise ValueError(f"Tool {tool_name} requires LLM provider")
