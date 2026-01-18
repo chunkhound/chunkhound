@@ -122,39 +122,6 @@ class StdioMCPServer(MCPServerBase):
                     CodexCLIProvider._codex_available = _stub_available  # type: ignore[attr-defined]
                 except Exception:
                     pass
-
-                # And if asked, force deep_research to call synthesis directly
-                if os.getenv("CH_TEST_FORCE_SYNTHESIS") == "1":
-                    try:
-                        from chunkhound.mcp_server import tools as tools_mod  # noqa: WPS433
-                        from chunkhound.mcp_server import common as common_mod  # noqa: WPS433
-
-                        # Stub has_reranker_support to bypass validation in test mode
-                        def _stub_has_reranker_support(embedding_manager) -> bool:  # type: ignore[override]
-                            return True
-
-                        common_mod.has_reranker_support = _stub_has_reranker_support  # type: ignore[assignment]
-
-                        async def _stub_deep_research_impl(*, services, embedding_manager, llm_manager, query, progress=None):
-                            if llm_manager is None:
-                                try:
-                                    from chunkhound.llm_manager import LLMManager  # noqa: WPS433
-
-                                    llm_manager = LLMManager(
-                                        {"provider": "codex-cli", "model": "codex"},
-                                        {"provider": "codex-cli", "model": "codex"},
-                                    )
-                                except Exception:
-                                    return {"answer": "LLM manager unavailable"}
-                            prov = llm_manager.get_synthesis_provider()
-                            resp = await prov.complete(prompt=f"E2E: {query}")
-                            return {"answer": resp.content}
-
-                        tools_mod.deep_research_impl = _stub_deep_research_impl  # type: ignore[assignment]
-                        if "code_research" in tools_mod.TOOL_REGISTRY:
-                            tools_mod.TOOL_REGISTRY["code_research"].implementation = _stub_deep_research_impl  # type: ignore[index]
-                    except Exception:
-                        pass
         except Exception:
             # Silent by design in MCP mode
             pass
