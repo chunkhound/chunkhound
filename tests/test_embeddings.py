@@ -792,35 +792,19 @@ async def test_real_api():
 
 
 async def test_tei_format_end_to_end_with_mock_server():
-    """Test TEI format with actual mock server for end-to-end verification.
+    """Test TEI format with actual mock server for end-to-end verification."""
+    from tests.fixtures.rerank_server_manager import RerankServerManager
 
-    This test requires the mock rerank server running on localhost:8001.
-    Run: uv run python tests/rerank_server.py
-    """
-    import subprocess
-    import time
-
-    # Start mock server in background
-    server_process = None
-    try:
-        server_process = subprocess.Popen(
-            [sys.executable, "tests/rerank_server.py"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        # Wait for server to start
-        time.sleep(2)
-
-        # Create provider with TEI format
+    async with RerankServerManager() as manager:
+        # Server guaranteed ready via health check polling
         provider = OpenAIEmbeddingProvider(
             base_url="http://localhost:11434/v1",
             model="nomic-embed-text",
             api_key="test-key",
-            rerank_url="http://localhost:8001/rerank",
-            rerank_format="tei",  # Explicit TEI format
+            rerank_url=f"{manager.base_url}/rerank",
+            rerank_format="tei",
         )
 
-        # Make actual request to mock server
         test_docs = [
             "Python is a programming language",
             "JavaScript is used for web development",
@@ -829,145 +813,80 @@ async def test_tei_format_end_to_end_with_mock_server():
 
         results = await provider.rerank("python programming", test_docs, top_k=2)
 
-        # Check if mock server returned empty results (HTTP parsing issue)
         if len(results) == 0:
             pytest.skip(
-                "Mock server HTTP parsing issue - returned empty results (use vLLM/TEI for full testing)"
+                "Mock server HTTP parsing issue - returned empty results"
             )
 
-        # Verify response structure
         assert len(results) > 0, "Should return results"
         assert len(results) <= 2, "Should respect top_k limit"
         assert all(hasattr(r, "index") and hasattr(r, "score") for r in results)
         assert all(0 <= r.index < len(test_docs) for r in results)
         assert all(isinstance(r.score, float) for r in results)
 
-        # Verify scores are descending
         for i in range(len(results) - 1):
             assert results[i].score >= results[i + 1].score
-
-        print("✅ TEI end-to-end test passed")
-        print(f"   • Reranked {len(test_docs)} documents")
-        print(f"   • Got {len(results)} results")
-        print(f"   • Top score: {results[0].score:.3f}")
-
-    finally:
-        if server_process:
-            server_process.terminate()
-            server_process.wait(timeout=5)
 
 
 async def test_auto_detection_caches_format():
     """Verify format detection caches result for subsequent calls."""
-    import subprocess
-    import time
+    from tests.fixtures.rerank_server_manager import RerankServerManager
 
-    # Start mock server
-    server_process = None
-    try:
-        server_process = subprocess.Popen(
-            [sys.executable, "tests/rerank_server.py"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        time.sleep(2)
-
-        # Create provider with auto mode
+    async with RerankServerManager() as manager:
         provider = OpenAIEmbeddingProvider(
             base_url="http://localhost:11434/v1",
             model="nomic-embed-text",
             api_key="test-key",
-            rerank_url="http://localhost:8001/rerank",
+            rerank_url=f"{manager.base_url}/rerank",
             rerank_format="auto",
         )
 
-        # Initial state: no format detected
         assert provider._detected_rerank_format is None
 
-        # First request - should detect format
         test_docs = ["doc1", "doc2", "doc3"]
         results1 = await provider.rerank("query", test_docs)
 
-        # Check if mock server returned empty results (HTTP parsing issue)
         if len(results1) == 0:
             pytest.skip(
-                "Mock server HTTP parsing issue - returned empty results (use vLLM/TEI for full testing)"
+                "Mock server HTTP parsing issue - returned empty results"
             )
 
-        # After first request: format should be detected and cached
         detected_format = provider._detected_rerank_format
         assert detected_format in ["cohere", "tei"], (
             f"Should detect format, got: {detected_format}"
         )
-        print(f"✅ Auto-detected format: {detected_format}")
 
-        # Second request - should use cached format
         results2 = await provider.rerank("another query", test_docs)
 
-        # Format should still be the same (cached)
         assert provider._detected_rerank_format == detected_format
         assert len(results2) > 0
-
-        print("✅ Format caching test passed")
-        print(f"   • Detected format: {detected_format}")
-        print("   • Format persisted across requests")
-
-    finally:
-        if server_process:
-            server_process.terminate()
-            server_process.wait(timeout=5)
 
 
 async def test_concurrent_rerank_calls():
     """Verify concurrent rerank calls don't race on format detection."""
-    import subprocess
-    import time
+    from tests.fixtures.rerank_server_manager import RerankServerManager
 
-    # Start mock server
-    server_process = None
-    try:
-        server_process = subprocess.Popen(
-            [sys.executable, "tests/rerank_server.py"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        time.sleep(2)
-
-        # Create provider with auto mode
+    async with RerankServerManager() as manager:
         provider = OpenAIEmbeddingProvider(
             base_url="http://localhost:11434/v1",
             model="nomic-embed-text",
             api_key="test-key",
-            rerank_url="http://localhost:8001/rerank",
+            rerank_url=f"{manager.base_url}/rerank",
             rerank_format="auto",
         )
 
         test_docs = ["doc1", "doc2", "doc3"]
 
-        # Make multiple concurrent requests
         tasks = [provider.rerank(f"query {i}", test_docs) for i in range(10)]
 
         results_list = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # All should succeed
         for i, results in enumerate(results_list):
             if isinstance(results, Exception):
-                print(f"Request {i} failed: {results}")
                 raise results
             assert len(results) > 0, f"Request {i} should return results"
 
-        # Format should be detected
         assert provider._detected_rerank_format is not None
-
-        print("✅ Concurrent rerank test passed")
-        print(f"   • Ran {len(tasks)} concurrent requests")
-        print("   • All requests succeeded")
-        print("   • No race conditions detected")
-
-    finally:
-        if server_process:
-            server_process.terminate()
-            server_process.wait(timeout=5)
 
 
 async def test_malformed_rerank_response():
