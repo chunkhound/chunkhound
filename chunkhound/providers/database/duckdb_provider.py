@@ -2027,6 +2027,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     "offset": offset,
                     "page_size": page_size,
                     "has_more": False,
+                    "next_offset": None,
                     "total": 0,
                 }
 
@@ -2129,6 +2130,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 "offset": offset,
                 "page_size": page_size,
                 "has_more": False,
+                "next_offset": None,
                 "total": 0,
             }
 
@@ -2245,6 +2247,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 "offset": offset,
                 "page_size": page_size,
                 "has_more": False,
+                "next_offset": None,
                 "total": 0,
             }
 

@@ -186,6 +186,11 @@ class LanceDBProvider(SerialDatabaseProvider):
         like = f"{escaped}%"
         return f"path LIKE '{like}' ESCAPE '\\\\'"
 
+    def _build_path_contains_clause(self, segment: str) -> str:
+        escaped = _escape_like_pattern(segment)
+        like = f"%{escaped}%"
+        return f"path LIKE '{like}' ESCAPE '\\\\'"
+
     def _fetch_file_paths_by_ids(self, file_ids: list[int]) -> dict[int, str]:
         if not self._files_table or not file_ids:
             return {}
@@ -1659,16 +1664,20 @@ class LanceDBProvider(SerialDatabaseProvider):
                     "offset": offset,
                     "page_size": 0,
                     "has_more": False,
+                    "next_offset": None,
                     "total": 0,
                 }
 
             # Check if any chunks have embeddings for this provider/model
             try:
-                sample_chunks = self._chunks_table.head(
-                    min(100, chunks_count)
-                ).to_pandas()
-                # Handle embeddings that are lists - also exclude zero vectors
-                embeddings_mask = sample_chunks["embedding"].apply(_has_valid_embedding)
+                sample_head = self._chunks_table.head(min(100, chunks_count))
+                try:
+                    sample_rows = sample_head.to_list()
+                except Exception:
+                    # Best-effort fallback for environments where LanceDB returns a
+                    # DataFrame-like wrapper.
+                    sample_df = sample_head.to_pandas()
+                    sample_rows = sample_df.to_dict(orient="records")
             except Exception as data_error:
                 logger.error(
                     f"LanceDB data corruption detected during semantic search: {data_error}"
@@ -1677,13 +1686,17 @@ class LanceDBProvider(SerialDatabaseProvider):
                     "offset": offset,
                     "page_size": 0,
                     "has_more": False,
+                    "next_offset": None,
                     "total": 0,
                 }
-            embeddings_exist = (
-                embeddings_mask
-                & (sample_chunks["provider"] == provider)
-                & (sample_chunks["model"] == model)
-            ).any()
+
+            embeddings_exist = any(
+                _has_valid_embedding(row.get("embedding"))
+                and str(row.get("provider", "")) == provider
+                and str(row.get("model", "")) == model
+                for row in sample_rows
+                if isinstance(row, dict)
+            )
 
             if not embeddings_exist:
                 logger.warning(
@@ -1693,6 +1706,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                     "offset": offset,
                     "page_size": 0,
                     "has_more": False,
+                    "next_offset": None,
                     "total": 0,
                 }
 
@@ -1700,19 +1714,70 @@ class LanceDBProvider(SerialDatabaseProvider):
             query = self._chunks_table.search(
                 query_embedding, vector_column_name="embedding"
             )
-            query = query.where(
-                f"provider = '{provider}' AND model = '{model}' AND embedding IS NOT NULL"
-            )
-            query = query.limit(page_size + offset)
+            where_parts = [
+                f"provider = '{provider}'",
+                f"model = '{model}'",
+                "embedding IS NOT NULL",
+            ]
 
-            if threshold:
-                query = query.where(f"_distance <= {threshold}")
+            # threshold is similarity (match DuckDB): similarity >= threshold
+            # LanceDB exposes distance; for cosine similarity distance ~= 1 - similarity.
+            if threshold is not None:
+                if threshold > 1.0:
+                    return [], {
+                        "offset": offset,
+                        "page_size": 0,
+                        "has_more": False,
+                        "next_offset": None,
+                        "total": 0,
+                    }
+                if threshold > 0.0:
+                    max_distance = 1.0 - float(threshold)
+                    where_parts.append(f"_distance <= {max_distance}")
 
+            valid_file_ids: set[int] | None = None
             if path_filter:
-                # Join with files table to filter by path
-                pass  # Would need more complex query joining with files table
+                if not self._files_table:
+                    logger.warning(
+                        "LanceDB semantic search: path_filter ignored (files table not initialized)."
+                    )
+                else:
+                    normalized_path = path_filter.replace("\\", "/")
+                    clause = self._build_path_contains_clause(normalized_path)
+                    file_results = self._files_table.search().where(clause).to_list()
+                    try:
+                        valid_file_ids = {
+                            int(r["id"]) for r in file_results if "id" in r
+                        }
+                    except Exception:
+                        valid_file_ids = None
+                    if valid_file_ids is not None and not valid_file_ids:
+                        return [], {
+                            "offset": offset,
+                            "page_size": 0,
+                            "has_more": False,
+                            "next_offset": None,
+                            "total": 0,
+                        }
+                    if valid_file_ids is not None:
+                        ids_str = ",".join(map(str, sorted(valid_file_ids)))
+                        where_parts.append(f"file_id IN ({ids_str})")
 
-            results = query.to_list()
+            where_clause = " AND ".join(where_parts)
+
+            # Overfetch by 1 so has_more works even without OFFSET support.
+            fetch_limit = offset + page_size + 1
+            results = (
+                query.where(where_clause)
+                .limit(fetch_limit)
+                .to_list()
+            )
+
+            # Safety net: enforce path_filter even if LanceDB query pushdown fails.
+            if valid_file_ids is not None:
+                results = [
+                    r for r in results if int(r.get("file_id", -1)) in valid_file_ids
+                ]
 
             # Deduplicate across fragments (safety net for fragment-induced duplicates)
             results = _deduplicate_by_id(results)
@@ -1749,11 +1814,14 @@ class LanceDBProvider(SerialDatabaseProvider):
                 }
                 formatted_results.append(formatted_result)
 
+            has_more = len(results) > offset + page_size
             pagination = {
                 "offset": offset,
                 "page_size": len(paginated_results),
-                "has_more": len(results) > offset + page_size,
-                "total": len(results),
+                "has_more": has_more,
+                "total": offset + len(paginated_results) + (1 if has_more else 0),
+                "total_is_estimate": True,
+                "next_offset": (offset + page_size) if has_more else None,
             }
 
             return formatted_results, pagination
@@ -1925,7 +1993,13 @@ class LanceDBProvider(SerialDatabaseProvider):
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Executor method for search_regex - runs in DB thread."""
         if not self._chunks_table or not self._files_table:
-            return [], {"offset": offset, "page_size": 0, "has_more": False, "total": 0}
+            return [], {
+                "offset": offset,
+                "page_size": 0,
+                "has_more": False,
+                "next_offset": None,
+                "total": 0,
+            }
 
         try:
             # Build WHERE clause using regexp_match (DataFusion SQL function)
@@ -1944,10 +2018,15 @@ class LanceDBProvider(SerialDatabaseProvider):
             if path_filter:
                 # Get file IDs matching path filter
                 normalized_path = path_filter.replace("\\", "/")
-                clause = self._build_path_like_clause(normalized_path)
-                file_results = self._files_table.search().where(clause).to_list()
-                valid_file_ids = {r["id"] for r in file_results}
-                results = [r for r in results if r["file_id"] in valid_file_ids]
+                if not self._files_table:
+                    logger.warning(
+                        "LanceDB regex search: path_filter ignored (files table not initialized)."
+                    )
+                else:
+                    clause = self._build_path_contains_clause(normalized_path)
+                    file_results = self._files_table.search().where(clause).to_list()
+                    valid_file_ids = {r["id"] for r in file_results if "id" in r}
+                    results = [r for r in results if r["file_id"] in valid_file_ids]
 
             total_count = len(results)
 
@@ -1979,6 +2058,7 @@ class LanceDBProvider(SerialDatabaseProvider):
                 "page_size": len(paginated),
                 "has_more": total_count > offset + page_size,
                 "total": total_count,
+                "next_offset": (offset + page_size) if total_count > offset + page_size else None,
             }
 
             return formatted, pagination
@@ -2010,18 +2090,62 @@ class LanceDBProvider(SerialDatabaseProvider):
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Executor method for search_fuzzy - runs in DB thread."""
         if not self._chunks_table:
-            return [], {"offset": offset, "page_size": 0, "has_more": False, "total": 0}
+            return [], {
+                "offset": offset,
+                "page_size": 0,
+                "has_more": False,
+                "next_offset": None,
+                "total": 0,
+            }
 
         try:
+            valid_file_ids: set[int] | None = None
+            if path_filter and self._files_table:
+                normalized_path = path_filter.replace("\\", "/")
+                clause = self._build_path_contains_clause(normalized_path)
+                file_results = self._files_table.search().where(clause).to_list()
+                try:
+                    valid_file_ids = {int(r["id"]) for r in file_results if "id" in r}
+                except Exception:
+                    valid_file_ids = None
+
+                if valid_file_ids is not None and not valid_file_ids:
+                    return [], {
+                        "offset": offset,
+                        "page_size": 0,
+                        "has_more": False,
+                        "next_offset": None,
+                        "total": 0,
+                    }
+            elif path_filter and not self._files_table:
+                logger.warning(
+                    "LanceDB fuzzy search: path_filter ignored (files table not initialized)."
+                )
+
             # Use LanceDB's full-text search capabilities
             escaped_query = _escape_like_pattern(query)
             where_clause = f"content LIKE '%{escaped_query}%' ESCAPE '\\\\'"
+            if valid_file_ids is not None:
+                ids_str = ",".join(map(str, sorted(valid_file_ids)))
+                where_clause = f"{where_clause} AND file_id IN ({ids_str})"
+
+            # Overfetch by 1 so has_more works even without OFFSET support.
+            fetch_limit = offset + page_size + 1
             results = (
                 self._chunks_table.search()
                 .where(where_clause)
-                .limit(page_size + offset)
+                .limit(fetch_limit)
                 .to_list()
             )
+
+            # Safety net: enforce path_filter even if LanceDB query pushdown fails.
+            if valid_file_ids is not None:
+                results = [
+                    r for r in results if int(r.get("file_id", -1)) in valid_file_ids
+                ]
+
+            # Deduplicate across fragments (safety net for fragment-induced duplicates)
+            results = _deduplicate_by_id(results)
 
             # Apply offset manually
             paginated_results = results[offset : offset + page_size]
@@ -2048,18 +2172,29 @@ class LanceDBProvider(SerialDatabaseProvider):
                 }
                 formatted_results.append(formatted_result)
 
+            has_more = len(results) > offset + page_size
             pagination = {
                 "offset": offset,
                 "page_size": len(paginated_results),
-                "has_more": len(results) > offset + page_size,
-                "total": len(results),
+                "has_more": has_more,
+                # total is an estimate (lower bound): enough for clients to
+                # progress via offset while avoiding expensive full counts.
+                "total": offset + len(paginated_results) + (1 if has_more else 0),
+                "total_is_estimate": True,
+                "next_offset": (offset + page_size) if has_more else None,
             }
 
             return formatted_results, pagination
 
         except Exception as e:
             logger.error(f"Error in fuzzy search: {e}")
-            return [], {"offset": offset, "page_size": 0, "has_more": False, "total": 0}
+            return [], {
+                "offset": offset,
+                "page_size": 0,
+                "has_more": False,
+                "next_offset": None,
+                "total": 0,
+            }
 
     def _executor_search_text(
         self,

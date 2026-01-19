@@ -201,7 +201,21 @@ class DatabaseProvider(Protocol):
             path_filter: Optional relative path to limit search scope (e.g., 'src/', 'tests/')
 
         Returns:
-            Tuple of (results, pagination_metadata)
+            Tuple of (results, pagination_metadata).
+
+            Pagination metadata is a dict that commonly contains:
+            - offset: int
+            - page_size: int (actual returned page size)
+            - has_more: bool
+            - total: int | None (may be missing for some strategies)
+            - next_offset: int | None (optional)
+            - total_is_estimate: bool (optional; when True, total is a best-effort
+              lower bound)
+
+            Provider notes:
+            - DuckDB providers generally return exact total counts and next_offset.
+            - LanceDB providers may return an estimated total; when present they set
+              total_is_estimate=True.
         """
         ...
 
@@ -269,7 +283,9 @@ class DatabaseProvider(Protocol):
             path_filter: Optional relative path to limit search scope (e.g., 'src/', 'tests/')
 
         Returns:
-            Tuple of (results, pagination_metadata)
+            Tuple of (results, pagination_metadata).
+
+            See search_semantic() for pagination metadata conventions.
         """
         ...
 
@@ -279,7 +295,9 @@ class DatabaseProvider(Protocol):
         """Perform full-text search on code content.
 
         Returns:
-            Tuple of (results, pagination_metadata)
+            Tuple of (results, pagination_metadata).
+
+            See search_semantic() for pagination metadata conventions.
         """
         ...
 
