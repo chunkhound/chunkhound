@@ -155,6 +155,7 @@ class Language(Enum):
     SVELTE = "svelte"
     SWIFT = "swift"
     DART = "dart"
+    LUA = "lua"
 
     # Documentation languages
     MARKDOWN = "markdown"
@@ -245,6 +246,7 @@ class Language(Enum):
             ".svelte": cls.SVELTE,
             ".swift": cls.SWIFT,
             ".swiftinterface": cls.SWIFT,
+            ".lua": cls.LUA,
         }
 
         return extension_map.get(extension, cls.UNKNOWN)
@@ -284,6 +286,7 @@ class Language(Enum):
             Language.SVELTE,
             Language.SWIFT,
             Language.DART,
+            Language.LUA,
         }
 
     @property

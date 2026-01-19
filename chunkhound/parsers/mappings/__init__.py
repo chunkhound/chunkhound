@@ -19,6 +19,7 @@ from .javascript import JavaScriptMapping
 from .json import JsonMapping
 from .jsx import JSXMapping
 from .kotlin import KotlinMapping
+from .lua import LuaMapping
 from .makefile import MakefileMapping
 from .markdown import MarkdownMapping
 from .matlab import MatlabMapping
@@ -53,6 +54,7 @@ __all__ = [
     "JsonMapping",
     "JSXMapping",
     "KotlinMapping",
+    "LuaMapping",
     "HclMapping",
     "MakefileMapping",
     "MarkdownMapping",

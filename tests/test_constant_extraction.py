@@ -81,6 +81,7 @@ WORKING_LANGUAGES = {
     Language.HASKELL,
     Language.JAVA,
     Language.KOTLIN,  # property_declaration captured by DEFINITION
+    Language.LUA,  # UPPER_SNAKE_CASE convention like Python
     Language.PYTHON,
     Language.RUST,
     Language.SWIFT,
@@ -130,6 +131,7 @@ NOT_IMPLEMENTED_LANGUAGES = {
         pytest.param(Language.JAVASCRIPT, "const MAX = 100;", ["MAX"], id="javascript"),
         # === WORKING LANGUAGES (continued) ===
         pytest.param(Language.KOTLIN, "const val MAX = 100", ["MAX"], id="kotlin"),
+        pytest.param(Language.LUA, "local MAX = 100", ["MAX"], id="lua"),
         # === NOT YET IMPLEMENTED (continued) ===
         pytest.param(Language.DART, "const MAX = 100;", ["MAX"], id="dart"),
         pytest.param(Language.GROOVY, "class Test { static final int MAX = 100 }", ["MAX"], id="groovy"),
@@ -1397,3 +1399,73 @@ end
     names = {c["name"] for c in constants}
     expected = {"MAX_CONNECTIONS", "API_URL", "TIMEOUT"}
     assert len(expected.intersection(names)) >= 1, f"Expected MATLAB constants, got {names}"
+
+
+# =============================================================================
+# Lua UPPER_SNAKE_CASE Pattern Tests
+# Tests UPPER_SNAKE_CASE constant detection for Lua (like Python convention).
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    "code,should_extract",
+    [
+        # Valid UPPER_SNAKE_CASE patterns
+        ("local MAX_VALUE = 100", True),
+        ("local API_KEY_V2 = 'secret'", True),
+        ("local _PRIVATE = 1", True),
+        ("local MAX123 = 1", True),
+        ("local A = 1", True),  # Single letter uppercase
+    ],
+    ids=["max_value", "api_key_v2", "private_underscore", "max_with_numbers", "single_letter"],
+)
+def test_lua_upper_snake_case_valid(parse_constants, code, should_extract):
+    """Test Lua UPPER_SNAKE_CASE constant detection (valid patterns)."""
+    constants = parse_constants(code, Language.LUA)
+    assert len(constants) > 0, f"Expected constant from '{code}' but got none"
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "local Max_Value = 1",  # Mixed case
+        "local maxValue = 1",  # camelCase
+        "local max_value = 1",  # lowercase snake_case
+        "local value = 1",  # lowercase
+    ],
+    ids=["mixed_case", "camel_case", "lowercase_snake", "lowercase"],
+)
+def test_lua_upper_snake_case_invalid(parse_constants, code):
+    """Test Lua does not extract non-UPPER_SNAKE_CASE patterns."""
+    constants = parse_constants(code, Language.LUA)
+    names = {c["name"] for c in constants}
+    var_name = code.split("=")[0].replace("local", "").strip()
+    assert var_name not in names, f"Should not extract '{var_name}' from '{code}'"
+
+
+def test_lua_function_not_extracted_as_constant(parse_constants):
+    """Functions with UPPER_SNAKE_CASE names should not be extracted as constants."""
+    code = "function MAX_FUNCTION() end"
+    constants = parse_constants(code, Language.LUA)
+    names = {c["name"] for c in constants}
+    assert "MAX_FUNCTION" not in names
+
+
+def test_lua_table_constant(parse_constants):
+    """Test Lua table assigned to UPPER_SNAKE_CASE variable."""
+    code = 'local CONFIG = {debug = true, version = "1.0"}'
+    constants = parse_constants(code, Language.LUA)
+    config_constants = [c for c in constants if c["name"] == "CONFIG"]
+    assert len(config_constants) == 1
+
+
+def test_lua_constants_in_parsed_file(parse_file_constants):
+    """Test Lua constants flow through file parsing pipeline."""
+    code = """
+local MAX_VALUE = 100
+local API_KEY = "secret"
+local DEFAULT_TIMEOUT = 30
+"""
+    constants = parse_file_constants(code, "config.lua", Language.LUA)
+    names = {c["name"] for c in constants}
+    assert len(names.intersection({"MAX_VALUE", "API_KEY", "DEFAULT_TIMEOUT"})) >= 1
