@@ -21,13 +21,15 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+# Import existing components that will be used by the provider
+from chunkhound.core.config.sharding_config import ShardingConfig
 from chunkhound.core.models import Chunk, Embedding, File
 from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.core.utils import normalize_path_for_lookup
-
-# Import existing components that will be used by the provider
-from chunkhound.core.config.sharding_config import ShardingConfig
 from chunkhound.embeddings import EmbeddingManager
+from chunkhound.providers.database.background_rebuild import (
+    BackgroundRebuildCoordinator,
+)
 from chunkhound.providers.database.duckdb.chunk_repository import DuckDBChunkRepository
 from chunkhound.providers.database.duckdb.connection_manager import (
     DuckDBConnectionManager,
@@ -88,6 +90,9 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         # ShardManager will be initialized in connect() after schema creation
         self.shard_manager: ShardManager | None = None
+
+        # Background rebuild coordinator (initialized with ShardManager)
+        self._rebuild_coordinator: BackgroundRebuildCoordinator | None = None
 
         # Class-level synchronization for WAL cleanup
         self._wal_cleanup_lock = threading.Lock()
@@ -246,8 +251,18 @@ class DuckDBProvider(SerialDatabaseProvider):
         )
         logger.info("ShardManager instance created successfully")
 
+        # Initialize background rebuild coordinator if enabled
+        if self._sharding_config.background_rebuild_enabled:
+            self._rebuild_coordinator = BackgroundRebuildCoordinator(
+                shard_manager=self.shard_manager,
+                db_provider=self,
+            )
+            logger.info("BackgroundRebuildCoordinator initialized")
+
         # Run fix_pass to reconcile USearch indexes with DuckDB state
         # This ensures indexes are valid before serving reads
+        # NOTE: Call fix_pass directly here (not via coordinator) because
+        # we're already running inside the executor thread from connect()
         logger.info("Running ShardManager fix_pass for index reconciliation...")
         try:
             self.shard_manager.fix_pass(conn, check_quality=True)
@@ -316,6 +331,11 @@ class DuckDBProvider(SerialDatabaseProvider):
     def disconnect(self, skip_checkpoint: bool = False) -> None:
         """Close database connection with optional checkpointing - delegate to connection manager."""
         try:
+            # Shutdown background rebuild coordinator first
+            if self._rebuild_coordinator:
+                self._rebuild_coordinator.shutdown(wait=True)
+                self._rebuild_coordinator = None
+
             # Call parent disconnect
             super().disconnect(skip_checkpoint)
         finally:
@@ -515,27 +535,6 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         except Exception as e:
             logger.warning(f"Optimization failed: {e}")
-
-    def run_fix_pass(self, check_quality: bool = True) -> None:
-        """Run ShardManager fix_pass for index maintenance.
-
-        Triggers shard reconciliation including:
-        - Orphaned file cleanup
-        - Missing index rebuilds
-        - Split/merge operations based on thresholds
-        - Centroid cache population
-
-        Args:
-            check_quality: If True, measure self-recall for each shard
-        """
-        self._execute_in_db_thread_sync("run_fix_pass", check_quality)
-
-    def _executor_run_fix_pass(
-        self, conn: Any, state: dict[str, Any], check_quality: bool
-    ) -> None:
-        """Executor method for run_fix_pass - runs in DB thread."""
-        if self.shard_manager is not None:
-            self.shard_manager.fix_pass(conn, check_quality=check_quality)
 
     def get_storage_stats(self) -> dict[str, Any]:
         """Get DuckDB storage statistics including fragmentation.
@@ -1717,9 +1716,12 @@ class DuckDBProvider(SerialDatabaseProvider):
                     emb_dicts, dims, provider, model, conn
                 )
 
-                # Always run fix_pass to ensure centroid cache is up to date
-                # fix_pass is idempotent - it's a NOP if indexes are consistent
-                self.shard_manager.fix_pass(conn, check_quality=False)
+                # Run fix_pass to ensure centroid cache is up to date
+                # Use background coordinator if available (non-blocking)
+                if self._rebuild_coordinator:
+                    self._rebuild_coordinator.request_rebuild(check_quality=False)
+                else:
+                    self.shard_manager.fix_pass(conn, check_quality=False)
             else:
                 # Warn if semantic search unavailable for file-based DB
                 if str(self._connection_manager.db_path) != ":memory:":
@@ -1831,8 +1833,12 @@ class DuckDBProvider(SerialDatabaseProvider):
             success, needs_fix = self.shard_manager.insert_embeddings(
                 emb_dicts, dims, embedding.provider, embedding.model, conn
             )
-            # Always run fix_pass to ensure centroid cache is up to date
-            self.shard_manager.fix_pass(conn, check_quality=False)
+            # Run fix_pass to ensure centroid cache is up to date
+            # Use background coordinator if available (non-blocking)
+            if self._rebuild_coordinator:
+                self._rebuild_coordinator.request_rebuild(check_quality=False)
+            else:
+                self.shard_manager.fix_pass(conn, check_quality=False)
 
         return embedding_id
 
@@ -1942,7 +1948,11 @@ class DuckDBProvider(SerialDatabaseProvider):
                     logger.debug(
                         f"Deletion of chunk {chunk_id} triggered shard fix_pass"
                     )
-                    self.shard_manager.fix_pass(conn, check_quality=False)
+                    # Use background coordinator if available (non-blocking)
+                    if self._rebuild_coordinator:
+                        self._rebuild_coordinator.request_rebuild(check_quality=False)
+                    else:
+                        self.shard_manager.fix_pass(conn, check_quality=False)
 
         except Exception as e:
             logger.error(f"Failed to delete embeddings for chunk {chunk_id}: {e}")
@@ -1954,12 +1964,18 @@ class DuckDBProvider(SerialDatabaseProvider):
         This is the public API for triggering fix_pass from outside the executor,
         such as from BulkIndexer for deferred quality checks.
 
+        Uses background coordinator if available (non-blocking), otherwise
+        runs synchronously via the database executor thread.
+
         Args:
             check_quality: If True, measure self-recall for each shard
         """
         if self.shard_manager is None:
             return
-        self._execute_in_db_thread_sync("run_fix_pass", check_quality)
+        if self._rebuild_coordinator:
+            self._rebuild_coordinator.request_rebuild(check_quality=check_quality)
+        else:
+            self._execute_in_db_thread_sync("run_fix_pass", check_quality)
 
     def _executor_run_fix_pass(
         self, conn: Any, state: dict[str, Any], check_quality: bool

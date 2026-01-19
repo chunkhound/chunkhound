@@ -161,6 +161,11 @@ class ShardingConfig(BaseModel):
         description="Batches between quality checks when mode is deferred",
     )
 
+    background_rebuild_enabled: bool = Field(
+        default=True,
+        description="Enable non-blocking background shard rebuilds",
+    )
+
     def __repr__(self) -> str:
         """String representation of sharding configuration."""
         return (
