@@ -42,6 +42,7 @@ LANGUAGE_SAMPLES = {
     Language.PHP: '<?php\nfunction hello() {\n  return "world";\n}\n?>',
     Language.SWIFT: "class MyClass {\n    func hello() -> String {\n        return \"world\"\n    }\n}",
     Language.DART: "void main() { }",
+    Language.LUA: "function hello() print('world') end",
 }
 
 
