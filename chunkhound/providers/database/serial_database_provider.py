@@ -332,10 +332,6 @@ class SerialDatabaseProvider(ABC):
         """Check if this provider supports regex search."""
         return hasattr(self, "_executor_search_regex")
 
-    def supports_fuzzy_search(self) -> bool:
-        """Check if this provider supports fuzzy search."""
-        return hasattr(self, "_executor_search_fuzzy")
-
     def supports_text_search(self) -> bool:
         """Check if this provider supports text search."""
         return hasattr(self, "_executor_search_text")

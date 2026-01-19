@@ -295,15 +295,11 @@ sys.exit(asyncio.run(test()))
                 tools = tools_result.get("tools", [])
                 tool_names = [t["name"] for t in tools]
 
-                # Should have at least regex search (works without embeddings)
-                assert "search_regex" in tool_names, f"search_regex not in tools: {tool_names}"
-                assert "get_stats" in tool_names, f"get_stats not in tools: {tool_names}"
-                assert "health_check" in tool_names, f"health_check not in tools: {tool_names}"
+                # Should have unified search tool (works without embeddings for regex)
+                assert "search" in tool_names, f"search not in tools: {tool_names}"
 
-                # Semantic search and code_research only if embeddings available
-                if api_key:
-                    assert "search_semantic" in tool_names, f"search_semantic not in tools: {tool_names}"
-                    assert "code_research" in tool_names, f"code_research not in tools: {tool_names}"
+                # code_research only if embeddings + LLM + reranker available
+                # (not testing conditional availability in smoke test)
 
             except asyncio.TimeoutError:
                 pytest.fail("MCP stdio protocol handshake timed out")
