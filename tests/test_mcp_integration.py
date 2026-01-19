@@ -107,10 +107,11 @@ class TestMCPIntegration:
         
         # Get initial search results using MCP tool execution
         initial_results = await execute_tool(
-            tool_name="search_semantic",
+            tool_name="search",
             services=services,
             embedding_manager=embedding_manager,
             arguments={
+                "type": "semantic",
                 "query": "unique_mcp_test_function",
                 "page_size": 10,
                 "offset": 0
@@ -131,10 +132,11 @@ def unique_mcp_test_function():
         
         # Search for new content using MCP tool execution
         new_results = await execute_tool(
-            tool_name="search_semantic",
+            tool_name="search",
             services=services,
             embedding_manager=embedding_manager,
             arguments={
+                "type": "semantic",
                 "query": "unique_mcp_test_function",
                 "page_size": 10,
                 "offset": 0
@@ -159,11 +161,12 @@ def unique_mcp_test_function():
         
         # Verify initial content is found
         initial_results = await execute_tool(
-            tool_name="search_regex",
+            tool_name="search",
             services=services,
             embedding_manager=None,
             arguments={
-                "pattern": "initial_function",
+                "type": "regex",
+                "query": "initial_function",
                 "page_size": 10,
                 "offset": 0
             }
@@ -184,11 +187,12 @@ def modified_unique_regex_pattern():
         
         # Search for modified content using MCP tool execution
         modified_results = await execute_tool(
-            tool_name="search_regex",
+            tool_name="search",
             services=services,
             embedding_manager=None,
             arguments={
-                "pattern": "modified_unique_regex_pattern",
+                "type": "regex",
+                "query": "modified_unique_regex_pattern",
                 "page_size": 10,
                 "offset": 0
             }
@@ -205,15 +209,10 @@ def modified_unique_regex_pattern():
         # Wait for initial scan
         await asyncio.sleep(1.0)
         
-        # Get initial stats
-        initial_stats = await execute_tool(
-            tool_name="get_stats",
-            services=services,
-            embedding_manager=None,
-            arguments={}
-        )
-        initial_files = initial_stats.get('total_files', 0)
-        initial_chunks = initial_stats.get('total_chunks', 0)
+        # Get initial stats directly from database provider
+        initial_stats = services.provider.get_stats()
+        initial_files = initial_stats.get('files', 0)
+        initial_chunks = initial_stats.get('chunks', 0)
         
         # Create multiple new files
         for i in range(3):
@@ -231,15 +230,10 @@ class StatsTestClass_{i}:
         # Wait for all files to be processed
         await asyncio.sleep(3.0)
         
-        # Get updated stats
-        updated_stats = await execute_tool(
-            tool_name="get_stats",
-            services=services,
-            embedding_manager=None,
-            arguments={}
-        )
-        updated_files = updated_stats.get('total_files', 0)
-        updated_chunks = updated_stats.get('total_chunks', 0)
+        # Get updated stats directly from database provider
+        updated_stats = services.provider.get_stats()
+        updated_files = updated_stats.get('files', 0)
+        updated_chunks = updated_stats.get('chunks', 0)
         
         assert updated_files > initial_files, \
             f"File count should increase (was {initial_files}, now {updated_files})"
@@ -264,11 +258,12 @@ def delete_test_unique_function():
         
         # Verify content is searchable
         before_delete = await execute_tool(
-            tool_name="search_regex",
+            tool_name="search",
             services=services,
             embedding_manager=None,
             arguments={
-                "pattern": "delete_test_unique_function",
+                "type": "regex",
+                "query": "delete_test_unique_function",
                 "page_size": 10,
                 "offset": 0
             }
@@ -283,11 +278,12 @@ def delete_test_unique_function():
         
         # Verify content is no longer searchable
         after_delete = await execute_tool(
-            tool_name="search_regex",
+            tool_name="search",
             services=services,
             embedding_manager=None,
             arguments={
-                "pattern": "delete_test_unique_function",
+                "type": "regex",
+                "query": "delete_test_unique_function",
                 "page_size": 10,
                 "offset": 0
             }

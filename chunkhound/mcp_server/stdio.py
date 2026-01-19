@@ -10,6 +10,7 @@ ARCHITECTURE: Global state required for stdio communication model
 from __future__ import annotations
 
 import asyncio
+import copy
 import sys
 import os
 import logging
@@ -49,7 +50,7 @@ from chunkhound.core.config.config import Config
 from chunkhound.version import __version__
 
 from .base import MCPServerBase
-from .common import handle_tool_call
+from .common import handle_tool_call, has_reranker_support
 from .tools import TOOL_REGISTRY
 
 # CRITICAL: Disable ALL logging to prevent JSON-RPC corruption
@@ -122,32 +123,6 @@ class StdioMCPServer(MCPServerBase):
                     CodexCLIProvider._codex_available = _stub_available  # type: ignore[attr-defined]
                 except Exception:
                     pass
-
-                # And if asked, force deep_research to call synthesis directly
-                if os.getenv("CH_TEST_FORCE_SYNTHESIS") == "1":
-                    try:
-                        from chunkhound.mcp_server import tools as tools_mod  # noqa: WPS433
-
-                        async def _stub_deep_research_impl(*, services, embedding_manager, llm_manager, query, progress=None):
-                            if llm_manager is None:
-                                try:
-                                    from chunkhound.llm_manager import LLMManager  # noqa: WPS433
-
-                                    llm_manager = LLMManager(
-                                        {"provider": "codex-cli", "model": "codex"},
-                                        {"provider": "codex-cli", "model": "codex"},
-                                    )
-                                except Exception:
-                                    return {"answer": "LLM manager unavailable"}
-                            prov = llm_manager.get_synthesis_provider()
-                            resp = await prov.complete(prompt=f"E2E: {query}")
-                            return {"answer": resp.content}
-
-                        tools_mod.deep_research_impl = _stub_deep_research_impl  # type: ignore[assignment]
-                        if "code_research" in tools_mod.TOOL_REGISTRY:
-                            tools_mod.TOOL_REGISTRY["code_research"].implementation = _stub_deep_research_impl  # type: ignore[index]
-                    except Exception:
-                        pass
         except Exception:
             # Silent by design in MCP mode
             pass
@@ -194,11 +169,57 @@ class StdioMCPServer(MCPServerBase):
 
         self._register_list_tools()
 
+    def build_available_tools(self) -> list[types.Tool]:
+        """Build list of tools available based on current configuration.
+
+        Filters tools based on embedding/LLM/reranker availability.
+        Dynamically restricts schema enums when capabilities unavailable.
+
+        Returns:
+            List of MCP Tool objects with filtered schemas.
+        """
+        tools = []
+        for tool_name, tool in TOOL_REGISTRY.items():
+            # Skip embedding-dependent tools if no providers available
+            if tool.requires_embeddings and (
+                not self.embedding_manager
+                or not self.embedding_manager.list_providers()
+            ):
+                continue
+
+            # Skip LLM-dependent tools if no LLM configured
+            if tool.requires_llm and not self.llm_manager:
+                continue
+
+            # Skip reranker-dependent tools if reranker not available
+            if tool.requires_reranker and not has_reranker_support(
+                self.embedding_manager
+            ):
+                continue
+
+            # Deep copy parameters to avoid mutating registry
+            tool_params = copy.deepcopy(tool.parameters)
+
+            # Hide semantic option if embeddings not available
+            if tool_name == "search" and (
+                not self.embedding_manager
+                or not self.embedding_manager.list_providers()
+            ):
+                if "type" in tool_params.get("properties", {}):
+                    tool_params["properties"]["type"]["enum"] = ["regex"]
+
+            tools.append(
+                types.Tool(
+                    name=tool_name,
+                    description=tool.description,
+                    inputSchema=tool_params,
+                )
+            )
+
+        return tools
+
     def _register_list_tools(self) -> None:
         """Register list_tools handler."""
-
-        # Lazy import to avoid hard dependency at module import time
-        import mcp.types as types  # noqa: WPS433
 
         @self.server.list_tools()  # type: ignore[misc]
         async def list_tools() -> list[types.Tool]:
@@ -212,24 +233,7 @@ class StdioMCPServer(MCPServerBase):
                 # Return basic tools even if not fully initialized
                 pass
 
-            tools = []
-            for tool_name, tool in TOOL_REGISTRY.items():
-                # Skip embedding-dependent tools if no providers available
-                if tool.requires_embeddings and (
-                    not self.embedding_manager
-                    or not self.embedding_manager.list_providers()
-                ):
-                    continue
-
-                tools.append(
-                    types.Tool(
-                        name=tool_name,
-                        description=tool.description,
-                        inputSchema=tool.parameters,
-                    )
-                )
-
-            return tools
+            return self.build_available_tools()
 
     @asynccontextmanager
     async def server_lifespan(self) -> AsyncIterator[dict]:

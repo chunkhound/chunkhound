@@ -303,29 +303,15 @@ Run the application with proper configuration.
                 
                 # === STEP 5: Test Search Queries ===
 
-                # Test 0.1: Check what the MCP server sees in the database
-                print("Getting database stats from MCP server...")
-                stats_result = await mcp_client.send_request(
-                    "tools/call",
-                    {
-                        "name": "get_stats",
-                        "arguments": {}
-                    }
-                )
-                if "content" in stats_result:
-                    stats_data = json.loads(stats_result["content"][0]["text"])
-                    print(f"MCP server stats: {stats_data}")
-                else:
-                    print(f"Stats error: {stats_result}")
-
-                # Test 0.2: Quick check - search for any content
+                # Test 0: Quick check - search for any content
                 print("Testing search for 'def' to see if any content is searchable...")
                 def_result = await mcp_client.send_request(
                     "tools/call",
                     {
-                        "name": "search_regex",
+                        "name": "search",
                         "arguments": {
-                            "pattern": "def",
+                            "type": "regex",
+                            "query": "def",
                             "page_size": 10,
                             "offset": 0
                         }
@@ -338,9 +324,10 @@ Run the application with proper configuration.
                 fibonacci_result = await mcp_client.send_request(
                     "tools/call",
                     {
-                        "name": "search_regex",
+                        "name": "search",
                         "arguments": {
-                            "pattern": "calculate_fibonacci",
+                            "type": "regex",
+                            "query": "calculate_fibonacci",
                             "page_size": 10,
                             "offset": 0
                         }
@@ -376,9 +363,10 @@ Run the application with proper configuration.
                 app_result = await mcp_client.send_request(
                     "tools/call",
                     {
-                        "name": "search_regex",
+                        "name": "search",
                         "arguments": {
-                            "pattern": "test_isolated_app_67890",
+                            "type": "regex",
+                            "query": "test_isolated_app_67890",
                             "page_size": 10,
                             "offset": 0
                         }
@@ -407,9 +395,10 @@ Run the application with proper configuration.
                 readme_result = await mcp_client.send_request(
                     "tools/call",
                     {
-                        "name": "search_regex",
+                        "name": "search",
                         "arguments": {
-                            "pattern": "unique_feature_identifier_99999",
+                            "type": "regex",
+                            "query": "unique_feature_identifier_99999",
                             "page_size": 10,
                             "offset": 0
                         }
@@ -438,9 +427,10 @@ Run the application with proper configuration.
                 class_result = await mcp_client.send_request(
                     "tools/call",
                     {
-                        "name": "search_regex",
+                        "name": "search",
                         "arguments": {
-                            "pattern": "class DataProcessor",
+                            "type": "regex",
+                            "query": "class DataProcessor",
                             "page_size": 10,
                             "offset": 0
                         }
@@ -464,9 +454,10 @@ def should_not_appear():
                 isolation_result = await mcp_client.send_request(
                     "tools/call",
                     {
-                        "name": "search_regex",
+                        "name": "search",
                         "arguments": {
-                            "pattern": "this_should_not_be_indexed_54321",
+                            "type": "regex",
+                            "query": "this_should_not_be_indexed_54321",
                             "page_size": 10,
                             "offset": 0
                         }

@@ -61,7 +61,7 @@ async def test_mcp_code_research_uses_codex_cli_via_stdio():
         mark_file = temp_dir / "codex_called.txt"
         env = get_safe_subprocess_env({
             **os.environ,
-            "PYTHONPATH": f"{Path('tests/helpers').resolve()}:{os.environ.get('PYTHONPATH','')}",
+            "PYTHONPATH": f"{Path('tests/helpers').resolve()}{os.pathsep}{os.environ.get('PYTHONPATH','')}",
             "CH_TEST_PATCH_CODEX": "1",
             "CH_TEST_FORCE_SYNTHESIS": "1",
             "CH_TEST_CODEX_MARK_FILE": str(mark_file),
@@ -81,7 +81,7 @@ async def test_mcp_code_research_uses_codex_cli_via_stdio():
             "mcp",
             str(temp_dir),
             "--stdio",
-            "--llm-synthesis-provider",
+            "--llm-provider",
             "codex-cli",
             "--llm-synthesis-model",
             "codex",

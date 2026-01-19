@@ -15,29 +15,26 @@ def test_tool_registry_populated():
 
     # Check expected tools are present
     expected_tools = [
-        "get_stats",
-        "health_check",
-        "search_regex",
-        "search_semantic",
+        "search",
         "code_research",
     ]
     for tool_name in expected_tools:
         assert tool_name in TOOL_REGISTRY, f"Tool '{tool_name}' should be in registry"
 
+    # Verify old tools are removed
+    removed_tools = ["get_stats", "health_check", "search_regex", "search_semantic"]
+    for tool_name in removed_tools:
+        assert tool_name not in TOOL_REGISTRY, f"Tool '{tool_name}' should be removed"
+
 
 def test_tool_descriptions_not_empty():
     """Verify all tools have non-empty descriptions."""
-    # Simple utility tools can have shorter descriptions
-    simple_tools = {"get_stats", "health_check"}
-
     for tool_name, tool in TOOL_REGISTRY.items():
         assert tool.description, f"Tool '{tool_name}' should have a description"
-
-        # Complex search/research tools should have comprehensive descriptions
-        if tool_name not in simple_tools:
-            assert len(tool.description) > 50, (
-                f"Tool '{tool_name}' description should be comprehensive (>50 chars)"
-            )
+        # All tools should have comprehensive descriptions
+        assert len(tool.description) > 50, (
+            f"Tool '{tool_name}' description should be comprehensive (>50 chars)"
+        )
 
 
 def test_tool_parameters_structure():
@@ -54,54 +51,26 @@ def test_tool_parameters_structure():
         )
 
 
-def test_search_regex_schema():
-    """Verify search_regex has correct schema from decorator."""
-    tool = TOOL_REGISTRY["search_regex"]
+def test_search_schema():
+    """Verify unified search has correct schema from decorator."""
+    tool = TOOL_REGISTRY["search"]
 
-    # Check description
-    assert "regular expressions" in tool.description.lower()
-    assert "exact" in tool.description.lower() or "precise" in tool.description.lower()
-
-    # Check parameters
-    props = tool.parameters["properties"]
-    assert "pattern" in props, "search_regex should have 'pattern' parameter"
-    assert "page_size" in props, "search_regex should have 'page_size' parameter"
-    assert "offset" in props, "search_regex should have 'offset' parameter"
-    assert "max_response_tokens" in props, (
-        "search_regex should have 'max_response_tokens' parameter"
-    )
-    assert "path" in props, "search_regex should have 'path' parameter"
-
-    # Check required fields
-    required = tool.parameters.get("required", [])
-    assert "pattern" in required, "'pattern' should be required for search_regex"
-
-
-def test_search_semantic_schema():
-    """Verify search_semantic has correct schema from decorator."""
-    tool = TOOL_REGISTRY["search_semantic"]
-
-    # Check description
-    assert (
-        "semantic" in tool.description.lower() or "meaning" in tool.description.lower()
-    )
+    # Check description mentions both search types
+    assert "regex" in tool.description.lower()
+    assert "semantic" in tool.description.lower()
 
     # Check parameters
     props = tool.parameters["properties"]
-    assert "query" in props, "search_semantic should have 'query' parameter"
-    assert "page_size" in props, "search_semantic should have 'page_size' parameter"
-    assert "offset" in props, "search_semantic should have 'offset' parameter"
-    assert "max_response_tokens" in props, (
-        "search_semantic should have 'max_response_tokens' parameter"
-    )
-    assert "path" in props, "search_semantic should have 'path' parameter"
-    assert "provider" in props, "search_semantic should have 'provider' parameter"
-    assert "model" in props, "search_semantic should have 'model' parameter"
-    assert "threshold" in props, "search_semantic should have 'threshold' parameter"
+    assert "type" in props, "search should have 'type' parameter"
+    assert "query" in props, "search should have 'query' parameter"
+    assert "page_size" in props, "search should have 'page_size' parameter"
+    assert "offset" in props, "search should have 'offset' parameter"
+    assert "path" in props, "search should have 'path' parameter"
 
     # Check required fields
     required = tool.parameters.get("required", [])
-    assert "query" in required, "'query' should be required for search_semantic"
+    assert "type" in required, "'type' should be required for search"
+    assert "query" in required, "'query' should be required for search"
 
 
 def test_code_research_schema():
@@ -110,8 +79,8 @@ def test_code_research_schema():
 
     # Check description
     assert (
-        "research" in tool.description.lower()
-        or "architecture" in tool.description.lower()
+        "architecture" in tool.description.lower()
+        or "analysis" in tool.description.lower()
     )
     assert len(tool.description) > 100, (
         "code_research should have comprehensive description"
@@ -127,16 +96,17 @@ def test_code_research_schema():
     assert "query" in required, "'query' should be required for code_research"
 
 
-def test_requires_embeddings_flag():
-    """Verify tools correctly declare embedding requirements."""
-    # Tools that don't require embeddings
-    assert not TOOL_REGISTRY["get_stats"].requires_embeddings
-    assert not TOOL_REGISTRY["health_check"].requires_embeddings
-    assert not TOOL_REGISTRY["search_regex"].requires_embeddings
+def test_capability_flags():
+    """Verify tools correctly declare capability requirements."""
+    # search: no special requirements (validates embedding at runtime)
+    assert not TOOL_REGISTRY["search"].requires_embeddings
+    assert not TOOL_REGISTRY["search"].requires_llm
+    assert not TOOL_REGISTRY["search"].requires_reranker
 
-    # Tools that require embeddings
-    assert TOOL_REGISTRY["search_semantic"].requires_embeddings
+    # code_research: requires all capabilities
     assert TOOL_REGISTRY["code_research"].requires_embeddings
+    assert TOOL_REGISTRY["code_research"].requires_llm
+    assert TOOL_REGISTRY["code_research"].requires_reranker
 
 
 def test_stdio_server_uses_registry_descriptions():
@@ -166,25 +136,10 @@ def test_stdio_server_uses_registry_descriptions():
 
 def test_default_values_in_schema():
     """Verify that default values are properly captured in schemas."""
-    # search_regex defaults
-    regex_props = TOOL_REGISTRY["search_regex"].parameters["properties"]
-    assert regex_props["page_size"].get("default") == 10
-    assert regex_props["offset"].get("default") == 0
-    assert regex_props["max_response_tokens"].get("default") == 20000
-
-    # search_semantic defaults
-    semantic_props = TOOL_REGISTRY["search_semantic"].parameters["properties"]
-    assert semantic_props["page_size"].get("default") == 10
-    assert semantic_props["offset"].get("default") == 0
-    assert semantic_props["max_response_tokens"].get("default") == 20000
-    # provider and model should NOT have defaults - they should be None
-    # to allow auto-detection from configured embedding provider
-    assert "default" not in semantic_props["provider"], (
-        "provider should not have default value (allows auto-detection)"
-    )
-    assert "default" not in semantic_props["model"], (
-        "model should not have default value (allows auto-detection)"
-    )
+    # search defaults
+    search_props = TOOL_REGISTRY["search"].parameters["properties"]
+    assert search_props["page_size"].get("default") == 10
+    assert search_props["offset"].get("default") == 0
 
 
 def test_no_duplicate_tool_dataclass():
@@ -222,6 +177,46 @@ def test_no_tool_definitions_list():
     assert "TOOL_DEFINITIONS = [" not in content, (
         "Old TOOL_DEFINITIONS list should be removed "
         "(registry now populated by decorators)"
+    )
+
+
+def test_search_enum_restricted_without_embeddings():
+    """Verify search type enum is restricted to regex when embeddings unavailable.
+
+    This tests the dynamic schema mutation in build_available_tools() that restricts
+    the search type to only ["regex"] when no embedding provider is available.
+    """
+    from unittest.mock import MagicMock
+
+    from chunkhound.mcp_server.stdio import StdioMCPServer
+    from chunkhound.mcp_server.tools import TOOL_REGISTRY
+
+    # Create server with mocked config (build_available_tools doesn't use config)
+    mock_config = MagicMock()
+    mock_config.debug = False
+    server = StdioMCPServer(config=mock_config)
+
+    # Ensure no embedding/llm managers (already None from base class)
+    assert server.embedding_manager is None
+    assert server.llm_manager is None
+
+    # Call actual server method
+    tools = server.build_available_tools()
+
+    # Find the search tool
+    search_tool = next((t for t in tools if t.name == "search"), None)
+    assert search_tool is not None, "search tool should be in list"
+
+    # Verify the type enum is restricted to regex only
+    type_schema = search_tool.inputSchema["properties"]["type"]
+    assert type_schema["enum"] == ["regex"], (
+        f"Expected ['regex'] without embeddings, got {type_schema['enum']}"
+    )
+
+    # Verify the original TOOL_REGISTRY was NOT mutated
+    original_enum = TOOL_REGISTRY["search"].parameters["properties"]["type"]["enum"]
+    assert "semantic" in original_enum, (
+        "TOOL_REGISTRY should not be mutated - 'semantic' should still be in enum"
     )
 
 
