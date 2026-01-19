@@ -180,5 +180,45 @@ def test_no_tool_definitions_list():
     )
 
 
+def test_search_enum_restricted_without_embeddings():
+    """Verify search type enum is restricted to regex when embeddings unavailable.
+
+    This tests the dynamic schema mutation in build_available_tools() that restricts
+    the search type to only ["regex"] when no embedding provider is available.
+    """
+    from unittest.mock import MagicMock
+
+    from chunkhound.mcp_server.stdio import StdioMCPServer
+    from chunkhound.mcp_server.tools import TOOL_REGISTRY
+
+    # Create server with mocked config (build_available_tools doesn't use config)
+    mock_config = MagicMock()
+    mock_config.debug = False
+    server = StdioMCPServer(config=mock_config)
+
+    # Ensure no embedding/llm managers (already None from base class)
+    assert server.embedding_manager is None
+    assert server.llm_manager is None
+
+    # Call actual server method
+    tools = server.build_available_tools()
+
+    # Find the search tool
+    search_tool = next((t for t in tools if t.name == "search"), None)
+    assert search_tool is not None, "search tool should be in list"
+
+    # Verify the type enum is restricted to regex only
+    type_schema = search_tool.inputSchema["properties"]["type"]
+    assert type_schema["enum"] == ["regex"], (
+        f"Expected ['regex'] without embeddings, got {type_schema['enum']}"
+    )
+
+    # Verify the original TOOL_REGISTRY was NOT mutated
+    original_enum = TOOL_REGISTRY["search"].parameters["properties"]["type"]["enum"]
+    assert "semantic" in original_enum, (
+        "TOOL_REGISTRY should not be mutated - 'semantic' should still be in enum"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
