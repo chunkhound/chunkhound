@@ -11,7 +11,7 @@ import json
 import types
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, TypedDict, Union, cast, get_args, get_origin
+from typing import Any, Literal, TypedDict, Union, cast, get_args, get_origin
 
 try:
     from typing import NotRequired  # type: ignore[attr-defined]
@@ -84,6 +84,10 @@ def _python_type_to_json_schema_type(type_hint: Any) -> dict[str, Any]:
             return {
                 "anyOf": [_python_type_to_json_schema_type(t) for t in non_none_types]
             }
+
+    # Handle Literal types (e.g., Literal["a", "b"])
+    if origin is Literal:
+        return {"type": "string", "enum": list(args)}
 
     # Handle basic types
     if type_hint is str:
@@ -402,7 +406,7 @@ ERROR RECOVERY: If incomplete, try narrower query or use path parameter to scope
 async def search_impl(
     services: DatabaseServices,
     embedding_manager: EmbeddingManager | None,
-    type: str,
+    type: Literal["regex", "semantic"],
     query: str,
     path: str | None = None,
     page_size: int = 10,
