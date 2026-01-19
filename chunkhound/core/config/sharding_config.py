@@ -85,10 +85,10 @@ class ShardingConfig(BaseModel):
     )
 
     quality_threshold: float = Field(
-        default=0.95,
+        default=0.85,
         ge=0.0,
         le=1.0,
-        description="Minimum quality score for shard index",
+        description="Minimum quality score for shard index (i8-tuned)",
     )
 
     quality_sample_size: int = Field(

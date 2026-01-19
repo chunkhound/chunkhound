@@ -1240,7 +1240,7 @@ class TestCompactionAndQuality:
         shard_manager: ShardManager,
         generator: SyntheticEmbeddingGenerator,
     ) -> None:
-        """Verify fix_pass rebuilds when self_recall < quality_threshold (0.95)."""
+        """Verify fix_pass rebuilds when self_recall < quality_threshold (0.85)."""
         # Create shard with 50 vectors
         shard_id = uuid4()
         shard_path = shard_manager._shard_path(shard_id)
@@ -1274,8 +1274,8 @@ class TestCompactionAndQuality:
         # Get initial file modification time
         initial_mtime = shard_path.stat().st_mtime
 
-        # Mock measure_quality to return degraded value (below 0.95 threshold)
-        with patch.object(usearch_wrapper, "measure_quality", return_value=0.90):
+        # Mock measure_quality to return degraded value (below 0.85 threshold)
+        with patch.object(usearch_wrapper, "measure_quality", return_value=0.80):
             shard_manager.fix_pass(tmp_db.connection, check_quality=True)
 
         # Verify: file was rebuilt (mtime changed)

@@ -791,7 +791,7 @@ class ShardManager:
 
         Rebuild conditions:
         - index_live != db_count with large delta (>10% of index_live)
-        - self_recall < quality_threshold (default 0.95)
+        - self_recall < quality_threshold (default 0.85)
         - tombstone_ratio >= compaction_threshold (default 0.20)
 
         Args:
