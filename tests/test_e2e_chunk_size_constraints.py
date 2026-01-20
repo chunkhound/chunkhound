@@ -220,6 +220,15 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         # Normal
         "String greet(String name) {\n  return 'Hello, $name';\n}",
     ),
+    Language.LUA: (
+        ".lua",
+        # Large function
+        "function processData(items)\n"
+        + _make_large_statements("    local x = 1")
+        + "\n    return x\nend",
+        # Normal
+        "function greet(name)\n    return 'Hello, ' .. name\nend",
+    ),
     Language.BASH: (
         ".sh",
         # Large script

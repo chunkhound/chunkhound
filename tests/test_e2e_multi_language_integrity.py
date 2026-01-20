@@ -130,6 +130,11 @@ LANGUAGE_SAMPLES: dict[Language, tuple[str, str | None, str | None]] = {
         "String greet(String name) {\n  return 'Hello, $name';\n}",
         "class Calculator {\n  int add(int a, int b) => a + b;\n}",
     ),
+    Language.LUA: (
+        ".lua",
+        "function greet(name)\n    return 'Hello, ' .. name\nend",
+        "local Calculator = {}\nfunction Calculator:add(a, b)\n    return a + b\nend",
+    ),
     Language.VUE: (
         ".vue",
         "<template>\n  <div>{{ greeting }}</div>\n</template>\n\n<script>\nexport default {\n  data() {\n    return { greeting: 'Hello' };\n  }\n};\n</script>",
