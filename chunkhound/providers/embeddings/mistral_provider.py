@@ -4,12 +4,15 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
 from loguru import logger
 
+from chunkhound.core.config.embedding_config import validate_rerank_configuration
 from chunkhound.core.constants import MISTRAL_DEFAULT_MODEL
 from chunkhound.core.exceptions.core import ValidationError
-from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
+from chunkhound.interfaces.embedding_provider import EmbeddingConfig
 
+from .rerank_mixin import RerankMixin
 from .shared_utils import (
     chunk_text_by_words,
     estimate_tokens_rough,
@@ -51,7 +54,7 @@ MISTRAL_MODEL_CONFIG = {
 }
 
 
-class MistralEmbeddingProvider:
+class MistralEmbeddingProvider(RerankMixin):
     """Mistral embedding provider using codestral-embed by default.
 
     Supports Mistral's embedding models including:
@@ -71,25 +74,35 @@ class MistralEmbeddingProvider:
     def __init__(
         self,
         api_key: str | None = None,
+        base_url: str | None = None,
         model: str = MISTRAL_DEFAULT_MODEL,
+        rerank_model: str | None = None,
+        rerank_url: str = "/rerank",
+        rerank_format: str = "auto",
         batch_size: int = 32,
         timeout: int = 30,
         retry_attempts: int = 3,
         retry_delay: float = 1.0,
         max_tokens: int | None = None,
         output_dimension: int | None = None,
+        rerank_batch_size: int | None = None,
     ):
         """Initialize Mistral embedding provider.
 
         Args:
             api_key: Mistral API key (defaults to MISTRAL_API_KEY env var)
+            base_url: Base URL for Mistral API (defaults to https://api.mistral.ai)
             model: Model name to use for embeddings
+            rerank_model: Model name to use for reranking (enables multi-hop search)
+            rerank_url: Rerank endpoint URL (defaults to /rerank)
+            rerank_format: Reranking API format - 'cohere', 'tei', or 'auto' (default: 'auto')
             batch_size: Maximum batch size for API requests
             timeout: Request timeout in seconds
             retry_attempts: Number of retry attempts for failed requests
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
             output_dimension: Output embedding dimension (1-3072 for codestral-embed)
+            rerank_batch_size: Max documents per rerank batch (overrides model defaults, bounded by model caps)
         """
         if not MISTRAL_AVAILABLE:
             raise ImportError(
@@ -97,8 +110,35 @@ class MistralEmbeddingProvider:
             )
 
         self._api_key = api_key
+        self._base_url = base_url
         self._model = model
+        self._rerank_model = rerank_model
+        self._rerank_url = rerank_url
+        self._rerank_format = rerank_format
+        self._detected_rerank_format: str | None = (
+            None  # Cache for auto-detected format
+        )
+        self._format_detection_lock = asyncio.Lock()  # Protect format detection cache
         self._output_dimension = output_dimension
+        self._rerank_batch_size = rerank_batch_size
+
+        # Validate rerank configuration at initialization (fail-fast)
+        is_using_reranking = rerank_model or (rerank_format == "tei" and rerank_url)
+        if is_using_reranking or rerank_format == "cohere":
+            validate_rerank_configuration(
+                provider="mistral",
+                rerank_format=rerank_format,
+                rerank_model=rerank_model,
+                rerank_url=rerank_url,
+                base_url=base_url,
+            )
+
+            # Warn about auto-detection risks in production
+            if rerank_format == "auto":
+                logger.warning(
+                    "Using rerank_format='auto' may cause first request to fail if format guess is wrong. "
+                    "For production use, explicitly set rerank_format to 'cohere' or 'tei'."
+                )
 
         # Get model configuration or use defaults
         model_config = MISTRAL_MODEL_CONFIG.get(
@@ -222,7 +262,7 @@ class MistralEmbeddingProvider:
     @property
     def base_url(self) -> str:
         """Base URL for API requests."""
-        return "https://api.mistral.ai"
+        return self._base_url or "https://api.mistral.ai"
 
     @property
     def timeout(self) -> int:
@@ -511,9 +551,27 @@ class MistralEmbeddingProvider:
     def get_max_rerank_batch_size(self) -> int:
         """Get maximum documents per batch for reranking operations.
 
-        Mistral does not currently support reranking.
+        Returns model-specific batch limit for reranking to prevent OOM errors.
+        Implements bounded override pattern: user can set batch size, but it's
+        clamped to model caps for safety.
+
+        Priority order:
+        0. User override (rerank_batch_size) - bounded by model cap below
+        1. Conservative default (128 for Mistral)
+
+        Returns:
+            Maximum number of documents to rerank in a single batch
         """
-        return self._batch_size
+        # Conservative default for Mistral reranking
+        # Research shows 32-128 is optimal for GPU reranking
+        model_cap = 128
+
+        # Priority 0: User override (bounded by model cap)
+        if self._rerank_batch_size is not None:
+            return min(self._rerank_batch_size, model_cap)
+
+        # Return model cap as default
+        return model_cap
 
     def get_recommended_concurrency(self) -> int:
         """Get recommended number of concurrent batches for Mistral.
@@ -523,24 +581,16 @@ class MistralEmbeddingProvider:
         """
         return self.RECOMMENDED_CONCURRENCY
 
-    def supports_reranking(self) -> bool:
-        """Check if reranking is supported.
+    # RerankMixin hook implementation
+    def _get_rerank_client_kwargs(self) -> dict[str, Any]:
+        """Get httpx client kwargs for rerank requests.
 
-        Mistral does not currently offer reranking models.
+        Mistral uses standard httpx configuration with timeout.
+
+        Returns:
+            Dictionary of kwargs to pass to httpx.AsyncClient
         """
-        return False
-
-    async def rerank(
-        self, query: str, documents: list[str], top_k: int | None = None
-    ) -> list[RerankResult]:
-        """Rerank documents by relevance to query.
-
-        Mistral does not currently support reranking.
-
-        Raises:
-            NotImplementedError: Always, as Mistral doesn't offer reranking
-        """
-        raise NotImplementedError("Mistral does not currently support reranking")
+        return {"timeout": self._timeout}
 
     async def validate_api_key(self) -> bool:
         """Validate API key with the service."""

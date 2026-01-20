@@ -6,3 +6,6 @@ VOYAGE_DEFAULT_RERANK_MODEL = "rerank-2.5"
 
 # Mistral AI embedding model defaults
 MISTRAL_DEFAULT_MODEL = "codestral-embed"
+MISTRAL_DEFAULT_RERANK_MODEL = (
+    None  # Mistral doesn't have native reranking; use external service
+)

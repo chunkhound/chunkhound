@@ -220,21 +220,31 @@ def create_openai_provider(
 
 def create_mistral_provider(
     api_key: str | None = None,
+    base_url: str | None = None,
     model: str = "codestral-embed",
+    rerank_model: str | None = None,
+    rerank_url: str = "/rerank",
+    rerank_format: str = "auto",
     batch_size: int = 100,
     timeout: int = 30,
     retry_attempts: int = 3,
     output_dimension: int | None = None,
+    rerank_batch_size: int | None = None,
 ) -> "MistralEmbeddingProvider":
     """Create a Mistral embedding provider with default settings.
 
     Args:
         api_key: Mistral API key (uses MISTRAL_API_KEY env var if None)
+        base_url: Base URL for Mistral API (defaults to https://api.mistral.ai)
         model: Model name to use (default: codestral-embed)
+        rerank_model: Model name to use for reranking (enables multi-hop search)
+        rerank_url: Rerank endpoint URL (defaults to /rerank)
+        rerank_format: Reranking API format - 'cohere', 'tei', or 'auto' (default: 'auto')
         batch_size: Maximum batch size for embedding requests
         timeout: Request timeout in seconds
         retry_attempts: Number of retry attempts for failed requests
         output_dimension: Output embedding dimension (1-3072, for Matryoshka embeddings)
+        rerank_batch_size: Max documents per rerank batch (overrides model defaults, bounded by model caps)
 
     Returns:
         Configured Mistral embedding provider
@@ -246,9 +256,14 @@ def create_mistral_provider(
 
     return MistralEmbeddingProvider(
         api_key=api_key,
+        base_url=base_url,
         model=model,
+        rerank_model=rerank_model,
+        rerank_url=rerank_url,
+        rerank_format=rerank_format,
         batch_size=batch_size,
         timeout=timeout,
         retry_attempts=retry_attempts,
         output_dimension=output_dimension,
+        rerank_batch_size=rerank_batch_size,
     )
