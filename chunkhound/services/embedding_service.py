@@ -599,16 +599,26 @@ class EmbeddingService(BaseService):
             if show_progress:
                 with update_lock:
                     processed_count += len(batch)
-                    if embed_task and self.progress:
+                    if embed_task is not None and self.progress:
                         self.progress.advance(embed_task, len(batch))
 
                         # Calculate and display speed
-                        task_obj = self.progress.tasks[embed_task]
-                        if task_obj.elapsed and task_obj.elapsed > 0:
-                            speed = processed_count / task_obj.elapsed
-                            self.progress.update(
-                                embed_task, speed=f"{speed:.1f} chunks/s"
-                            )
+                        # Wrap in try-except to handle potential errors accessing
+                        # Rich Progress task properties (e.g., if task_obj is wrong type)
+                        try:
+                            task_obj = self.progress.tasks[embed_task]
+                            if (
+                                hasattr(task_obj, "elapsed")
+                                and task_obj.elapsed
+                                and task_obj.elapsed > 0
+                            ):
+                                speed = processed_count / task_obj.elapsed
+                                self.progress.update(
+                                    embed_task, speed=f"{speed:.1f} chunks/s"
+                                )
+                        except (AttributeError, IndexError, TypeError):
+                            # Progress display is non-critical, continue without speed
+                            pass
 
             return result
 
