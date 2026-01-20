@@ -1585,6 +1585,33 @@ async def _validate_voyageai_key(api_key: str, formatter: RichOutputFormatter) -
         return False
 
 
+async def _validate_mistral_key(
+    api_key: str, model: str, formatter: RichOutputFormatter
+) -> bool:
+    """Test Mistral API key with minimal embedding request"""
+    try:
+        formatter.info("🔄 Validating API key...")
+
+        # Create a test configuration
+        config = EmbeddingConfig(
+            provider="mistral", api_key=SecretStr(api_key), model=model
+        )
+
+        # Try to create provider and test connection
+        from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+
+        provider = EmbeddingProviderFactory.create_provider(config)
+
+        # Test with minimal embedding
+        await provider.embed(["test connection"])
+        formatter.success("API key validated successfully")
+        return True
+
+    except Exception as e:
+        formatter.error(f"Validation failed: {e}")
+        return False
+
+
 async def _validate_openai_key(
     api_key: str, model: str, formatter: RichOutputFormatter
 ) -> bool:
@@ -1769,6 +1796,41 @@ async def _prompt_for_api_key(
             if not api_key.strip() and not url_opened:
                 url_opened = _open_url_on_empty_input(
                     "https://platform.openai.com/api-keys", "OpenAI", formatter
+                )
+                continue
+
+            return api_key.strip()
+
+    elif provider_type == "mistral":
+        formatter.section_header(f"{provider_name} API Key")
+        print("Getting Started:")
+        formatter.bullet_list(
+            [
+                "Visit: https://console.mistral.ai",
+                "Sign up for an account",
+                "Generate an API key in the dashboard",
+            ]
+        )
+        print()
+
+        url_opened = False  # Track if we've opened the URL
+
+        while True:
+
+            def validate_key(x):
+                if not x.strip() and not url_opened:
+                    return True  # Allow empty field first time
+                return len(x.strip()) > 0  # Mistral keys don't have a standard prefix
+
+            api_key = await rich_text(
+                "Enter your Mistral API key:",
+                default="",  # No pre-filling - detection handled at higher level
+                validate=validate_key,
+            )
+
+            if not api_key.strip() and not url_opened:
+                url_opened = _open_url_on_empty_input(
+                    "https://console.mistral.ai", "Mistral", formatter
                 )
                 continue
 
@@ -1980,6 +2042,14 @@ async def _validate_provider_config(
             formatter.error("VoyageAI API key not found")
             return False
         return await _validate_voyageai_key(api_key, formatter)
+
+    elif provider == "mistral":
+        api_key = config_data.get("api_key")
+        model = config_data.get("model", MISTRAL_DEFAULT_MODEL)
+        if not api_key:
+            formatter.error("Mistral API key not found")
+            return False
+        return await _validate_mistral_key(api_key, model, formatter)
 
     elif provider == "openai":
         api_key = config_data.get("api_key")

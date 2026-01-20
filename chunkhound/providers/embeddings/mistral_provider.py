@@ -72,7 +72,7 @@ class MistralEmbeddingProvider:
         self,
         api_key: str | None = None,
         model: str = MISTRAL_DEFAULT_MODEL,
-        batch_size: int = 100,
+        batch_size: int = 32,
         timeout: int = 30,
         retry_attempts: int = 3,
         retry_delay: float = 1.0,
