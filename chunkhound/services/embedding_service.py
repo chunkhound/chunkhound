@@ -603,22 +603,16 @@ class EmbeddingService(BaseService):
                         self.progress.advance(embed_task, len(batch))
 
                         # Calculate and display speed
-                        # Wrap in try-except to handle potential errors accessing
-                        # Rich Progress task properties (e.g., if task_obj is wrong type)
                         try:
                             task_obj = self.progress.tasks[embed_task]
-                            if (
-                                hasattr(task_obj, "elapsed")
-                                and task_obj.elapsed
-                                and task_obj.elapsed > 0
-                            ):
+                            if task_obj.elapsed and task_obj.elapsed > 0:
                                 speed = processed_count / task_obj.elapsed
                                 self.progress.update(
                                     embed_task, speed=f"{speed:.1f} chunks/s"
                                 )
-                        except (AttributeError, IndexError, TypeError):
-                            # Progress display is non-critical, continue without speed
-                            pass
+                        except (AttributeError, IndexError, TypeError) as e:
+                            # Progress display is non-critical, but log for debugging
+                            logger.debug(f"[EmbSvc] Progress speed update skipped: {e}")
 
             return result
 
