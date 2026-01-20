@@ -371,6 +371,13 @@ class RerankMixin:
             logger.debug(f"Using TEI format for reranking {len(documents)} documents")
             return {"query": query, "texts": documents}
 
+        elif format_to_use == "openarc":
+            # OpenArc format: requires model, uses "documents" field
+            logger.debug(
+                f"Using OpenArc format for reranking {len(documents)} documents with model {self._rerank_model}"
+            )
+            return {"model": self._rerank_model, "query": query, "documents": documents}
+
         elif format_to_use == "cohere":
             # Cohere format: requires model, uses "documents" field
             payload: dict[str, Any] = {
@@ -434,6 +441,69 @@ class RerankMixin:
                 f"num_documents is {num_documents} (zero or negative), returning empty results"
             )
             return []
+
+        # Check for OpenArc format: {"data": [{"ranked_documents": [{index, score, document}]}]}
+        if isinstance(response_data, dict) and "data" in response_data:
+            data_list = response_data["data"]
+            if (
+                isinstance(data_list, list)
+                and data_list
+                and "ranked_documents" in data_list[0]
+            ):
+                ranked_docs = data_list[0]["ranked_documents"]
+                if not isinstance(ranked_docs, list):
+                    raise ValueError(
+                        "Invalid OpenArc response: 'ranked_documents' must be a list"
+                    )
+
+                # Cache detected format if in auto mode (thread-safe with async lock)
+                if format_hint == "auto":
+                    async with self._format_detection_lock:
+                        # Double-check pattern: check if another task already detected the format
+                        if self._detected_rerank_format is None:
+                            self._detected_rerank_format = "openarc"
+                            logger.debug("Auto-detected rerank format: openarc")
+
+                # Parse OpenArc results with validation
+                rerank_results = []
+                for i, result in enumerate(ranked_docs):
+                    if not isinstance(result, dict):
+                        logger.warning(
+                            f"Skipping invalid OpenArc result {i}: not a dict"
+                        )
+                        continue
+
+                    if "index" not in result or "score" not in result:
+                        logger.warning(
+                            f"Skipping OpenArc result {i}: missing required fields (index, score)"
+                        )
+                        continue
+
+                    try:
+                        index = int(result["index"])
+                        score = float(result["score"])
+
+                        # Validate index is within bounds
+                        if index < 0:
+                            logger.warning(
+                                f"Skipping OpenArc result {i}: negative index {index}"
+                            )
+                            continue
+
+                        if index >= num_documents:
+                            logger.warning(
+                                f"Skipping OpenArc result {i}: index {index} out of bounds (num_documents={num_documents})"
+                            )
+                            continue
+
+                        rerank_results.append(RerankResult(index=index, score=score))
+                    except (ValueError, TypeError) as e:
+                        logger.warning(
+                            f"Skipping OpenArc result {i}: invalid data types - {e}"
+                        )
+                        continue
+
+                return rerank_results
 
         # Validate response has results
         # Note: Bare array responses are normalized to {"results": [...]} before this point

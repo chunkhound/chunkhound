@@ -122,10 +122,11 @@ class EmbeddingConfig(BaseSettings):
         "Relative paths combined with base_url for same-server reranking.",
     )
 
-    rerank_format: Literal["cohere", "tei", "auto"] = Field(
+    rerank_format: Literal["cohere", "tei", "openarc", "auto"] = Field(
         default="auto",
         description="Reranking API format. 'cohere' for Cohere-compatible APIs (requires model in request), "
         "'tei' for Hugging Face Text Embeddings Inference (model set at deployment), "
+        "'openarc' for OpenArc reranker (Qwen3-based models), "
         "'auto' for automatic format detection from response.",
     )
 
