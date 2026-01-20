@@ -14,7 +14,7 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import Self
 
-from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
+from chunkhound.core.constants import MISTRAL_DEFAULT_MODEL, VOYAGE_DEFAULT_MODEL
 
 from .openai_utils import is_official_openai_endpoint
 
@@ -93,8 +93,8 @@ class EmbeddingConfig(BaseSettings):
     )
 
     # Provider Selection
-    provider: Literal["openai", "voyageai"] = Field(
-        default="openai", description="Embedding provider (openai, voyageai)"
+    provider: Literal["openai", "voyageai", "mistral"] = Field(
+        default="openai", description="Embedding provider (openai, voyageai, mistral)"
     )
 
     # Common Configuration
@@ -241,6 +241,8 @@ class EmbeddingConfig(BaseSettings):
         # Provider defaults
         if self.provider == "voyageai":
             return VOYAGE_DEFAULT_MODEL
+        elif self.provider == "mistral":
+            return MISTRAL_DEFAULT_MODEL
         else:  # openai
             return "text-embedding-3-small"
 

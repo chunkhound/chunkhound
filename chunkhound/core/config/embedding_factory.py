@@ -10,7 +10,11 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERANK_MODEL
+from chunkhound.core.constants import (
+    MISTRAL_DEFAULT_MODEL,
+    VOYAGE_DEFAULT_MODEL,
+    VOYAGE_DEFAULT_RERANK_MODEL,
+)
 
 from .embedding_config import EmbeddingConfig
 
@@ -61,6 +65,8 @@ class EmbeddingProviderFactory:
             return EmbeddingProviderFactory._create_openai_provider(provider_config)
         elif config.provider == "voyageai":
             return EmbeddingProviderFactory._create_voyageai_provider(provider_config)
+        elif config.provider == "mistral":
+            return EmbeddingProviderFactory._create_mistral_provider(provider_config)
         else:
             raise ValueError(f"Unsupported provider: {config.provider}")
 
@@ -152,6 +158,43 @@ class EmbeddingProviderFactory:
             raise ValueError(f"Failed to create VoyageAI provider: {e}") from e
 
     @staticmethod
+    def _create_mistral_provider(config: dict[str, Any]) -> "EmbeddingProvider":
+        """Create Mistral embedding provider."""
+        try:
+            from chunkhound.providers.embeddings.mistral_provider import (
+                MistralEmbeddingProvider,
+            )
+        except ImportError as e:
+            raise ImportError(
+                "Failed to import Mistral provider. "
+                "Ensure mistralai package is installed: uv pip install mistralai"
+            ) from e
+
+        # Extract Mistral-specific parameters
+        api_key = config.get("api_key")
+        model = config.get("model")
+
+        # Model should come from config, but handle None case safely
+        if not model:
+            raise ValueError("Model not specified in provider configuration")
+
+        logger.debug(
+            f"Creating Mistral provider: model={model}, "
+            f"api_key={'***' if api_key else None}"
+        )
+
+        try:
+            return MistralEmbeddingProvider(
+                api_key=api_key,
+                model=model,
+                batch_size=config.get("batch_size", 100),
+                timeout=config.get("timeout", 30),
+                retry_attempts=config.get("max_retries", 3),
+            )
+        except Exception as e:
+            raise ValueError(f"Failed to create Mistral provider: {e}") from e
+
+    @staticmethod
     def get_supported_providers() -> list[str]:
         """
         Get list of supported embedding providers.
@@ -159,7 +202,7 @@ class EmbeddingProviderFactory:
         Returns:
             List of supported provider names
         """
-        return ["openai", "voyageai", "openai_compatible"]
+        return ["openai", "voyageai", "mistral", "openai_compatible"]
 
     @staticmethod
     def validate_provider_dependencies(provider: str) -> tuple[bool, str | None]:
@@ -182,6 +225,10 @@ class EmbeddingProviderFactory:
             elif provider == "voyageai":
                 from chunkhound.providers.embeddings.voyageai_provider import (  # noqa: F401
                     VoyageAIEmbeddingProvider,
+                )
+            elif provider == "mistral":
+                from chunkhound.providers.embeddings.mistral_provider import (  # noqa: F401
+                    MistralEmbeddingProvider,
                 )
 
             return True, None
@@ -350,6 +397,32 @@ class EmbeddingProviderFactory:
                     "default_models": [],  # Discovered dynamically
                     "default_rerankers": [],  # Discovered dynamically
                     "default_selection": None,
+                    "default_reranker": None,
+                }
+            )
+        elif provider == "mistral":
+            info.update(
+                {
+                    "description": "Mistral AI Codestral Embed - optimized for code",
+                    "requires": ["api_key"],
+                    "optional": ["model", "output_dimension"],
+                    "default_model": MISTRAL_DEFAULT_MODEL,
+                    "supported_models": [
+                        "codestral-embed",
+                        "mistral-embed",
+                    ],
+                    # UI-specific metadata for setup wizard
+                    "display_name": "Mistral",
+                    "base_url": "https://api.mistral.ai",
+                    "requires_api_key": True,
+                    "supports_model_listing": False,
+                    "supports_reranking": False,
+                    "default_models": [
+                        ("codestral-embed", "Best for code (1536 dims, 8K context)"),
+                        ("mistral-embed", "General purpose (1024 dims)"),
+                    ],
+                    "default_rerankers": [],
+                    "default_selection": MISTRAL_DEFAULT_MODEL,
                     "default_reranker": None,
                 }
             )
