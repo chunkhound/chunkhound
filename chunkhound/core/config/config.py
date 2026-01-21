@@ -5,13 +5,15 @@ This module provides a unified configuration system with clear precedence:
 2. Local .chunkhound.json in target directory (if present)
 3. Config file (via --config path)
 4. Environment variables
-5. Default values (lowest priority)
+5. .env file in target directory
+6. Default values (lowest priority)
 """
 
 import os
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .database_config import DatabaseConfig
@@ -98,9 +100,7 @@ class Config(BaseModel):
             from chunkhound.utils.project_detection import find_project_root
 
             target_dir = find_project_root(
-                None
-                if is_map
-                else (getattr(args, "path", None) if args else None)
+                None if is_map else (getattr(args, "path", None) if args else None)
             )
 
         # 2. Load config file if found
@@ -151,11 +151,18 @@ class Config(BaseModel):
                         "Please check the file format and try again."
                     )
 
-        # 4. Load environment variables (override config files)
+        # 4. Load .env file from target directory if it exists
+        # This is loaded BEFORE environment variables so that system env vars take precedence
+        if target_dir and target_dir.exists():
+            dotenv_path = target_dir / ".env"
+            if dotenv_path.exists():
+                load_dotenv(dotenv_path=dotenv_path, override=False)
+
+        # 5. Load environment variables (override config files and .env)
         env_vars = self._load_env_vars()
         self._deep_merge(config_data, env_vars)
 
-        # 5. Apply CLI arguments (highest precedence)
+        # 6. Apply CLI arguments (highest precedence)
         if args:
             cli_overrides = self._extract_cli_overrides(args)
             # If CLI provided an explicit exclude list, mark it as user-supplied
@@ -168,7 +175,7 @@ class Config(BaseModel):
                 pass
             self._deep_merge(config_data, cli_overrides)
 
-        # 6. Apply any direct kwargs (for testing)
+        # 7. Apply any direct kwargs (for testing)
         if kwargs:
             # If direct kwargs include an explicit exclude list, mark it as user-supplied
             try:
