@@ -5,6 +5,7 @@ Uses derived state architecture - metrics computed from DuckDB and USearch files
 """
 
 import gc
+import math
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -88,6 +89,7 @@ class ShardManager:
         self.shard_dir = shard_dir
         self.config = config
         self.centroids: dict[UUID, np.ndarray] = {}
+        self.radii: dict[UUID, float] = {}  # shard_id -> radius in radians
         self._heartbeat = heartbeat_callback or (lambda: None)
 
     def _calculate_max_concurrent_shards(self, dims: int, quantization: str) -> int:
@@ -152,8 +154,10 @@ class ShardManager:
         # Get quantization for memory calculation (use first shard's, all should match)
         quantization = result[0][1] if result else self.config.default_quantization
 
-        # Filter shards by centroid similarity
-        relevant_shards: list[tuple[UUID, Path]] = []
+        # Collect shards with best-case similarities for nprobe + threshold selection
+        # Format: (shard_id, path, best_case_similarity)
+        shard_candidates: list[tuple[UUID, Path, float]] = []
+
         for i, row in enumerate(result):
             # Heartbeat every 100 shards to prevent timeout during large shard filtering
             if i > 0 and i % 100 == 0:
@@ -167,20 +171,54 @@ class ShardManager:
             if not file_path.exists():
                 continue
 
-            # Check centroid similarity
+            # Compute best-case similarity using shard radius
+            # Default 1.0 for missing centroids (fail-safe to include shards)
+            best_case_similarity = 1.0
             centroid = self.centroids.get(shard_id)
             if centroid is not None:
-                # Compute cosine similarity
                 query_norm = np.linalg.norm(query_array)
                 centroid_norm = np.linalg.norm(centroid)
                 if query_norm > 0 and centroid_norm > 0:
-                    similarity = np.dot(query_array, centroid) / (
+                    # Compute angular distance from query to centroid
+                    cos_sim = np.dot(query_array, centroid) / (
                         query_norm * centroid_norm
                     )
-                    if similarity < self.config.shard_similarity_threshold:
-                        continue  # Skip distant shard
+                    cos_sim = np.clip(cos_sim, -1.0, 1.0)
+                    angular_dist = np.arccos(cos_sim)
 
-            relevant_shards.append((shard_id, file_path))
+                    # Best-case angle to any vector in shard (using radius)
+                    if shard_id not in self.radii:
+                        raise RuntimeError(
+                            f"Cache inconsistency: centroid exists for {shard_id} "
+                            "but radius missing"
+                        )
+                    radius = self.radii[shard_id]
+                    best_case_angle = max(0.0, angular_dist - radius)
+                    best_case_similarity = float(np.cos(best_case_angle))
+
+            shard_candidates.append((shard_id, file_path, best_case_similarity))
+
+        if not shard_candidates:
+            return []
+
+        # Sort by best-case similarity descending (closest first)
+        shard_candidates.sort(key=lambda x: x[2], reverse=True)
+
+        # Determine nprobe: use config or auto-scale with sqrt
+        # Auto-scale: sqrt provides sublinear growth (100 shards → 10, 10k → 100)
+        # to balance recall breadth with latency as shard count grows
+        effective_nprobe = self.config.nprobe
+        if effective_nprobe == 0:
+            effective_nprobe = max(1, int(math.sqrt(len(shard_candidates))))
+
+        # Select shards: MAX of nprobe and threshold (radius-aware)
+        # - Always include top nprobe shards by best-case similarity
+        # - Also include any shards where best-case similarity >= threshold
+        threshold = self.config.shard_similarity_threshold
+        relevant_shards: list[tuple[UUID, Path]] = []
+        for i, (shard_id, file_path, best_case_sim) in enumerate(shard_candidates):
+            if i < effective_nprobe or best_case_sim >= threshold:
+                relevant_shards.append((shard_id, file_path))
 
         if not relevant_shards:
             return []
@@ -670,9 +708,8 @@ class ShardManager:
                         continue
 
                 # Check for merge: db_count < merge_threshold and can merge
-                if (
-                    state.db_count < self.config.merge_threshold
-                    and self._can_merge(shard, conn)
+                if state.db_count < self.config.merge_threshold and self._can_merge(
+                    shard, conn
                 ):
                     if self._merge_shard(shard, conn):
                         changes_made += 1
@@ -741,10 +778,10 @@ class ShardManager:
 
         return deleted
 
-    def _safe_delete_empty_shard(
-        self, shard_id: UUID, dims: int, conn: Any
-    ) -> bool:
-        """Atomically delete shard record, file, and cache if no embeddings reference it.
+    def _safe_delete_empty_shard(self, shard_id: UUID, dims: int, conn: Any) -> bool:
+        """Atomically delete shard record, file, and cache if no embeddings.
+
+        Deletes shard only if no embeddings reference it.
 
         Uses NOT EXISTS subquery to guard against stale MVCC snapshots that
         may occur after system sleep/wake cycles. The DELETE is atomic within
@@ -779,6 +816,7 @@ class ShardManager:
             if file_path.exists():
                 file_path.unlink()
             self.centroids.pop(shard_id, None)
+            self.radii.pop(shard_id, None)
         else:
             logger.warning(
                 f"Shard {shard_id} delete skipped: embeddings exist "
@@ -827,7 +865,7 @@ class ShardManager:
         if state.index_live > 0:
             delta = abs(state.index_live - state.db_count)
             if delta / state.index_live > self.config.incremental_sync_threshold:
-                reasons.append(f"count delta {delta} ({delta/state.index_live:.0%})")
+                reasons.append(f"count delta {delta} ({delta / state.index_live:.0%})")
         elif state.db_count > 0:
             reasons.append(f"empty index, {state.db_count} in DB")
 
@@ -987,14 +1025,16 @@ class ShardManager:
         return True  # Rebuild succeeded
 
     def _populate_centroid_cache(self, conn: Any) -> None:
-        """Compute medoid for each shard and cache for routing.
+        """Compute medoid and radius for each shard and cache for routing.
 
         Args:
             conn: Database connection
 
         Populates self.centroids with shard_id -> medoid_vector mapping.
+        Populates self.radii with shard_id -> radius_radians mapping.
         """
         self.centroids.clear()
+        self.radii.clear()
 
         for shard in self._list_shards(conn):
             shard_id = UUID(shard["shard_id"])
@@ -1008,14 +1048,18 @@ class ShardManager:
                 if len(index) == 0:
                     continue
 
-                _, medoid = usearch_wrapper.get_medoid(index)
+                _, medoid, radius = usearch_wrapper.get_medoid_and_radius(index)
                 self.centroids[shard_id] = medoid
-                logger.debug(f"Cached centroid for shard {shard_id}")
+                self.radii[shard_id] = radius
+                logger.debug(
+                    f"Cached centroid and radius for shard {shard_id} "
+                    f"(radius={np.degrees(radius):.1f} deg)"
+                )
 
             except Exception as e:
                 logger.warning(f"Failed to compute centroid for shard {shard_id}: {e}")
 
-        logger.info(f"Populated {len(self.centroids)} shard centroids")
+        logger.info(f"Populated {len(self.centroids)} shard centroids with radii")
 
     def _shard_path(self, shard_id: UUID) -> Path:
         """Get file path for shard."""
@@ -1180,9 +1224,9 @@ class ShardManager:
 
             query = f"""
                 SELECT id,
-                    CASE {' '.join(case_parts)} END AS cluster_label
+                    CASE {" ".join(case_parts)} END AS cluster_label
                 FROM (
-                    SELECT id, embedding, {', '.join(dist_exprs)}
+                    SELECT id, embedding, {", ".join(dist_exprs)}
                     FROM {table_name}
                     WHERE shard_id = ?
                 ) sub
@@ -1191,6 +1235,184 @@ class ShardManager:
 
         result = conn.execute(query, params).fetchall()
         return {row[0]: row[1] for row in result}
+
+    def _compute_cluster_medoid(
+        self,
+        cluster_ids: list[int],
+        vectors: dict[int, np.ndarray],
+        initial_centroid: np.ndarray,
+    ) -> tuple[np.ndarray, float]:
+        """Compute medoid and radius for a cluster using sample-based approach.
+
+        Args:
+            cluster_ids: Embedding IDs in this cluster
+            vectors: Dict mapping embedding_id -> vector
+            initial_centroid: Initial centroid estimate (from k-means)
+
+        Returns:
+            Tuple of (medoid_vector, radius_radians)
+        """
+        if not cluster_ids:
+            return initial_centroid, 0.0
+
+        # Sample size matches usearch_wrapper.get_medoid() for consistency
+        sample_size = min(100, len(cluster_ids))
+        sample_ids = cluster_ids[:sample_size]
+        sample_vecs = np.array(
+            [vectors[id] for id in sample_ids], dtype=np.float32
+        )
+
+        # Mean of samples, find closest actual vector
+        mean_vec = sample_vecs.mean(axis=0)
+        mean_norm = np.linalg.norm(mean_vec)
+        if mean_norm > 0:
+            mean_vec = mean_vec / mean_norm
+
+        # Find medoid: vector closest to mean
+        min_dist = float("inf")
+        medoid_vec = initial_centroid
+        for id in sample_ids:
+            vec = vectors[id]
+            dist = usearch_wrapper.angular_distance(vec, mean_vec)
+            if dist < min_dist:
+                min_dist = dist
+                medoid_vec = vec.copy()
+
+        # Compute radius: max angular distance from medoid to all sampled vectors
+        max_angle = 0.0
+        for id in sample_ids:
+            angle = usearch_wrapper.angular_distance(vectors[id], medoid_vec)
+            max_angle = max(max_angle, angle)
+
+        return medoid_vec, max_angle
+
+    def _correct_overlapping_split(
+        self,
+        clusters: dict[int, list[int]],
+        vectors: dict[int, np.ndarray],
+        centroids: list[np.ndarray],
+    ) -> dict[int, list[int]]:
+        """Correct boundary vector misassignment in split clusters.
+
+        Detects overlap between clusters and reassigns boundary vectors
+        to their nearest centroid. Iterates until convergence or max iterations.
+
+        Args:
+            clusters: Dict mapping cluster_label -> list of embedding_ids
+            vectors: Dict mapping embedding_id -> vector
+            centroids: K-means centroids (will be updated to medoids)
+
+        Returns:
+            Corrected clusters dict
+        """
+        if len(clusters) != 2 or 0 not in clusters or 1 not in clusters:
+            logger.debug("Split correction requires exactly 2 clusters")
+            return clusters
+
+        # Convert to mutable structures
+        child1_ids = list(clusters[0])
+        child2_ids = list(clusters[1])
+        c1 = centroids[0].copy()
+        c2 = centroids[1].copy()
+
+        min_overlap = self.config.split_correction_min_overlap
+        max_iters = self.config.split_correction_max_iterations
+        convergence = self.config.split_correction_convergence
+
+        for iteration in range(max_iters):
+            # Store previous centroids for convergence check
+            prev_c1, prev_c2 = c1.copy(), c2.copy()
+
+            # Compute current medoids and radii (once per iteration)
+            c1, r1 = self._compute_cluster_medoid(child1_ids, vectors, c1)
+            c2, r2 = self._compute_cluster_medoid(child2_ids, vectors, c2)
+
+            # Check centroid convergence (skip first iteration)
+            if iteration > 0:
+                c1_movement = usearch_wrapper.angular_distance(c1, prev_c1)
+                c2_movement = usearch_wrapper.angular_distance(c2, prev_c2)
+                if c1_movement < convergence and c2_movement < convergence:
+                    logger.info(
+                        f"Split correction converged after {iteration} iterations "
+                        f"(centroid movement: c1={np.degrees(c1_movement):.2f}°, "
+                        f"c2={np.degrees(c2_movement):.2f}°)"
+                    )
+                    break
+
+            # Compute centroid separation and overlap
+            d = usearch_wrapper.angular_distance(c1, c2)
+            overlap = max(0.0, r1 + r2 - d)
+
+            logger.debug(
+                f"Split correction iter {iteration}: "
+                f"r1={np.degrees(r1):.1f}° r2={np.degrees(r2):.1f}° "
+                f"d={np.degrees(d):.1f}° overlap={np.degrees(overlap):.1f}°"
+            )
+
+            # Check if correction needed
+            if overlap < min_overlap:
+                if iteration == 0:
+                    logger.debug(
+                        f"No significant overlap ({np.degrees(overlap):.1f}° < "
+                        f"{np.degrees(min_overlap):.1f}°), skipping correction"
+                    )
+                else:
+                    logger.info(
+                        f"Split correction completed after {iteration} iterations, "
+                        f"final overlap={np.degrees(overlap):.1f}°"
+                    )
+                break
+
+            # Margin for boundary detection (half the overlap on each side)
+            margin = overlap / 2
+
+            # Find misassigned vectors in cluster 0 (should move to 1)
+            move_to_1: list[int] = []
+            for id in child1_ids:
+                v = vectors[id]
+                d0 = usearch_wrapper.angular_distance(v, c1)
+                d1 = usearch_wrapper.angular_distance(v, c2)
+                # In boundary zone AND closer to c2
+                if abs(d0 - d1) < margin and d1 < d0:
+                    move_to_1.append(id)
+
+            # Find misassigned vectors in cluster 1 (should move to 0)
+            move_to_0: list[int] = []
+            for id in child2_ids:
+                v = vectors[id]
+                d0 = usearch_wrapper.angular_distance(v, c1)
+                d1 = usearch_wrapper.angular_distance(v, c2)
+                # In boundary zone AND closer to c1
+                if abs(d0 - d1) < margin and d0 < d1:
+                    move_to_0.append(id)
+
+            total_moves = len(move_to_0) + len(move_to_1)
+            if total_moves == 0:
+                logger.debug("No misassigned vectors found, stopping correction")
+                break
+
+            logger.debug(
+                f"Reassigning {len(move_to_1)} vectors to cluster 1, "
+                f"{len(move_to_0)} vectors to cluster 0"
+            )
+
+            # Apply reassignments
+            move_to_0_set = set(move_to_0)
+            move_to_1_set = set(move_to_1)
+
+            child1_ids = [
+                id for id in child1_ids if id not in move_to_1_set
+            ] + list(move_to_0)
+            child2_ids = [
+                id for id in child2_ids if id not in move_to_0_set
+            ] + list(move_to_1)
+        else:
+            logger.info(
+                f"Split correction reached max iterations ({max_iters}), "
+                f"final overlap={np.degrees(overlap):.1f}°"
+            )
+
+        return {0: child1_ids, 1: child2_ids}
 
     def _split_shard(self, shard: dict[str, Any], conn: Any) -> bool:
         """Split a shard when db_count >= split_threshold.
@@ -1232,6 +1454,31 @@ class ShardManager:
         clusters: dict[int, list[int]] = {}
         for emb_id, label in cluster_assignments.items():
             clusters.setdefault(label, []).append(emb_id)
+
+        # Radius-aware split correction: detect and fix boundary vector misassignment
+        # TODO: Memory optimization - currently loads all vectors (~300MB for 50k×1536).
+        # Could load only boundary-zone vectors or stream in batches.
+        if len(clusters) == 2:
+            table_name = f"embeddings_{dims}"
+            all_ids = clusters[0] + clusters[1]
+            placeholders = ",".join(["?"] * len(all_ids))
+            rows = conn.execute(
+                f"SELECT id, embedding FROM {table_name} WHERE id IN ({placeholders})",
+                all_ids,
+            ).fetchall()
+            vectors = {row[0]: np.array(row[1], dtype=np.float32) for row in rows}
+
+            # Compute initial centroids from k-means assignment (sample-based)
+            c0 = np.array(
+                np.mean([vectors[id] for id in clusters[0][:100]], axis=0),
+                dtype=np.float32,
+            )
+            c1 = np.array(
+                np.mean([vectors[id] for id in clusters[1][:100]], axis=0),
+                dtype=np.float32,
+            )
+
+            clusters = self._correct_overlapping_split(clusters, vectors, [c0, c1])
 
         # Validate cluster sizes to prevent immediate merge cycles
         min_cluster_size = min(len(ids) for ids in clusters.values()) if clusters else 0
@@ -1395,9 +1642,9 @@ class ShardManager:
         # Sort candidates by distance to source centroid, take top N
         if source_centroid is not None:
             candidates.sort(
-                key=lambda t: 1.0 - np.dot(source_centroid, t[1]) / (
-                    np.linalg.norm(source_centroid) * np.linalg.norm(t[1]) + 1e-9
-                )
+                key=lambda t: 1.0
+                - np.dot(source_centroid, t[1])
+                / (np.linalg.norm(source_centroid) * np.linalg.norm(t[1]) + 1e-9)
             )
         targets = candidates[: self.config.merge_target_count]
 
@@ -1483,8 +1730,9 @@ class ShardManager:
                 file_path.unlink()
                 logger.debug(f"Removed merged shard file: {file_path}")
 
-            # Remove source from centroids cache
+            # Remove source from caches
             self.centroids.pop(shard_id, None)
+            self.radii.pop(shard_id, None)
 
             return True
 

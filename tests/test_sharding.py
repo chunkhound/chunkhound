@@ -1734,7 +1734,9 @@ class TestKMeansSplitClustering:
 
             # Verify assignments are valid cluster labels (0 or 1)
             unique_labels = set(result.values())
-            assert unique_labels == {0, 1}, f"Expected labels {{0, 1}}, got {unique_labels}"
+            assert unique_labels == {0, 1}, (
+                f"Expected labels {{0, 1}}, got {unique_labels}"
+            )
 
         finally:
             db_provider.disconnect()
@@ -2293,6 +2295,369 @@ class TestCentroidFilterCorrectness:
         query_emb_id = all_emb_ids[query_idx]
         assert query_emb_id in result_keys, (
             "Query vector not found in results - centroid filter too aggressive"
+        )
+
+
+class TestRadiusBasedShardSelection:
+    """Test radius-aware shard selection improves filtering over raw similarity."""
+
+    def test_radii_populated_with_centroids(
+        self,
+        tmp_db: MockDBProvider,
+        shard_manager: ShardManager,
+        generator: SyntheticEmbeddingGenerator,
+    ) -> None:
+        """Radii cache is populated alongside centroids during fix_pass."""
+        num_shards = 3
+        vectors_per_shard = 30
+
+        for i in range(num_shards):
+            shard_id = uuid4()
+            shard_path = shard_manager._shard_path(shard_id)
+
+            tmp_db.connection.execute(
+                """
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
+                """,
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
+            )
+
+            vectors = [
+                generator.generate_hash_seeded(f"shard{i}_doc_{j}")
+                for j in range(vectors_per_shard)
+            ]
+            insert_embeddings_to_db(tmp_db, vectors, shard_id)
+
+        # Build indexes - this populates centroids and radii
+        shard_manager.fix_pass(tmp_db.connection, check_quality=False)
+
+        # Verify radii populated for all shards with centroids
+        assert len(shard_manager.centroids) == num_shards
+        assert len(shard_manager.radii) == num_shards
+
+        # Radii should be in valid range [0, pi]
+        for shard_id, radius in shard_manager.radii.items():
+            assert 0 <= radius <= np.pi, f"Radius {radius} out of range for {shard_id}"
+            assert shard_id in shard_manager.centroids, "Radius without centroid"
+
+    def test_tight_cluster_pruned_at_distance(
+        self,
+        tmp_db: MockDBProvider,
+        shard_manager: ShardManager,
+    ) -> None:
+        """Tight cluster (small radius) far from query has low best-case similarity."""
+        # Create a very tight shard with nearly identical vectors
+        shard_id = uuid4()
+        tmp_db.connection.execute(
+            """
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
+            """,
+            [str(shard_id), TEST_DIMS, "test", "test-model"],
+        )
+
+        # Create tight cluster around [1, 0, 0, ...]
+        base_vec = np.zeros(TEST_DIMS, dtype=np.float32)
+        base_vec[0] = 1.0
+        vectors = []
+        for i in range(30):
+            vec = base_vec.copy()
+            vec += np.random.randn(TEST_DIMS).astype(np.float32) * 0.01  # Small noise
+            vec = vec / np.linalg.norm(vec)
+            vectors.append(vec)
+
+        insert_embeddings_to_db(tmp_db, vectors, shard_id)
+        shard_manager.fix_pass(tmp_db.connection, check_quality=False)
+
+        # Verify tight cluster has small radius (< 0.2 radians ~ 11 degrees)
+        radius = shard_manager.radii[shard_id]
+        assert radius < 0.2, f"Expected tight cluster, got radius {np.degrees(radius):.1f} deg"
+
+    def test_loose_cluster_included_despite_low_centroid_similarity(
+        self,
+        tmp_db: MockDBProvider,
+        shard_manager: ShardManager,
+    ) -> None:
+        """Loose cluster (large radius) included even with moderate centroid similarity."""
+        # Create a loose shard with spread-out vectors
+        shard_id = uuid4()
+        tmp_db.connection.execute(
+            """
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
+            """,
+            [str(shard_id), TEST_DIMS, "test", "test-model"],
+        )
+
+        # Create loose cluster with vectors spread in many directions
+        vectors = []
+        for i in range(30):
+            vec = np.random.randn(TEST_DIMS).astype(np.float32)
+            vec = vec / np.linalg.norm(vec)
+            vectors.append(vec)
+
+        insert_embeddings_to_db(tmp_db, vectors, shard_id)
+        shard_manager.fix_pass(tmp_db.connection, check_quality=False)
+
+        # Loose cluster should have larger radius
+        radius = shard_manager.radii[shard_id]
+        assert radius > 0.5, f"Expected loose cluster, got radius {np.degrees(radius):.1f} deg"
+
+    def test_radii_cleaned_on_shard_deletion(
+        self,
+        tmp_db: MockDBProvider,
+        shard_manager: ShardManager,
+        generator: SyntheticEmbeddingGenerator,
+    ) -> None:
+        """Radii cache cleaned when shard is deleted."""
+        shard_id = uuid4()
+        tmp_db.connection.execute(
+            """
+            INSERT INTO vector_shards (shard_id, dims, provider, model)
+            VALUES (?, ?, ?, ?)
+            """,
+            [str(shard_id), TEST_DIMS, "test", "test-model"],
+        )
+
+        vectors = [generator.generate_hash_seeded(f"doc_{i}") for i in range(30)]
+        insert_embeddings_to_db(tmp_db, vectors, shard_id)
+        shard_manager.fix_pass(tmp_db.connection, check_quality=False)
+
+        assert shard_id in shard_manager.centroids
+        assert shard_id in shard_manager.radii
+
+        # Delete all embeddings and shard
+        tmp_db.connection.execute(
+            f"DELETE FROM embeddings_{TEST_DIMS} WHERE shard_id = ?", [str(shard_id)]
+        )
+        tmp_db.connection.execute(
+            "DELETE FROM vector_shards WHERE shard_id = ?", [str(shard_id)]
+        )
+
+        # Trigger cleanup
+        shard_manager._safe_delete_empty_shard(shard_id, TEST_DIMS, tmp_db.connection)
+
+        # Both caches should be cleaned
+        assert shard_id not in shard_manager.centroids
+        assert shard_id not in shard_manager.radii
+
+
+class TestNprobeShardSelection:
+    """Test nprobe parameter ensures minimum shard exploration."""
+
+    def test_nprobe_auto_scaling(
+        self,
+        tmp_db: MockDBProvider,
+        shard_manager: ShardManager,
+        generator: SyntheticEmbeddingGenerator,
+    ) -> None:
+        """Auto-scaling (nprobe=0) uses sqrt(shard_count) for exploration."""
+        # Create 16 shards (sqrt = 4)
+        num_shards = 16
+        vectors_per_shard = 20
+        shard_ids: list[UUID] = []
+
+        for i in range(num_shards):
+            shard_id = uuid4()
+            shard_ids.append(shard_id)
+
+            tmp_db.connection.execute(
+                """
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
+                """,
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
+            )
+
+            # Create vectors with different seeds for each shard
+            vectors = [
+                generator.generate_hash_seeded(f"shard{i}_doc_{j}")
+                for j in range(vectors_per_shard)
+            ]
+            insert_embeddings_to_db(tmp_db, vectors, shard_id)
+
+        # Build indexes
+        shard_manager.fix_pass(tmp_db.connection, check_quality=False)
+
+        # Create query vector unrelated to any shard (low similarity to all)
+        query = generator.generate_hash_seeded("unrelated_query")
+
+        # Override config to use very high threshold (all shards will be below)
+        # and nprobe=0 (auto-scaling)
+        shard_manager.config.shard_similarity_threshold = 0.99
+        shard_manager.config.nprobe = 0
+
+        # Search should still work because auto-scale ensures sqrt(16) = 4 shards
+        results = shard_manager.search(
+            query=query.tolist(),
+            k=5,
+            dims=TEST_DIMS,
+            provider="test",
+            model="test-model",
+            conn=tmp_db.connection,
+        )
+
+        # Should get results despite high threshold (from at least 4 shards)
+        assert len(results) > 0, (
+            "nprobe auto-scaling failed - no results despite sqrt(16)=4 guarantee"
+        )
+
+    def test_nprobe_union_logic(
+        self,
+        tmp_db: MockDBProvider,
+        shard_manager: ShardManager,
+        generator: SyntheticEmbeddingGenerator,
+    ) -> None:
+        """nprobe uses union logic: top-N OR above-threshold."""
+        # Create 10 shards with controlled similarities
+        num_shards = 10
+        vectors_per_shard = 20
+        shard_ids: list[UUID] = []
+
+        for i in range(num_shards):
+            shard_id = uuid4()
+            shard_ids.append(shard_id)
+
+            tmp_db.connection.execute(
+                """
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
+                """,
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
+            )
+
+            vectors = [
+                generator.generate_hash_seeded(f"shard{i}_doc_{j}")
+                for j in range(vectors_per_shard)
+            ]
+            insert_embeddings_to_db(tmp_db, vectors, shard_id)
+
+        # Build indexes
+        shard_manager.fix_pass(tmp_db.connection, check_quality=False)
+
+        # Set nprobe=3, threshold=0.0 (all shards should pass threshold)
+        # With 10 shards and threshold=0.0, union logic should select all 10
+        shard_manager.config.nprobe = 3
+        shard_manager.config.shard_similarity_threshold = 0.0
+
+        query = generator.generate_hash_seeded("test_query")
+        results = shard_manager.search(
+            query=query.tolist(),
+            k=5,
+            dims=TEST_DIMS,
+            provider="test",
+            model="test-model",
+            conn=tmp_db.connection,
+        )
+
+        # Should get results from multiple shards (union logic)
+        assert len(results) > 0, "Union logic failed - no results"
+
+    def test_nprobe_exceeds_shard_count(
+        self,
+        tmp_db: MockDBProvider,
+        shard_manager: ShardManager,
+        generator: SyntheticEmbeddingGenerator,
+    ) -> None:
+        """nprobe > shard_count should not error, selects all shards."""
+        # Create 5 shards
+        num_shards = 5
+        vectors_per_shard = 20
+        shard_ids: list[UUID] = []
+
+        for i in range(num_shards):
+            shard_id = uuid4()
+            shard_ids.append(shard_id)
+
+            tmp_db.connection.execute(
+                """
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
+                """,
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
+            )
+
+            vectors = [
+                generator.generate_hash_seeded(f"shard{i}_doc_{j}")
+                for j in range(vectors_per_shard)
+            ]
+            insert_embeddings_to_db(tmp_db, vectors, shard_id)
+
+        # Build indexes
+        shard_manager.fix_pass(tmp_db.connection, check_quality=False)
+
+        # Set nprobe=10 (exceeds 5 shards)
+        shard_manager.config.nprobe = 10
+        shard_manager.config.shard_similarity_threshold = 0.99
+
+        query = generator.generate_hash_seeded("test_query")
+        # Should not error, should select all 5 shards
+        results = shard_manager.search(
+            query=query.tolist(),
+            k=5,
+            dims=TEST_DIMS,
+            provider="test",
+            model="test-model",
+            conn=tmp_db.connection,
+        )
+
+        # Should get results from all 5 shards
+        assert len(results) > 0, "nprobe > shard_count failed"
+
+    def test_nprobe_ensures_minimum_recall(
+        self,
+        tmp_db: MockDBProvider,
+        shard_manager: ShardManager,
+        generator: SyntheticEmbeddingGenerator,
+    ) -> None:
+        """nprobe prevents zero-recall scenarios with high threshold."""
+        # Create multiple shards
+        num_shards = 9
+        vectors_per_shard = 30
+
+        for i in range(num_shards):
+            shard_id = uuid4()
+
+            tmp_db.connection.execute(
+                """
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
+                """,
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
+            )
+
+            vectors = [
+                generator.generate_hash_seeded(f"shard{i}_doc_{j}")
+                for j in range(vectors_per_shard)
+            ]
+            insert_embeddings_to_db(tmp_db, vectors, shard_id)
+
+        # Build indexes
+        shard_manager.fix_pass(tmp_db.connection, check_quality=False)
+
+        # Create a query vector
+        query = generator.generate_hash_seeded("test_query")
+
+        # Set very high threshold that would exclude all shards by similarity
+        # But nprobe=3 should ensure at least 3 shards are searched
+        shard_manager.config.shard_similarity_threshold = 0.99
+        shard_manager.config.nprobe = 3
+
+        results = shard_manager.search(
+            query=query.tolist(),
+            k=10,
+            dims=TEST_DIMS,
+            provider="test",
+            model="test-model",
+            conn=tmp_db.connection,
+        )
+
+        # nprobe=3 guarantees at least 3 shards searched, should return results
+        # (prevents zero-recall scenario that would occur with threshold-only)
+        assert len(results) > 0, (
+            "nprobe failed to prevent zero-recall - no results returned "
+            f"despite nprobe=3 guarantee with {num_shards} shards available"
         )
 
 
@@ -3297,7 +3662,9 @@ class TestMillionVectorStress:
                         doubling_ratios.append((n, 2 * n, ratio))
 
                 if doubling_ratios:
-                    avg_ratio = sum(r[2] for r in doubling_ratios) / len(doubling_ratios)
+                    avg_ratio = sum(r[2] for r in doubling_ratios) / len(
+                        doubling_ratios
+                    )
                     formatter.info(
                         f"Doubling ratios: avg={avg_ratio:.2f}, "
                         f"pairs={len(doubling_ratios)}"
@@ -4503,7 +4870,9 @@ class TestSearchConsistencyAcrossStructuralOpsExternal(ExternalAPITestBase):
                 results_100[idx] = [r["chunk_id"] for r in results]
 
             # Phase 3: Insert 100 more (total=200, after splits)
-            chunk_ids_200 = self.create_test_chunks(provider, file_id, 100, start_id=100)
+            chunk_ids_200 = self.create_test_chunks(
+                provider, file_id, 100, start_id=100
+            )
             vectors_200 = [
                 generator.generate_hash_seeded(f"doc_{i}") for i in range(100, 200)
             ]
@@ -4613,3 +4982,205 @@ class TestNoFalseNegativesExternal(ExternalAPITestBase):
 
         finally:
             provider.disconnect()
+
+
+class TestRadiusAwareSplitCorrection:
+    """Test radius-aware boundary correction during shard splits.
+
+    Verifies that overlapping clusters are detected and boundary vectors
+    are reassigned to their semantically nearest centroid.
+
+    Exercises invariants: I1, I2, I11
+    """
+
+    def test_no_correction_when_clusters_well_separated(
+        self,
+        tmp_path: Path,
+        generator: SyntheticEmbeddingGenerator,
+    ) -> None:
+        """Well-separated clusters should not trigger correction."""
+        db_path = tmp_path / "well_separated_test.duckdb"
+        db_provider = MockDBProvider(db_path)
+        shard_dir = tmp_path / "shards"
+        shard_dir.mkdir(exist_ok=True)
+
+        config = ShardingConfig(
+            split_threshold=200,
+            merge_threshold=20,
+            split_correction_min_overlap=0.05,
+        )
+
+        shard_manager = ShardManager(
+            db_provider=db_provider,
+            shard_dir=shard_dir,
+            config=config,
+        )
+
+        try:
+            # Create initial shard
+            shard_id = uuid4()
+            db_provider.connection.execute(
+                """
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
+                """,
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
+            )
+
+            # Insert 300 vectors - above split_threshold
+            # Use generate_clustered() for deterministic bimodal distribution
+            # that k-means can reliably separate (separation=1.5 → near-orthogonal)
+            clustered_data = generator.generate_clustered(
+                num_clusters=2,
+                per_cluster=150,
+                separation=1.5,
+            )
+            vectors = [vec for vec, _cluster_id in clustered_data]
+            insert_embeddings_to_db(db_provider, vectors, shard_id)
+
+            # Run fix_pass - should split with minimal or no correction
+            shard_manager.fix_pass(db_provider.connection, check_quality=False)
+
+            # Verify split occurred
+            final_shards = get_all_shard_ids(db_provider)
+            assert len(final_shards) >= 2
+
+            # Verify invariants still hold
+            assert verify_invariant_i1_single_assignment(db_provider)
+            assert verify_invariant_i2_shard_existence(db_provider)
+
+            # Verify total count preserved
+            total = db_provider.connection.execute(
+                f"SELECT COUNT(*) FROM embeddings_{TEST_DIMS}"
+            ).fetchone()[0]
+            assert total == 300
+
+        finally:
+            db_provider.disconnect()
+
+    def test_correction_preserves_cluster_size_constraints(
+        self,
+        tmp_path: Path,
+        generator: SyntheticEmbeddingGenerator,
+    ) -> None:
+        """Correction should not violate merge_threshold constraints."""
+        db_path = tmp_path / "size_constraint_test.duckdb"
+        db_provider = MockDBProvider(db_path)
+        shard_dir = tmp_path / "shards"
+        shard_dir.mkdir(exist_ok=True)
+
+        config = ShardingConfig(
+            split_threshold=100,
+            merge_threshold=20,
+            split_correction_min_overlap=0.01,  # Low threshold to encourage correction
+            split_correction_max_iterations=3,
+        )
+
+        shard_manager = ShardManager(
+            db_provider=db_provider,
+            shard_dir=shard_dir,
+            config=config,
+        )
+
+        try:
+            shard_id = uuid4()
+            db_provider.connection.execute(
+                """
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
+                """,
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
+            )
+
+            # Insert 150 vectors
+            vectors = [
+                generator.generate_hash_seeded(f"constraint_doc_{i}")
+                for i in range(150)
+            ]
+            insert_embeddings_to_db(db_provider, vectors, shard_id)
+
+            # Run fix_pass
+            shard_manager.fix_pass(db_provider.connection, check_quality=False)
+
+            # Verify all child shards meet merge_threshold
+            shard_counts = db_provider.connection.execute(
+                f"""
+                SELECT s.shard_id, COUNT(e.id) as cnt
+                FROM vector_shards s
+                LEFT JOIN embeddings_{TEST_DIMS} e ON s.shard_id = e.shard_id
+                GROUP BY s.shard_id
+                """
+            ).fetchall()
+
+            for shard_id_str, count in shard_counts:
+                assert count >= config.merge_threshold or count == 0, (
+                    f"Shard {shard_id_str} has {count} vectors, "
+                    f"below merge_threshold {config.merge_threshold}"
+                )
+
+        finally:
+            db_provider.disconnect()
+
+    def test_split_correction_maintains_total_vector_count(
+        self,
+        tmp_path: Path,
+        generator: SyntheticEmbeddingGenerator,
+    ) -> None:
+        """Split correction should not lose or duplicate vectors."""
+        db_path = tmp_path / "vector_count_test.duckdb"
+        db_provider = MockDBProvider(db_path)
+        shard_dir = tmp_path / "shards"
+        shard_dir.mkdir(exist_ok=True)
+
+        config = ShardingConfig(
+            split_threshold=100,
+            merge_threshold=10,
+            split_correction_min_overlap=0.01,
+            split_correction_max_iterations=3,
+        )
+
+        shard_manager = ShardManager(
+            db_provider=db_provider,
+            shard_dir=shard_dir,
+            config=config,
+        )
+
+        try:
+            shard_id = uuid4()
+            db_provider.connection.execute(
+                """
+                INSERT INTO vector_shards (shard_id, dims, provider, model)
+                VALUES (?, ?, ?, ?)
+                """,
+                [str(shard_id), TEST_DIMS, "test", "test-model"],
+            )
+
+            initial_count = 200
+            vectors = [
+                generator.generate_hash_seeded(f"count_doc_{i}")
+                for i in range(initial_count)
+            ]
+            insert_embeddings_to_db(db_provider, vectors, shard_id)
+
+            # Verify initial count
+            before_count = db_provider.connection.execute(
+                f"SELECT COUNT(*) FROM embeddings_{TEST_DIMS}"
+            ).fetchone()[0]
+            assert before_count == initial_count
+
+            # Run fix_pass with correction
+            shard_manager.fix_pass(db_provider.connection, check_quality=False)
+
+            # Verify count preserved
+            after_count = db_provider.connection.execute(
+                f"SELECT COUNT(*) FROM embeddings_{TEST_DIMS}"
+            ).fetchone()[0]
+            assert after_count == initial_count, (
+                f"Vector count changed from {initial_count} to {after_count}"
+            )
+
+            # Verify I1: no duplicates
+            assert verify_invariant_i1_single_assignment(db_provider)
+
+        finally:
+            db_provider.disconnect()

@@ -101,13 +101,25 @@ class ShardingConfig(BaseModel):
         default=0.3,
         ge=0.0,
         le=1.0,
-        description="Similarity threshold for shard clustering decisions",
+        description="Minimum best-case similarity for shard selection (radius-aware)",
+    )
+
+    nprobe: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Minimum shards to search regardless of similarity "
+            "(0 = auto: sqrt(num_shards))"
+        ),
     )
 
     max_concurrent_shards: int = Field(
         default=4,
         ge=1,
-        description="Maximum number of shards to query in parallel (overridden by memory_budget_bytes)",
+        description=(
+            "Maximum number of shards to query in parallel "
+            "(overridden by memory_budget_bytes)"
+        ),
     )
 
     memory_budget_bytes: int = Field(
@@ -159,6 +171,27 @@ class ShardingConfig(BaseModel):
         ge=1,
         le=100,
         description="Batches between quality checks when mode is deferred",
+    )
+
+    split_correction_min_overlap: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description="Minimum overlap (radians) to trigger split correction",
+    )
+
+    split_correction_max_iterations: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Maximum correction iterations per split",
+    )
+
+    split_correction_convergence: float = Field(
+        default=0.01,
+        ge=0.0,
+        le=0.5,
+        description="Centroid movement threshold for convergence (radians)",
     )
 
     background_rebuild_enabled: bool = Field(
