@@ -261,3 +261,75 @@ def get_medoid(index: Index) -> tuple[int, np.ndarray]:
     medoid_vec = cast(np.ndarray, index[medoid_key])
 
     return medoid_key, medoid_vec
+
+
+def get_medoid_and_radius(index: Index) -> tuple[int, np.ndarray, float]:
+    """Find approximate medoid and cluster radius.
+
+    Radius is the maximum angular distance from medoid to any sampled vector.
+    For i8 quantization, radius is approximate due to quantization noise.
+
+    Args:
+        index: USearch index
+
+    Returns:
+        Tuple of (medoid_key, medoid_vector, radius_radians)
+
+    Raises:
+        ValueError: If index is empty
+    """
+    n_vectors = len(index)
+    if n_vectors == 0:
+        raise ValueError("Cannot find medoid of empty index")
+
+    # Sample vectors efficiently
+    sample_size = min(100, n_vectors)
+    sample_keys = cast(np.ndarray, index.keys[:sample_size])
+    sample_vecs = np.array([index[k] for k in sample_keys], dtype=np.float32)
+
+    # Compute mean and find medoid
+    mean_vec = sample_vecs.mean(axis=0)
+    mean_vec = _prepare_query_for_cosine(mean_vec)
+    results = index.search(mean_vec, count=1)
+    medoid_key = int(results.keys[0])
+    medoid_vec = cast(np.ndarray, index[medoid_key])
+
+    # Compute radius: max angular distance from medoid to samples
+    medoid_norm = np.linalg.norm(medoid_vec)
+    if medoid_norm == 0:
+        return medoid_key, medoid_vec, np.pi  # Degenerate case
+
+    medoid_unit = medoid_vec / medoid_norm
+
+    max_angle = 0.0
+    for vec in sample_vecs:
+        vec_norm = np.linalg.norm(vec)
+        if vec_norm > 0:
+            cos_sim = np.dot(medoid_unit, vec / vec_norm)
+            cos_sim = np.clip(cos_sim, -1.0, 1.0)
+            angle = float(np.arccos(cos_sim))
+            max_angle = max(max_angle, angle)
+
+    return medoid_key, medoid_vec, max_angle
+
+
+def angular_distance(v1: np.ndarray, v2: np.ndarray) -> float:
+    """Compute angular distance between two vectors in radians.
+
+    Angular distance satisfies the triangle inequality, enabling
+    geometric reasoning about cluster overlap and separation.
+
+    Args:
+        v1: First vector (will be normalized)
+        v2: Second vector (will be normalized)
+
+    Returns:
+        Angular distance in radians [0, pi]
+    """
+    v1_norm = np.linalg.norm(v1)
+    v2_norm = np.linalg.norm(v2)
+    if v1_norm == 0 or v2_norm == 0:
+        return float(np.pi)
+    cos_sim = np.dot(v1 / v1_norm, v2 / v2_norm)
+    cos_sim = np.clip(cos_sim, -1.0, 1.0)
+    return float(np.arccos(cos_sim))
