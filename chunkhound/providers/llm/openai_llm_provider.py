@@ -86,7 +86,9 @@ class OpenAILLMProvider(LLMProvider):
             reasoning_effort: Reasoning effort for reasoning models (none, minimal, low, medium, high)
         """
         if not OPENAI_AVAILABLE:
-            raise ImportError("OpenAI not available - install with: uv pip install openai")
+            raise ImportError(
+                "OpenAI not available - install with: uv pip install openai"
+            )
 
         self._model = model
         self._timeout = timeout
@@ -135,7 +137,9 @@ class OpenAILLMProvider(LLMProvider):
             return True
 
         # Check prefixes for dated model snapshots (e.g., "gpt-5.1-2025-11-13")
-        all_responses_models = self.RESPONSES_ONLY_MODELS | self.RESPONSES_PREFERRED_MODELS
+        all_responses_models = (
+            self.RESPONSES_ONLY_MODELS | self.RESPONSES_PREFERRED_MODELS
+        )
         for base_model in all_responses_models:
             if self._model.startswith(base_model + "-"):
                 return True
@@ -196,13 +200,17 @@ class OpenAILLMProvider(LLMProvider):
                     # Message item contains the actual response text
                     for content_item in item.content:
                         # Responses API uses "output_text" type
-                        if content_item.type == "output_text" and hasattr(content_item, 'text'):
+                        if content_item.type == "output_text" and hasattr(
+                            content_item, "text"
+                        ):
                             content_parts.append(content_item.text)
 
             content = "\n".join(content_parts) if content_parts else None
 
             tokens = response.usage.total_tokens if response.usage else 0
-            finish_reason = response.status  # Responses API uses 'status' instead of 'finish_reason'
+            finish_reason = (
+                response.status
+            )  # Responses API uses 'status' instead of 'finish_reason'
 
             # Validate content is not None or empty
             if content is None:
@@ -294,13 +302,26 @@ class OpenAILLMProvider(LLMProvider):
         # Use provided timeout or fall back to default
         request_timeout = timeout if timeout is not None else self._timeout
 
+        # Build request parameters
+        # Mistral and other compatible APIs use 'max_tokens' instead of 'max_completion_tokens'
+        # We detect the endpoint to use the correct parameter name
+        is_openai_endpoint = self._client.base_url is None or "api.openai.com" in str(
+            self._client.base_url
+        )
+
+        request_params: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "timeout": request_timeout,
+        }
+
+        if is_openai_endpoint:
+            request_params["max_completion_tokens"] = max_completion_tokens
+        else:
+            request_params["max_tokens"] = max_completion_tokens
+
         try:
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                max_completion_tokens=max_completion_tokens,
-                timeout=request_timeout,
-            )
+            response = await self._client.chat.completions.create(**request_params)
 
             self._requests_made += 1
             if response.usage:
@@ -436,7 +457,9 @@ class OpenAILLMProvider(LLMProvider):
             for item in response.output:
                 if item.type == "message":
                     for content_item in item.content:
-                        if content_item.type == "output_text" and hasattr(content_item, 'text'):
+                        if content_item.type == "output_text" and hasattr(
+                            content_item, "text"
+                        ):
                             content_parts.append(content_item.text)
 
             content = "\n".join(content_parts) if content_parts else None
@@ -468,7 +491,9 @@ class OpenAILLMProvider(LLMProvider):
             return parsed
 
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse Responses API structured output as JSON: {e}")
+            logger.error(
+                f"Failed to parse Responses API structured output as JSON: {e}"
+            )
             raise RuntimeError(f"Invalid JSON in structured output: {e}") from e
         except Exception as e:
             logger.error(f"Responses API structured completion failed: {e}")
@@ -503,7 +528,9 @@ class OpenAILLMProvider(LLMProvider):
         """
         # Route to Responses API for compatible models
         if self._should_use_responses_api():
-            logger.debug(f"Using Responses API for structured output with model: {self._model}")
+            logger.debug(
+                f"Using Responses API for structured output with model: {self._model}"
+            )
             return await self._complete_structured_with_responses_api(
                 prompt, json_schema, system, max_completion_tokens, timeout
             )
@@ -517,21 +544,33 @@ class OpenAILLMProvider(LLMProvider):
         # Use provided timeout or fall back to default
         request_timeout = timeout if timeout is not None else self._timeout
 
-        try:
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                max_completion_tokens=max_completion_tokens,
-                timeout=request_timeout,
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "structured_response",
-                        "strict": True,
-                        "schema": json_schema,
-                    },
+        # Build request parameters
+        # Mistral and other compatible APIs use 'max_tokens' instead of 'max_completion_tokens'
+        is_openai_endpoint = self._client.base_url is None or "api.openai.com" in str(
+            self._client.base_url
+        )
+
+        request_params: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "timeout": request_timeout,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "structured_response",
+                    "strict": True,
+                    "schema": json_schema,
                 },
-            )
+            },
+        }
+
+        if is_openai_endpoint:
+            request_params["max_completion_tokens"] = max_completion_tokens
+        else:
+            request_params["max_tokens"] = max_completion_tokens
+
+        try:
+            response = await self._client.chat.completions.create(**request_params)
 
             self._requests_made += 1
             if response.usage:

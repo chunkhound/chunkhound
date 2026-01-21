@@ -107,6 +107,11 @@ class EmbeddingConfig(BaseSettings):
         default=None, description="API key for authentication (provider-specific)"
     )
 
+    rerank_api_key: SecretStr | None = Field(
+        default=None,
+        description="Dedicated API key for reranking service. If not specified, uses api_key.",
+    )
+
     base_url: str | None = Field(
         default=None, description="Base URL for the embedding API"
     )
@@ -226,6 +231,8 @@ class EmbeddingConfig(BaseSettings):
         base_config["rerank_format"] = self.rerank_format
         if self.rerank_batch_size is not None:
             base_config["rerank_batch_size"] = self.rerank_batch_size
+        if self.rerank_api_key:
+            base_config["rerank_api_key"] = self.rerank_api_key.get_secret_value()
 
         return base_config
 

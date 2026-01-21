@@ -89,6 +89,7 @@ class EmbeddingProviderFactory:
         rerank_url = config.get("rerank_url", "/rerank")
         rerank_format = config.get("rerank_format", "auto")
         rerank_batch_size = config.get("rerank_batch_size")
+        rerank_api_key = config.get("rerank_api_key")
 
         # Model should come from config, but handle None case safely
         if not model:
@@ -97,6 +98,7 @@ class EmbeddingProviderFactory:
         logger.debug(
             f"Creating OpenAI provider: model={model}, "
             f"base_url={base_url}, api_key={'***' if api_key else None}, "
+            f"rerank_api_key={'***' if rerank_api_key else None}, "
             f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
             f"rerank_batch_size={rerank_batch_size}"
         )
@@ -110,6 +112,7 @@ class EmbeddingProviderFactory:
                 rerank_url=rerank_url,
                 rerank_format=rerank_format,
                 rerank_batch_size=rerank_batch_size,
+                rerank_api_key=rerank_api_key,
             )
         except Exception as e:
             raise ValueError(f"Failed to create OpenAI provider: {e}") from e
@@ -176,6 +179,7 @@ class EmbeddingProviderFactory:
         model = config.get("model")
         rerank_model = config.get("rerank_model")
         rerank_batch_size = config.get("rerank_batch_size")
+        rerank_api_key = config.get("rerank_api_key")
 
         # Model should come from config, but handle None case safely
         if not model:
@@ -184,7 +188,8 @@ class EmbeddingProviderFactory:
         logger.debug(
             f"Creating Mistral provider: model={model}, "
             f"rerank_model={rerank_model}, "
-            f"api_key={'***' if api_key else None}"
+            f"api_key={'***' if api_key else None}, "
+            f"rerank_api_key={'***' if rerank_api_key else None}"
         )
 
         try:
@@ -199,6 +204,7 @@ class EmbeddingProviderFactory:
                 timeout=config.get("timeout", 30),
                 retry_attempts=config.get("max_retries", 3),
                 rerank_batch_size=rerank_batch_size,
+                rerank_api_key=rerank_api_key,
             )
         except Exception as e:
             raise ValueError(f"Failed to create Mistral provider: {e}") from e

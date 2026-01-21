@@ -86,6 +86,7 @@ class MistralEmbeddingProvider(RerankMixin):
         max_tokens: int | None = None,
         output_dimension: int | None = None,
         rerank_batch_size: int | None = None,
+        rerank_api_key: str | None = None,
     ):
         """Initialize Mistral embedding provider.
 
@@ -103,6 +104,7 @@ class MistralEmbeddingProvider(RerankMixin):
             max_tokens: Maximum tokens per request (if applicable)
             output_dimension: Output embedding dimension (1-3072 for codestral-embed)
             rerank_batch_size: Max documents per rerank batch (overrides model defaults, bounded by model caps)
+            rerank_api_key: Dedicated API key for reranking service (optional)
         """
         if not MISTRAL_AVAILABLE:
             raise ImportError(
@@ -110,6 +112,7 @@ class MistralEmbeddingProvider(RerankMixin):
             )
 
         self._api_key = api_key
+        self._rerank_api_key = rerank_api_key
         self._base_url = base_url
         self._model = model
         self._rerank_model = rerank_model

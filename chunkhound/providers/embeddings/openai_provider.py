@@ -198,6 +198,7 @@ class OpenAIEmbeddingProvider(RerankMixin):
         retry_delay: float = 1.0,
         max_tokens: int | None = None,
         rerank_batch_size: int | None = None,
+        rerank_api_key: Any | None = None,
     ):
         """Initialize OpenAI embedding provider.
 
@@ -214,6 +215,7 @@ class OpenAIEmbeddingProvider(RerankMixin):
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
             rerank_batch_size: Max documents per rerank batch (overrides model defaults, bounded by model caps)
+            rerank_api_key: Dedicated API key for reranking service (optional)
         """
         if not OPENAI_AVAILABLE:
             raise ImportError(
@@ -222,6 +224,7 @@ class OpenAIEmbeddingProvider(RerankMixin):
 
         # API key and base URL should be provided via config, not env vars
         self._api_key = api_key
+        self._rerank_api_key = rerank_api_key
         self._base_url = base_url
         self._model = model
         self._rerank_model = rerank_model

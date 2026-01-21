@@ -29,6 +29,7 @@ class RerankMixin:
         - _rerank_batch_size: int | None
         - _base_url: str | None
         - _api_key: str | None
+        - _rerank_api_key: str | None
         - _timeout: int
         - _retry_attempts: int
         - _retry_delay: float
@@ -259,8 +260,20 @@ class RerankMixin:
                 headers = {"Content-Type": "application/json"}
 
                 # Add Authorization header if API key is set
-                if self._api_key:
-                    headers["Authorization"] = f"Bearer {self._api_key}"
+                # Use dedicated rerank API key if provided, otherwise fall back to provider API key
+                rerank_api_key = None
+                if hasattr(self, "_rerank_api_key") and self._rerank_api_key:
+                    from pydantic import SecretStr
+
+                    if isinstance(self._rerank_api_key, SecretStr):
+                        rerank_api_key = self._rerank_api_key.get_secret_value()
+                    else:
+                        rerank_api_key = str(self._rerank_api_key)
+                elif hasattr(self, "_api_key") and self._api_key:
+                    rerank_api_key = self._api_key
+
+                if rerank_api_key:
+                    headers["Authorization"] = f"Bearer {rerank_api_key}"
                     logger.debug("Added Authorization header for rerank request")
 
                 response = await client.post(
