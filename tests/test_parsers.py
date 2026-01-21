@@ -22,6 +22,7 @@ LANGUAGE_SAMPLES = {
     Language.KOTLIN: "fun hello() { }",
     Language.GO: "package main\nfunc main() { }",
     Language.HASKELL: "add x y = x + y",
+    Language.RUBY: "class User\n  def hello\n    'world'\n  end\nend",
     Language.RUST: "fn main() { }",
     Language.BASH: "echo hello",
     Language.MAKEFILE: "all:\n\techo hello",

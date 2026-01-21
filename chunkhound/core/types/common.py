@@ -141,6 +141,7 @@ class Language(Enum):
     KOTLIN = "kotlin"
     GO = "go"
     HASKELL = "haskell"
+    RUBY = "ruby"
     RUST = "rust"
     ZIG = "zig"
     BASH = "bash"
@@ -176,11 +177,16 @@ class Language(Enum):
         if isinstance(file_path, str):
             file_path = Path(file_path)
 
-        # Check filename-based detection first (for Makefiles)
+        # Check filename-based detection first (for Makefiles and Ruby special files)
         basename = file_path.name.lower()
         filename_map = {
             "makefile": cls.MAKEFILE,
             "gnumakefile": cls.MAKEFILE,
+            "rakefile": cls.RUBY,
+            "gemfile": cls.RUBY,
+            "guardfile": cls.RUBY,
+            "vagrantfile": cls.RUBY,
+            "capfile": cls.RUBY,
         }
 
         if basename in filename_map:
@@ -232,6 +238,10 @@ class Language(Enum):
             ".hpp": cls.CPP,
             ".hxx": cls.CPP,
             ".h++": cls.CPP,
+            ".rb": cls.RUBY,
+            ".rake": cls.RUBY,
+            ".gemspec": cls.RUBY,
+            ".jbuilder": cls.RUBY,
             ".rs": cls.RUST,
             ".zig": cls.ZIG,
             ".m": cls.MATLAB,  # Note: .m is ambiguous, will use content detection
@@ -274,6 +284,7 @@ class Language(Enum):
             Language.KOTLIN,
             Language.GO,
             Language.HASKELL,
+            Language.RUBY,
             Language.RUST,
             Language.BASH,
             Language.MAKEFILE,
@@ -305,6 +316,7 @@ class Language(Enum):
             Language.MATLAB,
             Language.OBJC,
             Language.PHP,
+            Language.RUBY,
             Language.VUE,
             Language.SVELTE,
             Language.SWIFT,

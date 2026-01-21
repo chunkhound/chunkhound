@@ -27,6 +27,7 @@ from .objc import ObjCMapping
 from .pdf import PDFMapping
 from .php import PHPMapping
 from .python import PythonMapping
+from .ruby import RubyMapping
 from .rust import RustMapping
 from .svelte import SvelteMapping
 from .swift import SwiftMapping
@@ -63,6 +64,7 @@ __all__ = [
     "PDFMapping",
     "PHPMapping",
     "PythonMapping",
+    "RubyMapping",
     "RustMapping",
     "SvelteMapping",
     "SwiftMapping",

@@ -43,6 +43,7 @@ from chunkhound.parsers.mappings import (
     PDFMapping,
     PHPMapping,
     PythonMapping,
+    RubyMapping,
     RustMapping,
     SvelteMapping,
     SwiftMapping,
@@ -137,6 +138,14 @@ try:
 except ImportError:
     ts_haskell = None
     HASKELL_AVAILABLE = False
+
+try:
+    import tree_sitter_ruby as ts_ruby
+
+    RUBY_AVAILABLE = True
+except ImportError:
+    ts_ruby = None
+    RUBY_AVAILABLE = False
 
 try:
     import tree_sitter_rust as ts_rust
@@ -486,6 +495,7 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.HASKELL: LanguageConfig(
         ts_haskell, HaskellMapping, HASKELL_AVAILABLE, "haskell"
     ),
+    Language.RUBY: LanguageConfig(ts_ruby, RubyMapping, RUBY_AVAILABLE, "ruby"),
     Language.RUST: LanguageConfig(ts_rust, RustMapping, RUST_AVAILABLE, "rust"),
     Language.ZIG: LanguageConfig(ts_zig, ZigMapping, ZIG_AVAILABLE, "zig"),
     Language.BASH: LanguageConfig(ts_bash, BashMapping, BASH_AVAILABLE, "bash"),
@@ -577,6 +587,15 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     ".hs-boot": Language.HASKELL,
     ".hsig": Language.HASKELL,
     ".hsc": Language.HASKELL,
+    ".rb": Language.RUBY,
+    ".rake": Language.RUBY,
+    ".gemspec": Language.RUBY,
+    ".jbuilder": Language.RUBY,
+    "Gemfile": Language.RUBY,
+    "Rakefile": Language.RUBY,
+    "Guardfile": Language.RUBY,
+    "Vagrantfile": Language.RUBY,
+    "Capfile": Language.RUBY,
     ".rs": Language.RUST,
     ".zig": Language.ZIG,
     ".sh": Language.BASH,
