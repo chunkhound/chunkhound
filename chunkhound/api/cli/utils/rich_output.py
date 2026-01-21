@@ -600,11 +600,19 @@ class _NoRichProgressManager:
         class _Shim:
             def __init__(self) -> None:
                 self._next_id = 1
-                # Minimal task object with .total and .completed attributes
+                # Minimal task object with .total, .completed, and .elapsed attributes
+                import time
+
                 class _Task:
                     def __init__(self, total: int | None = None) -> None:
                         self.total = total
                         self.completed = 0
+                        self._start_time = time.time()
+
+                    @property
+                    def elapsed(self) -> float:
+                        """Return elapsed time since task creation."""
+                        return time.time() - self._start_time
 
                 self._Task = _Task
                 self.tasks: dict[int, _Task] = {}
