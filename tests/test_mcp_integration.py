@@ -16,7 +16,7 @@ from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 from chunkhound.mcp_server.tools import execute_tool
 from chunkhound.embeddings import EmbeddingManager
-from .test_utils import get_api_key_for_tests, get_embedding_config_for_tests, build_embedding_config_from_dict
+from .test_utils import get_api_key_for_tests, get_embedding_config_for_tests, build_embedding_config_from_dict, create_embedding_manager_for_tests
 
 
 class TestMCPIntegration:
@@ -48,33 +48,8 @@ class TestMCPIntegration:
         )
 
         # Create embedding manager if API key is available
-        embedding_manager = None
-        if config_dict:
-            embedding_manager = EmbeddingManager()
-            provider = config_dict.get("provider", "openai")
-            api_key = config_dict["api_key"]
-            model = config_dict.get("model")
-            base_url = config_dict.get("base_url")
-
-            if provider == "openai":
-                from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
-                kwargs = {"api_key": api_key}
-                if model:
-                    kwargs["model"] = model
-                if base_url:
-                    kwargs["base_url"] = base_url
-                embedding_provider = OpenAIEmbeddingProvider(**kwargs)
-            elif provider == "voyageai":
-                from chunkhound.providers.embeddings.voyageai_provider import VoyageAIEmbeddingProvider
-                kwargs = {"api_key": api_key}
-                if model:
-                    kwargs["model"] = model
-                embedding_provider = VoyageAIEmbeddingProvider(**kwargs)
-            else:
-                embedding_provider = None
-
-            if embedding_provider:
-                embedding_manager.register_provider(embedding_provider, set_default=True)
+        # create_services() handles None manager gracefully
+        embedding_manager = create_embedding_manager_for_tests(config_dict)
         
         # Create services - this is what MCP server uses
         services = create_services(db_path, config, embedding_manager)

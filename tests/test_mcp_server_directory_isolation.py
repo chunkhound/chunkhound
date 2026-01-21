@@ -19,7 +19,7 @@ from pathlib import Path
 from chunkhound.database_factory import create_database_with_dependencies
 from chunkhound.core.config.config import Config
 from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
-from .test_utils import get_api_key_for_tests, get_embedding_config_for_tests, build_embedding_config_from_dict
+from .test_utils import get_api_key_for_tests, get_embedding_config_for_tests, build_embedding_config_from_dict, create_embedding_manager_for_tests
 
 # Import Windows-safe subprocess utilities and JSON-RPC client
 from tests.utils import (
@@ -553,27 +553,11 @@ def quicksort(arr):
                 indexing={"include": ["*.py"]}
             )
 
-            # Create embedding manager
-            embedding_manager = EmbeddingManager()
-            if config_dict:
-                provider_name = config_dict.get("provider", "openai")
-                api_key = config_dict["api_key"]
-                model = config_dict.get("model")
-
-                if provider_name == "openai":
-                    from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
-                    kwargs = {"api_key": api_key}
-                    if model:
-                        kwargs["model"] = model
-                    embedding_provider = OpenAIEmbeddingProvider(**kwargs)
-                elif provider_name == "voyageai":
-                    from chunkhound.providers.embeddings.voyageai_provider import VoyageAIEmbeddingProvider
-                    kwargs = {"api_key": api_key}
-                    if model:
-                        kwargs["model"] = model
-                    embedding_provider = VoyageAIEmbeddingProvider(**kwargs)
-            
-            embedding_manager.register_provider(embedding_provider, set_default=True)
+            # Create embedding manager using centralized helper
+            embedding_manager = create_embedding_manager_for_tests(config_dict)
+            if not embedding_manager:
+                from chunkhound.embeddings import EmbeddingManager
+                embedding_manager = EmbeddingManager()  # Fallback for no config
             
             # Create services
             services = create_services(db_path, config.to_dict(), embedding_manager)

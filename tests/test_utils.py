@@ -22,6 +22,9 @@ def get_api_key_for_tests() -> tuple[str | None, str | None]:
     """
     Intelligently discover API key and provider for testing.
 
+    DEPRECATED: Use get_embedding_config_for_tests() for new code.
+    This function is maintained for backwards compatibility only.
+
     Priority:
     1. CHUNKHOUND_EMBEDDING__API_KEY environment variable
     2. .chunkhound.json in current or parent directory
@@ -30,40 +33,13 @@ def get_api_key_for_tests() -> tuple[str | None, str | None]:
     Returns:
         Tuple of (api_key, provider) or (None, None) if not found
     """
-    # Priority 1: Environment variable (only if non-empty)
-    api_key = os.environ.get("CHUNKHOUND_EMBEDDING__API_KEY")
-    if api_key and api_key.strip():
-        # Also check for provider from config
-        config_file = _find_config_file()
-        if config_file:
-            try:
-                with open(config_file, 'r') as f:
-                    config_data = json.load(f)
-                embedding_config = config_data.get("embedding", {})
-                provider = embedding_config.get("provider")
-                return api_key.strip(), provider
-            except (json.JSONDecodeError, FileNotFoundError, KeyError):
-                pass
-        return api_key.strip(), None
-    
-    # Priority 2: Local .chunkhound.json file
-    config_file = _find_config_file()
-    if config_file:
-        try:
-            with open(config_file, 'r') as f:
-                config_data = json.load(f)
-            
-            embedding_config = config_data.get("embedding", {})
-            api_key = embedding_config.get("api_key")
-            provider = embedding_config.get("provider")
-            
-            if api_key and api_key.strip():
-                return api_key.strip(), provider
-                
-        except (json.JSONDecodeError, FileNotFoundError, KeyError):
-            pass
-    
-    return None, None
+    config_dict = get_embedding_config_for_tests()
+    if not config_dict:
+        return None, None
+
+    api_key = config_dict.get("api_key")
+    provider = config_dict.get("provider")
+    return api_key, provider
 
 
 def get_embedding_config_for_tests() -> dict | None:
@@ -188,6 +164,51 @@ def build_embedding_config_from_dict(config_dict: dict | None) -> dict | None:
             embedding_config[field] = config_dict[field]
 
     return embedding_config
+
+
+def create_embedding_manager_for_tests(config_dict: dict | None) -> "EmbeddingManager | None":
+    """
+    Create EmbeddingManager from discovered config.
+
+    Centralizes provider instantiation logic used across test files.
+
+    Args:
+        config_dict: Output from get_embedding_config_for_tests()
+
+    Returns:
+        Configured EmbeddingManager or None if no config provided
+
+    Example:
+        config_dict = get_embedding_config_for_tests()
+        embedding_manager = create_embedding_manager_for_tests(config_dict)
+    """
+    if not config_dict:
+        return None
+
+    provider = config_dict.get("provider", "openai")
+    api_key = config_dict["api_key"]
+    model = config_dict.get("model")
+    base_url = config_dict.get("base_url")
+
+    from chunkhound.embeddings import EmbeddingManager
+    manager = EmbeddingManager()
+    kwargs = {"api_key": api_key}
+    if model:
+        kwargs["model"] = model
+
+    if provider == "openai":
+        if base_url:
+            kwargs["base_url"] = base_url
+        from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
+        manager.register_provider(OpenAIEmbeddingProvider(**kwargs), set_default=True)
+    elif provider == "voyageai":
+        from chunkhound.providers.embeddings.voyageai_provider import VoyageAIEmbeddingProvider
+        manager.register_provider(VoyageAIEmbeddingProvider(**kwargs), set_default=True)
+    else:
+        # Unsupported provider - return None
+        return None
+
+    return manager
 
 
 def should_run_live_api_tests(expected_provider: str | None = None) -> bool:
