@@ -109,18 +109,22 @@ class OpenCodeCLIProvider(BaseCLIProvider):
         self._validate_model_format(self._model)
 
         # Build CLI command
+        binary = os.getenv("CHUNKHOUND_OPENCODE_BIN", "opencode")
+
+        # Combine system prompt and user prompt
+        full_prompt = f"{system}\n{prompt}" if system else prompt
+
+        # Write prompt to temp file and pass via stdin to avoid Windows command line
+        # length limits (~8191 chars). opencode-cli run reads from stdin when no
+        # positional args are provided.
+        prompt_bytes = full_prompt.encode("utf-8")
+
         cmd = [
-            "opencode",
+            binary,
             "run",
             "--model",
             self._model,
         ]
-
-        # Add system prompt if provided
-        if system:
-            cmd.append(system + "\n" + prompt)
-        else:
-            cmd.append(prompt)
 
         # Use provided timeout or default
         request_timeout = timeout if timeout is not None else self._timeout
@@ -130,19 +134,19 @@ class OpenCodeCLIProvider(BaseCLIProvider):
         for attempt in range(self._max_retries):
             process = None
             try:
-                # Create subprocess with neutral CWD to prevent workspace scanning
+                # Create subprocess with stdin pipe to send prompt
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
-                    stdin=subprocess.DEVNULL,  # Prevent stdin inheritance
+                    stdin=subprocess.PIPE,  # Pass prompt via stdin
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     env=os.environ.copy(),  # Use copy of environment
                     cwd=tempfile.gettempdir(),  # Cross-platform temp directory
                 )
 
-                # Wrap communicate() with timeout
+                # Send prompt via stdin and wait for response
                 stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
+                    process.communicate(input=prompt_bytes),
                     timeout=request_timeout,
                 )
 
