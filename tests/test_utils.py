@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 
+from chunkhound.embeddings import EmbeddingManager
+
 
 def _find_config_file() -> Path | None:
     """Find .chunkhound.json in current or parent directory."""
@@ -166,7 +168,7 @@ def build_embedding_config_from_dict(config_dict: dict | None) -> dict | None:
     return embedding_config
 
 
-def create_embedding_manager_for_tests(config_dict: dict | None) -> "EmbeddingManager | None":
+def create_embedding_manager_for_tests(config_dict: dict | None) -> EmbeddingManager | None:
     """
     Create EmbeddingManager from discovered config.
 
@@ -190,7 +192,6 @@ def create_embedding_manager_for_tests(config_dict: dict | None) -> "EmbeddingMa
     model = config_dict.get("model")
     base_url = config_dict.get("base_url")
 
-    from chunkhound.embeddings import EmbeddingManager
     manager = EmbeddingManager()
     kwargs = {"api_key": api_key}
     if model:
