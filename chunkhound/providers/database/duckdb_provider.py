@@ -1454,21 +1454,80 @@ class DuckDBProvider(SerialDatabaseProvider):
     def _executor_delete_chunks_batch(
         self, conn: Any, state: dict[str, Any], chunk_ids: list[int]
     ) -> None:
-        """Executor method for delete_chunks_batch - runs in DB thread."""
+        """Executor method for delete_chunks_batch - runs in DB thread.
+
+        Coordinates with ShardManager to track shard state changes and trigger
+        fix_pass if any affected shard falls below merge threshold.
+        """
         if not chunk_ids:
             return
+
         placeholders = ",".join(["?"] * len(chunk_ids))
-        # Delete embeddings first across all embedding tables
+
+        # Get all embedding tables
         tables = conn.execute(
-            "SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'embeddings_%'"
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_name LIKE 'embeddings_%'"
         ).fetchall()
+
+        # Track affected shards BEFORE deletion
+        affected_shards: dict[tuple[str, int], int] = {}
+        for (table_name,) in tables:
+            dims = int(table_name.split("_")[1])
+            result = conn.execute(
+                f"SELECT shard_id, COUNT(*) FROM {table_name} "
+                f"WHERE chunk_id IN ({placeholders}) AND shard_id IS NOT NULL "
+                f"GROUP BY shard_id",
+                chunk_ids,
+            ).fetchall()
+            for row in result:
+                key = (str(row[0]), dims)
+                affected_shards[key] = affected_shards.get(key, 0) + row[1]
+
+        # Delete embeddings first across all embedding tables
         for (table_name,) in tables:
             conn.execute(
                 f"DELETE FROM {table_name} WHERE chunk_id IN ({placeholders})",
                 chunk_ids,
             )
+
         # Delete chunks
         conn.execute(f"DELETE FROM chunks WHERE id IN ({placeholders})", chunk_ids)
+
+        # Coordinate with ShardManager if available
+        if self.shard_manager is not None and affected_shards:
+            needs_fix = False
+            for (shard_id_str, dims), _deleted_count in affected_shards.items():
+                table_name = f"embeddings_{dims}"
+                result = conn.execute(
+                    f"SELECT COUNT(*) FROM {table_name} WHERE shard_id = ?",
+                    [shard_id_str],
+                ).fetchone()
+                remaining = result[0] if result else 0
+
+                if (
+                    remaining < self.shard_manager.config.merge_threshold
+                    or remaining == 0
+                ):
+                    needs_fix = True
+                    logger.debug(
+                        f"Shard {shard_id_str[:8]}... has {remaining} embeddings "
+                        f"after batch deletion (threshold: "
+                        f"{self.shard_manager.config.merge_threshold})"
+                    )
+
+            if needs_fix:
+                logger.debug(
+                    f"Batch deletion of {len(chunk_ids)} chunks triggered shard fix_pass"
+                )
+                if state.get("transaction_active"):
+                    # Defer rebuild until transaction commits
+                    state["rebuild_pending"] = True
+                    logger.debug("Rebuild deferred - transaction active")
+                elif self._rebuild_coordinator:
+                    self._rebuild_coordinator.request_rebuild(check_quality=False)
+                else:
+                    self.shard_manager.fix_pass(conn, check_quality=False)
 
     def delete_chunk(self, chunk_id: int) -> None:
         """Delete a single chunk by ID with proper foreign key handling."""
@@ -2958,6 +3017,14 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Executor method for commit_transaction - runs in DB thread."""
         try:
             conn.execute("COMMIT")
+
+            # Trigger deferred rebuild if pending (must run after commit, before state clear)
+            if state.pop("rebuild_pending", False):
+                logger.debug("Triggering deferred rebuild after commit")
+                if self._rebuild_coordinator:
+                    self._rebuild_coordinator.request_rebuild(check_quality=False)
+                elif self.shard_manager:
+                    self.shard_manager.fix_pass(conn, check_quality=False)
 
             # Clear transaction state
             state["transaction_active"] = False
