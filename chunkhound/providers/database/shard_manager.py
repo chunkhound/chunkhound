@@ -207,9 +207,11 @@ class ShardManager:
         # Determine nprobe: use config or auto-scale with sqrt
         # Auto-scale: sqrt provides sublinear growth (100 shards → 10, 10k → 100)
         # to balance recall breadth with latency as shard count grows
+        # Minimum of 2 provides defense-in-depth against edge cases where radius
+        # underestimation could cause the shard containing the query to not rank #1
         effective_nprobe = self.config.nprobe
         if effective_nprobe == 0:
-            effective_nprobe = max(1, int(math.sqrt(len(shard_candidates))))
+            effective_nprobe = max(2, int(math.sqrt(len(shard_candidates))))
 
         # Select shards: MAX of nprobe and threshold (radius-aware)
         # - Always include top nprobe shards by best-case similarity
@@ -419,7 +421,11 @@ class ShardManager:
                 # Check split threshold per shard
                 count = self._get_shard_count(target_id, dims, conn)
                 if count >= self.config.split_threshold:
+                    # Skip incremental radius update - fix_pass will recompute after split
                     needs_fix_pass = True
+                elif target_id in self.centroids:
+                    # Incremental radius update O(k) - radius can only grow
+                    self._update_radius_incrementally(target_id, vectors_dict)
 
             return (True, needs_fix_pass)
 
@@ -1024,6 +1030,79 @@ class ShardManager:
         logger.debug(f"Shard {shard_id} rebuilt: {len(keys)} vectors")
         return True  # Rebuild succeeded
 
+    def _compute_accurate_radius(
+        self, conn: Any, shard_id: UUID, medoid: np.ndarray, dims: int
+    ) -> float:
+        """Compute exact radius using DuckDB aggregate over all shard vectors.
+
+        Unlike sample-based radius computation in usearch_wrapper, this scans
+        all vectors to find the true maximum angular distance from the medoid.
+        This prevents edge vectors from being excluded during shard selection.
+
+        Args:
+            conn: Database connection
+            shard_id: Shard UUID
+            medoid: Medoid vector (unit normalized)
+            dims: Embedding dimensions
+
+        Returns:
+            Radius in radians (max angular distance from medoid to any vector)
+        """
+        table_name = f"embeddings_{dims}"
+
+        # Normalize medoid for cosine similarity computation
+        medoid_norm = np.linalg.norm(medoid)
+        if medoid_norm == 0:
+            return float(np.pi)  # Degenerate case
+        medoid_unit = (medoid / medoid_norm).tolist()
+
+        # DuckDB computes max cosine distance across all shard vectors
+        # 1 - cosine_similarity = cosine_distance
+        result = conn.execute(
+            f"""
+            SELECT MAX(1.0 - list_cosine_similarity(embedding, ?::DOUBLE[{dims}]))
+            FROM {table_name}
+            WHERE shard_id = ?
+            """,
+            [medoid_unit, str(shard_id)],
+        ).fetchone()
+
+        max_cosine_dist = result[0] if result and result[0] is not None else 0.0
+
+        # Convert cosine distance to angular distance
+        # cosine_distance = 1 - cos(theta) => cos(theta) = 1 - cosine_distance
+        similarity = 1.0 - max_cosine_dist
+        similarity = np.clip(similarity, -1.0, 1.0)
+        return float(np.arccos(similarity))
+
+    def _update_radius_incrementally(
+        self, shard_id: UUID, vectors_dict: dict[int, list[float]]
+    ) -> None:
+        """Update shard radius incrementally after vector insertion.
+
+        Radius can only grow (new vectors may extend the boundary, but
+        existing max is preserved). This O(k) update is much cheaper than
+        a full DuckDB scan for hot-path insertions.
+
+        Args:
+            shard_id: Shard UUID
+            vectors_dict: Dict mapping embedding_id -> vector (newly inserted)
+        """
+        if shard_id not in self.centroids:
+            return  # No cached centroid, fix_pass will compute
+
+        centroid = self.centroids[shard_id]
+        current_radius = self.radii.get(shard_id, 0.0)
+
+        # Check if any new vector extends the radius
+        for vector in vectors_dict.values():
+            vec_array = np.array(vector, dtype=np.float32)
+            angle = usearch_wrapper.angular_distance(vec_array, centroid)
+            if angle > current_radius:
+                current_radius = angle
+
+        self.radii[shard_id] = current_radius
+
     def _populate_centroid_cache(self, conn: Any) -> None:
         """Compute medoid and radius for each shard and cache for routing.
 
@@ -1038,6 +1117,7 @@ class ShardManager:
 
         for shard in self._list_shards(conn):
             shard_id = UUID(shard["shard_id"])
+            dims = shard["dims"]
             file_path = self._shard_path(shard_id)
 
             if not file_path.exists():
@@ -1048,9 +1128,15 @@ class ShardManager:
                 if len(index) == 0:
                     continue
 
-                _, medoid, radius = usearch_wrapper.get_medoid_and_radius(index)
+                # Get medoid from USearch (efficient HNSW-based search)
+                _, medoid = usearch_wrapper.get_medoid(index)
                 self.centroids[shard_id] = medoid
+
+                # Compute accurate radius via DuckDB full scan (not sample-based)
+                # This ensures edge vectors are never excluded from shard selection
+                radius = self._compute_accurate_radius(conn, shard_id, medoid, dims)
                 self.radii[shard_id] = radius
+
                 logger.debug(
                     f"Cached centroid and radius for shard {shard_id} "
                     f"(radius={np.degrees(radius):.1f} deg)"
@@ -1139,19 +1225,22 @@ class ShardManager:
         return result[0] > 0 if result else False
 
     def _kmeans_fallback(
-        self, shard: dict[str, Any], conn: Any, n_clusters: int = 2
+        self,
+        shard: dict[str, Any],
+        conn: Any,
+        n_clusters: int = 2,
+        preloaded_vectors: dict[int, np.ndarray] | None = None,
     ) -> dict[int, int]:
-        """Sample-then-assign clustering using sklearn KMeans.
+        """Deterministic clustering using sklearn KMeans.
 
-        Instead of loading all embeddings into memory:
-        1. Sample ~512 random vectors from DuckDB
-        2. Run KMeans on samples to find centroids
-        3. Assign ALL vectors via DuckDB SQL using array_cosine_distance
+        Uses evenly-spaced sampling for deterministic centroid discovery,
+        then assigns all vectors using numpy for consistent results.
 
         Args:
             shard: Shard record from DB
             conn: Database connection
             n_clusters: Number of clusters to create
+            preloaded_vectors: Pre-loaded vectors dict (id -> vector array)
 
         Returns:
             Dict mapping embedding_id -> cluster_label (0 to n_clusters-1)
@@ -1162,79 +1251,69 @@ class ShardManager:
 
         self._heartbeat()
 
-        # Phase 1: Sample random vectors for centroid discovery
-        # Minimum 50 samples for reliable k=2 clustering (industry: 20-30 per cluster)
-        sample_size = min(KMEANS_SAMPLE_SIZE, max(50, self.config.split_threshold // 5))
-        samples = conn.execute(
-            f"SELECT id, embedding FROM {table_name} "
-            f"WHERE shard_id = ? ORDER BY RANDOM() LIMIT ?",
-            [str(shard_id), sample_size],
-        ).fetchall()
+        # Phase 1: Get vectors (use preloaded or load from DB)
+        if preloaded_vectors is not None:
+            all_ids = list(preloaded_vectors.keys())
+            total_count = len(all_ids)
+        else:
+            # Fallback: load from DB
+            rows = conn.execute(
+                f"SELECT id, embedding FROM {table_name} WHERE shard_id = ?",
+                [str(shard_id)],
+            ).fetchall()
+            preloaded_vectors = {
+                row[0]: np.array(row[1], dtype=np.float32) for row in rows
+            }
+            all_ids = [row[0] for row in rows]
+            total_count = len(all_ids)
 
-        if not samples:
+        if total_count == 0:
             return {}
 
         # Adjust n_clusters if we have fewer samples
-        actual_clusters = min(n_clusters, len(samples))
+        actual_clusters = min(n_clusters, total_count)
         if actual_clusters < 2:
-            # Can't cluster with fewer than 2 points - assign all to cluster 0
-            result = conn.execute(
-                f"SELECT id FROM {table_name} WHERE shard_id = ?",
-                [str(shard_id)],
-            ).fetchall()
-            return {row[0]: 0 for row in result}
+            return {id: 0 for id in all_ids}
 
         self._heartbeat()
 
-        # Phase 2: Run KMeans only on samples to find centroids
-        vectors = np.array([list(row[1]) for row in samples], dtype=np.float32)
+        # Phase 2: Deterministic evenly-spaced sampling for centroid discovery
+        sample_size = min(KMEANS_SAMPLE_SIZE, max(50, self.config.split_threshold // 5))
+        if total_count <= sample_size:
+            sample_ids = all_ids  # Use all (deterministic)
+        else:
+            # Evenly-spaced deterministic sampling
+            step = total_count // sample_size
+            sample_ids = [all_ids[i * step] for i in range(sample_size)]
+
+        vectors_array = np.array(
+            [preloaded_vectors[id] for id in sample_ids], dtype=np.float32
+        )
         kmeans = KMeans(n_clusters=actual_clusters, n_init="auto")
-        kmeans.fit(vectors)
+        kmeans.fit(vectors_array)
         centroids = kmeans.cluster_centers_
 
         self._heartbeat()
 
-        # Phase 3: Assign ALL vectors using DuckDB SQL with array_cosine_distance
-        # Build CASE expression to find nearest centroid for each vector
-        embedding_type = f"FLOAT[{dims}]"
-        centroid_params = [centroids[i].tolist() for i in range(actual_clusters)]
+        # Phase 3: Assign ALL vectors using numpy (cosine similarity)
+        all_vectors = np.array(
+            [preloaded_vectors[id] for id in all_ids], dtype=np.float32
+        )
 
-        # For 2 clusters, use simple CASE WHEN
-        if actual_clusters == 2:
-            query = f"""
-                SELECT id,
-                    CASE WHEN array_cosine_distance(embedding, ?::{embedding_type})
-                              <= array_cosine_distance(embedding, ?::{embedding_type})
-                         THEN 0 ELSE 1 END AS cluster_label
-                FROM {table_name}
-                WHERE shard_id = ?
-            """
-            params = [centroid_params[0], centroid_params[1], str(shard_id)]
-        else:
-            # For n clusters, build a nested CASE or use LEAST with index tracking
-            # Generate distance columns and find argmin
-            dist_exprs = [
-                f"array_cosine_distance(embedding, ?::{embedding_type}) AS d{i}"
-                for i in range(actual_clusters)
-            ]
-            case_parts = []
-            for i in range(actual_clusters):
-                conditions = [f"d{i} <= d{j}" for j in range(actual_clusters) if j != i]
-                case_parts.append(f"WHEN {' AND '.join(conditions)} THEN {i}")
+        # Normalize for cosine distance
+        norms = np.linalg.norm(all_vectors, axis=1, keepdims=True)
+        norms[norms == 0] = 1  # Avoid division by zero
+        all_vectors_normalized = all_vectors / norms
 
-            query = f"""
-                SELECT id,
-                    CASE {" ".join(case_parts)} END AS cluster_label
-                FROM (
-                    SELECT id, embedding, {", ".join(dist_exprs)}
-                    FROM {table_name}
-                    WHERE shard_id = ?
-                ) sub
-            """
-            params = centroid_params + [str(shard_id)]
+        centroid_norms = np.linalg.norm(centroids, axis=1, keepdims=True)
+        centroid_norms[centroid_norms == 0] = 1
+        centroids_normalized = centroids / centroid_norms
 
-        result = conn.execute(query, params).fetchall()
-        return {row[0]: row[1] for row in result}
+        # Compute cosine similarity (higher = closer)
+        similarities = all_vectors_normalized @ centroids_normalized.T  # (n, k)
+        labels = np.argmax(similarities, axis=1)
+
+        return {all_ids[i]: int(labels[i]) for i in range(len(all_ids))}
 
     def _compute_cluster_medoid(
         self,
@@ -1424,7 +1503,7 @@ class ShardManager:
         - Reassign embeddings shard_id to children
         - Delete parent shard record
 
-        Child indexes are built by convergence loop (fix_pass will handle).
+        Child indexes are built atomically before parent deletion.
 
         Args:
             shard: Shard record from DB
@@ -1440,15 +1519,27 @@ class ShardManager:
         logger.info(f"Splitting shard {shard_id}")
         self._heartbeat()
 
+        # Load ALL vectors once - reused for K-means and boundary correction
+        table_name = f"embeddings_{dims}"
+        rows = conn.execute(
+            f"SELECT id, embedding FROM {table_name} WHERE shard_id = ?",
+            [str(shard_id)],
+        ).fetchall()
+        vectors = {row[0]: np.array(row[1], dtype=np.float32) for row in rows}
+
+        if not vectors:
+            logger.warning(f"No embeddings to split for shard {shard_id}")
+            return False
+
+        self._heartbeat()
+
         # Always use K-means for splitting - guarantees exactly 2 balanced clusters.
         # USearch's native clustering uses HNSW graph structure which does NOT
         # guarantee min_count/max_count constraints, leading to many small clusters
         # that trigger merge operations and cause infinite split->merge cycles.
-        cluster_assignments = self._kmeans_fallback(shard, conn, n_clusters=2)
-
-        if not cluster_assignments:
-            logger.warning(f"No embeddings to split for shard {shard_id}")
-            return False
+        cluster_assignments = self._kmeans_fallback(
+            shard, conn, n_clusters=2, preloaded_vectors=vectors
+        )
 
         # Group embedding_ids by cluster label
         clusters: dict[int, list[int]] = {}
@@ -1456,18 +1547,8 @@ class ShardManager:
             clusters.setdefault(label, []).append(emb_id)
 
         # Radius-aware split correction: detect and fix boundary vector misassignment
-        # TODO: Memory optimization - currently loads all vectors (~300MB for 50k×1536).
-        # Could load only boundary-zone vectors or stream in batches.
+        # vectors dict already loaded at start of method
         if len(clusters) == 2:
-            table_name = f"embeddings_{dims}"
-            all_ids = clusters[0] + clusters[1]
-            placeholders = ",".join(["?"] * len(all_ids))
-            rows = conn.execute(
-                f"SELECT id, embedding FROM {table_name} WHERE id IN ({placeholders})",
-                all_ids,
-            ).fetchall()
-            vectors = {row[0]: np.array(row[1], dtype=np.float32) for row in rows}
-
             # Compute initial centroids from k-means assignment (sample-based)
             c0 = np.array(
                 np.mean([vectors[id] for id in clusters[0][:100]], axis=0),
@@ -1538,6 +1619,40 @@ class ShardManager:
                         [str(child_id)] + emb_ids,
                     )
                     self._heartbeat()
+
+            # Build child index files BEFORE deleting parent (atomic split)
+            # This eliminates the race window where vectors are unfindable
+            quantization = shard.get("quantization", self.config.default_quantization)
+            for cluster_label, emb_ids in clusters.items():
+                child_id = child_ids[cluster_label]
+                child_file_path = self._shard_path(child_id)
+
+                # Build index in RAM
+                child_index = usearch_wrapper.create(
+                    dims,
+                    quantization,
+                    connectivity=self.config.hnsw_connectivity,
+                    expansion_add=self.config.hnsw_expansion_add,
+                    expansion_search=self.config.hnsw_expansion_search,
+                )
+
+                child_keys = np.array(emb_ids, dtype=np.uint64)
+                child_vectors = np.array(
+                    [vectors[id] for id in emb_ids], dtype=np.float32
+                )
+                child_index.add(child_keys, child_vectors)
+
+                # Atomic write: temp + fsync + rename
+                self.shard_dir.mkdir(parents=True, exist_ok=True)
+                tmp_path = child_file_path.with_suffix(".usearch.tmp")
+                child_index.save(str(tmp_path))
+                fsync_path(tmp_path)
+                tmp_path.replace(child_file_path)
+
+                del child_index
+                self._heartbeat()
+
+                logger.debug(f"Built child shard {child_id}: {len(emb_ids)} vectors")
 
             # Phase 2 (post-commit): Delete parent shard now that FK references are gone
             conn.execute(
