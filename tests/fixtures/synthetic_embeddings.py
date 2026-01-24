@@ -168,6 +168,71 @@ class SyntheticEmbeddingGenerator:
         # Extract k orthonormal columns
         return [q[:, i].copy() for i in range(k)]
 
+    def get_orthogonal_centroids(self, k: int) -> list[np.ndarray]:
+        """Get k orthonormal centroids (maximally separated, cosine distance = 1.0).
+
+        Uses QR decomposition on random matrix for deterministic generation.
+        Orthonormal vectors have cosine similarity of 0, meaning cosine distance
+        of 1.0 (maximum separation).
+
+        Args:
+            k: Number of centroids (must be <= dims)
+
+        Returns:
+            List of k orthonormal centroid vectors
+
+        Raises:
+            ValueError: If k > dims
+        """
+        return self.generate_orthogonal(k)
+
+    def generate_around_centroids(
+        self,
+        centroids: list[np.ndarray],
+        per_centroid: int | list[int],
+        noise_std: float = 0.1,
+    ) -> list[tuple[np.ndarray, int]]:
+        """Generate vectors around caller-provided centroids.
+
+        Allows reusing the same centroids across multiple generation phases
+        to ensure vectors cluster consistently.
+
+        Args:
+            centroids: List of centroid vectors to generate around
+            per_centroid: Vectors per cluster - int for uniform count,
+                         list[int] for varying counts per cluster
+            noise_std: Standard deviation of Gaussian noise added to centroids.
+                      0.02 = very tight clusters, 0.1 = moderate, 0.3 = loose
+
+        Returns:
+            List of (vector, cluster_id) tuples where cluster_id is the
+            index into the centroids list
+        """
+        # Handle uniform vs varying counts
+        if isinstance(per_centroid, int):
+            counts = [per_centroid] * len(centroids)
+        else:
+            if len(per_centroid) != len(centroids):
+                msg = (
+                    f"per_centroid list length ({len(per_centroid)}) must match "
+                    f"number of centroids ({len(centroids)})"
+                )
+                raise ValueError(msg)
+            counts = per_centroid
+
+        results: list[tuple[np.ndarray, int]] = []
+
+        for cluster_id, (centroid, count) in enumerate(zip(centroids, counts)):
+            for _ in range(count):
+                noise = self.rng.normal(0, noise_std, self.dims)
+                vec = centroid + noise
+                norm = np.linalg.norm(vec)
+                if norm > 0:
+                    vec = vec / norm
+                results.append((vec, cluster_id))
+
+        return results
+
 
 def brute_force_search(
     query: np.ndarray,

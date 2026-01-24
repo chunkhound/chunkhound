@@ -1073,7 +1073,11 @@ class ShardManager:
         # cosine_distance = 1 - cos(theta) => cos(theta) = 1 - cosine_distance
         similarity = 1.0 - max_cosine_dist
         similarity = np.clip(similarity, -1.0, 1.0)
-        return float(np.arccos(similarity))
+
+        # Add epsilon buffer to account for floating-point precision differences
+        # between DuckDB's list_cosine_similarity and numpy's dot product used in search
+        RADIUS_EPSILON = 1e-6  # ~0.00006 radians, negligible angular difference
+        return float(np.arccos(similarity)) + RADIUS_EPSILON
 
     def _update_radius_incrementally(
         self, shard_id: UUID, vectors_dict: dict[int, list[float]]
