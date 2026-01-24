@@ -77,7 +77,7 @@ def get_thread_local_state() -> dict[str, Any]:
             "transaction_active": False,
             "last_activity_time": time.time(),  # Track last database activity
         }
-    return dict(_executor_local.state)  # Return a typed dict copy
+    return _executor_local.state  # Return actual dict for state persistence
 
 
 class SerialDatabaseExecutor:
