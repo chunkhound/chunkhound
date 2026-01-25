@@ -3,7 +3,7 @@
 import os
 from typing import Any
 
-from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
+from chunkhound.core.constants import MISTRAL_DEFAULT_MODEL, VOYAGE_DEFAULT_MODEL
 
 try:
     import httpx
@@ -27,6 +27,11 @@ def detect_provider_config() -> dict[str, dict[str, Any] | None]:
     if voyage_config:
         configs["voyageai"] = voyage_config
 
+    # Check Mistral
+    mistral_config = _detect_mistral()
+    if mistral_config:
+        configs["mistral"] = mistral_config
+
     # Check OpenAI
     openai_config = _detect_openai()
     if openai_config:
@@ -48,6 +53,18 @@ def _detect_voyageai() -> dict[str, Any] | None:
             "provider": "voyageai",
             "api_key": api_key,
             "model": VOYAGE_DEFAULT_MODEL,
+        }
+    return None
+
+
+def _detect_mistral() -> dict[str, Any] | None:
+    """Detect Mistral configuration from environment."""
+    api_key = os.getenv("MISTRAL_API_KEY")
+    if api_key:
+        return {
+            "provider": "mistral",
+            "api_key": api_key,
+            "model": MISTRAL_DEFAULT_MODEL,
         }
     return None
 
@@ -192,6 +209,9 @@ def format_detected_config_summary(configs: dict[str, dict[str, Any] | None]) ->
         if provider == "voyageai":
             lines.append("  - VoyageAI API key found (VOYAGE_API_KEY)")
 
+        elif provider == "mistral":
+            lines.append("  - Mistral API key found (MISTRAL_API_KEY)")
+
         elif provider == "openai":
             lines.append("  - OpenAI API key found (OPENAI_API_KEY)")
             if config.get("base_url"):
@@ -223,13 +243,17 @@ def get_priority_config(
     Get the highest priority detected configuration.
 
     Priority order:
-    1. VoyageAI (recommended)
-    2. OpenAI with official endpoint
-    3. OpenAI with custom endpoint
-    4. Local endpoints
+    1. VoyageAI (recommended for code)
+    2. Mistral (great for code)
+    3. OpenAI with official endpoint
+    4. OpenAI with custom endpoint
+    5. Local endpoints
     """
     if configs.get("voyageai"):
         return configs["voyageai"]
+
+    if configs.get("mistral"):
+        return configs["mistral"]
 
     if configs.get("openai"):
         openai_config = configs["openai"]

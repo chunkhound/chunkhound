@@ -24,7 +24,7 @@ from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_config import EmbeddingConfig
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.core.config.openai_utils import is_official_openai_endpoint
-from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
+from chunkhound.core.constants import MISTRAL_DEFAULT_MODEL, VOYAGE_DEFAULT_MODEL
 from chunkhound.version import __version__
 
 logger = logging.getLogger(__name__)
@@ -547,13 +547,14 @@ def _filter_embedding_models(models: list[str]) -> tuple[list[str], list[str]]:
         "e5-",
         "multilingual-e5",
         "gte-",
+        "codestral-embed",  # Mistral code embedding model
     ]
 
     # Known non-embedding model patterns
     non_embedding_keywords = [
         "gpt",
         "llama",
-        "mistral",
+        "mistral",  # LLM models like mistral-large, mistral-tiny (embedding is codestral-embed)
         "phi",
         "codellama",
         "vicuna",
@@ -685,8 +686,8 @@ def _display_detected_configs(
                 table.add_row(f"• {provider_name} configured via environment")
             else:
                 table.add_row(
-                        f"• {provider_name} server detected at "
-                        f"{config.get('base_url', 'unknown')}"
+                    f"• {provider_name} server detected at "
+                    f"{config.get('base_url', 'unknown')}"
                 )
 
     if formatter.console is not None:
@@ -702,8 +703,8 @@ def _display_detected_configs(
                 elif provider == "local":
                     provider_name = config.get("provider_name", "Unknown")
                     print(
-                    f"• {provider_name} server detected at "
-                    f"{config.get('base_url', 'unknown')}"
+                        f"• {provider_name} server detected at "
+                        f"{config.get('base_url', 'unknown')}"
                     )
 
 
@@ -734,6 +735,8 @@ async def run_setup_wizard(target_path: Path, args=None) -> Config | None:
     embedding_config = None
     if provider_choice == "voyageai":
         embedding_config = await _configure_voyageai(formatter)
+    elif provider_choice == "mistral":
+        embedding_config = await _configure_mistral(formatter)
     elif provider_choice == "openai":
         embedding_config = await _configure_openai(formatter)
     elif provider_choice == "openai_compatible":
@@ -801,6 +804,7 @@ async def _select_provider() -> str:
     """Interactive provider selection"""
     choices = [
         ("VoyageAI (Recommended - Best for code)", "voyageai"),
+        ("Mistral (Codestral Embed - Great for code)", "mistral"),
         ("OpenAI", "openai"),
         ("OpenAI-compatible (Ollama, LM Studio, etc.)", "openai_compatible"),
     ]
@@ -1156,10 +1160,7 @@ async def _setup_opencode(target_path: Path, formatter: RichOutputFormatter) -> 
             return True
 
     # Add ChunkHound server configuration
-    mcp_config["chunkhound"] = {
-        "type": "local",
-        "command": ["chunkhound", "mcp"]
-    }
+    mcp_config["chunkhound"] = {"type": "local", "command": ["chunkhound", "mcp"]}
 
     # Ensure schema is present
     if "$schema" not in config:
@@ -1253,6 +1254,34 @@ async def _configure_openai(formatter: RichOutputFormatter) -> dict[str, Any] | 
 
     return await _configure_provider_unified(
         "openai",
+        api_key=api_key,
+        formatter=formatter,
+        already_declined_key=already_declined,
+    )
+
+
+async def _configure_mistral(formatter: RichOutputFormatter) -> dict[str, Any] | None:
+    """Configure Mistral provider with signup assistance"""
+    print("Great choice! Mistral's Codestral Embed is optimized for code.\n")
+
+    # Check for existing API key
+    from .env_detector import _detect_mistral
+
+    detected_config = _detect_mistral()
+    api_key = None
+    already_declined = False
+
+    if detected_config and detected_config.get("api_key"):
+        use_detected = await rich_confirm(
+            "Found Mistral API key in environment. Use it?", default=True
+        )
+        if use_detected:
+            api_key = detected_config["api_key"]
+        else:
+            already_declined = True
+
+    return await _configure_provider_unified(
+        "mistral",
         api_key=api_key,
         formatter=formatter,
         already_declined_key=already_declined,
@@ -1557,6 +1586,33 @@ async def _validate_voyageai_key(api_key: str, formatter: RichOutputFormatter) -
         return False
 
 
+async def _validate_mistral_key(
+    api_key: str, model: str, formatter: RichOutputFormatter
+) -> bool:
+    """Test Mistral API key with minimal embedding request"""
+    try:
+        formatter.info("🔄 Validating API key...")
+
+        # Create a test configuration
+        config = EmbeddingConfig(
+            provider="mistral", api_key=SecretStr(api_key), model=model
+        )
+
+        # Try to create provider and test connection
+        from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
+
+        provider = EmbeddingProviderFactory.create_provider(config)
+
+        # Test with minimal embedding
+        await provider.embed(["test connection"])
+        formatter.success("API key validated successfully")
+        return True
+
+    except Exception as e:
+        formatter.error(f"Validation failed: {e}")
+        return False
+
+
 async def _validate_openai_key(
     api_key: str, model: str, formatter: RichOutputFormatter
 ) -> bool:
@@ -1741,6 +1797,41 @@ async def _prompt_for_api_key(
             if not api_key.strip() and not url_opened:
                 url_opened = _open_url_on_empty_input(
                     "https://platform.openai.com/api-keys", "OpenAI", formatter
+                )
+                continue
+
+            return api_key.strip()
+
+    elif provider_type == "mistral":
+        formatter.section_header(f"{provider_name} API Key")
+        print("Getting Started:")
+        formatter.bullet_list(
+            [
+                "Visit: https://console.mistral.ai",
+                "Sign up for an account",
+                "Generate an API key in the dashboard",
+            ]
+        )
+        print()
+
+        url_opened = False  # Track if we've opened the URL
+
+        while True:
+
+            def validate_key(x):
+                if not x.strip() and not url_opened:
+                    return True  # Allow empty field first time
+                return len(x.strip()) > 0  # Mistral keys don't have a standard prefix
+
+            api_key = await rich_text(
+                "Enter your Mistral API key:",
+                default="",  # No pre-filling - detection handled at higher level
+                validate=validate_key,
+            )
+
+            if not api_key.strip() and not url_opened:
+                url_opened = _open_url_on_empty_input(
+                    "https://console.mistral.ai", "Mistral", formatter
                 )
                 continue
 
@@ -1952,6 +2043,14 @@ async def _validate_provider_config(
             formatter.error("VoyageAI API key not found")
             return False
         return await _validate_voyageai_key(api_key, formatter)
+
+    elif provider == "mistral":
+        api_key = config_data.get("api_key")
+        model = config_data.get("model", MISTRAL_DEFAULT_MODEL)
+        if not api_key:
+            formatter.error("Mistral API key not found")
+            return False
+        return await _validate_mistral_key(api_key, model, formatter)
 
     elif provider == "openai":
         api_key = config_data.get("api_key")
