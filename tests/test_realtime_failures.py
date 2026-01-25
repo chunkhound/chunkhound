@@ -10,7 +10,7 @@ import pytest
 import shutil
 
 from chunkhound.core.config.config import Config
-from tests.utils.windows_compat import wait_for_indexed
+from tests.utils.windows_compat import wait_for_indexed, is_windows, is_ci
 from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 
@@ -41,8 +41,9 @@ class TestRealtimeFailures:
         services = create_services(db_path, config)
         services.provider.connect()
 
-
-        realtime_service = RealtimeIndexingService(services, config)
+        # Use polling on Windows CI where watchdog's ReadDirectoryChangesW is unreliable
+        force_polling = is_windows() and is_ci()
+        realtime_service = RealtimeIndexingService(services, config, force_polling=force_polling)
         
         yield realtime_service, watch_dir, temp_dir, services
         

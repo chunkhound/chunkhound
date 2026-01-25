@@ -139,12 +139,13 @@ class TestClass_{i}:
 @pytest.mark.asyncio
 async def test_realtime_indexing_embeddings_EXPECTED_FAIL(tmp_path):
     """REPRODUCTION TEST: Real-time indexed files should get embeddings.
-    
+
     This test is EXPECTED TO FAIL due to the embedding generation bug.
     It simulates the real-time indexing scenario that fails in practice.
     """
     from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
-    
+    from tests.utils.windows_compat import is_windows, is_ci
+
     # Setup config and services
     # Use fake args to prevent find_project_root call that fails in CI
     from types import SimpleNamespace
@@ -153,13 +154,15 @@ async def test_realtime_indexing_embeddings_EXPECTED_FAIL(tmp_path):
         args=fake_args,
         database={"path": str(tmp_path / "realtime_test.duckdb"), "provider": "duckdb"}
     )
-    
+
     # Only test with real embeddings if API key is available
     if not (hasattr(config.embedding, 'api_key') and config.embedding.api_key):
         pytest.skip("No embedding API key available for realtime test")
-    
+
     services = create_services(config.database.path, config)
-    realtime_service = RealtimeIndexingService(services, config)
+    # Use polling on Windows CI where watchdog's ReadDirectoryChangesW is unreliable
+    force_polling = is_windows() and is_ci()
+    realtime_service = RealtimeIndexingService(services, config, force_polling=force_polling)
     
     # Start realtime service
     watch_dir = tmp_path / "watch"
