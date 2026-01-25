@@ -2,7 +2,6 @@
 
 import argparse
 import sys
-from pathlib import Path
 from typing import Any, cast
 
 from loguru import logger
@@ -12,7 +11,7 @@ from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.database_factory import create_services
 from chunkhound.embeddings import EmbeddingManager
-from chunkhound.mcp_server.tools import search_regex_impl, search_semantic_impl
+from chunkhound.mcp_server.tools import search_impl
 from chunkhound.registry import configure_registry
 
 from ..utils.rich_output import RichOutputFormatter
@@ -81,66 +80,56 @@ async def search_command(args: argparse.Namespace, config: Config) -> None:
         force_strategy = "multi_hop"
 
     try:
-        if args.regex:
-            # Perform regex search
-            result = await search_regex_impl(
+        search_type = "regex" if args.regex else "semantic"
+
+        if args.regex or not force_strategy:
+            # Use unified search for regex or semantic without force_strategy
+            result = await search_impl(
                 services=services,
-                pattern=args.query,
+                embedding_manager=embedding_manager,
+                type=search_type,
+                query=args.query,
                 page_size=args.page_size,
                 offset=args.offset,
                 path=args.path_filter,
             )
             result_dict = cast(dict[str, Any], result)
         else:
-            # For semantic search, we need to handle force_strategy
-            if force_strategy:
-                # CLI-specific: When force_strategy is set, we need to call
-                # the service directly
-                # First validate using MCP's validation logic
-                if not embedding_manager or not embedding_manager.list_providers():
-                    raise Exception(
-                        "No embedding providers available. "
-                        "Configure an embedding provider via:\n"
-                        "1. Create .chunkhound.json with embedding configuration, OR\n"
-                        "2. Set CHUNKHOUND_EMBEDDING__API_KEY environment variable"
-                    )
-
-                # Get provider/model like search_semantic_impl does
-                provider_name = None
-                model_name = None
-                try:
-                    default_provider_obj = embedding_manager.get_provider()
-                    provider_name = default_provider_obj.name
-                    model_name = default_provider_obj.model
-                except ValueError:
-                    raise Exception(
-                        "No default embedding provider configured. "
-                        "Configure a default provider in config."
-                    )
-
-                # Call service directly with force_strategy
-                results, pagination = await services.search_service.search_semantic(
-                    query=args.query,
-                    page_size=args.page_size,
-                    offset=args.offset,
-                    threshold=None,
-                    provider=provider_name,
-                    model=model_name,
-                    path_filter=args.path_filter,
-                    force_strategy=force_strategy,
+            # CLI-specific: When force_strategy is set for semantic search,
+            # call the service directly to pass the force_strategy parameter
+            if not embedding_manager or not embedding_manager.list_providers():
+                raise Exception(
+                    "No embedding providers available. "
+                    "Configure an embedding provider via:\n"
+                    "1. Create .chunkhound.json with embedding configuration, OR\n"
+                    "2. Set CHUNKHOUND_EMBEDDING__API_KEY environment variable"
                 )
-                result_dict = {"results": results, "pagination": pagination}
-            else:
-                # No force_strategy - use MCP's search_semantic_impl directly
-                result = await search_semantic_impl(
-                    services=services,
-                    embedding_manager=embedding_manager,
-                    query=args.query,
-                    page_size=args.page_size,
-                    offset=args.offset,
-                    path=args.path_filter,
+
+            # Get provider/model
+            provider_name = None
+            model_name = None
+            try:
+                default_provider_obj = embedding_manager.get_provider()
+                provider_name = default_provider_obj.name
+                model_name = default_provider_obj.model
+            except ValueError:
+                raise Exception(
+                    "No default embedding provider configured. "
+                    "Configure a default provider in config."
                 )
-                result_dict = cast(dict[str, Any], result)
+
+            # Call service directly with force_strategy
+            results, pagination = await services.search_service.search_semantic(
+                query=args.query,
+                page_size=args.page_size,
+                offset=args.offset,
+                threshold=None,
+                provider=provider_name,
+                model=model_name,
+                path_filter=args.path_filter,
+                force_strategy=force_strategy,
+            )
+            result_dict = {"results": results, "pagination": pagination}
 
         # Format and display results
         _format_search_results(formatter, result_dict, args.query, args.regex)

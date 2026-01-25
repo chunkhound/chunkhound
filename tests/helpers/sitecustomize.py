@@ -73,7 +73,28 @@ def _force_code_research_synthesis() -> None:
         pass
 
 
+def _patch_capability_checks() -> None:
+    """Stub capability checks to return True in test mode.
+
+    In synthesis test mode, we bypass embedding/reranker validation
+    because the stubbed implementation doesn't need real providers.
+    """
+    if os.getenv("CH_TEST_FORCE_SYNTHESIS") != "1":
+        return
+
+    try:
+        # Patch the tool registry entry to not require embeddings/reranker
+        from chunkhound.mcp_server.tools import TOOL_REGISTRY
+        if "code_research" in TOOL_REGISTRY:
+            tool = TOOL_REGISTRY["code_research"]
+            tool.requires_embeddings = False
+            tool.requires_reranker = False
+    except ImportError:
+        pass
+
+
 if os.getenv("CH_TEST_PATCH_CODEX") == "1":  # activate only for tests that request it
     _patch_codex_cli_provider()
     if os.getenv("CH_TEST_FORCE_SYNTHESIS") == "1":
         _force_code_research_synthesis()
+        _patch_capability_checks()

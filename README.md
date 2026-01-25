@@ -37,7 +37,7 @@ Your AI assistant searches code but doesn't understand it. ChunkHound researches
 ## Documentation
 
 **Visit [chunkhound.github.io](https://chunkhound.github.io) for complete guides:**
-- [Tutorial](https://chunkhound.github.io/tutorial/)
+- [Quickstart](https://chunkhound.github.io/quickstart/)
 - [Configuration Guide](https://chunkhound.github.io/configuration/)
 - [Architecture Deep Dive](https://chunkhound.github.io/under-the-hood/)
 
