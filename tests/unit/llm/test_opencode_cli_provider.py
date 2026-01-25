@@ -259,9 +259,14 @@ class TestOpenCodeCLIProvider:
             assert "run" in call_args
             assert "--model" in call_args
             assert "openai/gpt-5-nano" in call_args
-            assert "Test prompt" in call_args
+            # Prompt should be passed via stdin, not as a command argument
+            assert "Test prompt" not in call_args
             # Should NOT contain --format since we use default text format
             assert "--format" not in call_args
+
+            # Verify prompt was passed via stdin
+            communicate_call = mock_process.communicate.call_args
+            assert communicate_call[1]["input"] == b"Test prompt"
 
     @pytest.mark.asyncio
     async def test_run_cli_command_with_system(self):
@@ -276,17 +281,21 @@ class TestOpenCodeCLIProvider:
 
             await self.provider._run_cli_command("Test prompt", system="System message")
 
-            # Verify system prompt is concatenated with user prompt
+            # Verify system prompt is combined with user prompt and passed via stdin
             call_args = mock_subprocess.call_args[0]
             # Should NOT contain --system flag
             assert "--system" not in call_args
-            # Should contain the concatenated prompt
-            assert "System message\nTest prompt" in call_args
+            # Prompt should be passed via stdin, not as a command argument
+            assert "System message\nTest prompt" not in call_args
             # Verify basic command structure
             assert "opencode" in call_args
             assert "run" in call_args
             assert "--model" in call_args
             assert "openai/gpt-5-nano" in call_args
+
+            # Verify combined prompt was passed via stdin
+            communicate_call = mock_process.communicate.call_args
+            assert communicate_call[1]["input"] == b"System message\nTest prompt"
 
     @pytest.mark.asyncio
     async def test_run_cli_command_without_system(self):
@@ -301,13 +310,18 @@ class TestOpenCodeCLIProvider:
 
             await self.provider._run_cli_command("Test prompt")
 
-            # Verify only user prompt is included
+            # Verify only user prompt is passed via stdin
             call_args = mock_subprocess.call_args[0]
-            assert "Test prompt" in call_args
+            # Prompt should be passed via stdin, not as a command argument
+            assert "Test prompt" not in call_args
             # Should NOT contain system prompt
             assert "System message" not in call_args
             # Should NOT contain --system flag
             assert "--system" not in call_args
+
+            # Verify prompt was passed via stdin
+            communicate_call = mock_process.communicate.call_args
+            assert communicate_call[1]["input"] == b"Test prompt"
 
     @pytest.mark.asyncio
     async def test_run_cli_command_retry_on_failure(self):
