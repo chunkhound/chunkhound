@@ -6,16 +6,18 @@ from typing import Any, Protocol
 
 # Import and re-export exceptions for backward compatibility
 from chunkhound.core.exceptions.embedding import (
-    ConfigurationError,
+    ConfigurationError,  # Deprecated: use EmbeddingConfigurationError
     EmbeddingBatchError,
+    EmbeddingConfigurationError,
     EmbeddingDimensionError,
     EmbeddingError,
 )
 
 __all__ = [
-    "ConfigurationError",
+    "ConfigurationError",  # Deprecated: use EmbeddingConfigurationError
     "EmbeddingBatchError",
     "EmbeddingConfig",
+    "EmbeddingConfigurationError",
     "EmbeddingDimensionError",
     "EmbeddingError",
     "EmbeddingProvider",
@@ -85,6 +87,16 @@ class EmbeddingProvider(Protocol):
 
     def supports_matryoshka(self) -> bool:
         """True if model supports variable output dimensions."""
+        ...
+
+    @property
+    def output_dims(self) -> int | None:
+        """Configured output dimension override, or None for native."""
+        ...
+
+    @property
+    def client_side_truncation(self) -> bool:
+        """Whether client-side truncation is enabled."""
         ...
 
     @property

@@ -241,6 +241,16 @@ class FakeEmbeddingProvider:
         return False  # Fake provider doesn't have real matryoshka
 
     @property
+    def output_dims(self) -> int | None:
+        """Configured output dimension override, or None for native."""
+        return self._output_dims
+
+    @property
+    def client_side_truncation(self) -> bool:
+        """Whether client-side truncation is enabled."""
+        return False  # Fake provider doesn't need client-side truncation
+
+    @property
     def distance(self) -> str:
         """Distance metric."""
         return self._distance

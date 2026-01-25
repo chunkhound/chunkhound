@@ -16,12 +16,13 @@ from chunkhound.core.config.embedding_config import (
 )
 from chunkhound.core.exceptions.core import ValidationError
 from chunkhound.core.exceptions.embedding import (
-    ConfigurationError,
+    EmbeddingConfigurationError,
     EmbeddingDimensionError,
 )
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 
 from .batch_utils import handle_token_limit_error, with_openai_token_handling
+from .shared_utils import l2_normalize
 
 try:
     import openai
@@ -360,13 +361,13 @@ class OpenAIEmbeddingProvider:
                         break
             if model_cfg:
                 if not model_cfg.get("matryoshka", False):
-                    raise ConfigurationError(
+                    raise EmbeddingConfigurationError(
                         f"Model {model} does not support matryoshka dimensions"
                     )
                 min_dims = cast(int, model_cfg.get("min_dims", 1))
                 native_dims = cast(int, model_cfg.get("native_dims", model_cfg.get("dims", 1536)))
                 if not (min_dims <= output_dims <= native_dims):
-                    raise ConfigurationError(
+                    raise EmbeddingConfigurationError(
                         f"output_dims {output_dims} out of range "
                         f"[{min_dims}, {native_dims}] for {model}"
                     )
@@ -548,13 +549,15 @@ class OpenAIEmbeddingProvider:
         model_cfg = self._get_model_config()
         return bool(model_cfg.get("matryoshka", False)) if model_cfg else False
 
-    @staticmethod
-    def _l2_normalize(vector: list[float]) -> list[float]:
-        """L2-normalize vector to unit length for cosine similarity."""
-        magnitude = sum(x * x for x in vector) ** 0.5
-        if magnitude > 0:
-            return [x / magnitude for x in vector]
-        return vector
+    @property
+    def output_dims(self) -> int | None:
+        """Configured output dimension override, or None for native."""
+        return self._output_dims
+
+    @property
+    def client_side_truncation(self) -> bool:
+        """Whether client-side truncation is enabled."""
+        return self._client_side_truncation
 
     @property
     def distance(self) -> str:
@@ -823,7 +826,7 @@ class OpenAIEmbeddingProvider:
                     embedding = data.embedding
                     # Client-side truncation + L2 normalize
                     if self._client_side_truncation and self._output_dims is not None:
-                        embedding = self._l2_normalize(embedding[: self._output_dims])
+                        embedding = l2_normalize(embedding[: self._output_dims])
                     embeddings.append(embedding)
 
                 # Validate embedding dimensions match expected dims (INV-1)
@@ -961,7 +964,7 @@ class OpenAIEmbeddingProvider:
             embedding = data.embedding
             # Client-side truncation + L2 normalize
             if self._client_side_truncation and self._output_dims is not None:
-                embedding = self._l2_normalize(embedding[: self._output_dims])
+                embedding = l2_normalize(embedding[: self._output_dims])
             embeddings.append(embedding)
 
         # Update usage statistics

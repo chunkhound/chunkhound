@@ -8,7 +8,7 @@ from loguru import logger
 
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERANK_MODEL
 from chunkhound.core.exceptions.embedding import (
-    ConfigurationError,
+    EmbeddingConfigurationError,
     EmbeddingDimensionError,
 )
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
@@ -188,7 +188,7 @@ class VoyageAIEmbeddingProvider:
             default_dim = cast(int, model_config["default_dimension"])
             supported = cast(list[int], model_config.get("dimensions", [default_dim]))
             if output_dims not in supported:
-                raise ConfigurationError(
+                raise EmbeddingConfigurationError(
                     f"output_dims {output_dims} not in supported dimensions "
                     f"{supported} for model {model}"
                 )
@@ -239,6 +239,16 @@ class VoyageAIEmbeddingProvider:
         """True if model supports variable output dimensions."""
         dims = cast(list[int], self._model_config.get("dimensions", []))
         return len(dims) > 1
+
+    @property
+    def output_dims(self) -> int | None:
+        """Configured output dimension override, or None for native."""
+        return self._output_dims
+
+    @property
+    def client_side_truncation(self) -> bool:
+        """Whether client-side truncation is enabled."""
+        return False  # VoyageAI uses server-side dimension control
 
     @property
     def distance(self) -> str:
