@@ -1752,22 +1752,23 @@ class DuckDBProvider(SerialDatabaseProvider):
                 provider = dim_embeddings[0]["provider"]
                 model = dim_embeddings[0]["model"]
 
-                # Get IDs of just-inserted embeddings
+                # Get IDs of just-inserted embeddings by chunk_id (robust approach)
+                # This avoids dependency on insertion order which isn't guaranteed
+                chunk_ids = [emb["chunk_id"] for emb in dim_embeddings]
+                chunk_placeholders = ",".join(["?"] * len(chunk_ids))
+
                 emb_ids_result = conn.execute(
                     f"""
-                    SELECT id FROM {table_name}
-                    WHERE provider = ? AND model = ?
-                    ORDER BY id DESC
-                    LIMIT ?
+                    SELECT id, embedding FROM {table_name}
+                    WHERE chunk_id IN ({chunk_placeholders})
+                    AND provider = ? AND model = ?
                 """,
-                    [provider, model, len(dim_embeddings)],
+                    chunk_ids + [provider, model],
                 ).fetchall()
 
-                # Query returns DESC (newest first), reverse to match dim_embeddings order
-                emb_ids = [row[0] for row in reversed(emb_ids_result)]
                 emb_dicts = [
-                    {"id": emb_id, "embedding": emb["embedding"]}
-                    for emb_id, emb in zip(emb_ids, dim_embeddings)
+                    {"id": row[0], "embedding": list(row[1])}
+                    for row in emb_ids_result
                 ]
 
                 # ShardManager assigns shard_id and creates shard record if needed
