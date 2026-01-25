@@ -7,7 +7,6 @@ chain works as expected: CLI > env vars > .env file > config file > defaults
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
