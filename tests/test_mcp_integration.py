@@ -17,7 +17,7 @@ from chunkhound.services.realtime_indexing_service import RealtimeIndexingServic
 from chunkhound.mcp_server.tools import execute_tool
 from chunkhound.embeddings import EmbeddingManager
 from .test_utils import get_api_key_for_tests
-from tests.utils.windows_compat import get_fs_event_timeout
+from tests.utils.windows_compat import get_fs_event_timeout, is_windows, is_ci
 
 
 class TestMCPIntegration:
@@ -79,7 +79,9 @@ class TestMCPIntegration:
 
 
         # Initialize realtime indexing service (what MCP server should do)
-        realtime_service = RealtimeIndexingService(services, config)
+        # Use polling mode on Windows CI where watchdog is unreliable
+        force_polling = is_windows() and is_ci()
+        realtime_service = RealtimeIndexingService(services, config, force_polling=force_polling)
         await realtime_service.start(watch_dir)
         
         yield services, realtime_service, watch_dir, temp_dir, embedding_manager
