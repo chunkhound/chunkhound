@@ -4760,7 +4760,7 @@ class TestSearchConsistencyAcrossStructuralOpsExternal(ExternalAPITestBase):
             # Phase 1: Insert 50 vectors (below split threshold)
             file_id = self.create_test_file(provider)
             chunk_ids_50 = self.create_test_chunks(provider, file_id, 50, start_id=0)
-            vectors_50 = [generator.generate_hash_seeded(f"doc_{i}") for i in range(50)]
+            vectors_50 = generator.generate_orthogonal(50)
             self.insert_embeddings_via_api(
                 provider, chunk_ids_50, vectors_50, self.TEST_DIMS
             )
