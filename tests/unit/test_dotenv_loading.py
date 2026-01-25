@@ -136,7 +136,7 @@ def test_cli_args_override_dotenv_and_env_vars(
     # Set environment variable
     os.environ["CHUNKHOUND_EMBEDDING__API_KEY"] = "sk-test-from-env-var"
 
-    # Create mock CLI args
+    # Create mock CLI args with api_key set (simulating actual CLI --api-key argument)
     from argparse import Namespace
 
     args = Namespace(
@@ -144,10 +144,11 @@ def test_cli_args_override_dotenv_and_env_vars(
         path=str(temp_project_dir),
         config=None,
         debug=False,
+        api_key="sk-test-from-cli",  # CLI argument
     )
 
-    # Override via kwargs (simulating CLI args for embedding config)
-    config = Config(args=args, embedding={"api_key": "sk-test-from-cli"})
+    # Create config with CLI args
+    config = Config(args=args)
 
     # Verify CLI took precedence
     assert config.embedding is not None
@@ -293,8 +294,10 @@ def test_dotenv_not_loaded_from_other_directories(
     config = Config(target_dir=temp_project_dir)
 
     # Verify .env from subdirectory was NOT loaded
-    if config.embedding:
-        assert config.embedding.api_key != "sk-should-not-load"
+    # Since no .env exists in target_dir and no env vars are set, embedding should be None
+    assert config.embedding is None, (
+        "Embedding config should be None when no .env exists in target directory"
+    )
 
 
 def test_dotenv_rerank_config(temp_project_dir: Path, clean_env: None) -> None:

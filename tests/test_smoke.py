@@ -480,7 +480,7 @@ class TestConfigurationSmoke:
         )
         assert config_auto.rerank_format == "auto"
 
-    def test_dotenv_file_loading(self):
+    def test_dotenv_file_loading(self, clean_environment):
         """Verify .env file loading doesn't break config initialization.
 
         This test ensures that dotenv support is properly integrated and
