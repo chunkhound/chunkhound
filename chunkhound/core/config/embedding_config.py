@@ -15,7 +15,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import Self
 
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
-from chunkhound.core.exceptions.embedding import ConfigurationError
+from chunkhound.core.exceptions.embedding import EmbeddingConfigurationError
 
 from .openai_utils import is_official_openai_endpoint
 
@@ -258,7 +258,7 @@ class EmbeddingConfig(BaseSettings):
             and self.base_url is None  # Skip for custom endpoints
         ):
             if self.rerank_model not in VOYAGEAI_RERANKER_WHITELIST:
-                raise ConfigurationError(
+                raise EmbeddingConfigurationError(
                     f"Unknown reranker model '{self.rerank_model}' for VoyageAI. "
                     f"Valid reranker models: {sorted(VOYAGEAI_RERANKER_WHITELIST)}"
                 )
@@ -276,13 +276,13 @@ class EmbeddingConfig(BaseSettings):
 
         if self.provider == "openai":
             if model not in OPENAI_MODEL_WHITELIST:
-                raise ConfigurationError(
+                raise EmbeddingConfigurationError(
                     f"Unknown model '{model}' for OpenAI. "
                     f"Valid models: {sorted(OPENAI_MODEL_WHITELIST)}"
                 )
         elif self.provider == "voyageai":
             if model not in VOYAGEAI_MODEL_WHITELIST:
-                raise ConfigurationError(
+                raise EmbeddingConfigurationError(
                     f"Unknown model '{model}' for VoyageAI. "
                     f"Valid models: {sorted(VOYAGEAI_MODEL_WHITELIST)}"
                 )

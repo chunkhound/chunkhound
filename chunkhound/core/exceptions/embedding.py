@@ -5,7 +5,7 @@ tracking. These are lightweight exceptions for configuration and dimension valid
 at the embedding provider interface level.
 
 Note: EmbeddingProviderError is the base to avoid collision with core.EmbeddingError.
-ConfigurationError here is specific to embedding config, distinct from
+EmbeddingConfigurationError is specific to embedding config, distinct from
 core.ConfigurationError.
 """
 
@@ -38,7 +38,7 @@ class EmbeddingBatchError(EmbeddingProviderError):
     pass
 
 
-class ConfigurationError(EmbeddingProviderError):
+class EmbeddingConfigurationError(EmbeddingProviderError):
     """Raised for embedding configuration errors.
 
     This occurs when:
@@ -50,5 +50,7 @@ class ConfigurationError(EmbeddingProviderError):
     pass
 
 
-# Backward compatibility alias
+# Backward compatibility aliases
 EmbeddingError = EmbeddingProviderError
+# Deprecated: use EmbeddingConfigurationError
+ConfigurationError = EmbeddingConfigurationError
