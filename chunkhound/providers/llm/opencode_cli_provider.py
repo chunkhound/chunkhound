@@ -114,7 +114,7 @@ class OpenCodeCLIProvider(BaseCLIProvider):
         # Combine system prompt and user prompt
         full_prompt = f"{system}\n{prompt}" if system else prompt
 
-        # Write prompt to temp file and pass via stdin to avoid Windows command line
+        # Encode prompt to bytes and pass via stdin to avoid Windows command line
         # length limits (~8191 chars). opencode-cli run reads from stdin when no
         # positional args are provided.
         prompt_bytes = full_prompt.encode("utf-8")
