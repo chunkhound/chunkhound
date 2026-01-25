@@ -359,8 +359,8 @@ class ProviderRegistry:
             logger.debug(
                 f"[REGISTRY] Created embedding provider: "
                 f"dims={provider.dims}, "
-                f"output_dims={getattr(provider, '_output_dims', None)}, "
-                f"client_side_truncation={getattr(provider, '_client_side_truncation', False)}"
+                f"output_dims={provider.output_dims}, "
+                f"client_side_truncation={provider.client_side_truncation}"
             )
 
             # Register provider with the manager (enables dimension detection)

@@ -73,8 +73,8 @@ class SingleHopStrategy:
         if actual_dims != expected_dims:
             logger.error(
                 f"Query embedding dimension mismatch: got {actual_dims}, expected {expected_dims}. "
-                f"Provider: output_dims={getattr(self._embedding_provider, '_output_dims', None)}, "
-                f"client_side_truncation={getattr(self._embedding_provider, '_client_side_truncation', False)}. "
+                f"Provider: output_dims={self._embedding_provider.output_dims}, "
+                f"client_side_truncation={self._embedding_provider.client_side_truncation}. "
                 f"This indicates client-side truncation is not being applied."
             )
 

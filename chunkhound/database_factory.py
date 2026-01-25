@@ -138,8 +138,8 @@ def create_services(
             logger.debug(
                 f"[create_services] Registered embedding provider from manager: "
                 f"dims={emb_provider.dims}, "
-                f"output_dims={getattr(emb_provider, '_output_dims', None)}, "
-                f"client_side_truncation={getattr(emb_provider, '_client_side_truncation', False)}"
+                f"output_dims={emb_provider.output_dims}, "
+                f"client_side_truncation={emb_provider.client_side_truncation}"
             )
         else:
             logger.debug(
