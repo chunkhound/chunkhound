@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -18,12 +18,15 @@ from .shared_utils import (
     validate_text_input,
 )
 
-try:
+if TYPE_CHECKING:
     from mistralai import Mistral
+
+try:
+    from mistralai import Mistral as MistralClient
 
     MISTRAL_AVAILABLE = True
 except ImportError:
-    Mistral = None  # type: ignore
+    MistralClient = None  # type: ignore
     MISTRAL_AVAILABLE = False
     logger.warning("Mistral SDK not available - install with: uv pip install mistralai")
 
@@ -129,7 +132,7 @@ class MistralEmbeddingProvider:
                 )
 
         # Initialize client lazily to handle async context properly
-        self._client: Mistral | None = None
+        self._client: Any = None
         self._client_initialized = False
 
         # Model dimension mapping (explicitly int values)
@@ -148,7 +151,7 @@ class MistralEmbeddingProvider:
         if self._client is not None and self._client_initialized:
             return
 
-        if not MISTRAL_AVAILABLE or Mistral is None:
+        if not MISTRAL_AVAILABLE or MistralClient is None:
             raise RuntimeError(
                 "Mistral SDK is not available. Install with: uv pip install mistralai"
             )
@@ -159,7 +162,7 @@ class MistralEmbeddingProvider:
                 "Set MISTRAL_API_KEY environment variable or pass api_key parameter."
             )
 
-        self._client = Mistral(api_key=self._api_key)
+        self._client = MistralClient(api_key=self._api_key)
         self._client_initialized = True
 
     @property
@@ -345,8 +348,11 @@ class MistralEmbeddingProvider:
                 if self._output_dimension is not None:
                     kwargs["output_dimension"] = self._output_dimension
 
-                # Call Mistral embeddings API
-                response = self._client.embeddings.create(**kwargs)
+                # Call Mistral embeddings API in a worker thread to avoid blocking the event loop
+                response = await asyncio.to_thread(
+                    self._client.embeddings.create,
+                    **kwargs,
+                )
 
                 # Extract embeddings from response
                 embeddings: list[list[float]] = []
@@ -474,6 +480,17 @@ class MistralEmbeddingProvider:
         """Update provider configuration."""
         if "model" in kwargs:
             self._model = kwargs["model"]
+            # Update model configuration to stay in sync with the selected model
+            self._model_config = MISTRAL_MODEL_CONFIG.get(
+                self._model,
+                {
+                    "max_tokens_per_batch": 100000,
+                    "max_texts_per_batch": 1000,
+                    "context_length": 8192,
+                    "default_dimension": 1536,
+                    "max_dimension": 3072,
+                },
+            )
         if "batch_size" in kwargs:
             self._batch_size = kwargs["batch_size"]
         if "timeout" in kwargs:
@@ -485,7 +502,15 @@ class MistralEmbeddingProvider:
         if "max_tokens" in kwargs:
             self._max_tokens = kwargs["max_tokens"]
         if "output_dimension" in kwargs:
-            self._output_dimension = kwargs["output_dimension"]
+            output_dimension = kwargs["output_dimension"]
+            if output_dimension is not None:
+                max_dim = self._model_config.get("max_dimension", 3072)
+                if output_dimension < 1 or output_dimension > max_dim:
+                    raise ValueError(
+                        f"output_dimension must be between 1 and {max_dim} for {self._model}, "
+                        f"got {output_dimension}"
+                    )
+            self._output_dimension = output_dimension
         if "api_key" in kwargs:
             self._api_key = kwargs["api_key"]
             # Reset client to force re-initialization with new API key

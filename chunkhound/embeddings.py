@@ -221,7 +221,7 @@ def create_openai_provider(
 def create_mistral_provider(
     api_key: str | None = None,
     model: str = "codestral-embed",
-    batch_size: int = 100,
+    batch_size: int = 32,
     timeout: int = 30,
     retry_attempts: int = 3,
     output_dimension: int | None = None,

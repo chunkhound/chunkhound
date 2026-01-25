@@ -554,6 +554,7 @@ def _filter_embedding_models(models: list[str]) -> tuple[list[str], list[str]]:
     non_embedding_keywords = [
         "gpt",
         "llama",
+        "mistral",  # LLM models like mistral-large, mistral-tiny (embedding is codestral-embed)
         "phi",
         "codellama",
         "vicuna",
