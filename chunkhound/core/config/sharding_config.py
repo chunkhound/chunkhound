@@ -199,6 +199,11 @@ class ShardingConfig(BaseModel):
         description="Enable non-blocking background shard rebuilds",
     )
 
+    kmeans_random_state: int | None = Field(
+        default=None,
+        description="KMeans random state (None=non-deterministic, int=reproducible)",
+    )
+
     def __repr__(self) -> str:
         """String representation of sharding configuration."""
         return (

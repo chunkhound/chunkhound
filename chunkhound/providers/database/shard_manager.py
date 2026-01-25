@@ -1293,7 +1293,11 @@ class ShardManager:
         vectors_array = np.array(
             [preloaded_vectors[id] for id in sample_ids], dtype=np.float32
         )
-        kmeans = KMeans(n_clusters=actual_clusters, n_init="auto")
+        kmeans = KMeans(
+            n_clusters=actual_clusters,
+            n_init="auto",
+            random_state=self.config.kmeans_random_state,
+        )
         kmeans.fit(vectors_array)
         centroids = kmeans.cluster_centers_
 
