@@ -10,7 +10,7 @@ Covers:
 import pytest
 
 from chunkhound.core.config.embedding_config import EmbeddingConfig
-from chunkhound.interfaces.embedding_provider import ConfigurationError
+from chunkhound.interfaces.embedding_provider import EmbeddingConfigurationError
 from tests.fixtures.fake_providers import FakeEmbeddingProvider
 
 
@@ -109,13 +109,13 @@ class TestModelWhitelist:
         assert config.model == "custom-model"
 
     def test_unknown_openai_model_raises_error(self):
-        """Unknown OpenAI model on official API raises ConfigurationError."""
-        with pytest.raises(ConfigurationError, match="Unknown model"):
+        """Unknown OpenAI model on official API raises EmbeddingConfigurationError."""
+        with pytest.raises(EmbeddingConfigurationError, match="Unknown model"):
             EmbeddingConfig(provider="openai", model="invalid-model")
 
     def test_unknown_voyageai_model_raises_error(self):
-        """Unknown VoyageAI model on official API raises ConfigurationError."""
-        with pytest.raises(ConfigurationError, match="Unknown model"):
+        """Unknown VoyageAI model on official API raises EmbeddingConfigurationError."""
+        with pytest.raises(EmbeddingConfigurationError, match="Unknown model"):
             EmbeddingConfig(provider="voyageai", model="invalid-model")
 
 
@@ -165,18 +165,18 @@ class TestOpenAIProviderMatryoshka:
             OpenAIEmbeddingProvider,
         )
 
-        with pytest.raises(ConfigurationError, match="does not support"):
+        with pytest.raises(EmbeddingConfigurationError, match="does not support"):
             OpenAIEmbeddingProvider(
                 api_key="test-key", model="text-embedding-ada-002", output_dims=512
             )
 
     def test_output_dims_out_of_range_raises_error(self):
-        """output_dims outside valid range raises ConfigurationError."""
+        """output_dims outside valid range raises EmbeddingConfigurationError."""
         from chunkhound.providers.embeddings.openai_provider import (
             OpenAIEmbeddingProvider,
         )
 
-        with pytest.raises(ConfigurationError, match="out of range"):
+        with pytest.raises(EmbeddingConfigurationError, match="out of range"):
             OpenAIEmbeddingProvider(
                 api_key="test-key",
                 model="text-embedding-3-small",
@@ -244,7 +244,7 @@ class TestVoyageAIProviderMatryoshka:
             VoyageAIEmbeddingProvider,
         )
 
-        with pytest.raises(ConfigurationError, match="not in supported dimensions"):
+        with pytest.raises(EmbeddingConfigurationError, match="not in supported dimensions"):
             VoyageAIEmbeddingProvider(
                 api_key="test-key",
                 model="voyage-3.5",
@@ -386,8 +386,8 @@ class TestRerankerWhitelist:
         assert config.rerank_model == "rerank-2.5-lite"
 
     def test_unknown_voyageai_reranker_raises_error(self):
-        """Unknown VoyageAI reranker raises ConfigurationError."""
-        with pytest.raises(ConfigurationError, match="Unknown reranker model"):
+        """Unknown VoyageAI reranker raises EmbeddingConfigurationError."""
+        with pytest.raises(EmbeddingConfigurationError, match="Unknown reranker model"):
             EmbeddingConfig(
                 provider="voyageai", model="voyage-3.5", rerank_model="invalid-reranker"
             )
@@ -483,33 +483,27 @@ class TestClientSideTruncation:
 
     def test_l2_normalize_unit_length(self):
         """L2 normalize produces unit-length vectors."""
-        from chunkhound.providers.embeddings.openai_provider import (
-            OpenAIEmbeddingProvider,
-        )
+        from chunkhound.providers.embeddings.shared_utils import l2_normalize
 
         # 3-4-5 right triangle: magnitude = 5
-        normalized = OpenAIEmbeddingProvider._l2_normalize([3.0, 4.0])
+        normalized = l2_normalize([3.0, 4.0])
         # Check it's unit length
         magnitude = sum(x * x for x in normalized) ** 0.5
         assert abs(magnitude - 1.0) < 1e-9
 
     def test_l2_normalize_zero_vector(self):
         """L2 normalize handles zero vector gracefully."""
-        from chunkhound.providers.embeddings.openai_provider import (
-            OpenAIEmbeddingProvider,
-        )
+        from chunkhound.providers.embeddings.shared_utils import l2_normalize
 
-        normalized = OpenAIEmbeddingProvider._l2_normalize([0.0, 0.0, 0.0])
+        normalized = l2_normalize([0.0, 0.0, 0.0])
         assert normalized == [0.0, 0.0, 0.0]
 
     def test_l2_normalize_already_unit(self):
         """L2 normalize preserves already-normalized vectors."""
-        from chunkhound.providers.embeddings.openai_provider import (
-            OpenAIEmbeddingProvider,
-        )
+        from chunkhound.providers.embeddings.shared_utils import l2_normalize
 
         # Already unit length
-        normalized = OpenAIEmbeddingProvider._l2_normalize([1.0, 0.0])
+        normalized = l2_normalize([1.0, 0.0])
         assert abs(normalized[0] - 1.0) < 1e-9
         assert abs(normalized[1] - 0.0) < 1e-9
 
