@@ -115,21 +115,17 @@ def orphan_test():
     chunk_result = db.execute_query(chunks_query)
     chunk_count = list(chunk_result[0].values())[0] if chunk_result else 0
     
-    # Get embedding count (dynamically discover embeddings table)
+    # Get embedding count using the correct table based on provider dimensions
     try:
-        # Discover which embeddings table exists (embeddings_768, embeddings_1024, embeddings_1536, etc.)
-        tables_query = "SHOW TABLES"
-        tables_result = db.execute_query(tables_query)
-        embedding_table = None
+        # Get the embedding provider's dimensions to determine the correct table.
+        # Note: Accessing _embedding_provider is acceptable in tests to verify
+        # internal consistency without adding test-only public API surface.
+        embedding_provider = services.embedding_service._embedding_provider
+        if not embedding_provider:
+            pytest.skip("No embedding provider configured")
 
-        for row in tables_result:
-            table_name = row.get('name') or list(row.values())[0]
-            if table_name.startswith('embeddings_'):
-                embedding_table = table_name
-                break
-
-        if not embedding_table:
-            pytest.skip("No embeddings table found - embeddings may not be enabled")
+        dims = embedding_provider.dims
+        embedding_table = f"embeddings_{dims}"
 
         # Get embedding count from discovered table
         embeddings_query = f"SELECT COUNT(*) FROM {embedding_table}"
