@@ -63,7 +63,7 @@ def get_embedding_config_for_tests() -> dict | None:
         config_dict = get_embedding_config_for_tests()
         embedding_config = build_embedding_config_from_dict(config_dict)
     """
-    config = {}
+    config: dict[str, str | int] = {}
 
     # Priority 1: Environment variables
     api_key = os.environ.get("CHUNKHOUND_EMBEDDING__API_KEY")
@@ -114,7 +114,10 @@ def get_embedding_config_for_tests() -> dict | None:
             if "rerank_format" not in config and (rerank_format := embedding_config.get("rerank_format")):
                 config["rerank_format"] = rerank_format
             if "rerank_batch_size" not in config and (rerank_batch_size := embedding_config.get("rerank_batch_size")):
-                config["rerank_batch_size"] = rerank_batch_size
+                try:
+                    config["rerank_batch_size"] = int(rerank_batch_size)
+                except ValueError:
+                    pass
 
         except (json.JSONDecodeError, FileNotFoundError, KeyError):
             pass
