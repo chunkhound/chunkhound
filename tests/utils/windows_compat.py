@@ -244,3 +244,47 @@ def wait_for_indexed_sync(
         time.sleep(poll_interval)
 
     return False
+
+
+async def wait_for_searchable(
+    services,
+    query: str,
+    search_type: str = "regex",
+    timeout: float | None = None,
+    poll_interval: float = 0.5
+) -> bool:
+    """Wait for content to be searchable in the index.
+
+    Polls search results instead of relying on queue state,
+    handling the polling monitor timing gap on Windows CI.
+
+    Args:
+        services: The services object with provider access
+        query: Search query to poll for
+        search_type: "regex" or "semantic"
+        timeout: Max wait time (defaults to platform-appropriate value)
+        poll_interval: Time between search polls
+
+    Returns:
+        True if content became searchable, False on timeout
+    """
+    import asyncio
+    from chunkhound.mcp_server.tools import execute_tool
+
+    if timeout is None:
+        timeout = get_fs_event_timeout()
+
+    deadline = time.monotonic() + timeout
+
+    while time.monotonic() < deadline:
+        results = await execute_tool("search", services, None, {
+            "type": search_type,
+            "query": query,
+            "page_size": 10,
+            "offset": 0
+        })
+        if len(results.get('results', [])) > 0:
+            return True
+        await asyncio.sleep(poll_interval)
+
+    return False
