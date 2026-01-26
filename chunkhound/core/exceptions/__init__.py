@@ -22,6 +22,12 @@ from chunkhound.core.exceptions.core import (
     ProviderError,
     ValidationError,
 )
+from chunkhound.core.exceptions.embedding import (
+    EmbeddingProviderError,
+    EmbeddingBatchError,
+    EmbeddingConfigurationError,
+    EmbeddingDimensionError,
+)
 
 __all__ = [
     # Base exception
@@ -35,4 +41,9 @@ __all__ = [
     "ConfigurationError",
     "DiskUsageLimitExceededError",
     "ProviderError",
+    # Embedding provider exceptions
+    "EmbeddingProviderError",
+    "EmbeddingBatchError",
+    "EmbeddingConfigurationError",
+    "EmbeddingDimensionError",
 ]

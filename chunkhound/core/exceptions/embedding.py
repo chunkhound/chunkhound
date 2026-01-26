@@ -1,17 +1,22 @@
-"""Embedding interface exceptions - simple exceptions for protocol-level errors.
+"""Embedding provider exceptions for protocol-level errors.
 
-These exceptions are distinct from core.EmbeddingError which provides rich context
-tracking. These are lightweight exceptions for configuration and dimension validation
-at the embedding provider interface level.
+These exceptions extend ChunkHoundError for consistent error handling with
+context tracking. They are specific to embedding provider operations:
+dimension validation, batch processing, and matryoshka configuration.
 
-Note: EmbeddingProviderError is the base to avoid collision with core.EmbeddingError.
-EmbeddingConfigurationError is specific to embedding config, distinct from
-core.ConfigurationError.
+Note: EmbeddingProviderError is distinct from core.EmbeddingError which
+covers higher-level embedding operations (generate, store, retrieve).
 """
 
+from chunkhound.core.exceptions.core import ChunkHoundError
 
-class EmbeddingProviderError(Exception):
-    """Base exception for embedding provider errors."""
+
+class EmbeddingProviderError(ChunkHoundError):
+    """Base exception for embedding provider errors.
+
+    Inherits from ChunkHoundError for consistent error handling with
+    context tracking and structured error messages.
+    """
 
     pass
 
@@ -48,9 +53,3 @@ class EmbeddingConfigurationError(EmbeddingProviderError):
     """
 
     pass
-
-
-# Backward compatibility aliases
-EmbeddingError = EmbeddingProviderError
-# Deprecated: use EmbeddingConfigurationError
-ConfigurationError = EmbeddingConfigurationError

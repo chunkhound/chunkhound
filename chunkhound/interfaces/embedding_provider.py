@@ -4,23 +4,21 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-# Import and re-export exceptions for backward compatibility
+# Import and re-export exceptions for convenience
 from chunkhound.core.exceptions.embedding import (
-    ConfigurationError,  # Deprecated: use EmbeddingConfigurationError
     EmbeddingBatchError,
     EmbeddingConfigurationError,
     EmbeddingDimensionError,
-    EmbeddingError,
+    EmbeddingProviderError,
 )
 
 __all__ = [
-    "ConfigurationError",  # Deprecated: use EmbeddingConfigurationError
     "EmbeddingBatchError",
     "EmbeddingConfig",
     "EmbeddingConfigurationError",
     "EmbeddingDimensionError",
-    "EmbeddingError",
     "EmbeddingProvider",
+    "EmbeddingProviderError",
     "RerankResult",
 ]
 
