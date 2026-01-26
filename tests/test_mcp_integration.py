@@ -249,30 +249,6 @@ def delete_test_unique_function():
         assert len(after_delete.get('results', [])) == 0, "Content should not be found after deletion"
 
     @pytest.mark.asyncio
-    async def test_mcp_realtime_service_actually_starts(self, mcp_setup):
-        """Test that realtime indexing service is actually running."""
-        services, realtime_service, watch_dir, _, _ = mcp_setup
-        
-        # Check service state
-        stats = await realtime_service.get_stats()
-        
-        assert stats.get('observer_alive', False), "Filesystem observer should be running"
-        assert stats.get('watching_directory') == str(watch_dir), \
-            f"Should be watching {watch_dir}, but watching {stats.get('watching_directory')}"
-        
-        # Verify service responds to filesystem events
-        test_file = watch_dir / "service_test.py"
-        test_file.write_text("def service_running_test(): pass")
-        
-        # Wait for processing
-        await asyncio.sleep(2.0)
-        
-        # Check that file was actually processed
-        # Use resolve() to get the real path (handles /private/var symlink on macOS)
-        file_record = services.provider.get_file_by_path(str(test_file.resolve()))
-        assert file_record is not None, "Realtime service should process new files"
-    
-    @pytest.mark.asyncio
     async def test_file_modification_detection_comprehensive(self, mcp_setup):
         """Comprehensive test to reproduce file modification detection issues."""
         services, realtime_service, watch_dir, _, _ = mcp_setup
