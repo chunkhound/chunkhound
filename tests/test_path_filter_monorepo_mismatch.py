@@ -22,7 +22,7 @@ from chunkhound.services.indexing_coordinator import IndexingCoordinator
 from chunkhound.services.search_service import SearchService
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.parser_factory import create_parser_for_language
-from tests.fixtures.fake_providers import FakeEmbeddingProvider
+from tests.fixtures.fake_providers import ConstantEmbeddingProvider
 
 
 @pytest.mark.asyncio
@@ -49,43 +49,50 @@ async def test_semantic_search_respects_repo_relative_path_filter(tmp_path: Path
 
     # Database is rooted at the workspace (one level above the repo),
     # so indexed paths will be stored as "orion-suite/services/engine/src/EngineModule.py"
-    db = DuckDBProvider(":memory:", base_directory=workspace_dir)
+    # Use file-based database (not :memory:) because semantic search requires ShardManager
+    db_path = workspace_dir / "test.db"
+    db = DuckDBProvider(str(db_path), base_directory=workspace_dir)
     db.connect()
 
-    embedding_provider = FakeEmbeddingProvider()
-    parser = create_parser_for_language(Language.PYTHON)
-    coordinator = IndexingCoordinator(
-        db,
-        workspace_dir,
-        embedding_provider,
-        {Language.PYTHON: parser},
-    )
+    try:
+        # Use ConstantEmbeddingProvider so any query matches any stored chunk,
+        # isolating this test to focus on path filtering logic
+        embedding_provider = ConstantEmbeddingProvider()
+        parser = create_parser_for_language(Language.PYTHON)
+        coordinator = IndexingCoordinator(
+            db,
+            workspace_dir,
+            embedding_provider,
+            {Language.PYTHON: parser},
+        )
 
-    # Index the engine file
-    await coordinator.process_file(engine_file)
+        # Index the engine file
+        await coordinator.process_file(engine_file)
 
-    # Sanity check: unscoped semantic search should find the function
-    search_service = SearchService(db, embedding_provider)
-    unscoped_results, _ = await search_service.search_semantic(
-        query="orion_engine_flag",
-        page_size=10,
-        offset=0,
-        path_filter=None,
-        force_strategy="single_hop",
-    )
-    assert unscoped_results, "Unscoped semantic search should return results"
+        # Sanity check: unscoped semantic search should find the function
+        search_service = SearchService(db, embedding_provider)
+        unscoped_results, _ = await search_service.search_semantic(
+            query="any query matches with constant embeddings",
+            page_size=10,
+            offset=0,
+            path_filter=None,
+            force_strategy="single_hop",
+        )
+        assert unscoped_results, "Unscoped semantic search should return results"
 
-    # Now use a repo-relative path_filter that omits the leading 'orion-suite/' prefix
-    scoped_results, _ = await search_service.search_semantic(
-        query="orion_engine_flag",
-        page_size=10,
-        offset=0,
-        path_filter="services/engine",
-        force_strategy="single_hop",
-    )
+        # Now use a repo-relative path_filter that omits the leading 'orion-suite/' prefix
+        scoped_results, _ = await search_service.search_semantic(
+            query="any query matches with constant embeddings",
+            page_size=10,
+            offset=0,
+            path_filter="services/engine",
+            force_strategy="single_hop",
+        )
 
-    assert scoped_results, "Scoped semantic search with repo-relative path_filter should return results"
-    for result in scoped_results:
-        file_path = result.get("file_path", "")
-        assert "services/engine" in file_path, f"Result {file_path} should be under services/engine"
+        assert scoped_results, "Scoped semantic search with repo-relative path_filter should return results"
+        for result in scoped_results:
+            file_path = result.get("file_path", "")
+            assert "services/engine" in file_path, f"Result {file_path} should be under services/engine"
+    finally:
+        db.disconnect()
 

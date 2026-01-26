@@ -49,6 +49,34 @@ class DatabaseConfig(BaseModel):
         description="Maximum database size in MB before indexing is stopped (None = no limit)",
     )
 
+    # Compaction settings
+    compaction_enabled: bool = Field(
+        default=True,
+        description="Enable automatic compaction when fragmentation exceeds threshold",
+    )
+
+    compaction_threshold: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Fragmentation ratio that triggers compaction",
+    )
+
+    compaction_min_size_mb: int = Field(
+        default=100,
+        ge=0,
+        description="Minimum reclaimable space in MB to trigger compaction",
+    )
+
+    duckdb_memory_limit: str = Field(
+        default="1GB",
+        description=(
+            "DuckDB buffer pool memory limit (e.g., '1GB', '2GB'). "
+            "Default is 1GB, suitable for MCP server with multiple instances. "
+            "Increase for large codebases."
+        ),
+    )
+
     @field_validator("path")
     def validate_path(cls, v: Path | None) -> Path | None:
         """Convert string paths to Path objects."""

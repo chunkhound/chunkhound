@@ -1,6 +1,7 @@
 """Windows compatibility utilities for tests."""
 
 import gc
+import os
 import tempfile
 import time
 from contextlib import contextmanager
@@ -155,7 +156,7 @@ def wait_for_file_release(file_path: Path, max_attempts: int = 10) -> bool:
 
 def force_close_database_files(db_path: Path) -> None:
     """Force close database files on Windows.
-    
+
     Args:
         db_path: Path to database file or directory
     """
@@ -168,3 +169,122 @@ def force_close_database_files(db_path: Path) -> None:
                 wait_for_file_release(db_file)
     except Exception as e:
         logger.error(f"Error force-closing database files at {db_path}: {e}")
+
+
+def is_ci() -> bool:
+    """Check if running in CI environment."""
+    return bool(os.environ.get("CI"))
+
+
+def get_fs_event_timeout() -> float:
+    """Get appropriate timeout for filesystem event detection.
+
+    Returns longer timeouts on Windows CI where ReadDirectoryChangesW
+    can be unreliable.
+    """
+    if is_ci():
+        return 10.0 if IS_WINDOWS else 5.0
+    return 3.0
+
+
+async def wait_for_indexed(
+    provider,
+    file_path,
+    timeout: float | None = None,
+    poll_interval: float = 0.2
+) -> bool:
+    """Wait for file to appear in database index.
+
+    Uses polling instead of fixed sleep to handle Windows CI flakiness
+    where ReadDirectoryChangesW may silently drop events.
+
+    Args:
+        provider: Database provider with get_file_by_path method
+        file_path: Path to file that should be indexed
+        timeout: Max wait time (defaults to platform-appropriate value)
+        poll_interval: Time between checks
+
+    Returns:
+        True if file was found, False on timeout
+    """
+    import asyncio
+
+    if timeout is None:
+        timeout = get_fs_event_timeout()
+
+    path_str = str(Path(file_path).resolve())
+    deadline = time.monotonic() + timeout
+
+    while time.monotonic() < deadline:
+        record = provider.get_file_by_path(path_str)
+        if record is not None:
+            return True
+        await asyncio.sleep(poll_interval)
+
+    return False
+
+
+def wait_for_indexed_sync(
+    provider,
+    file_path,
+    timeout: float | None = None,
+    poll_interval: float = 0.2
+) -> bool:
+    """Sync version of wait_for_indexed."""
+    if timeout is None:
+        timeout = get_fs_event_timeout()
+
+    path_str = str(Path(file_path).resolve())
+    deadline = time.monotonic() + timeout
+
+    while time.monotonic() < deadline:
+        record = provider.get_file_by_path(path_str)
+        if record is not None:
+            return True
+        time.sleep(poll_interval)
+
+    return False
+
+
+async def wait_for_searchable(
+    services,
+    query: str,
+    search_type: str = "regex",
+    timeout: float | None = None,
+    poll_interval: float = 0.5
+) -> bool:
+    """Wait for content to be searchable in the index.
+
+    Polls search results instead of relying on queue state,
+    handling the polling monitor timing gap on Windows CI.
+
+    Args:
+        services: The services object with provider access
+        query: Search query to poll for
+        search_type: "regex" or "semantic"
+        timeout: Max wait time (defaults to platform-appropriate value)
+        poll_interval: Time between search polls
+
+    Returns:
+        True if content became searchable, False on timeout
+    """
+    import asyncio
+    from chunkhound.mcp_server.tools import execute_tool
+
+    if timeout is None:
+        timeout = get_fs_event_timeout()
+
+    deadline = time.monotonic() + timeout
+
+    while time.monotonic() < deadline:
+        results = await execute_tool("search", services, None, {
+            "type": search_type,
+            "query": query,
+            "page_size": 10,
+            "offset": 0
+        })
+        if len(results.get('results', [])) > 0:
+            return True
+        await asyncio.sleep(poll_interval)
+
+    return False

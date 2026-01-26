@@ -19,6 +19,7 @@ from .settings_sources import (
     create_config_sources,
     find_config_files,
 )
+from .sharding_config import ShardingConfig
 
 __all__ = [
     "EmbeddingConfig",
@@ -30,4 +31,5 @@ __all__ = [
     "FilteredCliSettingsSource",
     "create_config_sources",
     "find_config_files",
+    "ShardingConfig",
 ]

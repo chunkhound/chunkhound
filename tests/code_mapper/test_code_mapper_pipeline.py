@@ -18,7 +18,11 @@ from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.services.embedding_service import EmbeddingService
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
 from chunkhound.services.search_service import SearchService
-from tests.fixtures.fake_providers import FakeEmbeddingProvider, FakeLLMProvider
+from tests.fixtures.fake_providers import (
+    ConstantEmbeddingProvider,
+    FakeEmbeddingProvider,
+    FakeLLMProvider,
+)
 from tests.integration.code_mapper_scope_helpers import write_scope_repo_layout
 
 
@@ -185,7 +189,8 @@ async def test_code_mapper_coverage_uses_deep_research_sources(
     write_scope_repo_layout(repo_root)
 
     embedding_manager = EmbeddingManager()
-    embedding_manager.register_provider(FakeEmbeddingProvider(), set_default=True)
+    # Use ConstantEmbeddingProvider so any query matches stored embeddings
+    embedding_manager.register_provider(ConstantEmbeddingProvider(), set_default=True)
 
     def _fake_create_provider(self, provider_config):
         return FakeLLMProvider()
@@ -200,7 +205,9 @@ async def test_code_mapper_coverage_uses_deep_research_sources(
     finally:
         LLMManager._create_provider = original_create_provider  # type: ignore[assignment]
 
-    db = DuckDBProvider(":memory:", base_directory=repo_root)
+    # Use file-based database (not :memory:) because semantic search requires ShardManager
+    db_path = repo_root / "test.db"
+    db = DuckDBProvider(str(db_path), base_directory=repo_root)
     db.connect()
     try:
         parser = create_parser_for_language(Language.PYTHON)

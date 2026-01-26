@@ -419,14 +419,6 @@ class LanceDBProvider(SerialDatabaseProvider):
                     f"Check LanceDB version supports create_scalar_index()."
                 )
 
-    def create_vector_index(
-        self, provider: str, model: str, dims: int, metric: str = "cosine"
-    ) -> None:
-        """Create vector index for specific provider/model/dims combination."""
-        return self._execute_in_db_thread_sync(
-            "create_vector_index", provider, model, dims, metric
-        )
-
     def _executor_create_vector_index(
         self,
         conn: Any,
@@ -486,13 +478,6 @@ class LanceDBProvider(SerialDatabaseProvider):
             )
         except Exception as e:
             logger.debug(f"Failed to create vector index for {provider}/{model}: {e}")
-
-    def drop_vector_index(
-        self, provider: str, model: str, dims: int, metric: str = "cosine"
-    ) -> str:
-        """Drop vector index for specific provider/model/dims combination."""
-        # LanceDB handles index management automatically
-        return "Index management handled automatically by LanceDB"
 
     def _generate_chunk_id_safe(self, chunk: Chunk) -> int:
         """Generate chunk ID with fallback to hash-based ID.
@@ -1027,6 +1012,24 @@ class LanceDBProvider(SerialDatabaseProvider):
                 self._chunks_table.delete(f"id = {chunk_id}")
             except Exception as e:
                 logger.error(f"Error deleting chunk {chunk_id}: {e}")
+
+    def delete_chunks_batch(self, chunk_ids: list[int]) -> None:
+        """Delete multiple chunks by ID."""
+        return self._execute_in_db_thread_sync("delete_chunks_batch", chunk_ids)
+
+    def _executor_delete_chunks_batch(
+        self, conn: Any, state: dict[str, Any], chunk_ids: list[int]
+    ) -> None:
+        """Executor method for delete_chunks_batch - runs in DB thread."""
+        if not chunk_ids or not self._chunks_table:
+            return
+        try:
+            # LanceDB stores embeddings inline in chunks table, so single delete suffices
+            id_list = ",".join(str(id) for id in chunk_ids)
+            self._chunks_table.delete(f"id IN ({id_list})")
+        except Exception as e:
+            logger.error(f"Error deleting chunks batch {chunk_ids}: {e}")
+            raise
 
     def update_chunk(self, chunk_id: int, **kwargs) -> None:
         """Update chunk record with new values."""

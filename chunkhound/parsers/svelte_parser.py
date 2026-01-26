@@ -8,15 +8,18 @@ from pathlib import Path
 
 from chunkhound.core.models.chunk import Chunk
 from chunkhound.core.types.common import (
-    ChunkType,
     FileId,
-    FilePath,
     Language,
     LineNumber,
 )
+from chunkhound.parsers.chunk_splitter import (
+    CASTConfig,
+    ChunkSplitter,
+    universal_to_chunk,
+)
 from chunkhound.parsers.mappings.svelte import SvelteMapping
 from chunkhound.parsers.parser_factory import create_parser_for_language
-from chunkhound.parsers.universal_parser import CASTConfig
+from chunkhound.parsers.universal_engine import UniversalChunk, UniversalConcept
 
 
 class SvelteParser:
@@ -68,6 +71,7 @@ class SvelteParser:
         """
         self.svelte_mapping = SvelteMapping()
         self.cast_config = cast_config or CASTConfig()
+        self.chunk_splitter = ChunkSplitter(self.cast_config)
 
         # Create TypeScript parser for script sections
         self.ts_parser = create_parser_for_language(Language.TYPESCRIPT, cast_config)
@@ -165,18 +169,23 @@ class SvelteParser:
                 # Ensure end_line is at least start_line
                 end_line = max(start_line, end_line)
 
-                template_chunk = Chunk(
-                    symbol="svelte_template",
-                    start_line=LineNumber(start_line),
-                    end_line=LineNumber(end_line),
-                    code=template_content,
-                    chunk_type=ChunkType.BLOCK,
-                    file_id=file_id or FileId(0),
-                    language=Language.SVELTE,
-                    file_path=FilePath(str(file_path)) if file_path else None,
+                # Create UniversalChunk for splitting
+                uchunk = UniversalChunk(
+                    concept=UniversalConcept.BLOCK,
+                    name="svelte_template",
+                    content=template_content,
+                    start_line=start_line,
+                    end_line=end_line,
                     metadata={"svelte_section": "template", "is_svelte_sfc": True},
+                    language_node_type="svelte_template",
                 )
-                chunks.append(template_chunk)
+
+                # Split if needed and convert to Chunk
+                for uc in self.chunk_splitter.validate_and_split(uchunk):
+                    template_chunk = universal_to_chunk(
+                        uc, file_path, file_id, Language.SVELTE
+                    )
+                    chunks.append(template_chunk)
 
         # Create chunks for style sections (as text blocks)
         for _, style_content, start_line in sections["style"]:
@@ -191,17 +200,22 @@ class SvelteParser:
                 # Ensure end_line is at least start_line
                 end_line = max(start_line, end_line)
 
-                style_chunk = Chunk(
-                    symbol="svelte_style",
-                    start_line=LineNumber(start_line),
-                    end_line=LineNumber(end_line),
-                    code=style_content,
-                    chunk_type=ChunkType.BLOCK,
-                    file_id=file_id or FileId(0),
-                    language=Language.SVELTE,
-                    file_path=FilePath(str(file_path)) if file_path else None,
+                # Create UniversalChunk for splitting
+                uchunk = UniversalChunk(
+                    concept=UniversalConcept.BLOCK,
+                    name="svelte_style",
+                    content=style_content,
+                    start_line=start_line,
+                    end_line=end_line,
                     metadata={"svelte_section": "style", "is_svelte_sfc": True},
+                    language_node_type="svelte_style",
                 )
-                chunks.append(style_chunk)
+
+                # Split if needed and convert to Chunk
+                for uc in self.chunk_splitter.validate_and_split(uchunk):
+                    style_chunk = universal_to_chunk(
+                        uc, file_path, file_id, Language.SVELTE
+                    )
+                    chunks.append(style_chunk)
 
         return chunks

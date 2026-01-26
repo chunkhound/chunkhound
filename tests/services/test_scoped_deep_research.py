@@ -21,7 +21,7 @@ from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.services.embedding_service import EmbeddingService
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
 from chunkhound.services.search_service import SearchService
-from tests.fixtures.fake_providers import FakeEmbeddingProvider, FakeLLMProvider
+from tests.fixtures.fake_providers import ConstantEmbeddingProvider, FakeLLMProvider
 
 
 @pytest.mark.asyncio
@@ -52,7 +52,7 @@ async def test_scoped_deep_research_uses_path_filter(tmp_path: Path) -> None:
 
     # Fake embedding + LLM providers to avoid network calls
     embedding_manager = EmbeddingManager()
-    embedding_manager.register_provider(FakeEmbeddingProvider(), set_default=True)
+    embedding_manager.register_provider(ConstantEmbeddingProvider(), set_default=True)
 
     # Monkeypatch LLMManager to use FakeLLMProvider via factory hook
     def _fake_create_provider(self, provider_config):
@@ -70,8 +70,9 @@ async def test_scoped_deep_research_uses_path_filter(tmp_path: Path) -> None:
         # Restore original factory to avoid cross-test leakage
         LLMManager._create_provider = original_create_provider  # type: ignore[assignment]
 
-    # Create in-memory DuckDB provider scoped to tmp_path
-    db = DuckDBProvider(":memory:", base_directory=tmp_path)
+    # Use file-based database (not :memory:) because semantic search requires ShardManager
+    db_path = tmp_path / "test.db"
+    db = DuckDBProvider(str(db_path), base_directory=tmp_path)
     db.connect()
 
     # Create minimal services bundle matching DatabaseServices contract
@@ -97,6 +98,10 @@ async def test_scoped_deep_research_uses_path_filter(tmp_path: Path) -> None:
     # Index both repos by running indexing coordinator directly
     await coordinator.process_file(a_file)
     await coordinator.process_file(b_file)
+
+    # Ensure USearch index is synced with DuckDB embeddings
+    # (needed because process_file triggers fix_pass only on NEW shard creation)
+    db.run_fix_pass(check_quality=False)
 
     stats = services.provider.get_stats()
     assert stats["chunks"] > 0, "Expected chunks after indexing test files"
@@ -177,7 +182,7 @@ async def test_deep_research_propagates_path_filter_to_search_service(
 
     # Fake embedding + LLM providers
     embedding_manager = EmbeddingManager()
-    embedding_manager.register_provider(FakeEmbeddingProvider(), set_default=True)
+    embedding_manager.register_provider(ConstantEmbeddingProvider(), set_default=True)
 
     def _fake_create_provider(self, provider_config):
         return FakeLLMProvider()
@@ -192,8 +197,9 @@ async def test_deep_research_propagates_path_filter_to_search_service(
     finally:
         LLMManager._create_provider = original_create_provider  # type: ignore[assignment]
 
-    # In-memory DuckDB provider scoped to tmp_path
-    db = DuckDBProvider(":memory:", base_directory=tmp_path)
+    # Use file-based database (not :memory:) because semantic search requires ShardManager
+    db_path = tmp_path / "test.db"
+    db = DuckDBProvider(str(db_path), base_directory=tmp_path)
     db.connect()
 
     parser = create_parser_for_language(Language.PYTHON)
@@ -218,6 +224,9 @@ async def test_deep_research_propagates_path_filter_to_search_service(
     # Index both files
     await coordinator.process_file(a_file)
     await coordinator.process_file(b_file)
+
+    # Ensure USearch index is synced with DuckDB embeddings
+    db.run_fix_pass(check_quality=False)
 
     # Instrument SearchService to capture path_filter usage
     semantic_path_filters: list[str | None] = []

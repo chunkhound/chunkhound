@@ -57,6 +57,7 @@ def create_parser() -> argparse.ArgumentParser:
     from .parsers import create_main_parser, setup_subparsers
     from .parsers.calibrate_parser import add_calibrate_subparser
     from .parsers.mcp_parser import add_mcp_subparser
+    from .parsers.repack_parser import add_repack_subparser
     from .parsers.research_parser import add_research_subparser
     from .parsers.autodoc_parser import add_autodoc_subparser
     from .parsers.code_mapper_parser import add_map_subparser
@@ -73,6 +74,7 @@ def create_parser() -> argparse.ArgumentParser:
     add_research_subparser(subparsers)
     add_autodoc_subparser(subparsers)
     add_map_subparser(subparsers)
+    add_repack_subparser(subparsers)
     # Diagnose command retired; functionality lives under: index --check-ignores
     add_calibrate_subparser(subparsers)
 
@@ -173,6 +175,11 @@ async def async_main() -> None:
             from .commands.calibrate import calibrate_command
 
             await calibrate_command(args, config)
+        elif args.command == "repack":
+            # Dynamic import to avoid early chunkhound module loading
+            from .commands.repack import repack_command
+
+            await repack_command(args, config)
         # 'diagnose' command retired; use: chunkhound index --check-ignores --vs git
         else:
             logger.error(f"Unknown command: {args.command}")

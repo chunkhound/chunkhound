@@ -116,21 +116,6 @@ class MultiHopStrategy:
             path_filter=path_filter,
         )
 
-        if len(initial_results) <= 5:
-            # Not enough results for expansion, fall back to standard search
-            logger.debug(
-                "Not enough results for dynamic expansion, using standard search"
-            )
-            return await self._single_hop_search(
-                query=query,
-                page_size=page_size,
-                offset=offset,
-                threshold=threshold,
-                provider=provider,
-                model=model,
-                path_filter=path_filter,
-            )
-
         # Rerank initial results
         try:
             assert hasattr(self._embedding_provider, "rerank")

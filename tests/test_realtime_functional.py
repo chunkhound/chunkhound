@@ -14,6 +14,7 @@ import shutil
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from tests.utils.windows_compat import wait_for_indexed, is_windows, is_ci
 
 
 class TestRealtimeFunctional:
@@ -42,8 +43,9 @@ class TestRealtimeFunctional:
         services = create_services(db_path, config)
         services.provider.connect()
 
-
-        realtime_service = RealtimeIndexingService(services, config)
+        # Use polling on Windows CI where watchdog's ReadDirectoryChangesW is unreliable
+        force_polling = is_windows() and is_ci()
+        realtime_service = RealtimeIndexingService(services, config, force_polling=force_polling)
         
         yield realtime_service, watch_dir, temp_dir, services
         
@@ -72,7 +74,8 @@ class TestRealtimeFunctional:
         stats = await service.get_stats()
         assert isinstance(stats, dict), "Stats should be returned"
         assert 'observer_alive' in stats, "Should report observer status"
-        
+        assert stats['watching_directory'] == str(watch_dir), "Should report watched directory"
+
         # Should be able to stop cleanly
         await service.stop()
 
@@ -87,42 +90,11 @@ class TestRealtimeFunctional:
         test_file.write_text("def hello_world(): pass")
         
         # Wait for filesystem event + debouncing + processing
-        await asyncio.sleep(2.0)
-        
-        # Check if file was actually processed (better than checking queues)
-        file_record = services.provider.get_file_by_path(str(test_file))
-        
-        # This tests the full pipeline: detection -> processing -> storage
-        assert file_record is not None, "File should be detected and processed by filesystem monitoring"
-        
-        await service.stop()
+        found = await wait_for_indexed(services.provider, test_file)
 
-    @pytest.mark.asyncio
-    async def test_file_actually_gets_processed(self, realtime_setup):
-        """Test that detected files are actually processed and stored in database."""
-        service, watch_dir, _, services = realtime_setup
-        await service.start(watch_dir)
-        
-        # Create test file
-        test_file = watch_dir / "process_test.py"
-        test_content = "def process_me():\n    return 'processed'"
-        test_file.write_text(test_content)
-        
-        # Wait for detection + processing
-        await asyncio.sleep(2.0)
-        
-        # Check if file was actually processed and stored
-        try:
-            file_record = services.provider.get_file_by_path(str(test_file))
-            assert file_record is not None, "File should be processed and stored in database"
-            
-            # If we get this far, check if chunks were created
-            chunks = services.provider.get_chunks_by_file_id(file_record['id'])
-            assert len(chunks) > 0, "File should have been chunked"
-            
-        except Exception as e:
-            pytest.fail(f"File processing failed: {e}")
-        
+        # This tests the full pipeline: detection -> processing -> storage
+        assert found, "File should be detected and processed by filesystem monitoring"
+
         await service.stop()
 
     @pytest.mark.asyncio

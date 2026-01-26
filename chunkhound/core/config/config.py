@@ -20,6 +20,7 @@ from .indexing_config import IndexingConfig
 from .llm_config import LLMConfig
 from .mcp_config import MCPConfig
 from .research_config import ResearchConfig
+from .sharding_config import ShardingConfig
 
 
 class Config(BaseModel):
@@ -33,6 +34,7 @@ class Config(BaseModel):
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     indexing: IndexingConfig = Field(default_factory=IndexingConfig)
     research: ResearchConfig = Field(default_factory=ResearchConfig)
+    sharding: ShardingConfig = Field(default_factory=ShardingConfig)
     debug: bool = Field(default=False)
 
     # Private field to store the target directory from CLI args

@@ -383,12 +383,9 @@ class TestIndexingCoordinatorIntegration:
     def test_process_directory_normal_operation(self, tmp_path):
         """Test that processing works normally when under disk limit."""
         db_path = tmp_path / "test.db"
-        # Create the actual database file with small content
-        actual_db_path = db_path / "chunks.db"
-        actual_db_path.parent.mkdir(parents=True, exist_ok=True)
-        actual_db_path.write_text("small")
 
         db = DuckDBProvider(db_path=db_path, base_directory=tmp_path)
+        db.connect()
         config = DatabaseConfig(max_disk_usage_mb=1024.0)  # 1GB limit
         coord = IndexingCoordinator(
             database_provider=db,

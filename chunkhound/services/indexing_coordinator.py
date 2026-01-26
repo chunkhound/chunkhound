@@ -26,12 +26,20 @@ from loguru import logger
 from rich.progress import Progress, TaskID
 
 from chunkhound.core.detection import detect_language
+from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector
 from chunkhound.core.exceptions import DiskUsageLimitExceededError
 from chunkhound.core.models import Chunk, File
 from chunkhound.core.types.common import FilePath, Language
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
+from chunkhound.parsers.chunk_splitter import (
+    CASTConfig,
+    ChunkMetrics,
+    ChunkSplitter,
+    chunk_to_universal,
+    universal_to_chunk,
+)
 from chunkhound.parsers.universal_parser import UniversalParser
 from chunkhound.utils.hashing import compute_file_hash
 
@@ -799,6 +807,60 @@ class IndexingCoordinator(BaseService):
             return 0.0
         return total_size / (1024**2)
 
+    def _validate_chunk_sizes(self, chunks: list[Chunk]) -> list[Chunk]:
+        """Validate and split any oversized chunks before persistence.
+
+        Central guard that catches any parser bypasses. Uses the standard
+        ChunkSplitter infrastructure to ensure chunks meet size constraints.
+
+        Args:
+            chunks: List of chunks to validate
+
+        Returns:
+            List of validated chunks (may include splits of oversized chunks)
+        """
+        config = CASTConfig()
+        effective_max = config.max_chunk_size - config.header_overhead
+        splitter = ChunkSplitter(config)
+
+        result = []
+        split_count = 0
+        for chunk in chunks:
+            metrics = ChunkMetrics.from_content(chunk.code or "")
+            if metrics.non_whitespace_chars > effective_max:
+                # Log individual oversized chunk with debugging context
+                preview = (chunk.code or "")[:100].replace("\n", " ").strip()
+                if len(chunk.code or "") > 100:
+                    preview += "..."
+                logger.warning(
+                    f"Oversized chunk: {chunk.file_path}:{chunk.start_line}-{chunk.end_line} "
+                    f"[{chunk.language.value}:{chunk.chunk_type.value}] "
+                    f"symbol={chunk.symbol!r} "
+                    f"size={metrics.non_whitespace_chars} > limit={effective_max} "
+                    f"preview={preview!r}"
+                )
+                # Convert to UniversalChunk, validate/split, convert back
+                uchunk = chunk_to_universal(chunk)
+                split_uchunks = splitter.validate_and_split(uchunk)
+                for uc in split_uchunks:
+                    result.append(
+                        universal_to_chunk(
+                            uc,
+                            file_path=chunk.file_path,
+                            file_id=chunk.file_id,
+                            language=chunk.language,
+                        )
+                    )
+                split_count += len(split_uchunks) - 1
+            else:
+                result.append(chunk)
+
+        if split_count > 0:
+            logger.warning(
+                f"Emergency split {split_count} oversized chunks before persistence"
+            )
+        return result
+
     async def _store_parsed_results(
         self,
         results: list[ParsedFileResult],
@@ -957,6 +1019,8 @@ class IndexingCoordinator(BaseService):
 
                         # Store new/modified chunks (pass models directly)
                         chunks_to_store = chunk_diff.added + chunk_diff.modified
+                        # Validate chunk sizes before persistence (central guard)
+                        chunks_to_store = self._validate_chunk_sizes(chunks_to_store)
                         ids = (
                             self._db.insert_chunks_batch(chunks_to_store)
                             if chunks_to_store
@@ -964,9 +1028,13 @@ class IndexingCoordinator(BaseService):
                         )
                     else:
                         # No existing chunks - store all as new
+                        # Validate chunk sizes before persistence (central guard)
+                        new_chunk_models = self._validate_chunk_sizes(new_chunk_models)
                         ids = self._db.insert_chunks_batch(new_chunk_models)
                 else:
                     # New file - store all
+                    # Validate chunk sizes before persistence (central guard)
+                    new_chunk_models = self._validate_chunk_sizes(new_chunk_models)
                     ids = self._db.insert_chunks_batch(new_chunk_models)
 
                 stats["chunk_ids_needing_embeddings"].extend(ids)
@@ -1312,13 +1380,12 @@ class IndexingCoordinator(BaseService):
                 if task.total:
                     self.progress.update(parse_task, completed=task.total)
 
-            # Optimize tables after parsing/chunking if fragmentation high
-            if agg_total_chunks > 0 and hasattr(self._db, "optimize_tables"):
-                if hasattr(self._db, "should_optimize") and self._db.should_optimize(
-                    "post-chunking"
-                ):
+            # Optimize tables after parsing/chunking (only if fragmentation warrants it)
+            if agg_total_chunks > 0 and hasattr(self._db, "should_optimize"):
+                if self._db.should_optimize(operation="post-chunking"):
                     logger.debug("Optimizing database after chunking phase...")
-                    self._db.optimize_tables()
+                    if hasattr(self._db, "optimize_tables"):
+                        self._db.optimize_tables()
 
             # Record startup profile if enabled (before heavy parse+store dominates totals)
             if _t0 is not None:
@@ -1384,21 +1451,15 @@ class IndexingCoordinator(BaseService):
             # Note: Embedding generation is handled separately via generate_missing_embeddings()
             # to provide a unified progress experience
 
-            # Optimize tables after bulk operations (provider-specific)
-            if total_chunks > 0 and hasattr(self._db, "optimize_tables"):
-                if hasattr(self._db, "should_optimize") and self._db.should_optimize(
-                    "post-bulk"
-                ):
-                    logger.debug("Optimizing database tables after bulk operations...")
+            # FINAL: Unified optimization (CHECKPOINT + compaction)
+            # Only run if fragmentation warrants it
+            if hasattr(self._db, "should_optimize") and self._db.should_optimize(operation="post-indexing"):
+                if hasattr(self._db, "optimize"):
+                    logger.info("Running final database optimization...")
+                    self._db.optimize()
+                elif hasattr(self._db, "optimize_tables"):
+                    logger.debug("Final optimization pass at end of indexing...")
                     self._db.optimize_tables()
-
-            # FINAL PASS: Always optimize at end of indexing for consistent UX
-            # Even if fragments are below threshold (e.g., 90 → 20), users expect
-            # the database to be in optimal state after indexing completes.
-            # This ensures predictable search performance regardless of threshold tuning.
-            if hasattr(self._db, "optimize_tables"):
-                logger.debug("Final optimization pass at end of indexing...")
-                self._db.optimize_tables()
 
             # Check for disk limit exceeded errors
             for error in agg_errors:
@@ -1526,6 +1587,9 @@ class IndexingCoordinator(BaseService):
         if not chunk_models:
             return []
 
+        # Validate chunk sizes before persistence (central guard)
+        chunk_models = self._validate_chunk_sizes(chunk_models)
+
         # Use batch insertion for optimal performance
         chunk_ids = self._db.insert_chunks_batch(chunk_models)
 
@@ -1588,7 +1652,9 @@ class IndexingCoordinator(BaseService):
             return 0
 
     async def generate_missing_embeddings(
-        self, exclude_patterns: list[str] | None = None
+        self,
+        exclude_patterns: list[str] | None = None,
+        metrics_collector: BatchMetricsCollector | None = None,
     ) -> dict[str, Any]:
         """Generate embeddings for chunks that don't have them.
 
@@ -1609,23 +1675,30 @@ class IndexingCoordinator(BaseService):
             # Use EmbeddingService for embedding generation
             from .embedding_service import EmbeddingService
 
-            # Get optimization frequency from config or use default
-            optimization_batch_frequency = 1000
-            if hasattr(self._db, "_config") and self._db._config:
-                optimization_batch_frequency = getattr(
-                    self._db._config.embedding, "optimization_batch_frequency", 1000
-                )
-
             embedding_service = EmbeddingService(
                 database_provider=self._db,
                 embedding_provider=self._embedding_provider,
-                optimization_batch_frequency=optimization_batch_frequency,
                 progress=self.progress,
+                metrics_collector=metrics_collector,
             )
 
-            return await embedding_service.generate_missing_embeddings(
-                exclude_patterns=exclude_patterns
-            )
+            # Get bulk_indexer if available for deferred quality checks
+            bulk_indexer = None
+            if hasattr(self._db, "get_bulk_indexer"):
+                bulk_indexer = self._db.get_bulk_indexer()
+
+            if bulk_indexer is not None:
+                with bulk_indexer:
+                    result = await embedding_service.generate_missing_embeddings(
+                        exclude_patterns=exclude_patterns
+                    )
+                    # Signal batch completion for deferred quality check
+                    bulk_indexer.on_batch_completed()
+                    return result
+            else:
+                return await embedding_service.generate_missing_embeddings(
+                    exclude_patterns=exclude_patterns
+                )
 
         except Exception as e:
             logger.error(

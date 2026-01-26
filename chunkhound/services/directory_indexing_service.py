@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
+
+from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector
 from chunkhound.utils.file_patterns import normalize_include_patterns
 
 
@@ -40,6 +42,7 @@ class DirectoryIndexingService:
         config: Any,
         progress_callback: Callable[[str], None] | None = None,
         progress: Any = None,
+        metrics_collector: BatchMetricsCollector | None = None,
     ):
         """Initialize directory indexing service.
 
@@ -48,11 +51,13 @@ class DirectoryIndexingService:
             config: Configuration object
             progress_callback: Optional callback for progress messages
             progress: Optional Rich Progress instance for hierarchical progress display
+            metrics_collector: Optional metrics collector for batch diagnostics
         """
         self.indexing_coordinator = indexing_coordinator
         self.config = config
         self.progress_callback = progress_callback or (lambda msg: None)
         self.progress = progress
+        self._metrics_collector = metrics_collector
 
         # Pass progress to coordinator if it supports it
         if hasattr(self.indexing_coordinator, "progress"):
@@ -92,6 +97,13 @@ class DirectoryIndexingService:
                 self.progress_callback("Checking for missing embeddings...")
                 embed_result = await self._generate_missing_embeddings(exclude_patterns)
                 stats.embeddings_generated = embed_result.get("generated", 0)
+
+                # Final optimization after embedding generation
+                db = self.indexing_coordinator._db
+                if hasattr(db, "should_optimize") and db.should_optimize():
+                    if hasattr(db, "optimize"):
+                        logger.info("Running post-embedding database optimization...")
+                        db.optimize()
 
             stats.processing_time = time.time() - start_time
 
@@ -137,7 +149,8 @@ class DirectoryIndexingService:
     ) -> dict[str, Any]:
         """Extracted from run.py:287-312 - embedding generation workflow."""
         embed_result = await self.indexing_coordinator.generate_missing_embeddings(
-            exclude_patterns=exclude_patterns
+            exclude_patterns=exclude_patterns,
+            metrics_collector=self._metrics_collector,
         )
 
         if embed_result["status"] not in ["success", "up_to_date", "complete"]:

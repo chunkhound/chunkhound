@@ -59,6 +59,17 @@ class DatabaseProvider(Protocol):
         """Close database connection and cleanup resources."""
         ...
 
+    def soft_disconnect(self, skip_checkpoint: bool = False) -> None:
+        """Close connection temporarily without shutting down executor.
+
+        Use for temporary disconnections (e.g., compaction) where reconnection
+        will happen soon. For final cleanup, use disconnect() instead.
+
+        Args:
+            skip_checkpoint: If True, skip final checkpoint (faster but less safe)
+        """
+        ...
+
     # Schema Management
     def create_schema(self) -> None:
         """Create database schema for files, chunks, and embeddings."""
@@ -66,18 +77,6 @@ class DatabaseProvider(Protocol):
 
     def create_indexes(self) -> None:
         """Create database indexes for performance optimization."""
-        ...
-
-    def create_vector_index(
-        self, provider: str, model: str, dims: int, metric: str = "cosine"
-    ) -> None:
-        """Create vector index for specific provider/model/dims combination."""
-        ...
-
-    def drop_vector_index(
-        self, provider: str, model: str, dims: int, metric: str = "cosine"
-    ) -> str:
-        """Drop vector index for specific provider/model/dims combination."""
         ...
 
     # File Operations
@@ -132,6 +131,10 @@ class DatabaseProvider(Protocol):
 
     def delete_chunk(self, chunk_id: int) -> None:
         """Delete a single chunk by ID."""
+        ...
+
+    def delete_chunks_batch(self, chunk_ids: list[int]) -> None:
+        """Delete multiple chunks by ID with proper cascade to embeddings."""
         ...
 
     def update_chunk(self, chunk_id: int, **kwargs: Any) -> None:
@@ -349,8 +352,23 @@ class DatabaseProvider(Protocol):
         ...
 
     # Health and Diagnostics
+    def should_optimize(self, operation: str = "") -> bool:
+        """Check if optimization/compaction is warranted.
+
+        Args:
+            operation: Optional context string for logging (e.g., 'post-chunking')
+
+        Returns:
+            True if optimization should be performed
+        """
+        ...
+
     def optimize_tables(self) -> None:
-        """Optimize tables by compacting fragments and rebuilding indexes (provider-specific)."""
+        """Optimize tables by compacting fragments.
+
+        For DuckDB: CHECKPOINT for WAL durability and space reclamation
+        For LanceDB: Fragment compaction via table.optimize()
+        """
         ...
 
     def health_check(self) -> dict[str, Any]:
