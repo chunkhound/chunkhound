@@ -550,7 +550,7 @@ class RealtimeIndexingService:
             # Simple debouncing for change events
             if priority == "change":
                 file_str = str(file_path)
-                current_time = time.time()
+                current_time = time.monotonic()
 
                 if file_str in self._pending_debounce:
                     # Update timestamp for existing pending file
@@ -579,7 +579,7 @@ class RealtimeIndexingService:
             last_update = self._pending_debounce[file_str]
 
             # Check if no recent updates during delay
-            if time.time() - last_update >= self._debounce_delay:
+            if time.monotonic() - last_update >= self._debounce_delay:
                 del self._pending_debounce[file_str]
                 await self.file_queue.put((priority, file_path))
                 logger.debug(f"Processing debounced file: {file_path}")
