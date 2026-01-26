@@ -10,7 +10,7 @@ import pytest
 import shutil
 
 from chunkhound.core.config.config import Config
-from tests.utils.windows_compat import wait_for_indexed, is_windows, is_ci
+from tests.utils.windows_compat import wait_for_indexed, is_windows, is_ci, get_fs_event_timeout
 from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 
@@ -166,16 +166,17 @@ class TestRealtimeFailures:
         """Test that filesystem observer doesn't properly watch subdirectories."""
         service, watch_dir, _, services = realtime_setup
         await service.start(watch_dir)
-        
+
         # Create subdirectory and file
         subdir = watch_dir / "subdir"
         subdir.mkdir()
         subdir_file = subdir / "nested.py"
         subdir_file.write_text("def nested(): pass")
-        
-        found = await wait_for_indexed(services.provider, subdir_file)
+
+        # Use platform-appropriate timeout for Windows CI polling mode
+        found = await wait_for_indexed(services.provider, subdir_file, timeout=get_fs_event_timeout())
         assert found, "Nested files should be detected by recursive monitoring"
-        
+
         await service.stop()
 
     @pytest.mark.asyncio

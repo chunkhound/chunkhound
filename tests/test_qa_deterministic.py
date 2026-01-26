@@ -24,7 +24,7 @@ from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 from chunkhound.mcp_server.tools import execute_tool
 from .test_utils import get_api_key_for_tests
-from tests.utils.windows_compat import get_fs_event_timeout, is_windows, is_ci
+from tests.utils.windows_compat import get_fs_event_timeout, is_windows, is_ci, wait_for_searchable
 
 
 class TestQADeterministic:
@@ -99,7 +99,7 @@ class TestQADeterministic:
     async def test_file_lifecycle_search_validation(self, qa_setup):
         """QA Items 1-4: Test file lifecycle with search validation."""
         services, realtime_service, watch_dir, _ = qa_setup
-        
+
         # QA Item 1: Pick specific existing file and search for it
         existing_file = watch_dir / "existing_test.py"
         existing_content = """def existing_function():
@@ -111,8 +111,11 @@ class ExistingClass:
         return "existing_method_result"
 """
         existing_file.write_text(existing_content)
-        await asyncio.sleep(3.0)  # Wait for processing (extended for Ollama)
-        
+
+        # Wait for content to be searchable (handles Windows CI polling delay)
+        found = await wait_for_searchable(services, "existing_function", timeout=get_fs_event_timeout())
+        assert found, "Existing content should be searchable"
+
         # Search for existing content
         existing_regex = await execute_tool("search", services, None, {
             "type": "regex",
@@ -149,8 +152,11 @@ class NewlyAddedClass:
         return "new_method_qa_test"
 """
         new_file.write_text(new_content)
-        await asyncio.sleep(3.5)  # Wait for debounce + processing
-        
+
+        # Wait for new content to be searchable (handles Windows CI polling delay)
+        found = await wait_for_searchable(services, "newly_added_content_unique_string", timeout=get_fs_event_timeout())
+        assert found, "New file content should be searchable"
+
         # Search for new content
         new_regex = await execute_tool("search", services, None, {
             "type": "regex",
@@ -184,8 +190,11 @@ def added_during_edit():
     return "added_content_edit_qa"
 """
         existing_file.write_text(modified_content)
-        await asyncio.sleep(3.5)
-        
+
+        # Wait for added content to be searchable (handles Windows CI polling delay)
+        found = await wait_for_searchable(services, "added_content_edit_qa", timeout=get_fs_event_timeout())
+        assert found, "Added content should be searchable"
+
         added_regex = await execute_tool("search", services, None, {
             "type": "regex",
             "query": "added_content_edit_qa",
@@ -207,8 +216,11 @@ def added_during_edit():
 # Note: ExistingClass was DELETED
 """
         existing_file.write_text(deleted_and_modified_content)
-        await asyncio.sleep(3.5)
-        
+
+        # Wait for modified content to be searchable (handles Windows CI polling delay)
+        found = await wait_for_searchable(services, "MODIFIED_existing_content", timeout=get_fs_event_timeout())
+        assert found, "Modified content should be searchable"
+
         # Check modification worked
         modified_regex = await execute_tool("search", services, None, {
             "type": "regex",
@@ -231,8 +243,10 @@ def added_during_edit():
         # QA Item 4: Delete file and verify search results
         delete_target = new_file  # Delete the new file we created
         delete_target.unlink()
-        await asyncio.sleep(3.5)
-        
+
+        # Wait for deletion to be processed (use platform-appropriate timeout)
+        await asyncio.sleep(get_fs_event_timeout())
+
         # Search for deleted file content
         deleted_file_regex = await execute_tool("search", services, None, {
             "type": "regex",
