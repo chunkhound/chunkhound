@@ -39,6 +39,7 @@ class SimpleEventHandler(FileSystemEventHandler):
         event_queue: asyncio.Queue,
         config: Config | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
+        root_path: Path | None = None,
     ):
         self.event_queue = event_queue
         self.config = config
@@ -46,10 +47,13 @@ class SimpleEventHandler(FileSystemEventHandler):
         self._engine = None
         self._include_patterns: list[str] | None = None
         self._pattern_cache: dict[str, Any] = {}
-        try:
-            self._root = (config.target_dir if config and config.target_dir else Path.cwd()).resolve()
-        except Exception:
-            self._root = Path.cwd().resolve()
+        if root_path is not None:
+            self._root = root_path.resolve()
+        else:
+            try:
+                self._root = (config.target_dir if config and config.target_dir else Path.cwd()).resolve()
+            except Exception:
+                self._root = Path.cwd().resolve()
 
     def on_any_event(self, event: Any) -> None:
         """Handle filesystem events - simple queue operation."""
@@ -423,7 +427,9 @@ class RealtimeIndexingService:
         self, watch_path: Path, loop: asyncio.AbstractEventLoop
     ) -> None:
         """Start filesystem monitoring with recursive watching for complete coverage."""
-        self.event_handler = SimpleEventHandler(self.event_queue, self.config, loop)
+        self.event_handler = SimpleEventHandler(
+            self.event_queue, self.config, loop, root_path=watch_path
+        )
         self.observer = Observer()
 
         # Use recursive=True to ensure all directory events are captured
@@ -462,7 +468,7 @@ class RealtimeIndexingService:
         known_files = set()
 
         # Create a simple event handler for shouldIndex check once
-        simple_handler = SimpleEventHandler(None, self.config, None)
+        simple_handler = SimpleEventHandler(None, self.config, None, root_path=watch_path)
 
         # Use a shorter interval during the first few seconds to ensure
         # freshly created files are detected quickly after startup/fallback.
