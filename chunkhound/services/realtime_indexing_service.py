@@ -465,7 +465,8 @@ class RealtimeIndexingService:
         """Simple polling monitor for large directories."""
         logger.debug(f"Starting polling monitor for {watch_path}")
         self._debug(f"polling monitor active for {watch_path}")
-        known_files = set()
+        # Track files with their mtime to detect modifications (not just new/deleted)
+        known_files: dict[Path, float] = {}
 
         # Create a simple event handler for shouldIndex check once
         simple_handler = SimpleEventHandler(None, self.config, None, root_path=watch_path)
@@ -476,7 +477,7 @@ class RealtimeIndexingService:
 
         while True:
             try:
-                current_files = set()
+                current_files: dict[Path, float] = {}
                 files_checked = 0
 
                 # Walk directory tree but with limits to avoid hanging
@@ -485,7 +486,13 @@ class RealtimeIndexingService:
                         if file_path.is_file():
                             files_checked += 1
                             if simple_handler._should_index(file_path):
-                                current_files.add(file_path)
+                                try:
+                                    current_mtime = file_path.stat().st_mtime
+                                except OSError:
+                                    continue
+
+                                current_files[file_path] = current_mtime
+
                                 if file_path not in known_files:
                                     # New file detected
                                     logger.debug(
@@ -493,6 +500,15 @@ class RealtimeIndexingService:
                                     )
                                     self._debug(
                                         f"polling detected new file: {file_path}"
+                                    )
+                                    await self.add_file(file_path, priority="change")
+                                elif known_files[file_path] != current_mtime:
+                                    # Modified file detected
+                                    logger.debug(
+                                        f"Polling detected modified file: {file_path}"
+                                    )
+                                    self._debug(
+                                        f"polling detected modified file: {file_path}"
                                     )
                                     await self.add_file(file_path, priority="change")
 
@@ -509,7 +525,7 @@ class RealtimeIndexingService:
                         continue
 
                 # Check for deleted files
-                deleted = known_files - current_files
+                deleted = set(known_files.keys()) - set(current_files.keys())
                 for file_path in deleted:
                     logger.debug(f"Polling detected deleted file: {file_path}")
                     await self.remove_file(file_path)
