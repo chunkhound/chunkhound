@@ -63,6 +63,8 @@ async def test_mcp_server_uses_positional_directory_argument():
 
         try:
             # Send initialize request and get response
+            # Use longer timeout on Windows CI where subprocess startup is slower
+            init_timeout = 15.0 if (is_windows() and is_ci()) else 5.0
             response = await client.send_request(
                 "initialize",
                 {
@@ -73,7 +75,7 @@ async def test_mcp_server_uses_positional_directory_argument():
                         "version": "1.0.0"
                     }
                 },
-                timeout=5.0
+                timeout=init_timeout
             )
             print(f"Parsed response: {response}")
 
