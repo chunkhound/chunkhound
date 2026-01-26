@@ -67,6 +67,17 @@ class SingleHopStrategy:
 
         query_vector = query_results[0]
 
+        # Validate query embedding dimensions match provider's configured dims
+        expected_dims = self._embedding_provider.dims
+        actual_dims = len(query_vector)
+        if actual_dims != expected_dims:
+            logger.error(
+                f"Query embedding dimension mismatch: got {actual_dims}, expected {expected_dims}. "
+                f"Provider: output_dims={self._embedding_provider.output_dims}, "
+                f"client_side_truncation={self._embedding_provider.client_side_truncation}. "
+                f"This indicates client-side truncation is not being applied."
+            )
+
         # Perform vector similarity search
         results, pagination = self._db.search_semantic(
             query_embedding=query_vector,

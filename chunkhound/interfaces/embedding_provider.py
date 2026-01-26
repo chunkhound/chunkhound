@@ -4,6 +4,24 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+# Import and re-export exceptions for convenience
+from chunkhound.core.exceptions.embedding import (
+    EmbeddingBatchError,
+    EmbeddingConfigurationError,
+    EmbeddingDimensionError,
+    EmbeddingProviderError,
+)
+
+__all__ = [
+    "EmbeddingBatchError",
+    "EmbeddingConfig",
+    "EmbeddingConfigurationError",
+    "EmbeddingDimensionError",
+    "EmbeddingProvider",
+    "EmbeddingProviderError",
+    "RerankResult",
+]
+
 
 @dataclass
 class RerankResult:
@@ -49,7 +67,34 @@ class EmbeddingProvider(Protocol):
 
     @property
     def dims(self) -> int:
-        """Embedding dimensions."""
+        """Actual output dimension (reflects matryoshka config if set)."""
+        ...
+
+    @property
+    def native_dims(self) -> int:
+        """Model's full/native embedding dimension."""
+        ...
+
+    @property
+    def supported_dimensions(self) -> list[int]:
+        """List of valid output dimensions for this model.
+
+        Returns single-element list [native_dims] for non-matryoshka models.
+        """
+        ...
+
+    def supports_matryoshka(self) -> bool:
+        """True if model supports variable output dimensions."""
+        ...
+
+    @property
+    def output_dims(self) -> int | None:
+        """Configured output dimension override, or None for native."""
+        ...
+
+    @property
+    def client_side_truncation(self) -> bool:
+        """Whether client-side truncation is enabled."""
         ...
 
     @property

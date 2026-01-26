@@ -186,6 +186,8 @@ def create_openai_provider(
     rerank_url: str = "/rerank",
     rerank_format: str = "auto",
     rerank_batch_size: int | None = None,
+    output_dims: int | None = None,
+    client_side_truncation: bool = False,
 ) -> "OpenAIEmbeddingProvider":
     """Create an OpenAI embedding provider with default settings.
 
@@ -197,6 +199,8 @@ def create_openai_provider(
         rerank_url: Rerank endpoint URL (defaults to /rerank)
         rerank_format: Reranking API format - 'cohere', 'tei', or 'auto' (default: 'auto')
         rerank_batch_size: Max documents per rerank batch (overrides model defaults, bounded by model caps)
+        output_dims: Output embedding dimension (for matryoshka models)
+        client_side_truncation: Truncate embeddings client-side instead of using API dimensions parameter
 
     Returns:
         Configured OpenAI embedding provider
@@ -212,4 +216,6 @@ def create_openai_provider(
         rerank_url=rerank_url,
         rerank_format=rerank_format,
         rerank_batch_size=rerank_batch_size,
+        output_dims=output_dims,
+        client_side_truncation=client_side_truncation,
     )
