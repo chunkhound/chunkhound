@@ -29,9 +29,6 @@ class CodexCLIProvider(BaseCLIProvider):
     - Never writes to stdout; only returns captured content to caller.
     """
 
-    # Token estimate (chars per token) — align with CLI providers
-    TOKEN_CHARS_RATIO = 4
-
     # Timeouts used in health checks (seconds)
     VERSION_CHECK_TIMEOUT = 5
     HEALTH_CHECK_TIMEOUT = 30

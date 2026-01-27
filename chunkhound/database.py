@@ -149,9 +149,6 @@ class Database:
                 self._search_service = create_search_service()
                 self._embedding_service = create_embedding_service()
 
-        # Legacy compatibility: expose provider connection as self.connection
-        self.connection = None  # Will be set after connect()
-
         self._file_discovery_cache = FileDiscoveryCache()
 
     def connect(self) -> None:
@@ -161,9 +158,6 @@ class Database:
         # Connect via provider
         self._provider.connect()
 
-        # Expose connection for legacy compatibility
-        self.connection = self._provider.connection
-
         logger.info("✅ Database connected via service layer")
 
     def close(self) -> None:
@@ -171,7 +165,6 @@ class Database:
         with self._connection_lock:
             if self._provider.is_connected:
                 self._provider.disconnect()
-            self.connection = None
 
     def is_connected(self) -> bool:
         """Check if database is connected."""
@@ -407,7 +400,6 @@ class Database:
         with self._connection_lock:
             try:
                 self._provider.disconnect()
-                self.connection = None
                 return True
             except Exception as e:
                 logger.error(f"Failed to detach database: {e}")
@@ -419,7 +411,6 @@ class Database:
             try:
                 # Reconnect
                 self._provider.connect()
-                self.connection = self._provider.connection
                 return True
             except Exception as e:
                 logger.error(f"Failed to reattach database: {e}")
@@ -430,7 +421,6 @@ class Database:
         with self._connection_lock:
             try:
                 self._provider.disconnect()
-                self.connection = None
                 return True
             except Exception as e:
                 logger.error(f"Failed to disconnect database: {e}")
@@ -441,7 +431,6 @@ class Database:
         with self._connection_lock:
             try:
                 self._provider.connect()
-                self.connection = self._provider.connection
                 return True
             except Exception as e:
                 logger.error(f"Failed to reconnect database: {e}")

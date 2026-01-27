@@ -1312,13 +1312,12 @@ class IndexingCoordinator(BaseService):
                 if task.total:
                     self.progress.update(parse_task, completed=task.total)
 
-            # Optimize tables after parsing/chunking if fragmentation high
-            if agg_total_chunks > 0 and hasattr(self._db, "optimize_tables"):
-                if hasattr(self._db, "should_optimize") and self._db.should_optimize(
-                    "post-chunking"
-                ):
+            # Optimize tables after parsing/chunking (only if fragmentation warrants it)
+            if agg_total_chunks > 0 and hasattr(self._db, "should_optimize"):
+                if self._db.should_optimize(operation="post-chunking"):
                     logger.debug("Optimizing database after chunking phase...")
-                    self._db.optimize_tables()
+                    if hasattr(self._db, "optimize_tables"):
+                        self._db.optimize_tables()
 
             # Record startup profile if enabled (before heavy parse+store dominates totals)
             if _t0 is not None:
@@ -1384,21 +1383,19 @@ class IndexingCoordinator(BaseService):
             # Note: Embedding generation is handled separately via generate_missing_embeddings()
             # to provide a unified progress experience
 
-            # Optimize tables after bulk operations (provider-specific)
-            if total_chunks > 0 and hasattr(self._db, "optimize_tables"):
-                if hasattr(self._db, "should_optimize") and self._db.should_optimize(
-                    "post-bulk"
-                ):
-                    logger.debug("Optimizing database tables after bulk operations...")
+            # FINAL: Unified optimization (CHECKPOINT + HNSW compact + full compaction)
+            # Only run if fragmentation warrants it
+            if hasattr(self._db, "should_optimize") and self._db.should_optimize(operation="post-indexing"):
+                if hasattr(self._db, "optimize"):
+                    logger.info("Running final database optimization...")
+                    self._db.optimize()
+                elif hasattr(self._db, "optimize_tables"):
+                    logger.debug("Final optimization pass at end of indexing...")
                     self._db.optimize_tables()
 
-            # FINAL PASS: Always optimize at end of indexing for consistent UX
-            # Even if fragments are below threshold (e.g., 90 → 20), users expect
-            # the database to be in optimal state after indexing completes.
-            # This ensures predictable search performance regardless of threshold tuning.
-            if hasattr(self._db, "optimize_tables"):
-                logger.debug("Final optimization pass at end of indexing...")
-                self._db.optimize_tables()
+            # Create deferred HNSW indexes (if any were deferred during first indexing)
+            if hasattr(self._db, "create_deferred_indexes"):
+                self._db.create_deferred_indexes()
 
             # Check for disk limit exceeded errors
             for error in agg_errors:
@@ -1609,17 +1606,9 @@ class IndexingCoordinator(BaseService):
             # Use EmbeddingService for embedding generation
             from .embedding_service import EmbeddingService
 
-            # Get optimization frequency from config or use default
-            optimization_batch_frequency = 1000
-            if hasattr(self._db, "_config") and self._db._config:
-                optimization_batch_frequency = getattr(
-                    self._db._config.embedding, "optimization_batch_frequency", 1000
-                )
-
             embedding_service = EmbeddingService(
                 database_provider=self._db,
                 embedding_provider=self._embedding_provider,
-                optimization_batch_frequency=optimization_batch_frequency,
                 progress=self.progress,
             )
 
