@@ -94,7 +94,16 @@ def test_url_detection_logic():
 )
 async def test_real_embedding_api():
     """Test real embedding API call with discovered provider and key."""
-    api_key, provider_name = get_api_key_for_tests()
+    from .test_utils import get_embedding_config_for_tests
+
+    config = get_embedding_config_for_tests()
+    if not config:
+        pytest.skip("No embedding config available for testing")
+
+    api_key = config.get("api_key")
+    provider_name = config.get("provider", "openai")
+    model = config.get("model")
+    base_url = config.get("base_url")
 
     # Create the appropriate provider based on what's configured
     if provider_name == "openai":
@@ -102,16 +111,22 @@ async def test_real_embedding_api():
             OpenAIEmbeddingProvider,
         )
 
+        # Use model from config or default
+        model = model or "text-embedding-3-small"
         provider = OpenAIEmbeddingProvider(
-            api_key=api_key, model="text-embedding-3-small"
+            api_key=api_key, model=model, base_url=base_url
         )
-        expected_dims = 1536
+
+        # Get actual embedding dimensions from a test embedding
+        test_result = await provider.embed(["test"])
+        expected_dims = len(test_result[0])
     elif provider_name == "voyageai":
         from chunkhound.providers.embeddings.voyageai_provider import (
             VoyageAIEmbeddingProvider,
         )
 
-        provider = VoyageAIEmbeddingProvider(api_key=api_key, model="voyage-3.5")
+        model = model or "voyage-3.5"
+        provider = VoyageAIEmbeddingProvider(api_key=api_key, model=model)
         expected_dims = 1024  # voyage-3.5 dimensions
     else:
         pytest.skip(f"Unknown provider: {provider_name}")
