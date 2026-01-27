@@ -64,6 +64,7 @@ class JSFamilyExtraction:
 
         if concept == UniversalConcept.DEFINITION and "definition" in captures:
             node = captures["definition"]
+            meta["node_type"] = getattr(node, "type", "")
             init = captures.get("init")
             target = init or node
             try:
@@ -86,6 +87,11 @@ class JSFamilyExtraction:
             except Exception:
                 # Best-effort only; do not set hint on failure
                 pass
+            if "chunk_type_hint" not in meta and getattr(node, "type", "") in {
+                "lexical_declaration",
+                "variable_declaration",
+            }:
+                meta["kind"] = "variable"
         return meta
 
     def extract_content(
@@ -268,4 +274,3 @@ class JSFamilyExtraction:
             constants.append({"name": var_name, "value": value})
 
         return constants if constants else None
-

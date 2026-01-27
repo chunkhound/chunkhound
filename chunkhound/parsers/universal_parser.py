@@ -1277,6 +1277,8 @@ class UniversalParser:
                 return ChunkType.CLASS
             elif kind == "method" or "method" in node_type:
                 return ChunkType.METHOD
+            elif kind == "constructor" or kind == "initializer" or "constructor" in node_type:
+                return ChunkType.CONSTRUCTOR
             elif kind == "struct" or "struct" in node_type:
                 # Structs map to CLASS in languages like Zig, Rust, Go
                 return ChunkType.CLASS
@@ -1286,6 +1288,26 @@ class UniversalParser:
                 return ChunkType.INTERFACE
             elif kind == "trait" or "trait" in node_type:
                 return ChunkType.TRAIT
+            elif kind == "namespace" or "namespace" in node_type:
+                return ChunkType.NAMESPACE
+            elif kind == "property" or "property" in node_type:
+                return ChunkType.PROPERTY
+            elif kind == "field" or "field" in node_type:
+                return ChunkType.FIELD
+            elif kind in {"variable", "loop_variable", "constant", "const", "define"} or (
+                "variable" in node_type
+            ):
+                return ChunkType.VARIABLE
+            elif kind in {"type_alias", "typedef"} or "type_alias" in node_type:
+                return ChunkType.TYPE_ALIAS
+            elif kind == "type" or node_type == "type":
+                return ChunkType.TYPE
+            elif kind == "macro" or "macro" in node_type:
+                return ChunkType.MACRO
+            elif kind == "mapping_pair":
+                return ChunkType.KEY_VALUE
+            elif kind == "sequence_item":
+                return ChunkType.ARRAY
             else:
                 return ChunkType.FUNCTION  # Default for definitions
 
