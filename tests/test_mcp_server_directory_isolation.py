@@ -556,7 +556,6 @@ def quicksort(arr):
             # Create embedding manager using centralized helper
             embedding_manager = create_embedding_manager_for_tests(config_dict)
             if not embedding_manager:
-                from chunkhound.embeddings import EmbeddingManager
                 embedding_manager = EmbeddingManager()  # Fallback for no config
             
             # Create services
