@@ -88,7 +88,11 @@ class JSFamilyExtraction:
                 # Best-effort only; do not set hint on failure
                 pass
             if "chunk_type_hint" not in meta and getattr(node, "type", "") in {
+                # Captured by LEXICAL_DECLARATION_CONFIG in `_shared/js_query_patterns.py`.
+                # `lexical_declaration` doesn't include "variable" in its node type, so we
+                # set `kind` to avoid falling back to the DEFINITION default (FUNCTION).
                 "lexical_declaration",
+                # Captured by VAR_DECLARATION_CONFIG in `_shared/js_query_patterns.py`.
                 "variable_declaration",
             }:
                 meta["kind"] = "variable"

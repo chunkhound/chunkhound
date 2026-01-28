@@ -1301,6 +1301,8 @@ class UniversalParser:
             elif kind in {"type_alias", "typedef"} or "type_alias" in node_type:
                 return ChunkType.TYPE_ALIAS
             elif kind == "type" or node_type == "type":
+                # Intentionally exact-match node_type here: substring matching on
+                # "type" would be too broad (e.g., it would hit "type_alias").
                 return ChunkType.TYPE
             elif kind == "macro" or "macro" in node_type:
                 return ChunkType.MACRO
