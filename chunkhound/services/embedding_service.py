@@ -610,9 +610,11 @@ class EmbeddingService(BaseService):
                                 self.progress.update(
                                     embed_task, speed=f"{speed:.1f} chunks/s"
                                 )
-                        except (AttributeError, IndexError, TypeError) as e:
+                        except (AttributeError, IndexError, TypeError, KeyError) as e:
                             # Progress display is non-critical, but log for debugging
-                            logger.debug(f"[EmbSvc] Progress speed update skipped: {e}")
+                            logger.opt(exception=e).debug(
+                                "[EmbSvc] Progress speed update skipped"
+                            )
 
             return result
 
