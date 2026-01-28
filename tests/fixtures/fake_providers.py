@@ -5,9 +5,11 @@ the complete code research pipeline in CI/CD without external dependencies.
 """
 
 import asyncio
-import hashlib
+import math
 from collections.abc import AsyncIterator
 from typing import Any
+
+import xxhash
 
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
@@ -248,24 +250,35 @@ class FakeEmbeddingProvider:
         )
 
     def _generate_deterministic_vector(self, text: str) -> list[float]:
-        """Generate deterministic embedding vector from text hash."""
-        # Use text hash to seed vector generation
-        text_hash = hashlib.sha256(text.encode()).digest()
+        """Generate deterministic embedding via character n-gram feature hashing.
 
-        # Convert hash bytes to floats in [-1, 1] range
-        vector = []
-        for i in range(self._dims):
-            # Use hash bytes cyclically
-            byte_idx = i % len(text_hash)
-            byte_val = text_hash[byte_idx]
-            # Normalize to [-1, 1]
-            normalized = (byte_val / 255.0) * 2 - 1
-            vector.append(normalized)
+        Uses the NUMEN technique (arXiv:2601.15205): hash character n-grams
+        to dimension indices, accumulate with length-based weights,
+        log-saturate, and L2-normalize. Produces vectors where texts sharing
+        substrings (identifiers, keywords) have high cosine similarity.
+        """
+        dims = self._dims
+        vector = [0.0] * dims
 
-        # Normalize vector to unit length for cosine similarity
-        magnitude = sum(x * x for x in vector) ** 0.5
+        words = text.lower().split()
+        for word in words:
+            padded = f"^{word}$"
+            for n in (3, 4, 5):
+                if len(padded) < n:
+                    continue
+                weight = {3: 1.0, 4: 5.0, 5: 10.0}[n]
+                for i in range(len(padded) - n + 1):
+                    ngram = padded[i : i + n]
+                    idx = xxhash.xxh3_64_intdigest(ngram.encode()) % dims
+                    vector[idx] += weight
+
+        # Log-saturation (BM25-style diminishing returns)
+        vector = [math.log1p(v) for v in vector]
+
+        # L2-normalize
+        magnitude = math.sqrt(sum(v * v for v in vector))
         if magnitude > 0:
-            vector = [x / magnitude for x in vector]
+            vector = [v / magnitude for v in vector]
 
         return vector
 
