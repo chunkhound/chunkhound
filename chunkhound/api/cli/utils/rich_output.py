@@ -600,11 +600,12 @@ class _NoRichProgressManager:
         class _Shim:
             def __init__(self) -> None:
                 self._next_id = 1
-                # Minimal task object with .total and .completed attributes
+                # Minimal task object mimicking Rich Progress Task attributes
                 class _Task:
                     def __init__(self, total: int | None = None) -> None:
                         self.total = total
                         self.completed = 0
+                        self.elapsed = 0.0  # Shim for Rich Task.elapsed
 
                 self._Task = _Task
                 self.tasks: dict[int, _Task] = {}
