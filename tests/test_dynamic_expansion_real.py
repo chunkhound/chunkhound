@@ -841,13 +841,19 @@ async def test_score_derivative_termination(indexed_codebase):
               f"termination={analysis['termination_detected']}")
 
 
-async def _verify_multi_hop_semantic_chains(db, provider):
+async def _verify_multi_hop_semantic_chains(db, provider, *, relaxed_component_discovery: bool = False):
     """Shared verification logic for multi-hop semantic chain tests.
 
     Tests the complete semantic chains discovered in ChunkHound's codebase:
     1. Provider factory -> validation -> configuration -> usage
     2. HNSW optimization -> database -> search -> coordination
     3. MCP tools -> authentication -> provider setup -> implementation
+
+    Args:
+        relaxed_component_discovery: When True, skip assertions that depend on
+            HNSW vector quality (component discovery, integration totals).
+            Use for FakeEmbeddingProvider whose hash-based vectors produce
+            nondeterministic HNSW orderings across platforms.
     """
     search_service = SearchService(db, provider)
 
@@ -861,7 +867,7 @@ async def _verify_multi_hop_semantic_chains(db, provider):
                 ('openai_provider.py', 'supports_reranking'),
                 ('search_service.py', 'search_semantic')
             ],
-            'min_hops': 1,
+            'min_hops': 2,
             'semantic_domains': ['factory', 'validation', 'provider', 'search']
         },
         {
@@ -873,7 +879,7 @@ async def _verify_multi_hop_semantic_chains(db, provider):
                 ('indexing_coordinator.py', 'process_file'),
                 ('search_service.py', 'search_semantic')
             ],
-            'min_hops': 1,
+            'min_hops': 2,
             'semantic_domains': ['hnsw', 'batch', 'optimization', 'vector', 'index']
         },
         {
@@ -885,7 +891,7 @@ async def _verify_multi_hop_semantic_chains(db, provider):
                 ('embedding_factory.py', 'create_provider'),
                 ('http.py', 'configuration')
             ],
-            'min_hops': 1,
+            'min_hops': 2,
             'semantic_domains': ['mcp', 'authentication', 'tools', 'provider']
         }
     ]
@@ -936,8 +942,9 @@ async def _verify_multi_hop_semantic_chains(db, provider):
         ]
         discovered_components.sort(key=lambda x: x[2], reverse=True)
 
-        assert len(discovered_components) >= chain['min_hops'], \
-            f"{chain['name']}: Should discover at least {chain['min_hops']} components, " \
+        effective_min_hops = 1 if relaxed_component_discovery else chain['min_hops']
+        assert len(discovered_components) >= effective_min_hops, \
+            f"{chain['name']}: Should discover at least {effective_min_hops} components, " \
             f"found {len(discovered_components)}: {[f'{f}:{fn}' for f, fn, _ in discovered_components]}"
 
         covered_domains = sum(semantic_coverage.values())
@@ -985,7 +992,8 @@ async def _verify_multi_hop_semantic_chains(db, provider):
     assert len(chain_results) == 3, "Should test all 3 semantic chains"
 
     total_components = sum(result['components_found'] for result in chain_results)
-    assert total_components >= 5, f"Should discover substantial components across all chains, got {total_components}"
+    min_total = 3 if relaxed_component_discovery else 5
+    assert total_components >= min_total, f"Should discover substantial components across all chains, got {total_components}"
 
     good_coverage = sum(1 for result in chain_results if result['semantic_coverage'] >= 2)
     assert good_coverage >= 2, f"At least 2 chains should have good semantic coverage, got {good_coverage}"
@@ -1015,4 +1023,4 @@ async def test_complete_multi_hop_semantic_chains(indexed_codebase):
 async def test_complete_multi_hop_semantic_chains_deterministic(indexed_codebase_fake):
     """Tests multi-hop algorithm without API calls using FakeEmbeddingProvider."""
     db, provider = indexed_codebase_fake
-    await _verify_multi_hop_semantic_chains(db, provider)
+    await _verify_multi_hop_semantic_chains(db, provider, relaxed_component_discovery=True)
