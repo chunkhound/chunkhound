@@ -599,15 +599,21 @@ class EmbeddingService(BaseService):
             if show_progress:
                 with update_lock:
                     processed_count += len(batch)
-                    if embed_task and self.progress:
+                    if embed_task is not None and self.progress:
                         self.progress.advance(embed_task, len(batch))
 
                         # Calculate and display speed
-                        task_obj = self.progress.tasks[embed_task]
-                        if task_obj.elapsed and task_obj.elapsed > 0:
-                            speed = processed_count / task_obj.elapsed
-                            self.progress.update(
-                                embed_task, speed=f"{speed:.1f} chunks/s"
+                        try:
+                            task_obj = self.progress.tasks[embed_task]
+                            if task_obj.elapsed and task_obj.elapsed > 0:
+                                speed = processed_count / task_obj.elapsed
+                                self.progress.update(
+                                    embed_task, speed=f"{speed:.1f} chunks/s"
+                                )
+                        except (AttributeError, IndexError, TypeError, KeyError) as e:
+                            # Progress display is non-critical, but log for debugging
+                            logger.opt(exception=e).debug(
+                                "[EmbSvc] Progress speed update skipped"
                             )
 
             return result
