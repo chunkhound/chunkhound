@@ -218,6 +218,7 @@ class YamlMapping(BaseMapping):
                     value_text = self.get_node_text(value_node, source).strip()
 
                     metadata["kind"] = "mapping_pair"
+                    metadata["chunk_type_hint"] = "key_value"
                     metadata["key"] = key_text
 
                     # Analyze value type
@@ -240,6 +241,7 @@ class YamlMapping(BaseMapping):
                 elif "item" in captures:
                     item_node = captures["item"]
                     metadata["kind"] = "sequence_item"
+                    metadata["chunk_type_hint"] = "array"
 
                     item_type = self._analyze_yaml_value_type(item_node, source)
                     metadata["item_type"] = item_type

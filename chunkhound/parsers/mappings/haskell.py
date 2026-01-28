@@ -212,11 +212,6 @@ class HaskellMapping(BaseMapping):
             (bind) @definition
 
             (pattern_synonym) @definition
-
-            ; Capture let bindings (inside expressions)
-            (local_binds
-                (bind) @definition
-            )
             """
 
         elif concept == UniversalConcept.BLOCK:
@@ -355,6 +350,11 @@ class HaskellMapping(BaseMapping):
         node = captures.get("definition") or next(iter(captures.values()), None)
         if node is not None:
             meta["node_type"] = getattr(node, "type", "")
+        if concept == UniversalConcept.DEFINITION and node is not None:
+            if getattr(node, "type", "") == "bind":
+                meta["kind"] = "variable"
+            elif getattr(node, "type", "") == "function":
+                meta["kind"] = "function"
         if concept == UniversalConcept.IMPORT:
             # Also include full import text
             src = content.decode("utf-8", errors="replace")
