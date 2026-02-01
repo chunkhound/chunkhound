@@ -466,7 +466,7 @@ class RealtimeIndexingService:
         logger.debug(f"Starting polling monitor for {watch_path}")
         self._debug(f"polling monitor active for {watch_path}")
         # Track files with their mtime to detect modifications (not just new/deleted)
-        known_files: dict[Path, float] = {}
+        known_files: dict[Path, int] = {}
 
         # Create a simple event handler for shouldIndex check once
         simple_handler = SimpleEventHandler(None, self.config, None, root_path=watch_path)
@@ -477,7 +477,7 @@ class RealtimeIndexingService:
 
         while True:
             try:
-                current_files: dict[Path, float] = {}
+                current_files: dict[Path, int] = {}
                 files_checked = 0
 
                 # Walk directory tree but with limits to avoid hanging
@@ -487,7 +487,7 @@ class RealtimeIndexingService:
                             files_checked += 1
                             if simple_handler._should_index(file_path):
                                 try:
-                                    current_mtime = file_path.stat().st_mtime
+                                    current_mtime = file_path.stat().st_mtime_ns
                                 except OSError:
                                     continue
 
@@ -841,9 +841,9 @@ class RealtimeIndexingService:
 
         Returns True when idle, False on timeout.
         """
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
 
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             # Check if all work sources are empty
             if (
                 self.event_queue.empty()
