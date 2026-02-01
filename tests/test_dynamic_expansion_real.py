@@ -26,6 +26,7 @@ from chunkhound.core.types.common import Language
 from chunkhound.parsers.parser_factory import create_parser_for_language
 
 from .provider_configs import get_reranking_providers
+from tests.fixtures.fake_providers import FakeEmbeddingProvider
 
 # Cache providers at module level to avoid multiple calls during parametrize
 reranking_providers = get_reranking_providers()
@@ -36,91 +37,69 @@ requires_provider = pytest.mark.skipif(
     reason="No embedding provider available"
 )
 
+# Files that form multi-hop chains for testing
+CRITICAL_FILES = [
+    # HNSW optimization chain: storage → database → search
+    "chunkhound/providers/database/duckdb/embedding_repository.py",
+    "chunkhound/providers/database/duckdb_provider.py",
+    "chunkhound/services/search_service.py",
+    "chunkhound/services/indexing_coordinator.py",
+    # MCP configuration chain: tools → config → validation → factory
+    "chunkhound/core/config/embedding_config.py",
+    "chunkhound/core/config/embedding_factory.py",
+    "chunkhound/mcp_server/tools.py",
+    # Provider configuration chain: interfaces → implementations → usage
+    "chunkhound/providers/embeddings/openai_provider.py",
+    "chunkhound/providers/embeddings/voyageai_provider.py",
+    "chunkhound/interfaces/embedding_provider.py",
+    "chunkhound/interfaces/database_provider.py",
+    # CLI/API bridge layer: enables CLI → Service semantic chains
+    "chunkhound/api/cli/main.py",
+    "chunkhound/api/cli/utils/config_factory.py",
+    "chunkhound/api/cli/utils/validation.py",
+    "chunkhound/api/cli/commands/mcp.py",
+    # Service orchestration layer: enables Service → Provider chains
+    "chunkhound/services/base_service.py",
+    "chunkhound/services/chunk_cache_service.py",
+    "chunkhound/services/directory_indexing_service.py",
+    "chunkhound/database.py",
+    # Parser/Language layer: enables Parser → Concept chains
+    "chunkhound/parsers/universal_engine.py",
+    "chunkhound/parsers/parser_factory.py",
+    "chunkhound/parsers/concept_extractor.py",
+    "chunkhound/parsers/universal_parser.py",
+    # Provider/Threading layer: enables Provider → Execution chains
+    "chunkhound/providers/database/serial_database_provider.py",
+    "chunkhound/providers/database/serial_executor.py",
+    "chunkhound/providers/embeddings/batch_utils.py",
+    "chunkhound/providers/embeddings/shared_utils.py",
+    # Configuration/MCP layer: enables Config → MCP chains
+    "chunkhound/core/config/config.py",
+    "chunkhound/core/config/database_config.py",
+    "chunkhound/core/config/indexing_config.py",
+    "chunkhound/core/config/settings_sources.py",
+    "chunkhound/mcp/base.py",
+    "chunkhound/mcp/stdio.py",
+    "chunkhound/embeddings.py",
+    # Additional semantic context (legacy)
+    "chunkhound/mcp/common.py",
+    "chunkhound/database_factory.py",
+]
 
-@pytest.fixture
-async def indexed_codebase(request, tmp_path):
-    """Index real ChunkHound files for multi-hop testing."""
-    from pathlib import Path
-    db = DuckDBProvider(":memory:", base_directory=tmp_path)
-    db.connect()
 
-    provider_name, provider_class, provider_config = request.param
-    embedding_provider = provider_class(**provider_config)
-
-    if not embedding_provider.supports_reranking():
-        pytest.skip(f"{provider_name} does not support reranking")
-
+async def _index_critical_files(db, embedding_provider, tmp_path):
+    """Index CRITICAL_FILES into the database. Returns (indexed_count, processed_files)."""
     parser = create_parser_for_language(Language.PYTHON)
     coordinator = IndexingCoordinator(db, tmp_path, embedding_provider, {Language.PYTHON: parser})
-    
-    # Index files that form multi-hop chains based on our search discoveries
-    critical_files = [
-        # HNSW optimization chain: storage → database → search
-        "chunkhound/providers/database/duckdb/embedding_repository.py",
-        "chunkhound/providers/database/duckdb_provider.py", 
-        "chunkhound/services/search_service.py",
-        "chunkhound/services/indexing_coordinator.py",
-        
-        # MCP configuration chain: tools → config → validation → factory
-        "chunkhound/core/config/embedding_config.py",
-        "chunkhound/core/config/embedding_factory.py",
-        "chunkhound/mcp_server/tools.py",
-        
-        # Provider configuration chain: interfaces → implementations → usage
-        "chunkhound/providers/embeddings/openai_provider.py",
-        "chunkhound/providers/embeddings/voyageai_provider.py",
-        "chunkhound/interfaces/embedding_provider.py",
-        "chunkhound/interfaces/database_provider.py",
-        
-        # CLI/API bridge layer: enables CLI → Service semantic chains
-        "chunkhound/api/cli/main.py",
-        "chunkhound/api/cli/utils/config_factory.py",
-        "chunkhound/api/cli/utils/validation.py",
-        "chunkhound/api/cli/commands/mcp.py",
-        
-        # Service orchestration layer: enables Service → Provider chains
-        "chunkhound/services/base_service.py",
-        "chunkhound/services/chunk_cache_service.py",
-        "chunkhound/services/directory_indexing_service.py",
-        "chunkhound/database.py",
-        
-        # Parser/Language layer: enables Parser → Concept chains
-        "chunkhound/parsers/universal_engine.py",
-        "chunkhound/parsers/parser_factory.py",
-        "chunkhound/parsers/concept_extractor.py",
-        "chunkhound/parsers/universal_parser.py",
-        
-        # Provider/Threading layer: enables Provider → Execution chains
-        "chunkhound/providers/database/serial_database_provider.py",
-        "chunkhound/providers/database/serial_executor.py",
-        "chunkhound/providers/embeddings/batch_utils.py",
-        "chunkhound/providers/embeddings/shared_utils.py",
-        
-        # Configuration/MCP layer: enables Config → MCP chains
-        "chunkhound/core/config/config.py",
-        "chunkhound/core/config/database_config.py",
-        "chunkhound/core/config/indexing_config.py",
-        "chunkhound/core/config/settings_sources.py",
-        "chunkhound/mcp/base.py",
-        "chunkhound/mcp/stdio.py",
-        "chunkhound/embeddings.py",
-        
-        # Additional semantic context (legacy)
-        "chunkhound/mcp/common.py",
-        "chunkhound/database_factory.py",
-    ]
-    
-    # Use the fixture tmp_path instead of creating a separate temp directory
+
     indexed_count = 0
     processed_files = []
 
-    # Process all files first
-    for file_path in critical_files:
+    for file_path in CRITICAL_FILES:
         full_path = Path(__file__).parent.parent / file_path
         if full_path.exists():
             try:
                 content = full_path.read_text(encoding='utf-8')
-                # Preserve directory structure to avoid naming conflicts
                 temp_file_path = tmp_path / file_path
                 temp_file_path.parent.mkdir(parents=True, exist_ok=True)
                 temp_file_path.write_text(content)
@@ -130,19 +109,58 @@ async def indexed_codebase(request, tmp_path):
             except Exception as e:
                 print(f"Warning: Could not process {file_path}: {e}")
 
-    # Check minimum file requirement AFTER processing all files
+    return indexed_count, processed_files
+
+
+@pytest.fixture
+async def indexed_codebase(request, tmp_path):
+    """Index real ChunkHound files for multi-hop testing."""
+    db = DuckDBProvider(":memory:", base_directory=tmp_path)
+    db.connect()
+
+    provider_name, provider_class, provider_config = request.param
+    embedding_provider = provider_class(**provider_config)
+
+    if not embedding_provider.supports_reranking():
+        pytest.skip(f"{provider_name} does not support reranking")
+
+    indexed_count, processed_files = await _index_critical_files(db, embedding_provider, tmp_path)
+
     if indexed_count < 10:
         print(f"Files successfully processed: {processed_files}")
         pytest.skip(f"Not enough files indexed ({indexed_count}), need at least 10 for meaningful tests")
 
     stats = db.get_stats()
     print(f"Indexed codebase stats: {stats} - Successfully indexed {indexed_count} files")
-        
+
     yield db, embedding_provider
 
     db.close()
 
 
+@pytest.fixture
+async def indexed_codebase_fake(tmp_path):
+    """Index real ChunkHound files using FakeEmbeddingProvider (no API key needed)."""
+    db = DuckDBProvider(":memory:", base_directory=tmp_path)
+    db.connect()
+
+    embedding_provider = FakeEmbeddingProvider()
+
+    indexed_count, processed_files = await _index_critical_files(db, embedding_provider, tmp_path)
+
+    if indexed_count < 10:
+        print(f"Files successfully processed: {processed_files}")
+        pytest.skip(f"Not enough files indexed ({indexed_count}), need at least 10 for meaningful tests")
+
+    stats = db.get_stats()
+    print(f"Indexed codebase stats (fake): {stats} - Successfully indexed {indexed_count} files")
+
+    yield db, embedding_provider
+
+    db.close()
+
+
+@pytest.mark.slow
 @pytest.mark.parametrize("indexed_codebase", reranking_providers, indirect=True)
 @requires_provider
 @pytest.mark.asyncio
@@ -266,6 +284,7 @@ async def test_multi_hop_semantic_chain_discovery(indexed_codebase):
           f"{len(results)} results, {len(high_quality_results)}/10 high quality")
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("indexed_codebase", reranking_providers, indirect=True)
 @requires_provider
 @pytest.mark.asyncio
@@ -359,6 +378,7 @@ async def test_multi_hop_with_path_filter_respects_scope(indexed_codebase):
         ), f"Result {file_path} should be constrained to {scoped_path}"
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("indexed_codebase", reranking_providers, indirect=True)
 @requires_provider
 @pytest.mark.asyncio
@@ -504,6 +524,7 @@ async def test_mcp_authentication_chain(indexed_codebase):
     print(f"Key files discovered: {sorted(found_expected)}")
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("indexed_codebase", reranking_providers, indirect=True)
 @requires_provider
 @pytest.mark.asyncio
@@ -662,6 +683,7 @@ async def test_expansion_termination_conditions(indexed_codebase):
               f"{result['rounds']} rounds, {result['results']} results")
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("indexed_codebase", reranking_providers, indirect=True)
 @requires_provider
 @pytest.mark.asyncio
@@ -819,25 +841,22 @@ async def test_score_derivative_termination(indexed_codebase):
               f"termination={analysis['termination_detected']}")
 
 
-@pytest.mark.parametrize("indexed_codebase", reranking_providers, indirect=True)
-@requires_provider
-@pytest.mark.asyncio
-async def test_complete_multi_hop_semantic_chains(indexed_codebase):
-    """
-    Comprehensive integration test of multi-hop discovery patterns.
-    
+async def _verify_multi_hop_semantic_chains(db, provider, *, relaxed_component_discovery: bool = False):
+    """Shared verification logic for multi-hop semantic chain tests.
+
     Tests the complete semantic chains discovered in ChunkHound's codebase:
-    1. Provider factory → validation → configuration → usage
-    2. HNSW optimization → database → search → coordination  
-    3. MCP tools → authentication → provider setup → implementation
-    
-    Validates that dynamic expansion successfully discovers semantically
-    related code across multiple architectural layers.
+    1. Provider factory -> validation -> configuration -> usage
+    2. HNSW optimization -> database -> search -> coordination
+    3. MCP tools -> authentication -> provider setup -> implementation
+
+    Args:
+        relaxed_component_discovery: When True, skip assertions that depend on
+            HNSW vector quality (component discovery, integration totals).
+            Use for FakeEmbeddingProvider whose hash-based vectors produce
+            nondeterministic HNSW orderings across platforms.
     """
-    db, provider = indexed_codebase
     search_service = SearchService(db, provider)
-    
-    # Define expected multi-hop chains based on our discoveries
+
     semantic_chains = [
         {
             'name': 'provider_factory_chain',
@@ -848,7 +867,7 @@ async def test_complete_multi_hop_semantic_chains(indexed_codebase):
                 ('openai_provider.py', 'supports_reranking'),
                 ('search_service.py', 'search_semantic')
             ],
-            'min_hops': 1,  # Relaxed from 2: Limited corpus may not have all semantic connections
+            'min_hops': 2,
             'semantic_domains': ['factory', 'validation', 'provider', 'search']
         },
         {
@@ -860,7 +879,7 @@ async def test_complete_multi_hop_semantic_chains(indexed_codebase):
                 ('indexing_coordinator.py', 'process_file'),
                 ('search_service.py', 'search_semantic')
             ],
-            'min_hops': 1,  # Relaxed from 2: Limited corpus may not have all semantic connections
+            'min_hops': 2,
             'semantic_domains': ['hnsw', 'batch', 'optimization', 'vector', 'index']
         },
         {
@@ -872,98 +891,87 @@ async def test_complete_multi_hop_semantic_chains(indexed_codebase):
                 ('embedding_factory.py', 'create_provider'),
                 ('http.py', 'configuration')
             ],
-            'min_hops': 1,  # Relaxed from 2: Limited corpus may not have all semantic connections
+            'min_hops': 2,
             'semantic_domains': ['mcp', 'authentication', 'tools', 'provider']
         }
     ]
-    
+
     chain_results = []
-    
+
     for chain in semantic_chains:
         print(f"\n--- Testing {chain['name']} ---")
-        
+
         results, pagination = await search_service.search_semantic(
             chain['query'],
-            page_size=40  # Get more results to capture the full chain
+            page_size=40
         )
-        
+
         # Track chain component discovery
         discovered_components = []
         file_scores = {}
         semantic_coverage = {domain: False for domain in chain['semantic_domains']}
-        
+
         for result in results:
             file_name = result['file_path'].split('/')[-1]
             content = result['content'].lower()
             score = result.get('score', 0.0)
-            
-            # Track best score per file
+
             if file_name not in file_scores or score > file_scores[file_name]:
                 file_scores[file_name] = score
-            
-            # Check for expected components (more flexible matching)
+
             for expected_file, expected_function in chain['expected_components']:
                 if expected_file in file_name:
-                    # More flexible function matching - check for related terms
                     function_terms = expected_function.lower().split('_')
                     if any(term in content for term in function_terms if len(term) > 3):
                         discovered_components.append((expected_file, expected_function, score))
                         break
-            
-            # Check semantic domain coverage
+
             for domain in chain['semantic_domains']:
                 if domain.lower() in content:
                     semantic_coverage[domain] = True
-        
+
         # Remove duplicates and sort by score
         unique_components = {}
         for file, func, score in discovered_components:
             key = (file, func)
             if key not in unique_components or score > unique_components[key]:
                 unique_components[key] = score
-        
+
         discovered_components = [
             (file, func, score) for (file, func), score in unique_components.items()
         ]
         discovered_components.sort(key=lambda x: x[2], reverse=True)
-        
-        # Verify multi-hop discovery
-        assert len(discovered_components) >= chain['min_hops'], \
-            f"{chain['name']}: Should discover at least {chain['min_hops']} components, " \
-            f"found {len(discovered_components)}: {[f'{f}:{fn}' for f, fn, _ in discovered_components]}"
-        
-        # Verify semantic domain coverage
-        # Relaxed from "at least half, minimum 2" to "at least 1" due to limited corpus
+
+        if not relaxed_component_discovery:
+            assert len(discovered_components) >= chain['min_hops'], \
+                f"{chain['name']}: Should discover at least {chain['min_hops']} components, " \
+                f"found {len(discovered_components)}: {[f'{f}:{fn}' for f, fn, _ in discovered_components]}"
+
         covered_domains = sum(semantic_coverage.values())
-        expected_coverage = 1  # At least one semantic domain should be covered
+        expected_coverage = 1
         assert covered_domains >= expected_coverage, \
             f"{chain['name']}: Should cover at least {expected_coverage} semantic domain(s), " \
             f"covered {covered_domains}/{len(chain['semantic_domains'])}: {semantic_coverage}"
-        
-        # Verify score gradient (implementation components should score higher)
+
         if len(discovered_components) >= 2:
             highest_score = discovered_components[0][2]
             lowest_score = discovered_components[-1][2]
             assert highest_score > lowest_score, \
                 f"{chain['name']}: Should have score gradient, " \
                 f"highest={highest_score:.3f}, lowest={lowest_score:.3f}"
-        
-        # Verify relevance to original query using semantic similarity scores
-        # If reranking is working, top results should have decent scores
+
         high_scoring_results = len([r for r in results[:15] if r.get('score', 0.0) >= 0.5])
-        
-        # More lenient: check for any term overlap OR high semantic scores
+
         query_terms = set(chain['query'].lower().split())
         relevant_results = 0
-        for result in results[:15]:  # Top 15 results
+        for result in results[:15]:
             content_terms = set(result['content'].lower().split())
-            # Count as relevant if has term overlap OR high semantic score
             if len(query_terms & content_terms) >= 1 or result.get('score', 0.0) >= 0.6:
                 relevant_results += 1
-        
+
         assert relevant_results >= 5, \
             f"{chain['name']}: At least 30% of top 15 should be relevant, got {relevant_results} (high scoring: {high_scoring_results})"
-        
+
         chain_results.append({
             'name': chain['name'],
             'components_found': len(discovered_components),
@@ -971,33 +979,49 @@ async def test_complete_multi_hop_semantic_chains(indexed_codebase):
             'total_results': pagination['total'],
             'relevant_results': relevant_results,
             'best_score': discovered_components[0][2] if discovered_components else 0,
-            'components': discovered_components[:3]  # Top 3 for reporting
+            'components': discovered_components[:3]
         })
-        
+
         print(f"  Found {len(discovered_components)} chain components")
         print(f"  Semantic coverage: {covered_domains}/{len(chain['semantic_domains'])} domains")
         print(f"  Relevance: {relevant_results}/15 top results")
         for i, (file, func, score) in enumerate(discovered_components[:3]):
             print(f"    {i+1}. {file}:{func} (score: {score:.3f})")
-    
+
     # Overall integration validation
     assert len(chain_results) == 3, "Should test all 3 semantic chains"
-    
-    # All chains should discover substantial components
+
     total_components = sum(result['components_found'] for result in chain_results)
-    assert total_components >= 5, f"Should discover substantial components across all chains, got {total_components}"
-    
-    # At least 2 chains should achieve good semantic coverage  
+    if not relaxed_component_discovery:
+        assert total_components >= 5, f"Should discover substantial components across all chains, got {total_components}"
+
     good_coverage = sum(1 for result in chain_results if result['semantic_coverage'] >= 2)
     assert good_coverage >= 2, f"At least 2 chains should have good semantic coverage, got {good_coverage}"
-    
-    # All chains should maintain relevance
+
     avg_relevance = sum(result['relevant_results'] for result in chain_results) / len(chain_results)
     assert avg_relevance >= 4, f"Average relevance should be decent, got {avg_relevance:.1f}"
-    
+
     print(f"\n--- Integration Test Summary ---")
     print(f"Total semantic components discovered: {total_components}")
     print(f"Average relevance per chain: {avg_relevance:.1f}/15")
     print(f"Chains with good coverage: {good_coverage}/3")
-    
-    return chain_results  # For potential further analysis
+
+    return chain_results
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("indexed_codebase", reranking_providers, indirect=True)
+@requires_provider
+@pytest.mark.asyncio
+async def test_complete_multi_hop_semantic_chains(indexed_codebase):
+    """Comprehensive integration test of multi-hop discovery patterns (real API)."""
+    db, provider = indexed_codebase
+    await _verify_multi_hop_semantic_chains(db, provider)
+
+
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_complete_multi_hop_semantic_chains_deterministic(indexed_codebase_fake):
+    """Tests multi-hop algorithm without API calls using FakeEmbeddingProvider."""
+    db, provider = indexed_codebase_fake
+    await _verify_multi_hop_semantic_chains(db, provider, relaxed_component_discovery=True)
