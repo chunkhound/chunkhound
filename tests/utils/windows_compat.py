@@ -4,15 +4,17 @@ import gc
 import os
 import tempfile
 import time
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any
 
 from loguru import logger
+
 from chunkhound.utils.windows_constants import (
     IS_WINDOWS,
     WINDOWS_DB_CLEANUP_DELAY,
-    WINDOWS_RETRY_DELAY
+    WINDOWS_RETRY_DELAY,
 )
 
 
@@ -40,7 +42,7 @@ def paths_equal(path1: str | Path, path2: str | Path) -> bool:
     """Compare two paths for equality, handling Windows short paths."""
     norm1 = normalize_path_for_comparison(path1)
     norm2 = normalize_path_for_comparison(path2)
-    
+
     # On Windows, also compare case-insensitive
     if is_windows():
         return norm1.lower() == norm2.lower()
@@ -51,7 +53,7 @@ def path_contains(parent: str | Path, child: str | Path) -> bool:
     """Check if parent path contains child path, handling Windows short paths."""
     parent_norm = normalize_path_for_comparison(parent)
     child_norm = normalize_path_for_comparison(child)
-    
+
     if is_windows():
         return child_norm.lower().startswith(parent_norm.lower())
     return child_norm.startswith(parent_norm)
@@ -84,14 +86,14 @@ def cleanup_database_resources(provider: Any = None) -> None:
             elif hasattr(provider, 'disconnect'):
                 provider.disconnect()
             # Note: Some tests may use close() instead - prefer that when available
-        
+
         # Force garbage collection to release resources
         gc.collect()
-        
+
         # Windows-specific: Additional delay for file handle release
         if is_windows():
             time.sleep(WINDOWS_DB_CLEANUP_DELAY)
-            
+
     except Exception as e:
         logger.error(f"Error during database cleanup: {e}")
 
@@ -112,16 +114,16 @@ def windows_safe_tempdir() -> Generator[Path, None, None]:
             try:
                 # Cleanup any database resources first
                 cleanup_database_resources()
-                
+
                 # Try to remove the directory
                 import shutil
                 shutil.rmtree(temp_dir, ignore_errors=True)
-                
+
                 # On Windows, retry if removal failed
                 if is_windows() and temp_dir.exists():
                     time.sleep(WINDOWS_RETRY_DELAY)  # Longer delay
                     shutil.rmtree(temp_dir, ignore_errors=True)
-                    
+
             except Exception as e:
                 logger.error(f"Error cleaning up temp directory {temp_dir}: {e}")
 
@@ -138,7 +140,7 @@ def wait_for_file_release(file_path: Path, max_attempts: int = 10) -> bool:
     """
     if not is_windows():
         return True
-        
+
     for attempt in range(max_attempts):
         try:
             # Try to rename the file (this will fail if locked)
@@ -150,7 +152,7 @@ def wait_for_file_release(file_path: Path, max_attempts: int = 10) -> bool:
             if attempt < max_attempts - 1:
                 time.sleep(0.1 * (attempt + 1))  # Exponential backoff
             continue
-    
+
     return False
 
 
@@ -174,6 +176,15 @@ def force_close_database_files(db_path: Path) -> None:
 def is_ci() -> bool:
     """Check if running in CI environment."""
     return bool(os.environ.get("CI"))
+
+
+def should_use_polling() -> bool:
+    """Returns True if tests should use polling mode instead of watchdog.
+
+    Windows CI has unreliable ReadDirectoryChangesW events that can silently
+    drop filesystem events, causing tests to hang or fail.
+    """
+    return is_windows() and is_ci()
 
 
 def get_fs_event_timeout() -> float:
@@ -246,22 +257,23 @@ def wait_for_indexed_sync(
     return False
 
 
-async def wait_for_searchable(
+async def wait_for_regex_searchable(
     services,
     query: str,
-    search_type: str = "regex",
     timeout: float | None = None,
     poll_interval: float = 0.5
 ) -> bool:
-    """Wait for content to be searchable in the index.
+    """Wait for content to be regex-searchable in the index.
 
-    Polls search results instead of relying on queue state,
+    Polls regex search results instead of relying on queue state,
     handling the polling monitor timing gap on Windows CI.
+
+    Note: This helper only supports regex search. Semantic search requires
+    embedding_manager threading which is test-specific.
 
     Args:
         services: The services object with provider access
-        query: Search query to poll for
-        search_type: "regex" or "semantic"
+        query: Regex pattern to poll for
         timeout: Max wait time (defaults to platform-appropriate value)
         poll_interval: Time between search polls
 
@@ -269,6 +281,7 @@ async def wait_for_searchable(
         True if content became searchable, False on timeout
     """
     import asyncio
+
     from chunkhound.mcp_server.tools import execute_tool
 
     if timeout is None:
@@ -278,7 +291,7 @@ async def wait_for_searchable(
 
     while time.monotonic() < deadline:
         results = await execute_tool("search", services, None, {
-            "type": search_type,
+            "type": "regex",
             "query": query,
             "page_size": 10,
             "offset": 0
