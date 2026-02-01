@@ -36,7 +36,7 @@ class SimpleEventHandler(FileSystemEventHandler):
 
     def __init__(
         self,
-        event_queue: asyncio.Queue,
+        event_queue: asyncio.Queue[tuple[str, Path]] | None,
         config: Config | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
         root_path: Path | None = None,
@@ -87,7 +87,7 @@ class SimpleEventHandler(FileSystemEventHandler):
 
         # Put event in async queue from watchdog thread
         try:
-            if self.loop and not self.loop.is_closed():
+            if self.loop and not self.loop.is_closed() and self.event_queue is not None:
                 future = asyncio.run_coroutine_threadsafe(
                     self.event_queue.put((event.event_type, file_path)), self.loop
                 )
@@ -179,7 +179,7 @@ class SimpleEventHandler(FileSystemEventHandler):
     def _queue_event(self, event_type: str, file_path: Path) -> None:
         """Queue an event for async processing."""
         try:
-            if self.loop and not self.loop.is_closed():
+            if self.loop and not self.loop.is_closed() and self.event_queue is not None:
                 future = asyncio.run_coroutine_threadsafe(
                     self.event_queue.put((event_type, file_path)), self.loop
                 )
