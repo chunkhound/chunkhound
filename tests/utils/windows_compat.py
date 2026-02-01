@@ -257,6 +257,42 @@ def wait_for_indexed_sync(
     return False
 
 
+async def wait_for_removed(
+    provider,
+    file_path,
+    timeout: float | None = None,
+    poll_interval: float = 0.2
+) -> bool:
+    """Wait for file to be removed from database index.
+
+    Uses polling instead of fixed sleep to handle Windows CI flakiness.
+
+    Args:
+        provider: Database provider with get_file_by_path method
+        file_path: Path to file that should be removed
+        timeout: Max wait time (defaults to platform-appropriate value)
+        poll_interval: Time between checks
+
+    Returns:
+        True if file was removed, False on timeout
+    """
+    import asyncio
+
+    if timeout is None:
+        timeout = get_fs_event_timeout()
+
+    path_str = str(Path(file_path).resolve())
+    deadline = time.monotonic() + timeout
+
+    while time.monotonic() < deadline:
+        record = provider.get_file_by_path(path_str)
+        if record is None:
+            return True
+        await asyncio.sleep(poll_interval)
+
+    return False
+
+
 async def wait_for_regex_searchable(
     services,
     query: str,
