@@ -95,7 +95,7 @@ def orphan_test():
     
     result = await services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
     assert result['status'] == 'success'
-    assert result.get('embeddings_skipped', True) == False, "Should not skip embeddings"
+    assert not result.get('embeddings_skipped', True), "Should not skip embeddings"
 
     # Wait for async embedding processing
     await asyncio.sleep(3.0)
@@ -115,22 +115,42 @@ def orphan_test():
     chunk_result = db.execute_query(chunks_query)
     chunk_count = list(chunk_result[0].values())[0] if chunk_result else 0
     
-    # Get embedding count using the correct table based on provider dimensions
+    # Get embedding count by discovering actual tables via information_schema.
+    # DuckDB insert paths select the embeddings table based on detected vector length,
+    # so we discover the actual embeddings_* table(s) present and select the one with
+    # rows (falling back to provider dims if none have data).
     try:
-        # Get the embedding provider's dimensions to determine the correct table.
-        # Note: Accessing _embedding_provider is acceptable in tests to verify
-        # internal consistency without adding test-only public API surface.
-        embedding_provider = services.embedding_service._embedding_provider
-        if not embedding_provider:
-            pytest.skip("No embedding provider configured")
+        tables_query = """
+            SELECT table_name FROM information_schema.tables
+            WHERE table_name LIKE 'embeddings_%'
+        """
+        tables_result = db.execute_query(tables_query)
+        embedding_tables = [row["table_name"] for row in tables_result] if tables_result else []
 
-        dims = embedding_provider.dims
-        embedding_table = f"embeddings_{dims}"
+        if not embedding_tables:
+            pytest.skip("No embedding tables exist in database")
 
-        # Get embedding count from discovered table
-        embeddings_query = f"SELECT COUNT(*) FROM {embedding_table}"
-        embedding_result = db.execute_query(embeddings_query)
-        embedding_count = list(embedding_result[0].values())[0] if embedding_result else 0
+        # Find the embedding table(s) with rows
+        tables_with_rows = []
+        for table_name in embedding_tables:
+            count_query = f"SELECT COUNT(*) as cnt FROM {table_name}"
+            count_result = db.execute_query(count_query)
+            row_count = count_result[0]["cnt"] if count_result else 0
+            if row_count > 0:
+                tables_with_rows.append((table_name, row_count))
+
+        if not tables_with_rows:
+            # Fallback to provider dims if no tables have rows
+            embedding_provider = services.embedding_service._embedding_provider
+            if not embedding_provider:
+                pytest.skip("No embedding provider configured and no embeddings found")
+            embedding_table = f"embeddings_{embedding_provider.dims}"
+            embedding_count = 0
+        else:
+            # Use the table with rows (should be only one in this test)
+            assert len(tables_with_rows) == 1, \
+                f"Expected one embedding table with rows, found: {tables_with_rows}"
+            embedding_table, embedding_count = tables_with_rows[0]
 
         # Check for orphaned embeddings (embeddings without corresponding chunks)
         orphaned_query = f"""
@@ -140,7 +160,7 @@ def orphan_test():
             WHERE c.id IS NULL
         """
         orphaned_result = db.execute_query(orphaned_query)
-        orphaned_count = orphaned_result[0]['orphaned_count'] if orphaned_result else 0
+        orphaned_count = orphaned_result[0]["orphaned_count"] if orphaned_result else 0
 
         assert orphaned_count == 0, f"Found {orphaned_count} orphaned embeddings"
 
