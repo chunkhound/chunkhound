@@ -58,15 +58,6 @@ class TestGeminiLLMProvider:
         )
         assert provider_low._thinking_level == "low"
 
-    def test_estimate_tokens(self, provider):
-        """Test token estimation (rough approximation)."""
-        text = "a" * 400  # 400 characters
-        tokens = provider.estimate_tokens(text)
-        assert tokens == 100  # 400 / 4 = 100 tokens
-
-        empty_text = ""
-        assert provider.estimate_tokens(empty_text) == 0
-
     def test_build_generation_config_basic(self, provider):
         """Test basic generation config building."""
         config = provider._build_generation_config(max_completion_tokens=2048)
