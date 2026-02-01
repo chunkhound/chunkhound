@@ -1019,6 +1019,7 @@ async def test_complete_multi_hop_semantic_chains(indexed_codebase):
     await _verify_multi_hop_semantic_chains(db, provider)
 
 
+@pytest.mark.slow
 @pytest.mark.asyncio
 async def test_complete_multi_hop_semantic_chains_deterministic(indexed_codebase_fake):
     """Tests multi-hop algorithm without API calls using FakeEmbeddingProvider."""
