@@ -10,7 +10,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.11"]   # 3.11 stable, 3.12 has usearch segfault issues
+        python: ["3.11"]
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
