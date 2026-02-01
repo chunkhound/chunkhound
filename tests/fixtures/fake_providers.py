@@ -11,8 +11,8 @@ from typing import Any
 
 import xxhash
 
-from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
+from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 
 
 class FakeLLMProvider(LLMProvider):
@@ -252,10 +252,10 @@ class FakeEmbeddingProvider:
     def _generate_deterministic_vector(self, text: str) -> list[float]:
         """Generate deterministic embedding via character n-gram feature hashing.
 
-        Uses the NUMEN technique (arXiv:2601.15205): hash character n-grams
-        to dimension indices, accumulate with length-based weights,
-        log-saturate, and L2-normalize. Produces vectors where texts sharing
-        substrings (identifiers, keywords) have high cosine similarity.
+        Hashes character n-grams (3, 4, 5-grams) to dimension indices,
+        accumulates with length-based weights, applies log-saturation,
+        and L2-normalizes. Produces vectors where texts sharing substrings
+        (identifiers, keywords) have high cosine similarity.
         """
         dims = self._dims
         vector = [0.0] * dims
