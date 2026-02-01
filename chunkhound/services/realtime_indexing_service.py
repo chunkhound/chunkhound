@@ -836,31 +836,3 @@ class RealtimeIndexingService:
             logger.warning(f"Monitoring not ready after {timeout}s")
             return False
 
-    async def wait_for_idle(self, timeout: float = 10.0) -> bool:
-        """Wait until all pending work is complete.
-
-        Returns True when idle, False on timeout.
-        """
-        deadline = time.monotonic() + timeout
-
-        while time.monotonic() < deadline:
-            # Check if all work sources are empty
-            if (
-                self.event_queue.empty()
-                and self.file_queue.empty()
-                and len(self.pending_files) == 0
-                and len(self._debounce_tasks) == 0
-            ):
-                # Double-check after brief pause to catch in-flight work
-                await asyncio.sleep(0.1)
-                if (
-                    self.event_queue.empty()
-                    and self.file_queue.empty()
-                    and len(self.pending_files) == 0
-                    and len(self._debounce_tasks) == 0
-                ):
-                    return True
-
-            await asyncio.sleep(0.1)
-
-        return False
