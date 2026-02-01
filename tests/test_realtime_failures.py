@@ -17,6 +17,7 @@ from tests.utils.windows_compat import (
     get_fs_event_timeout,
     should_use_polling,
     wait_for_indexed,
+    wait_for_removed,
 )
 
 
@@ -194,22 +195,16 @@ class TestRealtimeFailures:
         test_file = watch_dir / "delete_test.py"
         test_file.write_text("def to_be_deleted(): pass")
 
-        # Wait for debounce + processing to complete
-        await asyncio.sleep(1.5)
-
-        # Verify file was processed - use resolved path
-        file_record = services.provider.get_file_by_path(str(test_file.resolve()))
-        assert file_record is not None, "File should be processed initially"
+        # Wait for file to be indexed
+        found = await wait_for_indexed(services.provider, test_file, timeout=get_fs_event_timeout())
+        assert found, "File should be processed initially"
 
         # Delete the file
         test_file.unlink()
 
         # Wait for deletion processing
-        await asyncio.sleep(1.5)
-
-        # Check if file was removed from database - use resolved path
-        file_record_after = services.provider.get_file_by_path(str(test_file.resolve()))
-        assert file_record_after is None, "Deleted files should be removed from database"
+        removed = await wait_for_removed(services.provider, test_file, timeout=get_fs_event_timeout())
+        assert removed, "Deleted files should be removed from database"
 
         await service.stop()
 
