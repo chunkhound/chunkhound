@@ -36,9 +36,10 @@ class SimpleEventHandler(FileSystemEventHandler):
 
     def __init__(
         self,
-        event_queue: asyncio.Queue,
+        event_queue: asyncio.Queue[tuple[str, Path]] | None,
         config: Config | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
+        root_path: Path | None = None,
     ):
         self.event_queue = event_queue
         self.config = config
@@ -46,10 +47,13 @@ class SimpleEventHandler(FileSystemEventHandler):
         self._engine = None
         self._include_patterns: list[str] | None = None
         self._pattern_cache: dict[str, Any] = {}
-        try:
-            self._root = (config.target_dir if config and config.target_dir else Path.cwd()).resolve()
-        except Exception:
-            self._root = Path.cwd().resolve()
+        if root_path is not None:
+            self._root = root_path.resolve()
+        else:
+            try:
+                self._root = (config.target_dir if config and config.target_dir else Path.cwd()).resolve()
+            except Exception:
+                self._root = Path.cwd().resolve()
 
     def on_any_event(self, event: Any) -> None:
         """Handle filesystem events - simple queue operation."""
@@ -83,7 +87,7 @@ class SimpleEventHandler(FileSystemEventHandler):
 
         # Put event in async queue from watchdog thread
         try:
-            if self.loop and not self.loop.is_closed():
+            if self.loop and not self.loop.is_closed() and self.event_queue is not None:
                 future = asyncio.run_coroutine_threadsafe(
                     self.event_queue.put((event.event_type, file_path)), self.loop
                 )
@@ -175,7 +179,7 @@ class SimpleEventHandler(FileSystemEventHandler):
     def _queue_event(self, event_type: str, file_path: Path) -> None:
         """Queue an event for async processing."""
         try:
-            if self.loop and not self.loop.is_closed():
+            if self.loop and not self.loop.is_closed() and self.event_queue is not None:
                 future = asyncio.run_coroutine_threadsafe(
                     self.event_queue.put((event_type, file_path)), self.loop
                 )
@@ -197,12 +201,15 @@ class RealtimeIndexingService:
         services: DatabaseServices,
         config: Config,
         debug_sink: Callable[[str], None] | None = None,
+        force_polling: bool = False,
     ):
         self.services = services
         self.config = config
         # Optional sink that writes to MCPServerBase.debug_log so events land in
         # /tmp/chunkhound_mcp_debug.log when CHUNKHOUND_DEBUG is enabled.
         self._debug_sink = debug_sink
+        # Force polling mode - useful for Windows CI where watchdog is unreliable
+        self._force_polling = force_polling
 
         # Existing asyncio queue for priority processing
         self.file_queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue()
@@ -356,6 +363,17 @@ class RealtimeIndexingService:
         self, watch_path: Path, loop: asyncio.AbstractEventLoop
     ) -> None:
         """Setup watchdog with timeout - fall back to polling if it takes too long."""
+        # Skip watchdog entirely if force_polling is enabled (e.g., Windows CI)
+        if self._force_polling:
+            logger.info(f"Polling mode forced for {watch_path}")
+            self._using_polling = True
+            self._polling_task = asyncio.create_task(self._polling_monitor(watch_path))
+            await asyncio.sleep(0.5)
+            self._monitoring_ready_time = time.time()
+            self.monitoring_ready.set()
+            self._debug("force_polling enabled; using polling mode")
+            return
+
         # run_in_executor returns an awaitable Future - no create_task needed
         watchdog_task = loop.run_in_executor(
             None, self._start_fs_monitor, watch_path, loop
@@ -409,7 +427,9 @@ class RealtimeIndexingService:
         self, watch_path: Path, loop: asyncio.AbstractEventLoop
     ) -> None:
         """Start filesystem monitoring with recursive watching for complete coverage."""
-        self.event_handler = SimpleEventHandler(self.event_queue, self.config, loop)
+        self.event_handler = SimpleEventHandler(
+            self.event_queue, self.config, loop, root_path=watch_path
+        )
         self.observer = Observer()
 
         # Use recursive=True to ensure all directory events are captured
@@ -445,10 +465,11 @@ class RealtimeIndexingService:
         """Simple polling monitor for large directories."""
         logger.debug(f"Starting polling monitor for {watch_path}")
         self._debug(f"polling monitor active for {watch_path}")
-        known_files = set()
+        # Track files with their mtime to detect modifications (not just new/deleted)
+        known_files: dict[Path, int] = {}
 
         # Create a simple event handler for shouldIndex check once
-        simple_handler = SimpleEventHandler(None, self.config, None)
+        simple_handler = SimpleEventHandler(None, self.config, None, root_path=watch_path)
 
         # Use a shorter interval during the first few seconds to ensure
         # freshly created files are detected quickly after startup/fallback.
@@ -456,7 +477,7 @@ class RealtimeIndexingService:
 
         while True:
             try:
-                current_files = set()
+                current_files: dict[Path, int] = {}
                 files_checked = 0
 
                 # Walk directory tree but with limits to avoid hanging
@@ -465,7 +486,13 @@ class RealtimeIndexingService:
                         if file_path.is_file():
                             files_checked += 1
                             if simple_handler._should_index(file_path):
-                                current_files.add(file_path)
+                                try:
+                                    current_mtime = file_path.stat().st_mtime_ns
+                                except OSError:
+                                    continue
+
+                                current_files[file_path] = current_mtime
+
                                 if file_path not in known_files:
                                     # New file detected
                                     logger.debug(
@@ -473,6 +500,15 @@ class RealtimeIndexingService:
                                     )
                                     self._debug(
                                         f"polling detected new file: {file_path}"
+                                    )
+                                    await self.add_file(file_path, priority="change")
+                                elif known_files[file_path] != current_mtime:
+                                    # Modified file detected
+                                    logger.debug(
+                                        f"Polling detected modified file: {file_path}"
+                                    )
+                                    self._debug(
+                                        f"polling detected modified file: {file_path}"
                                     )
                                     await self.add_file(file_path, priority="change")
 
@@ -489,7 +525,7 @@ class RealtimeIndexingService:
                         continue
 
                 # Check for deleted files
-                deleted = known_files - current_files
+                deleted = set(known_files.keys()) - set(current_files.keys())
                 for file_path in deleted:
                     logger.debug(f"Polling detected deleted file: {file_path}")
                     await self.remove_file(file_path)
@@ -514,7 +550,7 @@ class RealtimeIndexingService:
             # Simple debouncing for change events
             if priority == "change":
                 file_str = str(file_path)
-                current_time = time.time()
+                current_time = time.monotonic()
 
                 if file_str in self._pending_debounce:
                     # Update timestamp for existing pending file
@@ -543,7 +579,7 @@ class RealtimeIndexingService:
             last_update = self._pending_debounce[file_str]
 
             # Check if no recent updates during delay
-            if time.time() - last_update >= self._debounce_delay:
+            if time.monotonic() - last_update >= self._debounce_delay:
                 del self._pending_debounce[file_str]
                 await self.file_queue.put((priority, file_path))
                 logger.debug(f"Processing debounced file: {file_path}")
@@ -737,6 +773,9 @@ class RealtimeIndexingService:
                 if hasattr(self.services.provider, "flush"):
                     await self.services.provider.flush()
 
+                # Clear event dedup entry so future modifications aren't suppressed
+                self._recent_file_events.pop(str(file_path), None)
+
                 # If we skipped embeddings, queue for embedding generation
                 if skip_embeddings:
                     await self.add_file(file_path, priority="embed")
@@ -796,3 +835,4 @@ class RealtimeIndexingService:
         except asyncio.TimeoutError:
             logger.warning(f"Monitoring not ready after {timeout}s")
             return False
+

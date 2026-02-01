@@ -37,10 +37,15 @@ def test_haskell_captures_top_level_bind_and_function():
     )
 
     chunks = parse_haskell(content)
-    names = {c.symbol for c in chunks if c.chunk_type == ChunkType.FUNCTION}
+    function_names = {c.symbol for c in chunks if c.chunk_type == ChunkType.FUNCTION}
+    variable_names = {c.symbol for c in chunks if c.chunk_type == ChunkType.VARIABLE}
 
-    assert "const" in names, f"Expected 'const' bind to be captured, got: {sorted(names)}"
-    assert "add" in names, f"Expected 'add' function to be captured, got: {sorted(names)}"
+    assert "const" in variable_names, (
+        f"Expected 'const' bind to be VARIABLE, got: {sorted(variable_names)}"
+    )
+    assert "add" in function_names, (
+        f"Expected 'add' function to be FUNCTION, got: {sorted(function_names)}"
+    )
 
 
 def test_haskell_captures_class_and_instance_methods():
