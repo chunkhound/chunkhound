@@ -11,6 +11,9 @@ from chunkhound.interfaces.embedding_provider import (
 )
 
 if TYPE_CHECKING:
+    from chunkhound.providers.embeddings.mistral_provider import (
+        MistralEmbeddingProvider,
+    )
     from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
 
 # Core domain models
@@ -212,4 +215,40 @@ def create_openai_provider(
         rerank_url=rerank_url,
         rerank_format=rerank_format,
         rerank_batch_size=rerank_batch_size,
+    )
+
+
+def create_mistral_provider(
+    api_key: str | None = None,
+    model: str = "codestral-embed",
+    batch_size: int = 32,
+    timeout: int = 30,
+    retry_attempts: int = 3,
+    output_dimension: int | None = None,
+) -> "MistralEmbeddingProvider":
+    """Create a Mistral embedding provider with default settings.
+
+    Args:
+        api_key: Mistral API key (uses MISTRAL_API_KEY env var if None)
+        model: Model name to use (default: codestral-embed)
+        batch_size: Maximum batch size for embedding requests
+        timeout: Request timeout in seconds
+        retry_attempts: Number of retry attempts for failed requests
+        output_dimension: Output embedding dimension (1-3072, for Matryoshka embeddings)
+
+    Returns:
+        Configured Mistral embedding provider
+    """
+    # Import the provider from the correct location
+    from chunkhound.providers.embeddings.mistral_provider import (
+        MistralEmbeddingProvider,
+    )
+
+    return MistralEmbeddingProvider(
+        api_key=api_key,
+        model=model,
+        batch_size=batch_size,
+        timeout=timeout,
+        retry_attempts=retry_attempts,
+        output_dimension=output_dimension,
     )

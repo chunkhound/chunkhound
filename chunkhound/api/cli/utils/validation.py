@@ -51,7 +51,7 @@ def validate_provider_args(
     if not provider:
         logger.error(
             """
-            No embedding provider configured. Choose from: openai, voyageai.
+            No embedding provider configured. Choose from: openai, voyageai, mistral.
             To fix this, you can:
             1) Set via --provider flag
             2) Set CHUNKHOUND_EMBEDDING__PROVIDER environment variable
@@ -77,6 +77,13 @@ def validate_provider_args(
         if not api_key:
             logger.error(
                 "VoyageAI API key required. Set CHUNKHOUND_EMBEDDING_API_KEY "
+                "or use --api-key"
+            )
+            return False
+    elif provider == "mistral":
+        if not api_key:
+            logger.error(
+                "Mistral API key required. Set CHUNKHOUND_EMBEDDING_API_KEY "
                 "or use --api-key"
             )
             return False
