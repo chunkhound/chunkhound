@@ -4,6 +4,7 @@ Vue SFCs require special handling because they contain multiple language
 sections (template, script, style) that need to be parsed separately.
 """
 
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,7 @@ from chunkhound.core.types.common import (
 from chunkhound.parsers.chunk_splitter import (
     CASTConfig,
     ChunkSplitter,
+    compute_end_line,
     universal_to_chunk,
 )
 from chunkhound.parsers.mappings.vue import VueMapping
@@ -191,8 +193,6 @@ class VueParser:
 
                 # Create new chunk with adjusted line numbers and metadata
                 # Chunks are frozen dataclasses, so we need to create a new one
-                from dataclasses import replace
-
                 adjusted_chunk = replace(
                     chunk,
                     start_line=LineNumber(chunk.start_line + start_line),
@@ -216,7 +216,7 @@ class VueParser:
                     template_chunks.extend(parsed_template_chunks)
                 else:
                     # Fallback: create simple text block for template
-                    end_line = start_line + template_content.count("\n")
+                    end_line = compute_end_line(template_content, start_line)
 
                     uchunk = UniversalChunk(
                         concept=UniversalConcept.BLOCK,
@@ -238,7 +238,7 @@ class VueParser:
         # Create chunks for style sections (optional, as text blocks)
         for attrs, style_content, start_line in sections["style"]:
             if style_content.strip():
-                end_line = start_line + style_content.count("\n")
+                end_line = compute_end_line(style_content, start_line)
                 is_scoped = "scoped" in attrs.lower()
 
                 uchunk = UniversalChunk(
@@ -313,8 +313,6 @@ class VueParser:
             # Adjust line numbers to account for:
             # 1. The <template> wrapper line (subtract 1)
             # 2. Template section position in file (add start_line)
-            from dataclasses import replace
-
             adjusted_chunks = []
             for chunk in template_chunks:
                 adjusted_chunk = replace(

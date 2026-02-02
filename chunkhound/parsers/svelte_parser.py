@@ -4,6 +4,8 @@ Svelte SFCs require special handling because they contain multiple language
 sections (template, script, style) that need to be parsed separately.
 """
 
+import re
+from dataclasses import replace
 from pathlib import Path
 
 from chunkhound.core.models.chunk import Chunk
@@ -15,6 +17,7 @@ from chunkhound.core.types.common import (
 from chunkhound.parsers.chunk_splitter import (
     CASTConfig,
     ChunkSplitter,
+    compute_end_line,
     universal_to_chunk,
 )
 from chunkhound.parsers.mappings.svelte import SvelteMapping
@@ -128,9 +131,6 @@ class SvelteParser:
 
                 # Add script language if detected
                 if attrs:
-                    # Simple lang extraction
-                    import re
-
                     lang_match = re.search(
                         r'lang\s*=\s*["\']?(\w+)["\']?', attrs, re.IGNORECASE
                     )
@@ -141,8 +141,6 @@ class SvelteParser:
 
                 # Create new chunk with adjusted line numbers and metadata
                 # Chunks are frozen dataclasses, so we need to create a new one
-                from dataclasses import replace
-
                 adjusted_chunk = replace(
                     chunk,
                     start_line=LineNumber(chunk.start_line + start_line - 1),
@@ -156,18 +154,7 @@ class SvelteParser:
         # Create chunks for template sections (as text blocks)
         for _, template_content, start_line in sections["template"]:
             if template_content.strip():
-                # Calculate end line: start_line is already positioned correctly
-                # by extract_sections(), and we need to count newlines in the content
-                # The end line is the last line that contains content
-                newline_count = template_content.count("\n")
-                # If content ends with newline, the last line is before that newline
-                if template_content.endswith("\n"):
-                    end_line = start_line + newline_count - 1
-                else:
-                    end_line = start_line + newline_count
-
-                # Ensure end_line is at least start_line
-                end_line = max(start_line, end_line)
+                end_line = compute_end_line(template_content, start_line)
 
                 # Create UniversalChunk for splitting
                 uchunk = UniversalChunk(
@@ -190,15 +177,7 @@ class SvelteParser:
         # Create chunks for style sections (as text blocks)
         for _, style_content, start_line in sections["style"]:
             if style_content.strip():
-                # Calculate end line consistently with template logic
-                newline_count = style_content.count("\n")
-                if style_content.endswith("\n"):
-                    end_line = start_line + newline_count - 1
-                else:
-                    end_line = start_line + newline_count
-
-                # Ensure end_line is at least start_line
-                end_line = max(start_line, end_line)
+                end_line = compute_end_line(style_content, start_line)
 
                 # Create UniversalChunk for splitting
                 uchunk = UniversalChunk(
