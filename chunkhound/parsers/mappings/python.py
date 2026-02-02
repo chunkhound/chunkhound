@@ -744,6 +744,8 @@ class PythonMapping(BaseMapping):
                     superclasses = self.extract_inheritance(def_node, source)
                     if superclasses:
                         metadata["superclasses"] = superclasses
+                elif def_node.type == "assignment":
+                    metadata["kind"] = "variable"
 
                 # Hint based on RHS literal kind when available
                 rhs = captures.get("rhs")

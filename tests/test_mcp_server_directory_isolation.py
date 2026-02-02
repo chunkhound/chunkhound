@@ -573,10 +573,10 @@ def quicksort(arr):
                 
                 # Search for sorting algorithms semantically
                 semantic_response = await execute_tool(
-                    tool_name="search_semantic",
+                    tool_name="search",
                     services=services,
                     embedding_manager=embedding_manager,
-                    arguments={"query": "sorting algorithms", "page_size": 10, "offset": 0}
+                    arguments={"type": "semantic", "query": "sorting algorithms", "page_size": 10, "offset": 0}
                 )
                 
                 semantic_results = semantic_response.get('results', [])

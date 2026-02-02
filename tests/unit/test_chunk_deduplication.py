@@ -206,3 +206,30 @@ def test_specificity_ranking():
     # Should keep only the highest specificity (FUNCTION)
     assert len(result) == 1
     assert result[0].chunk_type == ChunkType.FUNCTION
+
+
+def test_variable_specificity_is_recognized():
+    chunks = [
+        Chunk(
+            symbol="x",
+            start_line=LineNumber(1),
+            end_line=LineNumber(1),
+            code="x = 1",
+            chunk_type=ChunkType.BLOCK,  # Specificity 1
+            file_id=FileId(1),
+            language=Language.PYTHON,
+        ),
+        Chunk(
+            symbol="x",
+            start_line=LineNumber(1),
+            end_line=LineNumber(1),
+            code="x = 1",
+            chunk_type=ChunkType.VARIABLE,  # Should be higher than BLOCK
+            file_id=FileId(1),
+            language=Language.PYTHON,
+        ),
+    ]
+
+    result = deduplicate_chunks(chunks, Language.PYTHON)
+    assert len(result) == 1
+    assert result[0].chunk_type == ChunkType.VARIABLE
