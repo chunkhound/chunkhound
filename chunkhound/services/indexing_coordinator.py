@@ -29,6 +29,7 @@ from chunkhound.core.detection import detect_language
 from chunkhound.core.exceptions import DiskUsageLimitExceededError
 from chunkhound.core.models import Chunk, File
 from chunkhound.core.types.common import FilePath, Language
+from chunkhound.core.utils import estimate_tokens
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
@@ -825,7 +826,13 @@ class IndexingCoordinator(BaseService):
         split_count = 0
         for chunk in chunks:
             metrics = ChunkMetrics.from_content(chunk.code or "")
-            if metrics.non_whitespace_chars > config.max_chunk_size:
+            estimated_tokens = estimate_tokens(chunk.code or "")
+
+            # Dual constraint: check BOTH character AND token limits
+            chars_exceeded = metrics.non_whitespace_chars > config.max_chunk_size
+            tokens_exceeded = estimated_tokens > config.safe_token_limit
+
+            if chars_exceeded or tokens_exceeded:
                 # Log individual oversized chunk with debugging context
                 preview = (chunk.code or "")[:100].replace("\n", " ").strip()
                 if len(chunk.code or "") > 100:
@@ -834,7 +841,8 @@ class IndexingCoordinator(BaseService):
                     f"Oversized chunk: {chunk.file_path}:{chunk.start_line}-{chunk.end_line} "
                     f"[{chunk.language.value}:{chunk.chunk_type.value}] "
                     f"symbol={chunk.symbol!r} "
-                    f"size={metrics.non_whitespace_chars} > limit={config.max_chunk_size} "
+                    f"chars={metrics.non_whitespace_chars}/{config.max_chunk_size} "
+                    f"tokens={estimated_tokens}/{config.safe_token_limit} "
                     f"preview={preview!r}"
                 )
                 # Convert to UniversalChunk, validate/split, convert back
