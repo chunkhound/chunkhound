@@ -5,7 +5,7 @@ that exceed the 1200 non-whitespace character limit. It extracts the splitting
 logic from UniversalParser into a reusable component.
 
 The splitter enforces the cAST algorithm's size constraints:
-- Maximum 1200 non-whitespace characters per chunk (minus header overhead)
+- Maximum 1200 non-whitespace characters per chunk
 - Safe token limit of 6000 tokens per chunk
 - Multiple splitting strategies based on content analysis
 """
@@ -30,6 +30,9 @@ class CASTConfig:
 
     Based on research paper: "cAST: Enhancing Code Retrieval-Augmented Generation
     with Structural Chunking via Abstract Syntax Tree"
+
+    Note: max_chunk_size applies to content only. Embedding providers add
+    headers (file path, language) on top of content when creating embeddings.
     """
 
     max_chunk_size: int = 1200  # Reduced from 2000 (non-whitespace chars)
@@ -40,9 +43,6 @@ class CASTConfig:
     preserve_structure: bool = True  # Prioritize syntactic boundaries
     greedy_merge: bool = True  # Greedily merge adjacent sibling nodes
     safe_token_limit: int = 6000  # Conservative token limit (well under 8191 API limit)
-    # Header overhead for embedding: "# {file_path} ({language})\n" adds chars
-    # Reserve space so final text (with header) stays within max_chunk_size
-    header_overhead: int = 150  # Conservative buffer for long file paths
 
 
 @dataclass
@@ -63,12 +63,25 @@ class ChunkMetrics:
         return cls(non_ws, total, lines, ast_depth)
 
 
+def compute_end_line(content: str, start_line: int) -> int:
+    """Compute end line from content and start line.
+
+    Handles trailing newline correctly: if content ends with newline,
+    the last content line is before that newline.
+    """
+    newline_count = content.count("\n")
+    if content.endswith("\n"):
+        end_line = start_line + newline_count - 1
+    else:
+        end_line = start_line + newline_count
+    return max(start_line, end_line)
+
+
 class ChunkSplitter:
     """Handles splitting chunks that exceed size limits.
 
-    This class enforces the 1200 non-whitespace character limit per chunk,
-    accounting for header overhead added during embedding. It provides multiple
-    splitting strategies based on content analysis:
+    This class enforces the 1200 non-whitespace character limit per chunk.
+    It provides multiple splitting strategies based on content analysis:
 
     1. Line-based splitting for regular code with short lines
     2. Character-based emergency splitting for minified/single-line content
@@ -77,7 +90,6 @@ class ChunkSplitter:
     The splitter uses the cAST algorithm's constraints:
     - max_chunk_size: Maximum non-whitespace characters (default 1200)
     - safe_token_limit: Maximum tokens per chunk (default 6000)
-    - header_overhead: Reserved space for embedding headers (default 150)
     """
 
     def __init__(self, config: CASTConfig | None = None):
@@ -88,24 +100,12 @@ class ChunkSplitter:
         """
         self.config = config or CASTConfig()
 
-    @property
-    def _effective_max_chunk_size(self) -> int:
-        """Max chunk size minus header overhead for validation.
-
-        This accounts for the embedding header ("# {file_path} ({language})\n")
-        that will be added by format_chunk_for_embedding() after parsing.
-        """
-        return self.config.max_chunk_size - self.config.header_overhead
-
     def _estimate_tokens(self, content: str) -> int:
         """Helper method to estimate tokens using centralized utility."""
         return estimate_tokens(content)
 
     def validate_and_split(self, chunk: UniversalChunk) -> list[UniversalChunk]:
         """Validate chunk size and split if necessary.
-
-        Uses _effective_max_chunk_size which reserves space for the embedding
-        header ("# {file_path} ({language})\n") added by format_chunk_for_embedding().
 
         Args:
             chunk: The chunk to validate and potentially split
@@ -118,10 +118,10 @@ class ChunkSplitter:
         estimated_tokens = self._estimate_tokens(chunk.content)
 
         if (
-            metrics.non_whitespace_chars <= self._effective_max_chunk_size
+            metrics.non_whitespace_chars <= self.config.max_chunk_size
             and estimated_tokens <= self.config.safe_token_limit
         ):
-            # Chunk fits within both limits (with header overhead reserved)
+            # Chunk fits within both limits
             return [chunk]
         else:
             # Don't split Makefile rules unless they're excessively large
@@ -133,7 +133,7 @@ class ChunkSplitter:
                 tolerance = 1.2
                 if (
                     metrics.non_whitespace_chars
-                    <= self._effective_max_chunk_size * tolerance
+                    <= self.config.max_chunk_size * tolerance
                 ):
                     # Keep moderately large rules intact for semantic coherence
                     return [chunk]
@@ -194,7 +194,7 @@ class ChunkSplitter:
             test_content = "\n".join(test_lines)
             test_metrics = ChunkMetrics.from_content(test_content)
 
-            if test_metrics.non_whitespace_chars <= self._effective_max_chunk_size:
+            if test_metrics.non_whitespace_chars <= self.config.max_chunk_size:
                 # Fits - add to current group
                 current_recipe_group.append(recipe_line)
             else:
@@ -275,7 +275,7 @@ class ChunkSplitter:
         estimated_tokens = self._estimate_tokens(chunk.content)
 
         if (
-            metrics.non_whitespace_chars <= self._effective_max_chunk_size
+            metrics.non_whitespace_chars <= self.config.max_chunk_size
             and estimated_tokens <= self.config.safe_token_limit
         ):
             return [chunk]  # No splitting needed
@@ -350,7 +350,7 @@ class ChunkSplitter:
             sub_tokens = self._estimate_tokens(sub_chunk.content)
 
             if (
-                sub_metrics.non_whitespace_chars > self._effective_max_chunk_size
+                sub_metrics.non_whitespace_chars > self.config.max_chunk_size
                 or sub_tokens > self.config.safe_token_limit
             ):
                 result.extend(self._recursive_split(sub_chunk))
@@ -374,7 +374,7 @@ class ChunkSplitter:
 
             # If still over limit, use emergency split
             if (
-                sub_metrics.non_whitespace_chars > self._effective_max_chunk_size
+                sub_metrics.non_whitespace_chars > self.config.max_chunk_size
                 or sub_tokens > self.config.safe_token_limit
             ):
                 validated_result.extend(self._emergency_split(sub_chunk))
@@ -397,11 +397,11 @@ class ChunkSplitter:
         else:
             # Fallback to conservative estimation
             max_chars_from_tokens = int(self.config.safe_token_limit * 3.5 * 0.8)
-        max_chars = min(self._effective_max_chunk_size, max_chars_from_tokens)
+        max_chars = min(self.config.max_chunk_size, max_chars_from_tokens)
 
         metrics = ChunkMetrics.from_content(chunk.content)
         if (
-            metrics.non_whitespace_chars <= self._effective_max_chunk_size
+            metrics.non_whitespace_chars <= self.config.max_chunk_size
             and len(chunk.content) <= max_chars_from_tokens
         ):
             return [chunk]
@@ -419,7 +419,7 @@ class ChunkSplitter:
 
         while remaining:
             remaining_metrics = ChunkMetrics.from_content(remaining)
-            if remaining_metrics.non_whitespace_chars <= self._effective_max_chunk_size:
+            if remaining_metrics.non_whitespace_chars <= self.config.max_chunk_size:
                 chunks.append(
                     self._create_split_chunk(
                         chunk, remaining, part_num, current_pos, total_content_length
@@ -440,7 +440,7 @@ class ChunkSplitter:
                     test_metrics = ChunkMetrics.from_content(test_content)
                     if (
                         test_metrics.non_whitespace_chars
-                        <= self._effective_max_chunk_size
+                        <= self.config.max_chunk_size
                     ):
                         best_split = pos + 1  # Include the split character
                         break

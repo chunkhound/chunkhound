@@ -96,15 +96,6 @@ class UniversalParser:
         return estimate_tokens(content)
 
     @property
-    def _effective_max_chunk_size(self) -> int:
-        """Max chunk size minus header overhead for validation.
-
-        This accounts for the embedding header ("# {file_path} ({language})\n")
-        that will be added by format_chunk_for_embedding() after parsing.
-        """
-        return self.cast_config.max_chunk_size - self.cast_config.header_overhead
-
-    @property
     def language_name(self) -> str:
         """Get the language name."""
         if self.engine:
@@ -546,7 +537,7 @@ class UniversalParser:
 
         # If combined chunk is too large, return original chunks
         if (
-            metrics.non_whitespace_chars > self._effective_max_chunk_size
+            metrics.non_whitespace_chars > self.cast_config.max_chunk_size
             or estimated_tokens > self.cast_config.safe_token_limit
         ):
             return group
@@ -690,7 +681,7 @@ class UniversalParser:
             # Simple merge condition: fits in size limit and close proximity
             can_merge = (
                 not semantic_mismatch
-                and metrics.non_whitespace_chars <= self._effective_max_chunk_size
+                and metrics.non_whitespace_chars <= self.cast_config.max_chunk_size
                 and estimated_tokens <= self.cast_config.safe_token_limit
                 and next_chunk.start_line - current_chunk.end_line <= max_gap
             )

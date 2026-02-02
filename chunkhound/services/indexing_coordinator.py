@@ -819,14 +819,13 @@ class IndexingCoordinator(BaseService):
             List of validated chunks (may include splits of oversized chunks)
         """
         config = CASTConfig()
-        effective_max = config.max_chunk_size - config.header_overhead
         splitter = ChunkSplitter(config)
 
         result = []
         split_count = 0
         for chunk in chunks:
             metrics = ChunkMetrics.from_content(chunk.code or "")
-            if metrics.non_whitespace_chars > effective_max:
+            if metrics.non_whitespace_chars > config.max_chunk_size:
                 # Log individual oversized chunk with debugging context
                 preview = (chunk.code or "")[:100].replace("\n", " ").strip()
                 if len(chunk.code or "") > 100:
@@ -835,7 +834,7 @@ class IndexingCoordinator(BaseService):
                     f"Oversized chunk: {chunk.file_path}:{chunk.start_line}-{chunk.end_line} "
                     f"[{chunk.language.value}:{chunk.chunk_type.value}] "
                     f"symbol={chunk.symbol!r} "
-                    f"size={metrics.non_whitespace_chars} > limit={effective_max} "
+                    f"size={metrics.non_whitespace_chars} > limit={config.max_chunk_size} "
                     f"preview={preview!r}"
                 )
                 # Convert to UniversalChunk, validate/split, convert back
