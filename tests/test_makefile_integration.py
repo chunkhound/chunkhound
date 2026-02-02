@@ -98,12 +98,14 @@ distclean: clean
     all_chunks = [c for c in chunks if c.symbol == 'all']
     assert len(all_chunks) == 1, f"Simple 'all' target should stay intact: {len(all_chunks)}"
     
-    # VERIFY: Chunk size constraints respected  
+    # VERIFY: Chunk size constraints respected (non-whitespace characters per cAST algorithm)
+    import re
     cast_config = makefile_workflow["parser"].cast_config
     max_chunk_size = cast_config.max_chunk_size
-    
+
     for chunk in chunks:
-        assert len(chunk.code) <= max_chunk_size * 1.2, f"Chunk exceeds size limit: {len(chunk.code)} > {max_chunk_size}"
+        non_ws_chars = len(re.sub(r"\s", "", chunk.code))
+        assert non_ws_chars <= max_chunk_size, f"Chunk exceeds size limit: {non_ws_chars} > {max_chunk_size}"
     
     # VERIFY: Semantic coherence maintained
     for chunk in chunks:
