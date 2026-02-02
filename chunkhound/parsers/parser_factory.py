@@ -18,6 +18,7 @@ from typing import Any
 
 from chunkhound.core.types.common import Language
 from chunkhound.interfaces.language_parser import LanguageParser
+from chunkhound.parsers.concept_extractor import LanguageMapping
 
 # Import all language mappings
 from chunkhound.parsers.mappings import (
@@ -54,7 +55,6 @@ from chunkhound.parsers.mappings import (
     YamlMapping,
     ZigMapping,
 )
-from chunkhound.parsers.concept_extractor import LanguageMapping
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import SetupError, TreeSitterEngine
 from chunkhound.parsers.universal_parser import CASTConfig, UniversalParser
@@ -677,6 +677,12 @@ class ParserFactory:
             from chunkhound.parsers.svelte_parser import SvelteParser
 
             return SvelteParser(cast_config)
+
+        # Special case: Makefile uses custom parser for size enforcement
+        if language == Language.MAKEFILE:
+            from chunkhound.parsers.makefile_parser import MakefileParser
+
+            return MakefileParser(cast_config)
 
         # Use cache to avoid recreating parsers
         cache_key = self._cache_key(language)
