@@ -84,7 +84,7 @@ async def async_pipeline_function():
     # Verify file processing succeeded
     assert result['status'] == 'success', f"Pipeline processing failed: {result.get('error')}"
     assert result['chunks'] > 0, "Should create chunks"
-    assert result.get('embeddings_skipped', True) == False, "Should not skip embeddings"
+    assert not result.get('embeddings_skipped', True), "Should not skip embeddings"
     
     # Wait for any async embedding processing
     await asyncio.sleep(3.0)
