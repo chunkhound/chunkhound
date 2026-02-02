@@ -13,7 +13,11 @@ Validates:
 3. min_chunk_size: 25 non-whitespace chars - Log warning only (soft threshold)
 """
 
+import logging
+
 import pytest
+
+logger = logging.getLogger(__name__)
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.types.common import Language
@@ -21,8 +25,12 @@ from chunkhound.database_factory import create_services
 from chunkhound.embeddings import EmbeddingManager
 from tests.fixtures.fake_providers import ValidatingEmbeddingProvider
 
-# Default constraints from CASTConfig (universal_parser.py:52-59)
-MAX_CHUNK_SIZE = 1200  # non-whitespace chars
+# Default constraints from CASTConfig
+# Content limit is 1200 non-ws chars, but embedded text includes header overhead.
+# Header format: "# {file_path} ({language})\n" - typically 50-100 chars for
+# reasonable path lengths. We use 150 as a conservative upper bound.
+# Validator sees embedded text, so allow 1200 content + 150 header = 1350 total.
+MAX_CHUNK_SIZE = 1350  # non-whitespace chars (1200 content + 150 header overhead)
 MIN_CHUNK_SIZE = 25  # soft threshold for suspiciously small
 SAFE_TOKEN_LIMIT = 6000  # estimated tokens
 
@@ -500,34 +508,39 @@ async def test_all_parsers_respect_chunk_size_constraints(validating_db):
 
     # Log known limitations from non-enforced parsers
     if likely_non_enforced_chars:
-        print(
-            f"\nNote: {len(likely_non_enforced_chars)} oversized chunks from parsers "
-            f"without size enforcement (TEXT, UNKNOWN, YAML)"
+        logger.warning(
+            "%d oversized chunks from parsers without size enforcement "
+            "(TEXT, UNKNOWN, YAML)",
+            len(likely_non_enforced_chars),
         )
 
     # Log suspiciously small chunks (soft threshold, don't fail)
     if small_chunks:
-        print(
-            f"\nWarning: {len(small_chunks)} suspiciously small chunks "
-            f"(<{MIN_CHUNK_SIZE} non-ws chars)"
+        logger.warning(
+            "%d suspiciously small chunks (<%d non-ws chars)",
+            len(small_chunks),
+            MIN_CHUNK_SIZE,
         )
 
     # Sanity check: verify we actually processed chunks
     assert provider.chunk_stats["total"] > 0, "No chunks were processed"
-    print("\n=== Chunk Size Constraint Test Results ===")
-    print(f"Languages with cAST enforcement: {len(enforced_languages)}")
-    print(
-        f"Languages without enforcement: {len(non_enforced_languages)} "
-        f"({', '.join(lang.name for lang in non_enforced_languages)})"
+    logger.info("=== Chunk Size Constraint Test Results ===")
+    logger.info("Languages with cAST enforcement: %d", len(enforced_languages))
+    logger.info(
+        "Languages without enforcement: %d (%s)",
+        len(non_enforced_languages),
+        ", ".join(lang.name for lang in non_enforced_languages),
     )
-    print(f"Total chunks validated: {provider.chunk_stats['total']}")
-    print(
-        f"Char range: {provider.chunk_stats['min_size']} - "
-        f"{provider.chunk_stats['max_size']} non-ws chars"
+    logger.info("Total chunks validated: %d", provider.chunk_stats["total"])
+    logger.info(
+        "Char range: %d - %d non-ws chars",
+        provider.chunk_stats["min_size"],
+        provider.chunk_stats["max_size"],
     )
-    print(
-        f"Token range: {provider.chunk_stats['min_tokens']} - "
-        f"{provider.chunk_stats['max_tokens']} est. tokens"
+    logger.info(
+        "Token range: %d - %d est. tokens",
+        provider.chunk_stats["min_tokens"],
+        provider.chunk_stats["max_tokens"],
     )
 
 
