@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 
+from chunkhound.core.config import EmbeddingConfig
+from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.embeddings import EmbeddingManager
 
 
@@ -93,7 +95,7 @@ def get_embedding_config_for_tests() -> dict | None:
     config_file = _find_config_file()
     if config_file:
         try:
-            with open(config_file, 'r') as f:
+            with open(config_file, 'r', encoding='utf-8') as f:
                 config_data = json.load(f)
 
             embedding_config = config_data.get("embedding", {})
@@ -173,15 +175,17 @@ def build_embedding_config_from_dict(config_dict: dict | None) -> dict | None:
 
 def create_embedding_manager_for_tests(config_dict: dict | None) -> EmbeddingManager | None:
     """
-    Create EmbeddingManager from discovered config.
+    Create EmbeddingManager from discovered config using production factory.
 
-    Centralizes provider instantiation logic used across test files.
+    Aligns test provider creation with production path, ensuring all fields
+    (rerank settings, performance tuning) flow through correctly.
 
     Args:
         config_dict: Output from get_embedding_config_for_tests()
 
     Returns:
-        Configured EmbeddingManager or None if no config provided
+        Configured EmbeddingManager or None if no config provided,
+        dependencies unavailable, or configuration invalid
 
     Example:
         config_dict = get_embedding_config_for_tests()
@@ -190,29 +194,22 @@ def create_embedding_manager_for_tests(config_dict: dict | None) -> EmbeddingMan
     if not config_dict:
         return None
 
-    provider = config_dict.get("provider", "openai")
-    api_key = config_dict["api_key"]
-    model = config_dict.get("model")
-    base_url = config_dict.get("base_url")
+    try:
+        # Create validated config using production EmbeddingConfig
+        config = EmbeddingConfig(**config_dict)
 
-    manager = EmbeddingManager()
-    kwargs = {"api_key": api_key}
-    if model:
-        kwargs["model"] = model
+        # Use production factory to create provider (handles all fields)
+        provider = EmbeddingProviderFactory.create_provider(config)
 
-    if provider == "openai":
-        if base_url:
-            kwargs["base_url"] = base_url
-        from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
-        manager.register_provider(OpenAIEmbeddingProvider(**kwargs), set_default=True)
-    elif provider == "voyageai":
-        from chunkhound.providers.embeddings.voyageai_provider import VoyageAIEmbeddingProvider
-        manager.register_provider(VoyageAIEmbeddingProvider(**kwargs), set_default=True)
-    else:
-        # Unsupported provider - return None
+        # Register with EmbeddingManager
+        # Note: Protocol types from different modules are structurally equivalent
+        manager = EmbeddingManager()
+        manager.register_provider(provider, set_default=True)  # type: ignore[arg-type]
+
+        return manager
+    except (ImportError, ValueError):
+        # Dependencies not installed or config invalid - return None so tests skip
         return None
-
-    return manager
 
 
 def should_run_live_api_tests(expected_provider: str | None = None) -> bool:
