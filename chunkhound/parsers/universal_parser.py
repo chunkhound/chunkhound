@@ -56,7 +56,7 @@ class UniversalParser:
 
     def __init__(
         self,
-        engine: TreeSitterEngine,
+        engine: TreeSitterEngine | None,
         mapping: BaseMapping,
         cast_config: CASTConfig | None = None,
     ):
@@ -81,7 +81,7 @@ class UniversalParser:
             adapted_mapping = mapping  # type: ignore
 
         self.mapping = adapted_mapping
-        self.extractor = ConceptExtractor(engine, adapted_mapping)
+        self.extractor = ConceptExtractor(engine, adapted_mapping) if engine else None
         self.cast_config = cast_config or CASTConfig()
 
         # Initialize chunk splitter for enforcing size limits
@@ -211,6 +211,7 @@ class UniversalParser:
         content_bytes = content.encode("utf-8")
 
         # Extract universal concepts using ConceptExtractor
+        assert self.extractor is not None  # Guaranteed when engine is not None
         universal_chunks = self.extractor.extract_all_concepts(
             ast_tree.root_node, content_bytes
         )
@@ -917,17 +918,15 @@ class UniversalParser:
                     # Only create chunk if it meets minimum size
                     metrics = ChunkMetrics.from_content(paragraph_content)
                     if metrics.non_whitespace_chars >= self.cast_config.min_chunk_size:
-                        chunk = Chunk(
-                            symbol=f"paragraph_{current_start_line}",
-                            start_line=LineNumber(current_start_line),
-                            end_line=LineNumber(line_num - 1),
-                            code=paragraph_content,
-                            chunk_type=ChunkType.PARAGRAPH,
-                            file_id=file_id or FileId(0),
+                        chunks.extend(self.chunk_splitter.validate_and_convert_text(
+                            content=paragraph_content,
+                            name=f"paragraph_{current_start_line}",
+                            start_line=current_start_line,
+                            end_line=line_num - 1,
+                            file_path=file_path,
+                            file_id=file_id,
                             language=Language.TEXT,
-                            file_path=FilePath(str(file_path)) if file_path else None,
-                        )
-                        chunks.append(chunk)
+                        ))
 
                     current_paragraph = []
 
@@ -938,17 +937,15 @@ class UniversalParser:
             paragraph_content = "\n".join(current_paragraph)
             metrics = ChunkMetrics.from_content(paragraph_content)
             if metrics.non_whitespace_chars >= self.cast_config.min_chunk_size:
-                chunk = Chunk(
-                    symbol=f"paragraph_{current_start_line}",
-                    start_line=LineNumber(current_start_line),
-                    end_line=LineNumber(line_num - 1),
-                    code=paragraph_content,
-                    chunk_type=ChunkType.PARAGRAPH,
-                    file_id=file_id or FileId(0),
+                chunks.extend(self.chunk_splitter.validate_and_convert_text(
+                    content=paragraph_content,
+                    name=f"paragraph_{current_start_line}",
+                    start_line=current_start_line,
+                    end_line=line_num - 1,
+                    file_path=file_path,
+                    file_id=file_id,
                     language=Language.TEXT,
-                    file_path=FilePath(str(file_path)) if file_path else None,
-                )
-                chunks.append(chunk)
+                ))
 
         # Update statistics
         self._total_files_parsed += 1
