@@ -9,17 +9,13 @@ Makefile rules need special handling because:
 This follows the same pattern as VueParser and SvelteParser.
 """
 
-from pathlib import Path
-
-from chunkhound.core.models.chunk import Chunk
-from chunkhound.core.types.common import FileId
 from chunkhound.parsers.chunk_splitter import (
     CASTConfig,
     ChunkMetrics,
     ChunkSplitter,
 )
 from chunkhound.parsers.mappings.makefile import MakefileMapping
-from chunkhound.parsers.universal_engine import UniversalChunk
+from chunkhound.parsers.universal_engine import TreeSitterEngine, UniversalChunk
 from chunkhound.parsers.universal_parser import UniversalParser
 
 
@@ -127,25 +123,25 @@ class MakefileChunkSplitter(ChunkSplitter):
         )
 
 
-class MakefileParser:
+class MakefileParser(UniversalParser):
     """Parser for Makefiles with built-in size enforcement.
 
-    Delegates to UniversalParser but uses MakefileChunkSplitter
+    Inherits from UniversalParser and uses MakefileChunkSplitter
     to handle oversized rules with target/recipe coherence.
     """
 
     def __init__(self, cast_config: CASTConfig | None = None):
-        self.mapping = MakefileMapping()
-        self.cast_config = cast_config or CASTConfig()
-        self._universal_parser = self._create_universal_parser()
+        engine = self._create_makefile_engine()
+        mapping = MakefileMapping()
+        super().__init__(engine, mapping, cast_config)
+        # Override with Makefile-aware chunk splitter
+        self.chunk_splitter = MakefileChunkSplitter(self.cast_config)
 
-    def _create_universal_parser(self) -> UniversalParser | None:
-        """Create UniversalParser for Makefile content."""
+    def _create_makefile_engine(self) -> TreeSitterEngine | None:
+        """Create TreeSitterEngine for Makefile parsing."""
         try:
             import tree_sitter_make as ts_make
             from tree_sitter import Language as TSLanguage
-
-            from chunkhound.parsers.universal_engine import TreeSitterEngine
 
             # Handle tree-sitter API - language() returns PyCapsule that needs wrapping
             lang_result = ts_make.language()
@@ -155,43 +151,6 @@ class MakefileParser:
                 # In newer tree-sitter, need to wrap the capsule
                 ts_language = TSLanguage(lang_result)
 
-            engine = TreeSitterEngine("makefile", ts_language)
-            parser = UniversalParser(engine, self.mapping, self.cast_config)
-
-            # Replace the default chunk_splitter with Makefile-aware version
-            parser.chunk_splitter = MakefileChunkSplitter(self.cast_config)
-
-            return parser
+            return TreeSitterEngine("makefile", ts_language)
         except ImportError:
             return None
-
-    def parse_file(self, file_path: Path, file_id: FileId) -> list[Chunk]:
-        """Parse a Makefile.
-
-        Args:
-            file_path: Path to Makefile
-            file_id: Database file ID
-
-        Returns:
-            List of chunks with size enforcement
-        """
-        if not self._universal_parser:
-            return []
-        return self._universal_parser.parse_file(file_path, file_id)
-
-    def parse_content(
-        self, content: str, file_path: Path | None, file_id: FileId | None
-    ) -> list[Chunk]:
-        """Parse Makefile content with size enforcement.
-
-        Args:
-            content: Makefile source
-            file_path: Optional file path for metadata
-            file_id: Optional file ID for chunks
-
-        Returns:
-            List of chunks with size enforcement
-        """
-        if not self._universal_parser:
-            return []
-        return self._universal_parser.parse_content(content, file_path, file_id)
