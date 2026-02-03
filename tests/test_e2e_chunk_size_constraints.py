@@ -443,78 +443,49 @@ async def test_all_parsers_respect_chunk_size_constraints(validating_db):
         # For enforced languages, check if large sample created violations
         # (violations from non-enforced languages will be filtered later)
 
-    # Separate violations by type
-    char_violations = provider.get_violations_by_type("max_chars_exceeded")
-    token_violations = provider.get_violations_by_type("max_tokens_exceeded")
+    # Separate violations by type and language
+    # Languages without size enforcement (lowercase for header matching)
+    non_enforced_language_names = {lang.name.lower() for lang in LANGUAGES_WITHOUT_SIZE_ENFORCEMENT}
+
+    # Get violations from enforced languages only (excluding non-enforced)
+    enforced_char_violations = provider.get_violations_excluding_languages(
+        "max_chars_exceeded", non_enforced_language_names
+    )
+    enforced_token_violations = provider.get_violations_excluding_languages(
+        "max_tokens_exceeded", non_enforced_language_names
+    )
     small_chunks = provider.get_violations_by_type("suspiciously_small")
 
-    # For reporting, note that violations may come from non-enforced languages
-    # We can't easily filter by language since ValidatingProvider doesn't track source
-    # So we report ALL violations but note which languages don't enforce
-
-    # Check if violations are likely from non-enforced languages
-    # (we know VUE/SVELTE have HTML templates, TEXT/UNKNOWN/YAML are plaintext-like)
-    likely_non_enforced_chars = [
-        v
-        for v in char_violations
-        if any(
-            pattern in v["text_preview"]
-            for pattern in [
-                "<div>",
-                "<span>",
-                "items:",
-                "Line of text",
-                "Line of unknown",
-            ]
-        )
-    ]
-    likely_enforced_chars = [
-        v for v in char_violations if v not in likely_non_enforced_chars
-    ]
-
-    likely_non_enforced_tokens = [
-        v
-        for v in token_violations
-        if any(
-            pattern in v["text_preview"]
-            for pattern in [
-                "<div>",
-                "<span>",
-                "items:",
-                "Line of text",
-                "Line of unknown",
-            ]
-        )
-    ]
-    likely_enforced_tokens = [
-        v for v in token_violations if v not in likely_non_enforced_tokens
-    ]
+    # Get violations from non-enforced languages for reporting
+    non_enforced_char_violations = provider.get_violations_by_languages(
+        "max_chars_exceeded", non_enforced_language_names
+    )
 
     # Fail on violations from cAST-enforced languages
-    assert not likely_enforced_chars, (
-        f"Found {len(likely_enforced_chars)} chunks from cAST parsers exceeding "
+    assert not enforced_char_violations, (
+        f"Found {len(enforced_char_violations)} chunks from cAST parsers exceeding "
         f"max_chunk_size ({MAX_CHUNK_SIZE} non-ws chars):\n"
         + "\n".join(
-            f"  - {v['non_ws_chars']} chars: {v['text_preview'][:50]}..."
-            for v in likely_enforced_chars[:5]
+            f"  - {v['non_ws_chars']} chars [{v.get('language', 'unknown')}]: {v['text_preview'][:50]}..."
+            for v in enforced_char_violations[:5]
         )
     )
 
-    assert not likely_enforced_tokens, (
-        f"Found {len(likely_enforced_tokens)} chunks from cAST parsers exceeding "
+    assert not enforced_token_violations, (
+        f"Found {len(enforced_token_violations)} chunks from cAST parsers exceeding "
         f"safe_token_limit ({SAFE_TOKEN_LIMIT} tokens):\n"
         + "\n".join(
-            f"  - {v['estimated_tokens']} tokens: {v['text_preview'][:50]}..."
-            for v in likely_enforced_tokens[:5]
+            f"  - {v['estimated_tokens']} tokens [{v.get('language', 'unknown')}]: {v['text_preview'][:50]}..."
+            for v in enforced_token_violations[:5]
         )
     )
 
     # Log known limitations from non-enforced parsers
-    if likely_non_enforced_chars:
+    if non_enforced_char_violations:
         logger.warning(
             "%d oversized chunks from parsers without size enforcement "
             "(TEXT, UNKNOWN, YAML)",
-            len(likely_non_enforced_chars),
+            len(non_enforced_char_violations),
         )
 
     # Log suspiciously small chunks (soft threshold, don't fail)

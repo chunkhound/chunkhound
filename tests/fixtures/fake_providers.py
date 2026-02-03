@@ -6,6 +6,7 @@ the complete code research pipeline in CI/CD without external dependencies.
 
 import asyncio
 import math
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -543,16 +544,28 @@ class ValidatingEmbeddingProvider(FakeEmbeddingProvider):
             "max_tokens": 0,
         }
 
+    def _extract_language_from_header(self, text: str) -> str | None:
+        """Extract language from embedding header if present.
+
+        Header format: "# path/to/file.py (python)\n"
+        Returns language string (lowercase) or None if not found.
+        """
+        if not text.startswith("# "):
+            return None
+        # Look for language in parentheses within first 200 chars
+        match = re.search(r"\((\w+)\)\n", text[:200])
+        return match.group(1).lower() if match else None
+
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """Generate embeddings while validating chunk size constraints."""
-        import re
-
         for text in texts:
             self.all_texts.append(text)
             # Measure non-whitespace chars (same as ChunkMetrics.from_content)
             non_ws_chars = len(re.sub(r"\s", "", text))
             # Estimate tokens (conservative: len // 3)
             estimated_tokens = len(text) // 3
+            # Extract language from header for violation tracking
+            language = self._extract_language_from_header(text)
 
             # Update stats
             self.chunk_stats["total"] += 1
@@ -577,6 +590,7 @@ class ValidatingEmbeddingProvider(FakeEmbeddingProvider):
                         "non_ws_chars": non_ws_chars,
                         "limit": self.max_chunk_size,
                         "text_preview": text[:300],
+                        "language": language,
                     }
                 )
 
@@ -588,6 +602,7 @@ class ValidatingEmbeddingProvider(FakeEmbeddingProvider):
                         "estimated_tokens": estimated_tokens,
                         "limit": self.safe_token_limit,
                         "text_preview": text[:300],
+                        "language": language,
                     }
                 )
 
@@ -599,6 +614,7 @@ class ValidatingEmbeddingProvider(FakeEmbeddingProvider):
                         "non_ws_chars": non_ws_chars,
                         "threshold": self.min_chunk_size,
                         "text_preview": text[:300],
+                        "language": language,
                     }
                 )
 
@@ -607,6 +623,27 @@ class ValidatingEmbeddingProvider(FakeEmbeddingProvider):
     def get_violations_by_type(self, violation_type: str) -> list[dict[str, Any]]:
         """Get all violations of a specific type."""
         return [v for v in self.violations if v["type"] == violation_type]
+
+    def get_violations_by_languages(
+        self, violation_type: str, languages: set[str]
+    ) -> list[dict[str, Any]]:
+        """Get violations of a type from specific languages (lowercase names)."""
+        return [
+            v
+            for v in self.violations
+            if v["type"] == violation_type and v.get("language") in languages
+        ]
+
+    def get_violations_excluding_languages(
+        self, violation_type: str, excluded_languages: set[str]
+    ) -> list[dict[str, Any]]:
+        """Get violations of a type excluding specific languages (lowercase names)."""
+        return [
+            v
+            for v in self.violations
+            if v["type"] == violation_type
+            and v.get("language") not in excluded_languages
+        ]
 
     def reset_tracking(self) -> None:
         """Reset all tracking data."""
