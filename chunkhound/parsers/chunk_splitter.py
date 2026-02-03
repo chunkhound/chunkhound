@@ -20,8 +20,6 @@ from chunkhound.core.utils import estimate_tokens
 from .universal_engine import UniversalChunk, UniversalConcept
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from chunkhound.core.models.chunk import Chunk
     from chunkhound.core.types.common import FileId, Language
 

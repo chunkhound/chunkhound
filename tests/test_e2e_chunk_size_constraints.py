@@ -23,16 +23,19 @@ from chunkhound.core.config.config import Config
 from chunkhound.core.types.common import Language
 from chunkhound.database_factory import create_services
 from chunkhound.embeddings import EmbeddingManager
+from chunkhound.parsers.chunk_splitter import CASTConfig
 from tests.fixtures.fake_providers import ValidatingEmbeddingProvider
 
-# Default constraints from CASTConfig
-# Content limit is 1200 non-ws chars, but embedded text includes header overhead.
-# Header format: "# {file_path} ({language})\n" - typically 50-100 chars for
-# reasonable path lengths. We use 150 as a conservative upper bound.
-# Validator sees embedded text, so allow 1200 content + 150 header = 1350 total.
-MAX_CHUNK_SIZE = 1350  # non-whitespace chars (1200 content + 150 header overhead)
+# Derive constraints from CASTConfig to avoid drift
+_config = CASTConfig()
+# Content limit is max_chunk_size non-ws chars, but embedded text includes
+# header overhead. Header format: "# {file_path} ({language})\n" - typically
+# 50-100 chars for reasonable path lengths. We use 150 as conservative bound.
+# Validator sees embedded text, so allow content + header overhead.
+HEADER_OVERHEAD = 150
+MAX_CHUNK_SIZE = _config.max_chunk_size + HEADER_OVERHEAD  # non-ws chars
 MIN_CHUNK_SIZE = 25  # soft threshold for suspiciously small
-SAFE_TOKEN_LIMIT = 6000  # estimated tokens
+SAFE_TOKEN_LIMIT = _config.safe_token_limit
 
 # Languages with binary content (cannot test with text samples)
 BINARY_CONTENT_LANGUAGES = {Language.PDF}
