@@ -232,3 +232,22 @@ class TestRealtimeFailures:
         assert stats.get('observer_alive', False), "Service should survive processing errors"
 
         await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_polling_monitor_cleanup_on_cancellation(self, realtime_setup):
+        """Test that polling monitor cleans up resources when cancelled."""
+        service, watch_dir, _, _ = realtime_setup
+
+        # Force polling mode for deterministic testing
+        service._force_polling = True
+        await service.start(watch_dir)
+
+        # Let polling run at least one cycle
+        await asyncio.sleep(0.5)
+
+        # Stop service (triggers cancellation of polling task)
+        await service.stop()
+
+        # Verify cleanup completed - task should be done or None
+        assert service._polling_task is None or service._polling_task.done(), \
+            "Polling task should be cleaned up after stop()"

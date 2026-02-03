@@ -12,6 +12,7 @@ Architecture:
 """
 
 import asyncio
+import gc
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -475,72 +476,85 @@ class RealtimeIndexingService:
         # freshly created files are detected quickly after startup/fallback.
         polling_start = time.time()
 
-        while True:
-            try:
-                current_files: dict[Path, int] = {}
-                files_checked = 0
+        try:
+            while True:
+                try:
+                    current_files: dict[Path, int] = {}
+                    files_checked = 0
 
-                # Walk directory tree but with limits to avoid hanging
-                for file_path in watch_path.rglob("*"):
+                    # Walk directory tree but with limits to avoid hanging
+                    # Store generator to ensure cleanup on cancellation (Windows file handles)
+                    rglob_gen = watch_path.rglob("*")
                     try:
-                        if file_path.is_file():
-                            files_checked += 1
-                            if simple_handler._should_index(file_path):
-                                try:
-                                    current_mtime = file_path.stat().st_mtime_ns
-                                except OSError:
-                                    continue
+                        for file_path in rglob_gen:
+                            try:
+                                if file_path.is_file():
+                                    files_checked += 1
+                                    if simple_handler._should_index(file_path):
+                                        try:
+                                            current_mtime = file_path.stat().st_mtime_ns
+                                        except OSError:
+                                            continue
 
-                                current_files[file_path] = current_mtime
+                                        current_files[file_path] = current_mtime
 
-                                if file_path not in known_files:
-                                    # New file detected
-                                    logger.debug(
-                                        f"Polling detected new file: {file_path}"
-                                    )
-                                    self._debug(
-                                        f"polling detected new file: {file_path}"
-                                    )
-                                    await self.add_file(file_path, priority="change")
-                                elif known_files[file_path] != current_mtime:
-                                    # Modified file detected
-                                    logger.debug(
-                                        f"Polling detected modified file: {file_path}"
-                                    )
-                                    self._debug(
-                                        f"polling detected modified file: {file_path}"
-                                    )
-                                    await self.add_file(file_path, priority="change")
+                                        if file_path not in known_files:
+                                            # New file detected
+                                            logger.debug(
+                                                f"Polling detected new file: {file_path}"
+                                            )
+                                            self._debug(
+                                                f"polling detected new file: {file_path}"
+                                            )
+                                            await self.add_file(file_path, priority="change")
+                                        elif known_files[file_path] != current_mtime:
+                                            # Modified file detected
+                                            logger.debug(
+                                                f"Polling detected modified file: {file_path}"
+                                            )
+                                            self._debug(
+                                                f"polling detected modified file: {file_path}"
+                                            )
+                                            await self.add_file(file_path, priority="change")
 
-                        # Yield control periodically and limit total files checked
-                        if files_checked % 100 == 0:
-                            await asyncio.sleep(0)  # Yield control
-                            if files_checked > 5000:  # Limit to prevent hanging
-                                logger.warning(
-                                    f"Polling checked {files_checked} files, skipping rest to avoid blocking"
-                                )
-                                break
-                    except (OSError, PermissionError):
-                        # Skip files we can't access
-                        continue
+                                # Yield control periodically and limit total files checked
+                                if files_checked % 100 == 0:
+                                    await asyncio.sleep(0)  # Yield control
+                                    if files_checked > 5000:  # Limit to prevent hanging
+                                        logger.warning(
+                                            f"Polling checked {files_checked} files, skipping rest to avoid blocking"
+                                        )
+                                        break
+                            except (OSError, PermissionError):
+                                # Skip files we can't access
+                                continue
+                    finally:
+                        rglob_gen.close()  # Explicit generator cleanup for Windows
 
-                # Check for deleted files
-                deleted = set(known_files.keys()) - set(current_files.keys())
-                for file_path in deleted:
-                    logger.debug(f"Polling detected deleted file: {file_path}")
-                    await self.remove_file(file_path)
-                    self._debug(f"polling detected deleted file: {file_path}")
+                    # Check for deleted files
+                    deleted = set(known_files.keys()) - set(current_files.keys())
+                    for file_path in deleted:
+                        logger.debug(f"Polling detected deleted file: {file_path}")
+                        await self.remove_file(file_path)
+                        self._debug(f"polling detected deleted file: {file_path}")
 
-                known_files = current_files
+                    known_files = current_files
 
-                # Adaptive poll interval: 1s for the first 10s, then 5s
-                elapsed = time.time() - polling_start
-                interval = 1.0 if elapsed < 10.0 else 5.0
-                await asyncio.sleep(interval)
+                    # Adaptive poll interval: 1s for the first 10s, then 5s
+                    elapsed = time.time() - polling_start
+                    interval = 1.0 if elapsed < 10.0 else 5.0
+                    await asyncio.sleep(interval)
 
-            except Exception as e:
-                logger.error(f"Polling monitor error: {e}")
-                await asyncio.sleep(5)
+                except Exception as e:
+                    logger.error(f"Polling monitor error: {e}")
+                    await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            logger.debug("Polling monitor cancelled")
+            raise
+        finally:
+            # Force cleanup of any lingering file handles on Windows
+            gc.collect()
+            logger.debug("Polling monitor stopped")
 
     async def add_file(self, file_path: Path, priority: str = "change") -> None:
         """Add file to processing queue with deduplication and debouncing."""
