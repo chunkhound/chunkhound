@@ -30,9 +30,12 @@ from chunkhound.core.types.common import (
     Language,
     LineNumber,
 )
-from chunkhound.core.utils import estimate_tokens
+from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
 from chunkhound.interfaces.language_parser import ParseResult
-from chunkhound.utils.chunk_deduplication import deduplicate_chunks, get_chunk_specificity
+from chunkhound.utils.chunk_deduplication import (
+    deduplicate_chunks,
+    get_chunk_specificity,
+)
 from chunkhound.utils.normalization import normalize_content
 
 from .concept_extractor import ConceptExtractor
@@ -131,8 +134,10 @@ class UniversalParser:
         self._total_chunks_created = 0
 
     def _estimate_tokens(self, content: str) -> int:
-        """Helper method to estimate tokens using centralized utility."""
-        return estimate_tokens(content)
+        """Estimate tokens for chunking using embedding ratio."""
+        if not content:
+            return 0
+        return max(1, len(content) // EMBEDDING_CHARS_PER_TOKEN)
 
     @property
     def language_name(self) -> str:
