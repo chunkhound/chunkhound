@@ -157,6 +157,10 @@ class IndexingCoordinator(BaseService):
         # Chunk cache service for content-based comparison
         self._chunk_cache = ChunkCacheService()
 
+        # Chunk size validation (cached for performance)
+        self._chunk_validation_config = CASTConfig()
+        self._chunk_validation_splitter = ChunkSplitter(self._chunk_validation_config)
+
         # Per-run cache for repo-aware ignore engines to avoid repeated tree scans
         # Key: (root, tuple(sources), chignore_file, tuple(cfg_excludes))
         self._ignore_engine_cache: dict[
@@ -819,8 +823,8 @@ class IndexingCoordinator(BaseService):
         Returns:
             List of validated chunks (may include splits of oversized chunks)
         """
-        config = CASTConfig()
-        splitter = ChunkSplitter(config)
+        config = self._chunk_validation_config
+        splitter = self._chunk_validation_splitter
 
         result = []
         split_count = 0
