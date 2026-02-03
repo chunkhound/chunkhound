@@ -845,8 +845,8 @@ class OpenAIEmbeddingProvider:
         # Use safety margin to ensure we stay well under token limits
         safety_margin = max(200, max_tokens // 5)  # 20% margin, minimum 200 tokens
         safe_max_tokens = max_tokens - safety_margin
-        # Use conservative 3 chars per token for code/technical text
-        max_chars = safe_max_tokens * 3
+        # Use embedding ratio constant for code/technical text
+        max_chars = safe_max_tokens * EMBEDDING_CHARS_PER_TOKEN
 
         if len(text) <= max_chars:
             return [text]
