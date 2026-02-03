@@ -77,6 +77,8 @@ class MakefileChunkSplitter(ChunkSplitter):
         if not recipe_lines:
             return [chunk]
 
+        total_recipe_lines = len(recipe_lines)
+
         # Group recipe lines into size-limited chunks
         result: list[UniversalChunk] = []
         current_group: list[str] = []
@@ -91,14 +93,18 @@ class MakefileChunkSplitter(ChunkSplitter):
             else:
                 if current_group:
                     result.append(
-                        self._create_rule_chunk(chunk, target_line, current_group, part)
+                        self._create_rule_chunk(
+                            chunk, target_line, current_group, part, total_recipe_lines
+                        )
                     )
                     part += 1
                 current_group = [recipe_line]
 
         if current_group:
             result.append(
-                self._create_rule_chunk(chunk, target_line, current_group, part)
+                self._create_rule_chunk(
+                    chunk, target_line, current_group, part, total_recipe_lines
+                )
             )
 
         return result if result else [chunk]
@@ -109,15 +115,30 @@ class MakefileChunkSplitter(ChunkSplitter):
         target: str,
         recipe_lines: list[str],
         part: int,
+        total_recipe_lines: int,
     ) -> UniversalChunk:
-        """Create a split rule chunk with target + recipe subset."""
+        """Create a split rule chunk with target + recipe subset.
+
+        Uses proportional line span calculation to maintain accurate
+        end_line relative to the original chunk's span.
+        """
         content = "\n".join([target] + recipe_lines)
+
+        # Calculate proportional line span
+        original_line_span = original.end_line - original.start_line + 1
+        if total_recipe_lines > 0:
+            recipe_ratio = len(recipe_lines) / total_recipe_lines
+            line_span = max(1, int(recipe_ratio * original_line_span))
+        else:
+            line_span = 1
+        end_line = min(original.end_line, original.start_line + line_span - 1)
+
         return UniversalChunk(
             concept=original.concept,
             name=f"{original.name}_part{part}",
             content=content,
             start_line=original.start_line,
-            end_line=original.start_line + len(recipe_lines),
+            end_line=end_line,
             metadata=original.metadata.copy(),
             language_node_type=original.language_node_type,
         )
