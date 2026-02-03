@@ -1386,16 +1386,9 @@ class IndexingCoordinator(BaseService):
             # FINAL: Unified optimization (CHECKPOINT + HNSW compact + full compaction)
             # Only run if fragmentation warrants it
             if hasattr(self._db, "should_optimize") and self._db.should_optimize(operation="post-indexing"):
-                if hasattr(self._db, "optimize"):
+                if hasattr(self._db, "optimize_tables"):
                     logger.info("Running final database optimization...")
-                    self._db.optimize()
-                elif hasattr(self._db, "optimize_tables"):
-                    logger.debug("Final optimization pass at end of indexing...")
                     self._db.optimize_tables()
-
-            # Create deferred HNSW indexes (if any were deferred during first indexing)
-            if hasattr(self._db, "create_deferred_indexes"):
-                self._db.create_deferred_indexes()
 
             # Check for disk limit exceeded errors
             for error in agg_errors:
@@ -1434,6 +1427,13 @@ class IndexingCoordinator(BaseService):
                 }
             else:
                 return {"status": "error", "error": str(e)}
+
+    def finalize_optimization(self) -> None:
+        """Run post-embedding optimization if warranted."""
+        if hasattr(self._db, "should_optimize") and self._db.should_optimize():
+            if hasattr(self._db, "optimize_tables"):
+                logger.info("Running post-embedding database optimization...")
+                self._db.optimize_tables()
 
     def _extract_file_id(self, file_record: dict[str, Any] | File) -> int | None:
         """Safely extract file ID from either dict or File model."""
