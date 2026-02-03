@@ -94,11 +94,7 @@ class DirectoryIndexingService:
                 stats.embeddings_generated = embed_result.get("generated", 0)
 
                 # Final optimization after embedding generation
-                db = self.indexing_coordinator._db
-                if hasattr(db, "should_optimize") and db.should_optimize():
-                    if hasattr(db, "optimize"):
-                        logger.info("Running post-embedding database optimization...")
-                        db.optimize()
+                self.indexing_coordinator.finalize_optimization()
 
             stats.processing_time = time.time() - start_time
 
