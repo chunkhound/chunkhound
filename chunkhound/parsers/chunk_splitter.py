@@ -115,6 +115,10 @@ class ChunkSplitter:
         Returns:
             List of chunks that all fit within size limits. Returns [chunk] if
             the input chunk already fits, otherwise returns multiple split chunks.
+
+        Note:
+            Subclasses may override this method for domain-specific splitting
+            (e.g., MakefileChunkSplitter preserves target/recipe coherence).
         """
         metrics = ChunkMetrics.from_content(chunk.content)
         estimated_tokens = self._estimate_tokens(chunk.content)
