@@ -20,6 +20,8 @@ from chunkhound.core.utils import estimate_tokens
 from .universal_engine import UniversalChunk, UniversalConcept
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from chunkhound.core.models.chunk import Chunk
     from chunkhound.core.types.common import FileId, Language
 
@@ -128,6 +130,95 @@ class ChunkSplitter:
 
         # Too large, apply recursive splitting
         return self._recursive_split(chunk)
+
+    def validate_text_content(
+        self,
+        content: str,
+        name: str,
+        start_line: int,
+        end_line: int,
+        concept: UniversalConcept = UniversalConcept.BLOCK,
+    ) -> list[UniversalChunk]:
+        """Validate text content and split if oversized.
+
+        Convenience method for text-based parsers (PDF, TEXT) that don't use
+        tree-sitter. Creates a UniversalChunk and validates it.
+
+        Args:
+            content: Text content to validate
+            name: Name for the chunk
+            start_line: Starting line number
+            end_line: Ending line number
+            concept: Universal concept type (default: BLOCK)
+
+        Returns:
+            List of validated UniversalChunks (may be split if oversized).
+        """
+        chunk = UniversalChunk(
+            concept=concept,
+            name=name,
+            content=content,
+            start_line=start_line,
+            end_line=end_line,
+            metadata={},
+            language_node_type="text",
+        )
+        return self.validate_and_split(chunk)
+
+    def validate_and_convert_text(
+        self,
+        content: str,
+        name: str,
+        start_line: int,
+        end_line: int,
+        file_path: "Path | None",
+        file_id: "FileId | None",
+        language: "Language",
+    ) -> list["Chunk"]:
+        """Validate text content, split if oversized, and convert to Chunks.
+
+        Convenience method for text-based parsers (PDF, TEXT) that combines
+        validation, splitting, and conversion in one call.
+
+        Args:
+            content: Text content to validate
+            name: Name for the chunk
+            start_line: Starting line number
+            end_line: Ending line number
+            file_path: Optional file path for the chunk
+            file_id: Optional file ID for the chunk
+            language: Language to assign to the chunk
+
+        Returns:
+            List of Chunk objects (may be split if content was oversized).
+        """
+        from chunkhound.core.models.chunk import Chunk
+        from chunkhound.core.types.common import (
+            ChunkType,
+            FileId,
+            FilePath,
+            LineNumber,
+        )
+
+        validated = self.validate_text_content(
+            content=content,
+            name=name,
+            start_line=start_line,
+            end_line=end_line,
+        )
+        return [
+            Chunk(
+                symbol=vc.name,
+                start_line=LineNumber(vc.start_line),
+                end_line=LineNumber(vc.end_line),
+                code=vc.content,
+                chunk_type=ChunkType.PARAGRAPH,
+                file_id=file_id or FileId(0),
+                language=language,
+                file_path=FilePath(str(file_path)) if file_path else None,
+            )
+            for vc in validated
+        ]
 
     def _analyze_lines(self, lines: list[str]) -> tuple[bool, bool]:
         """Analyze line length statistics to choose optimal splitting strategy.
