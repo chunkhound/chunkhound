@@ -32,6 +32,8 @@ _config = CASTConfig()
 # header overhead. Header format: "# {file_path} ({language})\n" - typically
 # 50-100 chars for reasonable path lengths. We use 150 as conservative bound.
 # Validator sees embedded text, so allow content + header overhead.
+# Assumption: Test file paths are short (tmp_path + "large_python.py" ~50 chars).
+# Production paths may be longer; ValidatingEmbeddingProvider accounts for this.
 HEADER_OVERHEAD = 150
 MAX_CHUNK_SIZE = _config.max_chunk_size + HEADER_OVERHEAD  # non-ws chars
 MIN_CHUNK_SIZE = 25  # soft threshold for suspiciously small
