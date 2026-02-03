@@ -28,7 +28,7 @@ from tests.utils.windows_compat import (
     wait_for_regex_searchable,
 )
 
-from .test_utils import get_api_key_for_tests
+from .test_utils import get_api_key_for_tests, get_embedding_config_for_tests, build_embedding_config_from_dict
 
 
 class TestQADeterministic:
@@ -45,22 +45,16 @@ class TestQADeterministic:
         # Ensure database directory exists
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Standard API key discovery for multi-provider support
-        api_key, provider = get_api_key_for_tests()
-
-        # Create embedding config only when explicitly enabled.
+        # Get embedding config using centralized helper
+        # Only enable embeddings when explicitly requested via environment variable
         #
         # This test suite is intended to be deterministic and fast. When real API
         # keys are present, enabling embeddings can drastically increase runtime
         # (network calls + embedding generation), often exceeding pytest-timeout.
         embedding_config = None
-        if api_key and provider and (os.getenv("CH_TEST_QA_ENABLE_EMBEDDINGS") == "1"):
-            model = "text-embedding-3-small" if provider == "openai" else "voyage-3.5"
-            embedding_config = {
-                "provider": provider,
-                "api_key": api_key,
-                "model": model
-            }
+        if os.getenv("CH_TEST_QA_ENABLE_EMBEDDINGS") == "1":
+            config_dict = get_embedding_config_for_tests()
+            embedding_config = build_embedding_config_from_dict(config_dict)
 
         # Use fake args to prevent find_project_root call that fails in CI
         from types import SimpleNamespace
