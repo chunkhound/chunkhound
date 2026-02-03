@@ -718,7 +718,7 @@ class ParserFactory:
             # Text and PDF mappings don't need tree-sitter engine
             mapping = config.mapping_class()
             parser = UniversalParser(None, mapping, cast_config)  # type: ignore[arg-type]
-            wrapped = self._maybe_wrap_yaml_parser(language, parser)
+            wrapped = self._maybe_wrap_yaml_parser(language, parser, cast_config)
             self._parser_cache[cache_key] = wrapped
             return wrapped
 
@@ -747,7 +747,9 @@ class ParserFactory:
                 cast_config,
             )
 
-            parser = self._maybe_wrap_yaml_parser(language, universal_parser)
+            parser = self._maybe_wrap_yaml_parser(
+                language, universal_parser, cast_config
+            )
 
             # Cache for future use
             self._parser_cache[cache_key] = parser
@@ -802,7 +804,10 @@ class ParserFactory:
         return detect_language(file_path)
 
     def _maybe_wrap_yaml_parser(
-        self, language: Language, parser: UniversalParser
+        self,
+        language: Language,
+        parser: UniversalParser,
+        cast_config: CASTConfig | None = None,
     ) -> LanguageParser:
         """Wrap YAML parser with RapidYAML implementation when available."""
         if language != Language.YAML:
@@ -811,7 +816,7 @@ class ParserFactory:
             from chunkhound.parsers.rapid_yaml_parser import RapidYamlParser
         except Exception:
             return parser
-        return RapidYamlParser(parser)
+        return RapidYamlParser(parser, cast_config)
 
     def _cache_key(self, language: Language) -> tuple[Language, str]:
         if language == Language.YAML:

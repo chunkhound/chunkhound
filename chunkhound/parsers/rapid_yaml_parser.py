@@ -45,8 +45,11 @@ class RapidYamlParser(LanguageParser):
 
     _KEY_NODE_TYPES = {"KEYVAL", "KEYMAP", "KEYSEQ"}
 
-    def __init__(self, fallback: UniversalParser) -> None:
+    def __init__(
+        self, fallback: UniversalParser, cast_config: CASTConfig | None = None
+    ) -> None:
         self._fallback = fallback
+        self._cast_config = cast_config or CASTConfig()
         self._enabled = not _env_wants_tree_sitter()
         self._ryml = None
         self._tree = None
@@ -188,6 +191,7 @@ class RapidYamlParser(LanguageParser):
                 effective_content,
                 file_id or FileId(0),
                 perf=perf,
+                cast_config=self._cast_config,
             )
             chunks = builder.build_chunks()
             # Accumulate perf
@@ -609,7 +613,15 @@ class _LineLocator:
 class _RapidYamlChunkBuilder:
     """Walks a RapidYAML tree and produces Chunk objects."""
 
-    def __init__(self, ryml_module, tree, content: str, file_id: FileId, perf: _RymlPerf | None = None) -> None:
+    def __init__(
+        self,
+        ryml_module,
+        tree,
+        content: str,
+        file_id: FileId,
+        perf: _RymlPerf | None = None,
+        cast_config: CASTConfig | None = None,
+    ) -> None:
         self.ryml = ryml_module
         self.tree = tree
         self.file_id = file_id
@@ -619,7 +631,7 @@ class _RapidYamlChunkBuilder:
         self.perf = perf
         self.locator = _LineLocator(content, perf=self.perf)
         self._decoder = ryml_module.u
-        self.chunk_splitter = ChunkSplitter(CASTConfig())
+        self.chunk_splitter = ChunkSplitter(cast_config or CASTConfig())
 
     def build_chunks(self) -> list[Chunk]:
         self.tree.clear()
