@@ -41,11 +41,6 @@ from chunkhound.parsers.chunk_splitter import (
     universal_to_chunk,
 )
 from chunkhound.parsers.universal_parser import UniversalParser
-from chunkhound.utils.hashing import compute_file_hash
-
-from .base_service import BaseService
-from .batch_processor import ParsedFileResult, process_file_batch
-from .chunk_cache_service import ChunkCacheService
 
 # File pattern utilities for directory discovery
 from chunkhound.utils.file_patterns import (
@@ -54,7 +49,11 @@ from chunkhound.utils.file_patterns import (
     walk_directory_tree,
     walk_subtree_worker,
 )
+from chunkhound.utils.hashing import compute_file_hash
 
+from .base_service import BaseService
+from .batch_processor import ParsedFileResult, process_file_batch
+from .chunk_cache_service import ChunkCacheService
 
 # CRITICAL FIX: Force spawn multiprocessing start method to prevent fork + asyncio issues
 # RATIONALE: Linux defaults to 'fork' which is unsafe with asyncio event loops
@@ -245,7 +244,9 @@ class IndexingCoordinator(BaseService):
         or default locations) and extends the provided list.
         """
         try:
-            from chunkhound.utils.ignore_engine import _collect_global_gitignore_patterns
+            from chunkhound.utils.ignore_engine import (
+                _collect_global_gitignore_patterns,
+            )
 
             global_pats = _collect_global_gitignore_patterns()
             if global_pats:
@@ -2441,12 +2442,14 @@ class IndexingCoordinator(BaseService):
             return None
 
         try:
-            from chunkhound.utils.git_discovery import (
-                list_repo_files_via_git as _git_list,
+            from chunkhound.utils.file_patterns import (
+                load_gitignore_patterns as _load_gi,
             )
             from chunkhound.utils.file_patterns import (
                 walk_directory_tree as _walk,
-                load_gitignore_patterns as _load_gi,
+            )
+            from chunkhound.utils.git_discovery import (
+                list_repo_files_via_git as _git_list,
             )
         except Exception:
             return None
@@ -2796,10 +2799,11 @@ class IndexingCoordinator(BaseService):
         if not files and getattr(ignore_engine_obj, "matches", None):
             try:
                 import os as _os
-                from chunkhound.utils.file_patterns import should_include_file as _inc
-                from chunkhound.utils.file_patterns import compile_pattern as _cp
                 from fnmatch import translate as _translate
                 from pathlib import Path as _Path
+
+                from chunkhound.utils.file_patterns import compile_pattern as _cp
+                from chunkhound.utils.file_patterns import should_include_file as _inc
 
                 # Pre-compile include patterns for a minimal filter
                 pat_cache = {}
