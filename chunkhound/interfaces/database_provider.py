@@ -353,6 +353,18 @@ class DatabaseProvider(Protocol):
         """Optimize tables by compacting fragments and rebuilding indexes (provider-specific)."""
         ...
 
+    def should_optimize(self, operation: str = "") -> bool:
+        """Check if optimization is warranted.
+
+        Args:
+            operation: Optional operation context (e.g., "post-chunking", "post-indexing")
+
+        Returns:
+            True if optimization should run, False to skip.
+            Default False assumes database self-manages optimization.
+        """
+        ...
+
     def health_check(self) -> dict[str, Any]:
         """Perform health check and return status information."""
         ...
