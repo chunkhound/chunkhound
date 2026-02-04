@@ -27,7 +27,8 @@ class TestRealtimeFailures:
     @pytest.fixture
     async def realtime_setup(self):
         """Setup real service with temp database and project directory."""
-        temp_dir = Path(tempfile.mkdtemp())
+        # Resolve immediately to handle Windows 8.3 short path names
+        temp_dir = Path(tempfile.mkdtemp()).resolve()
         db_path = temp_dir / ".chunkhound" / "test.db"
         watch_dir = temp_dir / "project"
         watch_dir.mkdir(parents=True)

@@ -264,6 +264,11 @@ class RealtimeIndexingService:
 
     async def start(self, watch_path: Path) -> None:
         """Start real-time indexing service."""
+        # Resolve path to canonical form for Windows 8.3 short name handling
+        # This ensures polling monitor's rglob() returns paths with resolved prefixes,
+        # matching how Config.target_dir is resolved for IndexingCoordinator._base_directory
+        watch_path = watch_path.resolve()
+
         logger.debug(f"Starting real-time indexing for {watch_path}")
         self._debug(f"start watch on {watch_path}")
 
