@@ -47,6 +47,9 @@ class _FakeDB:
             "content_hash": rec.content_hash,
         }
 
+    def should_optimize(self, operation: str = "") -> bool:
+        return False
+
 
 class _Cfg:
     class _Indexing:
