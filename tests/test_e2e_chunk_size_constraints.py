@@ -29,11 +29,10 @@ logger = logging.getLogger(__name__)
 # Derive constraints from CASTConfig to avoid drift
 _config = CASTConfig()
 # Content limit is max_chunk_size non-ws chars, but embedded text includes
-# header overhead. Header format: "# {file_path} ({language})\n" - typically
-# 50-100 chars for reasonable path lengths. We use 150 as conservative bound.
-# Validator sees embedded text, so allow content + header overhead.
-# Assumption: Test file paths are short (tmp_path + "large_python.py" ~50 chars).
-# Production paths may be longer; ValidatingEmbeddingProvider accounts for this.
+# header overhead. Header format: "# {file_path} ({language})\n"
+# For test files: tmp_path (~30) + filename (~20) + language (~10) ≈ 60 chars
+# Using 150 as conservative bound for platform variations in tmp_path.
+# Production paths may be longer; this test validates content size, not header+content.
 HEADER_OVERHEAD = 150
 MAX_CHUNK_SIZE = _config.max_chunk_size + HEADER_OVERHEAD  # non-ws chars
 MIN_CHUNK_SIZE = 25  # soft threshold for suspiciously small
