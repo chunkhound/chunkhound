@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from chunkhound.core.types.common import ChunkType
 from chunkhound.core.utils import estimate_tokens
 
 from .universal_engine import UniversalChunk, UniversalConcept
@@ -493,6 +494,53 @@ class ChunkSplitter:
         )
 
 
+# Module-level mapping from ChunkType to UniversalConcept
+# Used by chunk_to_universal() for central guard splitting
+CHUNK_TYPE_TO_CONCEPT: dict[ChunkType, UniversalConcept] = {
+    # Code structure -> DEFINITION
+    ChunkType.FUNCTION: UniversalConcept.DEFINITION,
+    ChunkType.METHOD: UniversalConcept.DEFINITION,
+    ChunkType.CONSTRUCTOR: UniversalConcept.DEFINITION,
+    ChunkType.PROPERTY: UniversalConcept.DEFINITION,
+    ChunkType.FIELD: UniversalConcept.DEFINITION,
+    ChunkType.CLOSURE: UniversalConcept.DEFINITION,
+    ChunkType.EXTENSION_FUNCTION: UniversalConcept.DEFINITION,
+    ChunkType.VARIABLE: UniversalConcept.DEFINITION,
+    ChunkType.MACRO: UniversalConcept.DEFINITION,
+    # Code structure -> STRUCTURE
+    ChunkType.CLASS: UniversalConcept.STRUCTURE,
+    ChunkType.INTERFACE: UniversalConcept.STRUCTURE,
+    ChunkType.STRUCT: UniversalConcept.STRUCTURE,
+    ChunkType.ENUM: UniversalConcept.STRUCTURE,
+    ChunkType.NAMESPACE: UniversalConcept.STRUCTURE,
+    ChunkType.TYPE_ALIAS: UniversalConcept.STRUCTURE,
+    ChunkType.TRAIT: UniversalConcept.STRUCTURE,
+    ChunkType.OBJECT: UniversalConcept.STRUCTURE,
+    ChunkType.COMPANION_OBJECT: UniversalConcept.STRUCTURE,
+    ChunkType.DATA_CLASS: UniversalConcept.STRUCTURE,
+    ChunkType.TYPE: UniversalConcept.STRUCTURE,
+    # Documentation -> COMMENT
+    ChunkType.COMMENT: UniversalConcept.COMMENT,
+    ChunkType.DOCSTRING: UniversalConcept.COMMENT,
+    # Content blocks -> BLOCK (not DEFINITION, as these aren't named reusable units)
+    ChunkType.SCRIPT: UniversalConcept.BLOCK,  # File-level scripts
+    ChunkType.CODE_BLOCK: UniversalConcept.BLOCK,  # Markdown fenced blocks
+    # Markdown structure -> BLOCK
+    ChunkType.HEADER_1: UniversalConcept.BLOCK,
+    ChunkType.HEADER_2: UniversalConcept.BLOCK,
+    ChunkType.HEADER_3: UniversalConcept.BLOCK,
+    ChunkType.HEADER_4: UniversalConcept.BLOCK,
+    ChunkType.HEADER_5: UniversalConcept.BLOCK,
+    ChunkType.HEADER_6: UniversalConcept.BLOCK,
+    ChunkType.PARAGRAPH: UniversalConcept.BLOCK,
+    ChunkType.TABLE: UniversalConcept.BLOCK,
+    ChunkType.KEY_VALUE: UniversalConcept.BLOCK,
+    ChunkType.ARRAY: UniversalConcept.BLOCK,
+    ChunkType.BLOCK: UniversalConcept.BLOCK,
+    ChunkType.UNKNOWN: UniversalConcept.BLOCK,
+}
+
+
 def universal_to_chunk(
     uc: UniversalChunk,
     file_path: Path | None,
@@ -500,6 +548,12 @@ def universal_to_chunk(
     language: "Language",
 ) -> "Chunk":
     """Convert a UniversalChunk to a standard Chunk.
+
+    Note: ChunkType restoration from language_node_type works correctly for
+    chunks that went through chunk_to_universal() (central guard splitting).
+    For parser-created UniversalChunks, language_node_type contains tree-sitter
+    node types (e.g., "function_definition"), so type restoration falls back
+    to concept mapping.
 
     Args:
         uc: The UniversalChunk to convert
@@ -556,18 +610,7 @@ def chunk_to_universal(chunk: "Chunk") -> UniversalChunk:
     Returns:
         UniversalChunk instance for validation/splitting
     """
-    from chunkhound.core.types.common import ChunkType
-
-    # Map ChunkType back to UniversalConcept
-    concept_map = {
-        ChunkType.FUNCTION: UniversalConcept.DEFINITION,
-        ChunkType.BLOCK: UniversalConcept.BLOCK,
-        ChunkType.COMMENT: UniversalConcept.COMMENT,
-        ChunkType.KEY_VALUE: UniversalConcept.BLOCK,
-        ChunkType.ARRAY: UniversalConcept.BLOCK,
-        ChunkType.PARAGRAPH: UniversalConcept.BLOCK,
-    }
-    concept = concept_map.get(chunk.chunk_type, UniversalConcept.BLOCK)
+    concept = CHUNK_TYPE_TO_CONCEPT.get(chunk.chunk_type, UniversalConcept.BLOCK)
 
     return UniversalChunk(
         concept=concept,
