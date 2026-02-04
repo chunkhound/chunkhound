@@ -31,6 +31,20 @@ from tests.utils.windows_compat import (
 from .test_utils import get_api_key_for_tests
 
 
+def timeout_for_language_coverage() -> int:
+    """Calculate timeout based on number of testable languages.
+
+    Budget per language:
+    - File creation + indexing wait: ~10s (Windows CI worst case)
+    - Search validation: ~1s (parallelized)
+    - Base overhead: 60s (fixture setup, initial scan, assertions)
+    """
+    num_languages = len([lang for lang in Language if lang != Language.UNKNOWN])
+    per_language_budget = 12  # seconds per language (generous for Windows CI)
+    base_overhead = 60  # fixture setup, initial scan, etc.
+    return base_overhead + (num_languages * per_language_budget)
+
+
 class TestQADeterministic:
     """Deterministic QA test suite - converts manual testing into automated validation."""
 
@@ -263,6 +277,7 @@ def added_during_edit():
         print("✓ File deletion: Deleted file content not found in search")
 
     @pytest.mark.asyncio
+    @pytest.mark.timeout(timeout_for_language_coverage())
     async def test_language_coverage_comprehensive(self, qa_setup):
         """QA Items 5-6: Test all supported languages and file types."""
         services, realtime_service, watch_dir, _ = qa_setup
@@ -275,7 +290,10 @@ def added_during_edit():
             Language.PYTHON: 'def qa_test_function():\n    """Python QA test"""\n    return "python_qa_unique"',
             Language.JAVASCRIPT: 'function qaTestFunction() {\n    // JavaScript QA test\n    return "javascript_qa_unique";\n}',
             Language.TYPESCRIPT: 'function qaTestFunction(): string {\n    // TypeScript QA test\n    return "typescript_qa_unique";\n}',
+            Language.TSX: 'function QAComponent(): JSX.Element {\n    // TSX QA test\n    return <div>tsx_qa_unique</div>;\n}',
+            Language.JSX: 'function QAComponent() {\n    // JSX QA test\n    return <div>jsx_qa_unique</div>;\n}',
             Language.JAVA: 'public class QATest {\n    // Java QA test\n    public String test() { return "java_qa_unique"; }\n}',
+            Language.CSHARP: 'public class QATest {\n    // C# QA test\n    public string Test() { return "csharp_qa_unique"; }\n}',
             Language.GO: 'package main\n\n// Go QA test\nfunc qaTestFunction() string {\n    return "go_qa_unique"\n}',
             Language.RUST: 'fn qa_test_function() -> &\'static str {\n    // Rust QA test\n    "rust_qa_unique"\n}',
             Language.C: '#include <stdio.h>\n\n// C QA test\nchar* qa_test_function() {\n    return "c_qa_unique";\n}',
@@ -318,6 +336,19 @@ function qaTestFunction() {
     color: blue;
   }
 </style>''',
+            Language.GROOVY: 'def qaTestFunction() {\n    // Groovy QA test\n    return "groovy_qa_unique"\n}',
+            Language.KOTLIN: 'fun qaTestFunction(): String {\n    // Kotlin QA test\n    return "kotlin_qa_unique"\n}',
+            Language.MAKEFILE: '.PHONY: qa_test\n# Makefile QA test\nqa_test:\n\t@echo "makefile_qa_unique"',
+            Language.MATLAB: '% MATLAB QA test\nfunction result = qa_test_function()\n    result = "matlab_qa_unique";\nend',
+            Language.LUA: '-- Lua QA test\nfunction qa_test_function()\n    return "lua_qa_unique"\nend',
+            Language.HASKELL: '-- Haskell QA test\nqaTestFunction :: String\nqaTestFunction = "haskell_qa_unique"',
+            Language.HCL: '# HCL QA test\nvariable "qa_test" {\n  default = "hcl_qa_unique"\n}',
+            Language.DART: '// Dart QA test\nString qaTestFunction() {\n  return "dart_qa_unique";\n}',
+            Language.OBJC: '// Objective-C QA test\n@implementation QATest\n- (NSString *)qaTestMethod {\n    return @"objc_qa_unique";\n}\n@end',
+            Language.PHP: '<?php\n// PHP QA test\nfunction qa_test_function() {\n    return "php_qa_unique";\n}',
+            Language.SWIFT: '// Swift QA test\nfunc qaTestFunction() -> String {\n    return "swift_qa_unique"\n}',
+            Language.ZIG: '// Zig QA test\nfn qa_test_function() []const u8 {\n    return "zig_qa_unique";\n}',
+            Language.PDF: None,  # PDF is binary, skip content template
         }
 
         # Create extension mapping for file creation
@@ -345,7 +376,30 @@ function qaTestFunction() {
             Language.MATLAB: ".m",
             Language.VUE: ".vue",
             Language.SVELTE: ".svelte",
+            Language.LUA: ".lua",
+            Language.HASKELL: ".hs",
+            Language.HCL: ".tf",
+            Language.DART: ".dart",
+            # OBJC shares .m with MATLAB - content-based detection (language_detector.py)
+            # disambiguates via ObjC markers (@implementation in template above).
+            Language.OBJC: ".m",
+            Language.PHP: ".php",
+            Language.SWIFT: ".swift",
+            Language.ZIG: ".zig",
+            Language.PDF: ".pdf",
         }
+
+        # Validate ALL languages have test coverage (fail explicitly for new languages)
+        testable_languages = {lang for lang in Language if lang != Language.UNKNOWN}
+        missing_templates = testable_languages - set(content_templates.keys())
+        missing_extensions = testable_languages - set(extension_map.keys())
+        # Languages must be in BOTH dicts to be tested
+        uncovered = missing_templates | missing_extensions
+
+        assert not uncovered, (
+            f"Language(s) missing from test coverage: {sorted(l.value for l in uncovered)}. "
+            f"Add content template and extension mapping for each new language to this test."
+        )
 
         created_files = []
         search_patterns = []
@@ -353,6 +407,12 @@ function qaTestFunction() {
         # Create files for all testable languages
         for language in languages_to_test:
             if language in content_templates and language in extension_map:
+                content = content_templates[language]
+                # Skip languages with None content (e.g., PDF which is binary)
+                if content is None:
+                    print(f"Skipped {language.value} (binary format)")
+                    continue
+
                 ext = extension_map[language]
                 if ext == "Makefile":
                     filename = f"Makefile.qa_{language.value}"
@@ -360,7 +420,6 @@ function qaTestFunction() {
                     filename = f"qa_test_{language.value}{ext}"
 
                 file_path = watch_dir / filename
-                content = content_templates[language]
                 unique_pattern = f"{language.value}_qa_unique"
 
                 file_path.write_text(content)
@@ -394,27 +453,29 @@ function qaTestFunction() {
         print(f"📊 Final: {db_stats.get('files', 0)} files, {db_stats.get('chunks', 0)} chunks")
 
         # QA Item 5: Test concurrent processing for all languages
-        # Search for each language's unique content
-        successful_languages = []
-        failed_languages = []
+        # Search for each language's unique content - run in parallel for speed
 
-        for file_path, language, pattern in created_files:
+        async def validate_language_search(language, pattern):
+            """Validate a single language's content is searchable."""
             try:
-                # Test regex search
                 regex_results = await execute_tool("search", services, None, {
                     "type": "regex",
                     "query": pattern,
                     "page_size": 10,
                     "offset": 0
                 })
-
                 if len(regex_results.get('results', [])) > 0:
-                    successful_languages.append(language.value)
-                else:
-                    failed_languages.append(f"{language.value} (regex not found)")
-
+                    return (language.value, True, None)
+                return (language.value, False, "regex not found")
             except Exception as e:
-                failed_languages.append(f"{language.value} (error: {e})")
+                return (language.value, False, str(e))
+
+        # Run all searches in parallel
+        tasks = [validate_language_search(lang, pat) for _, lang, pat in created_files]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        successful_languages = [lang for lang, success, _ in results if success]
+        failed_languages = [f"{lang} ({err})" for lang, success, err in results if not success]
 
         print(f"✓ Languages successfully tested: {len(successful_languages)}")
         print(f"✓ Successful languages: {successful_languages}")
