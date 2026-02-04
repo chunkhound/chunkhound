@@ -17,14 +17,14 @@ import logging
 
 import pytest
 
-logger = logging.getLogger(__name__)
-
 from chunkhound.core.config.config import Config
 from chunkhound.core.types.common import Language
 from chunkhound.database_factory import create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.parsers.chunk_splitter import CASTConfig
 from tests.fixtures.fake_providers import ValidatingEmbeddingProvider
+
+logger = logging.getLogger(__name__)
 
 # Derive constraints from CASTConfig to avoid drift
 _config = CASTConfig()
@@ -72,7 +72,9 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         "def process_large_data(items):\n"
         '    """Process items."""\n' + _make_large_statements("    x = 1"),
         # Normal
-        'def greet(name: str) -> str:\n    """Say hello."""\n    return f"Hello, {name}"',
+        "def greet(name: str) -> str:\n"
+        '    """Say hello."""\n'
+        '    return f"Hello, {name}"',
     ),
     Language.JAVASCRIPT: (
         ".js",
@@ -267,10 +269,12 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         + _make_large_statements("- (int)field { return 0; }")
         + "\n@end",
         # Normal
-        "@interface Greeter : NSObject\n- (NSString *)greet:(NSString *)name;\n@end\n\n"
+        "@interface Greeter : NSObject\n"
+        "- (NSString *)greet:(NSString *)name;\n@end\n\n"
         "@implementation Greeter\n"
-        '- (NSString *)greet:(NSString *)name {\n    return [NSString stringWithFormat:@"Hello, %@", name];\n}\n'
-        "@end",
+        "- (NSString *)greet:(NSString *)name {\n"
+        '    return [NSString stringWithFormat:@"Hello, %@", name];\n'
+        "}\n@end",
     ),
     Language.MAKEFILE: (
         ".mk",
@@ -299,7 +303,9 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         "  data() {\n    return { greeting: 'Hello' };\n  }\n};\n</script>",
         # Normal
         "<template>\n  <div>{{ greeting }}</div>\n</template>\n\n"
-        "<script>\nexport default {\n  data() {\n    return { greeting: 'Hello' };\n  }\n};\n</script>",
+        "<script>\nexport default {\n"
+        "  data() {\n    return { greeting: 'Hello' };\n  }\n"
+        "};\n</script>",
     ),
     Language.SVELTE: (
         ".svelte",
@@ -316,7 +322,8 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         # Large document
         "# Large Document\n\n" + _make_large_statements("- Item with content here"),
         # Normal
-        "# Hello World\n\nThis is a sample markdown file.\n\n## Features\n\n- Feature 1\n- Feature 2",
+        "# Hello World\n\nThis is a sample markdown file.\n\n"
+        "## Features\n\n- Feature 1\n- Feature 2",
     ),
     # === Data/Configuration Languages ===
     Language.JSON: (
@@ -326,7 +333,8 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         + ",\n".join(['    {"id": ' + str(i) + "}" for i in range(200)])
         + "\n  ]\n}",
         # Normal
-        '{\n  "name": "example",\n  "version": "1.0.0",\n  "description": "A sample JSON file"\n}',
+        '{\n  "name": "example",\n  "version": "1.0.0",\n'
+        '  "description": "A sample JSON file"\n}',
     ),
     Language.YAML: (
         ".yaml",
@@ -447,7 +455,9 @@ async def test_all_parsers_respect_chunk_size_constraints(validating_db):
 
     # Separate violations by type and language
     # Languages without size enforcement (lowercase for header matching)
-    non_enforced_language_names = {lang.name.lower() for lang in LANGUAGES_WITHOUT_SIZE_ENFORCEMENT}
+    non_enforced_language_names = {
+        lang.name.lower() for lang in LANGUAGES_WITHOUT_SIZE_ENFORCEMENT
+    }
 
     # Get violations from enforced languages only (excluding non-enforced)
     enforced_char_violations = provider.get_violations_excluding_languages(
@@ -468,7 +478,8 @@ async def test_all_parsers_respect_chunk_size_constraints(validating_db):
         f"Found {len(enforced_char_violations)} chunks from cAST parsers exceeding "
         f"max_chunk_size ({MAX_CHUNK_SIZE} non-ws chars):\n"
         + "\n".join(
-            f"  - {v['non_ws_chars']} chars [{v.get('language', 'unknown')}]: {v['text_preview'][:50]}..."
+            f"  - {v['non_ws_chars']} chars [{v.get('language', 'unknown')}]: "
+            f"{v['text_preview'][:50]}..."
             for v in enforced_char_violations[:5]
         )
     )
@@ -477,7 +488,8 @@ async def test_all_parsers_respect_chunk_size_constraints(validating_db):
         f"Found {len(enforced_token_violations)} chunks from cAST parsers exceeding "
         f"safe_token_limit ({SAFE_TOKEN_LIMIT} tokens):\n"
         + "\n".join(
-            f"  - {v['estimated_tokens']} tokens [{v.get('language', 'unknown')}]: {v['text_preview'][:50]}..."
+            f"  - {v['estimated_tokens']} tokens [{v.get('language', 'unknown')}]: "
+            f"{v['text_preview'][:50]}..."
             for v in enforced_token_violations[:5]
         )
     )
@@ -532,8 +544,9 @@ def test_all_parsers_covered_with_large_samples():
 
     missing_languages = all_languages - covered_languages
     assert not missing_languages, (
-        f"Missing test samples for languages: {sorted(lang.name for lang in missing_languages)}. "
-        f"Every Language enum member MUST have an entry in LARGE_LANGUAGE_SAMPLES."
+        f"Missing test samples for languages: "
+        f"{sorted(lang.name for lang in missing_languages)}. "
+        "Every Language enum member MUST have an entry in LARGE_LANGUAGE_SAMPLES."
     )
 
     extra_languages = covered_languages - all_languages
@@ -565,6 +578,6 @@ def test_large_samples_exceed_threshold():
             )
 
     assert not undersized, (
-        f"Large samples must exceed {min_large_size} non-ws chars to trigger splitting:\n"
-        + "\n".join(f"  - {s}" for s in undersized)
+        f"Large samples must exceed {min_large_size} non-ws chars "
+        "to trigger splitting:\n" + "\n".join(f"  - {s}" for s in undersized)
     )
