@@ -518,15 +518,19 @@ def universal_to_chunk(
         LineNumber,
     )
 
-    # Map UniversalConcept to ChunkType
-    chunk_type_map = {
-        UniversalConcept.DEFINITION: ChunkType.FUNCTION,
-        UniversalConcept.BLOCK: ChunkType.BLOCK,
-        UniversalConcept.COMMENT: ChunkType.COMMENT,
-        UniversalConcept.IMPORT: ChunkType.BLOCK,
-        UniversalConcept.STRUCTURE: ChunkType.BLOCK,
-    }
-    chunk_type = chunk_type_map.get(uc.concept, ChunkType.BLOCK)
+    # Try to restore original chunk_type from language_node_type first
+    # This preserves types like METHOD, CLASS that were lost in chunk_to_universal()
+    chunk_type = ChunkType.from_string(uc.language_node_type)
+    if chunk_type == ChunkType.UNKNOWN:
+        # Fallback to concept mapping for non-ChunkType language_node_types
+        chunk_type_map = {
+            UniversalConcept.DEFINITION: ChunkType.FUNCTION,
+            UniversalConcept.BLOCK: ChunkType.BLOCK,
+            UniversalConcept.COMMENT: ChunkType.COMMENT,
+            UniversalConcept.IMPORT: ChunkType.BLOCK,
+            UniversalConcept.STRUCTURE: ChunkType.BLOCK,
+        }
+        chunk_type = chunk_type_map.get(uc.concept, ChunkType.BLOCK)
 
     return Chunk(
         symbol=uc.name,
