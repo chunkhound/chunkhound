@@ -87,8 +87,12 @@ class MakefileChunkSplitter(ChunkSplitter):
         for recipe_line in recipe_lines:
             test_content = "\n".join([target_line] + current_group + [recipe_line])
             test_metrics = ChunkMetrics.from_content(test_content)
+            test_tokens = self._estimate_tokens(test_content)
 
-            if test_metrics.non_whitespace_chars <= self.config.max_chunk_size:
+            if (
+                test_metrics.non_whitespace_chars <= self.config.max_chunk_size
+                and test_tokens <= self.config.safe_token_limit
+            ):
                 current_group.append(recipe_line)
             else:
                 if current_group:
