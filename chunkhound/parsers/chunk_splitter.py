@@ -561,6 +561,7 @@ def chunk_to_universal(chunk: "Chunk") -> UniversalChunk:
         ChunkType.COMMENT: UniversalConcept.COMMENT,
         ChunkType.KEY_VALUE: UniversalConcept.BLOCK,
         ChunkType.ARRAY: UniversalConcept.BLOCK,
+        ChunkType.PARAGRAPH: UniversalConcept.BLOCK,
     }
     concept = concept_map.get(chunk.chunk_type, UniversalConcept.BLOCK)
 
