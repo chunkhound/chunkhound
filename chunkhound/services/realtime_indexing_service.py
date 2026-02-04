@@ -540,9 +540,10 @@ class RealtimeIndexingService:
 
                     known_files = current_files
 
-                    # Adaptive poll interval: 1s for the first 10s, then 5s
+                    # Adaptive poll interval: 0.5s for the first 10s, then 3s
+                    # Fast initial polling matches debounce delay for reliable file detection
                     elapsed = time.time() - polling_start
-                    interval = 1.0 if elapsed < 10.0 else 5.0
+                    interval = 0.5 if elapsed < 10.0 else 3.0
                     await asyncio.sleep(interval)
 
                 except Exception as e:
