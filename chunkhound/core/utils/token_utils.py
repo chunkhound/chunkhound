@@ -28,6 +28,17 @@ def estimate_tokens_llm(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def estimate_tokens_embedding(text: str) -> int:
+    """Token estimation for embedding providers (3 chars/token).
+
+    Central implementation for chunking - used by parsers to estimate
+    chunk sizes for embedding APIs.
+    """
+    if not text:
+        return 0
+    return max(1, len(text) // EMBEDDING_CHARS_PER_TOKEN)
+
+
 def estimate_tokens(
     text: str,
     provider: str | None = None,
@@ -38,9 +49,12 @@ def estimate_tokens(
 
     Args:
         text: Text to estimate tokens for
-        provider: Provider name (openai, voyageai, etc.). If None, gets from registry config.
-        model: Model name for provider-specific tokenization. If None, gets from registry config.
-        require_provider: If True, raises error when no provider configured. If False, uses default estimation.
+        provider: Provider name (openai, voyageai, etc.).
+            If None, gets from registry config.
+        model: Model name for provider-specific tokenization.
+            If None, gets from registry config.
+        require_provider: If True, raises error when no provider configured.
+            If False, uses default estimation.
 
     Returns:
         Estimated token count

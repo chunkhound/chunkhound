@@ -8,6 +8,7 @@ from .token_utils import (
     EMBEDDING_CHARS_PER_TOKEN,
     LLM_CHARS_PER_TOKEN,
     estimate_tokens,
+    estimate_tokens_embedding,
     estimate_tokens_llm,
     get_chars_to_tokens_ratio,
 )
@@ -17,6 +18,7 @@ __all__ = [
     "EMBEDDING_CHARS_PER_TOKEN",
     "LLM_CHARS_PER_TOKEN",
     "estimate_tokens",
+    "estimate_tokens_embedding",
     "estimate_tokens_llm",
     "format_chunk_for_embedding",
     "get_chars_to_tokens_ratio",
