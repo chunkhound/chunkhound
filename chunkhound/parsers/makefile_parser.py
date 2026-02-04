@@ -111,7 +111,25 @@ class MakefileChunkSplitter(ChunkSplitter):
                 )
             )
 
-        return result if result else [chunk]
+        if not result:
+            return [chunk]
+
+        # Validate all result chunks - fall back to emergency split for any oversized
+        # This handles the case where a single recipe line + target exceeds size limit
+        validated_result: list[UniversalChunk] = []
+        for rule_chunk in result:
+            metrics = ChunkMetrics.from_content(rule_chunk.content)
+            tokens = self._estimate_tokens(rule_chunk.content)
+            if (
+                metrics.non_whitespace_chars > self.config.max_chunk_size
+                or tokens > self.config.safe_token_limit
+            ):
+                # Single recipe line exceeds limit - use emergency split
+                validated_result.extend(self._emergency_split(rule_chunk))
+            else:
+                validated_result.append(rule_chunk)
+
+        return validated_result if validated_result else [chunk]
 
     def _create_rule_chunk(
         self,
