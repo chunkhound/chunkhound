@@ -18,7 +18,7 @@ from chunkhound.core.config.embedding_config import (
 from chunkhound.core.exceptions.core import ValidationError
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 
-from .batch_utils import handle_token_limit_error, with_openai_token_handling
+from .batch_utils import handle_token_limit_error
 
 try:
     import openai
@@ -670,6 +670,13 @@ class OpenAIEmbeddingProvider:
                 embeddings: list[list[float] | None] = [None] * len(texts)
                 for data in response.data:
                     embeddings[data.index] = data.embedding
+
+                # Validate all indices were filled (defensive check)
+                if None in embeddings:
+                    missing = [i for i, e in enumerate(embeddings) if e is None]
+                    raise RuntimeError(
+                        f"OpenAI API returned incomplete embeddings, missing indices: {missing}"
+                    )
 
                 # Update usage statistics
                 self._usage_stats["requests_made"] += 1
