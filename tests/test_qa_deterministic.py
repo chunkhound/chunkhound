@@ -30,6 +30,49 @@ from tests.utils.windows_compat import (
 
 from .test_utils import get_api_key_for_tests
 
+# =============================================================================
+# Test Configuration Constants
+# =============================================================================
+
+# Timeout & Wait Durations
+INITIAL_SCAN_WAIT_SECONDS = 2.0           # Wait for initial scan after service start
+CONCURRENT_SETUP_WAIT_SECONDS = 3.0       # Wait before concurrent operations
+PAGINATION_SETUP_WAIT_SECONDS = 3.0       # Wait after creating pagination test files
+SEARCH_ITERATION_DELAY_SECONDS = 0.2      # Delay between search iterations
+FILE_OPERATION_DELAY_SECONDS = 0.3        # Delay between file operations
+STABILITY_CHECK_INTERVAL_SECONDS = 2.0    # Interval between stability checks
+INDEXING_POLL_INTERVAL_SECONDS = 0.5      # Polling interval for indexing completion
+RIPGREP_TIMEOUT_SECONDS = 10              # Timeout for ripgrep subprocess
+
+# Budget Constants (used in timeout calculations)
+BASE_OVERHEAD_SECONDS = 60                # Fixture setup, initial scan, etc.
+BUDGET_PER_LANGUAGE_SECONDS = 12          # Per-language budget (Windows CI worst case)
+SEARCH_VALIDATION_BUDGET_SECONDS = 60     # Reserve for parallel searches + assertions
+INDEXING_CAP_SECONDS = 180.0              # Hard cap for indexing wait (fail fast)
+SINGLE_FILE_INDEXING_MAX_SECONDS = 10.0   # Max wait for single file indexing
+
+# Threshold Constants
+MIN_MAJOR_LANGUAGES_REQUIRED = 3          # Minimum major languages that must work
+MIN_TOTAL_LANGUAGES_REQUIRED = 3          # Minimum total languages that must work
+LOW_SUCCESS_RATE_THRESHOLD = 0.5          # Below this = low success rate warning
+AVG_SEARCH_TIME_LIMIT_SECONDS = 2.0       # Max acceptable average search time
+MAX_SEARCH_TIME_LIMIT_SECONDS = 5.0       # Max acceptable single search time
+FILE_REFLECTION_MAX_SECONDS = 10.0        # Max time for file changes to reflect
+SEARCH_EXECUTION_MAX_SECONDS = 5.0        # Max time for search execution
+SEARCH_GOOD_THRESHOLD_SECONDS = 1.0       # Below = good search performance
+SEARCH_ACCEPTABLE_THRESHOLD_SECONDS = 3.0 # Below = acceptable search performance
+
+# Test Data Constants
+NUM_PAGINATION_TEST_FILES = 15            # Files to create for pagination test
+NUM_BASE_CONCURRENT_FILES = 3             # Base files for concurrent test
+NUM_CONCURRENT_SEARCHES = 10              # Searches during concurrent operations
+NUM_RAPID_MODIFICATIONS = 5               # File modifications in rapid test
+MAX_PAGINATION_PAGES = 10                 # Safety limit for pagination loop
+MAX_STABILITY_CHECKS = 10                 # Retry attempts for chunk stability
+MIN_EXPECTED_CHUNKS_PAGINATION = 15       # Minimum chunks for pagination test
+EXPECTED_CHUNKS_PER_FILE = 2              # Expected chunks per substantial file
+DEFAULT_PAGE_SIZE = 10                    # Standard pagination page size
+
 
 def timeout_for_language_coverage() -> int:
     """Calculate timeout based on number of testable languages.
@@ -37,12 +80,10 @@ def timeout_for_language_coverage() -> int:
     Budget per language:
     - File creation + indexing wait: ~10s (Windows CI worst case)
     - Search validation: ~1s (parallelized)
-    - Base overhead: 60s (fixture setup, initial scan, assertions)
+    - Base overhead: BASE_OVERHEAD_SECONDS (fixture setup, initial scan, assertions)
     """
     num_languages = len([lang for lang in Language if lang != Language.UNKNOWN])
-    per_language_budget = 12  # seconds per language (generous for Windows CI)
-    base_overhead = 60  # fixture setup, initial scan, etc.
-    return base_overhead + (num_languages * per_language_budget)
+    return BASE_OVERHEAD_SECONDS + (num_languages * BUDGET_PER_LANGUAGE_SECONDS)
 
 
 class TestQADeterministic:
@@ -96,7 +137,7 @@ class TestQADeterministic:
         await realtime_service.start(watch_dir)
 
         # Wait for initial scan
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(INITIAL_SCAN_WAIT_SECONDS)
 
         yield services, realtime_service, watch_dir, temp_dir
 
@@ -430,11 +471,13 @@ function qaTestFunction() {
 
         # Wait for all files to be processed - poll until all files are in database
         expected_file_count = len(created_files)
-        # Wait for all files with longer timeout on Windows CI where
-        # ReadDirectoryChangesW can be unreliable with many files
-        base_timeout = get_fs_event_timeout() * 3  # Triple for many files
-        max_wait = max(60.0, base_timeout * expected_file_count // 2)
-        poll_interval = 0.5
+        # Cap max_wait to leave time for search validation phase
+        # Note: Windows CI may need longer due to ReadDirectoryChangesW unreliability,
+        # but we cap at INDEXING_CAP_SECONDS to fail fast rather than hang
+        total_timeout = timeout_for_language_coverage()
+        available_for_indexing = total_timeout - BASE_OVERHEAD_SECONDS - SEARCH_VALIDATION_BUDGET_SECONDS
+        max_wait = min(available_for_indexing, INDEXING_CAP_SECONDS)
+        poll_interval = INDEXING_POLL_INTERVAL_SECONDS
         elapsed = 0.0
 
         while elapsed < max_wait:
@@ -448,9 +491,16 @@ function qaTestFunction() {
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
 
-        # Final stats check
+        # Final stats check with informative failure if indexing incomplete
         db_stats = await services.indexing_coordinator.get_stats()
-        print(f"📊 Final: {db_stats.get('files', 0)} files, {db_stats.get('chunks', 0)} chunks")
+        indexed_files = db_stats.get('files', 0)
+        print(f"📊 Final: {indexed_files} files, {db_stats.get('chunks', 0)} chunks")
+
+        if indexed_files < expected_file_count:
+            pytest.fail(
+                f"Only {indexed_files}/{expected_file_count} files indexed after {elapsed:.1f}s. "
+                f"This may indicate indexing performance issues on CI."
+            )
 
         # QA Item 5: Test concurrent processing for all languages
         # Search for each language's unique content - run in parallel for speed
@@ -487,17 +537,17 @@ function qaTestFunction() {
         major_languages = ['python', 'javascript', 'typescript', 'java', 'go']
         working_major = [lang for lang in successful_languages if lang in major_languages]
 
-        assert len(working_major) >= 3, f"At least 3 major languages should work, got: {working_major}"
+        assert len(working_major) >= MIN_MAJOR_LANGUAGES_REQUIRED, f"At least {MIN_MAJOR_LANGUAGES_REQUIRED} major languages should work, got: {working_major}"
 
         # Realistic expectation - at least some languages should work
         # This test reveals which languages actually work in the current system
-        assert len(successful_languages) >= 3, f"At least 3 languages should work, got {len(successful_languages)}: {successful_languages}"
+        assert len(successful_languages) >= MIN_TOTAL_LANGUAGES_REQUIRED, f"At least {MIN_TOTAL_LANGUAGES_REQUIRED} languages should work, got {len(successful_languages)}: {successful_languages}"
 
         # Report findings for manual review
         success_rate = len(successful_languages) / len(created_files) if created_files else 0
         print(f"📊 Language success rate: {success_rate:.1%} ({len(successful_languages)}/{len(created_files)})")
 
-        if success_rate < 0.5:
+        if success_rate < LOW_SUCCESS_RATE_THRESHOLD:
             print("⚠ LOW SUCCESS RATE: This may indicate indexing or parsing issues with some languages")
 
     @pytest.mark.asyncio
@@ -507,7 +557,7 @@ function qaTestFunction() {
 
         # Create initial test files
         base_files = []
-        for i in range(3):
+        for i in range(NUM_BASE_CONCURRENT_FILES):
             file_path = watch_dir / f"concurrent_test_{i}.py"
             content = f"""def concurrent_function_{i}():
     '''Concurrent test function {i}'''
@@ -516,12 +566,12 @@ function qaTestFunction() {
             file_path.write_text(content)
             base_files.append((file_path, f"concurrent_qa_test_{i}"))
 
-        await asyncio.sleep(3.0)
+        await asyncio.sleep(CONCURRENT_SETUP_WAIT_SECONDS)
 
         # Function to perform searches during file modifications
         async def search_during_modifications():
             search_results = []
-            for i in range(10):  # Multiple searches during modifications
+            for i in range(NUM_CONCURRENT_SEARCHES):
                 try:
                     start_time = time.time()
                     results = await execute_tool("search", services, None, {
@@ -541,7 +591,7 @@ function qaTestFunction() {
                     })
 
                     # Small delay between searches
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(SEARCH_ITERATION_DELAY_SECONDS)
                 except Exception as e:
                     search_results.append({
                         'iteration': i,
@@ -554,7 +604,7 @@ function qaTestFunction() {
         # Function to perform rapid file modifications
         async def rapid_file_modifications():
             modifications = []
-            for i in range(5):
+            for i in range(NUM_RAPID_MODIFICATIONS):
                 try:
                     # Create new file
                     new_file = watch_dir / f"rapid_modify_{i}.py"
@@ -586,7 +636,7 @@ class RapidClass_{i}:
                         })
 
                     # Small delay between operations
-                    await asyncio.sleep(0.3)
+                    await asyncio.sleep(FILE_OPERATION_DELAY_SECONDS)
 
                 except Exception as e:
                     modifications.append({
@@ -631,8 +681,8 @@ class RapidClass_{i}:
             print(f"✓ Search timing: avg={avg_search_time:.3f}s, max={max_search_time:.3f}s")
 
             # Search should not block - reasonable performance expected
-            assert avg_search_time < 2.0, f"Average search time should be < 2s, got {avg_search_time:.3f}s"
-            assert max_search_time < 5.0, f"Max search time should be < 5s, got {max_search_time:.3f}s"
+            assert avg_search_time < AVG_SEARCH_TIME_LIMIT_SECONDS, f"Average search time should be < {AVG_SEARCH_TIME_LIMIT_SECONDS}s, got {avg_search_time:.3f}s"
+            assert max_search_time < MAX_SEARCH_TIME_LIMIT_SECONDS, f"Max search time should be < {MAX_SEARCH_TIME_LIMIT_SECONDS}s, got {max_search_time:.3f}s"
 
     @pytest.mark.asyncio
     async def test_pagination_comprehensive(self, qa_setup):
@@ -664,7 +714,7 @@ class RapidClass_{i}:
     return "single_unique_result_qa_test"
 """
         single_file.write_text(single_content)
-        await asyncio.sleep(3.0)
+        await asyncio.sleep(PAGINATION_SETUP_WAIT_SECONDS)
 
         single_results = await execute_tool("search", services, None, {
             "type": "regex",
@@ -682,7 +732,7 @@ class RapidClass_{i}:
         created_files_for_pagination = []
 
         # Create each file individually to avoid f-string complexity
-        for i in range(15):  # Create substantial files to ensure multiple chunks
+        for i in range(NUM_PAGINATION_TEST_FILES):
             file_path = watch_dir / f"pagination_test_{i:03d}.py"
 
             # Build content using string formatting to avoid f-string nesting issues
@@ -900,22 +950,22 @@ if __name__ == "__main__":
         # Wait for all files to be processed with verification
         # Poll until we get a stable chunk count
         stable_count = None
-        for _ in range(10):  # Try for up to 20 seconds
-            await asyncio.sleep(2.0)
+        for _ in range(MAX_STABILITY_CHECKS):
+            await asyncio.sleep(STABILITY_CHECK_INTERVAL_SECONDS)
             stats = await services.indexing_coordinator.get_stats()
             current_chunks = stats.get('chunks', 0)
-            if stable_count == current_chunks and current_chunks >= 15:  # At least 15 chunks expected
+            if stable_count == current_chunks and current_chunks >= MIN_EXPECTED_CHUNKS_PAGINATION:
                 break
             stable_count = current_chunks
         else:
             # Fallback - just wait a bit more
-            await asyncio.sleep(3.0)
+            await asyncio.sleep(PAGINATION_SETUP_WAIT_SECONDS)
 
         # Test pagination by fetching all pages
         all_results = []
-        page_size = 10
+        page_size = DEFAULT_PAGE_SIZE
         offset = 0
-        max_pages = 10  # Safety limit
+        max_pages = MAX_PAGINATION_PAGES
         page_count = 0
         total_count = 0  # Track actual total from pagination metadata
 
@@ -951,19 +1001,19 @@ if __name__ == "__main__":
         assert page_count >= 2, f"Should require multiple pages with page_size={page_size}, used {page_count} pages"
 
         # Report actual vs expected for manual review
-        expected_files = 15  # Updated to match new file count
+        expected_chunks = NUM_PAGINATION_TEST_FILES * EXPECTED_CHUNKS_PER_FILE
         # Note: Due to cAST algorithm's semantic chunking, files may be merged into fewer chunks
         # than expected based on size. This is by design for better semantic coherence.
-        if len(all_results) < expected_files * 2:  # Each substantial file ideally creates multiple chunks
-            processing_rate = len(all_results) / (expected_files * 2)
-            print(f"📊 Chunk processing rate: {processing_rate:.1%} ({len(all_results)}/{expected_files * 2} expected chunks)")
+        if len(all_results) < expected_chunks:
+            processing_rate = len(all_results) / expected_chunks
+            print(f"📊 Chunk processing rate: {processing_rate:.1%} ({len(all_results)}/{expected_chunks} expected chunks)")
 
         # 4. Compare with external validation using ripgrep if available
         try:
             # Try to use ripgrep for external validation
             rg_result = subprocess.run([
                 'rg', '--count', '--no-heading', common_pattern, str(watch_dir)
-            ], capture_output=True, text=True, timeout=10)
+            ], capture_output=True, text=True, timeout=RIPGREP_TIMEOUT_SECONDS)
 
             if rg_result.returncode == 0:
                 # Parse ripgrep results - count matches across files
@@ -1037,8 +1087,8 @@ if __name__ == "__main__":
         timing_test_file.write_text(timing_content)
 
         # Poll until content is searchable
-        max_wait = 10.0  # Maximum wait time
-        poll_interval = 0.5
+        max_wait = SINGLE_FILE_INDEXING_MAX_SECONDS
+        poll_interval = INDEXING_POLL_INTERVAL_SECONDS
         elapsed = 0.0
 
         while elapsed < max_wait:
@@ -1089,12 +1139,22 @@ if __name__ == "__main__":
         print("   Performance measurements: COMPLETED")
 
         print("\n📋 QA REQUIREMENTS STATUS:")
-        print(f"   Real-time indexing: {'✅ WORKING' if indexing_time < 10 else '❌ SLOW'}")
-        print(f"   Search performance: {'✅ GOOD' if search_time < 1.0 else '⚠ ACCEPTABLE' if search_time < 3.0 else '❌ SLOW'}")
+        indexing_ok = indexing_time < FILE_REFLECTION_MAX_SECONDS
+        print(f"   Real-time indexing: {'✅ WORKING' if indexing_ok else '❌ SLOW'}")
+        search_good = search_time < SEARCH_GOOD_THRESHOLD_SECONDS
+        search_ok = search_time < SEARCH_ACCEPTABLE_THRESHOLD_SECONDS
+        search_status = '✅ GOOD' if search_good else '⚠ ACCEPTABLE' if search_ok else '❌ SLOW'
+        print(f"   Search performance: {search_status}")
         print("   Non-blocking searches: ✅ VERIFIED")
 
         print("="*60)
 
         # Final assertions for QA requirements
-        assert indexing_time < 10.0, f"File changes should be reflected within 10s, took {indexing_time:.2f}s"
-        assert search_time < 5.0, f"Search should complete within 5s, took {search_time:.3f}s"
+        assert indexing_time < FILE_REFLECTION_MAX_SECONDS, (
+            f"File changes should be reflected within {FILE_REFLECTION_MAX_SECONDS}s, "
+            f"took {indexing_time:.2f}s"
+        )
+        assert search_time < SEARCH_EXECUTION_MAX_SECONDS, (
+            f"Search should complete within {SEARCH_EXECUTION_MAX_SECONDS}s, "
+            f"took {search_time:.3f}s"
+        )
