@@ -764,35 +764,6 @@ class OpenAIEmbeddingProvider:
             f"Failed to generate embeddings after {self._retry_attempts} attempts"
         )
 
-    @with_openai_token_handling()
-    async def _embed_batch_simple(self, texts: list[str]) -> list[list[float]]:
-        """Simplified embedding method using the token limit decorator.
-
-        This demonstrates how future providers can use the decorator approach.
-        """
-        if not self._client:
-            raise RuntimeError("OpenAI client not initialized")
-
-        logger.debug(f"Generating embeddings for {len(texts)} texts")
-
-        response = await self._client.embeddings.create(
-            model=self.model, input=texts, timeout=self._timeout
-        )
-
-        # Extract embeddings from response
-        embeddings = []
-        for data in response.data:
-            embeddings.append(data.embedding)
-
-        # Update usage statistics
-        self._usage_stats["requests_made"] += 1
-        self._usage_stats["embeddings_generated"] += len(embeddings)
-        if hasattr(response, "usage") and response.usage:
-            self._usage_stats["tokens_used"] += response.usage.total_tokens
-
-        logger.debug(f"Successfully generated {len(embeddings)} embeddings")
-        return embeddings
-
     def validate_texts(self, texts: list[str]) -> list[str]:
         """Validate and preprocess texts before embedding."""
         if not texts:
