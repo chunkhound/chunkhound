@@ -5,7 +5,7 @@ import heapq
 import math
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from loguru import logger
@@ -667,7 +667,7 @@ class OpenAIEmbeddingProvider:
                 # Extract embeddings from response, sorted by original input order
                 # OpenAI API does not guarantee response order - each data object
                 # has an 'index' field indicating its position in the input array
-                embeddings = [None] * len(texts)
+                embeddings: list[list[float] | None] = [None] * len(texts)
                 for data in response.data:
                     embeddings[data.index] = data.embedding
 
@@ -678,7 +678,7 @@ class OpenAIEmbeddingProvider:
                     self._usage_stats["tokens_used"] += response.usage.total_tokens
 
                 logger.debug(f"Successfully generated {len(embeddings)} embeddings")
-                return embeddings
+                return cast(list[list[float]], embeddings)
 
             except Exception as rate_error:
                 if (
