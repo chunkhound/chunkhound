@@ -47,7 +47,6 @@ BINARY_CONTENT_LANGUAGES = {Language.PDF}
 LANGUAGES_WITHOUT_SIZE_ENFORCEMENT = {
     Language.TEXT,  # Plaintext fallback - no semantic structure
     Language.UNKNOWN,  # Generic fallback parser
-    Language.YAML,  # Line-based YAML chunking
 }
 
 
