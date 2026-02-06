@@ -3,7 +3,11 @@ import os
 from pathlib import Path
 
 import pytest
-import tomllib
+
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
 
 
 class _DummyProc:

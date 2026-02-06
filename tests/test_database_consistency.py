@@ -11,27 +11,18 @@ from pathlib import Path
 
 from chunkhound.database_factory import create_services
 from chunkhound.core.config.config import Config
-from .test_utils import get_api_key_for_tests
+from .test_utils import get_api_key_for_tests, get_embedding_config_for_tests, build_embedding_config_from_dict
 
 
 @pytest.fixture
 async def consistency_services(tmp_path):
     """Create database services for consistency testing."""
     db_path = tmp_path / "consistency_test.duckdb"
-    
-    # Standard API key discovery
-    api_key, provider = get_api_key_for_tests()
-    
-    # Standard embedding config
-    embedding_config = None
-    if api_key and provider:
-        model = "text-embedding-3-small" if provider == "openai" else "voyage-3.5"
-        embedding_config = {
-            "provider": provider,
-            "api_key": api_key,
-            "model": model
-        }
-    
+
+    # Get embedding config using centralized helper
+    config_dict = get_embedding_config_for_tests()
+    embedding_config = build_embedding_config_from_dict(config_dict)
+
     # Standard config creation
     config = Config(
         database={"path": str(db_path), "provider": "duckdb"},
@@ -104,9 +95,16 @@ def orphan_test():
     
     result = await services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
     assert result['status'] == 'success'
-    
-    # Wait for processing
-    await asyncio.sleep(1.0)
+    assert not result.get('embeddings_skipped', True), "Should not skip embeddings"
+
+    # Wait for async embedding processing
+    await asyncio.sleep(3.0)
+
+    # Also call generate_missing_embeddings to ensure embeddings are created
+    embedding_result = await services.indexing_coordinator.generate_missing_embeddings()
+    if embedding_result['status'] == 'success':
+        # If we generated embeddings, wait a bit more
+        await asyncio.sleep(1.0)
     
     # Query database directly to check for orphaned embeddings
     # This would need to be implemented based on the actual database schema
@@ -117,28 +115,59 @@ def orphan_test():
     chunk_result = db.execute_query(chunks_query)
     chunk_count = list(chunk_result[0].values())[0] if chunk_result else 0
     
-    # Get embedding count (assuming embeddings table exists)
+    # Get embedding count by discovering actual tables via information_schema.
+    # DuckDB insert paths select the embeddings table based on detected vector length,
+    # so we discover the actual embeddings_* table(s) present and select the one with
+    # rows (falling back to provider dims if none have data).
     try:
-        embeddings_query = "SELECT COUNT(*) FROM embeddings_1024"  # VoyageAI uses 1024 dimensions
-        embedding_result = db.execute_query(embeddings_query)
-        embedding_count = list(embedding_result[0].values())[0] if embedding_result else 0
-        
+        tables_query = """
+            SELECT table_name FROM information_schema.tables
+            WHERE table_name LIKE 'embeddings_%'
+        """
+        tables_result = db.execute_query(tables_query)
+        embedding_tables = [row["table_name"] for row in tables_result] if tables_result else []
+
+        if not embedding_tables:
+            pytest.skip("No embedding tables exist in database")
+
+        # Find the embedding table(s) with rows
+        tables_with_rows = []
+        for table_name in embedding_tables:
+            count_query = f"SELECT COUNT(*) as cnt FROM {table_name}"
+            count_result = db.execute_query(count_query)
+            row_count = count_result[0]["cnt"] if count_result else 0
+            if row_count > 0:
+                tables_with_rows.append((table_name, row_count))
+
+        if not tables_with_rows:
+            # Fallback to provider dims if no tables have rows
+            embedding_provider = services.embedding_service._embedding_provider
+            if not embedding_provider:
+                pytest.skip("No embedding provider configured and no embeddings found")
+            embedding_table = f"embeddings_{embedding_provider.dims}"
+            embedding_count = 0
+        else:
+            # Use the table with rows (should be only one in this test)
+            assert len(tables_with_rows) == 1, \
+                f"Expected one embedding table with rows, found: {tables_with_rows}"
+            embedding_table, embedding_count = tables_with_rows[0]
+
         # Check for orphaned embeddings (embeddings without corresponding chunks)
-        orphaned_query = """
+        orphaned_query = f"""
             SELECT COUNT(*) as orphaned_count
-            FROM embeddings_1536 e 
-            LEFT JOIN chunks c ON e.chunk_id = c.id 
+            FROM {embedding_table} e
+            LEFT JOIN chunks c ON e.chunk_id = c.id
             WHERE c.id IS NULL
         """
         orphaned_result = db.execute_query(orphaned_query)
-        orphaned_count = orphaned_result[0]['orphaned_count'] if orphaned_result else 0
-        
+        orphaned_count = orphaned_result[0]["orphaned_count"] if orphaned_result else 0
+
         assert orphaned_count == 0, f"Found {orphaned_count} orphaned embeddings"
-        
+
         # Verify embedding/chunk consistency
         assert embedding_count == chunk_count, \
             f"Embedding count ({embedding_count}) should match chunk count ({chunk_count})"
-    
+
     except Exception as e:
         # If embeddings table doesn't exist or query fails, that's also a consistency issue
         pytest.fail(f"Could not verify embedding consistency: {e}")

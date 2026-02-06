@@ -605,6 +605,7 @@ class _NoRichProgressManager:
                     def __init__(self, total: int | None = None) -> None:
                         self.total = total
                         self.completed = 0
+                        self.elapsed: float | None = None  # shim for Rich compatibility
 
                 self._Task = _Task
                 self.tasks: dict[int, _Task] = {}

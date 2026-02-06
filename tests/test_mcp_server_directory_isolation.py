@@ -19,7 +19,7 @@ from pathlib import Path
 from chunkhound.database_factory import create_database_with_dependencies
 from chunkhound.core.config.config import Config
 from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
-from .test_utils import get_api_key_for_tests
+from .test_utils import get_api_key_for_tests, get_embedding_config_for_tests, build_embedding_config_from_dict, create_embedding_manager_for_tests
 
 # Import Windows-safe subprocess utilities and JSON-RPC client
 from tests.utils import (
@@ -542,34 +542,21 @@ def quicksort(arr):
             # Database and config setup
             db_path = project_dir / ".chunkhound" / "semantic_test.db"
             db_path.parent.mkdir(exist_ok=True)
-            
-            # Get API key and provider configuration
-            api_key, provider_name = get_api_key_for_tests()
-            model = "text-embedding-3-small" if provider_name == "openai" else "voyage-3.5"
-            
-            # Configure embedding based on available API key
-            embedding_config = {
-                "provider": provider_name,
-                "api_key": api_key,
-                "model": model
-            }
-            
+
+            # Get embedding config using centralized helper
+            config_dict = get_embedding_config_for_tests()
+            embedding_config = build_embedding_config_from_dict(config_dict)
+
             config = Config(
                 database={"path": str(db_path), "provider": "duckdb"},
                 embedding=embedding_config,
                 indexing={"include": ["*.py"]}
             )
-            
-            # Create embedding manager
-            embedding_manager = EmbeddingManager()
-            if provider_name == "openai":
-                from chunkhound.providers.embeddings.openai_provider import OpenAIEmbeddingProvider
-                embedding_provider = OpenAIEmbeddingProvider(api_key=api_key, model=model)
-            elif provider_name == "voyageai":
-                from chunkhound.providers.embeddings.voyageai_provider import VoyageAIEmbeddingProvider
-                embedding_provider = VoyageAIEmbeddingProvider(api_key=api_key, model=model)
-            
-            embedding_manager.register_provider(embedding_provider, set_default=True)
+
+            # Create embedding manager using centralized helper
+            embedding_manager = create_embedding_manager_for_tests(config_dict)
+            if not embedding_manager:
+                embedding_manager = EmbeddingManager()  # Fallback for no config
             
             # Create services
             services = create_services(db_path, config.to_dict(), embedding_manager)
