@@ -483,53 +483,29 @@ class RealtimeIndexingService:
                     files_checked = 0
 
                     # Walk directory tree but with limits to avoid hanging
-                    # Store generator to ensure cleanup on cancellation (Windows file handles)
+                    # Store generator to ensure cleanup on cancellation
                     rglob_gen = watch_path.rglob("*")
                     try:
                         for file_path in rglob_gen:
                             try:
                                 if file_path.is_file():
                                     files_checked += 1
-                                    if simple_handler._should_index(file_path):
-                                        try:
-                                            current_mtime = file_path.stat().st_mtime_ns
-                                        except OSError:
-                                            continue
-
-                                        current_files[file_path] = current_mtime
-
-                                        if file_path not in known_files:
-                                            # New file detected
-                                            logger.debug(
-                                                f"Polling detected new file: {file_path}"
-                                            )
-                                            self._debug(
-                                                f"polling detected new file: {file_path}"
-                                            )
-                                            await self.add_file(file_path, priority="change")
-                                        elif known_files[file_path] != current_mtime:
-                                            # Modified file detected
-                                            logger.debug(
-                                                f"Polling detected modified file: {file_path}"
-                                            )
-                                            self._debug(
-                                                f"polling detected modified file: {file_path}"
-                                            )
-                                            await self.add_file(file_path, priority="change")
-
-                                # Yield control periodically and limit total files checked
+                                    await self._process_polled_file(
+                                        file_path, simple_handler,
+                                        known_files, current_files,
+                                    )
                                 if files_checked % 100 == 0:
-                                    await asyncio.sleep(0)  # Yield control
-                                    if files_checked > 5000:  # Limit to prevent hanging
+                                    await asyncio.sleep(0)
+                                    if files_checked > 5000:
                                         logger.warning(
-                                            f"Polling checked {files_checked} files, skipping rest to avoid blocking"
+                                            f"Polling checked {files_checked} files,"
+                                            " skipping rest",
                                         )
                                         break
                             except (OSError, PermissionError):
-                                # Skip files we can't access
                                 continue
                     finally:
-                        rglob_gen.close()  # Explicit generator cleanup for Windows
+                        rglob_gen.close()
 
                     # Check for deleted files
                     deleted = set(known_files.keys()) - set(current_files.keys())
@@ -558,6 +534,32 @@ class RealtimeIndexingService:
             # Force cleanup of any lingering file handles on Windows
             gc.collect()
             logger.debug("Polling monitor stopped")
+
+    async def _process_polled_file(
+        self,
+        file_path: Path,
+        handler: SimpleEventHandler,
+        known_files: dict[Path, int],
+        current_files: dict[Path, int],
+    ) -> None:
+        """Check a single file for changes during polling."""
+        if not handler._should_index(file_path):  # noqa: SLF001
+            return
+        try:
+            current_mtime = file_path.stat().st_mtime_ns
+        except OSError:
+            return
+
+        current_files[file_path] = current_mtime
+
+        if file_path not in known_files:
+            logger.debug(f"Polling detected new file: {file_path}")
+            self._debug(f"polling detected new file: {file_path}")
+            await self.add_file(file_path, priority="change")
+        elif known_files[file_path] != current_mtime:
+            logger.debug(f"Polling detected modified file: {file_path}")
+            self._debug(f"polling detected modified file: {file_path}")
+            await self.add_file(file_path, priority="change")
 
     async def add_file(self, file_path: Path, priority: str = "change") -> None:
         """Add file to processing queue with deduplication and debouncing."""
