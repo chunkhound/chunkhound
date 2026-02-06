@@ -56,6 +56,9 @@ class _FakeDB:
     def insert_chunks_batch(self, chunks):
         return []
 
+    def should_optimize(self, operation: str = "") -> bool:
+        return False
+
 
 class _Cfg:
     class _Indexing:
