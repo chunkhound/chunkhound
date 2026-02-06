@@ -481,7 +481,7 @@ class UniversalParser:
 
         # Check BOTH character and token constraints
         estimated_tokens = self._estimate_tokens(total_content)
-        safe_token_limit = 6000
+        safe_token_limit = self.cast_config.safe_token_limit
 
         if (
             metrics.non_whitespace_chars
