@@ -211,6 +211,7 @@ class Language(Enum):
             ".bash": cls.BASH,
             ".zsh": cls.BASH,
             ".mk": cls.MAKEFILE,
+            ".mak": cls.MAKEFILE,
             ".make": cls.MAKEFILE,
             ".md": cls.MARKDOWN,
             ".markdown": cls.MARKDOWN,

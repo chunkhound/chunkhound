@@ -16,6 +16,7 @@ from chunkhound.services.realtime_indexing_service import RealtimeIndexingServic
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
     should_use_polling,
+    stabilize_polling_monitor,
     wait_for_indexed,
     wait_for_removed,
 )
@@ -65,29 +66,6 @@ class TestRealtimeFailures:
             pass
 
         shutil.rmtree(temp_dir, ignore_errors=True)
-
-    @pytest.mark.asyncio
-    async def test_threading_integration_is_broken(self, realtime_setup):
-        """Test that threading integration between watchdog and asyncio works."""
-        service, watch_dir, _, services = realtime_setup
-        await service.start(watch_dir)
-
-        # Wait for initial scan to complete
-        await asyncio.sleep(1.0)
-
-        # Now create file AFTER initial scan - should only be caught by real-time monitoring
-        test_file = watch_dir / "realtime_test.py"
-        test_file.write_text("def realtime_test(): pass")
-
-        # Wait for debounce delay (0.5s) + processing + database commit
-        await asyncio.sleep(2.0)
-
-        # If threading integration works, file should be processed by real-time monitoring
-        # Use resolved path to match what the real-time service stores
-        file_record = services.provider.get_file_by_path(str(test_file.resolve()))
-        assert file_record is not None, "Real-time file should be processed by filesystem monitoring"
-
-        await service.stop()
 
     @pytest.mark.asyncio
     async def test_indexing_coordinator_skip_embeddings_not_implemented(self, realtime_setup):
@@ -173,6 +151,8 @@ class TestRealtimeFailures:
         service, watch_dir, _, services = realtime_setup
         await service.start(watch_dir)
 
+        await stabilize_polling_monitor()
+
         # Create subdirectory and file
         subdir = watch_dir / "subdir"
         subdir.mkdir()
@@ -232,3 +212,22 @@ class TestRealtimeFailures:
         assert stats.get('observer_alive', False), "Service should survive processing errors"
 
         await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_polling_monitor_cleanup_on_cancellation(self, realtime_setup):
+        """Test that polling monitor cleans up resources when cancelled."""
+        service, watch_dir, _, _ = realtime_setup
+
+        # Force polling mode for deterministic testing
+        service._force_polling = True
+        await service.start(watch_dir)
+
+        # Let polling run at least one cycle
+        await asyncio.sleep(0.5)
+
+        # Stop service (triggers cancellation of polling task)
+        await service.stop()
+
+        # Verify cleanup completed - task should be done or None
+        assert service._polling_task is None or service._polling_task.done(), \
+            "Polling task should be cleaned up after stop()"
