@@ -724,7 +724,7 @@ class _RapidYamlChunkBuilder:
             start_line=start_line,
             end_line=max(start_line, end_line),
             metadata=metadata,
-            language_node_type=node_type.lower(),
+            language_node_type=self._chunk_type_for(node_type).value,
         )
 
         # Validate and split if oversized
