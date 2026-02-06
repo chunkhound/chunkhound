@@ -5,7 +5,7 @@ import heapq
 import math
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from loguru import logger
@@ -18,7 +18,7 @@ from chunkhound.core.config.embedding_config import (
 from chunkhound.core.exceptions.core import ValidationError
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 
-from .batch_utils import handle_token_limit_error, with_openai_token_handling
+from .batch_utils import handle_token_limit_error
 
 try:
     import openai
@@ -664,10 +664,19 @@ class OpenAIEmbeddingProvider:
                     model=self.model, input=texts, timeout=self._timeout
                 )
 
-                # Extract embeddings from response
-                embeddings = []
+                # Extract embeddings from response, sorted by original input order
+                # OpenAI API does not guarantee response order - each data object
+                # has an 'index' field indicating its position in the input array
+                embeddings: list[list[float] | None] = [None] * len(texts)
                 for data in response.data:
-                    embeddings.append(data.embedding)
+                    embeddings[data.index] = data.embedding
+
+                # Validate all indices were filled (defensive check)
+                if None in embeddings:
+                    missing = [i for i, e in enumerate(embeddings) if e is None]
+                    raise RuntimeError(
+                        f"OpenAI API returned incomplete embeddings, missing indices: {missing}"
+                    )
 
                 # Update usage statistics
                 self._usage_stats["requests_made"] += 1
@@ -676,7 +685,7 @@ class OpenAIEmbeddingProvider:
                     self._usage_stats["tokens_used"] += response.usage.total_tokens
 
                 logger.debug(f"Successfully generated {len(embeddings)} embeddings")
-                return embeddings
+                return cast(list[list[float]], embeddings)
 
             except Exception as rate_error:
                 if (
@@ -761,35 +770,6 @@ class OpenAIEmbeddingProvider:
         raise RuntimeError(
             f"Failed to generate embeddings after {self._retry_attempts} attempts"
         )
-
-    @with_openai_token_handling()
-    async def _embed_batch_simple(self, texts: list[str]) -> list[list[float]]:
-        """Simplified embedding method using the token limit decorator.
-
-        This demonstrates how future providers can use the decorator approach.
-        """
-        if not self._client:
-            raise RuntimeError("OpenAI client not initialized")
-
-        logger.debug(f"Generating embeddings for {len(texts)} texts")
-
-        response = await self._client.embeddings.create(
-            model=self.model, input=texts, timeout=self._timeout
-        )
-
-        # Extract embeddings from response
-        embeddings = []
-        for data in response.data:
-            embeddings.append(data.embedding)
-
-        # Update usage statistics
-        self._usage_stats["requests_made"] += 1
-        self._usage_stats["embeddings_generated"] += len(embeddings)
-        if hasattr(response, "usage") and response.usage:
-            self._usage_stats["tokens_used"] += response.usage.total_tokens
-
-        logger.debug(f"Successfully generated {len(embeddings)} embeddings")
-        return embeddings
 
     def validate_texts(self, texts: list[str]) -> list[str]:
         """Validate and preprocess texts before embedding."""
