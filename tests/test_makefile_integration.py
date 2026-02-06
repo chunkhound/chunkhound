@@ -1,5 +1,7 @@
 """End-to-end integration test for Makefile parsing with cAST algorithm verification."""
 
+import re
+
 import pytest
 import tempfile
 from pathlib import Path
@@ -99,7 +101,6 @@ distclean: clean
     assert len(all_chunks) == 1, f"Simple 'all' target should stay intact: {len(all_chunks)}"
     
     # VERIFY: Chunk size constraints respected (non-whitespace characters per cAST algorithm)
-    import re
     cast_config = makefile_workflow["parser"].cast_config
     max_chunk_size = cast_config.max_chunk_size
 
