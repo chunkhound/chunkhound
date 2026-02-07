@@ -7,10 +7,11 @@ embedding failure.
 Related: PR #159 - fix error handling for progress task access
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from chunkhound.core.types.common import ChunkId
 from chunkhound.services.embedding_service import EmbeddingService
 
 
@@ -158,10 +159,13 @@ class TestProgressFailuresDoNotMaskEmbeddingErrors:
         self.mock_embedding_provider = MagicMock()
         self.mock_embedding_provider.name = "test-provider"
         self.mock_embedding_provider.model = "test-model"
-        self.mock_embedding_provider.dimensions = 768
+        self.mock_embedding_provider.dims = 768
+        self.mock_embedding_provider.batch_size = 100
 
-        # Configure provider to return recommended concurrency
+        # Configure provider to return recommended concurrency and batch limits
         self.mock_embedding_provider.get_recommended_concurrency.return_value = 4
+        self.mock_embedding_provider.get_max_tokens_per_batch.return_value = 8192
+        self.mock_embedding_provider.get_max_documents_per_batch.return_value = 100
 
         self.mock_progress = MagicMock()
         self.service = EmbeddingService(
@@ -179,7 +183,7 @@ class TestProgressFailuresDoNotMaskEmbeddingErrors:
         progress error.
         """
         # Configure embedding provider to fail
-        self.mock_embedding_provider.generate_embeddings.side_effect = ConnectionError(
+        self.mock_embedding_provider.embed.side_effect = ConnectionError(
             "Ollama crashed"
         )
 
@@ -189,7 +193,7 @@ class TestProgressFailuresDoNotMaskEmbeddingErrors:
 
         # The embedding error should be what we see in results, not progress errors
         result = await self.service.generate_embeddings_for_chunks(
-            chunk_ids=["chunk1", "chunk2"],
+            chunk_ids=[ChunkId(1), ChunkId(2)],
             chunk_texts=["text1", "text2"],
             show_progress=True,
         )
@@ -198,16 +202,16 @@ class TestProgressFailuresDoNotMaskEmbeddingErrors:
         assert result == 0
 
         # The embedding provider was called (error occurred there, not in progress)
-        self.mock_embedding_provider.generate_embeddings.assert_called()
+        self.mock_embedding_provider.embed.assert_called()
 
     @pytest.mark.asyncio
     async def test_successful_embedding_with_broken_progress(self):
         """Successful embeddings should complete even if progress tracking fails."""
-        # Configure embedding provider to succeed
-        self.mock_embedding_provider.generate_embeddings.return_value = [
+        # Configure embedding provider to succeed (async method needs AsyncMock)
+        self.mock_embedding_provider.embed = AsyncMock(return_value=[
             [0.1] * 768,
             [0.2] * 768,
-        ]
+        ])
 
         # Configure progress to fail
         self.mock_progress.tasks = {}  # Will raise KeyError
@@ -215,9 +219,10 @@ class TestProgressFailuresDoNotMaskEmbeddingErrors:
 
         # Mock database operations
         self.mock_db.get_existing_embeddings.return_value = set()
+        self.mock_db.insert_embeddings_batch.return_value = 2
 
         result = await self.service.generate_embeddings_for_chunks(
-            chunk_ids=["chunk1", "chunk2"],
+            chunk_ids=[ChunkId(1), ChunkId(2)],
             chunk_texts=["text1", "text2"],
             show_progress=True,
         )

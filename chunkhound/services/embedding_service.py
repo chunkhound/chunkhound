@@ -105,17 +105,20 @@ class EmbeddingService(BaseService):
             processed_count: Total items processed so far
             batch_num: Current batch number (for logging context)
         """
+        progress = self.progress
+        if progress is None:
+            return
         try:
-            self.progress.advance(embed_task, batch_size)
+            progress.advance(embed_task, batch_size)
             # Calculate and display speed
-            task_obj = self.progress.tasks[embed_task]
+            task_obj = progress.tasks[embed_task]
             if task_obj.elapsed and task_obj.elapsed > 0:
                 speed = processed_count / task_obj.elapsed
-                self.progress.update(embed_task, speed=f"{speed:.1f} chunks/s")
+                progress.update(embed_task, speed=f"{speed:.1f} chunks/s")
         except (AttributeError, IndexError, TypeError, KeyError) as e:
             # Progress display is non-critical, but log for debugging
             logger.opt(exception=e).debug(
-                f"[EmbSvc] Progress update skipped: task={embed_task} batch={batch_num}"
+                "[EmbSvc] Progress update skipped: task={} batch={}", embed_task, batch_num
             )
 
     async def generate_embeddings_for_chunks(
