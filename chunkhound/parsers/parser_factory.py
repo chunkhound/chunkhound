@@ -44,6 +44,7 @@ from chunkhound.parsers.mappings import (
     PHPMapping,
     PythonMapping,
     RustMapping,
+    SqlMapping,
     SvelteMapping,
     SwiftMapping,
     TextMapping,
@@ -335,6 +336,14 @@ except ImportError:
     ZIG_AVAILABLE = False
 
 try:
+    import tree_sitter_sql as ts_sql
+
+    SQL_AVAILABLE = True
+except ImportError:
+    ts_sql = None
+    SQL_AVAILABLE = False
+
+try:
     from tree_sitter_language_pack import get_language
 
     _dart_lang = get_language("dart")
@@ -502,6 +511,7 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.DART: LanguageConfig(ts_dart, DartMapping, DART_AVAILABLE, "dart"),
     Language.OBJC: LanguageConfig(ts_objc, ObjCMapping, OBJC_AVAILABLE, "objc"),
     Language.PHP: LanguageConfig(ts_php, PHPMapping, PHP_AVAILABLE, "php"),
+    Language.SQL: LanguageConfig(ts_sql, SqlMapping, SQL_AVAILABLE, "sql"),
     Language.SWIFT: LanguageConfig(ts_swift, SwiftMapping, SWIFT_AVAILABLE, "swift"),
     Language.VUE: LanguageConfig(
         ts_typescript, VueMapping, TYPESCRIPT_AVAILABLE, "vue"
@@ -594,6 +604,8 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     ".php4": Language.PHP,
     ".php5": Language.PHP,
     ".phps": Language.PHP,
+    # SQL
+    ".sql": Language.SQL,
     # Swift
     ".swift": Language.SWIFT,
     ".swiftinterface": Language.SWIFT,
