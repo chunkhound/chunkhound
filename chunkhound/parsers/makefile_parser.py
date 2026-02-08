@@ -15,7 +15,11 @@ from chunkhound.parsers.chunk_splitter import (
     ChunkSplitter,
 )
 from chunkhound.parsers.mappings.makefile import MakefileMapping
-from chunkhound.parsers.universal_engine import TreeSitterEngine, UniversalChunk
+from chunkhound.parsers.universal_engine import (
+    SetupError,
+    TreeSitterEngine,
+    UniversalChunk,
+)
 from chunkhound.parsers.universal_parser import UniversalParser
 
 
@@ -178,7 +182,7 @@ class MakefileParser(UniversalParser):
         # Override with Makefile-aware chunk splitter
         self.chunk_splitter = MakefileChunkSplitter(self.cast_config)
 
-    def _create_makefile_engine(self) -> TreeSitterEngine | None:
+    def _create_makefile_engine(self) -> TreeSitterEngine:
         """Create TreeSitterEngine for Makefile parsing."""
         try:
             import tree_sitter_make as ts_make
@@ -193,5 +197,10 @@ class MakefileParser(UniversalParser):
                 ts_language = TSLanguage(lang_result)
 
             return TreeSitterEngine("makefile", ts_language)
-        except ImportError:
-            return None
+        except ImportError as exc:
+            raise SetupError(
+                parser="makefile",
+                missing_dependency="tree-sitter-make",
+                install_command="pip install tree-sitter-make",
+                original_error=str(exc),
+            ) from exc
