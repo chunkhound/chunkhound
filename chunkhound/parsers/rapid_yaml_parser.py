@@ -5,12 +5,12 @@ from __future__ import annotations
 import logging
 import os
 import re
+from bisect import bisect_left
 from collections import Counter
+from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence
-from bisect import bisect_left
 from time import perf_counter
 
 from chunkhound.core.models.chunk import Chunk
@@ -81,7 +81,8 @@ class RapidYamlParser(LanguageParser):
             except Exception as exc:  # pragma: no cover - import-time guard
                 self._enabled = False
                 logger.info(
-                    "RapidYAML disabled (import failure): %s. Falling back to tree-sitter.",
+                    "RapidYAML disabled (import failure): %s."
+                    " Falling back to tree-sitter.",
                     exc,
                 )
 
@@ -127,7 +128,8 @@ class RapidYamlParser(LanguageParser):
         file_id: FileId | None = None,
     ) -> list[Chunk]:
         # Denylist: skip ryml attempts for known-bad paths (no tree-sitter fallback)
-        if file_path is not None and str(file_path) in getattr(self, "_denylist_paths", set()):
+        denylist = getattr(self, "_denylist_paths", set())
+        if file_path is not None and str(file_path) in denylist:
             self._count_fallback_ts += 1
             return []
 
@@ -138,7 +140,6 @@ class RapidYamlParser(LanguageParser):
         sanitized = sanitize_helm_templates(content)
         self._t_sanitize += perf_counter() - t0
         effective_content = sanitized.text
-        fallback_source = effective_content if sanitized.changed else content
         if sanitized.changed:
             self._count_sanitized += 1
             summary = _summarize_rewrites(sanitized.rewrites)
@@ -173,7 +174,8 @@ class RapidYamlParser(LanguageParser):
         if _has_complex_keys(effective_content):
             path_str = str(file_path) if file_path else "<memory>"
             logger.debug(
-                "RapidYAML skipped %s: detected complex YAML keys. Falling back to tree-sitter.",
+                "RapidYAML skipped %s: complex YAML keys."
+                " Falling back to tree-sitter.",
                 path_str,
             )
             self._count_complex_skip += 1
@@ -192,6 +194,7 @@ class RapidYamlParser(LanguageParser):
                 file_id or FileId(0),
                 perf=perf,
                 cast_config=self._cast_config,
+                file_path=file_path,
             )
             chunks = builder.build_chunks()
             # Accumulate perf
@@ -307,7 +310,7 @@ class _LineLocator:
     """Utility to approximate line ranges for emitted YAML blocks."""
 
     lines: Sequence[str]
-    depth_positions: List[int]
+    depth_positions: list[int]
     fallback_line: int = 0
 
     perf: _RymlPerf | None = None
@@ -318,9 +321,9 @@ class _LineLocator:
         self.fallback_line = 0
         self.perf = perf
         # Precompute stripped lines to avoid repeated .strip()
-        self._stripped_lines: List[str] = [ln.strip() for ln in self.lines]
-        # Build an index map for exact-match lookups: stripped_line -> sorted list of indices
-        self._index_map: dict[str, List[int]] = {}
+        self._stripped_lines: list[str] = [ln.strip() for ln in self.lines]
+        # Index map for exact-match lookups: stripped_line -> indices
+        self._index_map: dict[str, list[int]] = {}
         for idx, s in enumerate(self._stripped_lines):
             if not s:
                 continue
@@ -332,7 +335,7 @@ class _LineLocator:
 
         # Multi-line context index for more accurate disambiguation
         # Maps (line1, line2, line3) tuples to list of starting indices
-        self._context_index: dict[tuple[str, ...], List[int]] = {}
+        self._context_index: dict[tuple[str, ...], list[int]] = {}
         for idx in range(len(self._stripped_lines)):
             # Build context from up to 3 lines
             context = tuple(self._stripped_lines[idx : idx + 3])
@@ -416,7 +419,9 @@ class _LineLocator:
             self.perf.locate_calls += 1
         return start, end
 
-    def _find_from(self, target_line: str, start: int, node_type: str = "KEYVAL") -> int | None:
+    def _find_from(
+        self, target_line: str, start: int, node_type: str = "KEYVAL",
+    ) -> int | None:
         """Find target line with node-type specific logic."""
         stripped_target = target_line.strip()
         if not stripped_target:
@@ -547,7 +552,9 @@ class _LineLocator:
 
         return None
 
-    def _find_with_parent_scope(self, target_line: str, start: int, parent_key: str) -> int | None:
+    def _find_with_parent_scope(
+        self, target_line: str, start: int, parent_key: str,
+    ) -> int | None:
         """Find target_line within parent key's scope.
 
         Strategy: Search for parent_key, then look for target_line after it
@@ -621,10 +628,12 @@ class _RapidYamlChunkBuilder:
         file_id: FileId,
         perf: _RymlPerf | None = None,
         cast_config: CASTConfig | None = None,
+        file_path: Path | None = None,
     ) -> None:
         self.ryml = ryml_module
         self.tree = tree
         self.file_id = file_id
+        self.file_path = file_path
         self.content = content
         self._buffer = bytearray(content.encode("utf-8"))
         self.lines = content.splitlines()
@@ -685,7 +694,8 @@ class _RapidYamlChunkBuilder:
         return chunks
 
     def _create_chunk(
-        self, node: int, node_type: str, symbol: str, depth: int, parent_key: str | None = None
+        self, node: int, node_type: str, symbol: str,
+        depth: int, parent_key: str | None = None,
     ) -> list[Chunk]:
         with _suppress_c_output():
             _t0 = perf_counter()
@@ -735,7 +745,8 @@ class _RapidYamlChunkBuilder:
         # Convert each validated chunk to Chunk
         return [
             universal_to_chunk(
-                uc, file_path=None, file_id=self.file_id, language=Language.YAML
+                uc, file_path=self.file_path,
+                file_id=self.file_id, language=Language.YAML,
             )
             for uc in validated_chunks
         ]
