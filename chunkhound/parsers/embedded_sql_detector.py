@@ -70,6 +70,7 @@ class EmbeddedSqlDetector:
         "encapsed_string",  # PHP strings
         "raw_string_literal",
         "interpreted_string_literal",
+        "verbatim_string_literal",  # C# verbatim strings (@"...")
         "string_value",
         "quoted_string",
     }
