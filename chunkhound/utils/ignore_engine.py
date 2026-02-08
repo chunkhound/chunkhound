@@ -180,6 +180,8 @@ def _detect_repo_roots(root: Path, pre_exclude_spec: Optional["PathSpec"] = None
     """
     roots: list[Path] = []
     root = root.resolve()
+    git_checked: bool | None = None
+    ignored_cache: dict[tuple[str, str], bool] = {}
     for dirpath, dirnames, filenames in os.walk(root, topdown=True):
         dpath = Path(dirpath)
 
@@ -196,6 +198,51 @@ def _detect_repo_roots(root: Path, pre_exclude_spec: Optional["PathSpec"] = None
 
         # Repo root if .git dir exists or .git file exists (submodule)
         if (dpath / ".git").is_dir() or (dpath / ".git").is_file():
+            # Best-effort: if this repo root directory is ignored by an ancestor
+            # repo's gitignore rules, do NOT treat it as a boundary.
+            #
+            # This avoids surprising discovery behavior when a parent repo ignores
+            # a subtree (e.g. `.gitignored/`) that contains nested worktrees/repos.
+            parent: Path | None = None
+            for rr in reversed(roots):
+                try:
+                    dpath.resolve().relative_to(rr.resolve())
+                    parent = rr
+                    break
+                except Exception:
+                    continue
+
+            if parent is not None:
+                try:
+                    if git_checked is None:
+                        import shutil as _sh
+
+                        git_checked = _sh.which("git") is not None
+                    if git_checked:
+                        from chunkhound.utils.git_safe import run_git
+
+                        try:
+                            rel = dpath.resolve().relative_to(parent.resolve()).as_posix()
+                        except Exception:
+                            rel = ""
+                        if rel:
+                            key = (str(parent.resolve()), rel)
+                            ign = ignored_cache.get(key)
+                            if ign is None:
+                                proc = run_git(
+                                    ["check-ignore", "-q", "--no-index", rel],
+                                    cwd=parent,
+                                    timeout_s=5.0,
+                                )
+                                ign = proc.returncode == 0
+                                ignored_cache[key] = ign
+                            if ign:
+                                # Prune traversal below this directory as well.
+                                dirnames[:] = []
+                                continue
+                except Exception:
+                    pass
+
             roots.append(dpath)
     # Sort deepest first for nearest-ancestor selection convenience later
     roots.sort(key=lambda p: len(p.as_posix()))

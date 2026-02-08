@@ -2422,6 +2422,12 @@ class IndexingCoordinator(BaseService):
             repo_roots = self._get_or_detect_repo_roots(directory, effective_excludes)
         except Exception:
             repo_roots = []
+        # If a nested repo lives under a parent-ignored subtree (e.g. `.gitignored/`),
+        # scanning it independently via Git can surface unexpected files.
+        try:
+            repo_roots = self._prune_repo_roots_ignored_by_parent_gitignore(repo_roots)
+        except Exception:
+            pass
         # Expose whether any repos were detected for caller decisions
         try:
             setattr(self, "_git_repo_roots_detected", bool(repo_roots))
@@ -2662,6 +2668,139 @@ class IndexingCoordinator(BaseService):
             roots = []
         self._repo_roots_cache[key] = roots
         return roots
+
+    def _prune_repo_roots_ignored_by_parent_gitignore(
+        self, repo_roots: list[Path]
+    ) -> list[Path]:
+        """Prune nested repo roots that are ignored by an ancestor repo's git rules.
+
+        When indexing a workspace that contains multiple repos, ChunkHound treats
+        each detected repo root independently for Git-backed discovery. This can
+        surface unexpected files when a nested repo/worktree lives under a path
+        ignored by its parent repo (e.g., `.gitignored/`), because `git ls-files`
+        inside the nested repo does not consult the parent's ignore rules.
+
+        To align with `git check-ignore` behavior in the parent repo, we skip
+        scanning nested repos whose *repo root directory* is ignored by a detected
+        ancestor repo.
+
+        Best-effort:
+        - Only applied when `gitignore` is an active ignore source.
+        - Requires `git` to be available.
+        - On any errors, returns the original repo_roots.
+        """
+        try:
+            idx = getattr(getattr(self, "config", None), "indexing", None)
+            sources = idx.resolve_ignore_sources() if idx is not None else []
+        except Exception:
+            sources = []
+        if "gitignore" not in (sources or []):
+            return repo_roots
+
+        try:
+            import shutil as _sh
+
+            if _sh.which("git") is None:
+                return repo_roots
+        except Exception:
+            return repo_roots
+
+        try:
+            from chunkhound.utils.git_safe import run_git
+        except Exception:
+            return repo_roots
+
+        roots: list[Path] = []
+        seen: set[str] = set()
+        for r in repo_roots or []:
+            try:
+                rr = r.resolve()
+            except Exception:
+                rr = r
+            s = str(rr)
+            if s not in seen:
+                seen.add(s)
+                roots.append(rr)
+
+        roots.sort(key=lambda p: len(p.as_posix()))
+
+        parents: dict[str, Path | None] = {}
+        for i, rr in enumerate(roots):
+            parent: Path | None = None
+            for j in range(i - 1, -1, -1):
+                cand = roots[j]
+                try:
+                    if rr.is_relative_to(cand):
+                        parent = cand
+                        break
+                except Exception:
+                    try:
+                        rr.relative_to(cand)
+                        parent = cand
+                        break
+                    except Exception:
+                        continue
+            parents[str(rr)] = parent
+
+        def _ignored_by(repo_root: Path, abs_path: Path) -> bool:
+            try:
+                rel = abs_path.resolve().relative_to(repo_root.resolve()).as_posix()
+            except Exception:
+                return False
+            try:
+                proc = run_git(
+                    ["check-ignore", "-q", "--no-index", rel],
+                    cwd=repo_root,
+                    timeout_s=5.0,
+                )
+                return proc.returncode == 0
+            except Exception:
+                return False
+
+        pruned_prefixes: list[Path] = []
+        kept: list[Path] = []
+        for rr in roots:
+            # If an ancestor repo root was pruned, skip all descendants without
+            # extra checks.
+            try:
+                if any(rr.is_relative_to(pp) for pp in pruned_prefixes):
+                    continue
+            except Exception:
+                skip = False
+                for pp in pruned_prefixes:
+                    try:
+                        rr.relative_to(pp)
+                        skip = True
+                        break
+                    except Exception:
+                        continue
+                if skip:
+                    continue
+
+            parent = parents.get(str(rr))
+            while parent is not None:
+                try:
+                    if any(parent.is_relative_to(pp) for pp in pruned_prefixes):
+                        parent = parents.get(str(parent))
+                        continue
+                except Exception:
+                    pass
+                break
+
+            if parent is None:
+                kept.append(rr)
+                continue
+
+            if _ignored_by(parent, rr):
+                pruned_prefixes.append(rr)
+                logger.debug(
+                    f"Pruned nested repo root ignored by parent: {rr} (parent={parent})"
+                )
+                continue
+
+            kept.append(rr)
+
+        return kept
 
     def _walk_directory_with_excludes(
         self,
