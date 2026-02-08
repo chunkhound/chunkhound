@@ -619,6 +619,7 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     "GNUmakefile": Language.MAKEFILE,
     ".mk": Language.MAKEFILE,
     ".mak": Language.MAKEFILE,
+    ".make": Language.MAKEFILE,
     # Text files (fallback)
     ".txt": Language.TEXT,
     ".text": Language.TEXT,
