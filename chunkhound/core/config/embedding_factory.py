@@ -148,9 +148,9 @@ class EmbeddingProviderFactory:
                 "timeout": config.get("timeout", 30),
                 "retry_attempts": config.get("max_retries", 3),
             }
-            if rerank_model:
+            if rerank_model is not None:
                 kwargs["rerank_model"] = rerank_model
-            if rerank_batch_size:
+            if rerank_batch_size is not None:
                 kwargs["rerank_batch_size"] = rerank_batch_size
 
             return VoyageAIEmbeddingProvider(**kwargs)
