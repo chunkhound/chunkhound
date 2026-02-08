@@ -143,14 +143,15 @@ class MakefileChunkSplitter(ChunkSplitter):
     ) -> UniversalChunk:
         """Create a split rule chunk with target + recipe subset.
 
-        Uses recipe_offset to calculate non-overlapping line spans
-        for each split chunk.
+        Each chunk includes the target line for semantic coherence.
+        start_line matches the target line; end_line uses recipe_offset
+        for distinct spans per chunk.
         """
         content = "\n".join([target] + recipe_lines)
 
-        # +1 to skip the target line itself
-        start_line = original.start_line + 1 + recipe_offset
-        end_line = min(original.end_line, start_line + len(recipe_lines) - 1)
+        start_line = original.start_line
+        recipe_start = original.start_line + 1 + recipe_offset
+        end_line = min(original.end_line, recipe_start + len(recipe_lines) - 1)
 
         return UniversalChunk(
             concept=original.concept,
