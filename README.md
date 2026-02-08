@@ -54,7 +54,7 @@ Natural language queries like "find rate limiting logic" combined with precise p
 
 Research-backed semantic code chunking that preserves function boundaries and context. Based on [published research](https://arxiv.org/pdf/2506.15655). Your AI sees complete, meaningful code units—not arbitrary line splits.
 
-### 29 Languages
+### 32 Languages
 
 Structured parsing via [Tree-sitter](https://tree-sitter.github.io/tree-sitter/) for Python, TypeScript, Go, Rust, Java, C++, and 23 more. Plus configuration formats (JSON, YAML, TOML, HCL) and documents (Markdown, PDF).
 
