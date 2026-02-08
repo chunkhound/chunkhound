@@ -1871,10 +1871,25 @@ class IndexingCoordinator(BaseService):
         precomputed_roots = []
         try:
             from chunkhound.utils.ignore_engine import detect_repo_roots  # type: ignore
+        except ImportError:
+            detect_repo_roots = None  # type: ignore[assignment]
 
-            precomputed_roots = detect_repo_roots(directory, effective_excludes)
-        except Exception:
-            precomputed_roots = []
+        if detect_repo_roots is not None:
+            prune_gitfile_roots = (
+                self.config is not None
+                and "gitignore" in self.config.indexing.resolve_ignore_sources()
+            )
+            try:
+                precomputed_roots = detect_repo_roots(
+                    directory,
+                    effective_excludes,
+                    prune_ignored_gitfile_roots=prune_gitfile_roots,
+                )
+            except Exception as e:
+                logger.debug(
+                    "Failed to precompute repo roots for parallel discovery: %s", e
+                )
+                precomputed_roots = []
 
         # Determine number of workers for directory discovery
         # Scale based on number of subtrees and available cores
