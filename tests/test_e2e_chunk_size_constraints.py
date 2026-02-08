@@ -411,7 +411,7 @@ async def test_all_parsers_respect_chunk_size_constraints(validating_db):
     5. Logs warnings for suspiciously small chunks
     6. Separately tracks violations from parsers without size enforcement
 
-    Note: Some parsers (TEXT, UNKNOWN, YAML) don't use cAST
+    Note: Some parsers (TEXT, UNKNOWN) don't use cAST
     and are tracked separately as known limitations.
     """
     services, provider, tmp_path = validating_db
@@ -496,7 +496,7 @@ async def test_all_parsers_respect_chunk_size_constraints(validating_db):
     if non_enforced_char_violations:
         logger.warning(
             "%d oversized chunks from parsers without size enforcement "
-            "(TEXT, UNKNOWN, YAML)",
+            "(TEXT, UNKNOWN)",
             len(non_enforced_char_violations),
         )
 
