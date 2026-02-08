@@ -172,7 +172,12 @@ def _collect_gitignore_patterns(root: Path, pre_exclude_spec: Optional["PathSpec
     return out
 
 
-def _detect_repo_roots(root: Path, pre_exclude_spec: Optional["PathSpec"] = None) -> list[Path]:
+def _detect_repo_roots(
+    root: Path,
+    pre_exclude_spec: Optional["PathSpec"] = None,
+    *,
+    prune_ignored_gitfile_roots: bool = False,
+) -> list[Path]:
     """Detect Git repository roots under root by looking for .git dir or file.
 
     Prunes excluded subtrees using pre_exclude_spec (e.g., node_modules) to
@@ -206,12 +211,15 @@ def _detect_repo_roots(root: Path, pre_exclude_spec: Optional["PathSpec"] = None
                 roots.append(dpath)
                 continue
 
-            # `.git` file (worktree/submodule): best-effort guard. If this repo root
-            # directory is ignored by an ancestor repo's gitignore rules, do NOT
-            # treat it as a boundary.
-            #
+            # `.git` file (linked worktree/submodule): optional guard. When enabled,
+            # if this repo root directory is ignored by an ancestor repo's gitignore
+            # rules, do NOT treat it as a boundary.
+            if not prune_ignored_gitfile_roots:
+                roots.append(dpath)
+                continue
+
             # This avoids surprising discovery behavior when a parent repo ignores
-            # a subtree (e.g. `.gitignored/`) that contains nested worktrees.
+            # a subtree (e.g. `.gitignored/`) that contains linked worktrees.
             parent: Path | None = None
             for rr in reversed(roots):
                 try:
@@ -228,7 +236,7 @@ def _detect_repo_roots(root: Path, pre_exclude_spec: Optional["PathSpec"] = None
 
                         git_checked = _sh.which("git") is not None
                     if git_checked:
-                        from chunkhound.utils.git_safe import run_git
+                        from chunkhound.utils.git_safe import git_check_ignored
 
                         try:
                             rel = dpath.resolve().relative_to(parent.resolve()).as_posix()
@@ -238,12 +246,11 @@ def _detect_repo_roots(root: Path, pre_exclude_spec: Optional["PathSpec"] = None
                             key = (str(parent.resolve()), rel)
                             ign = ignored_cache.get(key)
                             if ign is None:
-                                proc = run_git(
-                                    ["check-ignore", "-q", "--no-index", rel],
-                                    cwd=parent,
+                                ign = git_check_ignored(
+                                    repo_root=parent,
+                                    rel_path=rel,
                                     timeout_s=5.0,
                                 )
-                                ign = proc.returncode == 0
                                 ignored_cache[key] = ign
                             if ign:
                                 # Prune traversal below this directory as well.
@@ -339,7 +346,11 @@ def build_repo_aware_ignore_engine(
     workspace_root_only_gitignore: Optional[bool] = None,
 ) -> RepoAwareIgnoreEvaluator:
     pre_spec = _compile_gitwildmatch(config_exclude or []) if (config_exclude) else None
-    repo_roots = _detect_repo_roots(root, pre_spec)
+    repo_roots = _detect_repo_roots(
+        root,
+        pre_spec,
+        prune_ignored_gitfile_roots=("gitignore" in (sources or [])),
+    )
     if backend == "libgit2":
         eng = _try_build_libgit2_repo_aware(root, repo_roots, sources, chignore_file, config_exclude)
         if eng is not None:
@@ -433,14 +444,23 @@ def _transform_gitignore_line(dir_rel: str, line: str) -> list[str]:
     return parts
 
 
-def detect_repo_roots(root: Path, config_exclude: Optional[Iterable[str]] = None) -> list[Path]:
+def detect_repo_roots(
+    root: Path,
+    config_exclude: Optional[Iterable[str]] = None,
+    *,
+    prune_ignored_gitfile_roots: bool = False,
+) -> list[Path]:
     """Public helper to detect repo roots under a workspace root.
 
     Applies pruning using config_exclude (gitwildmatch semantics) to avoid
     descending into heavy trees (e.g., node_modules) while scanning.
     """
     pre_spec = _compile_gitwildmatch(config_exclude or []) if config_exclude else None
-    return _detect_repo_roots(root, pre_spec)
+    return _detect_repo_roots(
+        root,
+        pre_spec,
+        prune_ignored_gitfile_roots=prune_ignored_gitfile_roots,
+    )
 
 
 def build_repo_aware_ignore_engine_from_roots(

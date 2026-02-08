@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from chunkhound.api.cli.utils.rich_output import RichOutputFormatter
-from chunkhound.utils.git_safe import run_git
+from chunkhound.utils.git_safe import git_check_ignored, run_git
 
 
 def _nearest_existing_dir(path: Path) -> Path | None:
@@ -41,15 +41,7 @@ def _git_is_ignored(*, repo_root: Path, path: Path) -> bool:
         rel = path.resolve().relative_to(repo_root.resolve())
     except (OSError, RuntimeError, ValueError):
         return False
-    try:
-        result = run_git(
-            ["check-ignore", "-q", "--no-index", rel.as_posix()],
-            cwd=repo_root,
-            timeout_s=5.0,
-        )
-    except Exception:
-        return False
-    return result.returncode == 0
+    return git_check_ignored(repo_root=repo_root, rel_path=rel.as_posix(), timeout_s=5.0)
 
 
 def maybe_warn_git_output_dir(
@@ -76,4 +68,3 @@ def maybe_warn_git_output_dir(
         "generated docs may show up in `git status`. Consider adding it to "
         ".gitignore or writing to a git-ignored directory."
     )
-
