@@ -2760,6 +2760,17 @@ class IndexingCoordinator(BaseService):
         pruned_prefixes: list[Path] = []
         kept: list[Path] = []
         for rr in roots:
+            # Only apply this policy to linked worktrees/submodules (`.git` file).
+            # Full nested repos (`.git` directory) are treated as strict boundaries
+            # and are not pruned based on parent ignore rules.
+            try:
+                if not (rr / ".git").is_file():
+                    kept.append(rr)
+                    continue
+            except Exception:
+                kept.append(rr)
+                continue
+
             # If an ancestor repo root was pruned, skip all descendants without
             # extra checks.
             try:

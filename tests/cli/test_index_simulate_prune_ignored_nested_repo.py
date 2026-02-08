@@ -36,16 +36,19 @@ def test_git_discovery_skips_nested_repo_under_parent_ignored_dir(
     parent = ws / "parent"
     parent.mkdir()
     assert _git(["init"], parent).returncode == 0
+    assert _git(["config", "user.email", "test@example.com"], parent).returncode == 0
+    assert _git(["config", "user.name", "Test User"], parent).returncode == 0
 
-    # Parent ignores the subtree containing a nested repo/worktree.
+    # Parent ignores the subtree containing a nested worktree.
     (parent / ".gitignore").write_text("ignored/\n")
     (parent / "main.py").write_text("print('ok')\n")
 
     ignored_dir = parent / "ignored"
-    child = ignored_dir / "childrepo"
-    child.mkdir(parents=True)
-    assert _git(["init"], child).returncode == 0
-    (child / "foo.py").write_text("print('child')\n")
+    wt = ignored_dir / "wt"
+    assert _git(["add", ".gitignore", "main.py"], parent).returncode == 0
+    assert _git(["commit", "-m", "init"], parent).returncode == 0
+    assert _git(["worktree", "add", "-b", "wtbranch", str(wt)], parent).returncode == 0
+    assert (wt / ".git").is_file()
 
     db_path = ws / "chunks.duckdb"
     proc = _run(
@@ -66,7 +69,7 @@ def test_git_discovery_skips_nested_repo_under_parent_ignored_dir(
     out = set(proc.stdout.strip().splitlines())
 
     assert "parent/main.py" in out
-    assert "parent/ignored/childrepo/foo.py" not in out
+    assert "parent/ignored/wt/main.py" not in out
 
     # Also verify the Python walker path (repo-aware ignore engine) does not treat
     # the nested repo as a boundary when its root directory is ignored by parent.
@@ -88,4 +91,4 @@ def test_git_discovery_skips_nested_repo_under_parent_ignored_dir(
     assert proc2.returncode == 0, proc2.stderr
     out2 = set(proc2.stdout.strip().splitlines())
     assert "parent/main.py" in out2
-    assert "parent/ignored/childrepo/foo.py" not in out2
+    assert "parent/ignored/wt/main.py" not in out2

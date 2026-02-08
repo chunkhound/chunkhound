@@ -196,13 +196,22 @@ def _detect_repo_roots(root: Path, pre_exclude_spec: Optional["PathSpec"] = None
             for dn in to_remove:
                 dirnames.remove(dn)
 
-        # Repo root if .git dir exists or .git file exists (submodule)
-        if (dpath / ".git").is_dir() or (dpath / ".git").is_file():
-            # Best-effort: if this repo root directory is ignored by an ancestor
-            # repo's gitignore rules, do NOT treat it as a boundary.
+        # Repo root if .git dir exists or .git file exists (worktree/submodule)
+        git_dir = (dpath / ".git").is_dir()
+        git_file = (dpath / ".git").is_file()
+        if git_dir or git_file:
+            if git_dir:
+                # Full nested repos remain strict boundaries: do not consult parent
+                # ignore rules here (by design; see repo boundary tests).
+                roots.append(dpath)
+                continue
+
+            # `.git` file (worktree/submodule): best-effort guard. If this repo root
+            # directory is ignored by an ancestor repo's gitignore rules, do NOT
+            # treat it as a boundary.
             #
             # This avoids surprising discovery behavior when a parent repo ignores
-            # a subtree (e.g. `.gitignored/`) that contains nested worktrees/repos.
+            # a subtree (e.g. `.gitignored/`) that contains nested worktrees.
             parent: Path | None = None
             for rr in reversed(roots):
                 try:
