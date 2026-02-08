@@ -139,15 +139,21 @@ class EmbeddingProviderFactory:
         )
 
         try:
-            return VoyageAIEmbeddingProvider(
-                api_key=api_key,
-                model=model,
-                rerank_model=rerank_model,
-                batch_size=config.get("batch_size", 100),
-                timeout=config.get("timeout", 30),
-                retry_attempts=config.get("max_retries", 3),
-                rerank_batch_size=rerank_batch_size,
-            )
+            # Build kwargs, only including rerank params if explicitly set
+            # to allow provider constructor defaults to be used
+            kwargs: dict[str, Any] = {
+                "api_key": api_key,
+                "model": model,
+                "batch_size": config.get("batch_size", 100),
+                "timeout": config.get("timeout", 30),
+                "retry_attempts": config.get("max_retries", 3),
+            }
+            if rerank_model:
+                kwargs["rerank_model"] = rerank_model
+            if rerank_batch_size:
+                kwargs["rerank_batch_size"] = rerank_batch_size
+
+            return VoyageAIEmbeddingProvider(**kwargs)
         except Exception as e:
             raise ValueError(f"Failed to create VoyageAI provider: {e}") from e
 
