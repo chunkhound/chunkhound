@@ -50,7 +50,9 @@ class TestRealtimeFailures:
 
         # Use polling on Windows CI where watchdog's ReadDirectoryChangesW is unreliable
         force_polling = should_use_polling()
-        realtime_service = RealtimeIndexingService(services, config, force_polling=force_polling)
+        realtime_service = RealtimeIndexingService(
+            services, config, force_polling=force_polling
+        )
 
         yield realtime_service, watch_dir, temp_dir, services
 
@@ -68,8 +70,11 @@ class TestRealtimeFailures:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     @pytest.mark.asyncio
-    async def test_indexing_coordinator_skip_embeddings_not_implemented(self, realtime_setup):
-        """Test that IndexingCoordinator.process_file doesn't support skip_embeddings parameter."""
+    async def test_indexing_coordinator_skip_embeddings_not_implemented(
+        self, realtime_setup
+    ):
+        """Test that IndexingCoordinator.process_file doesn't support
+        skip_embeddings parameter."""
         service, watch_dir, _, services = realtime_setup
 
         # Try to call process_file with skip_embeddings directly
@@ -83,10 +88,14 @@ class TestRealtimeFailures:
                 skip_embeddings=True  # This parameter might not exist
             )
             # If we get here, the parameter exists but might not work correctly
-            assert result.get('embeddings_skipped') == True, \
+            assert result.get('embeddings_skipped'), (
                 "skip_embeddings parameter should actually skip embeddings"
+            )
         except TypeError as e:
-            pytest.fail(f"IndexingCoordinator.process_file doesn't support skip_embeddings: {e}")
+            pytest.fail(
+                f"IndexingCoordinator.process_file doesn't support "
+                f"skip_embeddings: {e}"
+            )
 
     @pytest.mark.asyncio
     async def test_file_debouncing_creates_memory_leaks(self, realtime_setup):
@@ -110,7 +119,10 @@ class TestRealtimeFailures:
         if service.event_handler and hasattr(service.event_handler, 'debouncer'):
             active_timers = len(service.event_handler.debouncer.timers)
             # Should only have 1 timer max for the single file, or 0 if cleaned up
-            assert active_timers <= 1, f"Too many active timers ({active_timers}) - should cleanup after execution"
+            assert active_timers <= 1, (
+                f"Too many active timers ({active_timers}) "
+                "- should cleanup after execution"
+            )
 
         await service.stop()
 
@@ -140,8 +152,10 @@ class TestRealtimeFailures:
             chunk_contents = [chunk.get('content', '') for chunk in chunks]
             unique_contents = set(chunk_contents)
 
-            assert len(chunk_contents) == len(unique_contents), \
-                f"Duplicate processing detected: {len(chunk_contents)} chunks, {len(unique_contents)} unique"
+            assert len(chunk_contents) == len(unique_contents), (
+                f"Duplicate processing detected: {len(chunk_contents)} "
+                f"chunks, {len(unique_contents)} unique"
+            )
 
         await service.stop()
 
@@ -160,7 +174,9 @@ class TestRealtimeFailures:
         subdir_file.write_text("def nested(): pass")
 
         # Use platform-appropriate timeout for Windows CI polling mode
-        found = await wait_for_indexed(services.provider, subdir_file, timeout=get_fs_event_timeout())
+        found = await wait_for_indexed(
+            services.provider, subdir_file, timeout=get_fs_event_timeout()
+        )
         assert found, "Nested files should be detected by recursive monitoring"
 
         await service.stop()
@@ -176,14 +192,18 @@ class TestRealtimeFailures:
         test_file.write_text("def to_be_deleted(): pass")
 
         # Wait for file to be indexed
-        found = await wait_for_indexed(services.provider, test_file, timeout=get_fs_event_timeout())
+        found = await wait_for_indexed(
+            services.provider, test_file, timeout=get_fs_event_timeout()
+        )
         assert found, "File should be processed initially"
 
         # Delete the file
         test_file.unlink()
 
         # Wait for deletion processing
-        removed = await wait_for_removed(services.provider, test_file, timeout=get_fs_event_timeout())
+        removed = await wait_for_removed(
+            services.provider, test_file, timeout=get_fs_event_timeout()
+        )
         assert removed, "Deleted files should be removed from database"
 
         await service.stop()
@@ -209,7 +229,9 @@ class TestRealtimeFailures:
 
         # Check if service is still alive after error
         stats = await service.get_stats()
-        assert stats.get('observer_alive', False), "Service should survive processing errors"
+        assert stats.get('observer_alive', False), (
+            "Service should survive processing errors"
+        )
 
         await service.stop()
 

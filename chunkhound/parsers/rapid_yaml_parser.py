@@ -14,7 +14,7 @@ from bisect import bisect_left
 from time import perf_counter
 
 from chunkhound.core.models.chunk import Chunk
-from chunkhound.core.types.common import ChunkType, FileId, Language, LineNumber
+from chunkhound.core.types.common import ChunkType, FileId, Language
 from chunkhound.interfaces.language_parser import LanguageParser, ParseResult
 from chunkhound.parsers.chunk_splitter import (
     CASTConfig,
@@ -674,7 +674,9 @@ class _RapidYamlChunkBuilder:
             # path[-1] is the current node, path[-2] is the actual parent
             parent_key = path[-2] if len(path) >= 2 else None
 
-            chunks.extend(self._create_chunk(node, node_type, symbol, depth, parent_key))
+            chunks.extend(
+                self._create_chunk(node, node_type, symbol, depth, parent_key)
+            )
 
         # Deduplicate chunks to prevent duplicate chunk IDs
         # (e.g., YAML files with repeated config values like "name: example-config")
@@ -732,7 +734,9 @@ class _RapidYamlChunkBuilder:
 
         # Convert each validated chunk to Chunk
         return [
-            universal_to_chunk(uc, file_path=None, file_id=self.file_id, language=Language.YAML)
+            universal_to_chunk(
+                uc, file_path=None, file_id=self.file_id, language=Language.YAML
+            )
             for uc in validated_chunks
         ]
 
