@@ -664,12 +664,14 @@ class ParserFactory:
         self,
         language: Language,
         cast_config: CASTConfig | None = None,
+        detect_embedded_sql: bool = False,
     ) -> LanguageParser:
         """Create a universal parser for the specified language.
 
         Args:
             language: Programming language to create parser for
             cast_config: Optional cAST configuration (uses default if not provided)
+            detect_embedded_sql: Whether to detect SQL in string literals
 
         Returns:
             UniversalParser instance configured for the language
@@ -723,7 +725,9 @@ class ParserFactory:
         if language in (Language.TEXT, Language.PDF):
             # Text and PDF mappings don't need tree-sitter engine
             mapping = config.mapping_class()
-            parser = UniversalParser(None, mapping, cast_config)  # type: ignore[arg-type]
+            parser = UniversalParser(
+                None, mapping, cast_config, detect_embedded_sql
+            )  # type: ignore[arg-type]
             wrapped = self._maybe_wrap_yaml_parser(language, parser)
             self._parser_cache[cache_key] = wrapped
             return wrapped
@@ -751,6 +755,7 @@ class ParserFactory:
                 engine,
                 mapping,
                 cast_config,
+                detect_embedded_sql,
             )
 
             parser = self._maybe_wrap_yaml_parser(language, universal_parser)
