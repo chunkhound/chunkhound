@@ -1077,7 +1077,6 @@ if __name__ == "__main__":
 """
 
         # Measure indexing time
-        start_write = time.time()
         timing_test_file.write_text(timing_content)
 
         # Poll until content is searchable
