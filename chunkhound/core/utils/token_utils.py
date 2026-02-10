@@ -25,7 +25,7 @@ def estimate_tokens_llm(text: str) -> int:
     """
     if not text:
         return 0
-    return max(1, len(text) // 4)
+    return max(1, len(text) // LLM_CHARS_PER_TOKEN)
 
 
 def estimate_tokens_embedding(text: str) -> int:
@@ -89,7 +89,7 @@ def _estimate_tokens_openai(text: str, model: str) -> int:
     """Use tiktoken for exact OpenAI token counting."""
     if not TIKTOKEN_AVAILABLE:
         # Fallback to conservative estimation
-        return max(1, int(len(text) / 3.0))
+        return max(1, int(len(text) / EMBEDDING_CHARS_PER_TOKEN))
 
     try:
         encoding = tiktoken.encoding_for_model(model)
@@ -106,12 +106,12 @@ def _estimate_tokens_voyageai(text: str) -> int:
     Based on actual measurements:
     - 325,138 tokens for 975,414 chars = 3.0 chars/token
     """
-    return max(1, int(len(text) / 3.0))
+    return max(1, int(len(text) / EMBEDDING_CHARS_PER_TOKEN))
 
 
 def _estimate_tokens_default(text: str) -> int:
     """Conservative default estimation for unknown providers."""
-    return max(1, int(len(text) / 3.5))
+    return max(1, int(len(text) / DEFAULT_CHARS_PER_TOKEN))
 
 
 def get_chars_to_tokens_ratio(provider: str, model: str = "") -> float:
@@ -122,8 +122,8 @@ def get_chars_to_tokens_ratio(provider: str, model: str = "") -> float:
     """
     if provider == "openai":
         # tiktoken is exact, but for ratio calculations use conservative estimate
-        return 3.0
+        return float(EMBEDDING_CHARS_PER_TOKEN)
     elif provider == "voyageai":
-        return 3.0  # Measured ratio
+        return float(EMBEDDING_CHARS_PER_TOKEN)  # Measured ratio
     else:
-        return 3.5  # Conservative default
+        return float(DEFAULT_CHARS_PER_TOKEN)  # Conservative default
