@@ -9,10 +9,12 @@ The splitter is designed to be used by all parsers to ensure consistent
 chunk sizing across the codebase.
 """
 
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
 
-from chunkhound.core.utils import estimate_tokens_embedding
+from chunkhound.core.utils import DEFAULT_CHARS_PER_TOKEN, estimate_tokens_embedding
 
 from .universal_engine import UniversalChunk
 
@@ -45,7 +47,7 @@ class ChunkMetrics:
     ast_depth: int
 
     @classmethod
-    def from_content(cls, content: str, ast_depth: int = 0) -> "ChunkMetrics":
+    def from_content(cls, content: str, ast_depth: int = 0) -> ChunkMetrics:
         """Calculate metrics from content string."""
         non_ws = len(re.sub(r"\s", "", content))
         total = len(content)
@@ -292,7 +294,7 @@ class ChunkSplitter:
                 self.config.safe_token_limit * actual_ratio * 0.8
             )
         else:
-            max_chars_from_tokens = int(self.config.safe_token_limit * 3.5 * 0.8)
+            max_chars_from_tokens = int(self.config.safe_token_limit * DEFAULT_CHARS_PER_TOKEN * 0.8)
         max_chars = min(self.config.max_chunk_size, max_chars_from_tokens)
 
         metrics = ChunkMetrics.from_content(chunk.content)
