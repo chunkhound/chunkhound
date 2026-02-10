@@ -85,6 +85,42 @@ class EmbeddingService(BaseService):
         """
         self._embedding_provider = provider
 
+    def _update_progress_with_speed(
+        self,
+        embed_task: TaskID,
+        batch_size: int,
+        processed_count: int,
+        batch_num: int,
+    ) -> None:
+        """Update progress bar with batch completion and speed calculation.
+
+        This method handles all progress-related updates including advancing
+        the progress bar and calculating/displaying the processing speed.
+        All errors are caught and logged at DEBUG level since progress display
+        is non-critical UI functionality.
+
+        Args:
+            embed_task: The Rich Progress task ID to update
+            batch_size: Number of items in the completed batch
+            processed_count: Total items processed so far
+            batch_num: Current batch number (for logging context)
+        """
+        progress = self.progress
+        if progress is None:
+            return
+        try:
+            progress.advance(embed_task, batch_size)
+            # Calculate and display speed
+            task_obj = progress.tasks[embed_task]
+            if task_obj.elapsed and task_obj.elapsed > 0:
+                speed = processed_count / task_obj.elapsed
+                progress.update(embed_task, speed=f"{speed:.1f} chunks/s")
+        except (AttributeError, IndexError, TypeError, KeyError) as e:
+            # Progress display is non-critical, but log for debugging
+            logger.opt(exception=e).debug(
+                "[EmbSvc] Progress update skipped: task={} batch={}", embed_task, batch_num
+            )
+
     async def generate_embeddings_for_chunks(
         self,
         chunk_ids: list[ChunkId],
@@ -599,16 +635,10 @@ class EmbeddingService(BaseService):
             if show_progress:
                 with update_lock:
                     processed_count += len(batch)
-                    if embed_task and self.progress:
-                        self.progress.advance(embed_task, len(batch))
-
-                        # Calculate and display speed
-                        task_obj = self.progress.tasks[embed_task]
-                        if task_obj.elapsed and task_obj.elapsed > 0:
-                            speed = processed_count / task_obj.elapsed
-                            self.progress.update(
-                                embed_task, speed=f"{speed:.1f} chunks/s"
-                            )
+                    if embed_task is not None and self.progress:
+                        self._update_progress_with_speed(
+                            embed_task, len(batch), processed_count, batch_num
+                        )
 
             return result
 
