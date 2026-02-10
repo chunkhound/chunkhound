@@ -14,10 +14,16 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from tree_sitter import Node
-
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.universal_engine import UniversalChunk, UniversalConcept
+
+try:
+    from tree_sitter import Node as TSNode
+
+    TREE_SITTER_AVAILABLE = True
+except ImportError:
+    TREE_SITTER_AVAILABLE = False
+    TSNode = Any  # type: ignore
 
 
 @dataclass(frozen=True)
@@ -31,6 +37,44 @@ class EmbeddedSqlMatch:
     confidence: float  # 0-1 score of SQL detection confidence
 
 
+# Pre-compiled regex patterns for SQL confidence scoring
+_PRIMARY_KEYWORD_PATTERNS = {
+    keyword: re.compile(r"\b" + keyword + r"\b")
+    for keyword in [
+        "SELECT", "INSERT", "UPDATE", "DELETE",
+        "CREATE", "ALTER", "DROP",
+    ]
+}
+
+# DDL keywords that indicate a DEFINITION concept
+_DDL_KEYWORDS = {"CREATE", "ALTER", "DROP"}
+
+_SECONDARY_KEYWORD_PATTERNS = {
+    keyword: re.compile(r"\b" + keyword + r"\b")
+    for keyword in [
+        "FROM", "WHERE", "JOIN", "ORDER", "GROUP",
+        "HAVING", "LIMIT", "OFFSET", "INTO", "SET",
+    ]
+}
+
+_SQL_PATTERNS = [
+    (re.compile(r"\bFROM\s+\w+"), 15),
+    (re.compile(r"\bWHERE\s+\w+"), 10),
+    (re.compile(r"\bJOIN\s+\w+"), 10),
+    (re.compile(r"\bSET\s+\w+\s*="), 10),
+    (re.compile(r"\bORDER\s+BY\b"), 10),
+    (re.compile(r"\bGROUP\s+BY\b"), 10),
+    (re.compile(r"\bINTO\s+\w+"), 10),
+    (re.compile(r"\bVALUES\s*\("), 10),
+    (re.compile(r"\bTABLE\s+"), 20),
+    (re.compile(r"\bPRIMARY\s+KEY\b"), 10),
+    (re.compile(r"\bFOREIGN\s+KEY\b"), 10),
+]
+
+_SELECT_PATTERN = re.compile(r"\bSELECT\b")
+_FROM_PATTERN = re.compile(r"\bFROM\b")
+
+
 class EmbeddedSqlDetector:
     """Detects and extracts SQL code embedded in string literals.
 
@@ -40,25 +84,6 @@ class EmbeddedSqlDetector:
     3. Extracting and cleaning the SQL code
     4. Returning matches with metadata
     """
-
-    # SQL keywords that indicate SQL content (case-insensitive)
-    SQL_KEYWORDS = {
-        # DML (Data Manipulation Language)
-        "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE",
-        # DDL (Data Definition Language)
-        "CREATE", "ALTER", "DROP", "TRUNCATE",
-        # DCL (Data Control Language)
-        "GRANT", "REVOKE",
-        # TCL (Transaction Control Language)
-        "COMMIT", "ROLLBACK", "SAVEPOINT",
-        # Other common SQL
-        "FROM", "WHERE", "JOIN", "INNER", "LEFT", "RIGHT", "OUTER",
-        "ON", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET",
-        "UNION", "INTERSECT", "EXCEPT",
-        # T-SQL specific
-        "EXEC", "EXECUTE", "BEGIN", "END", "DECLARE",
-        "WITH", "AS", "TABLE", "VIEW", "INDEX", "PROCEDURE", "FUNCTION",
-    }
 
     # Common string node types across languages
     STRING_NODE_TYPES = {
@@ -83,7 +108,9 @@ class EmbeddedSqlDetector:
         """
         self.host_language = host_language
 
-    def detect_in_tree(self, root_node: Node, source_bytes: bytes) -> list[EmbeddedSqlMatch]:
+    def detect_in_tree(
+        self, root_node: TSNode, source_bytes: bytes
+    ) -> list[EmbeddedSqlMatch]:
         """Detect embedded SQL in a parsed AST tree.
 
         Args:
@@ -102,7 +129,7 @@ class EmbeddedSqlDetector:
 
     def _visit_node(
         self,
-        node: Node,
+        node: TSNode,
         source_bytes: bytes,
         matches: list[EmbeddedSqlMatch]
     ) -> None:
@@ -126,7 +153,7 @@ class EmbeddedSqlDetector:
 
     def _check_string_node(
         self,
-        node: Node,
+        node: TSNode,
         source_bytes: bytes,
         matches: list[EmbeddedSqlMatch]
     ) -> None:
@@ -194,7 +221,7 @@ class EmbeddedSqlDetector:
     def _calculate_sql_confidence(self, content: str) -> float:
         """Calculate confidence that content is SQL.
 
-        Uses heuristics:
+        Uses pre-compiled regex patterns for efficient matching:
         - Presence of SQL keywords (weighted)
         - SQL-like syntax patterns
         - Structure indicators (FROM, WHERE, JOIN)
@@ -208,56 +235,40 @@ class EmbeddedSqlDetector:
         content_upper = content.upper()
         score = 0.0
 
-        # Check for primary SQL keywords (30 points each, but only count one)
-        primary_keywords = {"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP"}
+        # Check for primary SQL keywords (30 points, only count one)
         has_primary = False
-        for keyword in primary_keywords:
-            if re.search(r'\b' + keyword + r'\b', content_upper):
+        for pattern in _PRIMARY_KEYWORD_PATTERNS.values():
+            if pattern.search(content_upper):
                 score += 30
                 has_primary = True
-                break  # Only count one primary keyword
+                break
 
-        # If no primary keyword, very unlikely to be SQL
         if not has_primary:
             return 0.0
 
         # Check for secondary SQL keywords (10 points each)
-        secondary_keywords = {"FROM", "WHERE", "JOIN", "ORDER", "GROUP", "HAVING", "LIMIT", "OFFSET", "INTO", "SET"}
-        for keyword in secondary_keywords:
-            if re.search(r'\b' + keyword + r'\b', content_upper):
+        for pattern in _SECONDARY_KEYWORD_PATTERNS.values():
+            if pattern.search(content_upper):
                 score += 10
 
         # Check for SQL patterns (additional points)
-        patterns = [
-            (r'\bFROM\s+\w+', 15),  # FROM table - increased weight
-            (r'\bWHERE\s+\w+', 10),  # WHERE condition
-            (r'\bJOIN\s+\w+', 10),  # JOIN table
-            (r'\bSET\s+\w+\s*=', 10),  # SET col = val
-            (r'\bORDER\s+BY\b', 10),  # ORDER BY
-            (r'\bGROUP\s+BY\b', 10),  # GROUP BY
-            (r'\bINTO\s+\w+', 10),  # INSERT INTO / DELETE INTO
-            (r'\bVALUES\s*\(', 10),  # VALUES (...)
-            (r'\bTABLE\s+', 20),  # TABLE keyword (CREATE/ALTER/DROP TABLE)
-            (r'\bPRIMARY\s+KEY\b', 10),  # PRIMARY KEY
-            (r'\bFOREIGN\s+KEY\b', 10),  # FOREIGN KEY
-        ]
-
-        for pattern, points in patterns:
-            if re.search(pattern, content_upper):
+        for pattern, points in _SQL_PATTERNS:
+            if pattern.search(content_upper):
                 score += points
 
         # Bonus: SELECT + FROM combination is very strong indicator
-        if re.search(r'\bSELECT\b', content_upper) and re.search(r'\bFROM\b', content_upper):
+        if (
+            _SELECT_PATTERN.search(content_upper)
+            and _FROM_PATTERN.search(content_upper)
+        ):
             score += 10
 
         # Convert to 0-1 scale
-        # A simple query like "SELECT * FROM users" should get ~0.65-0.7
-        # A complex query should get close to 1.0
         normalized = min(score / 100.0, 1.0)
 
         return normalized
 
-    def _get_context(self, node: Node, source_bytes: bytes) -> str:
+    def _get_context(self, node: TSNode, source_bytes: bytes) -> str:
         """Get contextual information about where the string appears.
 
         Tries to find the containing function/method/class name.
@@ -294,27 +305,38 @@ class EmbeddedSqlDetector:
 
         return "global"
 
+    @staticmethod
+    def _classify_sql_concept(sql_content: str) -> UniversalConcept:
+        """Classify SQL content into the appropriate UniversalConcept.
+
+        DDL statements (CREATE, ALTER, DROP) are DEFINITION.
+        DML statements (SELECT, INSERT, UPDATE, DELETE) are BLOCK.
+        """
+        content_upper = sql_content.strip().upper()
+        for keyword in _DDL_KEYWORDS:
+            if _PRIMARY_KEYWORD_PATTERNS[keyword].search(content_upper):
+                return UniversalConcept.DEFINITION
+        return UniversalConcept.BLOCK
+
     def create_embedded_sql_chunks(
         self,
         matches: list[EmbeddedSqlMatch],
-        sql_parser: Any | None = None
     ) -> list[UniversalChunk]:
         """Convert detected SQL matches into UniversalChunk objects.
 
         Args:
             matches: Detected SQL matches
-            sql_parser: Optional SQL parser to parse the SQL content
 
         Returns:
             List of UniversalChunk objects for embedded SQL
         """
         chunks: list[UniversalChunk] = []
 
-        for i, match in enumerate(matches):
-            # Create a chunk for the embedded SQL
+        for match in matches:
+            concept = self._classify_sql_concept(match.sql_content)
             chunk = UniversalChunk(
-                concept=UniversalConcept.DEFINITION,  # SQL is a definition
-                name=f"embedded_sql_{i+1}",
+                concept=concept,
+                name=f"embedded_sql_line_{match.start_line}",
                 content=match.sql_content,
                 start_line=match.start_line,
                 end_line=match.end_line,
@@ -325,7 +347,7 @@ class EmbeddedSqlDetector:
                     "sql_confidence": match.confidence,
                     "detected_language": "sql",
                 },
-                language_node_type="embedded_sql_string"
+                language_node_type="embedded_sql_string",
             )
             chunks.append(chunk)
 

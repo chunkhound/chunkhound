@@ -1219,16 +1219,33 @@ class UniversalParser:
             return []
 
         # Detect SQL in string literals
-        sql_matches = self.sql_detector.detect_in_tree(ast_tree.root_node, content_bytes)
+        sql_matches = self.sql_detector.detect_in_tree(
+            ast_tree.root_node, content_bytes
+        )
 
         if not sql_matches:
             return []
 
         # Convert matches to UniversalChunk objects
-        universal_chunks = self.sql_detector.create_embedded_sql_chunks(sql_matches)
+        universal_chunks = self.sql_detector.create_embedded_sql_chunks(
+            sql_matches
+        )
+
+        # Apply dedup and size validation (but not merging, since each
+        # embedded SQL string is a distinct semantic unit)
+        universal_chunks = deduplicate_chunks(
+            universal_chunks, self.language_name
+        )
+        validated_chunks = []
+        for chunk in universal_chunks:
+            validated_chunks.extend(
+                self._validate_and_split_chunk(chunk, content)
+            )
 
         # Convert to standard Chunk format
-        chunks = self._convert_to_chunks(universal_chunks, content, file_path, file_id)
+        chunks = self._convert_to_chunks(
+            validated_chunks, content, file_path, file_id
+        )
 
         return chunks
 

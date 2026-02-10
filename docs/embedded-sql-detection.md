@@ -102,20 +102,15 @@ Embedded SQL chunks include special metadata:
 
 ## Language Support
 
-### Verified Working (13/15 tests passing)
+### Verified Working (28/28 tests passing)
 - ✅ Python - string literals and docstrings
 - ✅ Java - string literals
-- ✅ TypeScript - string literals
-- ✅ C# - string literals
-- ✅ Go - string literals
+- ✅ JavaScript - string literals and template strings
+- ✅ TypeScript - string literals and template strings
+- ✅ C# - string literals and verbatim strings
+- ✅ Go - string literals and raw strings
 - ✅ Rust - string literals
-
-### Partial Support
-- ⚠️ JavaScript - regular strings work, template strings need refinement
-- ⚠️ PHP - needs string node type mapping
-
-### Not Yet Tested
-- Ruby, Kotlin, Swift, etc. (should work but not verified)
+- ✅ PHP - string literals (PDO and MySQLi styles)
 
 ## Examples
 
@@ -179,7 +174,7 @@ Run embedded SQL detection tests:
 uv run pytest tests/test_embedded_sql.py -v
 ```
 
-Current test results: **13/15 passing** (86.7% success rate)
+Current test results: **28/28 passing** (100% success rate)
 
 ## Configuration
 
