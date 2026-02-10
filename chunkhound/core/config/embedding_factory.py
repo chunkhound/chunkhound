@@ -84,16 +84,32 @@ class EmbeddingProviderFactory:
         rerank_format = config.get("rerank_format", "auto")
         rerank_batch_size = config.get("rerank_batch_size")
 
+        # Azure OpenAI parameters
+        api_version = config.get("api_version")
+        azure_endpoint = config.get("azure_endpoint")
+        azure_deployment = config.get("azure_deployment")
+
         # Model should come from config, but handle None case safely
         if not model:
             raise ValueError("Model not specified in provider configuration")
 
-        logger.debug(
-            f"Creating OpenAI provider: model={model}, "
-            f"base_url={base_url}, api_key={'***' if api_key else None}, "
-            f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
-            f"rerank_batch_size={rerank_batch_size}"
-        )
+        # Log Azure configuration if present
+        if azure_endpoint:
+            logger.debug(
+                f"Creating Azure OpenAI provider: model={model}, "
+                f"azure_endpoint={azure_endpoint}, api_version={api_version}, "
+                f"azure_deployment={azure_deployment}, "
+                f"api_key={'***' if api_key else None}, "
+                f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
+                f"rerank_batch_size={rerank_batch_size}"
+            )
+        else:
+            logger.debug(
+                f"Creating OpenAI provider: model={model}, "
+                f"base_url={base_url}, api_key={'***' if api_key else None}, "
+                f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
+                f"rerank_batch_size={rerank_batch_size}"
+            )
 
         try:
             return create_openai_provider(
@@ -104,6 +120,9 @@ class EmbeddingProviderFactory:
                 rerank_url=rerank_url,
                 rerank_format=rerank_format,
                 rerank_batch_size=rerank_batch_size,
+                api_version=api_version,
+                azure_endpoint=azure_endpoint,
+                azure_deployment=azure_deployment,
             )
         except Exception as e:
             raise ValueError(f"Failed to create OpenAI provider: {e}") from e
