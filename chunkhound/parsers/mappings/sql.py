@@ -5,16 +5,26 @@ for the universal concept system. It maps SQL's AST nodes to universal
 semantic concepts used by the unified parser.
 
 Supported constructs: CREATE TABLE, CREATE VIEW, CREATE FUNCTION,
-CREATE PROCEDURE, CREATE TRIGGER, CREATE INDEX, ALTER TABLE, comments,
-and BEGIN...END blocks.
+CREATE INDEX, ALTER TABLE, comments, and BEGIN...END blocks.
 """
 
-from typing import Any
-
-from tree_sitter import Node
+from typing import TYPE_CHECKING, Any
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import BaseMapping
+
+if TYPE_CHECKING:
+    from chunkhound.parsers.universal_engine import UniversalConcept
+
+try:
+    from tree_sitter import Node as TSNode
+
+    TREE_SITTER_AVAILABLE = True
+except ImportError:
+    TREE_SITTER_AVAILABLE = False
+    TSNode = Any  # type: ignore
+
+# Import UniversalConcept at runtime
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 
@@ -47,7 +57,7 @@ class SqlMapping(BaseMapping):
         (marginalia) @comment
         """
 
-    def extract_function_name(self, node: Node | None, source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract function name from a function definition node."""
         if node is None:
             return self.get_fallback_name(node, "function")
@@ -58,11 +68,11 @@ class SqlMapping(BaseMapping):
 
         return self.get_fallback_name(node, "function")
 
-    def extract_class_name(self, node: Node | None, source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract class name (not applicable to SQL)."""
         return ""
 
-    def _extract_object_name(self, node: Node, source: str) -> str:
+    def _extract_object_name(self, node: TSNode, source: str) -> str:
         """Extract the full name from an object_reference child.
 
         Handles schema-qualified names like dbo.Users by returning
@@ -116,7 +126,7 @@ class SqlMapping(BaseMapping):
         return None
 
     def extract_name(
-        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for this concept."""
 
@@ -175,7 +185,7 @@ class SqlMapping(BaseMapping):
         return "unnamed"
 
     def extract_content(
-        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for this concept."""
 
@@ -194,7 +204,7 @@ class SqlMapping(BaseMapping):
         return ""
 
     def extract_metadata(
-        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract SQL-specific metadata."""
 

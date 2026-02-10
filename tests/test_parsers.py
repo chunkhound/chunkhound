@@ -43,7 +43,7 @@ LANGUAGE_SAMPLES = {
     Language.SWIFT: "class MyClass {\n    func hello() -> String {\n        return \"world\"\n    }\n}",
     Language.DART: "void main() { }",
     Language.LUA: "function hello() print('world') end",
-    Language.SQL: "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100));",
+    Language.SQL: "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100));\nCREATE VIEW active_users AS SELECT * FROM users;\nCREATE FUNCTION get_user_count() RETURNS INT BEGIN RETURN 0; END;",
 }
 
 
