@@ -6,6 +6,10 @@ semantic concepts used by the unified parser.
 
 Supported constructs: CREATE TABLE, CREATE VIEW, CREATE FUNCTION,
 CREATE INDEX, ALTER TABLE, comments, and BEGIN...END blocks.
+
+Note: CREATE PROCEDURE and CREATE TRIGGER are not supported because
+tree-sitter-sql lacks grammar rules for them (both produce ERROR nodes).
+Tracked upstream: https://github.com/DerekStride/tree-sitter-sql/issues/354
 """
 
 from typing import TYPE_CHECKING, Any
