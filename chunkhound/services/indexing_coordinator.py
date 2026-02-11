@@ -1427,7 +1427,7 @@ class IndexingCoordinator(BaseService):
 
     def finalize_optimization(self) -> None:
         """Run post-embedding optimization if warranted."""
-        if self._db.should_optimize():
+        if self._db.should_optimize(operation="post-embedding"):
             logger.info("Running post-embedding database optimization...")
             self._db.optimize_tables()
 
@@ -1608,9 +1608,11 @@ class IndexingCoordinator(BaseService):
                 progress=self.progress,
             )
 
-            return await embedding_service.generate_missing_embeddings(
+            result = await embedding_service.generate_missing_embeddings(
                 exclude_patterns=exclude_patterns
             )
+            self.finalize_optimization()
+            return result
 
         except Exception as e:
             logger.error(
