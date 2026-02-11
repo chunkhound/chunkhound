@@ -94,3 +94,18 @@ def run_git(args: Sequence[str], cwd: Path | None, timeout_s: float | None = Non
     except Exception as e:
         raise GitCommandError(f"git command failed: {e}") from e
 
+
+def git_check_ignored(*, repo_root: Path, rel_path: str, timeout_s: float = 5.0) -> bool:
+    """Return True if Git would ignore rel_path in repo_root.
+
+    Uses `git check-ignore -q --no-index` and returns False on any errors.
+    """
+    try:
+        proc = run_git(
+            ["check-ignore", "-q", "--no-index", rel_path],
+            cwd=repo_root,
+            timeout_s=timeout_s,
+        )
+    except Exception:
+        return False
+    return proc.returncode == 0
