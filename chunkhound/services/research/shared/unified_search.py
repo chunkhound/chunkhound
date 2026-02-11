@@ -29,7 +29,7 @@ from chunkhound.services.research.shared.models import (
     REGEX_MIN_RESULTS,
     ResearchContext,
 )
-from chunkhound.utils.metadata import iter_parameter_symbols
+from chunkhound.utils.metadata import extract_parameter_symbols
 
 
 class UnifiedSearch:
@@ -484,7 +484,7 @@ class UnifiedSearch:
             # Secondary: Extract parameters as potential searchable symbols
             # Many functions/methods have meaningful parameter names
             params = metadata.get("parameters")
-            for param_symbol in iter_parameter_symbols(params):
+            for param_symbol in extract_parameter_symbols(params):
                 add_symbol(param_symbol)
 
         # Filter out common noise (single chars, numbers, common keywords)

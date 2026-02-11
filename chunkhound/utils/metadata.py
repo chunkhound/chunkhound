@@ -61,7 +61,7 @@ def normalize_parameters(value: Any) -> list[ParameterItem]:
     return normalized
 
 
-def iter_parameter_names(value: Any) -> list[str]:
+def extract_parameter_names(value: Any) -> list[str]:
     """Extract parameter names from a parameters metadata value."""
     names: list[str] = []
     for item in normalize_parameters(value):
@@ -74,7 +74,7 @@ def iter_parameter_names(value: Any) -> list[str]:
     return names
 
 
-def iter_parameter_symbols(value: Any) -> list[str]:
+def extract_parameter_symbols(value: Any) -> list[str]:
     """Extract searchable parameter symbols from a parameters metadata value.
 
     For dict-shaped parameters, emits ``name`` first (when present), then ``type``.
@@ -92,4 +92,3 @@ def iter_parameter_symbols(value: Any) -> list[str]:
             if isinstance(param_type, str) and param_type:
                 symbols.append(param_type)
     return symbols
-

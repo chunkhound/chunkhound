@@ -28,7 +28,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from chunkhound.core.models.chunk import Chunk
-from chunkhound.utils.metadata import iter_parameter_names
+from chunkhound.utils.metadata import extract_parameter_names
 
 
 @dataclass
@@ -275,7 +275,7 @@ def build_symbol_table_from_chunks(script_chunks: list[Chunk]) -> VueSymbolTable
         # Extract function parameters as symbols (for template access)
         if chunk.metadata and "parameters" in chunk.metadata:
             parameters = chunk.metadata["parameters"]
-            for param_name in iter_parameter_names(parameters):
+            for param_name in extract_parameter_names(parameters):
                 if param_name and param_name not in JS_KEYWORDS:
                     param_symbol = VueSymbol(
                         name=param_name,
