@@ -232,7 +232,7 @@ class UnifiedSearch:
             symbols = await self.extract_symbols_from_chunks(semantic_results)
 
             if symbols:
-                # Step 4: Select top symbols (already in relevance order from reranked semantic results)
+                # Step 4: Select top symbols (deterministic first-seen order from semantic results)
                 max_symbols = self._config.max_symbols if self._config else MAX_SYMBOLS_TO_SEARCH
                 logger.debug(
                     f"Step 4: Selecting top {max_symbols} symbols from {len(symbols)} extracted symbols"
@@ -411,10 +411,22 @@ class UnifiedSearch:
         Returns:
             Deduplicated list of symbol names
         """
-        symbols = set()
+        ordered_symbols: list[str] = []
+        seen: set[str] = set()
+
+        def add_symbol(symbol: str) -> None:
+            stripped = symbol.strip()
+            if not stripped:
+                return
+            if stripped in seen:
+                return
+            seen.add(stripped)
+            ordered_symbols.append(stripped)
 
         def iter_parameter_symbols(params: Any) -> list[str]:
             if isinstance(params, str):
+                if "," in params:
+                    return [part.strip() for part in params.split(",") if part.strip()]
                 return [params]
             if not isinstance(params, list):
                 return []
@@ -441,38 +453,32 @@ class UnifiedSearch:
             # This field is populated by UniversalParser for all languages
             symbol = chunk.get("symbol")
             if isinstance(symbol, str):
-                stripped_symbol = symbol.strip()
-                if stripped_symbol:
-                    symbols.add(stripped_symbol)
+                add_symbol(symbol)
 
-            # Secondary: Extract parameters as potential searchable symbols
-            # Many functions/methods have meaningful parameter names
+            # Tertiary: Extract from chunk_type-specific metadata
+            # Some chunks have additional symbol information
             metadata = chunk.get("metadata", {})
             if not isinstance(metadata, dict):
                 metadata = {}
 
-            params = metadata.get("parameters")
-            for param_symbol in iter_parameter_symbols(params):
-                stripped_param = param_symbol.strip()
-                if stripped_param:
-                    symbols.add(stripped_param)
-
-            # Tertiary: Extract from chunk_type-specific metadata
-            # Some chunks have additional symbol information
             chunk_type = metadata.get("kind")
             if isinstance(chunk_type, str) and chunk_type:
                 # Skip generic types, focus on specific symbols
                 if chunk_type not in ("block", "comment", "unknown"):
                     name = chunk.get("name")
                     if isinstance(name, str):
-                        stripped_name = name.strip()
-                        if stripped_name:
-                            symbols.add(stripped_name)
+                        add_symbol(name)
+
+            # Secondary: Extract parameters as potential searchable symbols
+            # Many functions/methods have meaningful parameter names
+            params = metadata.get("parameters")
+            for param_symbol in iter_parameter_symbols(params):
+                add_symbol(param_symbol)
 
         # Filter out common noise (single chars, numbers, common keywords)
         filtered_symbols = [
             s
-            for s in symbols
+            for s in ordered_symbols
             if len(s) > 1
             and not s.isdigit()
             and s.lower() not in {"self", "cls", "this"}
