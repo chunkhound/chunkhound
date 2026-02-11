@@ -34,6 +34,24 @@ from chunkhound.services.research.shared.models import (
 class UnifiedSearch:
     """Orchestrates unified semantic + symbol-based regex search."""
 
+    @staticmethod
+    def _build_symbol_regex(symbol: str) -> str:
+        """Build a safe regex pattern for a symbol across backends.
+
+        Note: Some backends (e.g., DuckDB/RE2) do not support lookbehind, so
+        patterns must avoid it.
+        """
+        escaped = re.escape(symbol)
+        if not symbol:
+            return escaped
+
+        starts_word = bool(re.match(r"[A-Za-z0-9_]", symbol[0]))
+        ends_word = bool(re.match(r"[A-Za-z0-9_]", symbol[-1]))
+
+        prefix = r"\b" if starts_word else r"(?:^|\W)"
+        suffix = r"\b" if ends_word else r"(?:$|\W)"
+        return f"{prefix}{escaped}{suffix}"
+
     def __init__(
         self,
         db_services: DatabaseServices,
@@ -395,27 +413,61 @@ class UnifiedSearch:
         """
         symbols = set()
 
+        def iter_parameter_symbols(params: Any) -> list[str]:
+            if isinstance(params, str):
+                return [params]
+            if not isinstance(params, list):
+                return []
+
+            extracted: list[str] = []
+            for param in params:
+                if isinstance(param, str):
+                    extracted.append(param)
+                    continue
+
+                if isinstance(param, dict):
+                    name = param.get("name")
+                    if isinstance(name, str):
+                        extracted.append(name)
+
+                    param_type = param.get("type")
+                    if isinstance(param_type, str):
+                        extracted.append(param_type)
+
+            return extracted
+
         for chunk in chunks:
             # Primary: Extract symbol name (function/class/method name)
             # This field is populated by UniversalParser for all languages
-            if symbol := chunk.get("symbol"):
-                if symbol and symbol.strip():
-                    symbols.add(symbol.strip())
+            symbol = chunk.get("symbol")
+            if isinstance(symbol, str):
+                stripped_symbol = symbol.strip()
+                if stripped_symbol:
+                    symbols.add(stripped_symbol)
 
             # Secondary: Extract parameters as potential searchable symbols
             # Many functions/methods have meaningful parameter names
             metadata = chunk.get("metadata", {})
-            if params := metadata.get("parameters"):
-                if isinstance(params, list):
-                    symbols.update(p.strip() for p in params if p and p.strip())
+            if not isinstance(metadata, dict):
+                metadata = {}
+
+            params = metadata.get("parameters")
+            for param_symbol in iter_parameter_symbols(params):
+                stripped_param = param_symbol.strip()
+                if stripped_param:
+                    symbols.add(stripped_param)
 
             # Tertiary: Extract from chunk_type-specific metadata
             # Some chunks have additional symbol information
-            if chunk_type := metadata.get("kind"):
+            chunk_type = metadata.get("kind")
+            if isinstance(chunk_type, str) and chunk_type:
                 # Skip generic types, focus on specific symbols
                 if chunk_type not in ("block", "comment", "unknown"):
-                    if name := chunk.get("name"):
-                        symbols.add(name.strip())
+                    name = chunk.get("name")
+                    if isinstance(name, str):
+                        stripped_name = name.strip()
+                        if stripped_name:
+                            symbols.add(stripped_name)
 
         # Filter out common noise (single chars, numbers, common keywords)
         filtered_symbols = [
@@ -465,11 +517,7 @@ class UnifiedSearch:
             UNDISCOVERED chunks (chunks not in exclude_ids), as per spec lines 192-216.
             """
             try:
-                # Escape special regex characters
-                escaped = re.escape(symbol)
-                # Match word boundaries to avoid partial matches
-                # This works across all languages (identifier boundaries)
-                pattern = rf"\b{escaped}\b"
+                pattern = self._build_symbol_regex(symbol)
 
                 # Internal pagination loop: keep fetching pages until we have enough undiscovered chunks
                 results: list[dict[str, Any]] = []
