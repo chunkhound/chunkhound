@@ -93,9 +93,6 @@ class DirectoryIndexingService:
                 embed_result = await self._generate_missing_embeddings(exclude_patterns)
                 stats.embeddings_generated = embed_result.get("generated", 0)
 
-                # Final optimization after embedding generation
-                self.indexing_coordinator.finalize_optimization()
-
             stats.processing_time = time.time() - start_time
 
         except Exception as e:
