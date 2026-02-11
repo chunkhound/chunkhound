@@ -29,7 +29,7 @@ from chunkhound.services.research.shared.models import (
     REGEX_MIN_RESULTS,
     ResearchContext,
 )
-from chunkhound.utils.metadata import extract_parameter_symbols
+from chunkhound.utils.metadata import extract_parameter_names, extract_parameter_types
 
 
 class UnifiedSearch:
@@ -450,6 +450,7 @@ class UnifiedSearch:
         """
         ordered_symbols: list[str] = []
         seen: set[str] = set()
+        deferred_types: list[str] = []
 
         def add_symbol(symbol: str) -> None:
             stripped = symbol.strip()
@@ -484,8 +485,12 @@ class UnifiedSearch:
             # Secondary: Extract parameters as potential searchable symbols
             # Many functions/methods have meaningful parameter names
             params = metadata.get("parameters")
-            for param_symbol in extract_parameter_symbols(params):
-                add_symbol(param_symbol)
+            for param_name in extract_parameter_names(params):
+                add_symbol(param_name)
+            deferred_types.extend(extract_parameter_types(params))
+
+        for param_type in deferred_types:
+            add_symbol(param_type)
 
         # Filter out common noise (single chars, numbers, common keywords)
         filtered_symbols = [
@@ -535,6 +540,8 @@ class UnifiedSearch:
             UNDISCOVERED chunks (chunks not in exclude_ids), as per spec lines 192-216.
             """
             try:
+                if not symbol.strip():
+                    return []
                 pattern = self._build_symbol_regex(symbol)
 
                 # Internal pagination loop: keep fetching pages until we have enough

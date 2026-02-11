@@ -6,14 +6,24 @@ vs structured lists). These helpers centralize shape-tolerant parsing so consume
 don't re-implement ad-hoc logic.
 """
 
+import re
 from typing import Any
 
 ParameterItem = str | dict[str, str]
 
+_IDENTIFIER_LIKE_RE = re.compile(r"^[A-Za-z_$][\w$]*$")
+
 
 def _split_comma_separated(value: str) -> list[str]:
     parts = [part.strip() for part in value.split(",")]
-    return [part for part in parts if part]
+    stripped_parts = [part for part in parts if part]
+    if not stripped_parts:
+        return []
+
+    if all(_IDENTIFIER_LIKE_RE.match(part) for part in stripped_parts):
+        return stripped_parts
+
+    return [value]
 
 
 def normalize_parameters(value: Any) -> list[ParameterItem]:
@@ -74,21 +84,15 @@ def extract_parameter_names(value: Any) -> list[str]:
     return names
 
 
-def extract_parameter_symbols(value: Any) -> list[str]:
-    """Extract searchable parameter symbols from a parameters metadata value.
+def extract_parameter_types(value: Any) -> list[str]:
+    """Extract parameter type values from a parameters metadata value.
 
-    For dict-shaped parameters, emits ``name`` first (when present), then ``type``.
+    Only emits types from dict-shaped parameters (e.g., ``{'name': str, 'type': str}``).
     """
-    symbols: list[str] = []
+    types: list[str] = []
     for item in normalize_parameters(value):
-        if isinstance(item, str):
-            symbols.append(item)
-        elif isinstance(item, dict):
-            name = item.get("name")
-            if isinstance(name, str) and name:
-                symbols.append(name)
-
+        if isinstance(item, dict):
             param_type = item.get("type")
             if isinstance(param_type, str) and param_type:
-                symbols.append(param_type)
-    return symbols
+                types.append(param_type)
+    return types
