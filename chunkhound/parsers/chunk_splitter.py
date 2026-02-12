@@ -294,7 +294,9 @@ class ChunkSplitter:
                 self.config.safe_token_limit * actual_ratio * 0.8
             )
         else:
-            max_chars_from_tokens = int(self.config.safe_token_limit * DEFAULT_CHARS_PER_TOKEN * 0.8)
+            max_chars_from_tokens = int(
+                self.config.safe_token_limit * DEFAULT_CHARS_PER_TOKEN * 0.8
+            )
         max_chars = min(self.config.max_chunk_size, max_chars_from_tokens)
 
         metrics = ChunkMetrics.from_content(chunk.content)
