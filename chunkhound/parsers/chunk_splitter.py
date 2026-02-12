@@ -92,7 +92,10 @@ class ChunkSplitter:
         # Don't split Makefile rules unless they're excessively large
         if chunk.metadata.get("kind") == "rule":
             tolerance = 1.2
-            if metrics.non_whitespace_chars <= self.config.max_chunk_size * tolerance:
+            if (
+                metrics.non_whitespace_chars <= self.config.max_chunk_size * tolerance
+                and estimated_tokens <= self.config.safe_token_limit * tolerance
+            ):
                 return [chunk]
             return self._split_makefile_rule(chunk)
 
@@ -132,7 +135,11 @@ class ChunkSplitter:
             test_content = "\n".join(test_lines)
             test_metrics = ChunkMetrics.from_content(test_content)
 
-            if test_metrics.non_whitespace_chars <= self.config.max_chunk_size:
+            if (
+                test_metrics.non_whitespace_chars <= self.config.max_chunk_size
+                and estimate_tokens_embedding(test_content)
+                <= self.config.safe_token_limit
+            ):
                 current_recipe_group.append(recipe_line)
             else:
                 if current_recipe_group:
@@ -316,7 +323,10 @@ class ChunkSplitter:
 
         while remaining:
             remaining_metrics = ChunkMetrics.from_content(remaining)
-            if remaining_metrics.non_whitespace_chars <= self.config.max_chunk_size:
+            if (
+                remaining_metrics.non_whitespace_chars <= self.config.max_chunk_size
+                and len(remaining) <= max_chars_from_tokens
+            ):
                 chunks.append(
                     self._create_split_chunk(
                         chunk, remaining, part_num, current_pos, total_content_length
