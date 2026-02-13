@@ -3,17 +3,24 @@
 Uses HDBSCAN for natural semantic clustering (first pass) and k-means
 for budget-based clustering (subsequent passes) to group files into
 token-bounded clusters for parallel synthesis operations.
+
+Heavy scientific computing deps (numpy, hdbscan, sklearn) are lazy-loaded
+inside methods to avoid crashing the MCP server at startup on systems with
+WDAC code-integrity policies that block unsigned .pyd files. See #192.
 """
 
-from dataclasses import dataclass
+from __future__ import annotations
 
-import hdbscan
-import numpy as np
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
 from loguru import logger
-from sklearn.cluster import KMeans  # type: ignore[import-untyped]
 
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 from chunkhound.interfaces.llm_provider import LLMProvider
+
+if TYPE_CHECKING:
+    import numpy as np
 
 
 @dataclass
@@ -62,6 +69,9 @@ class ClusteringService:
         Raises:
             ValueError: If files dict is empty or n_clusters < 1
         """
+        import numpy as np
+        from sklearn.cluster import KMeans  # type: ignore[import-untyped]
+
         if not files:
             raise ValueError("Cannot cluster empty files dictionary")
         if n_clusters < 1:
@@ -179,6 +189,9 @@ class ClusteringService:
         Raises:
             ValueError: If files dict is empty
         """
+        import hdbscan
+        import numpy as np
+
         if not files:
             raise ValueError("Cannot cluster empty files dictionary")
 
@@ -310,6 +323,8 @@ class ClusteringService:
         Returns:
             Modified labels array with no -1 values
         """
+        import numpy as np
+
         outlier_mask = labels == -1
         if not outlier_mask.any():
             return labels
@@ -381,6 +396,10 @@ class ClusteringService:
             Such files are returned as-is in their own cluster, potentially
             exceeding the configured bound. A warning is logged when this occurs.
         """
+        import hdbscan
+        import numpy as np
+        from sklearn.cluster import KMeans  # type: ignore[import-untyped]
+
         if not files:
             raise ValueError("Cannot cluster empty files dictionary")
 

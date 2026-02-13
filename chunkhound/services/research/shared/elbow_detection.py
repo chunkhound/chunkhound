@@ -2,9 +2,11 @@
 
 Implements the Kneedle algorithm (Satopaa et al. 2011) for finding elbow points
 in score curves. Used for adaptive threshold computation in research phases.
+
+numpy is lazy-loaded inside functions to avoid pulling heavy deps at MCP startup.
+See #192.
 """
 
-import numpy as np
 from loguru import logger
 
 
@@ -37,6 +39,8 @@ def find_elbow_kneedle(sorted_scores: list[float]) -> int | None:
         >>> find_elbow_kneedle(scores)
         None  # Need at least 3 points
     """
+    import numpy as np
+
     if len(sorted_scores) < 3:
         logger.debug("Kneedle: Too few points (<3), cannot detect elbow")
         return None  # Need at least 3 points for elbow
