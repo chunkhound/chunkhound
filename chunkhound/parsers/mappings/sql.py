@@ -5,20 +5,18 @@ for the universal concept system. It maps SQL's AST nodes to universal
 semantic concepts used by the unified parser.
 
 Supported constructs: CREATE TABLE, CREATE VIEW, CREATE FUNCTION,
-CREATE INDEX, ALTER TABLE, comments, and BEGIN...END blocks.
+CREATE INDEX, CREATE TRIGGER, ALTER TABLE, comments, and BEGIN...END blocks.
 
-Note: CREATE PROCEDURE and CREATE TRIGGER are not supported because
-tree-sitter-sql lacks grammar rules for them (both produce ERROR nodes).
+Note: CREATE PROCEDURE is not supported because tree-sitter-sql lacks a
+grammar rule for it (produces ERROR nodes).
 Tracked upstream: https://github.com/DerekStride/tree-sitter-sql/issues/354
 """
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import BaseMapping
-
-if TYPE_CHECKING:
-    from chunkhound.parsers.universal_engine import UniversalConcept
+from chunkhound.parsers.universal_engine import UniversalConcept
 
 try:
     from tree_sitter import Node as TSNode
@@ -27,9 +25,6 @@ try:
 except ImportError:
     TREE_SITTER_AVAILABLE = False
     TSNode = Any  # type: ignore
-
-# Import UniversalConcept at runtime
-from chunkhound.parsers.universal_engine import UniversalConcept
 
 
 class SqlMapping(BaseMapping):
@@ -55,11 +50,11 @@ class SqlMapping(BaseMapping):
         return ""
 
     def get_comment_query(self) -> str:
-        """Get tree-sitter query pattern for comments."""
-        return """
-        (comment) @comment
-        (marginalia) @comment
+        """Get tree-sitter query pattern for comments.
+
+        Delegates to get_query_for_concept to avoid capture name inconsistency.
         """
+        return self.get_query_for_concept(UniversalConcept.COMMENT) or ""
 
     def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract function name from a function definition node."""
@@ -104,6 +99,8 @@ class SqlMapping(BaseMapping):
             (create_function) @definition
 
             (create_index) @definition
+
+            (create_trigger) @definition
             """
 
         elif concept == UniversalConcept.BLOCK:
@@ -156,6 +153,8 @@ class SqlMapping(BaseMapping):
                 if idx_name:
                     return f"index_{self.get_node_text(idx_name, source).strip()}"
                 return self.get_fallback_name(node, "index")
+            elif node_type == "create_trigger":
+                return f"trigger_{name}" if name else self.get_fallback_name(node, "trigger")
             else:
                 return name if name else self.get_fallback_name(node, "definition")
 
@@ -242,6 +241,9 @@ class SqlMapping(BaseMapping):
                         metadata["target_table"] = self.get_node_text(
                             obj_ref, source
                         ).strip()
+
+                elif def_node.type == "create_trigger":
+                    metadata["kind"] = "trigger"
 
         elif concept == UniversalConcept.BLOCK:
             if "block" in captures:
