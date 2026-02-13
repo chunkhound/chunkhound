@@ -6,21 +6,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-# CRITICAL: Import numpy modules FIRST to prevent DuckDB threading segfaults
-# This must happen before DuckDB operations start in threaded environments
-# See: https://duckdb.org/docs/stable/clients/python/known_issues.html
-try:
-    import numpy
-
-    # CRITICAL: Import numpy.core.multiarray specifically for threading safety
-    # DuckDB docs: "If this module has not been imported from the main thread,
-    # and a different thread during execution attempts to import it this causes
-    # either a deadlock or a crash"
-    import numpy.core.multiarray  # noqa: F401
-except ImportError:
-    # NumPy not available - VSS extension may not work properly
-    pass
-
 # Suppress known SWIG warning from DuckDB Python bindings
 # This warning appears in CI environments and doesn't affect functionality
 import warnings
@@ -60,9 +45,31 @@ class DuckDBConnectionManager:
         """Check if database connection is active."""
         return self.connection is not None
 
+    @staticmethod
+    def _preload_numpy() -> None:
+        """Pre-import numpy to prevent DuckDB threading segfaults.
+
+        Must be called before DuckDB operations start in threaded environments.
+        Deferred from module level to avoid crashing on WDAC systems where
+        numpy's unsigned .pyd files are blocked. See #192.
+        See: https://duckdb.org/docs/stable/clients/python/known_issues.html
+        """
+        try:
+            import numpy  # noqa: F401
+
+            # DuckDB docs: "If this module has not been imported from the main
+            # thread, and a different thread during execution attempts to import
+            # it this causes either a deadlock or a crash"
+            import numpy.core.multiarray  # noqa: F401
+        except ImportError:
+            pass
+
     def connect(self) -> None:
         """Establish database connection and initialize schema with WAL validation."""
         logger.info(f"Connecting to DuckDB database: {self.db_path}")
+
+        # Pre-import numpy before any DuckDB operations for threading safety
+        self._preload_numpy()
 
         # Ensure parent directory exists for file-based databases
         if isinstance(self.db_path, Path):
