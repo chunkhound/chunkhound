@@ -1,5 +1,6 @@
 """Tests for performance diagnostics collection and analysis."""
 
+import asyncio
 import time
 
 from chunkhound.core.diagnostics.batch_metrics import (
@@ -77,6 +78,18 @@ class TestBatchTiming:
         )
         assert timing.db_insert_ms == 0.0
 
+    def test_mark_methods_set_timestamps(self):
+        """Verify mark_* methods set perf_counter timestamps on the handle."""
+        timing = BatchTiming(batch_index=0, chunk_count=10, start_time=0.0)
+        timing.mark_embed_api_start()
+        assert timing.embed_api_start is not None
+        timing.mark_embed_api_end()
+        assert timing.embed_api_end is not None
+        timing.mark_db_insert_start()
+        assert timing.db_insert_start is not None
+        timing.mark_db_insert_end()
+        assert timing.db_insert_end is not None
+
 
 class TestBatchMetricsCollector:
     """Tests for BatchMetricsCollector."""
@@ -84,14 +97,14 @@ class TestBatchMetricsCollector:
     def test_collect_single_batch(self):
         """Verify collector properly records a single batch with timing markers."""
         collector = BatchMetricsCollector()
-        collector.start_batch(0, 30)
-        collector.mark_embed_api_start()
+        timing = collector.start_batch(0, 30)
+        timing.mark_embed_api_start()
         time.sleep(0.01)
-        collector.mark_embed_api_end()
-        collector.mark_db_insert_start()
+        timing.mark_embed_api_end()
+        timing.mark_db_insert_start()
         time.sleep(0.01)
-        collector.mark_db_insert_end()
-        collector.end_batch()
+        timing.mark_db_insert_end()
+        collector.end_batch(timing)
 
         assert len(collector.batches) == 1
         assert collector.batches[0].chunk_count == 30
@@ -103,38 +116,83 @@ class TestBatchMetricsCollector:
         """Verify collector properly records multiple sequential batches."""
         collector = BatchMetricsCollector()
         for i in range(5):
-            collector.start_batch(i, 30 + i)
-            collector.end_batch()
+            timing = collector.start_batch(i, 30 + i)
+            collector.end_batch(timing)
 
         assert len(collector.batches) == 5
         for i, batch in enumerate(collector.batches):
             assert batch.batch_index == i
             assert batch.chunk_count == 30 + i
 
-    def test_current_batch_cleared_after_end(self):
-        """Verify current batch is cleared after calling end_batch."""
-        collector = BatchMetricsCollector()
-        collector.start_batch(0, 30)
-        assert collector._current_batch is not None
-        collector.end_batch()
-        assert collector._current_batch is None
-
-    def test_marks_ignored_without_current_batch(self):
-        """Verify marking methods do nothing when no batch is active."""
-        collector = BatchMetricsCollector()
-        # Should not raise when no current batch
-        collector.mark_embed_api_start()
-        collector.mark_embed_api_end()
-        collector.mark_db_insert_start()
-        collector.mark_db_insert_end()
-        collector.end_batch()  # Should not add anything
-        assert len(collector.batches) == 0
-
     def test_batches_start_empty(self):
         """Verify collector starts with empty batches list."""
         collector = BatchMetricsCollector()
         assert len(collector.batches) == 0
-        assert collector._current_batch is None
+
+    def test_start_batch_returns_handle(self):
+        """Verify start_batch returns a BatchTiming handle owned by caller."""
+        collector = BatchMetricsCollector()
+        timing = collector.start_batch(0, 50)
+        assert isinstance(timing, BatchTiming)
+        assert timing.batch_index == 0
+        assert timing.chunk_count == 50
+        assert timing.start_time > 0
+        assert timing.end_time is None  # not ended yet
+
+    def test_concurrent_handles_independent(self):
+        """Verify multiple handles from same collector are independent."""
+        collector = BatchMetricsCollector()
+        t1 = collector.start_batch(0, 10)
+        t2 = collector.start_batch(1, 20)
+
+        t1.mark_embed_api_start()
+        t2.mark_db_insert_start()
+
+        assert t1.embed_api_start is not None
+        assert t1.db_insert_start is None
+        assert t2.embed_api_start is None
+        assert t2.db_insert_start is not None
+
+        collector.end_batch(t1)
+        collector.end_batch(t2)
+        assert len(collector.batches) == 2
+
+    def test_async_concurrent_batches(self):
+        """Verify 8 concurrent coroutines get independent correct timing data."""
+
+        async def _run():
+            collector = BatchMetricsCollector()
+
+            async def process(batch_idx: int) -> BatchTiming:
+                timing = collector.start_batch(batch_idx, 10 + batch_idx)
+                timing.mark_embed_api_start()
+                await asyncio.sleep(0.01)
+                timing.mark_embed_api_end()
+                timing.mark_db_insert_start()
+                await asyncio.sleep(0.005)
+                timing.mark_db_insert_end()
+                collector.end_batch(timing)
+                return timing
+
+            handles = await asyncio.gather(*[process(i) for i in range(8)])
+            return collector, handles
+
+        collector, handles = asyncio.run(_run())
+
+        assert len(collector.batches) == 8
+
+        # Each batch should have its own independent timing data
+        seen_indices = set()
+        for batch in collector.batches:
+            seen_indices.add(batch.batch_index)
+            assert batch.chunk_count == 10 + batch.batch_index
+            assert batch.total_latency_ms > 0
+            assert batch.embed_api_ms > 0
+            assert batch.db_insert_ms > 0
+            assert batch.end_time is not None
+
+        # All 8 distinct batch indices present
+        assert seen_indices == set(range(8))
 
 
 class TestPerfAnalyzer:
@@ -144,8 +202,8 @@ class TestPerfAnalyzer:
         """Verify regression analysis is skipped with insufficient batches."""
         collector = BatchMetricsCollector()
         for i in range(3):  # Less than min_batches=5
-            collector.start_batch(i, 30)
-            collector.end_batch()
+            timing = collector.start_batch(i, 30)
+            collector.end_batch(timing)
 
         analyzer = PerfAnalyzer(min_batches=5)
         result = analyzer.analyze(collector)
@@ -159,10 +217,13 @@ class TestPerfAnalyzer:
     def test_enough_batches_runs_regression(self):
         """Verify regression analysis runs with sufficient batches."""
         collector = BatchMetricsCollector()
+        # Use synthetic data to avoid time.sleep
         for i in range(10):
-            collector.start_batch(i, 30)
-            time.sleep(0.01)  # Small consistent delay
-            collector.end_batch()
+            timing = BatchTiming(
+                batch_index=i, chunk_count=30,
+                start_time=float(i), end_time=float(i) + 0.1,
+            )
+            collector.batches.append(timing)
 
         analyzer = PerfAnalyzer(min_batches=5)
         result = analyzer.analyze(collector)
@@ -262,8 +323,8 @@ class TestPerfAnalyzer:
         """Verify to_dict produces all required fields."""
         collector = BatchMetricsCollector()
         for i in range(5):
-            collector.start_batch(i, 30)
-            collector.end_batch()
+            timing = collector.start_batch(i, 30)
+            collector.end_batch(timing)
 
         analyzer = PerfAnalyzer(min_batches=5)
         result = analyzer.analyze(collector)
@@ -297,6 +358,24 @@ class TestPerfAnalyzer:
         assert "mean_batch_latency_ms" in summary
         assert "std_batch_latency_ms" in summary
         assert "throughput_chunks_per_sec" in summary
+
+    def test_regression_uses_batch_index_ordering(self):
+        """Verify regression sorts by batch_index and uses it as x-values."""
+        collector = BatchMetricsCollector()
+
+        # Insert batches out of order
+        for i in [5, 2, 8, 0, 3, 7, 1, 4, 6, 9]:
+            timing = BatchTiming(
+                batch_index=i, chunk_count=30,
+                start_time=float(i), end_time=float(i) + 0.1 + (i * 0.01),
+            )
+            collector.batches.append(timing)
+
+        analyzer = PerfAnalyzer(min_batches=5)
+        result = analyzer.analyze(collector)
+
+        # Regression should still work correctly on out-of-order batches
+        assert result.regression is not None
 
 
 class TestRegressionResult:

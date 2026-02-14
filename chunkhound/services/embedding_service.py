@@ -6,7 +6,7 @@ from typing import Any
 from loguru import logger
 from rich.progress import Progress, TaskID
 
-from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector
+from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector, BatchTiming
 from chunkhound.core.types.common import ChunkId
 from chunkhound.core.utils import estimate_tokens
 from chunkhound.interfaces.database_provider import DatabaseProvider
@@ -512,12 +512,17 @@ class EmbeddingService(BaseService):
         semaphore = asyncio.Semaphore(self._max_concurrent_batches)
 
         async def process_batch(
-            batch: list[tuple[ChunkId, str]], batch_num: int, retry_depth: int = 0
+            batch: list[tuple[ChunkId, str]],
+            batch_num: int,
+            retry_depth: int = 0,
         ) -> int:
             """Process a single batch of embeddings."""
             async with semaphore:
-                if self._metrics_collector:
-                    self._metrics_collector.start_batch(batch_num, len(batch))
+                # Timing is only created for top-level calls (retry_depth == 0);
+                # retries have timing=None and skip all instrumentation.
+                timing: BatchTiming | None = None
+                if self._metrics_collector and retry_depth == 0:
+                    timing = self._metrics_collector.start_batch(batch_num, len(batch))
                 try:
                     logger.debug(
                         f"Processing batch {batch_num + 1}/{len(batches)} with {len(batch)} chunks"
@@ -530,11 +535,11 @@ class EmbeddingService(BaseService):
                     # Generate embeddings
                     if not self._embedding_provider:
                         return 0
-                    if self._metrics_collector:
-                        self._metrics_collector.mark_embed_api_start()
+                    if timing:
+                        timing.mark_embed_api_start()
                     embedding_results = await self._embedding_provider.embed(texts)
-                    if self._metrics_collector:
-                        self._metrics_collector.mark_embed_api_end()
+                    if timing:
+                        timing.mark_embed_api_end()
 
                     if len(embedding_results) != len(chunk_ids):
                         logger.warning(
@@ -560,13 +565,13 @@ class EmbeddingService(BaseService):
                         )
 
                     # Store in database with configurable batch size
-                    if self._metrics_collector:
-                        self._metrics_collector.mark_db_insert_start()
+                    if timing:
+                        timing.mark_db_insert_start()
                     stored_count = self._db.insert_embeddings_batch(
                         embeddings_data, self._db_batch_size
                     )
-                    if self._metrics_collector:
-                        self._metrics_collector.mark_db_insert_end()
+                    if timing:
+                        timing.mark_db_insert_end()
                     logger.debug(
                         f"Batch {batch_num + 1} completed: {stored_count} embeddings stored"
                     )
@@ -626,8 +631,8 @@ class EmbeddingService(BaseService):
                     )
                     return 0
                 finally:
-                    if self._metrics_collector:
-                        self._metrics_collector.end_batch()
+                    if timing and self._metrics_collector:
+                        self._metrics_collector.end_batch(timing)
 
         # Create progress task for embedding generation if requested
         embed_task: TaskID | None = None

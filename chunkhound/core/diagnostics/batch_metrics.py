@@ -15,6 +15,22 @@ class BatchTiming:
     db_insert_start: float | None = None
     db_insert_end: float | None = None
 
+    def mark_embed_api_start(self) -> None:
+        """Mark the start of embedding API call."""
+        self.embed_api_start = time.perf_counter()
+
+    def mark_embed_api_end(self) -> None:
+        """Mark the end of embedding API call."""
+        self.embed_api_end = time.perf_counter()
+
+    def mark_db_insert_start(self) -> None:
+        """Mark the start of database insert."""
+        self.db_insert_start = time.perf_counter()
+
+    def mark_db_insert_end(self) -> None:
+        """Mark the end of database insert."""
+        self.db_insert_end = time.perf_counter()
+
     @property
     def total_latency_ms(self) -> float:
         """Total batch processing time in milliseconds."""
@@ -42,39 +58,16 @@ class BatchMetricsCollector:
     """Collects timing metrics across all batches during embedding generation."""
 
     batches: list[BatchTiming] = field(default_factory=list)
-    _current_batch: BatchTiming | None = field(default=None, repr=False)
 
-    def start_batch(self, batch_index: int, chunk_count: int) -> None:
-        """Start timing a new batch."""
-        self._current_batch = BatchTiming(
+    def start_batch(self, batch_index: int, chunk_count: int) -> BatchTiming:
+        """Start timing a new batch. Returns a handle the caller owns."""
+        return BatchTiming(
             batch_index=batch_index,
             chunk_count=chunk_count,
             start_time=time.perf_counter(),
         )
 
-    def mark_embed_api_start(self) -> None:
-        """Mark the start of embedding API call."""
-        if self._current_batch:
-            self._current_batch.embed_api_start = time.perf_counter()
-
-    def mark_embed_api_end(self) -> None:
-        """Mark the end of embedding API call."""
-        if self._current_batch:
-            self._current_batch.embed_api_end = time.perf_counter()
-
-    def mark_db_insert_start(self) -> None:
-        """Mark the start of database insert."""
-        if self._current_batch:
-            self._current_batch.db_insert_start = time.perf_counter()
-
-    def mark_db_insert_end(self) -> None:
-        """Mark the end of database insert."""
-        if self._current_batch:
-            self._current_batch.db_insert_end = time.perf_counter()
-
-    def end_batch(self) -> None:
-        """End timing the current batch and store it."""
-        if self._current_batch:
-            self._current_batch.end_time = time.perf_counter()
-            self.batches.append(self._current_batch)
-            self._current_batch = None
+    def end_batch(self, timing: BatchTiming) -> None:
+        """End timing a batch and store it."""
+        timing.end_time = time.perf_counter()
+        self.batches.append(timing)
