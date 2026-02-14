@@ -77,7 +77,7 @@ def estimate_tokens(
             # Fallback to default estimation when provider not required
             return _estimate_tokens_default(text)
 
-    if provider == "openai" and TIKTOKEN_AVAILABLE:
+    if provider in ("openai", "azure_openai") and TIKTOKEN_AVAILABLE:
         return _estimate_tokens_openai(text, model or "")
     elif provider == "voyageai":
         return _estimate_tokens_voyageai(text)
@@ -120,7 +120,7 @@ def get_chars_to_tokens_ratio(provider: str, model: str = "") -> float:
     This is the inverse of token estimation - useful for calculating
     maximum character limits from token limits.
     """
-    if provider == "openai":
+    if provider in ("openai", "azure_openai"):
         # tiktoken is exact, but for ratio calculations use conservative estimate
         return float(EMBEDDING_CHARS_PER_TOKEN)
     elif provider == "voyageai":
