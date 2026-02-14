@@ -299,7 +299,7 @@ class EmbeddingConfig(BaseSettings):
         if self.provider == "openai":
             # Azure OpenAI always requires API key
             if self.azure_endpoint:
-                return self.api_key is not None
+                return self.api_key is not None and self.api_version is not None
             # For OpenAI provider, only require API key for official endpoints
             if is_official_openai_endpoint(self.base_url):
                 return self.api_key is not None
