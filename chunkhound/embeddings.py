@@ -7,6 +7,8 @@ from loguru import logger
 
 from chunkhound.interfaces.embedding_provider import (
     EmbeddingProvider as InterfaceEmbeddingProvider,
+)
+from chunkhound.interfaces.embedding_provider import (
     RerankResult,
 )
 
@@ -186,8 +188,14 @@ def create_openai_provider(
     rerank_url: str = "/rerank",
     rerank_format: str = "auto",
     rerank_batch_size: int | None = None,
+    api_version: str | None = None,
+    azure_endpoint: str | None = None,
+    azure_deployment: str | None = None,
 ) -> "OpenAIEmbeddingProvider":
     """Create an OpenAI embedding provider with default settings.
+
+    Supports both standard OpenAI and Azure OpenAI endpoints. For Azure,
+    provide azure_endpoint, api_version, and optionally azure_deployment.
 
     Args:
         api_key: OpenAI API key (uses OPENAI_API_KEY env var if None)
@@ -197,6 +205,9 @@ def create_openai_provider(
         rerank_url: Rerank endpoint URL (defaults to /rerank)
         rerank_format: Reranking API format - 'cohere', 'tei', or 'auto' (default: 'auto')
         rerank_batch_size: Max documents per rerank batch (overrides model defaults, bounded by model caps)
+        api_version: Azure OpenAI API version (e.g., '2024-02-01')
+        azure_endpoint: Azure OpenAI endpoint URL (e.g., 'https://myresource.openai.azure.com')
+        azure_deployment: Azure OpenAI deployment name
 
     Returns:
         Configured OpenAI embedding provider
@@ -212,4 +223,7 @@ def create_openai_provider(
         rerank_url=rerank_url,
         rerank_format=rerank_format,
         rerank_batch_size=rerank_batch_size,
+        api_version=api_version,
+        azure_endpoint=azure_endpoint,
+        azure_deployment=azure_deployment,
     )
