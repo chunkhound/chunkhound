@@ -5,8 +5,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from scipy.stats import linregress  # type: ignore[import-untyped]
-
 from .batch_metrics import BatchMetricsCollector, BatchTiming
 
 
@@ -100,11 +98,9 @@ class PerfAnalyzer:
     def __init__(
         self,
         min_batches: int = 5,
-        r_squared_threshold: float = 0.80,
         outlier_sigma: float = 2.0,
     ) -> None:
         self.min_batches = min_batches
-        self.r_squared_threshold = r_squared_threshold
         self.outlier_sigma = outlier_sigma
 
     def analyze(self, collector: BatchMetricsCollector) -> PerformanceDiagnostics:
@@ -142,8 +138,11 @@ class PerfAnalyzer:
 
     def _run_regression(self, batches: list[BatchTiming]) -> RegressionResult:
         """Run linear regression on batch latencies over time."""
-        x = list(range(len(batches)))
-        y = [b.total_latency_ms for b in batches]
+        from scipy.stats import linregress  # type: ignore[import-untyped]
+
+        sorted_batches = sorted(batches, key=lambda b: b.batch_index)
+        x = [b.batch_index for b in sorted_batches]
+        y = [b.total_latency_ms for b in sorted_batches]
 
         result = linregress(x, y)
 
@@ -254,8 +253,8 @@ class PerfAnalyzer:
             return 0.0
 
         start = min(b.start_time for b in batches)
-        end = max(b.end_time for b in batches if b.end_time is not None)
-        return end - start if end else 0.0
+        end = max((b.end_time for b in batches if b.end_time is not None), default=None)
+        return end - start if end is not None else 0.0
 
     def _build_batch_metrics(
         self, batches: list[BatchTiming]
