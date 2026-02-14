@@ -726,7 +726,8 @@ async def run_setup_wizard(target_path: Path, args=None) -> Config | None:
     provider_choice = await _select_provider()
     if provider_choice == "skip":
         formatter.info(
-            "Skipping provider setup. You can configure later in .chunkhound.json"
+            "Skipping provider setup. You can configure later in .chunkhound.json\n"
+            "Need help? See https://chunkhound.github.io/quickstart"
         )
         return None
 
@@ -741,7 +742,9 @@ async def run_setup_wizard(target_path: Path, args=None) -> Config | None:
 
     if not embedding_config:
         formatter.warning(
-            "Setup cancelled. You can configure later using .chunkhound.json"
+            "Setup cancelled. No worries! You can configure later using "
+            ".chunkhound.json\n"
+            "For step-by-step instructions: https://chunkhound.github.io/quickstart"
         )
         return None
 
@@ -756,6 +759,7 @@ async def run_setup_wizard(target_path: Path, args=None) -> Config | None:
         await _run_agent_setup(target_path, formatter)
 
         print("\nReady to start indexing your codebase!")
+        print("Need help? Visit https://chunkhound.github.io or join us at https://discord.gg/BAepHEXXnX")
         # Return a new config object that will pick up the saved file
         return Config(args=args) if args else Config()
     elif status == "cancelled":
@@ -853,7 +857,7 @@ async def _setup_claude_code(target_path: Path, formatter: RichOutputFormatter) 
 
     # Write updated configuration
     if _write_claude_mcp_config(mcp_path, config):
-        formatter.success(f"✓ ChunkHound MCP server added to {mcp_path}")
+        formatter.success(f"ChunkHound MCP server added to {mcp_path}")
         print("You can now use ChunkHound tools directly in Claude Code!")
         print(
             "Claude Code will prompt you to approve this project-scoped "
@@ -862,6 +866,7 @@ async def _setup_claude_code(target_path: Path, formatter: RichOutputFormatter) 
         return True
     else:
         formatter.error(f"Failed to write configuration to {mcp_path}")
+        print("This might be a permissions issue. Try creating the file manually.")
         _show_manual_claude_instructions(formatter, mcp_path)
         return False
 
@@ -876,6 +881,7 @@ def _show_claude_installation_instructions(formatter: RichOutputFormatter) -> No
             "Create .mcp.json file in your project root with ChunkHound configuration",
         ]
     )
+    print("\nNeed help? Check our MCP setup guide: https://chunkhound.github.io/mcp")
 
 
 def _show_manual_claude_instructions(
@@ -900,6 +906,7 @@ def _show_manual_claude_instructions(
                 "Claude Code will prompt to approve the server on first use",
             ]
         )
+    print("\nFull instructions: https://chunkhound.github.io/mcp")
 
 
 def _detect_vscode_workspace(target_path: Path) -> Path | None:
@@ -1025,11 +1032,12 @@ async def _setup_vscode(target_path: Path, formatter: RichOutputFormatter) -> bo
 
         # Write updated configuration
         if _write_vscode_mcp_config(mcp_path, config):
-            formatter.success(f"✓ ChunkHound MCP server added to {mcp_path}")
+            formatter.success(f"ChunkHound MCP server added to {mcp_path}")
             print("You can now use ChunkHound tools in VS Code with GitHub Copilot!")
             return True
         else:
             formatter.error(f"Failed to write configuration to {mcp_path}")
+            print("This might be a permissions issue. Try creating the file manually.")
             _show_manual_vscode_instructions(formatter, mcp_path)
             return False
     else:
@@ -1052,7 +1060,7 @@ async def _setup_vscode(target_path: Path, formatter: RichOutputFormatter) -> bo
 
             if _write_vscode_mcp_config(mcp_path, config):
                 formatter.success(
-                    f"✓ Created VS Code workspace with ChunkHound MCP: {mcp_path}"
+                    f"Created VS Code workspace with ChunkHound MCP: {mcp_path}"
                 )
                 print(
                     "You can now use ChunkHound tools in VS Code with GitHub Copilot!"
@@ -1060,6 +1068,10 @@ async def _setup_vscode(target_path: Path, formatter: RichOutputFormatter) -> bo
                 return True
             else:
                 formatter.error(f"Failed to create {mcp_path}")
+                print(
+                    "This might be a permissions issue. "
+                    "Try creating the file manually."
+                )
                 _show_manual_vscode_instructions(formatter, mcp_path)
                 return False
         else:
@@ -1089,6 +1101,7 @@ def _show_manual_vscode_instructions(
                 "Restart VS Code to load the MCP server",
             ]
         )
+    print("\nFull instructions: https://chunkhound.github.io/mcp")
 
 
 def _show_manual_opencode_instructions(
@@ -1112,6 +1125,7 @@ def _show_manual_opencode_instructions(
                 'Add: { "mcp": { "chunkhound": { "type": "local", "command": ["chunkhound", "mcp"] } }, "$schema": "https://opencode.ai/config.json" }',
             ]
         )
+    print("\nFull instructions: https://chunkhound.github.io/mcp")
 
 
 async def _setup_opencode(target_path: Path, formatter: RichOutputFormatter) -> bool:
@@ -1167,12 +1181,13 @@ async def _setup_opencode(target_path: Path, formatter: RichOutputFormatter) -> 
 
     # Write updated configuration
     if _write_opencode_config(opencode_path, config):
-        formatter.success(f"✓ ChunkHound MCP server added to {opencode_path}")
+        formatter.success(f"ChunkHound MCP server added to {opencode_path}")
         print("You can now use ChunkHound tools directly in OpenCode!")
         print("OpenCode will automatically detect and load the MCP server.")
         return True
     else:
         formatter.error(f"Failed to write configuration to {opencode_path}")
+        print("This might be a permissions issue. Try creating the file manually.")
         _show_manual_opencode_instructions(formatter, opencode_path)
         return False
 
@@ -1202,11 +1217,13 @@ async def _run_agent_setup(target_path: Path, formatter: RichOutputFormatter) ->
             "Agent setup incomplete. ChunkHound will still work via command line."
         )
         print("Run 'chunkhound mcp' to test the MCP server manually.")
+        print("Need help? Visit https://chunkhound.github.io/mcp or https://discord.gg/BAepHEXXnX")
 
 
 async def _configure_voyageai(formatter: RichOutputFormatter) -> dict[str, Any] | None:
     """Configure VoyageAI provider with signup assistance"""
-    print("Excellent choice! VoyageAI offers specialized code embeddings.\n")
+    print("Excellent choice! VoyageAI offers specialized code embeddings.")
+    print("They have a generous free tier to get you started.\n")
 
     # Check for existing API key
     from .env_detector import _detect_voyageai
@@ -1535,7 +1552,7 @@ async def _validate_detected_config(
 async def _validate_voyageai_key(api_key: str, formatter: RichOutputFormatter) -> bool:
     """Test VoyageAI API key with minimal embedding request"""
     try:
-        formatter.info("🔄 Validating API key...")
+        formatter.info("Validating API key...")
 
         # Create a test configuration
         config = EmbeddingConfig(
@@ -1554,6 +1571,7 @@ async def _validate_voyageai_key(api_key: str, formatter: RichOutputFormatter) -
 
     except Exception as e:
         formatter.error(f"Validation failed: {e}")
+        print("Double-check your API key and try again. Get a new key at https://www.voyageai.com")
         return False
 
 
@@ -1562,7 +1580,7 @@ async def _validate_openai_key(
 ) -> bool:
     """Test OpenAI API key with minimal embedding request"""
     try:
-        formatter.info("🔄 Validating API key...")
+        formatter.info("Validating API key...")
 
         # Create a test configuration
         config = EmbeddingConfig(
@@ -1581,6 +1599,7 @@ async def _validate_openai_key(
 
     except Exception as e:
         formatter.error(f"Validation failed: {e}")
+        print("Double-check your API key and try again. Get a new key at https://platform.openai.com/api-keys")
         return False
 
 
@@ -1589,7 +1608,7 @@ async def _validate_openai_compatible(
 ) -> bool:
     """Test OpenAI-compatible endpoint connection"""
     try:
-        formatter.info("🔄 Testing connection...")
+        formatter.info("Testing connection...")
 
         # Create a test configuration
         config_kwargs = {
@@ -1615,6 +1634,10 @@ async def _validate_openai_compatible(
 
     except Exception as e:
         formatter.error(f"Connection failed: {e}")
+        print(
+            "Make sure the endpoint is running and accessible. "
+            "Check the URL and try again."
+        )
         return False
 
 
@@ -1937,6 +1960,7 @@ async def _configure_provider_unified(
         return config_data
     else:
         formatter.error("Configuration validation failed. Please try again.")
+        print("Need help? Visit https://chunkhound.github.io/quickstart or https://discord.gg/BAepHEXXnX")
         return None
 
 
@@ -2019,4 +2043,12 @@ async def _save_configuration(
 
     except Exception as e:
         formatter.error(f"Failed to save configuration: {e}")
+        print(
+            "This might be a permissions issue. "
+            "Try running with appropriate permissions."
+        )
+        print(
+            "Need help? Visit https://chunkhound.github.io "
+            "or https://discord.gg/BAepHEXXnX"
+        )
         return None, "error"

@@ -29,15 +29,18 @@ from chunkhound.core.detection import detect_language
 from chunkhound.core.exceptions import DiskUsageLimitExceededError
 from chunkhound.core.models import Chunk, File
 from chunkhound.core.types.common import FilePath, Language
+from chunkhound.core.utils import estimate_tokens
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
+from chunkhound.parsers.chunk_splitter import (
+    CASTConfig,
+    ChunkMetrics,
+    ChunkSplitter,
+    chunk_to_universal,
+    universal_to_chunk,
+)
 from chunkhound.parsers.universal_parser import UniversalParser
-from chunkhound.utils.hashing import compute_file_hash
-
-from .base_service import BaseService
-from .batch_processor import ParsedFileResult, process_file_batch
-from .chunk_cache_service import ChunkCacheService
 
 # File pattern utilities for directory discovery
 from chunkhound.utils.file_patterns import (
@@ -46,7 +49,11 @@ from chunkhound.utils.file_patterns import (
     walk_directory_tree,
     walk_subtree_worker,
 )
+from chunkhound.utils.hashing import compute_file_hash
 
+from .base_service import BaseService
+from .batch_processor import ParsedFileResult, process_file_batch
+from .chunk_cache_service import ChunkCacheService
 
 # CRITICAL FIX: Force spawn multiprocessing start method to prevent fork + asyncio issues
 # RATIONALE: Linux defaults to 'fork' which is unsafe with asyncio event loops
@@ -149,6 +156,10 @@ class IndexingCoordinator(BaseService):
         # Chunk cache service for content-based comparison
         self._chunk_cache = ChunkCacheService()
 
+        # Chunk size validation (cached for performance)
+        self._chunk_validation_config = CASTConfig()
+        self._chunk_validation_splitter = ChunkSplitter(self._chunk_validation_config)
+
         # Per-run cache for repo-aware ignore engines to avoid repeated tree scans
         # Key: (root, tuple(sources), chignore_file, tuple(cfg_excludes))
         self._ignore_engine_cache: dict[
@@ -233,7 +244,9 @@ class IndexingCoordinator(BaseService):
         or default locations) and extends the provided list.
         """
         try:
-            from chunkhound.utils.ignore_engine import _collect_global_gitignore_patterns
+            from chunkhound.utils.ignore_engine import (
+                _collect_global_gitignore_patterns,
+            )
 
             global_pats = _collect_global_gitignore_patterns()
             if global_pats:
@@ -332,7 +345,7 @@ class IndexingCoordinator(BaseService):
                 pass
             # Linux /proc/meminfo
             try:
-                with open("/proc/meminfo", "r", encoding="utf-8", errors="ignore") as f:
+                with open("/proc/meminfo", encoding="utf-8", errors="ignore") as f:
                     for line in f:
                         if line.startswith("MemAvailable:"):
                             parts = line.split()
@@ -728,7 +741,7 @@ class IndexingCoordinator(BaseService):
                             await on_batch(batch_result)
                         else:
                             on_batch(batch_result)
-                    except Exception as e:
+                    except Exception:
                         # Re-raise all exceptions from on_batch to propagate disk limit errors
                         raise
 
@@ -791,13 +804,74 @@ class IndexingCoordinator(BaseService):
         """
         total_size = 0
         try:
-            for file_path in directory.rglob('*'):
+            for file_path in directory.rglob("*"):
                 if file_path.is_file():
                     total_size += file_path.stat().st_size
         except Exception:
             # If directory traversal fails, return 0 to avoid blocking indexing
             return 0.0
         return total_size / (1024**2)
+
+    def _validate_chunk_sizes(self, chunks: list[Chunk]) -> list[Chunk]:
+        """Validate and split any oversized chunks before persistence.
+
+        Central guard that catches any parser bypasses. Uses the standard
+        ChunkSplitter infrastructure to ensure chunks meet size constraints.
+
+        Args:
+            chunks: List of chunks to validate
+
+        Returns:
+            List of validated chunks (may include splits of oversized chunks)
+        """
+        config = self._chunk_validation_config
+        splitter = self._chunk_validation_splitter
+
+        result = []
+        split_count = 0
+        for chunk in chunks:
+            metrics = ChunkMetrics.from_content(chunk.code or "")
+            estimated_tokens = estimate_tokens(chunk.code or "")
+
+            # Dual constraint: check BOTH character AND token limits
+            chars_exceeded = metrics.non_whitespace_chars > config.max_chunk_size
+            tokens_exceeded = estimated_tokens > config.safe_token_limit
+
+            if chars_exceeded or tokens_exceeded:
+                # Log individual oversized chunk with debugging context
+                preview = (chunk.code or "")[:100].replace("\n", " ").strip()
+                if len(chunk.code or "") > 100:
+                    preview += "..."
+                logger.warning(
+                    f"Oversized chunk: {chunk.file_path}"
+                    f":{chunk.start_line}-{chunk.end_line} "
+                    f"[{chunk.language.value}:{chunk.chunk_type.value}] "
+                    f"symbol={chunk.symbol!r} "
+                    f"chars={metrics.non_whitespace_chars}/{config.max_chunk_size} "
+                    f"tokens={estimated_tokens}/{config.safe_token_limit} "
+                    f"preview={preview!r}"
+                )
+                # Convert to UniversalChunk, validate/split, convert back
+                uchunk = chunk_to_universal(chunk)
+                split_uchunks = splitter.validate_and_split(uchunk)
+                for uc in split_uchunks:
+                    result.append(
+                        universal_to_chunk(
+                            uc,
+                            file_path=chunk.file_path,
+                            file_id=chunk.file_id,
+                            language=chunk.language,
+                        )
+                    )
+                split_count += len(split_uchunks) - 1
+            else:
+                result.append(chunk)
+
+        if split_count > 0:
+            logger.warning(
+                f"Emergency split {split_count} oversized chunks before persistence"
+            )
+        return result
 
     async def _store_parsed_results(
         self,
@@ -826,13 +900,15 @@ class IndexingCoordinator(BaseService):
         disk_limit_error = self._check_disk_usage_limit()
         if disk_limit_error:
             # Add disk limit error to stats for consistent error handling
-            stats["errors"].append({
-                "file": None,  # Global error, not file-specific
-                "error": str(disk_limit_error),
-                "disk_limit_exceeded": True,
-                "current_size_mb": disk_limit_error.current_size_mb,
-                "limit_mb": disk_limit_error.limit_mb,
-            })
+            stats["errors"].append(
+                {
+                    "file": None,  # Global error, not file-specific
+                    "error": str(disk_limit_error),
+                    "disk_limit_exceeded": True,
+                    "current_size_mb": disk_limit_error.current_size_mb,
+                    "limit_mb": disk_limit_error.limit_mb,
+                }
+            )
             # Return early - don't process any files if disk limit exceeded
             return stats
 
@@ -957,6 +1033,8 @@ class IndexingCoordinator(BaseService):
 
                         # Store new/modified chunks (pass models directly)
                         chunks_to_store = chunk_diff.added + chunk_diff.modified
+                        # Validate chunk sizes before persistence (central guard)
+                        chunks_to_store = self._validate_chunk_sizes(chunks_to_store)
                         ids = (
                             self._db.insert_chunks_batch(chunks_to_store)
                             if chunks_to_store
@@ -964,9 +1042,13 @@ class IndexingCoordinator(BaseService):
                         )
                     else:
                         # No existing chunks - store all as new
+                        # Validate chunk sizes before persistence (central guard)
+                        new_chunk_models = self._validate_chunk_sizes(new_chunk_models)
                         ids = self._db.insert_chunks_batch(new_chunk_models)
                 else:
                     # New file - store all
+                    # Validate chunk sizes before persistence (central guard)
+                    new_chunk_models = self._validate_chunk_sizes(new_chunk_models)
                     ids = self._db.insert_chunks_batch(new_chunk_models)
 
                 stats["chunk_ids_needing_embeddings"].extend(ids)
@@ -1292,7 +1374,6 @@ class IndexingCoordinator(BaseService):
                 if isinstance(stats_part, tuple):
                     stats_part = stats_part[0]
 
-
                 agg_total_files += stats_part.get("total_files", 0)
                 agg_total_chunks += stats_part.get("total_chunks", 0)
                 agg_errors.extend(stats_part.get("errors", []))
@@ -1420,8 +1501,6 @@ class IndexingCoordinator(BaseService):
                 "skipped_filtered": skipped_filtered,
             }
 
-
-
         except Exception as e:
             import traceback
 
@@ -1458,7 +1537,7 @@ class IndexingCoordinator(BaseService):
         """
         try:
             return compute_file_hash(file_path)
-        except (OSError, IOError) as e:
+        except OSError as e:
             rel_path = self._get_relative_path(file_path).as_posix()
             logger.warning(f"Failed to compute hash for {rel_path}: {e}")
             return None
@@ -1525,6 +1604,9 @@ class IndexingCoordinator(BaseService):
         """
         if not chunk_models:
             return []
+
+        # Validate chunk sizes before persistence (central guard)
+        chunk_models = self._validate_chunk_sizes(chunk_models)
 
         # Use batch insertion for optimal performance
         chunk_ids = self._db.insert_chunks_batch(chunk_models)
@@ -1717,8 +1799,8 @@ class IndexingCoordinator(BaseService):
             except Exception as e:
                 if "transaction is aborted" in str(e).lower():
                     logger.warning(
-                        f"[IndexCoord] Transaction aborted during embedding insertion, "
-                        f"attempting recovery and retry"
+                        "[IndexCoord] Transaction aborted during embedding insertion, "
+                        "attempting recovery and retry"
                     )
                     # Try to clean up the aborted transaction
                     try:
@@ -1792,11 +1874,9 @@ class IndexingCoordinator(BaseService):
         top_level_items = []
         # Use effective config excludes (includes defaults even when sentinel is set)
         effective_excludes = list(
-            (
-                self.config.indexing.get_effective_config_excludes()
-                if self.config and getattr(self.config, "indexing", None)
-                else []
-            )
+            self.config.indexing.get_effective_config_excludes()
+            if self.config and getattr(self.config, "indexing", None)
+            else []
         )
         # Add global gitignore patterns to effective excludes
         self._extend_with_global_gitignore(effective_excludes)
@@ -2198,10 +2278,8 @@ class IndexingCoordinator(BaseService):
                 for item in directory.iterdir():
                     try:
                         if any(
-                            (
-                                item.resolve().is_relative_to(rr.resolve())
-                                for rr in repo_roots
-                            )
+                            item.resolve().is_relative_to(rr.resolve())
+                            for rr in repo_roots
                         ):
                             continue
                     except Exception:
@@ -2348,7 +2426,6 @@ class IndexingCoordinator(BaseService):
         of Git results. Non-repo portions of the directory are scanned using the
         Python walker while pruning repo subtrees.
         """
-        from fnmatch import fnmatch as _fnmatch
 
         try:
             # Quick probe: ensure git exists
@@ -2360,12 +2437,14 @@ class IndexingCoordinator(BaseService):
             return None
 
         try:
-            from chunkhound.utils.git_discovery import (
-                list_repo_files_via_git as _git_list,
+            from chunkhound.utils.file_patterns import (
+                load_gitignore_patterns as _load_gi,
             )
             from chunkhound.utils.file_patterns import (
                 walk_directory_tree as _walk,
-                load_gitignore_patterns as _load_gi,
+            )
+            from chunkhound.utils.git_discovery import (
+                list_repo_files_via_git as _git_list,
             )
         except Exception:
             return None
@@ -2715,10 +2794,10 @@ class IndexingCoordinator(BaseService):
         if not files and getattr(ignore_engine_obj, "matches", None):
             try:
                 import os as _os
-                from chunkhound.utils.file_patterns import should_include_file as _inc
-                from chunkhound.utils.file_patterns import compile_pattern as _cp
-                from fnmatch import translate as _translate
                 from pathlib import Path as _Path
+
+                from chunkhound.utils.file_patterns import compile_pattern as _cp
+                from chunkhound.utils.file_patterns import should_include_file as _inc
 
                 # Pre-compile include patterns for a minimal filter
                 pat_cache = {}

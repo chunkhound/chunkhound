@@ -20,6 +20,7 @@ from chunkhound.core.types.common import (
     Language,
     LineNumber,
 )
+from chunkhound.parsers.chunk_splitter import CASTConfig, ChunkSplitter
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
@@ -34,9 +35,14 @@ except ImportError:
 class PDFMapping(BaseMapping):
     """PDF-specific mapping for universal concepts using text extraction."""
 
-    def __init__(self) -> None:
-        """Initialize PDF mapping."""
+    def __init__(self, cast_config: CASTConfig | None = None) -> None:
+        """Initialize PDF mapping.
+
+        Args:
+            cast_config: Configuration for cAST algorithm. Defaults to CASTConfig().
+        """
         super().__init__(Language.PDF)
+        self._splitter = ChunkSplitter(cast_config or CASTConfig())
 
     def parse_pdf_content(
         self, content_bytes: bytes, file_path: Path | None, file_id: FileId | None
@@ -95,42 +101,39 @@ class PDFMapping(BaseMapping):
                     if not paragraph.strip():
                         continue
 
+                    para_lines = len(paragraph.split("\n"))
+
                     # Only create chunk if it has meaningful content
                     if len(paragraph.strip()) >= 50:  # Minimum content threshold
-                        para_lines = len(paragraph.split("\n"))
-
-                        chunk = Chunk(
-                            symbol=f"page_{page_num + 1}_paragraph_{para_idx + 1}",
-                            start_line=LineNumber(current_line),
-                            end_line=LineNumber(current_line + para_lines - 1),
-                            code=paragraph,
-                            chunk_type=ChunkType.PARAGRAPH,
-                            file_id=file_id or FileId(0),
+                        chunks.extend(self._splitter.validate_and_convert_text(
+                            content=paragraph,
+                            name=f"page_{page_num + 1}_paragraph_{para_idx + 1}",
+                            start_line=current_line,
+                            end_line=current_line + para_lines - 1,
+                            file_path=file_path,
+                            file_id=file_id,
                             language=Language.PDF,
-                            file_path=FilePath(str(file_path)) if file_path else None,
-                        )
-                        chunks.append(chunk)
+                        ))
                         current_line += para_lines
                     else:
                         # Still increment line counter for small paragraphs
-                        current_line += len(paragraph.split("\n"))
+                        current_line += para_lines
 
                 # If no paragraphs were extracted, create a single page chunk
                 if not any(
                     c.symbol.startswith(f"page_{page_num + 1}_") for c in chunks
                 ):
                     page_lines = len(page_text.split("\n"))
-                    chunk = Chunk(
-                        symbol=f"page_{page_num + 1}_content",
-                        start_line=LineNumber(page_start_line),
-                        end_line=LineNumber(current_line + page_lines - 1),
-                        code=page_text,
-                        chunk_type=ChunkType.PARAGRAPH,
-                        file_id=file_id or FileId(0),
+
+                    chunks.extend(self._splitter.validate_and_convert_text(
+                        content=page_text,
+                        name=f"page_{page_num + 1}_content",
+                        start_line=page_start_line,
+                        end_line=current_line + page_lines - 1,
+                        file_path=file_path,
+                        file_id=file_id,
                         language=Language.PDF,
-                        file_path=FilePath(str(file_path)) if file_path else None,
-                    )
-                    chunks.append(chunk)
+                    ))
                     current_line += page_lines
 
             doc.close()

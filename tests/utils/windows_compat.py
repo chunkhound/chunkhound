@@ -25,7 +25,7 @@ def is_windows() -> bool:
 
 def normalize_path_for_comparison(path: str | Path) -> str:
     """Normalize path for cross-platform comparison.
-    
+
     On Windows, resolves short path names (8.3 format) to full paths.
     """
     path_obj = Path(path)
@@ -62,7 +62,7 @@ def path_contains(parent: str | Path, child: str | Path) -> bool:
 @contextmanager
 def database_cleanup_context(provider: Any = None) -> Generator[None, None, None]:
     """Context manager for proper database cleanup on Windows.
-    
+
     Args:
         provider: Database provider to cleanup (optional)
     """
@@ -74,7 +74,7 @@ def database_cleanup_context(provider: Any = None) -> Generator[None, None, None
 
 def cleanup_database_resources(provider: Any = None) -> None:
     """Cleanup database resources with Windows-specific handling.
-    
+
     Args:
         provider: Database provider to cleanup (optional)
     """
@@ -101,7 +101,7 @@ def cleanup_database_resources(provider: Any = None) -> None:
 @contextmanager
 def windows_safe_tempdir() -> Generator[Path, None, None]:
     """Create a temporary directory with Windows-safe cleanup.
-    
+
     Uses database cleanup utilities to ensure proper resource cleanup
     before attempting to delete the directory.
     """
@@ -130,11 +130,11 @@ def windows_safe_tempdir() -> Generator[Path, None, None]:
 
 def wait_for_file_release(file_path: Path, max_attempts: int = 10) -> bool:
     """Wait for a file to be released on Windows.
-    
+
     Args:
         file_path: Path to file to check
         max_attempts: Maximum number of attempts
-        
+
     Returns:
         True if file was released, False if still locked
     """
@@ -187,6 +187,9 @@ def should_use_polling() -> bool:
     return is_windows() and is_ci()
 
 
+POLLING_STABILIZATION_DELAY: float = 1.0  # Seconds to wait for first poll iteration
+
+
 def get_fs_event_timeout() -> float:
     """Get appropriate timeout for filesystem event detection.
 
@@ -196,6 +199,17 @@ def get_fs_event_timeout() -> float:
     if is_ci():
         return 10.0 if IS_WINDOWS else 5.0
     return 3.0
+
+
+async def stabilize_polling_monitor() -> None:
+    """Wait for polling monitor to complete first iteration on Windows CI.
+
+    No-op on platforms using native filesystem events.
+    """
+    if should_use_polling():
+        import asyncio
+
+        await asyncio.sleep(POLLING_STABILIZATION_DELAY)
 
 
 async def wait_for_indexed(

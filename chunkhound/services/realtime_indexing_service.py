@@ -12,18 +12,19 @@ Architecture:
 """
 
 import asyncio
+import gc
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from loguru import logger
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
-from chunkhound.utils.windows_constants import IS_WINDOWS
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices
+from chunkhound.utils.windows_constants import IS_WINDOWS
 
 
 def normalize_file_path(path: Path | str) -> str:
@@ -51,7 +52,9 @@ class SimpleEventHandler(FileSystemEventHandler):
             self._root = root_path.resolve()
         else:
             try:
-                self._root = (config.target_dir if config and config.target_dir else Path.cwd()).resolve()
+                self._root = (
+                    config.target_dir if config and config.target_dir else Path.cwd()
+                ).resolve()
             except Exception:
                 self._root = Path.cwd().resolve()
 
@@ -121,18 +124,31 @@ class SimpleEventHandler(FileSystemEventHandler):
         # Repo-aware ignore engine (lazy init)
         try:
             if self._engine is None:
-                from chunkhound.utils.ignore_engine import build_repo_aware_ignore_engine
+                from chunkhound.utils.ignore_engine import (
+                    build_repo_aware_ignore_engine,
+                )
+
                 sources = self.config.indexing.resolve_ignore_sources()
                 cfg_ex = self.config.indexing.get_effective_config_excludes()
                 chf = self.config.indexing.chignore_file
-                overlay = bool(getattr(self.config.indexing, "workspace_gitignore_nonrepo", False))
-                self._engine = build_repo_aware_ignore_engine(self._root, sources, chf, cfg_ex, workspace_root_only_gitignore=overlay)
+                overlay = bool(
+                    getattr(self.config.indexing, "workspace_gitignore_nonrepo", False)
+                )
+                self._engine = build_repo_aware_ignore_engine(
+                    self._root,
+                    sources,
+                    chf,
+                    cfg_ex,
+                    workspace_root_only_gitignore=overlay,
+                )
         except Exception:
             self._engine = None
 
         # Exclude via engine
         try:
-            if self._engine is not None and self._engine.matches(file_path, is_dir=False):
+            if self._engine is not None and self._engine.matches(
+                file_path, is_dir=False
+            ):
                 return False
         except Exception:
             pass
@@ -141,14 +157,19 @@ class SimpleEventHandler(FileSystemEventHandler):
         try:
             if self._include_patterns is None:
                 from chunkhound.utils.file_patterns import normalize_include_patterns
+
                 inc = list(self.config.indexing.include)
                 self._include_patterns = normalize_include_patterns(inc)
 
             from chunkhound.utils.file_patterns import should_include_file
-            return should_include_file(file_path, self._root, self._include_patterns, self._pattern_cache)
+
+            return should_include_file(
+                file_path, self._root, self._include_patterns, self._pattern_cache
+            )
         except Exception:
             # Fallback to Language-based detection if include matching fails
             from chunkhound.core.types.common import Language
+
             if file_path.suffix.lower() in Language.get_all_extensions():
                 return True
             if file_path.name.lower() in Language.get_all_filename_patterns():
@@ -226,7 +247,9 @@ class RealtimeIndexingService:
         self._debounce_delay = 0.5  # 500ms delay from research
         self._debounce_tasks: set[asyncio.Task] = set()  # Track active debounce tasks
 
-        self._recent_file_events: dict[str, tuple[str, float]] = {}  # Layer 3: event dedup
+        self._recent_file_events: dict[
+            str, tuple[str, float]
+        ] = {}  # Layer 3: event dedup
 
         # Background scan state
         self.scan_iterator: Iterator | None = None
@@ -469,78 +492,100 @@ class RealtimeIndexingService:
         known_files: dict[Path, int] = {}
 
         # Create a simple event handler for shouldIndex check once
-        simple_handler = SimpleEventHandler(None, self.config, None, root_path=watch_path)
+        simple_handler = SimpleEventHandler(
+            None, self.config, None, root_path=watch_path
+        )
 
         # Use a shorter interval during the first few seconds to ensure
         # freshly created files are detected quickly after startup/fallback.
         polling_start = time.time()
 
-        while True:
-            try:
-                current_files: dict[Path, int] = {}
-                files_checked = 0
+        try:
+            while True:
+                try:
+                    current_files: dict[Path, int] = {}
+                    files_checked = 0
 
-                # Walk directory tree but with limits to avoid hanging
-                for file_path in watch_path.rglob("*"):
+                    # Walk directory tree but with limits to avoid hanging
+                    # Store generator to ensure cleanup on cancellation
+                    rglob_gen = watch_path.rglob("*")
                     try:
-                        if file_path.is_file():
-                            files_checked += 1
-                            if simple_handler._should_index(file_path):
-                                try:
-                                    current_mtime = file_path.stat().st_mtime_ns
-                                except OSError:
-                                    continue
-
-                                current_files[file_path] = current_mtime
-
-                                if file_path not in known_files:
-                                    # New file detected
-                                    logger.debug(
-                                        f"Polling detected new file: {file_path}"
+                        for file_path in rglob_gen:
+                            try:
+                                if file_path.is_file():
+                                    files_checked += 1
+                                    await self._process_polled_file(
+                                        file_path,
+                                        simple_handler,
+                                        known_files,
+                                        current_files,
                                     )
-                                    self._debug(
-                                        f"polling detected new file: {file_path}"
-                                    )
-                                    await self.add_file(file_path, priority="change")
-                                elif known_files[file_path] != current_mtime:
-                                    # Modified file detected
-                                    logger.debug(
-                                        f"Polling detected modified file: {file_path}"
-                                    )
-                                    self._debug(
-                                        f"polling detected modified file: {file_path}"
-                                    )
-                                    await self.add_file(file_path, priority="change")
+                                if files_checked % 100 == 0:
+                                    await asyncio.sleep(0)
+                                    if files_checked > 5000:
+                                        logger.warning(
+                                            f"Polling checked {files_checked} files,"
+                                            " skipping rest",
+                                        )
+                                        break
+                            except (OSError, PermissionError):
+                                continue
+                    finally:
+                        rglob_gen.close()
 
-                        # Yield control periodically and limit total files checked
-                        if files_checked % 100 == 0:
-                            await asyncio.sleep(0)  # Yield control
-                            if files_checked > 5000:  # Limit to prevent hanging
-                                logger.warning(
-                                    f"Polling checked {files_checked} files, skipping rest to avoid blocking"
-                                )
-                                break
-                    except (OSError, PermissionError):
-                        # Skip files we can't access
-                        continue
+                    # Check for deleted files
+                    deleted = set(known_files.keys()) - set(current_files.keys())
+                    for file_path in deleted:
+                        logger.debug(f"Polling detected deleted file: {file_path}")
+                        await self.remove_file(file_path)
+                        self._debug(f"polling detected deleted file: {file_path}")
 
-                # Check for deleted files
-                deleted = set(known_files.keys()) - set(current_files.keys())
-                for file_path in deleted:
-                    logger.debug(f"Polling detected deleted file: {file_path}")
-                    await self.remove_file(file_path)
-                    self._debug(f"polling detected deleted file: {file_path}")
+                    known_files = current_files
 
-                known_files = current_files
+                    # Adaptive poll interval: 0.5s for the first 30s, then 3s
+                    # Extended fast polling window ensures reliable detection during
+                    # multi-file test sequences on Windows CI where setup + indexing
+                    # can consume the initial fast-polling budget
+                    elapsed = time.time() - polling_start
+                    interval = 0.5 if elapsed < 30.0 else 3.0
+                    await asyncio.sleep(interval)
 
-                # Adaptive poll interval: 1s for the first 10s, then 5s
-                elapsed = time.time() - polling_start
-                interval = 1.0 if elapsed < 10.0 else 5.0
-                await asyncio.sleep(interval)
+                except Exception as e:
+                    logger.error(f"Polling monitor error: {e}")
+                    await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            logger.debug("Polling monitor cancelled")
+            raise
+        finally:
+            # Force cleanup of any lingering file handles on Windows
+            gc.collect()
+            logger.debug("Polling monitor stopped")
 
-            except Exception as e:
-                logger.error(f"Polling monitor error: {e}")
-                await asyncio.sleep(5)
+    async def _process_polled_file(
+        self,
+        file_path: Path,
+        handler: SimpleEventHandler,
+        known_files: dict[Path, int],
+        current_files: dict[Path, int],
+    ) -> None:
+        """Check a single file for changes during polling."""
+        if not handler._should_index(file_path):  # noqa: SLF001
+            return
+        try:
+            current_mtime = file_path.stat().st_mtime_ns
+        except OSError:
+            return
+
+        current_files[file_path] = current_mtime
+
+        if file_path not in known_files:
+            logger.debug(f"Polling detected new file: {file_path}")
+            self._debug(f"polling detected new file: {file_path}")
+            await self.add_file(file_path, priority="change")
+        elif known_files[file_path] != current_mtime:
+            logger.debug(f"Polling detected modified file: {file_path}")
+            self._debug(f"polling detected modified file: {file_path}")
+            await self.add_file(file_path, priority="change")
 
     async def add_file(self, file_path: Path, priority: str = "change") -> None:
         """Add file to processing queue with deduplication and debouncing."""
@@ -604,9 +649,17 @@ class RealtimeIndexingService:
                 current_time = time.time()
 
                 if file_key in self._recent_file_events:
-                    last_event_type, last_event_time = self._recent_file_events[file_key]
-                    if last_event_type == event_type and (current_time - last_event_time) < self._EVENT_DEDUP_WINDOW_SECONDS:
-                        logger.debug(f"Suppressing duplicate {event_type} event for {file_path} (within {self._EVENT_DEDUP_WINDOW_SECONDS}s window)")
+                    last_event_type, last_event_time = self._recent_file_events[
+                        file_key
+                    ]
+                    if (
+                        last_event_type == event_type
+                        and (current_time - last_event_time)
+                        < self._EVENT_DEDUP_WINDOW_SECONDS
+                    ):
+                        logger.debug(
+                            f"Suppressing duplicate {event_type} event for {file_path} (within {self._EVENT_DEDUP_WINDOW_SECONDS}s window)"
+                        )
                         self._debug(f"suppressed duplicate {event_type}: {file_path}")
                         self.event_queue.task_done()
                         continue
@@ -618,7 +671,8 @@ class RealtimeIndexingService:
                 if len(self._recent_file_events) > 1000:
                     cutoff = current_time - self._EVENT_HISTORY_RETENTION_SECONDS
                     self._recent_file_events = {
-                        k: v for k, v in self._recent_file_events.items()
+                        k: v
+                        for k, v in self._recent_file_events.items()
                         if v[1] > cutoff
                     }
 
@@ -757,7 +811,9 @@ class RealtimeIndexingService:
                     try:
                         await self.services.indexing_coordinator.generate_missing_embeddings()
                     except Exception as e:
-                        logger.warning(f"Embedding generation failed in realtime (embed pass): {e}")
+                        logger.warning(
+                            f"Embedding generation failed in realtime (embed pass): {e}"
+                        )
                     continue
 
                 # Skip embeddings for initial and change events to keep loop responsive.
@@ -835,4 +891,3 @@ class RealtimeIndexingService:
         except asyncio.TimeoutError:
             logger.warning(f"Monitoring not ready after {timeout}s")
             return False
-

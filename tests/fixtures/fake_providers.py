@@ -6,6 +6,7 @@ the complete code research pipeline in CI/CD without external dependencies.
 
 import asyncio
 import math
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -171,16 +172,16 @@ class FakeLLMProvider(LLMProvider):
             "completion_tokens": self._completion_tokens,
         }
 
-    def get_synthesis_concurrency(self) -> int:
-        """Get recommended concurrency for parallel synthesis operations."""
-        return 3  # Conservative default matching LLMProvider interface
-
 
 class FakeEmbeddingProvider:
     """Fake embedding provider that returns deterministic vectors.
 
     Generates consistent embeddings based on text content hash,
     allowing reproducible tests without API calls.
+
+    NOTE: Because each text gets a unique hash-based vector, query embeddings
+    won't match stored embeddings. For tests requiring semantic search matches,
+    use ConstantEmbeddingProvider instead.
     """
 
     def __init__(
@@ -487,3 +488,171 @@ class FakeEmbeddingProvider:
             results = results[:top_k]
 
         return results
+
+
+class ConstantEmbeddingProvider(FakeEmbeddingProvider):
+    """Embedding provider that returns identical vectors for all inputs.
+
+    Use this for tests that require semantic search to find matches, since
+    any query will match any stored embedding with perfect similarity.
+    """
+
+    def _generate_deterministic_vector(self, text: str) -> list[float]:
+        """Return constant unit vector (all components equal)."""
+        value = 1.0 / (self._dims**0.5)
+        return [value] * self._dims
+
+
+class ValidatingEmbeddingProvider(FakeEmbeddingProvider):
+    """Embedding provider that validates chunk size constraints.
+
+    Intercepts all texts sent to embed() and validates they conform
+    to the min/max chunk size constraints:
+    - max_chunk_size: 1200 non-whitespace chars
+    - min_chunk_size: 25 non-whitespace chars (soft threshold)
+    - safe_token_limit: 6000 tokens (estimated as len(text) // 3)
+
+    Use this for e2e tests that verify all parsers respect chunk size limits.
+    """
+
+    def __init__(
+        self,
+        max_chunk_size: int = 1200,
+        min_chunk_size: int = 25,
+        safe_token_limit: int = 6000,
+        **kwargs: Any,
+    ):
+        """Initialize validating embedding provider.
+
+        Args:
+            max_chunk_size: Maximum non-whitespace chars per chunk (default 1200)
+            min_chunk_size: Soft threshold for suspiciously small chunks (default 25)
+            safe_token_limit: Maximum estimated tokens per chunk (default 6000)
+            **kwargs: Arguments passed to FakeEmbeddingProvider
+        """
+        super().__init__(**kwargs)
+        self.max_chunk_size = max_chunk_size
+        self.min_chunk_size = min_chunk_size
+        self.safe_token_limit = safe_token_limit
+        self.violations: list[dict[str, Any]] = []
+        self.all_texts: list[str] = []
+        self.chunk_stats: dict[str, Any] = {
+            "total": 0,
+            "min_size": float("inf"),
+            "max_size": 0,
+            "min_tokens": float("inf"),
+            "max_tokens": 0,
+        }
+
+    def _extract_language_from_header(self, text: str) -> str | None:
+        """Extract language from embedding header if present.
+
+        Header format: "# path/to/file.py (python)\n"
+        Returns language string (lowercase) or None if not found.
+        """
+        if not text.startswith("# "):
+            return None
+        # Look for language in parentheses within first 200 chars
+        match = re.search(r"\((\w+)\)\n", text[:200])
+        return match.group(1).lower() if match else None
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        """Generate embeddings while validating chunk size constraints."""
+        for text in texts:
+            self.all_texts.append(text)
+            # Measure non-whitespace chars (same as ChunkMetrics.from_content)
+            non_ws_chars = len(re.sub(r"\s", "", text))
+            # Estimate tokens (conservative: len // 3)
+            estimated_tokens = len(text) // 3
+            # Extract language from header for violation tracking
+            language = self._extract_language_from_header(text)
+
+            # Update stats
+            self.chunk_stats["total"] += 1
+            self.chunk_stats["min_size"] = min(
+                self.chunk_stats["min_size"], non_ws_chars
+            )
+            self.chunk_stats["max_size"] = max(
+                self.chunk_stats["max_size"], non_ws_chars
+            )
+            self.chunk_stats["min_tokens"] = min(
+                self.chunk_stats["min_tokens"], estimated_tokens
+            )
+            self.chunk_stats["max_tokens"] = max(
+                self.chunk_stats["max_tokens"], estimated_tokens
+            )
+
+            # Validate max_chunk_size (non-whitespace chars)
+            if non_ws_chars > self.max_chunk_size:
+                self.violations.append(
+                    {
+                        "type": "max_chars_exceeded",
+                        "non_ws_chars": non_ws_chars,
+                        "limit": self.max_chunk_size,
+                        "text_preview": text[:300],
+                        "language": language,
+                    }
+                )
+
+            # Validate safe_token_limit
+            if estimated_tokens > self.safe_token_limit:
+                self.violations.append(
+                    {
+                        "type": "max_tokens_exceeded",
+                        "estimated_tokens": estimated_tokens,
+                        "limit": self.safe_token_limit,
+                        "text_preview": text[:300],
+                        "language": language,
+                    }
+                )
+
+            # Soft threshold: flag suspiciously small chunks
+            if non_ws_chars < self.min_chunk_size:
+                self.violations.append(
+                    {
+                        "type": "suspiciously_small",
+                        "non_ws_chars": non_ws_chars,
+                        "threshold": self.min_chunk_size,
+                        "text_preview": text[:300],
+                        "language": language,
+                    }
+                )
+
+        return await super().embed(texts)
+
+    def get_violations_by_type(self, violation_type: str) -> list[dict[str, Any]]:
+        """Get all violations of a specific type."""
+        return [v for v in self.violations if v["type"] == violation_type]
+
+    def get_violations_by_languages(
+        self, violation_type: str, languages: set[str]
+    ) -> list[dict[str, Any]]:
+        """Get violations of a type from specific languages (lowercase names)."""
+        return [
+            v
+            for v in self.violations
+            if v["type"] == violation_type and v.get("language") in languages
+        ]
+
+    def get_violations_excluding_languages(
+        self, violation_type: str, excluded_languages: set[str]
+    ) -> list[dict[str, Any]]:
+        """Get violations of a type excluding specific languages (lowercase names)."""
+        return [
+            v
+            for v in self.violations
+            if v["type"] == violation_type
+            and v.get("language") not in excluded_languages
+        ]
+
+    def reset_tracking(self) -> None:
+        """Reset all tracking data."""
+        self.violations = []
+        self.all_texts = []
+        self.chunk_stats = {
+            "total": 0,
+            "min_size": float("inf"),
+            "max_size": 0,
+            "min_tokens": float("inf"),
+            "max_tokens": 0,
+        }

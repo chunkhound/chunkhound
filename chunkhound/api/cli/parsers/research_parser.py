@@ -18,8 +18,8 @@ def add_research_subparser(subparsers: Any) -> argparse.ArgumentParser:
     """
     research_parser = subparsers.add_parser(
         "research",
-        help="Perform deep code research",
-        description="Answer complex questions about codebase architecture and patterns. Synthesis budgets scale automatically based on repository size.",
+        help="ChunkHound's flagship capability: comprehensive architectural reports",
+        description="Get comprehensive architectural reports instead of file lists. Combines semantic search, symbol discovery, and intelligent synthesis to answer complex questions about your codebase. Synthesis budgets scale automatically based on repository size.",
     )
 
     # Required query argument

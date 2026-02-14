@@ -5,18 +5,23 @@ from __future__ import annotations
 import logging
 import os
 import re
+from bisect import bisect_left
 from collections import Counter
+from collections.abc import Sequence
 from contextlib import contextmanager
-import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence
-from bisect import bisect_left
 from time import perf_counter
 
 from chunkhound.core.models.chunk import Chunk
-from chunkhound.core.types.common import ChunkType, FileId, Language, LineNumber
+from chunkhound.core.types.common import ChunkType, FileId, Language
 from chunkhound.interfaces.language_parser import LanguageParser, ParseResult
+from chunkhound.parsers.chunk_splitter import (
+    CASTConfig,
+    ChunkSplitter,
+    universal_to_chunk,
+)
+from chunkhound.parsers.universal_engine import UniversalChunk, UniversalConcept
 from chunkhound.parsers.universal_parser import UniversalParser
 from chunkhound.parsers.yaml_template_sanitizer import sanitize_helm_templates
 from chunkhound.utils.chunk_deduplication import deduplicate_chunks
@@ -40,8 +45,11 @@ class RapidYamlParser(LanguageParser):
 
     _KEY_NODE_TYPES = {"KEYVAL", "KEYMAP", "KEYSEQ"}
 
-    def __init__(self, fallback: UniversalParser) -> None:
+    def __init__(
+        self, fallback: UniversalParser, cast_config: CASTConfig | None = None
+    ) -> None:
         self._fallback = fallback
+        self._cast_config = cast_config or CASTConfig()
         self._enabled = not _env_wants_tree_sitter()
         self._ryml = None
         self._tree = None
@@ -73,7 +81,8 @@ class RapidYamlParser(LanguageParser):
             except Exception as exc:  # pragma: no cover - import-time guard
                 self._enabled = False
                 logger.info(
-                    "RapidYAML disabled (import failure): %s. Falling back to tree-sitter.",
+                    "RapidYAML disabled (import failure): %s."
+                    " Falling back to tree-sitter.",
                     exc,
                 )
 
@@ -119,7 +128,8 @@ class RapidYamlParser(LanguageParser):
         file_id: FileId | None = None,
     ) -> list[Chunk]:
         # Denylist: skip ryml attempts for known-bad paths (no tree-sitter fallback)
-        if file_path is not None and str(file_path) in getattr(self, "_denylist_paths", set()):
+        denylist = getattr(self, "_denylist_paths", set())
+        if file_path is not None and str(file_path) in denylist:
             self._count_fallback_ts += 1
             return []
 
@@ -130,7 +140,6 @@ class RapidYamlParser(LanguageParser):
         sanitized = sanitize_helm_templates(content)
         self._t_sanitize += perf_counter() - t0
         effective_content = sanitized.text
-        fallback_source = effective_content if sanitized.changed else content
         if sanitized.changed:
             self._count_sanitized += 1
             summary = _summarize_rewrites(sanitized.rewrites)
@@ -165,7 +174,7 @@ class RapidYamlParser(LanguageParser):
         if _has_complex_keys(effective_content):
             path_str = str(file_path) if file_path else "<memory>"
             logger.debug(
-                "RapidYAML skipped %s: detected complex YAML keys. Falling back to tree-sitter.",
+                "RapidYAML skipped %s: complex YAML keys. Falling back to tree-sitter.",
                 path_str,
             )
             self._count_complex_skip += 1
@@ -183,6 +192,8 @@ class RapidYamlParser(LanguageParser):
                 effective_content,
                 file_id or FileId(0),
                 perf=perf,
+                cast_config=self._cast_config,
+                file_path=file_path,
             )
             chunks = builder.build_chunks()
             # Accumulate perf
@@ -235,9 +246,9 @@ class RapidYamlParser(LanguageParser):
 
     def cleanup(self) -> None:
         # Emit one-line summary for this parser instance
-        top_rewrites = ", ".join(
-            f"{k}={v}" for k, v in self._rewrite_counts.most_common(6)
-        ) or "-"
+        top_rewrites = (
+            ", ".join(f"{k}={v}" for k, v in self._rewrite_counts.most_common(6)) or "-"
+        )
         logger.info(
             (
                 "RapidYAML summary: sanitized=%d pre_skip=%d complex_skip=%d "
@@ -298,7 +309,7 @@ class _LineLocator:
     """Utility to approximate line ranges for emitted YAML blocks."""
 
     lines: Sequence[str]
-    depth_positions: List[int]
+    depth_positions: list[int]
     fallback_line: int = 0
 
     perf: _RymlPerf | None = None
@@ -309,9 +320,9 @@ class _LineLocator:
         self.fallback_line = 0
         self.perf = perf
         # Precompute stripped lines to avoid repeated .strip()
-        self._stripped_lines: List[str] = [ln.strip() for ln in self.lines]
-        # Build an index map for exact-match lookups: stripped_line -> sorted list of indices
-        self._index_map: dict[str, List[int]] = {}
+        self._stripped_lines: list[str] = [ln.strip() for ln in self.lines]
+        # Index map for exact-match lookups: stripped_line -> indices
+        self._index_map: dict[str, list[int]] = {}
         for idx, s in enumerate(self._stripped_lines):
             if not s:
                 continue
@@ -323,7 +334,7 @@ class _LineLocator:
 
         # Multi-line context index for more accurate disambiguation
         # Maps (line1, line2, line3) tuples to list of starting indices
-        self._context_index: dict[tuple[str, ...], List[int]] = {}
+        self._context_index: dict[tuple[str, ...], list[int]] = {}
         for idx in range(len(self._stripped_lines)):
             # Build context from up to 3 lines
             context = tuple(self._stripped_lines[idx : idx + 3])
@@ -407,7 +418,12 @@ class _LineLocator:
             self.perf.locate_calls += 1
         return start, end
 
-    def _find_from(self, target_line: str, start: int, node_type: str = "KEYVAL") -> int | None:
+    def _find_from(
+        self,
+        target_line: str,
+        start: int,
+        node_type: str = "KEYVAL",
+    ) -> int | None:
         """Find target line with node-type specific logic."""
         stripped_target = target_line.strip()
         if not stripped_target:
@@ -538,7 +554,12 @@ class _LineLocator:
 
         return None
 
-    def _find_with_parent_scope(self, target_line: str, start: int, parent_key: str) -> int | None:
+    def _find_with_parent_scope(
+        self,
+        target_line: str,
+        start: int,
+        parent_key: str,
+    ) -> int | None:
         """Find target_line within parent key's scope.
 
         Strategy: Search for parent_key, then look for target_line after it
@@ -604,16 +625,27 @@ class _LineLocator:
 class _RapidYamlChunkBuilder:
     """Walks a RapidYAML tree and produces Chunk objects."""
 
-    def __init__(self, ryml_module, tree, content: str, file_id: FileId, perf: _RymlPerf | None = None) -> None:
+    def __init__(
+        self,
+        ryml_module,
+        tree,
+        content: str,
+        file_id: FileId,
+        perf: _RymlPerf | None = None,
+        cast_config: CASTConfig | None = None,
+        file_path: Path | None = None,
+    ) -> None:
         self.ryml = ryml_module
         self.tree = tree
         self.file_id = file_id
+        self.file_path = file_path
         self.content = content
         self._buffer = bytearray(content.encode("utf-8"))
         self.lines = content.splitlines()
         self.perf = perf
         self.locator = _LineLocator(content, perf=self.perf)
         self._decoder = ryml_module.u
+        self.chunk_splitter = ChunkSplitter(cast_config or CASTConfig())
 
     def build_chunks(self) -> list[Chunk]:
         self.tree.clear()
@@ -656,9 +688,9 @@ class _RapidYamlChunkBuilder:
             # path[-1] is the current node, path[-2] is the actual parent
             parent_key = path[-2] if len(path) >= 2 else None
 
-            chunk = self._create_chunk(node, node_type, symbol, depth, parent_key)
-            if chunk:
-                chunks.append(chunk)
+            chunks.extend(
+                self._create_chunk(node, node_type, symbol, depth, parent_key)
+            )
 
         # Deduplicate chunks to prevent duplicate chunk IDs
         # (e.g., YAML files with repeated config values like "name: example-config")
@@ -667,8 +699,13 @@ class _RapidYamlChunkBuilder:
         return chunks
 
     def _create_chunk(
-        self, node: int, node_type: str, symbol: str, depth: int, parent_key: str | None = None
-    ) -> Chunk | None:
+        self,
+        node: int,
+        node_type: str,
+        symbol: str,
+        depth: int,
+        parent_key: str | None = None,
+    ) -> list[Chunk]:
         with _suppress_c_output():
             _t0 = perf_counter()
             emitted = self.ryml.emit_yaml(self.tree, node)
@@ -689,7 +726,6 @@ class _RapidYamlChunkBuilder:
         if not file_snippet.strip():
             file_snippet = normalized or first_line
 
-        chunk_type = self._chunk_type_for(node_type)
         metadata = {
             "parser": "rapid_yaml",
             "node_type": node_type.lower(),
@@ -701,16 +737,30 @@ class _RapidYamlChunkBuilder:
         if value is not None:
             metadata["scalar_value"] = self._decoder(value)
 
-        return Chunk(
-            symbol=symbol,
-            start_line=LineNumber(start_line),
-            end_line=LineNumber(max(start_line, end_line)),
-            code=file_snippet,
-            chunk_type=chunk_type,
-            file_id=self.file_id,
-            language=Language.YAML,
+        # Create UniversalChunk for validation
+        uchunk = UniversalChunk(
+            concept=UniversalConcept.BLOCK,
+            name=symbol,
+            content=file_snippet,
+            start_line=start_line,
+            end_line=max(start_line, end_line),
             metadata=metadata,
+            language_node_type=self._chunk_type_for(node_type).value,
         )
+
+        # Validate and split if oversized
+        validated_chunks = self.chunk_splitter.validate_and_split(uchunk)
+
+        # Convert each validated chunk to Chunk
+        return [
+            universal_to_chunk(
+                uc,
+                file_path=self.file_path,
+                file_id=self.file_id,
+                language=Language.YAML,
+            )
+            for uc in validated_chunks
+        ]
 
     def _slice_content(self, start_line: int, end_line: int) -> str:
         if not self.content:
