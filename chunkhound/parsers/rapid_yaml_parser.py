@@ -174,8 +174,7 @@ class RapidYamlParser(LanguageParser):
         if _has_complex_keys(effective_content):
             path_str = str(file_path) if file_path else "<memory>"
             logger.debug(
-                "RapidYAML skipped %s: complex YAML keys."
-                " Falling back to tree-sitter.",
+                "RapidYAML skipped %s: complex YAML keys. Falling back to tree-sitter.",
                 path_str,
             )
             self._count_complex_skip += 1
@@ -247,9 +246,9 @@ class RapidYamlParser(LanguageParser):
 
     def cleanup(self) -> None:
         # Emit one-line summary for this parser instance
-        top_rewrites = ", ".join(
-            f"{k}={v}" for k, v in self._rewrite_counts.most_common(6)
-        ) or "-"
+        top_rewrites = (
+            ", ".join(f"{k}={v}" for k, v in self._rewrite_counts.most_common(6)) or "-"
+        )
         logger.info(
             (
                 "RapidYAML summary: sanitized=%d pre_skip=%d complex_skip=%d "
@@ -420,7 +419,10 @@ class _LineLocator:
         return start, end
 
     def _find_from(
-        self, target_line: str, start: int, node_type: str = "KEYVAL",
+        self,
+        target_line: str,
+        start: int,
+        node_type: str = "KEYVAL",
     ) -> int | None:
         """Find target line with node-type specific logic."""
         stripped_target = target_line.strip()
@@ -553,7 +555,10 @@ class _LineLocator:
         return None
 
     def _find_with_parent_scope(
-        self, target_line: str, start: int, parent_key: str,
+        self,
+        target_line: str,
+        start: int,
+        parent_key: str,
     ) -> int | None:
         """Find target_line within parent key's scope.
 
@@ -694,8 +699,12 @@ class _RapidYamlChunkBuilder:
         return chunks
 
     def _create_chunk(
-        self, node: int, node_type: str, symbol: str,
-        depth: int, parent_key: str | None = None,
+        self,
+        node: int,
+        node_type: str,
+        symbol: str,
+        depth: int,
+        parent_key: str | None = None,
     ) -> list[Chunk]:
         with _suppress_c_output():
             _t0 = perf_counter()
@@ -745,8 +754,10 @@ class _RapidYamlChunkBuilder:
         # Convert each validated chunk to Chunk
         return [
             universal_to_chunk(
-                uc, file_path=self.file_path,
-                file_id=self.file_id, language=Language.YAML,
+                uc,
+                file_path=self.file_path,
+                file_id=self.file_id,
+                language=Language.YAML,
             )
             for uc in validated_chunks
         ]

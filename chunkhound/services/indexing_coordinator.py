@@ -345,7 +345,7 @@ class IndexingCoordinator(BaseService):
                 pass
             # Linux /proc/meminfo
             try:
-                with open("/proc/meminfo", "r", encoding="utf-8", errors="ignore") as f:
+                with open("/proc/meminfo", encoding="utf-8", errors="ignore") as f:
                     for line in f:
                         if line.startswith("MemAvailable:"):
                             parts = line.split()
@@ -741,7 +741,7 @@ class IndexingCoordinator(BaseService):
                             await on_batch(batch_result)
                         else:
                             on_batch(batch_result)
-                    except Exception as e:
+                    except Exception:
                         # Re-raise all exceptions from on_batch to propagate disk limit errors
                         raise
 
@@ -804,7 +804,7 @@ class IndexingCoordinator(BaseService):
         """
         total_size = 0
         try:
-            for file_path in directory.rglob('*'):
+            for file_path in directory.rglob("*"):
                 if file_path.is_file():
                     total_size += file_path.stat().st_size
         except Exception:
@@ -843,7 +843,8 @@ class IndexingCoordinator(BaseService):
                 if len(chunk.code or "") > 100:
                     preview += "..."
                 logger.warning(
-                    f"Oversized chunk: {chunk.file_path}:{chunk.start_line}-{chunk.end_line} "
+                    f"Oversized chunk: {chunk.file_path}"
+                    f":{chunk.start_line}-{chunk.end_line} "
                     f"[{chunk.language.value}:{chunk.chunk_type.value}] "
                     f"symbol={chunk.symbol!r} "
                     f"chars={metrics.non_whitespace_chars}/{config.max_chunk_size} "
@@ -899,13 +900,15 @@ class IndexingCoordinator(BaseService):
         disk_limit_error = self._check_disk_usage_limit()
         if disk_limit_error:
             # Add disk limit error to stats for consistent error handling
-            stats["errors"].append({
-                "file": None,  # Global error, not file-specific
-                "error": str(disk_limit_error),
-                "disk_limit_exceeded": True,
-                "current_size_mb": disk_limit_error.current_size_mb,
-                "limit_mb": disk_limit_error.limit_mb,
-            })
+            stats["errors"].append(
+                {
+                    "file": None,  # Global error, not file-specific
+                    "error": str(disk_limit_error),
+                    "disk_limit_exceeded": True,
+                    "current_size_mb": disk_limit_error.current_size_mb,
+                    "limit_mb": disk_limit_error.limit_mb,
+                }
+            )
             # Return early - don't process any files if disk limit exceeded
             return stats
 
@@ -1371,7 +1374,6 @@ class IndexingCoordinator(BaseService):
                 if isinstance(stats_part, tuple):
                     stats_part = stats_part[0]
 
-
                 agg_total_files += stats_part.get("total_files", 0)
                 agg_total_chunks += stats_part.get("total_chunks", 0)
                 agg_errors.extend(stats_part.get("errors", []))
@@ -1499,8 +1501,6 @@ class IndexingCoordinator(BaseService):
                 "skipped_filtered": skipped_filtered,
             }
 
-
-
         except Exception as e:
             import traceback
 
@@ -1537,7 +1537,7 @@ class IndexingCoordinator(BaseService):
         """
         try:
             return compute_file_hash(file_path)
-        except (OSError, IOError) as e:
+        except OSError as e:
             rel_path = self._get_relative_path(file_path).as_posix()
             logger.warning(f"Failed to compute hash for {rel_path}: {e}")
             return None
@@ -1799,8 +1799,8 @@ class IndexingCoordinator(BaseService):
             except Exception as e:
                 if "transaction is aborted" in str(e).lower():
                     logger.warning(
-                        f"[IndexCoord] Transaction aborted during embedding insertion, "
-                        f"attempting recovery and retry"
+                        "[IndexCoord] Transaction aborted during embedding insertion, "
+                        "attempting recovery and retry"
                     )
                     # Try to clean up the aborted transaction
                     try:
@@ -1874,11 +1874,9 @@ class IndexingCoordinator(BaseService):
         top_level_items = []
         # Use effective config excludes (includes defaults even when sentinel is set)
         effective_excludes = list(
-            (
-                self.config.indexing.get_effective_config_excludes()
-                if self.config and getattr(self.config, "indexing", None)
-                else []
-            )
+            self.config.indexing.get_effective_config_excludes()
+            if self.config and getattr(self.config, "indexing", None)
+            else []
         )
         # Add global gitignore patterns to effective excludes
         self._extend_with_global_gitignore(effective_excludes)
@@ -2280,10 +2278,8 @@ class IndexingCoordinator(BaseService):
                 for item in directory.iterdir():
                     try:
                         if any(
-                            (
-                                item.resolve().is_relative_to(rr.resolve())
-                                for rr in repo_roots
-                            )
+                            item.resolve().is_relative_to(rr.resolve())
+                            for rr in repo_roots
                         ):
                             continue
                     except Exception:
@@ -2430,7 +2426,6 @@ class IndexingCoordinator(BaseService):
         of Git results. Non-repo portions of the directory are scanned using the
         Python walker while pruning repo subtrees.
         """
-        from fnmatch import fnmatch as _fnmatch
 
         try:
             # Quick probe: ensure git exists
@@ -2799,7 +2794,6 @@ class IndexingCoordinator(BaseService):
         if not files and getattr(ignore_engine_obj, "matches", None):
             try:
                 import os as _os
-                from fnmatch import translate as _translate
                 from pathlib import Path as _Path
 
                 from chunkhound.utils.file_patterns import compile_pattern as _cp

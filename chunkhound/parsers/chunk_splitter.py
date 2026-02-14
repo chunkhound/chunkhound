@@ -10,6 +10,8 @@ The splitter enforces the cAST algorithm's size constraints:
 - Multiple splitting strategies based on content analysis
 """
 
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,7 +58,7 @@ class ChunkMetrics:
     ast_depth: int
 
     @classmethod
-    def from_content(cls, content: str, ast_depth: int = 0) -> "ChunkMetrics":
+    def from_content(cls, content: str, ast_depth: int = 0) -> ChunkMetrics:
         """Calculate metrics from content string."""
         non_ws = len(re.sub(r"\s", "", content))
         total = len(content)
@@ -174,10 +176,10 @@ class ChunkSplitter:
         name: str,
         start_line: int,
         end_line: int,
-        file_path: "Path | None",
-        file_id: "FileId | None",
-        language: "Language",
-    ) -> list["Chunk"]:
+        file_path: Path | None,
+        file_id: FileId | None,
+        language: Language,
+    ) -> list[Chunk]:
         """Validate text content, split if oversized, and convert to Chunks.
 
         Convenience method for text-based parsers (PDF, TEXT) that combines
@@ -422,10 +424,7 @@ class ChunkSplitter:
                     # Check if this split point gives us valid chunk size
                     test_content = remaining[: pos + 1]
                     test_metrics = ChunkMetrics.from_content(test_content)
-                    if (
-                        test_metrics.non_whitespace_chars
-                        <= self.config.max_chunk_size
-                    ):
+                    if test_metrics.non_whitespace_chars <= self.config.max_chunk_size:
                         best_split = pos + 1  # Include the split character
                         break
 
@@ -544,9 +543,9 @@ CHUNK_TYPE_TO_CONCEPT: dict[ChunkType, UniversalConcept] = {
 def universal_to_chunk(
     uc: UniversalChunk,
     file_path: Path | None,
-    file_id: "FileId | None",
-    language: "Language",
-) -> "Chunk":
+    file_id: FileId | None,
+    language: Language,
+) -> Chunk:
     """Convert a UniversalChunk to a standard Chunk.
 
     Note: ChunkType restoration from language_node_type works correctly for
@@ -599,7 +598,7 @@ def universal_to_chunk(
     )
 
 
-def chunk_to_universal(chunk: "Chunk") -> UniversalChunk:
+def chunk_to_universal(chunk: Chunk) -> UniversalChunk:
     """Convert a Chunk to UniversalChunk for validation.
 
     Used by central guard to validate chunks from any parser.

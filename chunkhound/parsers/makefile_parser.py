@@ -101,7 +101,10 @@ class MakefileChunkSplitter(ChunkSplitter):
                 if current_group:
                     result.append(
                         self._create_rule_chunk(
-                            chunk, target_line, current_group, part,
+                            chunk,
+                            target_line,
+                            current_group,
+                            part,
                             recipe_offset,
                         )
                     )
@@ -112,7 +115,10 @@ class MakefileChunkSplitter(ChunkSplitter):
         if current_group:
             result.append(
                 self._create_rule_chunk(
-                    chunk, target_line, current_group, part,
+                    chunk,
+                    target_line,
+                    current_group,
+                    part,
                     recipe_offset,
                 )
             )
