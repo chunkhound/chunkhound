@@ -131,32 +131,37 @@ class EmbeddingConfig(BaseSettings):
 
     rerank_url: str = Field(
         default="/rerank",
-        description="Rerank endpoint URL. Absolute URLs (http/https) used as-is for separate services. "
-        "Relative paths combined with base_url for same-server reranking.",
+        description=(
+            "Rerank endpoint URL. Absolute URLs (http/https) used "
+            "as-is for separate services. Relative paths combined "
+            "with base_url for same-server reranking."
+        ),
     )
 
     rerank_format: Literal["cohere", "tei", "auto"] = Field(
         default="auto",
-        description="Reranking API format. 'cohere' for Cohere-compatible APIs (requires model in request), "
-        "'tei' for Hugging Face Text Embeddings Inference (model set at deployment), "
-        "'auto' for automatic format detection from response.",
+        description=(
+            "Reranking API format. 'cohere' for Cohere-compatible "
+            "APIs (requires model in request), 'tei' for Hugging "
+            "Face TEI (model set at deployment), 'auto' for "
+            "automatic format detection from response."
+        ),
     )
 
     # Internal settings - not exposed to users
     batch_size: int = Field(default=100, description="Internal batch size")
     rerank_batch_size: int | None = Field(
         default=None,
-        description="Max documents per rerank batch (overrides model defaults, bounded by model caps)",
+        description=(
+            "Max documents per rerank batch "
+            "(overrides model defaults, bounded by model caps)"
+        ),
     )
     timeout: int = Field(default=30, description="Internal timeout")
     max_retries: int = Field(default=3, description="Internal max retries")
     max_concurrent_batches: int | None = Field(
         default=None,
         description="Internal concurrency (auto-detected from provider if not set)",
-    )
-    optimization_batch_frequency: int = Field(
-        default=1000,
-        description="Internal optimization frequency (runs every N batches during indexing)",
     )
 
     @field_validator("rerank_batch_size")
@@ -229,8 +234,10 @@ class EmbeddingConfig(BaseSettings):
             # azure_endpoint and base_url are mutually exclusive
             if self.base_url:
                 raise ValueError(
-                    "azure_endpoint and base_url are mutually exclusive. "
-                    "Use azure_endpoint for Azure OpenAI, base_url for custom OpenAI-compatible endpoints."
+                    "azure_endpoint and base_url are mutually "
+                    "exclusive. Use azure_endpoint for Azure "
+                    "OpenAI, base_url for custom "
+                    "OpenAI-compatible endpoints."
                 )
 
         return self
@@ -303,7 +310,7 @@ class EmbeddingConfig(BaseSettings):
         if self.provider == "openai":
             # Azure OpenAI always requires API key
             if self.azure_endpoint:
-                return self.api_key is not None
+                return self.api_key is not None and self.api_version is not None
             # For OpenAI provider, only require API key for official endpoints
             if is_official_openai_endpoint(self.base_url):
                 return self.api_key is not None
