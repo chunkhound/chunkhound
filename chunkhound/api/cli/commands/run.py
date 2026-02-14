@@ -141,6 +141,7 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
                 output_path = db_path.parent / f"perf_diagnostics_{timestamp}.json"
 
             # Write JSON file
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(json.dumps(diagnostics.to_dict(), indent=2))
             formatter.info(f"Performance diagnostics written to: {output_path}")
 
