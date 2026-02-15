@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import shutil
 from pathlib import Path
 from typing import Iterable, Optional, Dict, List, Tuple
 from loguru import logger
@@ -185,8 +186,42 @@ def _detect_repo_roots(
     """
     roots: list[Path] = []
     root = root.resolve()
-    git_checked: bool | None = None
     ignored_cache: dict[tuple[str, str], bool] = {}
+    prune_debug_logged = False
+
+    def _log_prune_debug(msg: str, *args: object) -> None:
+        nonlocal prune_debug_logged
+        if prune_debug_logged:
+            return
+        prune_debug_logged = True
+        try:
+            logger.debug(msg, *args)
+        except Exception:
+            # Avoid raising during best-effort logging
+            pass
+
+    git_available = False
+    git_check_ignored_fn = None
+    if prune_ignored_gitfile_roots:
+        try:
+            git_available = shutil.which("git") is not None
+        except Exception as e:
+            git_available = False
+            _log_prune_debug(
+                "Worktree ignore pruning: failed to check git availability: {}",
+                e,
+            )
+        if git_available:
+            try:
+                from chunkhound.utils.git_safe import git_check_ignored as _git_check_ignored
+
+                git_check_ignored_fn = _git_check_ignored
+            except Exception as e:
+                git_check_ignored_fn = None
+                _log_prune_debug(
+                    "Worktree ignore pruning: failed to import git_check_ignored: {}",
+                    e,
+                )
     for dirpath, dirnames, filenames in os.walk(root, topdown=True):
         dpath = Path(dirpath)
 
@@ -214,7 +249,11 @@ def _detect_repo_roots(
             # `.git` file (linked worktree/submodule): optional guard. When enabled,
             # if this repo root directory is ignored by an ancestor repo's gitignore
             # rules, do NOT treat it as a boundary.
-            if not prune_ignored_gitfile_roots:
+            if (
+                not prune_ignored_gitfile_roots
+                or (not git_available)
+                or git_check_ignored_fn is None
+            ):
                 roots.append(dpath)
                 continue
 
@@ -231,33 +270,41 @@ def _detect_repo_roots(
 
             if parent is not None:
                 try:
-                    if git_checked is None:
-                        import shutil as _sh
-
-                        git_checked = _sh.which("git") is not None
-                    if git_checked:
-                        from chunkhound.utils.git_safe import git_check_ignored
-
+                    try:
+                        rel = dpath.resolve().relative_to(parent.resolve()).as_posix()
+                    except Exception:
+                        rel = ""
+                    if rel:
                         try:
-                            rel = dpath.resolve().relative_to(parent.resolve()).as_posix()
+                            parent_key = str(parent.resolve())
                         except Exception:
-                            rel = ""
-                        if rel:
-                            key = (str(parent.resolve()), rel)
-                            ign = ignored_cache.get(key)
-                            if ign is None:
-                                ign = git_check_ignored(
-                                    repo_root=parent,
-                                    rel_path=rel,
-                                    timeout_s=5.0,
-                                )
-                                ignored_cache[key] = ign
-                            if ign:
-                                # Prune traversal below this directory as well.
-                                dirnames[:] = []
-                                continue
-                except Exception:
-                    pass
+                            parent_key = str(parent)
+                        key = (parent_key, rel)
+                        ign = ignored_cache.get(key)
+                        if ign is None:
+                            ign = git_check_ignored_fn(
+                                repo_root=parent,
+                                rel_path=rel,
+                                timeout_s=5.0,
+                                on_error=lambda e, _dpath=dpath, _parent=parent: _log_prune_debug(
+                                    "Worktree ignore pruning: git check failed for {} (parent={}): {}",
+                                    _dpath,
+                                    _parent,
+                                    e,
+                                ),
+                            )
+                            ignored_cache[key] = ign
+                        if ign:
+                            # Prune traversal below this directory as well.
+                            dirnames[:] = []
+                            continue
+                except Exception as e:
+                    _log_prune_debug(
+                        "Worktree ignore pruning: unexpected failure for {} (parent={}): {}",
+                        dpath,
+                        parent,
+                        e,
+                    )
 
             roots.append(dpath)
     # Sort deepest first for nearest-ancestor selection convenience later

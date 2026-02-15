@@ -4,7 +4,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 
 @dataclass
@@ -95,7 +95,13 @@ def run_git(args: Sequence[str], cwd: Path | None, timeout_s: float | None = Non
         raise GitCommandError(f"git command failed: {e}") from e
 
 
-def git_check_ignored(*, repo_root: Path, rel_path: str, timeout_s: float = 5.0) -> bool:
+def git_check_ignored(
+    *,
+    repo_root: Path,
+    rel_path: str,
+    timeout_s: float = 5.0,
+    on_error: Callable[[Exception], None] | None = None,
+) -> bool:
     """Return True if Git would ignore rel_path in repo_root.
 
     Uses `git check-ignore -q --no-index` and returns False on any errors.
@@ -106,6 +112,11 @@ def git_check_ignored(*, repo_root: Path, rel_path: str, timeout_s: float = 5.0)
             cwd=repo_root,
             timeout_s=timeout_s,
         )
-    except Exception:
+    except Exception as e:
+        if on_error is not None:
+            try:
+                on_error(e)
+            except Exception:
+                pass
         return False
     return proc.returncode == 0
