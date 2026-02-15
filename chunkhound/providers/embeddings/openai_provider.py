@@ -361,16 +361,7 @@ class OpenAIEmbeddingProvider:
 
         # Validate output_dims if specified
         if output_dims is not None:
-            # Check both OpenAI and Qwen model configs
-            normalized = _normalize_qwen_model_name(model)
-            model_cfg = self._model_config.get(model) or QWEN_MODEL_CONFIG.get(normalized)
-            # Try case-insensitive match for Qwen models
-            if not model_cfg:
-                normalized_lower = normalized.lower()
-                for key, cfg in QWEN_MODEL_CONFIG.items():
-                    if key.lower() == normalized_lower:
-                        model_cfg = cfg
-                        break
+            model_cfg = self._get_model_config()
             if model_cfg:
                 if not model_cfg.get("matryoshka", False):
                     raise EmbeddingConfigurationError(
