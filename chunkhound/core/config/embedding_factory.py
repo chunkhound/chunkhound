@@ -83,6 +83,8 @@ class EmbeddingProviderFactory:
         rerank_url = config.get("rerank_url", "/rerank")
         rerank_format = config.get("rerank_format", "auto")
         rerank_batch_size = config.get("rerank_batch_size")
+        output_dims = config.get("output_dims")
+        client_side_truncation = config.get("client_side_truncation", False)
 
         # Azure OpenAI parameters
         api_version = config.get("api_version")
@@ -101,14 +103,16 @@ class EmbeddingProviderFactory:
                 f"azure_deployment={azure_deployment}, "
                 f"api_key={'***' if api_key else None}, "
                 f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
-                f"rerank_batch_size={rerank_batch_size}"
+                f"rerank_batch_size={rerank_batch_size}, output_dims={output_dims}, "
+                f"client_side_truncation={client_side_truncation}"
             )
         else:
             logger.debug(
                 f"Creating OpenAI provider: model={model}, "
                 f"base_url={base_url}, api_key={'***' if api_key else None}, "
                 f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
-                f"rerank_batch_size={rerank_batch_size}"
+                f"rerank_batch_size={rerank_batch_size}, output_dims={output_dims}, "
+                f"client_side_truncation={client_side_truncation}"
             )
 
         try:
@@ -120,6 +124,8 @@ class EmbeddingProviderFactory:
                 rerank_url=rerank_url,
                 rerank_format=rerank_format,
                 rerank_batch_size=rerank_batch_size,
+                output_dims=output_dims,
+                client_side_truncation=client_side_truncation,
                 api_version=api_version,
                 azure_endpoint=azure_endpoint,
                 azure_deployment=azure_deployment,
@@ -145,6 +151,7 @@ class EmbeddingProviderFactory:
         model = config.get("model")
         rerank_model = config.get("rerank_model")
         rerank_batch_size = config.get("rerank_batch_size")
+        output_dims = config.get("output_dims")
 
         # Model should come from config, but handle None case safely
         if not model:
@@ -154,7 +161,7 @@ class EmbeddingProviderFactory:
             f"Creating VoyageAI provider: model={model}, "
             f"api_key={'***' if api_key else None}, "
             f"rerank_model={rerank_model}, "
-            f"rerank_batch_size={rerank_batch_size}"
+            f"rerank_batch_size={rerank_batch_size}, output_dims={output_dims}"
         )
 
         try:
@@ -171,6 +178,8 @@ class EmbeddingProviderFactory:
                 kwargs["rerank_model"] = rerank_model
             if rerank_batch_size is not None:
                 kwargs["rerank_batch_size"] = rerank_batch_size
+            if output_dims is not None:
+                kwargs["output_dims"] = output_dims
 
             return VoyageAIEmbeddingProvider(**kwargs)
         except Exception as e:

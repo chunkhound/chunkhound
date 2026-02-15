@@ -58,8 +58,16 @@ def get_usage_stats_dict(
     }
 
 
-def get_dimensions_for_model(
-    model: str, dimensions_map: dict[str, int], default_dims: int = 1536
-) -> int:
-    """Get embedding dimensions for a model with fallback to default."""
-    return dimensions_map.get(model, default_dims)
+def l2_normalize(vector: list[float]) -> list[float]:
+    """L2-normalize vector to unit length for cosine similarity.
+
+    Args:
+        vector: Input vector to normalize
+
+    Returns:
+        Unit-length vector (or original if zero-magnitude)
+    """
+    magnitude = sum(x * x for x in vector) ** 0.5
+    if magnitude > 0:
+        return [x / magnitude for x in vector]
+    return vector

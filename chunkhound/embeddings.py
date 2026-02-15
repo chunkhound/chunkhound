@@ -188,6 +188,8 @@ def create_openai_provider(
     rerank_url: str = "/rerank",
     rerank_format: str = "auto",
     rerank_batch_size: int | None = None,
+    output_dims: int | None = None,
+    client_side_truncation: bool = False,
     api_version: str | None = None,
     azure_endpoint: str | None = None,
     azure_deployment: str | None = None,
@@ -205,6 +207,8 @@ def create_openai_provider(
         rerank_url: Rerank endpoint URL (defaults to /rerank)
         rerank_format: Reranking API format - 'cohere', 'tei', or 'auto' (default: 'auto')
         rerank_batch_size: Max documents per rerank batch (overrides model defaults, bounded by model caps)
+        output_dims: Output embedding dimension (for matryoshka models)
+        client_side_truncation: Truncate embeddings client-side instead of using API dimensions parameter
         api_version: Azure OpenAI API version (e.g., '2024-02-01')
         azure_endpoint: Azure OpenAI endpoint URL (e.g., 'https://myresource.openai.azure.com')
         azure_deployment: Azure OpenAI deployment name
@@ -223,6 +227,8 @@ def create_openai_provider(
         rerank_url=rerank_url,
         rerank_format=rerank_format,
         rerank_batch_size=rerank_batch_size,
+        output_dims=output_dims,
+        client_side_truncation=client_side_truncation,
         api_version=api_version,
         azure_endpoint=azure_endpoint,
         azure_deployment=azure_deployment,
