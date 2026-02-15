@@ -196,12 +196,6 @@ class VoyageAIEmbeddingProvider:
         # Initialize client
         self._client = voyageai.Client(api_key=api_key)
 
-        # Model dimension mapping - built from configuration
-        self._dimensions_map = {
-            model_name: config["default_dimension"]
-            for model_name, config in VOYAGE_MODEL_CONFIG.items()
-        }
-
         # Usage tracking
         self._requests_made = 0
         self._tokens_used = 0
