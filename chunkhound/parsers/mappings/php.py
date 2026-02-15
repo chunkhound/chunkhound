@@ -43,22 +43,12 @@ class_declaration
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
-
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = Any  # type: ignore
+from tree_sitter import Node as TSNode
 
 
 class PHPMapping(BaseMapping):
@@ -122,7 +112,7 @@ class PHPMapping(BaseMapping):
 
     def extract_function_name(self, node: "TSNode | None", source: str) -> str:
         """Extract function name from a PHP function definition node."""
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "function")
 
         name_node = self.find_child_by_type(node, "name")
@@ -135,7 +125,7 @@ class PHPMapping(BaseMapping):
 
     def extract_class_name(self, node: "TSNode | None", source: str) -> str:
         """Extract class name from a PHP class definition node."""
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "class")
 
         name_node = self.find_child_by_type(node, "name")
@@ -480,7 +470,7 @@ class PHPMapping(BaseMapping):
         Returns:
             List of parameter dictionaries with 'name' and optionally 'type' keys
         """
-        if not TREE_SITTER_AVAILABLE or func_node is None:
+        if func_node is None:
             return []
 
         parameters: list[dict[str, str]] = []
@@ -526,7 +516,7 @@ class PHPMapping(BaseMapping):
         Returns:
             Return type string or None if not specified
         """
-        if not TREE_SITTER_AVAILABLE or func_node is None:
+        if func_node is None:
             return None
 
         # Look for return type (appears after : in function signature)
@@ -562,7 +552,7 @@ class PHPMapping(BaseMapping):
         Returns:
             Visibility string or None (defaults to public in PHP)
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return None
 
         # Look for visibility modifier nodes
@@ -582,7 +572,7 @@ class PHPMapping(BaseMapping):
         Returns:
             True if static, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Look for static_modifier node
@@ -602,7 +592,7 @@ class PHPMapping(BaseMapping):
         Returns:
             True if abstract, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Look for abstract_modifier node
@@ -622,7 +612,7 @@ class PHPMapping(BaseMapping):
         Returns:
             True if final, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Look for final_modifier node
@@ -637,7 +627,7 @@ class PHPMapping(BaseMapping):
 
         Handles both short array syntax `[ ... ]` and classic `array(...)` forms.
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         try:
@@ -676,9 +666,6 @@ class PHPMapping(BaseMapping):
         Returns:
             List of dictionaries with "name" and "value" keys, or None
         """
-        if not TREE_SITTER_AVAILABLE:
-            return None
-
         source = content.decode("utf-8")
         constants: list[dict[str, str]] = []
 
