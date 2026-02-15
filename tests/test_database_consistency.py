@@ -88,7 +88,6 @@ async def test_orphaned_embeddings_cleanup(consistency_services, tmp_path):
     services = consistency_services
 
     # Create and process test files
-    test_files = []
     for i in range(3):
         test_file = tmp_path / f"orphan_test_{i}.py"
         test_file.write_text(f"""
@@ -100,10 +99,9 @@ class OrphanTestClass_{i}:
     def orphan_method_{i}(self):
         return "orphan method {i}"
 """)
-
-    result = await services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
-    assert result['status'] == 'success'
-    assert not result.get('embeddings_skipped', True), "Should not skip embeddings"
+        result = await services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
+        assert result['status'] == 'success'
+        assert not result.get('embeddings_skipped', True), "Should not skip embeddings"
 
     # Wait for async embedding processing
     await asyncio.sleep(3.0)
