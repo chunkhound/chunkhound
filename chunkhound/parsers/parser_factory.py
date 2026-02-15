@@ -64,119 +64,29 @@ logger = logging.getLogger(__name__)
 # Explicit tree-sitter language imports
 # Import all available tree-sitter languages explicitly to avoid
 # dynamic import complexity
+#
+# Import strategy:
+# - Languages with standalone PyPI packages listed in pyproject.toml are imported
+#   directly (no try/except) since they are required dependencies
+# - Languages only available via tree-sitter-language-pack use conditional imports
+#   with try/except, as the language pack's contents may vary across versions
 
-# Core language support
-try:
-    import tree_sitter_python as ts_python
+# Core language support - direct imports (required dependencies in pyproject.toml)
+import tree_sitter_python as ts_python
+import tree_sitter_javascript as ts_javascript
+import tree_sitter_typescript as ts_typescript
+import tree_sitter_java as ts_java
+import tree_sitter_c as ts_c
+import tree_sitter_cpp as ts_cpp
+import tree_sitter_c_sharp as ts_csharp
+import tree_sitter_go as ts_go
+import tree_sitter_rust as ts_rust
+import tree_sitter_bash as ts_bash
+import tree_sitter_kotlin as ts_kotlin
+import tree_sitter_lua as ts_lua
+import tree_sitter_groovy as ts_groovy
 
-    PYTHON_AVAILABLE = True
-except ImportError:
-    ts_python = None
-    PYTHON_AVAILABLE = False
-
-try:
-    import tree_sitter_javascript as ts_javascript
-
-    JAVASCRIPT_AVAILABLE = True
-except ImportError:
-    ts_javascript = None
-    JAVASCRIPT_AVAILABLE = False
-
-try:
-    import tree_sitter_typescript as ts_typescript
-
-    TYPESCRIPT_AVAILABLE = True
-except ImportError:
-    ts_typescript = None
-    TYPESCRIPT_AVAILABLE = False
-
-try:
-    import tree_sitter_java as ts_java
-
-    JAVA_AVAILABLE = True
-except ImportError:
-    ts_java = None
-    JAVA_AVAILABLE = False
-
-try:
-    import tree_sitter_c as ts_c
-
-    C_AVAILABLE = True
-except ImportError:
-    ts_c = None
-    C_AVAILABLE = False
-
-try:
-    import tree_sitter_cpp as ts_cpp
-
-    CPP_AVAILABLE = True
-except ImportError:
-    ts_cpp = None
-    CPP_AVAILABLE = False
-
-try:
-    import tree_sitter_c_sharp as ts_csharp
-
-    CSHARP_AVAILABLE = True
-except ImportError:
-    ts_csharp = None
-    CSHARP_AVAILABLE = False
-
-try:
-    import tree_sitter_go as ts_go
-
-    GO_AVAILABLE = True
-except ImportError:
-    ts_go = None
-    GO_AVAILABLE = False
-
-try:
-    import tree_sitter_haskell as ts_haskell
-
-    HASKELL_AVAILABLE = True
-except ImportError:
-    ts_haskell = None
-    HASKELL_AVAILABLE = False
-
-try:
-    import tree_sitter_rust as ts_rust
-
-    RUST_AVAILABLE = True
-except ImportError:
-    ts_rust = None
-    RUST_AVAILABLE = False
-
-try:
-    import tree_sitter_bash as ts_bash
-
-    BASH_AVAILABLE = True
-except ImportError:
-    ts_bash = None
-    BASH_AVAILABLE = False
-
-try:
-    import tree_sitter_kotlin as ts_kotlin
-
-    KOTLIN_AVAILABLE = True
-except ImportError:
-    ts_kotlin = None
-    KOTLIN_AVAILABLE = False
-
-try:
-    import tree_sitter_lua as ts_lua
-
-    LUA_AVAILABLE = True
-except ImportError:
-    ts_lua = None
-    LUA_AVAILABLE = False
-
-try:
-    import tree_sitter_groovy as ts_groovy
-
-    GROOVY_AVAILABLE = True
-except ImportError:
-    ts_groovy = None
-    GROOVY_AVAILABLE = False
+import tree_sitter_haskell as ts_haskell
 
 try:
     from tree_sitter_language_pack import get_language
@@ -216,13 +126,7 @@ except ImportError:
     ts_objc = None
     OBJC_AVAILABLE = False
 
-try:
-    import tree_sitter_php as ts_php
-
-    PHP_AVAILABLE = True
-except ImportError:
-    ts_php = None
-    PHP_AVAILABLE = False
+import tree_sitter_php as ts_php
 
 try:
     from tree_sitter_language_pack import get_language as _get_language_swift
@@ -243,48 +147,37 @@ except ImportError:
     ts_swift = None
     SWIFT_AVAILABLE = False
 
-if not HASKELL_AVAILABLE:
-    try:
-        from tree_sitter_language_pack import get_language as _get_language_haskell
 
-        _haskell_lang = _get_language_haskell("haskell")
-        if _haskell_lang:
+# Markup and config languages - direct imports (required dependencies in pyproject.toml)
+import tree_sitter_json as ts_json
+import tree_sitter_toml as ts_toml
+import tree_sitter_markdown as ts_markdown
 
-            class _HaskellLanguageWrapper:
-                def language(self):
-                    return _haskell_lang
-
-            ts_haskell = _HaskellLanguageWrapper()
-            HASKELL_AVAILABLE = True
-    except ImportError:
-        pass
-
-# Markup and config languages
+# YAML: only available via language pack, not a standalone PyPI package
 try:
-    import tree_sitter_json as ts_json
+    from tree_sitter_language_pack import get_language as _get_language_yaml
 
-    JSON_AVAILABLE = True
-except ImportError:
-    ts_json = None
-    JSON_AVAILABLE = False
+    _yaml_lang = _get_language_yaml("yaml")
+    if _yaml_lang:
 
-try:
-    import tree_sitter_yaml as ts_yaml
+        class _YamlLanguageWrapper:
+            def language(self):
+                return _yaml_lang
 
-    YAML_AVAILABLE = True
+        ts_yaml = _YamlLanguageWrapper()
+        YAML_AVAILABLE = True
+    else:
+        ts_yaml = None
+        YAML_AVAILABLE = False
 except ImportError:
     ts_yaml = None
     YAML_AVAILABLE = False
 
-try:
-    import tree_sitter_toml as ts_toml
+# Build system languages - direct imports (required dependencies)
+import tree_sitter_make as ts_make
+import tree_sitter_zig as ts_zig
 
-    TOML_AVAILABLE = True
-except ImportError:
-    ts_toml = None
-    TOML_AVAILABLE = False
-
-# HCL (Terraform) language
+# HCL (Terraform) language: try direct import first, fallback to language pack
 try:
     import tree_sitter_hcl as ts_hcl
 
@@ -310,31 +203,6 @@ if not HCL_AVAILABLE:
         pass
 
 try:
-    import tree_sitter_markdown as ts_markdown
-
-    MARKDOWN_AVAILABLE = True
-except ImportError:
-    ts_markdown = None
-    MARKDOWN_AVAILABLE = False
-
-# Build system languages
-try:
-    import tree_sitter_make as ts_make
-
-    MAKEFILE_AVAILABLE = True
-except ImportError:
-    ts_make = None
-    MAKEFILE_AVAILABLE = False
-
-try:
-    import tree_sitter_zig as ts_zig
-
-    ZIG_AVAILABLE = True
-except ImportError:
-    ts_zig = None
-    ZIG_AVAILABLE = False
-
-try:
     from tree_sitter_language_pack import get_language
 
     _dart_lang = get_language("dart")
@@ -354,9 +222,9 @@ except ImportError:
     DART_AVAILABLE = False
 
 
-# Additional language extensions (these might use the same parser as base language)
-JSX_AVAILABLE = JAVASCRIPT_AVAILABLE  # JSX uses JavaScript parser
-TSX_AVAILABLE = TYPESCRIPT_AVAILABLE  # TSX uses TypeScript parser
+# Additional language extensions (these use TypeScript parser with TSX grammar)
+JSX_AVAILABLE = True
+TSX_AVAILABLE = True
 
 
 class LanguageConfig:
@@ -467,64 +335,55 @@ class LanguageConfig:
 
 # Language configuration mapping
 LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
-    Language.PYTHON: LanguageConfig(
-        ts_python, PythonMapping, PYTHON_AVAILABLE, "python"
-    ),
+    # Direct imports (always available - required dependencies)
+    Language.PYTHON: LanguageConfig(ts_python, PythonMapping, True, "python"),
     Language.JAVASCRIPT: LanguageConfig(
-        ts_javascript, JavaScriptMapping, JAVASCRIPT_AVAILABLE, "javascript"
+        ts_javascript, JavaScriptMapping, True, "javascript"
     ),
     Language.TYPESCRIPT: LanguageConfig(
-        ts_typescript, TypeScriptMapping, TYPESCRIPT_AVAILABLE, "typescript"
+        ts_typescript, TypeScriptMapping, True, "typescript"
     ),
-    Language.JAVA: LanguageConfig(ts_java, JavaMapping, JAVA_AVAILABLE, "java"),
-    Language.C: LanguageConfig(ts_c, CMapping, C_AVAILABLE, "c"),
-    Language.CPP: LanguageConfig(ts_cpp, CppMapping, CPP_AVAILABLE, "cpp"),
-    Language.CSHARP: LanguageConfig(
-        ts_csharp, CSharpMapping, CSHARP_AVAILABLE, "csharp"
-    ),
-    Language.GO: LanguageConfig(ts_go, GoMapping, GO_AVAILABLE, "go"),
-    Language.HASKELL: LanguageConfig(
-        ts_haskell, HaskellMapping, HASKELL_AVAILABLE, "haskell"
-    ),
-    Language.RUST: LanguageConfig(ts_rust, RustMapping, RUST_AVAILABLE, "rust"),
-    Language.ZIG: LanguageConfig(ts_zig, ZigMapping, ZIG_AVAILABLE, "zig"),
-    Language.BASH: LanguageConfig(ts_bash, BashMapping, BASH_AVAILABLE, "bash"),
-    Language.KOTLIN: LanguageConfig(
-        ts_kotlin, KotlinMapping, KOTLIN_AVAILABLE, "kotlin"
-    ),
-    Language.LUA: LanguageConfig(ts_lua, LuaMapping, LUA_AVAILABLE, "lua"),
-    Language.GROOVY: LanguageConfig(
-        ts_groovy, GroovyMapping, GROOVY_AVAILABLE, "groovy"
-    ),
+    Language.JAVA: LanguageConfig(ts_java, JavaMapping, True, "java"),
+    Language.C: LanguageConfig(ts_c, CMapping, True, "c"),
+    Language.CPP: LanguageConfig(ts_cpp, CppMapping, True, "cpp"),
+    Language.CSHARP: LanguageConfig(ts_csharp, CSharpMapping, True, "csharp"),
+    Language.GO: LanguageConfig(ts_go, GoMapping, True, "go"),
+    Language.RUST: LanguageConfig(ts_rust, RustMapping, True, "rust"),
+    Language.ZIG: LanguageConfig(ts_zig, ZigMapping, True, "zig"),
+    Language.BASH: LanguageConfig(ts_bash, BashMapping, True, "bash"),
+    Language.KOTLIN: LanguageConfig(ts_kotlin, KotlinMapping, True, "kotlin"),
+    Language.LUA: LanguageConfig(ts_lua, LuaMapping, True, "lua"),
+    Language.GROOVY: LanguageConfig(ts_groovy, GroovyMapping, True, "groovy"),
+    Language.PHP: LanguageConfig(ts_php, PHPMapping, True, "php"),
+    Language.JSON: LanguageConfig(ts_json, JsonMapping, True, "json"),
+    Language.TOML: LanguageConfig(ts_toml, TomlMapping, True, "toml"),
+    Language.MARKDOWN: LanguageConfig(ts_markdown, MarkdownMapping, True, "markdown"),
+    Language.MAKEFILE: LanguageConfig(ts_make, MakefileMapping, True, "makefile"),
+    # Haskell (required dependency in pyproject.toml)
+    Language.HASKELL: LanguageConfig(ts_haskell, HaskellMapping, True, "haskell"),
+    Language.HCL: LanguageConfig(ts_hcl, HclMapping, HCL_AVAILABLE, "hcl"),
+    # Language pack languages (conditional availability)
+    Language.YAML: LanguageConfig(ts_yaml, YamlMapping, YAML_AVAILABLE, "yaml"),
     Language.MATLAB: LanguageConfig(
         ts_matlab, MatlabMapping, MATLAB_AVAILABLE, "matlab"
     ),
     Language.DART: LanguageConfig(ts_dart, DartMapping, DART_AVAILABLE, "dart"),
     Language.OBJC: LanguageConfig(ts_objc, ObjCMapping, OBJC_AVAILABLE, "objc"),
-    Language.PHP: LanguageConfig(ts_php, PHPMapping, PHP_AVAILABLE, "php"),
     Language.SWIFT: LanguageConfig(ts_swift, SwiftMapping, SWIFT_AVAILABLE, "swift"),
+    # Languages that use TypeScript parser
     Language.VUE: LanguageConfig(
-        ts_typescript, VueMapping, TYPESCRIPT_AVAILABLE, "vue"
+        ts_typescript, VueMapping, True, "vue"
     ),  # Vue uses TypeScript parser for script sections
     Language.SVELTE: LanguageConfig(
-        ts_typescript, SvelteMapping, TYPESCRIPT_AVAILABLE, "svelte"
+        ts_typescript, SvelteMapping, True, "svelte"
     ),  # Svelte uses TypeScript parser for script sections
-    Language.JSON: LanguageConfig(ts_json, JsonMapping, JSON_AVAILABLE, "json"),
-    Language.YAML: LanguageConfig(ts_yaml, YamlMapping, YAML_AVAILABLE, "yaml"),
-    Language.TOML: LanguageConfig(ts_toml, TomlMapping, TOML_AVAILABLE, "toml"),
-    Language.HCL: LanguageConfig(ts_hcl, HclMapping, HCL_AVAILABLE, "hcl"),
-    Language.MARKDOWN: LanguageConfig(
-        ts_markdown, MarkdownMapping, MARKDOWN_AVAILABLE, "markdown"
-    ),
-    Language.MAKEFILE: LanguageConfig(
-        ts_make, MakefileMapping, MAKEFILE_AVAILABLE, "makefile"
-    ),
     Language.JSX: LanguageConfig(
-        ts_typescript, JSXMapping, JSX_AVAILABLE, "jsx"
+        ts_typescript, JSXMapping, True, "jsx"
     ),  # JSX uses TSX grammar
     Language.TSX: LanguageConfig(
-        ts_typescript, TSXMapping, TSX_AVAILABLE, "tsx"
+        ts_typescript, TSXMapping, True, "tsx"
     ),  # TSX uses TS parser with tsx language
+    # Non-tree-sitter languages
     Language.TEXT: LanguageConfig(
         None, TextMapping, True, "text"
     ),  # Text doesn't need tree-sitter
@@ -698,7 +557,6 @@ class ParserFactory:
                 max_chunk_size=cast_config.max_chunk_size,
                 min_chunk_size=cast_config.min_chunk_size,
                 merge_threshold=cast_config.merge_threshold,
-                preserve_structure=cast_config.preserve_structure,
                 greedy_merge=False,
                 safe_token_limit=cast_config.safe_token_limit,
             )

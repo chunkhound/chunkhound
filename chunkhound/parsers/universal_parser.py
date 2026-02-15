@@ -54,7 +54,6 @@ class CASTConfig:
     merge_threshold: float = (
         0.8  # Merge siblings if combined size < threshold * max_size
     )
-    preserve_structure: bool = True  # Prioritize syntactic boundaries
     greedy_merge: bool = True  # Greedily merge adjacent sibling nodes
     safe_token_limit: int = 6000  # Conservative token limit (well under 8191 API limit)
 
@@ -1416,7 +1415,6 @@ class UniversalParser:
                 "max_chunk_size": self.cast_config.max_chunk_size,
                 "min_chunk_size": self.cast_config.min_chunk_size,
                 "merge_threshold": self.cast_config.merge_threshold,
-                "preserve_structure": self.cast_config.preserve_structure,
                 "greedy_merge": self.cast_config.greedy_merge,
             },
         }

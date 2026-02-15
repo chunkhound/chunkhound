@@ -8,17 +8,15 @@ syntax while building on the Java foundation.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any
 
 from loguru import logger
+from tree_sitter import Node as TSNode
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 from .base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
 
 
 class GroovyMapping(BaseMapping):
@@ -879,10 +877,10 @@ class GroovyMapping(BaseMapping):
 
     def extract_metadata(
         self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """Extract Groovy-specific metadata."""
         source = content.decode("utf-8")
-        metadata: dict[str, str] = {}
+        metadata: dict[str, Any] = {}
 
         def_node = captures.get("definition")
         if def_node:
@@ -898,10 +896,10 @@ class GroovyMapping(BaseMapping):
                 if def_node.type in ("method_declaration", "constructor_declaration"):
                     params = self.extract_parameters(def_node, source)
                     if params:
-                        metadata["parameters"] = ", ".join(params)
+                        metadata["parameters"] = params
                 elif def_node.type == "closure":
                     params = self.extract_closure_parameters(def_node, source)
                     if params:
-                        metadata["parameters"] = ", ".join(params)
+                        metadata["parameters"] = params
 
         return metadata

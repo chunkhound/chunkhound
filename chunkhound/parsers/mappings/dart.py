@@ -6,22 +6,10 @@ for mapping Dart AST nodes to semantic chunks.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
-
-if TYPE_CHECKING:
-    from chunkhound.parsers.universal_engine import UniversalConcept
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = Any  # type: ignore
-
-# Import UniversalConcept at runtime
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 
@@ -105,7 +93,7 @@ class DartMapping(BaseMapping):
         Returns:
             Function name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "function")
 
         # Try to find identifier child node for function name
@@ -135,7 +123,7 @@ class DartMapping(BaseMapping):
         Returns:
             Class name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "class")
 
         # Handle regular classes, enums, and mixins
@@ -158,7 +146,7 @@ class DartMapping(BaseMapping):
         Returns:
             Method name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "method")
 
         # Handle method signatures within classes
@@ -197,7 +185,7 @@ class DartMapping(BaseMapping):
         Returns:
             List of parameter names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         parameters: list[str] = []
@@ -231,7 +219,7 @@ class DartMapping(BaseMapping):
         Returns:
             True if node should be included, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Exclude synthetic nodes or nodes without meaningful content

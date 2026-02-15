@@ -8,24 +8,14 @@ TSX expressions with type annotations.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from loguru import logger
 
 from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.mappings.typescript import TypeScriptMapping
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
-
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = None
+from tree_sitter import Node as TSNode
 
 
 class TSXMapping(TypeScriptMapping):
@@ -215,7 +205,7 @@ class TSXMapping(TypeScriptMapping):
         Returns:
             Component name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return "unknown_component"
 
         # Use base TypeScript function name extraction
@@ -237,7 +227,7 @@ class TSXMapping(TypeScriptMapping):
         Returns:
             JSX element name or fallback
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return "unknown_element"
 
         # Look for opening tag name
@@ -266,7 +256,7 @@ class TSXMapping(TypeScriptMapping):
         Returns:
             Hook name or fallback
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return "unknown_hook"
 
         # For hook calls
@@ -297,7 +287,7 @@ class TSXMapping(TypeScriptMapping):
         Returns:
             Props type string or None if not found
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return None
 
         try:
@@ -342,7 +332,7 @@ class TSXMapping(TypeScriptMapping):
         Returns:
             Dictionary with type information
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return {}
 
         types = {}
@@ -388,7 +378,7 @@ class TSXMapping(TypeScriptMapping):
         Returns:
             True if the function appears to be a React component
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Check if function returns JSX
@@ -418,7 +408,7 @@ class TSXMapping(TypeScriptMapping):
         Returns:
             List of prop names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         props = []
@@ -455,7 +445,7 @@ class TSXMapping(TypeScriptMapping):
         Returns:
             True if node should be included, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Use base TypeScript filtering first
@@ -541,7 +531,7 @@ class TSXMapping(TypeScriptMapping):
         )
 
         # Add TSX-specific enhancements
-        if node and TREE_SITTER_AVAILABLE:
+        if node:
             try:
                 # Add component props type for React components
                 if chunk_type == ChunkType.FUNCTION and self.is_react_component(

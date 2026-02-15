@@ -12,13 +12,7 @@ from typing import Any
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH
 from chunkhound.parsers.universal_engine import UniversalConcept
 
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TSNode = Any  # type: ignore[misc,assignment]
-    TREE_SITTER_AVAILABLE = False
+from tree_sitter import Node as TSNode
 
 
 class JSFamilyExtraction:
@@ -129,9 +123,6 @@ class JSFamilyExtraction:
             List of constant dictionaries with 'name' and 'value' keys, or None
         """
         if concept != UniversalConcept.DEFINITION:
-            return None
-
-        if not TREE_SITTER_AVAILABLE:
             return None
 
         source = content.decode("utf-8", errors="replace")

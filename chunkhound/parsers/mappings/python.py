@@ -6,22 +6,12 @@ for mapping Python AST nodes to semantic chunks.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
-
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = Any  # type: ignore
+from tree_sitter import Node as TSNode
 
 
 class PythonMapping(BaseMapping):
@@ -149,7 +139,7 @@ class PythonMapping(BaseMapping):
         Returns:
             Function name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "function")
 
         # Look for the name child node
@@ -171,7 +161,7 @@ class PythonMapping(BaseMapping):
         Returns:
             Class name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "class")
 
         # Look for the name child node
@@ -196,7 +186,7 @@ class PythonMapping(BaseMapping):
         Returns:
             List of parameter names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         parameters: list[str] = []
@@ -266,7 +256,7 @@ class PythonMapping(BaseMapping):
         Returns:
             List of decorator names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         decorators = []
@@ -292,7 +282,7 @@ class PythonMapping(BaseMapping):
         Returns:
             List of superclass names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         superclasses: list[str] = []
@@ -332,7 +322,7 @@ class PythonMapping(BaseMapping):
         Returns:
             Dictionary mapping parameter names to their type hints
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return {}
 
         type_hints: dict[str, str] = {}
@@ -384,7 +374,7 @@ class PythonMapping(BaseMapping):
         Returns:
             True if the function is async, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         return node.type == "async_function_definition"
@@ -399,7 +389,7 @@ class PythonMapping(BaseMapping):
         Returns:
             True if the function contains yield statements, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Look for yield expressions in the function body
@@ -418,7 +408,7 @@ class PythonMapping(BaseMapping):
         Returns:
             Dictionary with import information
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return {}
 
         import_info = {}
@@ -445,7 +435,7 @@ class PythonMapping(BaseMapping):
         Returns:
             True if node should be included, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Get the node text to check size
