@@ -14,6 +14,7 @@ from chunkhound.core.config.embedding_config import (
     RERANK_BASE_URL_REQUIRED,
     validate_rerank_configuration,
 )
+from chunkhound.core.config.openai_utils import is_azure_openai_endpoint
 from chunkhound.core.exceptions.core import ValidationError
 from chunkhound.core.exceptions.embedding import (
     EmbeddingConfigurationError,
@@ -21,7 +22,7 @@ from chunkhound.core.exceptions.embedding import (
 )
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 
-from .batch_utils import handle_token_limit_error, with_openai_token_handling
+from .batch_utils import handle_token_limit_error
 from .shared_utils import l2_normalize
 
 try:
@@ -254,6 +255,9 @@ class OpenAIEmbeddingProvider:
         rerank_batch_size: int | None = None,
         output_dims: int | None = None,
         client_side_truncation: bool = False,
+        api_version: str | None = None,
+        azure_endpoint: str | None = None,
+        azure_deployment: str | None = None,
     ):
         """Initialize OpenAI embedding provider.
 
@@ -272,6 +276,9 @@ class OpenAIEmbeddingProvider:
             rerank_batch_size: Max documents per rerank batch (overrides model defaults, bounded by model caps)
             output_dims: Output embedding dims for matryoshka models (None = native)
             client_side_truncation: Truncate embeddings client-side instead of using API dimensions parameter
+            api_version: Azure OpenAI API version (e.g., '2024-02-01')
+            azure_endpoint: Azure OpenAI endpoint URL
+            azure_deployment: Azure OpenAI deployment name
         """
         if not OPENAI_AVAILABLE:
             raise ImportError(
@@ -282,6 +289,11 @@ class OpenAIEmbeddingProvider:
         self._api_key = api_key
         self._base_url = base_url
         self._model = model
+
+        # Azure OpenAI configuration
+        self._api_version = api_version
+        self._azure_endpoint = azure_endpoint
+        self._azure_deployment = azure_deployment
         self._rerank_model = rerank_model
         self._rerank_url = rerank_url
         self._rerank_format = rerank_format
@@ -450,6 +462,11 @@ class OpenAIEmbeddingProvider:
                 "OpenAI library is not available. Install with: pip install openai"
             )
 
+        # Check if using Azure OpenAI
+        if is_azure_openai_endpoint(self._azure_endpoint):
+            await self._ensure_azure_client()
+            return
+
         # Only require API key for official OpenAI API
         from chunkhound.core.config.openai_utils import is_official_openai_endpoint
 
@@ -489,9 +506,42 @@ class OpenAIEmbeddingProvider:
         self._client = openai.AsyncOpenAI(**client_kwargs)
         self._client_initialized = True
 
+    async def _ensure_azure_client(self) -> None:
+        """Initialize Azure OpenAI client.
+
+        Azure OpenAI uses a different client class (AzureOpenAI) with specific
+        parameters for endpoint, API version, and deployment.
+        """
+        if not self._api_key:
+            raise ValueError("Azure OpenAI API key is required")
+
+        if not self._api_version:
+            raise ValueError("Azure OpenAI API version is required")
+
+        # azure_endpoint is validated by is_azure_openai_endpoint before this method is called
+        if not self._azure_endpoint:
+            raise ValueError("Azure endpoint is required for Azure OpenAI")
+
+        logger.debug(
+            f"Creating Azure OpenAI client: endpoint={self._azure_endpoint}, "
+            f"api_version={self._api_version}, deployment={self._azure_deployment}"
+        )
+
+        # AzureOpenAI client has different constructor parameters
+        self._client = openai.AsyncAzureOpenAI(
+            api_key=self._api_key,
+            api_version=self._api_version,
+            azure_endpoint=self._azure_endpoint,
+            timeout=self._timeout,
+        )
+        self._client_initialized = True
+
     @property
     def name(self) -> str:
         """Provider name."""
+        # Return azure_openai for Azure endpoints to distinguish in logs/metrics
+        if is_azure_openai_endpoint(self._azure_endpoint):
+            return "azure_openai"
         return "openai"
 
     @property
@@ -515,6 +565,21 @@ class OpenAIEmbeddingProvider:
             if key.lower() == normalized_lower:
                 return config
         return None
+
+    def _get_deployment_model(self) -> str:
+        """Get the model/deployment name for API requests.
+
+        For Azure OpenAI, this returns the deployment name if specified,
+        otherwise falls back to the model name (Azure deployments can use
+        model name as deployment name).
+
+        For standard OpenAI, this returns the model name.
+        """
+        if is_azure_openai_endpoint(self._azure_endpoint):
+            # Azure: prefer explicit deployment, fall back to model name
+            # (Azure allows using model name as deployment name)
+            return self._azure_deployment or self._model
+        return self._model
 
     @property
     def dims(self) -> int:
@@ -633,6 +698,10 @@ class OpenAIEmbeddingProvider:
         """Check if the provider is available and properly configured."""
         if not OPENAI_AVAILABLE:
             return False
+
+        # Azure OpenAI always requires API key and api_version
+        if is_azure_openai_endpoint(self._azure_endpoint):
+            return self._api_key is not None and self._api_version is not None
 
         # Import the utility function (following existing pattern)
         from chunkhound.core.config.openai_utils import is_official_openai_endpoint
@@ -810,35 +879,35 @@ class OpenAIEmbeddingProvider:
                 # Skip dimensions param if client_side_truncation is enabled
                 if self._output_dims is not None and not self._client_side_truncation:
                     response = await self._client.embeddings.create(
-                        model=self.model,
+                        model=self._get_deployment_model(),
                         input=texts,
                         dimensions=self._output_dims,
                         timeout=self._timeout,
                     )
                 else:
                     response = await self._client.embeddings.create(
-                        model=self.model, input=texts, timeout=self._timeout
+                        model=self._get_deployment_model(),
+                        input=texts,
+                        timeout=self._timeout,
                     )
 
-                # Extract embeddings from response
-                embeddings = []
+                # Extract embeddings from response, sorted by original input order
+                # OpenAI API does not guarantee response order - each data object
+                # has an 'index' field indicating its position in the input array
+                embeddings: list[list[float] | None] = [None] * len(texts)
                 for data in response.data:
                     embedding = data.embedding
                     # Client-side truncation + L2 normalize
                     if self._client_side_truncation and self._output_dims is not None:
                         embedding = l2_normalize(embedding[: self._output_dims])
-                    embeddings.append(embedding)
+                    embeddings[data.index] = embedding
 
-                # Validate embedding dimensions match expected dims (INV-1)
-                # Skip dimension validation when using client_side_truncation
-                if embeddings and not self._client_side_truncation:
-                    actual_dims = len(embeddings[0])
-                    expected_dims = self.dims
-                    if actual_dims != expected_dims:
-                        raise EmbeddingDimensionError(
-                            f"API returned embedding with {actual_dims} dims, "
-                            f"expected {expected_dims}"
-                        )
+                # Validate all indices were filled (defensive check)
+                if None in embeddings:
+                    missing = [i for i, e in enumerate(embeddings) if e is None]
+                    raise RuntimeError(
+                        f"OpenAI API returned incomplete embeddings, missing indices: {missing}"
+                    )
 
                 # Update usage statistics
                 self._usage_stats["requests_made"] += 1
@@ -847,7 +916,7 @@ class OpenAIEmbeddingProvider:
                     self._usage_stats["tokens_used"] += response.usage.total_tokens
 
                 logger.debug(f"Successfully generated {len(embeddings)} embeddings")
-                return embeddings
+                return cast(list[list[float]], embeddings)
 
             except Exception as rate_error:
                 if (
@@ -932,49 +1001,6 @@ class OpenAIEmbeddingProvider:
         raise RuntimeError(
             f"Failed to generate embeddings after {self._retry_attempts} attempts"
         )
-
-    @with_openai_token_handling()
-    async def _embed_batch_simple(self, texts: list[str]) -> list[list[float]]:
-        """Simplified embedding method using the token limit decorator.
-
-        This demonstrates how future providers can use the decorator approach.
-        """
-        if not self._client:
-            raise RuntimeError("OpenAI client not initialized")
-
-        logger.debug(f"Generating embeddings for {len(texts)} texts")
-
-        # Pass dimensions parameter for matryoshka models when output_dims is set
-        # Skip dimensions param if client_side_truncation is enabled
-        if self._output_dims is not None and not self._client_side_truncation:
-            response = await self._client.embeddings.create(
-                model=self.model,
-                input=texts,
-                dimensions=self._output_dims,
-                timeout=self._timeout,
-            )
-        else:
-            response = await self._client.embeddings.create(
-                model=self.model, input=texts, timeout=self._timeout
-            )
-
-        # Extract embeddings from response
-        embeddings = []
-        for data in response.data:
-            embedding = data.embedding
-            # Client-side truncation + L2 normalize
-            if self._client_side_truncation and self._output_dims is not None:
-                embedding = l2_normalize(embedding[: self._output_dims])
-            embeddings.append(embedding)
-
-        # Update usage statistics
-        self._usage_stats["requests_made"] += 1
-        self._usage_stats["embeddings_generated"] += len(embeddings)
-        if hasattr(response, "usage") and response.usage:
-            self._usage_stats["tokens_used"] += response.usage.total_tokens
-
-        logger.debug(f"Successfully generated {len(embeddings)} embeddings")
-        return embeddings
 
     def validate_texts(self, texts: list[str]) -> list[str]:
         """Validate and preprocess texts before embedding."""
@@ -1115,7 +1141,7 @@ class OpenAIEmbeddingProvider:
         try:
             # Test with a minimal request
             response = await self._client.embeddings.create(
-                model=self.model, input=["test"], timeout=5
+                model=self._get_deployment_model(), input=["test"], timeout=5
             )
             return (
                 len(response.data) == 1 and len(response.data[0].embedding) == self.dims

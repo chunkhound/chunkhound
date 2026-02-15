@@ -37,7 +37,7 @@ try:  # runtime path
     import mcp.types as types  # type: ignore
     from mcp.server import Server  # type: ignore
     from mcp.server.models import InitializationOptions  # type: ignore
-except Exception:  # pragma: no cover - optional dependency path
+except ImportError:  # pragma: no cover - optional dependency path
     _MCP_AVAILABLE = False
 
 if TYPE_CHECKING:  # type-checkers only; avoid runtime hard deps at import
@@ -283,20 +283,32 @@ class StdioMCPServer(MCPServerBase):
                             init_options,
                         )
             else:
-                # Minimal fallback stdio: immediately emit a valid initialize response
+                # Minimal fallback stdio: read initialize request, respond with matching ID
                 # so tests can proceed without the official MCP SDK.
-                import json, os as _os
+                import json
+
+                # Read one line from stdin (the initialize request)
+                request_id = 1
+                try:
+                    line = sys.stdin.readline()
+                    if line:
+                        request = json.loads(line)
+                        request_id = request.get("id", 1)
+                except Exception:
+                    pass
+
                 resp = {
                     "jsonrpc": "2.0",
-                    "id": 1,
+                    "id": request_id,  # Match client's request ID per JSON-RPC spec
                     "result": {
                         "protocolVersion": "2024-11-05",
                         "serverInfo": {"name": "ChunkHound Code Search", "version": __version__},
-                        "capabilities": {},
+                        "capabilities": {"tools": {}},  # Advertise tools capability
                     },
                 }
                 try:
-                    _os.write(1, (json.dumps(resp) + "\n").encode())
+                    sys.stdout.write(json.dumps(resp) + "\n")
+                    sys.stdout.flush()
                 except Exception:
                     pass
                 # Keep process alive briefly; tests terminate the process
@@ -341,16 +353,30 @@ async def main(args: Any = None) -> None:
 
     if validation_errors:
         # CRITICAL: Cannot print to stderr in MCP mode - breaks JSON-RPC protocol
-        # Exit silently with error code
+        # Log to debug file if available, then exit
+        debug_file = os.getenv("CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_mcp_debug.log")
+        try:
+            with open(debug_file, "a") as f:
+                f.write(f"MCP validation errors: {validation_errors}\n")
+        except Exception:
+            pass
         sys.exit(1)
 
     # Create and run the stdio server
     try:
         server = StdioMCPServer(config, args=args)
         await server.run()
-    except Exception:
+    except Exception as e:
         # CRITICAL: Cannot print to stderr in MCP mode - breaks JSON-RPC protocol
-        # Exit silently with error code
+        # Log to debug file if available, then exit
+        debug_file = os.getenv("CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_mcp_debug.log")
+        try:
+            import traceback
+            with open(debug_file, "a") as f:
+                f.write(f"MCP server error: {e}\n")
+                traceback.print_exc(file=f)
+        except Exception:
+            pass
         sys.exit(1)
 
 

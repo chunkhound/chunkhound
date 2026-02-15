@@ -5,12 +5,14 @@ the complete code research pipeline in CI/CD without external dependencies.
 """
 
 import asyncio
-import hashlib
+import math
 from collections.abc import AsyncIterator
 from typing import Any
 
-from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
+import xxhash
+
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
+from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 
 
 class FakeLLMProvider(LLMProvider):
@@ -278,25 +280,35 @@ class FakeEmbeddingProvider:
         )
 
     def _generate_deterministic_vector(self, text: str) -> list[float]:
-        """Generate deterministic embedding vector from text hash."""
-        # Use text hash to seed vector generation
-        text_hash = hashlib.sha256(text.encode()).digest()
+        """Generate deterministic embedding via character n-gram feature hashing.
 
-        # Convert hash bytes to floats in [-1, 1] range
-        # Use self.dims to respect output_dims override
-        vector = []
-        for i in range(self.dims):
-            # Use hash bytes cyclically
-            byte_idx = i % len(text_hash)
-            byte_val = text_hash[byte_idx]
-            # Normalize to [-1, 1]
-            normalized = (byte_val / 255.0) * 2 - 1
-            vector.append(normalized)
+        Hashes character n-grams (3, 4, 5-grams) to dimension indices,
+        accumulates with length-based weights, applies log-saturation,
+        and L2-normalizes. Produces vectors where texts sharing substrings
+        (identifiers, keywords) have high cosine similarity.
+        """
+        dims = self.dims
+        vector = [0.0] * dims
 
-        # Normalize vector to unit length for cosine similarity
-        magnitude = sum(x * x for x in vector) ** 0.5
+        words = text.lower().split()
+        for word in words:
+            padded = f"^{word}$"
+            for n in (3, 4, 5):
+                if len(padded) < n:
+                    continue
+                weight = {3: 1.0, 4: 5.0, 5: 10.0}[n]
+                for i in range(len(padded) - n + 1):
+                    ngram = padded[i : i + n]
+                    idx = xxhash.xxh3_64_intdigest(ngram.encode()) % dims
+                    vector[idx] += weight
+
+        # Log-saturation (BM25-style diminishing returns)
+        vector = [math.log1p(v) for v in vector]
+
+        # L2-normalize
+        magnitude = math.sqrt(sum(v * v for v in vector))
         if magnitude > 0:
-            vector = [x / magnitude for x in vector]
+            vector = [v / magnitude for v in vector]
 
         return vector
 
@@ -445,10 +457,22 @@ class FakeEmbeddingProvider:
         """Fake provider supports reranking."""
         return True
 
+    @staticmethod
+    def _tokenize(text: str) -> set[str]:
+        """Extract lowercase terms longer than 2 characters."""
+        return {w for w in text.lower().split() if len(w) > 2}
+
     async def rerank(
         self, query: str, documents: list[str], top_k: int | None = None
     ) -> list[RerankResult]:
-        """Rerank documents by relevance using deterministic scoring."""
+        """Rerank documents using hybrid term-overlap + hash-cosine scoring.
+
+        Score components (range [0.0, 1.0]):
+          - Term overlap  (0.5 weight): fraction of query terms found in doc terms
+          - Substring match (0.3 weight): fraction of query terms found as
+            substrings in the document (catches compound identifiers)
+          - Hash cosine    (0.2 weight): deterministic tie-breaker mapped to [0, 0.2]
+        """
         if not documents:
             return []
 
@@ -456,14 +480,33 @@ class FakeEmbeddingProvider:
 
         self._requests_made += 1
 
-        # Generate deterministic relevance scores based on query-document similarity
+        query_terms = self._tokenize(query)
         query_vector = self._generate_deterministic_vector(query)
         results = []
 
         for idx, doc in enumerate(documents):
+            doc_lower = doc.lower()
+            doc_terms = self._tokenize(doc)
+
+            # Term overlap: exact token match
+            if query_terms:
+                term_overlap = len(query_terms & doc_terms) / len(query_terms)
+            else:
+                term_overlap = 0.0
+
+            # Substring match: query term appears anywhere in doc text
+            if query_terms:
+                substr_hits = sum(1 for t in query_terms if t in doc_lower)
+                substr_score = substr_hits / len(query_terms)
+            else:
+                substr_score = 0.0
+
+            # Hash cosine: deterministic tie-breaker mapped from [-1,1] to [0,1]
             doc_vector = self._generate_deterministic_vector(doc)
-            # Cosine similarity
-            score = sum(a * b for a, b in zip(query_vector, doc_vector))
+            cosine = sum(a * b for a, b in zip(query_vector, doc_vector))
+            hash_score = (cosine + 1.0) / 2.0  # [0, 1]
+
+            score = 0.5 * term_overlap + 0.3 * substr_score + 0.2 * hash_score
             results.append(RerankResult(index=idx, score=score))
 
         # Sort by score descending
