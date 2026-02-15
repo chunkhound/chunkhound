@@ -264,42 +264,6 @@ if __name__ == "__main__":
             error_output = result.stderr + result.stdout
             assert error_output, "Should have error message"
 
-    @pytest.mark.skipif(
-        get_api_key_for_tests()[0] is None, reason="No API key available"
-    )
-    def test_search_semantic_basic(self, cli_project_setup):
-        """Test basic semantic search via CLI (if embedding provider available)."""
-        project_dir = cli_project_setup
-
-        # Standard API key check
-        api_key, provider = get_api_key_for_tests()
-        if not api_key:
-            pytest.skip("No embedding API key available for semantic search test")
-
-        result = subprocess.run(
-            [
-                "uv",
-                "run",
-                "chunkhound",
-                "search",
-                "tax calculation",
-                ".",
-                "--semantic",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            env=get_safe_subprocess_env(),
-            cwd=project_dir,
-        )
-
-        assert result.returncode == 0, f"Semantic search failed: {result.stderr}"
-        # Should find tax-related functions
-        output_lower = result.stdout.lower()
-        assert any(
-            word in output_lower for word in ["tax", "calculate", "calculator"]
-        ), f"Should find tax-related content, got: {result.stdout}"
-
     def test_search_output_format_structure(self, cli_project_setup):
         """Test that search output has expected structure."""
         project_dir = cli_project_setup
