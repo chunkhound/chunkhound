@@ -832,7 +832,11 @@ class UniversalParser:
                 return ChunkType.CLASS
             elif kind == "method" or "method" in node_type:
                 return ChunkType.METHOD
-            elif kind == "constructor" or kind == "initializer" or "constructor" in node_type:
+            elif (
+                kind == "constructor"
+                or kind == "initializer"
+                or "constructor" in node_type
+            ):
                 return ChunkType.CONSTRUCTOR
             elif kind == "struct" or "struct" in node_type:
                 # Structs map to CLASS in languages like Zig, Rust, Go
@@ -849,9 +853,13 @@ class UniversalParser:
                 return ChunkType.PROPERTY
             elif kind == "field" or "field" in node_type:
                 return ChunkType.FIELD
-            elif kind in {"variable", "loop_variable", "constant", "const", "define"} or (
-                "variable" in node_type
-            ):
+            elif kind in {
+                "variable",
+                "loop_variable",
+                "constant",
+                "const",
+                "define",
+            } or ("variable" in node_type):
                 return ChunkType.VARIABLE
             elif kind in {"type_alias", "typedef"} or "type_alias" in node_type:
                 return ChunkType.TYPE_ALIAS
@@ -918,15 +926,17 @@ class UniversalParser:
                     # Only create chunk if it meets minimum size
                     metrics = ChunkMetrics.from_content(paragraph_content)
                     if metrics.non_whitespace_chars >= self.cast_config.min_chunk_size:
-                        chunks.extend(self.chunk_splitter.validate_and_convert_text(
-                            content=paragraph_content,
-                            name=f"paragraph_{current_start_line}",
-                            start_line=current_start_line,
-                            end_line=line_num - 1,
-                            file_path=file_path,
-                            file_id=file_id,
-                            language=Language.TEXT,
-                        ))
+                        chunks.extend(
+                            self.chunk_splitter.validate_and_convert_text(
+                                content=paragraph_content,
+                                name=f"paragraph_{current_start_line}",
+                                start_line=current_start_line,
+                                end_line=line_num - 1,
+                                file_path=file_path,
+                                file_id=file_id,
+                                language=Language.TEXT,
+                            )
+                        )
 
                     current_paragraph = []
 
@@ -937,15 +947,17 @@ class UniversalParser:
             paragraph_content = "\n".join(current_paragraph)
             metrics = ChunkMetrics.from_content(paragraph_content)
             if metrics.non_whitespace_chars >= self.cast_config.min_chunk_size:
-                chunks.extend(self.chunk_splitter.validate_and_convert_text(
-                    content=paragraph_content,
-                    name=f"paragraph_{current_start_line}",
-                    start_line=current_start_line,
-                    end_line=line_num - 1,
-                    file_path=file_path,
-                    file_id=file_id,
-                    language=Language.TEXT,
-                ))
+                chunks.extend(
+                    self.chunk_splitter.validate_and_convert_text(
+                        content=paragraph_content,
+                        name=f"paragraph_{current_start_line}",
+                        start_line=current_start_line,
+                        end_line=line_num - 1,
+                        file_path=file_path,
+                        file_id=file_id,
+                        language=Language.TEXT,
+                    )
+                )
 
         # Update statistics
         self._total_files_parsed += 1

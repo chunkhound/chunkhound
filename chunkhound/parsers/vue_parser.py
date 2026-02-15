@@ -226,9 +226,7 @@ class VueParser:
 
                     # Split if needed and convert to Chunks
                     for uc in self.chunk_splitter.validate_and_split(uchunk):
-                        chunk = universal_to_chunk(
-                            uc, file_path, file_id, Language.VUE
-                        )
+                        chunk = universal_to_chunk(uc, file_path, file_id, Language.VUE)
                         template_chunks.append(chunk)
 
         # Create chunks for style sections (optional, as text blocks)

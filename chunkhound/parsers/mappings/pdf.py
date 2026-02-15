@@ -105,15 +105,17 @@ class PDFMapping(BaseMapping):
 
                     # Only create chunk if it has meaningful content
                     if len(paragraph.strip()) >= 50:  # Minimum content threshold
-                        chunks.extend(self._splitter.validate_and_convert_text(
-                            content=paragraph,
-                            name=f"page_{page_num + 1}_paragraph_{para_idx + 1}",
-                            start_line=current_line,
-                            end_line=current_line + para_lines - 1,
-                            file_path=file_path,
-                            file_id=file_id,
-                            language=Language.PDF,
-                        ))
+                        chunks.extend(
+                            self._splitter.validate_and_convert_text(
+                                content=paragraph,
+                                name=f"page_{page_num + 1}_paragraph_{para_idx + 1}",
+                                start_line=current_line,
+                                end_line=current_line + para_lines - 1,
+                                file_path=file_path,
+                                file_id=file_id,
+                                language=Language.PDF,
+                            )
+                        )
                         current_line += para_lines
                     else:
                         # Still increment line counter for small paragraphs
@@ -125,15 +127,17 @@ class PDFMapping(BaseMapping):
                 ):
                     page_lines = len(page_text.split("\n"))
 
-                    chunks.extend(self._splitter.validate_and_convert_text(
-                        content=page_text,
-                        name=f"page_{page_num + 1}_content",
-                        start_line=page_start_line,
-                        end_line=current_line + page_lines - 1,
-                        file_path=file_path,
-                        file_id=file_id,
-                        language=Language.PDF,
-                    ))
+                    chunks.extend(
+                        self._splitter.validate_and_convert_text(
+                            content=page_text,
+                            name=f"page_{page_num + 1}_content",
+                            start_line=page_start_line,
+                            end_line=current_line + page_lines - 1,
+                            file_path=file_path,
+                            file_id=file_id,
+                            language=Language.PDF,
+                        )
+                    )
                     current_line += page_lines
 
             doc.close()
@@ -636,10 +640,7 @@ class PDFMapping(BaseMapping):
         return annotations
 
     def resolve_import_path(
-        self,
-        import_text: str,
-        base_dir: Path,
-        source_file: Path
+        self, import_text: str, base_dir: Path, source_file: Path
     ) -> Path | None:
         """Data formats don't have imports."""
         return None

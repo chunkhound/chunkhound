@@ -43,8 +43,23 @@ class FakeLLMProvider(LLMProvider):
         # Default responses for common patterns
         self._responses = responses or {
             "expand": "function definition, class implementation, code structure",
-            "follow": "1. How is search implemented?\n2. What are the key algorithms?\n3. How does data flow through the system?",
-            "synthesis": "## Overview\nThe codebase implements semantic search with BFS traversal.\n\n## Key Components\n- Search service handles queries\n- Deep research coordinates BFS exploration\n- Database provider stores chunks\n\n## Data Flow\nQueries → Semantic search → Chunk retrieval → Smart boundaries → Synthesis",
+            "follow": (
+                "1. How is search implemented?\n"
+                "2. What are the key algorithms?\n"
+                "3. How does data flow through the system?"
+            ),
+            "synthesis": (
+                "## Overview\n"
+                "The codebase implements semantic search"
+                " with BFS traversal.\n\n"
+                "## Key Components\n"
+                "- Search service handles queries\n"
+                "- Deep research coordinates BFS exploration\n"
+                "- Database provider stores chunks\n\n"
+                "## Data Flow\n"
+                "Queries → Semantic search → Chunk retrieval"
+                " → Smart boundaries → Synthesis"
+            ),
             "code": "semantic search, deep research, database operations",
         }
 
