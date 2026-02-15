@@ -383,7 +383,7 @@ class ChunkSplitter:
         else:
             # Fallback to conservative estimation
             max_chars_from_tokens = int(self.config.safe_token_limit * 3.5 * 0.8)
-        max_chars = min(self.config.max_chunk_size, max_chars_from_tokens)
+        max_chars = max(1, min(self.config.max_chunk_size, max_chars_from_tokens))
 
         metrics = ChunkMetrics.from_content(chunk.content)
         if (
@@ -393,7 +393,7 @@ class ChunkSplitter:
             return [chunk]
 
         # Smart split points for code (in order of preference)
-        split_chars = [";", "}", "{", ",", " "]
+        split_chars = ["\n", ";", "}", "{", ",", " "]
 
         chunks = []
         remaining = chunk.content
@@ -405,7 +405,10 @@ class ChunkSplitter:
 
         while remaining:
             remaining_metrics = ChunkMetrics.from_content(remaining)
-            if remaining_metrics.non_whitespace_chars <= self.config.max_chunk_size:
+            if (
+                remaining_metrics.non_whitespace_chars <= self.config.max_chunk_size
+                and self._estimate_tokens(remaining) <= self.config.safe_token_limit
+            ):
                 chunks.append(
                     self._create_split_chunk(
                         chunk, remaining, part_num, current_pos, total_content_length
