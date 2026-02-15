@@ -22,13 +22,7 @@ from .base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 if TYPE_CHECKING:
     from chunkhound.parsers.universal_engine import UniversalConcept
 
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = Any  # type: ignore
+from tree_sitter import Node as TSNode
 
 
 class ObjCMapping(BaseMapping):

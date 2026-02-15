@@ -26,21 +26,11 @@ structure of Vue Single File Components (.vue files).
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Optional
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.typescript import TypeScriptMapping
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
-
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = Any  # type: ignore
+from tree_sitter import Node as TSNode
 
 
 class VueMapping(TypeScriptMapping):
