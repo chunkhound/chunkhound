@@ -6,22 +6,12 @@ for mapping C AST nodes to semantic chunks.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
-
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = Any
+from tree_sitter import Node as TSNode
 
 
 class CMapping(BaseMapping):
@@ -158,7 +148,7 @@ class CMapping(BaseMapping):
         Returns:
             Function name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "function")
 
         # Look for identifier nodes in the declarator hierarchy
@@ -186,7 +176,7 @@ class CMapping(BaseMapping):
         Returns:
             Struct/union/enum name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "struct")
 
         # Look for the type_identifier child node
@@ -215,7 +205,7 @@ class CMapping(BaseMapping):
         Returns:
             List of parameter declarations
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         parameters: list[str] = []
@@ -244,7 +234,7 @@ class CMapping(BaseMapping):
         Returns:
             Preprocessor directive name or fallback
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "preprocessor")
 
         # For #include directives, extract the path
@@ -280,7 +270,7 @@ class CMapping(BaseMapping):
         Returns:
             Variable name or fallback
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "variable")
 
         # Look for identifier nodes in the declarator
@@ -305,7 +295,7 @@ class CMapping(BaseMapping):
         Returns:
             Typedef name or fallback
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "typedef")
 
         # Look for the type_identifier (the new type name)
@@ -556,7 +546,7 @@ class CMapping(BaseMapping):
 
     def _extract_return_type(self, func_node: "TSNode", source: str) -> str | None:
         """Extract return type from a C function node."""
-        if not TREE_SITTER_AVAILABLE or func_node is None:
+        if func_node is None:
             return None
 
         # Look for type specifiers before the function declarator
@@ -576,7 +566,7 @@ class CMapping(BaseMapping):
         self, typedef_node: "TSNode", source: str
     ) -> str | None:
         """Extract underlying type from a typedef definition."""
-        if not TREE_SITTER_AVAILABLE or typedef_node is None:
+        if typedef_node is None:
             return None
 
         # Look for the type being aliased (before the declarator)
@@ -605,7 +595,7 @@ class CMapping(BaseMapping):
         Returns:
             True if node should be included, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Get the node text to check size
@@ -641,9 +631,6 @@ class CMapping(BaseMapping):
         Returns:
             List of dictionaries with "name" and "value" keys, or None
         """
-        if not TREE_SITTER_AVAILABLE:
-            return None
-
         source = content.decode("utf-8")
         constants: list[dict[str, str]] = []
 

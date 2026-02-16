@@ -21,13 +21,7 @@ from chunkhound.parsers.universal_engine import UniversalConcept
 
 from .base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = Any  # type: ignore
+from tree_sitter import Node as TSNode
 
 
 class SwiftMapping(BaseMapping):
@@ -768,9 +762,6 @@ class SwiftMapping(BaseMapping):
         Returns:
             List of dictionaries with "name", "value", and optionally "type" keys, or None
         """
-        if not TREE_SITTER_AVAILABLE:
-            return None
-
         source = content.decode("utf-8")
         constants: list[dict[str, str]] = []
 
