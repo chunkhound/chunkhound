@@ -287,13 +287,16 @@ class VoyageAIEmbeddingProvider:
         # Retry loop for transient network errors
         for attempt in range(self._retry_attempts):
             try:
+                embed_kwargs: dict[str, Any] = {
+                    "texts": validated_texts,
+                    "model": self._model,
+                    "input_type": "document",
+                    "truncation": True,
+                }
+                if self._output_dims is not None:
+                    embed_kwargs["output_dimension"] = self._output_dims
                 result = await asyncio.to_thread(
-                    self._client.embed,
-                    texts=validated_texts,
-                    model=self._model,
-                    input_type="document",
-                    truncation=True,
-                    output_dimension=self._output_dims,
+                    self._client.embed, **embed_kwargs
                 )
 
                 self._requests_made += 1
