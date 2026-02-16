@@ -263,24 +263,11 @@ class EmbeddingConfig(BaseSettings):
             rerank_url=self.rerank_url,
             base_url=self.base_url,
         )
-
-        # Validate reranker model against whitelist for VoyageAI on official API
-        if (
-            self.provider == "voyageai"
-            and self.rerank_model is not None
-            and self.base_url is None  # Skip for custom endpoints
-        ):
-            if self.rerank_model not in VOYAGEAI_RERANKER_WHITELIST:
-                raise EmbeddingConfigurationError(
-                    f"Unknown reranker model '{self.rerank_model}' for VoyageAI. "
-                    f"Valid reranker models: {sorted(VOYAGEAI_RERANKER_WHITELIST)}"
-                )
-
         return self
 
     @model_validator(mode="after")
     def validate_model_whitelist(self) -> Self:
-        """Validate model against whitelist for official APIs."""
+        """Validate model and reranker against whitelists for official APIs."""
         # Skip validation for custom endpoints
         if self.base_url is not None:
             return self
@@ -298,6 +285,14 @@ class EmbeddingConfig(BaseSettings):
                 raise EmbeddingConfigurationError(
                     f"Unknown model '{model}' for VoyageAI. "
                     f"Valid models: {sorted(VOYAGEAI_MODEL_WHITELIST)}"
+                )
+            if (
+                self.rerank_model is not None
+                and self.rerank_model not in VOYAGEAI_RERANKER_WHITELIST
+            ):
+                raise EmbeddingConfigurationError(
+                    f"Unknown reranker model '{self.rerank_model}' for VoyageAI. "
+                    f"Valid reranker models: {sorted(VOYAGEAI_RERANKER_WHITELIST)}"
                 )
 
         return self
