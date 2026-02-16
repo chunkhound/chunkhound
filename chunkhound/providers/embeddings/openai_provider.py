@@ -3,7 +3,7 @@
 import asyncio
 import heapq
 import math
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import datetime
 from typing import Any, cast
 
@@ -591,13 +591,13 @@ class OpenAIEmbeddingProvider:
         return 1536
 
     @property
-    def supported_dimensions(self) -> list[int]:
-        """List of valid output dimensions for this model."""
+    def supported_dimensions(self) -> Sequence[int]:
+        """Valid output dimensions for this model."""
         model_cfg = self._get_model_config()
         if model_cfg and model_cfg.get("matryoshka", False):
             min_dims = cast(int, model_cfg.get("min_dims", 1))
             native = cast(int, model_cfg.get("native_dims", model_cfg.get("dims", 1536)))
-            return list(range(min_dims, native + 1))
+            return range(min_dims, native + 1)
         return [self.native_dims]
 
     def supports_matryoshka(self) -> bool:
