@@ -1,19 +1,17 @@
 """EmbeddingProvider protocol for ChunkHound - abstract interface for embedding implementations."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 # Import and re-export exceptions for convenience
 from chunkhound.core.exceptions.embedding import (
-    EmbeddingBatchError,
     EmbeddingConfigurationError,
     EmbeddingDimensionError,
     EmbeddingProviderError,
 )
 
 __all__ = [
-    "EmbeddingBatchError",
     "EmbeddingConfig",
     "EmbeddingConfigurationError",
     "EmbeddingDimensionError",
@@ -76,10 +74,11 @@ class EmbeddingProvider(Protocol):
         ...
 
     @property
-    def supported_dimensions(self) -> list[int]:
-        """List of valid output dimensions for this model.
+    def supported_dimensions(self) -> Sequence[int]:
+        """Valid output dimensions for this model.
 
         Returns single-element list [native_dims] for non-matryoshka models.
+        May return a range for continuous-dimension models.
         """
         ...
 

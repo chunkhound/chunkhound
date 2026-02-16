@@ -2,7 +2,7 @@
 
 These exceptions extend ChunkHoundError for consistent error handling with
 context tracking. They are specific to embedding provider operations:
-dimension validation, batch processing, and matryoshka configuration.
+dimension validation and matryoshka configuration.
 
 Note: EmbeddingProviderError is distinct from core.EmbeddingError which
 covers higher-level embedding operations (generate, store, retrieve).
@@ -27,17 +27,6 @@ class EmbeddingDimensionError(EmbeddingProviderError):
     This occurs when:
     - API returns embeddings with unexpected dimension
     - provider.dims doesn't match actual embedding length
-    """
-
-    pass
-
-
-class EmbeddingBatchError(EmbeddingProviderError):
-    """Raised when embedding batch has inconsistent dimensions.
-
-    This occurs when:
-    - Embeddings in a single batch have different dimensions
-    - Batch dimension doesn't match expected index dimension
     """
 
     pass

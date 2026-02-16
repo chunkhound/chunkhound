@@ -23,10 +23,9 @@ from chunkhound.core.exceptions.core import (
     ValidationError,
 )
 from chunkhound.core.exceptions.embedding import (
-    EmbeddingProviderError,
-    EmbeddingBatchError,
     EmbeddingConfigurationError,
     EmbeddingDimensionError,
+    EmbeddingProviderError,
 )
 
 __all__ = [
@@ -43,7 +42,6 @@ __all__ = [
     "ProviderError",
     # Embedding provider exceptions
     "EmbeddingProviderError",
-    "EmbeddingBatchError",
     "EmbeddingConfigurationError",
     "EmbeddingDimensionError",
 ]
