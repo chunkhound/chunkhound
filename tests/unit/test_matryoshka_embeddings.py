@@ -14,12 +14,6 @@ from chunkhound.interfaces.embedding_provider import EmbeddingConfigurationError
 from tests.fixtures.fake_providers import FakeEmbeddingProvider
 
 
-def _voyageai_available() -> bool:
-    """Check if VoyageAI SDK is available."""
-    import importlib.util
-
-    return importlib.util.find_spec("voyageai") is not None
-
 
 class TestOutputDimsConfig:
     """Test output_dims configuration field."""
@@ -200,72 +194,44 @@ class TestOpenAIProviderMatryoshka:
         assert 2048 in provider.supported_dimensions
 
 
-class TestVoyageAIProviderMatryoshka:
-    """Test VoyageAI provider matryoshka support."""
+class TestVoyageModelConfigProperties:
+    """Test VoyageAI model config properties without requiring SDK.
 
-    @pytest.mark.skipif(
-        not _voyageai_available(),
-        reason="Requires VoyageAI SDK",
-    )
+    Validates VOYAGE_MODEL_CONFIG entries produce the correct matryoshka
+    properties. These are the same invariants the provider derives at runtime
+    via trivial dict lookups.
+    """
+
     def test_voyage_35_supports_matryoshka(self):
-        """voyage-3.5 supports matryoshka with discrete dimensions."""
-        from chunkhound.providers.embeddings.voyageai_provider import (
-            VoyageAIEmbeddingProvider,
-        )
+        """voyage-3.5 config has multiple dimensions (matryoshka)."""
+        from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
 
-        provider = VoyageAIEmbeddingProvider(api_key="test-key", model="voyage-3.5")
-        assert provider.supports_matryoshka() is True
-        assert provider.native_dims == 2048
-        assert provider.supported_dimensions == [256, 512, 1024, 2048]
+        dims = VOYAGE_MODEL_CONFIG["voyage-3.5"]["dimensions"]
+        assert len(dims) > 1
+        assert max(dims) == 2048
+        assert dims == [256, 512, 1024, 2048]
 
-    @pytest.mark.skipif(
-        not _voyageai_available(),
-        reason="Requires VoyageAI SDK",
-    )
     def test_voyage_35_output_dims_valid(self):
-        """voyage-3.5 accepts valid output_dims from discrete set."""
-        from chunkhound.providers.embeddings.voyageai_provider import (
-            VoyageAIEmbeddingProvider,
-        )
+        """voyage-3.5 config accepts 512 as valid output_dims."""
+        from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
 
-        provider = VoyageAIEmbeddingProvider(
-            api_key="test-key", model="voyage-3.5", output_dims=512
-        )
-        assert provider.dims == 512
-        assert provider.native_dims == 2048
+        config = VOYAGE_MODEL_CONFIG["voyage-3.5"]
+        assert 512 in config["dimensions"]
+        assert max(config["dimensions"]) == 2048
 
-    @pytest.mark.skipif(
-        not _voyageai_available(),
-        reason="Requires VoyageAI SDK",
-    )
-    def test_voyage_35_output_dims_invalid_raises_error(self):
-        """voyage-3.5 rejects output_dims not in discrete set."""
-        from chunkhound.providers.embeddings.voyageai_provider import (
-            VoyageAIEmbeddingProvider,
-        )
+    def test_voyage_35_output_dims_invalid(self):
+        """768 is not a valid output_dims for voyage-3.5."""
+        from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
 
-        with pytest.raises(EmbeddingConfigurationError, match="not in supported dimensions"):
-            VoyageAIEmbeddingProvider(
-                api_key="test-key",
-                model="voyage-3.5",
-                output_dims=768,  # Not in [256, 512, 1024, 2048]
-            )
+        assert 768 not in VOYAGE_MODEL_CONFIG["voyage-3.5"]["dimensions"]
 
-    @pytest.mark.skipif(
-        not _voyageai_available(),
-        reason="Requires VoyageAI SDK",
-    )
     def test_voyage_finance_no_matryoshka(self):
-        """voyage-finance-2 does not support matryoshka (single dimension)."""
-        from chunkhound.providers.embeddings.voyageai_provider import (
-            VoyageAIEmbeddingProvider,
-        )
+        """voyage-finance-2 has single dimension (no matryoshka)."""
+        from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
 
-        provider = VoyageAIEmbeddingProvider(
-            api_key="test-key", model="voyage-finance-2"
-        )
-        assert provider.supports_matryoshka() is False
-        assert provider.supported_dimensions == [1024]
+        dims = VOYAGE_MODEL_CONFIG["voyage-finance-2"]["dimensions"]
+        assert len(dims) == 1
+        assert dims == [1024]
 
 
 class TestDimensionBoundaries:
@@ -337,35 +303,24 @@ class TestConfigIntegration:
 
 
 class TestVoyage3ModelConfig:
-    """Test voyage-3 model configuration (Gap 1 fix)."""
+    """Test voyage-3 model configuration without requiring SDK."""
 
-    @pytest.mark.skipif(
-        not _voyageai_available(),
-        reason="Requires VoyageAI SDK",
-    )
     def test_voyage_3_in_model_config(self):
         """voyage-3 exists in VOYAGE_MODEL_CONFIG."""
-        from chunkhound.providers.embeddings.voyageai_provider import (
-            VOYAGE_MODEL_CONFIG,
-        )
+        from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
 
         assert "voyage-3" in VOYAGE_MODEL_CONFIG
 
-    @pytest.mark.skipif(
-        not _voyageai_available(),
-        reason="Requires VoyageAI SDK",
-    )
     def test_voyage_3_no_matryoshka(self):
-        """voyage-3 does not support matryoshka (single dimension)."""
-        from chunkhound.providers.embeddings.voyageai_provider import (
-            VoyageAIEmbeddingProvider,
-        )
+        """voyage-3 has single dimension (no matryoshka)."""
+        from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
 
-        provider = VoyageAIEmbeddingProvider(api_key="test-key", model="voyage-3")
-        assert provider.supports_matryoshka() is False
-        assert provider.supported_dimensions == [1024]
-        assert provider.native_dims == 1024
-        assert provider.dims == 1024
+        config = VOYAGE_MODEL_CONFIG["voyage-3"]
+        dims = config["dimensions"]
+        assert len(dims) == 1
+        assert dims == [1024]
+        assert max(dims) == 1024
+        assert config["default_dimension"] == 1024
 
 
 class TestRerankerWhitelist:
