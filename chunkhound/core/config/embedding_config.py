@@ -476,6 +476,20 @@ class EmbeddingConfig(BaseSettings):
             help="Azure OpenAI deployment name",
         )
 
+        parser.add_argument(
+            "--output-dims",
+            "--embedding-output-dims",
+            type=int,
+            help="Output embedding dimensions for matryoshka models",
+        )
+
+        parser.add_argument(
+            "--client-side-truncation",
+            "--embedding-client-side-truncation",
+            action="store_true",
+            help="Truncate embeddings client-side instead of via API",
+        )
+
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
         """Load embedding config from environment variables."""
@@ -574,6 +588,24 @@ class EmbeddingConfig(BaseSettings):
             and args.embedding_azure_deployment
         ):
             overrides["azure_deployment"] = args.embedding_azure_deployment
+
+        # Handle output_dims arguments (both variations)
+        if hasattr(args, "output_dims") and args.output_dims is not None:
+            overrides["output_dims"] = args.output_dims
+        if (
+            hasattr(args, "embedding_output_dims")
+            and args.embedding_output_dims is not None
+        ):
+            overrides["output_dims"] = args.embedding_output_dims
+
+        # Handle client_side_truncation arguments (both variations)
+        if hasattr(args, "client_side_truncation") and args.client_side_truncation:
+            overrides["client_side_truncation"] = True
+        if (
+            hasattr(args, "embedding_client_side_truncation")
+            and args.embedding_client_side_truncation
+        ):
+            overrides["client_side_truncation"] = True
 
         # Handle no-embeddings flag (special case - disables embeddings)
         if hasattr(args, "no_embeddings") and args.no_embeddings:
