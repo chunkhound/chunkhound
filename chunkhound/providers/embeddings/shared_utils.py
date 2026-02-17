@@ -2,6 +2,8 @@
 
 from typing import Any
 
+from chunkhound.core.exceptions.embedding import EmbeddingDimensionError
+
 
 def estimate_tokens_rough(text: str) -> float:
     """Rough token estimation (1.3 tokens per word approximation)."""
@@ -71,3 +73,15 @@ def l2_normalize(vector: list[float]) -> list[float]:
     if magnitude > 0:
         return [x / magnitude for x in vector]
     return vector
+
+
+def validate_embedding_dims(actual_dims: int, expected_dims: int) -> None:
+    """Validate embedding dimensions match expected value (INV-1).
+
+    Raises:
+        EmbeddingDimensionError: If dimensions don't match.
+    """
+    if actual_dims != expected_dims:
+        raise EmbeddingDimensionError(
+            f"Embedding dimension mismatch: got {actual_dims}, expected {expected_dims}"
+        )

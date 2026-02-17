@@ -7,16 +7,14 @@ from typing import Any, cast
 from loguru import logger
 
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERANK_MODEL
-from chunkhound.core.exceptions.embedding import (
-    EmbeddingConfigurationError,
-    EmbeddingDimensionError,
-)
+from chunkhound.core.exceptions.embedding import EmbeddingConfigurationError
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 
 from .shared_utils import (
     chunk_text_by_words,
     estimate_tokens_rough,
     get_usage_stats_dict,
+    validate_embedding_dims,
     validate_text_input,
 )
 
@@ -307,13 +305,7 @@ class VoyageAIEmbeddingProvider:
 
                 # Validate embedding dimensions match expected dims (INV-1)
                 if embeddings:
-                    actual_dims = len(embeddings[0])
-                    expected_dims = self.dims
-                    if actual_dims != expected_dims:
-                        raise EmbeddingDimensionError(
-                            f"API returned embedding with {actual_dims} dims, "
-                            f"expected {expected_dims}"
-                        )
+                    validate_embedding_dims(len(embeddings[0]), self.dims)
 
                 return embeddings
 
