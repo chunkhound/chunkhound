@@ -293,7 +293,7 @@ class VoyageAIEmbeddingProvider:
                     "input_type": "document",
                     "truncation": True,
                 }
-                if self._output_dims is not None:
+                if self._output_dims is not None and self.supports_matryoshka():
                     embed_kwargs["output_dimension"] = self._output_dims
                 result = await asyncio.to_thread(
                     self._client.embed, **embed_kwargs
