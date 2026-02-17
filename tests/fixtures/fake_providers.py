@@ -6,7 +6,7 @@ the complete code research pipeline in CI/CD without external dependencies.
 
 import asyncio
 import math
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import xxhash
@@ -233,7 +233,7 @@ class FakeEmbeddingProvider:
         return self._dims
 
     @property
-    def supported_dimensions(self) -> list[int]:
+    def supported_dimensions(self) -> Sequence[int]:
         """List of valid output dimensions for this model."""
         # Fake provider supports any dimension for testing flexibility
         return [self._dims]

@@ -1,7 +1,7 @@
 """VoyageAI embedding provider implementation for ChunkHound - concrete embedding provider using VoyageAI API."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any, cast
 
 from loguru import logger
@@ -225,7 +225,7 @@ class VoyageAIEmbeddingProvider:
         return max(dims_list)
 
     @property
-    def supported_dimensions(self) -> list[int]:
+    def supported_dimensions(self) -> Sequence[int]:
         """List of valid output dimensions for this model."""
         return cast(list[int], self._model_config.get("dimensions", [self.native_dims]))
 
