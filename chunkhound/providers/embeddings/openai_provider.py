@@ -866,21 +866,15 @@ class OpenAIEmbeddingProvider:
                     f"Generating embeddings for {len(texts)} texts (attempt {attempt + 1})"
                 )
 
-                # Pass dimensions parameter for matryoshka models when output_dims is set
-                # Skip dimensions param if client_side_truncation is enabled
+                # Build kwargs; add dimensions for server-side matryoshka truncation
+                embed_kwargs: dict[str, Any] = {
+                    "model": self._get_deployment_model(),
+                    "input": texts,
+                    "timeout": self._timeout,
+                }
                 if self._output_dims is not None and not self._client_side_truncation:
-                    response = await self._client.embeddings.create(
-                        model=self._get_deployment_model(),
-                        input=texts,
-                        dimensions=self._output_dims,
-                        timeout=self._timeout,
-                    )
-                else:
-                    response = await self._client.embeddings.create(
-                        model=self._get_deployment_model(),
-                        input=texts,
-                        timeout=self._timeout,
-                    )
+                    embed_kwargs["dimensions"] = self._output_dims
+                response = await self._client.embeddings.create(**embed_kwargs)
 
                 # Extract embeddings from response, sorted by original input order
                 # OpenAI API does not guarantee response order - each data object
