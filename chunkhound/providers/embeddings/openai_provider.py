@@ -44,12 +44,11 @@ QWEN_MODEL_CONFIG: dict[str, dict[str, Any]] = {
     # Native dimensions: 0.6B=1024, 4B=2560, 8B=4096
     # All support Matryoshka Representation Learning (MRL) for dimension reduction
     # Batch sizes balanced for GPU memory and throughput
-    "dengcao/Qwen3-Embedding-0.6B:Q5_K_M": {
+    "dengcao/qwen3-embedding-0.6b:q5_k_m": {
         "max_tokens_per_batch": 200000,  # Conservative for Q5_K_M quantization
         "max_texts_per_batch": 512,  # Smallest model: highest throughput
         "context_length": 8192,
         "max_rerank_batch": 128,  # Smallest reranker: largest batches
-        "dims": 1024,
         "native_dims": 1024,
         "matryoshka": True,
         "min_dims": 32,
@@ -60,18 +59,16 @@ QWEN_MODEL_CONFIG: dict[str, dict[str, Any]] = {
         "max_texts_per_batch": 512,
         "context_length": 8192,
         "max_rerank_batch": 128,
-        "dims": 1024,
         "native_dims": 1024,
         "matryoshka": True,
         "min_dims": 32,
         "distance": "cosine",
     },
-    "dengcao/Qwen3-Embedding-4B:Q5_K_M": {
+    "dengcao/qwen3-embedding-4b:q5_k_m": {
         "max_tokens_per_batch": 150000,
         "max_texts_per_batch": 256,  # Medium model: balanced speed/memory
         "context_length": 8192,
         "max_rerank_batch": 96,  # Medium reranker batch size
-        "dims": 2560,
         "native_dims": 2560,
         "matryoshka": True,
         "min_dims": 32,
@@ -82,18 +79,16 @@ QWEN_MODEL_CONFIG: dict[str, dict[str, Any]] = {
         "max_texts_per_batch": 256,
         "context_length": 8192,
         "max_rerank_batch": 96,
-        "dims": 2560,
         "native_dims": 2560,
         "matryoshka": True,
         "min_dims": 32,
         "distance": "cosine",
     },
-    "dengcao/Qwen3-Embedding-8B:Q5_K_M": {
+    "dengcao/qwen3-embedding-8b:q5_k_m": {
         "max_tokens_per_batch": 100000,
         "max_texts_per_batch": 128,  # Largest model: conservative for memory
         "context_length": 8192,
         "max_rerank_batch": 64,  # Largest reranker: smallest batches
-        "dims": 4096,
         "native_dims": 4096,
         "matryoshka": True,
         "min_dims": 32,
@@ -104,7 +99,6 @@ QWEN_MODEL_CONFIG: dict[str, dict[str, Any]] = {
         "max_texts_per_batch": 128,
         "context_length": 8192,
         "max_rerank_batch": 64,
-        "dims": 4096,
         "native_dims": 4096,
         "matryoshka": True,
         "min_dims": 32,
@@ -206,16 +200,16 @@ _validate_qwen_model_config()
 
 
 def _normalize_qwen_model_name(model: str) -> str:
-    """Strip provider prefixes from Qwen model names for config lookup.
+    """Strip provider prefixes and lowercase Qwen model names for config lookup.
 
-    Handles: fireworks/qwen3-embedding-4b → qwen3-embedding-4b
+    Handles: Fireworks/Qwen3-Embedding-4B → qwen3-embedding-4b
     """
     prefixes = ("fireworks/", "ollama/", "together/")
     model_lower = model.lower()
     for prefix in prefixes:
         if model_lower.startswith(prefix):
-            return model[len(prefix):]
-    return model
+            return model_lower[len(prefix):]
+    return model_lower
 
 
 class OpenAIEmbeddingProvider:
@@ -335,7 +329,6 @@ class OpenAIEmbeddingProvider:
         # Model-specific configuration for OpenAI models
         self._model_config = {
             "text-embedding-3-small": {
-                "dims": 1536,
                 "native_dims": 1536,
                 "matryoshka": True,
                 "min_dims": 1,
@@ -343,7 +336,6 @@ class OpenAIEmbeddingProvider:
                 "max_tokens": 8191,
             },
             "text-embedding-3-large": {
-                "dims": 3072,
                 "native_dims": 3072,
                 "matryoshka": True,
                 "min_dims": 1,
@@ -351,7 +343,6 @@ class OpenAIEmbeddingProvider:
                 "max_tokens": 8191,
             },
             "text-embedding-ada-002": {
-                "dims": 1536,
                 "native_dims": 1536,
                 "matryoshka": False,
                 "distance": "cosine",
@@ -368,7 +359,7 @@ class OpenAIEmbeddingProvider:
                         f"Model {model} does not support matryoshka dimensions"
                     )
                 min_dims = cast(int, model_cfg.get("min_dims", 1))
-                native_dims = cast(int, model_cfg.get("native_dims", model_cfg.get("dims", 1536)))
+                native_dims = cast(int, model_cfg.get("native_dims", 1536))
                 if not (min_dims <= output_dims <= native_dims):
                     raise EmbeddingConfigurationError(
                         f"output_dims {output_dims} out of range "
@@ -550,11 +541,6 @@ class OpenAIEmbeddingProvider:
 
         if normalized in QWEN_MODEL_CONFIG:
             return QWEN_MODEL_CONFIG[normalized]
-        # Case-insensitive match for Qwen models
-        normalized_lower = normalized.lower()
-        for key, config in QWEN_MODEL_CONFIG.items():
-            if key.lower() == normalized_lower:
-                return config
         return None
 
     def _get_deployment_model(self) -> str:
@@ -578,8 +564,8 @@ class OpenAIEmbeddingProvider:
         if self._output_dims is not None:
             return self._output_dims
         model_cfg = self._get_model_config()
-        if model_cfg and "dims" in model_cfg:
-            return cast(int, model_cfg["dims"])
+        if model_cfg and "native_dims" in model_cfg:
+            return cast(int, model_cfg["native_dims"])
         return 1536  # Default for unknown models
 
     @property
@@ -587,7 +573,7 @@ class OpenAIEmbeddingProvider:
         """Model's full/native embedding dimension."""
         model_cfg = self._get_model_config()
         if model_cfg:
-            return cast(int, model_cfg.get("native_dims", model_cfg.get("dims", 1536)))
+            return cast(int, model_cfg.get("native_dims", 1536))
         return 1536
 
     @property
@@ -596,7 +582,7 @@ class OpenAIEmbeddingProvider:
         model_cfg = self._get_model_config()
         if model_cfg and model_cfg.get("matryoshka", False):
             min_dims = cast(int, model_cfg.get("min_dims", 1))
-            native = cast(int, model_cfg.get("native_dims", model_cfg.get("dims", 1536)))
+            native = cast(int, model_cfg.get("native_dims", 1536))
             return range(min_dims, native + 1)
         return [self.native_dims]
 

@@ -243,7 +243,7 @@ class TestQwenModelConfig:
         for model in embedding_models:
             assert (
                 model in QWEN_MODEL_CONFIG
-                or f"dengcao/Qwen3-Embedding-{model.split('-')[-1].upper()}:Q5_K_M"
+                or f"dengcao/{model}:q5_k_m"
                 in QWEN_MODEL_CONFIG
             ), f"Embedding model {model} not found in config"
 
