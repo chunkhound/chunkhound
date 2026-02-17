@@ -235,7 +235,7 @@ class FakeEmbeddingProvider:
     @property
     def supported_dimensions(self) -> Sequence[int]:
         """List of valid output dimensions for this model."""
-        # Fake provider supports any dimension for testing flexibility
+        # Fake provider only supports its configured native dimension
         return [self._dims]
 
     def supports_matryoshka(self) -> bool:

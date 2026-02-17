@@ -11,8 +11,8 @@ import pytest
 
 from chunkhound.core.config.embedding_config import EmbeddingConfig
 from chunkhound.interfaces.embedding_provider import EmbeddingConfigurationError
+from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
 from tests.fixtures.fake_providers import FakeEmbeddingProvider
-
 
 
 class TestOutputDimsConfig:
@@ -204,7 +204,6 @@ class TestVoyageModelConfigProperties:
 
     def test_voyage_35_supports_matryoshka(self):
         """voyage-3.5 config has multiple dimensions (matryoshka)."""
-        from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
 
         dims = VOYAGE_MODEL_CONFIG["voyage-3.5"]["dimensions"]
         assert len(dims) > 1
@@ -213,7 +212,6 @@ class TestVoyageModelConfigProperties:
 
     def test_voyage_35_output_dims_valid(self):
         """voyage-3.5 config accepts 512 as valid output_dims."""
-        from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
 
         config = VOYAGE_MODEL_CONFIG["voyage-3.5"]
         assert 512 in config["dimensions"]
@@ -221,13 +219,11 @@ class TestVoyageModelConfigProperties:
 
     def test_voyage_35_output_dims_invalid(self):
         """768 is not a valid output_dims for voyage-3.5."""
-        from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
 
         assert 768 not in VOYAGE_MODEL_CONFIG["voyage-3.5"]["dimensions"]
 
     def test_voyage_finance_no_matryoshka(self):
         """voyage-finance-2 has single dimension (no matryoshka)."""
-        from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
 
         dims = VOYAGE_MODEL_CONFIG["voyage-finance-2"]["dimensions"]
         assert len(dims) == 1
@@ -307,13 +303,11 @@ class TestVoyage3ModelConfig:
 
     def test_voyage_3_in_model_config(self):
         """voyage-3 exists in VOYAGE_MODEL_CONFIG."""
-        from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
 
         assert "voyage-3" in VOYAGE_MODEL_CONFIG
 
     def test_voyage_3_no_matryoshka(self):
         """voyage-3 has single dimension (no matryoshka)."""
-        from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
 
         config = VOYAGE_MODEL_CONFIG["voyage-3"]
         dims = config["dimensions"]
@@ -364,7 +358,7 @@ class TestRerankerWhitelist:
             provider="openai",
             model="text-embedding-3-small",
             rerank_model="any-reranker",
-            base_url="http://localhost:8000",  # Custom endpoint to bypass embed whitelist
+            base_url="http://localhost:8000",  # Bypass embed whitelist
         )
         assert config.rerank_model == "any-reranker"
 
