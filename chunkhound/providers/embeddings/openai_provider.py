@@ -16,14 +16,11 @@ from chunkhound.core.config.embedding_config import (
 )
 from chunkhound.core.config.openai_utils import is_azure_openai_endpoint
 from chunkhound.core.exceptions.core import ValidationError
-from chunkhound.core.exceptions.embedding import (
-    EmbeddingConfigurationError,
-    EmbeddingDimensionError,
-)
+from chunkhound.core.exceptions.embedding import EmbeddingConfigurationError
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 
 from .batch_utils import handle_token_limit_error
-from .shared_utils import l2_normalize
+from .shared_utils import l2_normalize, validate_embedding_dims
 
 try:
     import openai
@@ -303,6 +300,7 @@ class OpenAIEmbeddingProvider:
         self._rerank_batch_size = rerank_batch_size
         self._output_dims = output_dims
         self._client_side_truncation = client_side_truncation
+        self._discovered_dims: int | None = None
 
         # Validate rerank configuration at initialization (fail-fast)
         # Match config validation logic: check if reranking is enabled
@@ -566,7 +564,9 @@ class OpenAIEmbeddingProvider:
         model_cfg = self._get_model_config()
         if model_cfg and "native_dims" in model_cfg:
             return cast(int, model_cfg["native_dims"])
-        return 1536  # Default for unknown models
+        if self._discovered_dims is not None:
+            return self._discovered_dims
+        return 1536  # Default before first API call for unknown models
 
     @property
     def native_dims(self) -> int:
@@ -574,6 +574,8 @@ class OpenAIEmbeddingProvider:
         model_cfg = self._get_model_config()
         if model_cfg:
             return cast(int, model_cfg.get("native_dims", 1536))
+        if self._discovered_dims is not None:
+            return self._discovered_dims
         return 1536
 
     @property
@@ -866,8 +868,11 @@ class OpenAIEmbeddingProvider:
                 # OpenAI API does not guarantee response order - each data object
                 # has an 'index' field indicating its position in the input array
                 embeddings: list[list[float] | None] = [None] * len(texts)
+                raw_dim: int | None = None
                 for data in response.data:
                     embedding = data.embedding
+                    if raw_dim is None:
+                        raw_dim = len(embedding)
                     # Client-side truncation + L2 normalize
                     if self._client_side_truncation and self._output_dims is not None:
                         embedding = l2_normalize(embedding[: self._output_dims])
@@ -887,6 +892,25 @@ class OpenAIEmbeddingProvider:
                     self._usage_stats["tokens_used"] += response.usage.total_tokens
 
                 logger.debug(f"Successfully generated {len(embeddings)} embeddings")
+
+                # Discover native dims and validate output dims (INV-1)
+                actual_dims = len(cast(list[float], embeddings[0]))
+                # Only discover when raw_dim reflects the true native size:
+                # skip when server-side truncation is active (API already truncated).
+                server_side_truncation = (
+                    self._output_dims is not None and not self._client_side_truncation
+                )
+                if (
+                    self._discovered_dims is None
+                    and self._get_model_config() is None
+                    and not server_side_truncation
+                ):
+                    self._discovered_dims = cast(int, raw_dim)
+                    logger.debug(
+                        f"Discovered native embedding dimension: {self._discovered_dims}"
+                    )
+                validate_embedding_dims(actual_dims, self.dims)
+
                 return cast(list[list[float]], embeddings)
 
             except Exception as rate_error:
