@@ -262,7 +262,7 @@ class EmbeddingConfig(BaseSettings):
     def validate_model_whitelist(self) -> Self:
         """Validate model and reranker against whitelists for official APIs."""
         # Skip validation for custom endpoints
-        if self.base_url is not None:
+        if self.base_url is not None and not is_official_openai_endpoint(self.base_url):
             return self
 
         model = self.get_default_model()
