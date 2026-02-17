@@ -26,19 +26,12 @@ OPENAI_MODEL_WHITELIST = {
     "text-embedding-ada-002",
 }
 
-VOYAGEAI_MODEL_WHITELIST = {
-    "voyage-3",
-    "voyage-3-lite",
-    "voyage-3.5",
-    "voyage-3.5-lite",
-    "voyage-3-large",
-    "voyage-code-3",
-    "voyage-finance-2",
-    "voyage-law-2",
-    "voyage-multilingual-2",
-    "voyage-large-2-instruct",
-    "voyage-2",
-}
+
+def _get_voyageai_model_whitelist() -> set[str]:
+    """Derive VoyageAI whitelist from provider config (lazy to avoid circular import)."""
+    from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
+
+    return set(VOYAGE_MODEL_CONFIG.keys())
 
 VOYAGEAI_RERANKER_WHITELIST = {
     "rerank-2.5",
@@ -281,10 +274,11 @@ class EmbeddingConfig(BaseSettings):
                     f"Valid models: {sorted(OPENAI_MODEL_WHITELIST)}"
                 )
         elif self.provider == "voyageai":
-            if model not in VOYAGEAI_MODEL_WHITELIST:
+            whitelist = _get_voyageai_model_whitelist()
+            if model not in whitelist:
                 raise EmbeddingConfigurationError(
                     f"Unknown model '{model}' for VoyageAI. "
-                    f"Valid models: {sorted(VOYAGEAI_MODEL_WHITELIST)}"
+                    f"Valid models: {sorted(whitelist)}"
                 )
             if (
                 self.rerank_model is not None
