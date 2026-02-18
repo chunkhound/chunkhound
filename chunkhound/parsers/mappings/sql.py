@@ -5,30 +5,19 @@ for the universal concept system. It maps SQL's AST nodes to universal
 semantic concepts used by the unified parser.
 
 Supported constructs: CREATE TABLE, CREATE VIEW, CREATE FUNCTION,
-CREATE INDEX, ALTER TABLE, comments, and BEGIN...END blocks.
+CREATE INDEX, CREATE TRIGGER, ALTER TABLE, comments, and BEGIN...END blocks.
 
-Note: CREATE PROCEDURE and CREATE TRIGGER are not supported because
-tree-sitter-sql lacks grammar rules for them (both produce ERROR nodes).
+Note: CREATE PROCEDURE is not supported because tree-sitter-sql lacks a
+grammar rule for it (produces ERROR nodes).
 Tracked upstream: https://github.com/DerekStride/tree-sitter-sql/issues/354
 """
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
+
+from tree_sitter import Node as TSNode
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import BaseMapping
-
-if TYPE_CHECKING:
-    from chunkhound.parsers.universal_engine import UniversalConcept
-
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = Any  # type: ignore
-
-# Import UniversalConcept at runtime
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 
@@ -41,25 +30,22 @@ class SqlMapping(BaseMapping):
 
     # BaseMapping required methods
     def get_function_query(self) -> str:
-        """Get tree-sitter query pattern for function definitions."""
-        return """
-        (create_function
-            name: (object_reference
-                (identifier) @func_name
-            )
-        ) @func_def
+        """Get tree-sitter query pattern for function definitions.
+
+        Delegates to get_query_for_concept to avoid dead sub-captures.
         """
+        return self.get_query_for_concept(UniversalConcept.DEFINITION) or ""
 
     def get_class_query(self) -> str:
-        """Get tree-sitter query pattern for class definitions (not applicable to SQL)."""
+        """Get tree-sitter query for class definitions (N/A for SQL)."""
         return ""
 
     def get_comment_query(self) -> str:
-        """Get tree-sitter query pattern for comments."""
-        return """
-        (comment) @comment
-        (marginalia) @comment
+        """Get tree-sitter query pattern for comments.
+
+        Delegates to get_query_for_concept to avoid capture name inconsistency.
         """
+        return self.get_query_for_concept(UniversalConcept.COMMENT) or ""
 
     def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract function name from a function definition node."""
@@ -104,6 +90,8 @@ class SqlMapping(BaseMapping):
             (create_function) @definition
 
             (create_index) @definition
+
+            (create_trigger) @definition
             """
 
         elif concept == UniversalConcept.BLOCK:
@@ -145,19 +133,39 @@ class SqlMapping(BaseMapping):
             name = self._extract_object_name(node, source)
 
             if node_type == "create_table":
-                return f"table_{name}" if name else self.get_fallback_name(node, "table")
+                if name:
+                    return f"table_{name}"
+                return self.get_fallback_name(node, "table")
             elif node_type == "create_view":
-                return f"view_{name}" if name else self.get_fallback_name(node, "view")
+                if name:
+                    return f"view_{name}"
+                return self.get_fallback_name(node, "view")
             elif node_type == "create_function":
-                return f"function_{name}" if name else self.get_fallback_name(node, "function")
+                if name:
+                    return f"function_{name}"
+                return self.get_fallback_name(node, "function")
             elif node_type == "create_index":
-                # Index name is a direct identifier child, not inside object_reference
-                idx_name = self.find_child_by_type(node, "identifier")
+                # Index name is a direct identifier child, not
+                # inside object_reference
+                idx_name = self.find_child_by_type(
+                    node, "identifier"
+                )
                 if idx_name:
-                    return f"index_{self.get_node_text(idx_name, source).strip()}"
+                    idx_text = self.get_node_text(
+                        idx_name, source
+                    ).strip()
+                    return f"index_{idx_text}"
                 return self.get_fallback_name(node, "index")
+            elif node_type == "create_trigger":
+                if name:
+                    return f"trigger_{name}"
+                return self.get_fallback_name(node, "trigger")
             else:
-                return name if name else self.get_fallback_name(node, "definition")
+                if name:
+                    return name
+                return self.get_fallback_name(
+                    node, "definition"
+                )
 
         elif concept == UniversalConcept.BLOCK:
             node = captures.get("block")
@@ -242,6 +250,9 @@ class SqlMapping(BaseMapping):
                         metadata["target_table"] = self.get_node_text(
                             obj_ref, source
                         ).strip()
+
+                elif def_node.type == "create_trigger":
+                    metadata["kind"] = "trigger"
 
         elif concept == UniversalConcept.BLOCK:
             if "block" in captures:
