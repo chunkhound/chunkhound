@@ -24,7 +24,7 @@ from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_config import EmbeddingConfig
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.core.config.openai_utils import is_official_openai_endpoint
-from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
+from chunkhound.core.constants import OPENAI_DEFAULT_MODEL, VOYAGE_DEFAULT_MODEL
 from chunkhound.version import __version__
 
 logger = logging.getLogger(__name__)
@@ -1507,7 +1507,7 @@ async def _validate_detected_config(
         elif provider == "openai":
             api_key = config_data.get("api_key")
             base_url = config_data.get("base_url")
-            model = config_data.get("model", "text-embedding-3-small")
+            model = config_data.get("model", OPENAI_DEFAULT_MODEL)
 
             if not api_key:
                 formatter.error("OpenAI API key not found")
@@ -1956,7 +1956,7 @@ async def _validate_provider_config(
     elif provider == "openai":
         api_key = config_data.get("api_key")
         base_url = config_data.get("base_url")
-        model = config_data.get("model", "text-embedding-3-small")
+        model = config_data.get("model", OPENAI_DEFAULT_MODEL)
 
         # Only require API key for official OpenAI endpoints
         if is_official_openai_endpoint(base_url):

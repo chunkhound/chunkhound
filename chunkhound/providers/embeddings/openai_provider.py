@@ -14,6 +14,7 @@ from chunkhound.core.config.embedding_config import (
     validate_rerank_configuration,
 )
 from chunkhound.core.config.openai_utils import is_azure_openai_endpoint
+from chunkhound.core.constants import OPENAI_DEFAULT_MODEL
 from chunkhound.core.exceptions.core import ValidationError
 from chunkhound.core.exceptions.embedding import EmbeddingConfigurationError
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
@@ -142,6 +143,47 @@ QWEN_MODEL_CONFIG: dict[str, dict[str, Any]] = {
 }
 
 
+# OpenAI model config: single source of truth for metadata and wizard
+OPENAI_MODEL_CONFIG: dict[str, dict[str, Any]] = {
+    "text-embedding-3-small": {
+        "native_dims": 1536,
+        "matryoshka": True,
+        "min_dims": 1,
+        "distance": "cosine",
+        "max_tokens": 8191,
+        "display": {"description": "Fast & efficient", "order": 1},
+    },
+    "text-embedding-3-large": {
+        "native_dims": 3072,
+        "matryoshka": True,
+        "min_dims": 1,
+        "distance": "cosine",
+        "max_tokens": 8191,
+        "display": {"description": "Higher quality", "order": 0},
+    },
+    # Legacy: accepted but not shown in wizard (no "display" key)
+    "text-embedding-ada-002": {
+        "native_dims": 1536,
+        "matryoshka": False,
+        "distance": "cosine",
+        "max_tokens": 8191,
+    },
+}
+
+
+def get_openai_display_models() -> list[tuple[str, str]]:
+    """Featured OpenAI embedding models for setup wizard."""
+    items = [
+        (k, v["display"]["description"])
+        for k, v in OPENAI_MODEL_CONFIG.items()
+        if "display" in v
+    ]
+    return sorted(
+        items,
+        key=lambda x: OPENAI_MODEL_CONFIG[x[0]]["display"]["order"],
+    )
+
+
 def _validate_qwen_model_config() -> None:
     """Validate QWEN_MODEL_CONFIG structure at module load time.
 
@@ -209,7 +251,7 @@ def _normalize_qwen_model_name(model: str) -> str:
 
 
 class OpenAIEmbeddingProvider:
-    """OpenAI embedding provider using text-embedding-3-small by default.
+    """OpenAI embedding provider using text-embedding-3-large by default.
 
     Thread Safety:
         This provider is thread-safe and stateless. Multiple concurrent calls to
@@ -233,7 +275,7 @@ class OpenAIEmbeddingProvider:
         self,
         api_key: str | None = None,
         base_url: str | None = None,
-        model: str = "text-embedding-3-small",
+        model: str = OPENAI_DEFAULT_MODEL,
         rerank_model: str | None = None,
         rerank_url: str = "/rerank",
         rerank_format: str = "auto",
@@ -300,6 +342,7 @@ class OpenAIEmbeddingProvider:
         self._output_dims = output_dims
         self._client_side_truncation = client_side_truncation
         self._discovered_dims: int | None = None
+        self._warned_default_dims = False
 
         # Validate rerank configuration at initialization (fail-fast)
         # Match config validation logic: check if reranking is enabled
@@ -323,29 +366,8 @@ class OpenAIEmbeddingProvider:
         # Configure Qwen-specific batch sizes (extracted for clarity)
         self._configure_qwen_batch_sizes(model, rerank_model, batch_size)
 
-        # Model-specific configuration for OpenAI models
-        self._model_config = {
-            "text-embedding-3-small": {
-                "native_dims": 1536,
-                "matryoshka": True,
-                "min_dims": 1,
-                "distance": "cosine",
-                "max_tokens": 8191,
-            },
-            "text-embedding-3-large": {
-                "native_dims": 3072,
-                "matryoshka": True,
-                "min_dims": 1,
-                "distance": "cosine",
-                "max_tokens": 8191,
-            },
-            "text-embedding-ada-002": {
-                "native_dims": 1536,
-                "matryoshka": False,
-                "distance": "cosine",
-                "max_tokens": 8191,
-            },
-        }
+        # Model-specific configuration for OpenAI models (module-level single source of truth)
+        self._model_config = OPENAI_MODEL_CONFIG
 
         # Validate output_dims if specified
         if output_dims is not None:
@@ -555,7 +577,11 @@ class OpenAIEmbeddingProvider:
 
     @property
     def dims(self) -> int:
-        """Actual output dimension (reflects matryoshka config if set)."""
+        """Actual output dimension (reflects matryoshka config if set).
+
+        For unknown models (no config entry), returns 1536 as a pre-discovery
+        default until the first embed() call discovers the actual dimension.
+        """
         if self._output_dims is not None:
             return self._output_dims
         model_cfg = self._get_model_config()
@@ -563,7 +589,13 @@ class OpenAIEmbeddingProvider:
             return cast(int, model_cfg["native_dims"])
         if self._discovered_dims is not None:
             return self._discovered_dims
-        return 1536  # Default before first API call for unknown models
+        if not self._warned_default_dims:
+            self._warned_default_dims = True
+            logger.warning(
+                f"Unknown model '{self._model}': using default dims=1536. "
+                "Actual dimensions will be discovered on first embed() call."
+            )
+        return 1536
 
     @property
     def native_dims(self) -> int:
@@ -1074,6 +1106,8 @@ class OpenAIEmbeddingProvider:
         """Update provider configuration."""
         if "model" in kwargs:
             self._model = kwargs["model"]
+            self._warned_default_dims = False
+            self._discovered_dims = None
         if "batch_size" in kwargs:
             self._batch_size = kwargs["batch_size"]
         if "timeout" in kwargs:

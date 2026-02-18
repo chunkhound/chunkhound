@@ -60,7 +60,7 @@ class EmbeddingProvider(Protocol):
 
     @property
     def model(self) -> str:
-        """Model name (e.g., 'text-embedding-3-small', 'sentence-transformers/all-MiniLM-L6-v2')."""
+        """Model name (e.g., 'text-embedding-3-large', 'sentence-transformers/all-MiniLM-L6-v2')."""
         ...
 
     @property

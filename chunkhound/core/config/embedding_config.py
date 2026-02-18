@@ -7,6 +7,7 @@ variables, config files, CLI arguments) across MCP server and indexing flows.
 """
 
 import argparse
+import functools
 import os
 from typing import Any, Literal
 
@@ -14,31 +15,42 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import Self
 
-from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
+from chunkhound.core.constants import OPENAI_DEFAULT_MODEL, VOYAGE_DEFAULT_MODEL
 from chunkhound.core.exceptions.embedding import EmbeddingConfigurationError
 
 from .openai_utils import is_azure_openai_endpoint, is_official_openai_endpoint
 
-# Model whitelists for official API endpoints
-OPENAI_MODEL_WHITELIST = {
-    "text-embedding-3-small",
-    "text-embedding-3-large",
-    "text-embedding-ada-002",
-}
+
+@functools.lru_cache(maxsize=1)
+def _get_openai_model_whitelist() -> frozenset[str]:
+    """Derive OpenAI whitelist from provider config (lazy to avoid circular import)."""
+    from chunkhound.providers.embeddings.openai_provider import OPENAI_MODEL_CONFIG
+
+    return frozenset(OPENAI_MODEL_CONFIG.keys())
 
 
-def _get_voyageai_model_whitelist() -> set[str]:
-    """Derive VoyageAI whitelist from provider config (lazy to avoid circular import)."""
+@functools.lru_cache(maxsize=1)
+def _get_voyageai_model_whitelist() -> frozenset[str]:
+    """Derive VoyageAI whitelist from provider config.
+
+    Lazy import to avoid circular dependency.
+    """
     from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
 
-    return set(VOYAGE_MODEL_CONFIG.keys())
+    return frozenset(VOYAGE_MODEL_CONFIG.keys())
 
-VOYAGEAI_RERANKER_WHITELIST = {
-    "rerank-2.5",
-    "rerank-2.5-lite",
-    "rerank-2",
-    "rerank-2-lite",
-}
+
+@functools.lru_cache(maxsize=1)
+def _get_voyageai_reranker_whitelist() -> frozenset[str]:
+    """Derive VoyageAI reranker whitelist from provider config.
+
+    Lazy import to avoid circular dependency.
+    """
+    from chunkhound.providers.embeddings.voyageai_provider import (
+        VOYAGE_RERANKER_CONFIG,
+    )
+
+    return frozenset(VOYAGE_RERANKER_CONFIG.keys())
 
 # Error message constants for consistent messaging across config and provider
 RERANK_MODEL_REQUIRED_COHERE = (
@@ -101,7 +113,7 @@ class EmbeddingConfig(BaseSettings):
 
     Environment Variables:
         CHUNKHOUND_EMBEDDING_API_KEY=sk-...
-        CHUNKHOUND_EMBEDDING_MODEL=text-embedding-3-small
+        CHUNKHOUND_EMBEDDING_MODEL=text-embedding-3-large
         CHUNKHOUND_EMBEDDING_BASE_URL=https://api.openai.com/v1
     """
 
@@ -261,17 +273,22 @@ class EmbeddingConfig(BaseSettings):
     @model_validator(mode="after")
     def validate_model_whitelist(self) -> Self:
         """Validate model and reranker against whitelists for official APIs."""
-        # Skip validation for custom endpoints
-        if self.base_url is not None and not is_official_openai_endpoint(self.base_url):
+        # Skip validation for custom OpenAI-compatible endpoints (Ollama, vLLM, etc.)
+        if (
+            self.provider == "openai"
+            and self.base_url is not None
+            and not is_official_openai_endpoint(self.base_url)
+        ):
             return self
 
         model = self.get_default_model()
 
         if self.provider == "openai":
-            if model not in OPENAI_MODEL_WHITELIST:
+            whitelist = _get_openai_model_whitelist()
+            if model not in whitelist:
                 raise EmbeddingConfigurationError(
                     f"Unknown model '{model}' for OpenAI. "
-                    f"Valid models: {sorted(OPENAI_MODEL_WHITELIST)}"
+                    f"Valid models: {sorted(whitelist)}"
                 )
         elif self.provider == "voyageai":
             whitelist = _get_voyageai_model_whitelist()
@@ -280,13 +297,14 @@ class EmbeddingConfig(BaseSettings):
                     f"Unknown model '{model}' for VoyageAI. "
                     f"Valid models: {sorted(whitelist)}"
                 )
+            reranker_whitelist = _get_voyageai_reranker_whitelist()
             if (
                 self.rerank_model is not None
-                and self.rerank_model not in VOYAGEAI_RERANKER_WHITELIST
+                and self.rerank_model not in reranker_whitelist
             ):
                 raise EmbeddingConfigurationError(
                     f"Unknown reranker model '{self.rerank_model}' for VoyageAI. "
-                    f"Valid reranker models: {sorted(VOYAGEAI_RERANKER_WHITELIST)}"
+                    f"Valid reranker models: {sorted(reranker_whitelist)}"
                 )
 
         return self
@@ -383,7 +401,7 @@ class EmbeddingConfig(BaseSettings):
         if self.provider == "voyageai":
             return VOYAGE_DEFAULT_MODEL
         else:  # openai
-            return "text-embedding-3-small"
+            return OPENAI_DEFAULT_MODEL
 
     def is_provider_configured(self) -> bool:
         """
@@ -436,7 +454,7 @@ class EmbeddingConfig(BaseSettings):
         parser.add_argument(
             "--model",
             "--embedding-model",
-            help="Embedding model (default: text-embedding-3-small)",
+            help=f"Embedding model (default: {OPENAI_DEFAULT_MODEL})",
         )
 
         parser.add_argument(

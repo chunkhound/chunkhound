@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from loguru import logger
 
+from chunkhound.core.constants import OPENAI_DEFAULT_MODEL
 from chunkhound.interfaces.embedding_provider import (
     EmbeddingProvider as InterfaceEmbeddingProvider,
 )
@@ -31,7 +32,7 @@ class EmbeddingProvider(Protocol):
 
     @property
     def model(self) -> str:
-        """Model name (e.g., 'text-embedding-3-small')."""
+        """Model name (e.g., 'text-embedding-3-large')."""
         ...
 
     @property
@@ -183,7 +184,7 @@ class EmbeddingManager:
 def create_openai_provider(
     api_key: str | None = None,
     base_url: str | None = None,
-    model: str = "text-embedding-3-small",
+    model: str = OPENAI_DEFAULT_MODEL,
     rerank_model: str | None = None,
     rerank_url: str = "/rerank",
     rerank_format: str = "auto",

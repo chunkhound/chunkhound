@@ -10,7 +10,11 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERANK_MODEL
+from chunkhound.core.constants import (
+    OPENAI_DEFAULT_MODEL,
+    VOYAGE_DEFAULT_MODEL,
+    VOYAGE_DEFAULT_RERANK_MODEL,
+)
 
 from .embedding_config import EmbeddingConfig
 
@@ -307,62 +311,51 @@ class EmbeddingProviderFactory:
 
         # Provider-specific information
         if provider == "openai":
+            from chunkhound.providers.embeddings.openai_provider import (
+                OPENAI_MODEL_CONFIG,
+                get_openai_display_models,
+            )
+
             info.update(
                 {
                     "description": "OpenAI text embedding API",
                     "requires": ["api_key"],
                     "optional": ["base_url", "model"],
-                    "default_model": "text-embedding-3-large",
-                    "supported_models": [
-                        "text-embedding-3-small",
-                        "text-embedding-3-large",
-                        "text-embedding-ada-002",
-                    ],
+                    "supported_models": list(OPENAI_MODEL_CONFIG.keys()),
                     # UI-specific metadata for setup wizard
                     "display_name": "OpenAI",
                     "base_url": "https://api.openai.com",
                     "requires_api_key": True,
                     "supports_model_listing": False,
                     "supports_reranking": False,
-                    "default_models": [
-                        ("text-embedding-3-large", "Higher quality"),
-                        ("text-embedding-3-small", "Fast & efficient"),
-                    ],
+                    "default_models": get_openai_display_models(),
                     "default_rerankers": [],
-                    "default_selection": "text-embedding-3-large",
+                    "default_selection": OPENAI_DEFAULT_MODEL,
                     "default_reranker": None,
                 }
             )
         elif provider == "voyageai":
+            from chunkhound.providers.embeddings.voyageai_provider import (
+                VOYAGE_MODEL_CONFIG,
+                get_voyage_display_models,
+                get_voyage_display_rerankers,
+            )
+
+            display_models = get_voyage_display_models()
             info.update(
                 {
                     "description": "VoyageAI specialized embedding API",
                     "requires": ["api_key"],
                     "optional": ["model", "rerank_model"],
-                    "default_model": VOYAGE_DEFAULT_MODEL,
-                    "supported_models": [
-                        "voyage-3.5",
-                        "voyage-code-3",
-                        "voyage-3.5-lite",
-                        "voyage-3-large",
-                    ],
+                    "supported_models": list(VOYAGE_MODEL_CONFIG.keys()),
                     # UI-specific metadata for setup wizard
                     "display_name": "VoyageAI",
                     "base_url": None,  # Uses SDK, no direct endpoint
                     "requires_api_key": True,
                     "supports_model_listing": False,
                     "supports_reranking": True,
-                    "default_models": [
-                        ("voyage-3.5", "Latest general-purpose, (recommended)"),
-                        ("voyage-3.5-lite", "Cost-optimized with good accuracy"),
-                        ("voyage-3-large", "Previous gen, proven performance"),
-                        ("voyage-code-3", "Previous gen, code optimized"),
-                    ],
-                    "default_rerankers": [
-                        ("rerank-2.5", "Latest reranker, best accuracy"),
-                        ("rerank-2.5-lite", "Lighter, cost-effective"),
-                        ("rerank-2", "Previous gen, great for code"),
-                    ],
+                    "default_models": display_models,
+                    "default_rerankers": get_voyage_display_rerankers(),
                     "default_selection": VOYAGE_DEFAULT_MODEL,
                     "default_reranker": VOYAGE_DEFAULT_RERANK_MODEL,
                 }
@@ -373,7 +366,6 @@ class EmbeddingProviderFactory:
                     "description": "OpenAI-compatible API server",
                     "requires": [],  # May or may not need API key
                     "optional": ["api_key", "base_url", "model"],
-                    "default_model": None,
                     "supported_models": [],  # Discovered dynamically
                     # UI-specific metadata for setup wizard
                     "display_name": "OpenAI-Compatible",

@@ -29,7 +29,7 @@ except ImportError:
 
 
 # Official VoyageAI model configuration based on API documentation
-VOYAGE_MODEL_CONFIG = {
+VOYAGE_MODEL_CONFIG: dict[str, dict[str, Any]] = {
     # Models with 120,000 token limit per batch
     "voyage-3": {
         "max_tokens_per_batch": 120000,
@@ -51,6 +51,7 @@ VOYAGE_MODEL_CONFIG = {
         "context_length": 32000,
         "dimensions": [256, 512, 1024, 2048],
         "default_dimension": 1024,
+        "display": {"description": "Previous gen, proven performance", "order": 2},
     },
     "voyage-code-3": {
         "max_tokens_per_batch": 120000,
@@ -58,6 +59,7 @@ VOYAGE_MODEL_CONFIG = {
         "context_length": 32000,
         "dimensions": [256, 512, 1024, 2048],
         "default_dimension": 1024,
+        "display": {"description": "Previous gen, code optimized", "order": 3},
     },
     "voyage-finance-2": {
         "max_tokens_per_batch": 120000,
@@ -94,6 +96,7 @@ VOYAGE_MODEL_CONFIG = {
         "context_length": 32000,
         "dimensions": [256, 512, 1024, 2048],
         "default_dimension": 1024,
+        "display": {"description": "Latest general-purpose (recommended)", "order": 0},
     },
     "voyage-2": {
         "max_tokens_per_batch": 320000,
@@ -109,8 +112,43 @@ VOYAGE_MODEL_CONFIG = {
         "context_length": 32000,
         "dimensions": [256, 512, 1024, 2048],
         "default_dimension": 1024,
+        "display": {"description": "Cost-optimized with good accuracy", "order": 1},
     },
 }
+
+# Single source of truth for VoyageAI reranker models and display metadata
+VOYAGE_RERANKER_CONFIG: dict[str, dict[str, Any]] = {
+    "rerank-2.5": {
+        "display": {"description": "Latest reranker, best accuracy", "order": 0},
+    },
+    "rerank-2.5-lite": {
+        "display": {"description": "Lighter, cost-effective", "order": 1},
+    },
+    "rerank-2": {
+        "display": {"description": "Previous gen, great for code", "order": 2},
+    },
+    "rerank-2-lite": {},  # Valid model, not shown in wizard
+}
+
+
+def get_voyage_display_models() -> list[tuple[str, str]]:
+    """Featured VoyageAI embedding models for setup wizard."""
+    items = [
+        (k, v["display"]["description"])
+        for k, v in VOYAGE_MODEL_CONFIG.items()
+        if "display" in v
+    ]
+    return sorted(items, key=lambda x: VOYAGE_MODEL_CONFIG[x[0]]["display"]["order"])
+
+
+def get_voyage_display_rerankers() -> list[tuple[str, str]]:
+    """Featured VoyageAI reranker models for setup wizard."""
+    items = [
+        (k, v["display"]["description"])
+        for k, v in VOYAGE_RERANKER_CONFIG.items()
+        if "display" in v
+    ]
+    return sorted(items, key=lambda x: VOYAGE_RERANKER_CONFIG[x[0]]["display"]["order"])
 
 
 class VoyageAIEmbeddingProvider:

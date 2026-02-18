@@ -289,11 +289,29 @@ class TestConfigIntegration:
     def test_config_default_model_resolution(self):
         """EmbeddingConfig resolves default model correctly."""
         openai_config = EmbeddingConfig(provider="openai")
-        assert openai_config.get_default_model() == "text-embedding-3-small"
+        assert openai_config.get_default_model() == "text-embedding-3-large"
 
         voyageai_config = EmbeddingConfig(provider="voyageai")
         # Default voyage model
         assert voyageai_config.get_default_model() is not None
+
+    def test_default_openai_model_has_correct_dimensions(self):
+        """Default OpenAI model (text-embedding-3-large) maps to 3072 native dims."""
+        from chunkhound.providers.embeddings.openai_provider import (
+            OPENAI_MODEL_CONFIG,
+            OpenAIEmbeddingProvider,
+        )
+
+        # Verify config table agrees with constant
+        default_model = EmbeddingConfig(provider="openai").get_default_model()
+        assert default_model in OPENAI_MODEL_CONFIG
+        assert OPENAI_MODEL_CONFIG[default_model]["native_dims"] == 3072
+
+        # Verify provider resolves correctly
+        provider = OpenAIEmbeddingProvider(api_key="test-key")
+        assert provider.model == "text-embedding-3-large"
+        assert provider.native_dims == 3072
+        assert provider.dims == 3072
 
 
 class TestVoyage3ModelConfig:
@@ -340,10 +358,10 @@ class TestRerankerWhitelist:
             )
 
     def test_unknown_reranker_with_custom_base_url_allowed(self):
-        """Unknown reranker with custom base_url is allowed."""
+        """Unknown reranker with custom base_url is allowed for OpenAI provider."""
         config = EmbeddingConfig(
-            provider="voyageai",
-            model="voyage-3.5",
+            provider="openai",
+            model="custom-model",
             rerank_model="custom-reranker",
             base_url="http://localhost:8000",  # Custom endpoint bypasses whitelist
         )
