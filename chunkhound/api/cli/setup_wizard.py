@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 _console = Console()
 
 
-def console_print(message: str, style: str = None) -> None:
+def console_print(message: str, style: str | None = None) -> None:
     """Print with colors using Rich console or fallback to plain print."""
     try:
         if style:
@@ -516,8 +516,8 @@ async def _fetch_available_models(
         # Check if it's an authentication error
         if e.response.status_code in [401, 403]:
             return (None, True)  # Definitely needs authentication
-        elif e.response.status_code in [200, 404]:
-            return (None, False)  # Clear no-auth cases (success or not found)
+        elif e.response.status_code == 404:
+            return (None, False)  # Not found - no auth issue
         else:
             # Other HTTP errors (500, etc.) - assume auth needed to be safe
             return (None, True)

@@ -4,7 +4,6 @@ import asyncio
 import heapq
 import math
 from collections.abc import AsyncIterator, Sequence
-from datetime import datetime
 from typing import Any, cast
 
 import httpx
@@ -468,8 +467,6 @@ class OpenAIEmbeddingProvider:
             # For custom endpoints (non-OpenAI), disable SSL verification
             # These often use self-signed certificates (e.g., corporate servers, Ollama)
             if not is_openai_official:
-                import httpx
-
                 # Create httpx client with SSL verification disabled
                 http_client = httpx.AsyncClient(
                     timeout=httpx.Timeout(timeout=self._timeout),
@@ -738,9 +735,8 @@ class OpenAIEmbeddingProvider:
             return await self.embed_batch(validated_texts)
 
         except Exception as e:
-            # CRITICAL: Log EVERY exception that passes through here to trace execution path
             logger.error(
-                f"[DEBUG-TRACE] Exception caught in OpenAI embed() method: {type(e).__name__}: {str(e)[:200]}"
+                f"Exception in OpenAI embed(): {type(e).__name__}: {str(e)[:200]}"
             )
             self._usage_stats["errors"] += 1
             # Log details of oversized chunks for root cause analysis
@@ -768,17 +764,6 @@ class OpenAIEmbeddingProvider:
             logger.error(
                 f"[OpenAI-Provider] Failed to generate embeddings (texts: {len(validated_texts)}, total_chars: {total_chars}, max_chars: {max_chars}): {e}"
             )
-
-            # Add debug logging to trace the error
-            debug_file = "/tmp/chunkhound_openai_debug.log"
-            try:
-                with open(debug_file, "a") as f:
-                    f.write(
-                        f"[{datetime.now().isoformat()}] OPENAI-PROVIDER ERROR: texts={len(validated_texts)}, max_chars={max_chars}, error={e}\n"
-                    )
-                    f.flush()
-            except OSError:
-                pass  # Debug logging is best-effort, OK to fail silently
 
             raise
 

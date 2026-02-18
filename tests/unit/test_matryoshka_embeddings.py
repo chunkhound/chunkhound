@@ -7,6 +7,8 @@ Covers:
 - Dimension boundary testing
 """
 
+import asyncio
+
 import pytest
 
 from chunkhound.core.config.embedding_config import EmbeddingConfig
@@ -258,16 +260,12 @@ class TestDimensionBoundaries:
 
     def test_fake_provider_vector_length_matches_dims(self):
         """FakeEmbeddingProvider generates vectors matching dims property."""
-        import asyncio
-
         provider = FakeEmbeddingProvider(dims=1536)
         embeddings = asyncio.run(provider.embed(["test text"]))
         assert len(embeddings[0]) == 1536
 
     def test_fake_provider_vector_length_matches_output_dims(self):
         """FakeEmbeddingProvider generates vectors matching output_dims."""
-        import asyncio
-
         provider = FakeEmbeddingProvider(dims=1536, output_dims=512)
         embeddings = asyncio.run(provider.embed(["test text"]))
         assert len(embeddings[0]) == 512
@@ -370,8 +368,6 @@ class TestDimensionValidation:
         """Dimension mismatch in returned embeddings should be detectable."""
         # This test verifies the FakeEmbeddingProvider generates correct dims
         # Real dimension validation testing requires mocking the API response
-        import asyncio
-
         provider = FakeEmbeddingProvider(dims=1536, output_dims=512)
         embeddings = asyncio.run(provider.embed(["test text"]))
         # FakeEmbeddingProvider respects output_dims
