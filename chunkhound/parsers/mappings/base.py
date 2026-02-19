@@ -490,7 +490,7 @@ class BaseMapping(ABC):
     def extract_constants(
         self,
         concept: "UniversalConcept",
-        captures: dict[str, "TSNode"],
+        captures: dict[str, TSNode],
         content: bytes,
     ) -> list[dict[str, str]] | None:
         """Extract constants from captures.

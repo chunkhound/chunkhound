@@ -68,7 +68,7 @@ class JavaMapping(BaseMapping):
         (block_comment) @comment
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract method name from a Java method definition node.
 
         Args:
@@ -98,7 +98,7 @@ class JavaMapping(BaseMapping):
 
         return self.get_fallback_name(node, "method")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract class name from a Java class definition node.
 
         Args:
@@ -127,7 +127,7 @@ class JavaMapping(BaseMapping):
 
         return self.get_fallback_name(node, "class")
 
-    def extract_method_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_method_name(self, node: TSNode | None, source: str) -> str:
         """Extract method name from a Java method definition node.
 
         Args:
@@ -140,7 +140,7 @@ class JavaMapping(BaseMapping):
         # Delegate to extract_function_name as Java methods are functions
         return self.extract_function_name(node, source)
 
-    def extract_parameters(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter names and types from a Java method node.
 
         Args:
@@ -195,7 +195,7 @@ class JavaMapping(BaseMapping):
 
         return parameters
 
-    def extract_package_name(self, root_node: "TSNode | None", source: str) -> str:
+    def extract_package_name(self, root_node: TSNode | None, source: str) -> str:
         """Extract package name from Java file.
 
         Args:
@@ -227,7 +227,7 @@ class JavaMapping(BaseMapping):
 
         return ""
 
-    def extract_annotations(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_annotations(self, node: TSNode | None, source: str) -> list[str]:
         """Extract Java annotations from a node.
 
         Args:
@@ -273,7 +273,7 @@ class JavaMapping(BaseMapping):
 
         return annotations
 
-    def extract_type_parameters(self, node: "TSNode | None", source: str) -> str:
+    def extract_type_parameters(self, node: TSNode | None, source: str) -> str:
         """Extract generic type parameters from a Java node.
 
         Args:
@@ -296,7 +296,7 @@ class JavaMapping(BaseMapping):
 
         return ""
 
-    def extract_return_type(self, node: "TSNode | None", source: str) -> str | None:
+    def extract_return_type(self, node: TSNode | None, source: str) -> str | None:
         """Extract return type from a Java method node.
 
         Args:
@@ -332,7 +332,7 @@ class JavaMapping(BaseMapping):
 
         return None
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a Java node should be included as a chunk.
 
         Args:
@@ -409,7 +409,7 @@ class JavaMapping(BaseMapping):
 
     def get_qualified_name(
         self,
-        node: "TSNode | None",
+        node: TSNode | None,
         source: str,
         package_name: str = "",
         parent_name: str = "",

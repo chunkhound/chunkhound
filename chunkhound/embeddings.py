@@ -91,9 +91,9 @@ class LocalEmbeddingResult:
     total_tokens: int | None = None
 
 
-# OpenAIEmbeddingProvider has been moved to chunkhound.providers.embeddings.openai_provider
-# The old implementation has been removed to avoid duplication and confusion.
-# Use create_openai_provider() function below which imports from the new location.
+# OpenAIEmbeddingProvider moved to
+# chunkhound.providers.embeddings.openai_provider.
+# Use create_openai_provider() below.
 
 
 class EmbeddingManager:
@@ -203,8 +203,10 @@ def create_openai_provider(
         model: Model name to use
         rerank_model: Model name to use for reranking (enables multi-hop search)
         rerank_url: Rerank endpoint URL (defaults to /rerank)
-        rerank_format: Reranking API format - 'cohere', 'tei', or 'auto' (default: 'auto')
-        rerank_batch_size: Max documents per rerank batch (overrides model defaults, bounded by model caps)
+        rerank_format: Reranking API format -
+            'cohere', 'tei', or 'auto' (default: 'auto')
+        rerank_batch_size: Max documents per rerank batch
+            (overrides model defaults, bounded by model caps)
         api_version: Azure OpenAI API version (e.g., '2024-02-01')
         azure_endpoint: Azure OpenAI endpoint URL (e.g., 'https://myresource.openai.azure.com')
         azure_deployment: Azure OpenAI deployment name

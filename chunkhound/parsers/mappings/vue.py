@@ -135,7 +135,7 @@ class VueMapping(TypeScriptMapping):
         return list(set(matches))  # Remove duplicates
 
     def _extract_attributes(
-        self, start_tag_node: Optional["TSNode"], source: str
+        self, start_tag_node: Optional[TSNode], source: str
     ) -> str:
         """Extract attributes from a start_tag node.
 

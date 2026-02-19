@@ -7,11 +7,11 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERANK_MODEL
+from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 
 from .shared_utils import (
     chunk_text_by_words,
-    estimate_tokens_rough,
     get_dimensions_for_model,
     get_usage_stats_dict,
     validate_text_input,
@@ -356,8 +356,11 @@ class VoyageAIEmbeddingProvider:
             }
 
     def estimate_tokens(self, text: str) -> int:
-        """Estimate token count for a text (rough approximation)."""
-        return int(estimate_tokens_rough(text))
+        """Estimate token count for a text using central embedding ratio.
+
+        Based on actual measurements: 3.0 chars/token for VoyageAI.
+        """
+        return max(1, len(text) // EMBEDDING_CHARS_PER_TOKEN)
 
     def validate_texts(self, texts: list[str]) -> list[str]:
         """Validate and preprocess texts before embedding."""

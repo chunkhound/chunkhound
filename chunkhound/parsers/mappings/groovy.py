@@ -101,7 +101,7 @@ class GroovyMapping(BaseMapping):
         (block_comment) @groovydoc
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract method name from a Groovy method definition node.
 
         Args:
@@ -140,7 +140,7 @@ class GroovyMapping(BaseMapping):
 
         return self.get_fallback_name(node, "method")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract class name from a Groovy class definition node.
 
         Args:
@@ -169,7 +169,7 @@ class GroovyMapping(BaseMapping):
 
         return self.get_fallback_name(node, "class")
 
-    def extract_method_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_method_name(self, node: TSNode | None, source: str) -> str:
         """Extract method name from a Groovy method definition node.
 
         Args:
@@ -182,7 +182,7 @@ class GroovyMapping(BaseMapping):
         # Delegate to extract_function_name as Groovy methods are functions
         return self.extract_function_name(node, source)
 
-    def extract_parameters(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter names and types from a Groovy method node.
 
         Args:
@@ -253,7 +253,7 @@ class GroovyMapping(BaseMapping):
 
         return parameters
 
-    def extract_package_name(self, root_node: "TSNode | None", source: str) -> str:
+    def extract_package_name(self, root_node: TSNode | None, source: str) -> str:
         """Extract package name from Groovy file.
 
         Args:
@@ -287,7 +287,7 @@ class GroovyMapping(BaseMapping):
 
         return ""
 
-    def extract_annotations(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_annotations(self, node: TSNode | None, source: str) -> list[str]:
         """Extract Groovy annotations from a node.
 
         Args:
@@ -333,7 +333,7 @@ class GroovyMapping(BaseMapping):
 
         return annotations
 
-    def is_closure(self, node: "TSNode | None") -> bool:
+    def is_closure(self, node: TSNode | None) -> bool:
         """Check if a node is a Groovy closure.
 
         Args:
@@ -344,7 +344,7 @@ class GroovyMapping(BaseMapping):
         """
         return node is not None and node.type == "closure"
 
-    def is_trait(self, node: "TSNode | None") -> bool:
+    def is_trait(self, node: TSNode | None) -> bool:
         """Check if a node is a Groovy trait.
 
         Args:
@@ -355,7 +355,7 @@ class GroovyMapping(BaseMapping):
         """
         return node is not None and node.type == "trait_declaration"
 
-    def extract_gstring_content(self, node: "TSNode | None", source: str) -> str:
+    def extract_gstring_content(self, node: TSNode | None, source: str) -> str:
         """Extract content from a Groovy GString (interpolated string).
 
         Args:
@@ -378,7 +378,7 @@ class GroovyMapping(BaseMapping):
         return ""
 
     def extract_closure_parameters(
-        self, node: "TSNode | None", source: str
+        self, node: TSNode | None, source: str
     ) -> list[str]:
         """Extract parameter names from a Groovy closure.
 
@@ -408,7 +408,7 @@ class GroovyMapping(BaseMapping):
 
         return parameters
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a Groovy node should be included as a chunk.
 
         Args:
@@ -489,7 +489,7 @@ class GroovyMapping(BaseMapping):
 
     def get_qualified_name(
         self,
-        node: "TSNode | None",
+        node: TSNode | None,
         source: str,
         package_name: str = "",
         parent_name: str = "",
@@ -545,7 +545,7 @@ class GroovyMapping(BaseMapping):
             return self.get_fallback_name(node, "symbol")
 
     def extract_field_declarations(
-        self, node: "TSNode | None", source: str
+        self, node: TSNode | None, source: str
     ) -> list[str]:
         """Extract field declaration names from a Groovy class.
 
@@ -581,7 +581,7 @@ class GroovyMapping(BaseMapping):
         return fields
 
     def extract_constants(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> list[dict[str, str]] | None:
         """Extract constant definitions from Groovy code.
 
@@ -786,7 +786,7 @@ class GroovyMapping(BaseMapping):
             return None
 
     def extract_name(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for this concept."""
         source = content.decode("utf-8")
@@ -861,7 +861,7 @@ class GroovyMapping(BaseMapping):
         return "unnamed"
 
     def extract_content(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for this concept."""
         source = content.decode("utf-8")
@@ -876,7 +876,7 @@ class GroovyMapping(BaseMapping):
         return ""
 
     def extract_metadata(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract Groovy-specific metadata."""
         source = content.decode("utf-8")

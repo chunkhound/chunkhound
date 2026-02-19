@@ -179,7 +179,7 @@ async def handle_tool_call(
     try:
         # Lazy import at runtime to construct MCP content objects without
         # forcing hard dependency during module import/collection.
-        import mcp.types as types  # noqa: WPS433
+        import mcp.types as types
         # Wait for initialization (reduced timeout, server is ready)
         await asyncio.wait_for(initialization_complete.wait(), timeout=5.0)
 

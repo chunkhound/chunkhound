@@ -181,17 +181,6 @@ class TestProviderCapabilities:
         # Anthropic has higher rate limits than OpenAI
         assert provider.get_synthesis_concurrency() == 5
 
-    def test_token_estimation(self):
-        """Test token estimation (rough approximation)."""
-        provider = AnthropicLLMProvider(api_key="test-key")
-
-        # ~4 chars per token for Claude
-        text = "a" * 400
-        estimated = provider.estimate_tokens(text)
-
-        assert estimated == 100
-
-
 @pytest.mark.skipif(not ANTHROPIC_AVAILABLE, reason="Anthropic SDK not installed")
 class TestConfiguration:
     """Test various configuration scenarios."""

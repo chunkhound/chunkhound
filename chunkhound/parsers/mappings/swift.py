@@ -91,7 +91,7 @@ class SwiftMapping(BaseMapping):
         (extension_declaration) @extension_def
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract function name from a Swift function definition node.
 
         Handles functions, methods, initializers, and deinit.
@@ -143,7 +143,7 @@ class SwiftMapping(BaseMapping):
 
         return self.get_fallback_name(node, "function")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract type name from a Swift type definition node.
 
         Handles classes, structs, protocols, enums, and actors.
@@ -189,7 +189,7 @@ class SwiftMapping(BaseMapping):
 
         return self.get_fallback_name(node, "type")
 
-    def extract_extension_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_extension_name(self, node: TSNode | None, source: str) -> str:
         """Extract extended type name from a Swift extension node.
 
         Args:
@@ -224,7 +224,7 @@ class SwiftMapping(BaseMapping):
         return self.get_fallback_name(node, "extension")
 
     def extract_generic_parameters(
-        self, node: "TSNode | None", source: str
+        self, node: TSNode | None, source: str
     ) -> list[str]:
         """Extract generic parameter names from a Swift type or function.
 
@@ -257,7 +257,7 @@ class SwiftMapping(BaseMapping):
 
         return generic_params
 
-    def extract_parameter_types(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_parameter_types(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter types from a function or subscript.
 
         Args:
@@ -293,7 +293,7 @@ class SwiftMapping(BaseMapping):
         return param_types
 
     def extract_extension_protocols(
-        self, node: "TSNode | None", source: str
+        self, node: TSNode | None, source: str
     ) -> list[str]:
         """Extract protocol names from an extension's conformance list.
 
@@ -326,7 +326,7 @@ class SwiftMapping(BaseMapping):
 
         return protocols
 
-    def extract_inherited_types(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_inherited_types(self, node: TSNode | None, source: str) -> list[str]:
         """Extract inherited types (superclasses and protocols) from a type declaration.
 
         Args:
@@ -358,7 +358,7 @@ class SwiftMapping(BaseMapping):
 
         return inherited
 
-    def extract_access_modifier(self, node: "TSNode | None", source: str) -> str | None:
+    def extract_access_modifier(self, node: TSNode | None, source: str) -> str | None:
         """Extract access modifier from a Swift declaration.
 
         Args:
@@ -388,7 +388,7 @@ class SwiftMapping(BaseMapping):
 
         return None
 
-    def is_async_function(self, node: "TSNode | None", source: str) -> bool:
+    def is_async_function(self, node: TSNode | None, source: str) -> bool:
         """Check if a function is async.
 
         Args:
@@ -413,7 +413,7 @@ class SwiftMapping(BaseMapping):
 
         return False
 
-    def is_throwing_function(self, node: "TSNode | None", source: str) -> bool:
+    def is_throwing_function(self, node: TSNode | None, source: str) -> bool:
         """Check if a function can throw errors.
 
         Args:
@@ -436,7 +436,7 @@ class SwiftMapping(BaseMapping):
 
         return False
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a Swift node should be included as a chunk.
 
         Filters out very small nodes and empty definitions.
@@ -511,7 +511,7 @@ class SwiftMapping(BaseMapping):
         return None
 
     def extract_name(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for this concept.
 
@@ -589,7 +589,7 @@ class SwiftMapping(BaseMapping):
         return "unnamed"
 
     def extract_content(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for this concept.
 
@@ -614,7 +614,7 @@ class SwiftMapping(BaseMapping):
         return ""
 
     def extract_metadata(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract Swift-specific metadata.
 
@@ -746,7 +746,7 @@ class SwiftMapping(BaseMapping):
         return metadata
 
     def extract_constants(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> list[dict[str, str]] | None:
         """Extract constant definitions from Swift code.
 
