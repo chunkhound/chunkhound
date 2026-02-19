@@ -153,6 +153,7 @@ class Language(Enum):
     PHP = "php"
     VUE = "vue"
     SVELTE = "svelte"
+    SQL = "sql"
     SWIFT = "swift"
     DART = "dart"
     LUA = "lua"
@@ -244,6 +245,7 @@ class Language(Enum):
             ".phps": cls.PHP,
             ".vue": cls.VUE,
             ".svelte": cls.SVELTE,
+            ".sql": cls.SQL,
             ".swift": cls.SWIFT,
             ".swiftinterface": cls.SWIFT,
             ".lua": cls.LUA,
@@ -282,6 +284,7 @@ class Language(Enum):
             Language.MATLAB,
             Language.OBJC,
             Language.PHP,
+            Language.SQL,
             Language.VUE,
             Language.SVELTE,
             Language.SWIFT,
