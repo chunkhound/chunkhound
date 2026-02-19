@@ -973,7 +973,6 @@ class UniversalParser:
                 "max_chunk_size": self.cast_config.max_chunk_size,
                 "min_chunk_size": self.cast_config.min_chunk_size,
                 "merge_threshold": self.cast_config.merge_threshold,
-                "preserve_structure": self.cast_config.preserve_structure,
                 "greedy_merge": self.cast_config.greedy_merge,
             },
         }

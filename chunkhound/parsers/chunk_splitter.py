@@ -32,7 +32,6 @@ class CASTConfig:
     merge_threshold: float = (
         0.8  # Merge siblings if combined size < threshold * max_size
     )
-    preserve_structure: bool = True  # Prioritize syntactic boundaries
     greedy_merge: bool = True  # Greedily merge adjacent sibling nodes
     safe_token_limit: int = 6000  # Conservative token limit (well under 8191 API limit)
 

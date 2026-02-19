@@ -7,18 +7,15 @@ including classes, interfaces, methods, constructors, annotations, and Javadoc.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from loguru import logger
-from tree_sitter import Node
+from tree_sitter import Node as TSNode
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 from .base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
 
 
 class JavaMapping(BaseMapping):
@@ -503,7 +500,7 @@ class JavaMapping(BaseMapping):
     def extract_constants(
         self,
         concept: UniversalConcept,
-        captures: dict[str, Node],
+        captures: dict[str, TSNode],
         content: bytes,
     ) -> list[dict[str, str]] | None:
         """Extract constant definitions from Java code.
@@ -699,7 +696,7 @@ class JavaMapping(BaseMapping):
             return None
 
     def extract_name(
-        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for this concept."""
         source = content.decode("utf-8")
@@ -764,7 +761,7 @@ class JavaMapping(BaseMapping):
         return "unnamed"
 
     def extract_content(
-        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for this concept."""
         source = content.decode("utf-8")
@@ -779,7 +776,7 @@ class JavaMapping(BaseMapping):
         return ""
 
     def extract_metadata(
-        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract Java-specific metadata."""
         source = content.decode("utf-8")
