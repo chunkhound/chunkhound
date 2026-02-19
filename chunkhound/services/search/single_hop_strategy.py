@@ -15,6 +15,7 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.core.exceptions.embedding import EmbeddingDimensionError
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 
@@ -66,6 +67,17 @@ class SingleHopStrategy:
             return [], {}
 
         query_vector = query_results[0]
+
+        # Validate query embedding dimensions match provider's configured dims
+        expected_dims = self._embedding_provider.dims
+        actual_dims = len(query_vector)
+        if actual_dims != expected_dims:
+            raise EmbeddingDimensionError(
+                f"Query embedding dimension mismatch: got {actual_dims}, "
+                f"expected {expected_dims}. "
+                f"Provider: output_dims={self._embedding_provider.output_dims}, "
+                f"client_side_truncation={self._embedding_provider.client_side_truncation}"
+            )
 
         # Perform vector similarity search
         results, pagination = self._db.search_semantic(

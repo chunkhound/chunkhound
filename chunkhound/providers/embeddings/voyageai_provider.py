@@ -1,19 +1,20 @@
 """VoyageAI embedding provider implementation for ChunkHound - concrete embedding provider using VoyageAI API."""
 
 import asyncio
-from collections.abc import AsyncIterator
-from typing import Any
+from collections.abc import AsyncIterator, Sequence
+from typing import Any, cast
 
 from loguru import logger
 
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERANK_MODEL
+from chunkhound.core.exceptions.embedding import EmbeddingConfigurationError
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 
 from .shared_utils import (
     chunk_text_by_words,
     estimate_tokens_rough,
-    get_dimensions_for_model,
     get_usage_stats_dict,
+    validate_embedding_dims,
     validate_text_input,
 )
 
@@ -28,14 +29,29 @@ except ImportError:
 
 
 # Official VoyageAI model configuration based on API documentation
-VOYAGE_MODEL_CONFIG = {
+VOYAGE_MODEL_CONFIG: dict[str, dict[str, Any]] = {
     # Models with 120,000 token limit per batch
+    "voyage-3": {
+        "max_tokens_per_batch": 120000,
+        "max_texts_per_batch": 1000,
+        "context_length": 16000,
+        "dimensions": [1024],
+        "default_dimension": 1024,
+    },
+    "voyage-3-lite": {
+        "max_tokens_per_batch": 120000,
+        "max_texts_per_batch": 1000,
+        "context_length": 32000,
+        "dimensions": [1024],
+        "default_dimension": 1024,
+    },
     "voyage-3-large": {
         "max_tokens_per_batch": 120000,
         "max_texts_per_batch": 1000,
         "context_length": 32000,
         "dimensions": [256, 512, 1024, 2048],
         "default_dimension": 1024,
+        "display": {"description": "Previous gen, proven performance", "order": 2},
     },
     "voyage-code-3": {
         "max_tokens_per_batch": 120000,
@@ -43,6 +59,7 @@ VOYAGE_MODEL_CONFIG = {
         "context_length": 32000,
         "dimensions": [256, 512, 1024, 2048],
         "default_dimension": 1024,
+        "display": {"description": "Previous gen, code optimized", "order": 3},
     },
     "voyage-finance-2": {
         "max_tokens_per_batch": 120000,
@@ -79,6 +96,7 @@ VOYAGE_MODEL_CONFIG = {
         "context_length": 32000,
         "dimensions": [256, 512, 1024, 2048],
         "default_dimension": 1024,
+        "display": {"description": "Latest general-purpose (recommended)", "order": 0},
     },
     "voyage-2": {
         "max_tokens_per_batch": 320000,
@@ -94,8 +112,43 @@ VOYAGE_MODEL_CONFIG = {
         "context_length": 32000,
         "dimensions": [256, 512, 1024, 2048],
         "default_dimension": 1024,
+        "display": {"description": "Cost-optimized with good accuracy", "order": 1},
     },
 }
+
+# Single source of truth for VoyageAI reranker models and display metadata
+VOYAGE_RERANKER_CONFIG: dict[str, dict[str, Any]] = {
+    "rerank-2.5": {
+        "display": {"description": "Latest reranker, best accuracy", "order": 0},
+    },
+    "rerank-2.5-lite": {
+        "display": {"description": "Lighter, cost-effective", "order": 1},
+    },
+    "rerank-2": {
+        "display": {"description": "Previous gen, great for code", "order": 2},
+    },
+    "rerank-2-lite": {},  # Valid model, not shown in wizard
+}
+
+
+def get_voyage_display_models() -> list[tuple[str, str]]:
+    """Featured VoyageAI embedding models for setup wizard."""
+    items = [
+        (k, v["display"]["description"])
+        for k, v in VOYAGE_MODEL_CONFIG.items()
+        if "display" in v
+    ]
+    return sorted(items, key=lambda x: VOYAGE_MODEL_CONFIG[x[0]]["display"]["order"])
+
+
+def get_voyage_display_rerankers() -> list[tuple[str, str]]:
+    """Featured VoyageAI reranker models for setup wizard."""
+    items = [
+        (k, v["display"]["description"])
+        for k, v in VOYAGE_RERANKER_CONFIG.items()
+        if "display" in v
+    ]
+    return sorted(items, key=lambda x: VOYAGE_RERANKER_CONFIG[x[0]]["display"]["order"])
 
 
 class VoyageAIEmbeddingProvider:
@@ -120,6 +173,7 @@ class VoyageAIEmbeddingProvider:
         retry_delay: float = 1.0,
         max_tokens: int | None = None,
         rerank_batch_size: int | None = None,
+        output_dims: int | None = None,
     ):
         """Initialize VoyageAI embedding provider.
 
@@ -133,6 +187,7 @@ class VoyageAIEmbeddingProvider:
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
             rerank_batch_size: Max documents per rerank batch (overrides default of 1000)
+            output_dims: Output embedding dimension (for matryoshka models)
         """
         if not VOYAGEAI_AVAILABLE:
             raise ImportError(
@@ -162,15 +217,20 @@ class VoyageAIEmbeddingProvider:
         self._api_key = api_key
         self._model_config = model_config
         self._rerank_batch_size = rerank_batch_size
+        self._output_dims = output_dims
+
+        # Validate output_dims if specified
+        if output_dims is not None:
+            default_dim = cast(int, model_config["default_dimension"])
+            supported = cast(list[int], model_config.get("dimensions", [default_dim]))
+            if output_dims not in supported:
+                raise EmbeddingConfigurationError(
+                    f"output_dims {output_dims} not in supported dimensions "
+                    f"{supported} for model {model}"
+                )
 
         # Initialize client
         self._client = voyageai.Client(api_key=api_key)
-
-        # Model dimension mapping - built from configuration
-        self._dimensions_map = {
-            model_name: config["default_dimension"]
-            for model_name, config in VOYAGE_MODEL_CONFIG.items()
-        }
 
         # Usage tracking
         self._requests_made = 0
@@ -189,10 +249,36 @@ class VoyageAIEmbeddingProvider:
 
     @property
     def dims(self) -> int:
-        """Embedding dimensions."""
-        return get_dimensions_for_model(
-            self._model, self._dimensions_map, default_dims=1024
-        )
+        """Actual output dimension (reflects matryoshka config if set)."""
+        if self._output_dims is not None:
+            return self._output_dims
+        return cast(int, self._model_config.get("default_dimension", 1024))
+
+    @property
+    def native_dims(self) -> int:
+        """Model's full/native embedding dimension."""
+        dims_list = cast(list[int], self._model_config.get("dimensions", [1024]))
+        return max(dims_list)
+
+    @property
+    def supported_dimensions(self) -> Sequence[int]:
+        """List of valid output dimensions for this model."""
+        return cast(list[int], self._model_config.get("dimensions", [self.native_dims]))
+
+    def supports_matryoshka(self) -> bool:
+        """True if model supports variable output dimensions."""
+        dims = cast(list[int], self._model_config.get("dimensions", []))
+        return len(dims) > 1
+
+    @property
+    def output_dims(self) -> int | None:
+        """Configured output dimension override, or None for native."""
+        return self._output_dims
+
+    @property
+    def client_side_truncation(self) -> bool:
+        """Whether client-side truncation is enabled."""
+        return False  # VoyageAI uses server-side dimension control
 
     @property
     def distance(self) -> str:
@@ -237,19 +323,29 @@ class VoyageAIEmbeddingProvider:
         # Retry loop for transient network errors
         for attempt in range(self._retry_attempts):
             try:
+                embed_kwargs: dict[str, Any] = {
+                    "texts": validated_texts,
+                    "model": self._model,
+                    "input_type": "document",
+                    "truncation": True,
+                }
+                if self._output_dims is not None and self.supports_matryoshka():
+                    embed_kwargs["output_dimension"] = self._output_dims
                 result = await asyncio.to_thread(
-                    self._client.embed,
-                    texts=validated_texts,
-                    model=self._model,
-                    input_type="document",
-                    truncation=True,
+                    self._client.embed, **embed_kwargs
                 )
 
                 self._requests_made += 1
                 self._tokens_used += result.total_tokens
                 self._embeddings_generated += len(texts)
 
-                return [embedding for embedding in result.embeddings]
+                embeddings = [embedding for embedding in result.embeddings]
+
+                # Validate embedding dimensions match expected dims (INV-1)
+                if embeddings:
+                    validate_embedding_dims(len(embeddings[0]), self.dims)
+
+                return embeddings
 
             except Exception as e:
                 # Classify error type for retry decision

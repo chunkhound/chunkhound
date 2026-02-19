@@ -7,6 +7,7 @@ variables, config files, CLI arguments) across MCP server and indexing flows.
 """
 
 import argparse
+import functools
 import os
 from typing import Any, Literal
 
@@ -14,9 +15,42 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import Self
 
-from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
+from chunkhound.core.constants import OPENAI_DEFAULT_MODEL, VOYAGE_DEFAULT_MODEL
+from chunkhound.core.exceptions.embedding import EmbeddingConfigurationError
 
 from .openai_utils import is_azure_openai_endpoint, is_official_openai_endpoint
+
+
+@functools.lru_cache(maxsize=1)
+def _get_openai_model_whitelist() -> frozenset[str]:
+    """Derive OpenAI whitelist from provider config (lazy to avoid circular import)."""
+    from chunkhound.providers.embeddings.openai_provider import OPENAI_MODEL_CONFIG
+
+    return frozenset(OPENAI_MODEL_CONFIG.keys())
+
+
+@functools.lru_cache(maxsize=1)
+def _get_voyageai_model_whitelist() -> frozenset[str]:
+    """Derive VoyageAI whitelist from provider config.
+
+    Lazy import to avoid circular dependency.
+    """
+    from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
+
+    return frozenset(VOYAGE_MODEL_CONFIG.keys())
+
+
+@functools.lru_cache(maxsize=1)
+def _get_voyageai_reranker_whitelist() -> frozenset[str]:
+    """Derive VoyageAI reranker whitelist from provider config.
+
+    Lazy import to avoid circular dependency.
+    """
+    from chunkhound.providers.embeddings.voyageai_provider import (
+        VOYAGE_RERANKER_CONFIG,
+    )
+
+    return frozenset(VOYAGE_RERANKER_CONFIG.keys())
 
 # Error message constants for consistent messaging across config and provider
 RERANK_MODEL_REQUIRED_COHERE = (
@@ -79,7 +113,7 @@ class EmbeddingConfig(BaseSettings):
 
     Environment Variables:
         CHUNKHOUND_EMBEDDING_API_KEY=sk-...
-        CHUNKHOUND_EMBEDDING_MODEL=text-embedding-3-small
+        CHUNKHOUND_EMBEDDING_MODEL=text-embedding-3-large
         CHUNKHOUND_EMBEDDING_BASE_URL=https://api.openai.com/v1
     """
 
@@ -142,6 +176,21 @@ class EmbeddingConfig(BaseSettings):
         "'auto' for automatic format detection from response.",
     )
 
+    output_dims: int | None = Field(
+        default=None,
+        description="Output embedding dimension. If None, uses model default. "
+        "Must be in model's supported_dimensions list.",
+    )
+
+    client_side_truncation: bool = Field(
+        default=False,
+        description=(
+            "Truncate embeddings client-side instead of using API dimensions "
+            "parameter. Requires output_dims. Use for APIs that don't support "
+            "the dimensions parameter."
+        ),
+    )
+
     # Internal settings - not exposed to users
     batch_size: int = Field(default=100, description="Internal batch size")
     rerank_batch_size: int | None = Field(
@@ -165,6 +214,20 @@ class EmbeddingConfig(BaseSettings):
         if v is not None and v <= 0:
             raise ValueError("rerank_batch_size must be positive")
         return v
+
+    @field_validator("output_dims")
+    def validate_output_dims(cls, v: int | None) -> int | None:  # noqa: N805
+        """Validate output_dims is positive."""
+        if v is not None and v <= 0:
+            raise ValueError("output_dims must be positive")
+        return v
+
+    @model_validator(mode="after")
+    def validate_client_side_truncation(self) -> Self:
+        """Validate client_side_truncation requires output_dims."""
+        if self.client_side_truncation and self.output_dims is None:
+            raise ValueError("client_side_truncation requires output_dims to be set")
+        return self
 
     @field_validator("model")
     def validate_model(cls, v: str | None) -> str | None:  # noqa: N805
@@ -205,6 +268,45 @@ class EmbeddingConfig(BaseSettings):
             rerank_url=self.rerank_url,
             base_url=self.base_url,
         )
+        return self
+
+    @model_validator(mode="after")
+    def validate_model_whitelist(self) -> Self:
+        """Validate model and reranker against whitelists for official APIs."""
+        # Skip validation for custom OpenAI-compatible endpoints (Ollama, vLLM, etc.)
+        if (
+            self.provider == "openai"
+            and self.base_url is not None
+            and not is_official_openai_endpoint(self.base_url)
+        ):
+            return self
+
+        model = self.get_default_model()
+
+        if self.provider == "openai":
+            whitelist = _get_openai_model_whitelist()
+            if model not in whitelist:
+                raise EmbeddingConfigurationError(
+                    f"Unknown model '{model}' for OpenAI. "
+                    f"Valid models: {sorted(whitelist)}"
+                )
+        elif self.provider == "voyageai":
+            whitelist = _get_voyageai_model_whitelist()
+            if model not in whitelist:
+                raise EmbeddingConfigurationError(
+                    f"Unknown model '{model}' for VoyageAI. "
+                    f"Valid models: {sorted(whitelist)}"
+                )
+            reranker_whitelist = _get_voyageai_reranker_whitelist()
+            if (
+                self.rerank_model is not None
+                and self.rerank_model not in reranker_whitelist
+            ):
+                raise EmbeddingConfigurationError(
+                    f"Unknown reranker model '{self.rerank_model}' for VoyageAI. "
+                    f"Valid reranker models: {sorted(reranker_whitelist)}"
+                )
+
         return self
 
     @model_validator(mode="after")
@@ -275,6 +377,14 @@ class EmbeddingConfig(BaseSettings):
         if self.rerank_batch_size is not None:
             base_config["rerank_batch_size"] = self.rerank_batch_size
 
+        # Add output_dims if specified
+        if self.output_dims is not None:
+            base_config["output_dims"] = self.output_dims
+
+        # Add client_side_truncation if enabled
+        if self.client_side_truncation:
+            base_config["client_side_truncation"] = self.client_side_truncation
+
         return base_config
 
     def get_default_model(self) -> str:
@@ -291,7 +401,7 @@ class EmbeddingConfig(BaseSettings):
         if self.provider == "voyageai":
             return VOYAGE_DEFAULT_MODEL
         else:  # openai
-            return "text-embedding-3-small"
+            return OPENAI_DEFAULT_MODEL
 
     def is_provider_configured(self) -> bool:
         """
@@ -344,7 +454,7 @@ class EmbeddingConfig(BaseSettings):
         parser.add_argument(
             "--model",
             "--embedding-model",
-            help="Embedding model (default: text-embedding-3-small)",
+            help=f"Embedding model (default: {OPENAI_DEFAULT_MODEL})",
         )
 
         parser.add_argument(
@@ -384,6 +494,20 @@ class EmbeddingConfig(BaseSettings):
             help="Azure OpenAI deployment name",
         )
 
+        parser.add_argument(
+            "--output-dims",
+            "--embedding-output-dims",
+            type=int,
+            help="Output embedding dimensions for matryoshka models",
+        )
+
+        parser.add_argument(
+            "--client-side-truncation",
+            "--embedding-client-side-truncation",
+            action="store_true",
+            help="Truncate embeddings client-side instead of via API",
+        )
+
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
         """Load embedding config from environment variables."""
@@ -418,6 +542,26 @@ class EmbeddingConfig(BaseSettings):
                 config["rerank_batch_size"] = int(rerank_batch_size)
             except ValueError:
                 pass
+
+        if output_dims := os.getenv("CHUNKHOUND_EMBEDDING__OUTPUT_DIMS"):
+            try:
+                config["output_dims"] = int(output_dims)
+            except ValueError:
+                from loguru import logger
+
+                logger.warning(
+                    f"Invalid CHUNKHOUND_EMBEDDING__OUTPUT_DIMS='{output_dims}', "
+                    "must be a positive integer. Using default."
+                )
+
+        if client_side_truncation := os.getenv(
+            "CHUNKHOUND_EMBEDDING__CLIENT_SIDE_TRUNCATION"
+        ):
+            config["client_side_truncation"] = client_side_truncation.lower() in (
+                "true",
+                "1",
+                "yes",
+            )
 
         return config
 
@@ -462,6 +606,24 @@ class EmbeddingConfig(BaseSettings):
             and args.embedding_azure_deployment
         ):
             overrides["azure_deployment"] = args.embedding_azure_deployment
+
+        # Handle output_dims arguments (both variations)
+        if hasattr(args, "output_dims") and args.output_dims is not None:
+            overrides["output_dims"] = args.output_dims
+        if (
+            hasattr(args, "embedding_output_dims")
+            and args.embedding_output_dims is not None
+        ):
+            overrides["output_dims"] = args.embedding_output_dims
+
+        # Handle client_side_truncation arguments (both variations)
+        if hasattr(args, "client_side_truncation") and args.client_side_truncation:
+            overrides["client_side_truncation"] = True
+        if (
+            hasattr(args, "embedding_client_side_truncation")
+            and args.embedding_client_side_truncation
+        ):
+            overrides["client_side_truncation"] = True
 
         # Handle no-embeddings flag (special case - disables embeddings)
         if hasattr(args, "no_embeddings") and args.no_embeddings:

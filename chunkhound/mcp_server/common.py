@@ -60,12 +60,6 @@ class EmbeddingTimeoutError(MCPError):
     pass
 
 
-class EmbeddingProviderError(MCPError):
-    """Raised when embedding provider is not available."""
-
-    pass
-
-
 async def with_timeout(
     coro: Coroutine[Any, Any, T],
     timeout_seconds: float,

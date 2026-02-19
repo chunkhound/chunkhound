@@ -55,7 +55,7 @@ All configuration options are now available as CLI arguments:
 chunkhound index . --database-path /path/to/db --database-provider lancedb
 
 # Embedding configuration
-chunkhound index . --embedding-provider openai --embedding-model text-embedding-3-small
+chunkhound index . --embedding-provider openai --embedding-model text-embedding-3-large
 
 # MCP configuration (stdio only)
 chunkhound mcp
@@ -76,7 +76,7 @@ The configuration file format remains the same JSON structure:
   },
   "embedding": {
     "provider": "openai",
-    "model": "text-embedding-3-small",
+    "model": "text-embedding-3-large",
     "batch_size": 1000,
     "max_concurrent": 8
   },
@@ -160,6 +160,45 @@ If you see an error about config file not found:
 Use `--debug` flag to see which configuration source is being used:
 ```bash
 chunkhound index . --config .chunkhound.json --debug
+```
+
+## Default Embedding Model Change
+
+Starting with this release, the default OpenAI embedding model has changed:
+
+- **Old default:** `text-embedding-3-small` (1536 dimensions)
+- **New default:** `text-embedding-3-large` (3072 dimensions)
+
+### Impact
+
+- **Existing indexes are incompatible** — embeddings with different dimensions cannot be mixed. You must reindex after upgrading.
+- **Higher quality** — `text-embedding-3-large` produces more accurate embeddings for code search.
+- **Higher cost** — `text-embedding-3-large` costs more per token than `text-embedding-3-small`. See [OpenAI pricing](https://openai.com/api/pricing/) for details.
+
+### If you want to keep the old default
+
+Explicitly set the model in your configuration:
+
+```bash
+chunkhound index . --embedding-model text-embedding-3-small
+```
+
+Or in `.chunkhound.json`:
+
+```json
+{
+  "embedding": {
+    "model": "text-embedding-3-small"
+  }
+}
+```
+
+### If you want to use the new default
+
+Reindex your codebase:
+
+```bash
+chunkhound index . --force-reindex
 ```
 
 ## Benefits of the New System

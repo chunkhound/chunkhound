@@ -356,7 +356,12 @@ class ProviderRegistry:
             # Use the factory to create the provider
             logger.debug("[REGISTRY] Creating embedding provider from factory")
             provider = EmbeddingProviderFactory.create_provider(self._config.embedding)
-            logger.debug(f"[REGISTRY] Created provider: {type(provider)}")
+            logger.debug(
+                f"[REGISTRY] Created embedding provider: "
+                f"dims={provider.dims}, "
+                f"output_dims={provider.output_dims}, "
+                f"client_side_truncation={provider.client_side_truncation}"
+            )
 
             # Register provider with the manager (enables dimension detection)
             self._embedding_manager.register_provider(provider, set_default=True)

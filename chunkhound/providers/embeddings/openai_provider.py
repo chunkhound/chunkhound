@@ -3,8 +3,7 @@
 import asyncio
 import heapq
 import math
-from collections.abc import AsyncIterator
-from datetime import datetime
+from collections.abc import AsyncIterator, Sequence
 from typing import Any, cast
 
 import httpx
@@ -15,10 +14,13 @@ from chunkhound.core.config.embedding_config import (
     validate_rerank_configuration,
 )
 from chunkhound.core.config.openai_utils import is_azure_openai_endpoint
+from chunkhound.core.constants import OPENAI_DEFAULT_MODEL
 from chunkhound.core.exceptions.core import ValidationError
+from chunkhound.core.exceptions.embedding import EmbeddingConfigurationError
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 
 from .batch_utils import handle_token_limit_error
+from .shared_utils import l2_normalize, validate_embedding_dims
 
 try:
     import openai
@@ -34,44 +36,70 @@ except ImportError:
 # Research: https://www.baseten.co/blog/day-zero-benchmarks-for-qwen-3
 # Batch sizes optimized for throughput on GPU inference (A100 baseline)
 # Rerank limits: 32-128 per batch based on model size to prevent OOM
-QWEN_MODEL_CONFIG = {
-    # Qwen3 Embedding Models (via Ollama)
+QWEN_MODEL_CONFIG: dict[str, dict[str, Any]] = {
+    # Qwen3 Embedding Models (via Ollama/OpenAI-compatible endpoints)
+    # Native dimensions: 0.6B=1024, 4B=2560, 8B=4096
+    # All support Matryoshka Representation Learning (MRL) for dimension reduction
     # Batch sizes balanced for GPU memory and throughput
-    "dengcao/Qwen3-Embedding-0.6B:Q5_K_M": {
+    "dengcao/qwen3-embedding-0.6b:q5_k_m": {
         "max_tokens_per_batch": 200000,  # Conservative for Q5_K_M quantization
         "max_texts_per_batch": 512,  # Smallest model: highest throughput
         "context_length": 8192,
         "max_rerank_batch": 128,  # Smallest reranker: largest batches
+        "native_dims": 1024,
+        "matryoshka": True,
+        "min_dims": 32,
+        "distance": "cosine",
     },
     "qwen3-embedding-0.6b": {
         "max_tokens_per_batch": 200000,
         "max_texts_per_batch": 512,
         "context_length": 8192,
         "max_rerank_batch": 128,
+        "native_dims": 1024,
+        "matryoshka": True,
+        "min_dims": 32,
+        "distance": "cosine",
     },
-    "dengcao/Qwen3-Embedding-4B:Q5_K_M": {
+    "dengcao/qwen3-embedding-4b:q5_k_m": {
         "max_tokens_per_batch": 150000,
         "max_texts_per_batch": 256,  # Medium model: balanced speed/memory
         "context_length": 8192,
         "max_rerank_batch": 96,  # Medium reranker batch size
+        "native_dims": 2560,
+        "matryoshka": True,
+        "min_dims": 32,
+        "distance": "cosine",
     },
     "qwen3-embedding-4b": {
         "max_tokens_per_batch": 150000,
         "max_texts_per_batch": 256,
         "context_length": 8192,
         "max_rerank_batch": 96,
+        "native_dims": 2560,
+        "matryoshka": True,
+        "min_dims": 32,
+        "distance": "cosine",
     },
-    "dengcao/Qwen3-Embedding-8B:Q5_K_M": {
+    "dengcao/qwen3-embedding-8b:q5_k_m": {
         "max_tokens_per_batch": 100000,
         "max_texts_per_batch": 128,  # Largest model: conservative for memory
         "context_length": 8192,
         "max_rerank_batch": 64,  # Largest reranker: smallest batches
+        "native_dims": 4096,
+        "matryoshka": True,
+        "min_dims": 32,
+        "distance": "cosine",
     },
     "qwen3-embedding-8b": {
         "max_tokens_per_batch": 100000,
         "max_texts_per_batch": 128,
         "context_length": 8192,
         "max_rerank_batch": 64,
+        "native_dims": 4096,
+        "matryoshka": True,
+        "min_dims": 32,
+        "distance": "cosine",
     },
     # Qwen3 Reranker Models
     # Batch sizes based on research: 32-128 for GPU inference
@@ -113,6 +141,47 @@ QWEN_MODEL_CONFIG = {
         "max_rerank_batch": 64,
     },
 }
+
+
+# OpenAI model config: single source of truth for metadata and wizard
+OPENAI_MODEL_CONFIG: dict[str, dict[str, Any]] = {
+    "text-embedding-3-small": {
+        "native_dims": 1536,
+        "matryoshka": True,
+        "min_dims": 1,
+        "distance": "cosine",
+        "max_tokens": 8191,
+        "display": {"description": "Fast & efficient", "order": 1},
+    },
+    "text-embedding-3-large": {
+        "native_dims": 3072,
+        "matryoshka": True,
+        "min_dims": 1,
+        "distance": "cosine",
+        "max_tokens": 8191,
+        "display": {"description": "Higher quality", "order": 0},
+    },
+    # Legacy: accepted but not shown in wizard (no "display" key)
+    "text-embedding-ada-002": {
+        "native_dims": 1536,
+        "matryoshka": False,
+        "distance": "cosine",
+        "max_tokens": 8191,
+    },
+}
+
+
+def get_openai_display_models() -> list[tuple[str, str]]:
+    """Featured OpenAI embedding models for setup wizard."""
+    items = [
+        (k, v["display"]["description"])
+        for k, v in OPENAI_MODEL_CONFIG.items()
+        if "display" in v
+    ]
+    return sorted(
+        items,
+        key=lambda x: OPENAI_MODEL_CONFIG[x[0]]["display"]["order"],
+    )
 
 
 def _validate_qwen_model_config() -> None:
@@ -168,8 +237,21 @@ def _validate_qwen_model_config() -> None:
 _validate_qwen_model_config()
 
 
+def _normalize_qwen_model_name(model: str) -> str:
+    """Strip provider prefixes and lowercase Qwen model names for config lookup.
+
+    Handles: Fireworks/Qwen3-Embedding-4B → qwen3-embedding-4b
+    """
+    prefixes = ("fireworks/", "ollama/", "together/")
+    model_lower = model.lower()
+    for prefix in prefixes:
+        if model_lower.startswith(prefix):
+            return model_lower[len(prefix):]
+    return model_lower
+
+
 class OpenAIEmbeddingProvider:
-    """OpenAI embedding provider using text-embedding-3-small by default.
+    """OpenAI embedding provider using text-embedding-3-large by default.
 
     Thread Safety:
         This provider is thread-safe and stateless. Multiple concurrent calls to
@@ -193,7 +275,7 @@ class OpenAIEmbeddingProvider:
         self,
         api_key: str | None = None,
         base_url: str | None = None,
-        model: str = "text-embedding-3-small",
+        model: str = OPENAI_DEFAULT_MODEL,
         rerank_model: str | None = None,
         rerank_url: str = "/rerank",
         rerank_format: str = "auto",
@@ -203,6 +285,8 @@ class OpenAIEmbeddingProvider:
         retry_delay: float = 1.0,
         max_tokens: int | None = None,
         rerank_batch_size: int | None = None,
+        output_dims: int | None = None,
+        client_side_truncation: bool = False,
         api_version: str | None = None,
         azure_endpoint: str | None = None,
         azure_deployment: str | None = None,
@@ -222,6 +306,8 @@ class OpenAIEmbeddingProvider:
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
             rerank_batch_size: Max documents per rerank batch (overrides model defaults, bounded by model caps)
+            output_dims: Output embedding dims for matryoshka models (None = native)
+            client_side_truncation: Truncate embeddings client-side instead of using API dimensions parameter
             api_version: Azure OpenAI API version (e.g., '2024-02-01')
             azure_endpoint: Azure OpenAI endpoint URL
             azure_deployment: Azure OpenAI deployment name
@@ -253,6 +339,10 @@ class OpenAIEmbeddingProvider:
         self._retry_delay = retry_delay
         self._max_tokens = max_tokens
         self._rerank_batch_size = rerank_batch_size
+        self._output_dims = output_dims
+        self._client_side_truncation = client_side_truncation
+        self._discovered_dims: int | None = None
+        self._warned_default_dims = False
 
         # Validate rerank configuration at initialization (fail-fast)
         # Match config validation logic: check if reranking is enabled
@@ -276,24 +366,24 @@ class OpenAIEmbeddingProvider:
         # Configure Qwen-specific batch sizes (extracted for clarity)
         self._configure_qwen_batch_sizes(model, rerank_model, batch_size)
 
-        # Model-specific configuration for OpenAI models
-        self._model_config = {
-            "text-embedding-3-small": {
-                "dims": 1536,
-                "distance": "cosine",
-                "max_tokens": 8191,
-            },
-            "text-embedding-3-large": {
-                "dims": 3072,
-                "distance": "cosine",
-                "max_tokens": 8191,
-            },
-            "text-embedding-ada-002": {
-                "dims": 1536,
-                "distance": "cosine",
-                "max_tokens": 8191,
-            },
-        }
+        # Model-specific configuration for OpenAI models (module-level single source of truth)
+        self._model_config = OPENAI_MODEL_CONFIG
+
+        # Validate output_dims if specified
+        if output_dims is not None:
+            model_cfg = self._get_model_config()
+            if model_cfg:
+                if not model_cfg.get("matryoshka", False):
+                    raise EmbeddingConfigurationError(
+                        f"Model {model} does not support matryoshka dimensions"
+                    )
+                min_dims = cast(int, model_cfg.get("min_dims", 1))
+                native_dims = cast(int, model_cfg.get("native_dims", 1536))
+                if not (min_dims <= output_dims <= native_dims):
+                    raise EmbeddingConfigurationError(
+                        f"output_dims {output_dims} out of range "
+                        f"[{min_dims}, {native_dims}] for {model}"
+                    )
 
         # Usage statistics
         self._usage_stats = {
@@ -326,18 +416,22 @@ class OpenAIEmbeddingProvider:
         model_lower = model.lower()
         rerank_model_lower = (rerank_model or "").lower()
 
+        # Normalize model names (strip provider prefixes like fireworks/)
+        normalized_model = _normalize_qwen_model_name(model)
+        normalized_rerank = _normalize_qwen_model_name(rerank_model) if rerank_model else ""
+
         # Check if embedding model is a Qwen model
-        if "qwen" in model_lower or model in QWEN_MODEL_CONFIG:
-            qwen_config = QWEN_MODEL_CONFIG.get(model)
+        if "qwen" in model_lower or normalized_model in QWEN_MODEL_CONFIG:
+            qwen_config = QWEN_MODEL_CONFIG.get(normalized_model)
             if qwen_config:
                 logger.info(f"Detected Qwen embedding model: {model}")
 
         # Check if rerank model is a Qwen model
         qwen_rerank_config = None
         if rerank_model and (
-            "qwen" in rerank_model_lower or rerank_model in QWEN_MODEL_CONFIG
+            "qwen" in rerank_model_lower or normalized_rerank in QWEN_MODEL_CONFIG
         ):
-            qwen_rerank_config = QWEN_MODEL_CONFIG.get(rerank_model)
+            qwen_rerank_config = QWEN_MODEL_CONFIG.get(normalized_rerank)
             if qwen_rerank_config:
                 logger.info(f"Detected Qwen reranker model: {rerank_model}")
 
@@ -395,8 +489,6 @@ class OpenAIEmbeddingProvider:
             # For custom endpoints (non-OpenAI), disable SSL verification
             # These often use self-signed certificates (e.g., corporate servers, Ollama)
             if not is_openai_official:
-                import httpx
-
                 # Create httpx client with SSL verification disabled
                 http_client = httpx.AsyncClient(
                     timeout=httpx.Timeout(timeout=self._timeout),
@@ -456,6 +548,18 @@ class OpenAIEmbeddingProvider:
         """Model name."""
         return self._model
 
+    def _get_model_config(self) -> dict[str, Any] | None:
+        """Get model config from OpenAI models or Qwen models."""
+        if self._model in self._model_config:
+            return self._model_config[self._model]
+
+        # Normalize Qwen model names (strip provider prefixes)
+        normalized = _normalize_qwen_model_name(self._model)
+
+        if normalized in QWEN_MODEL_CONFIG:
+            return QWEN_MODEL_CONFIG[normalized]
+        return None
+
     def _get_deployment_model(self) -> str:
         """Get the model/deployment name for API requests.
 
@@ -473,16 +577,67 @@ class OpenAIEmbeddingProvider:
 
     @property
     def dims(self) -> int:
-        """Embedding dimensions."""
-        if self._model in self._model_config:
-            return self._model_config[self._model]["dims"]
-        return 1536  # Default for most OpenAI models
+        """Actual output dimension (reflects matryoshka config if set).
+
+        For unknown models (no config entry), returns 1536 as a pre-discovery
+        default until the first embed() call discovers the actual dimension.
+        """
+        if self._output_dims is not None:
+            return self._output_dims
+        model_cfg = self._get_model_config()
+        if model_cfg and "native_dims" in model_cfg:
+            return cast(int, model_cfg["native_dims"])
+        if self._discovered_dims is not None:
+            return self._discovered_dims
+        if not self._warned_default_dims:
+            self._warned_default_dims = True
+            logger.warning(
+                f"Unknown model '{self._model}': using default dims=1536. "
+                "Actual dimensions will be discovered on first embed() call."
+            )
+        return 1536
+
+    @property
+    def native_dims(self) -> int:
+        """Model's full/native embedding dimension."""
+        model_cfg = self._get_model_config()
+        if model_cfg:
+            return cast(int, model_cfg.get("native_dims", 1536))
+        if self._discovered_dims is not None:
+            return self._discovered_dims
+        return 1536
+
+    @property
+    def supported_dimensions(self) -> Sequence[int]:
+        """Valid output dimensions for this model."""
+        model_cfg = self._get_model_config()
+        if model_cfg and model_cfg.get("matryoshka", False):
+            min_dims = cast(int, model_cfg.get("min_dims", 1))
+            native = cast(int, model_cfg.get("native_dims", 1536))
+            return range(min_dims, native + 1)
+        return [self.native_dims]
+
+    def supports_matryoshka(self) -> bool:
+        """True if model supports variable output dimensions."""
+        model_cfg = self._get_model_config()
+        return bool(model_cfg.get("matryoshka", False)) if model_cfg else False
+
+    @property
+    def output_dims(self) -> int | None:
+        """Configured output dimension override, or None for native."""
+        return self._output_dims
+
+    @property
+    def client_side_truncation(self) -> bool:
+        """Whether client-side truncation is enabled."""
+        return self._client_side_truncation
 
     @property
     def distance(self) -> str:
         """Distance metric."""
-        if self._model in self._model_config:
-            return self._model_config[self._model]["distance"]
+        model_cfg = self._get_model_config()
+        if model_cfg and "distance" in model_cfg:
+            return cast(str, model_cfg["distance"])
         return "cosine"
 
     @property
@@ -612,9 +767,8 @@ class OpenAIEmbeddingProvider:
             return await self.embed_batch(validated_texts)
 
         except Exception as e:
-            # CRITICAL: Log EVERY exception that passes through here to trace execution path
             logger.error(
-                f"[DEBUG-TRACE] Exception caught in OpenAI embed() method: {type(e).__name__}: {str(e)[:200]}"
+                f"Exception in OpenAI embed(): {type(e).__name__}: {str(e)[:200]}"
             )
             self._usage_stats["errors"] += 1
             # Log details of oversized chunks for root cause analysis
@@ -642,17 +796,6 @@ class OpenAIEmbeddingProvider:
             logger.error(
                 f"[OpenAI-Provider] Failed to generate embeddings (texts: {len(validated_texts)}, total_chars: {total_chars}, max_chars: {max_chars}): {e}"
             )
-
-            # Add debug logging to trace the error
-            debug_file = "/tmp/chunkhound_openai_debug.log"
-            try:
-                with open(debug_file, "a") as f:
-                    f.write(
-                        f"[{datetime.now().isoformat()}] OPENAI-PROVIDER ERROR: texts={len(validated_texts)}, max_chars={max_chars}, error={e}\n"
-                    )
-                    f.flush()
-            except OSError:
-                pass  # Debug logging is best-effort, OK to fail silently
 
             raise
 
@@ -728,18 +871,29 @@ class OpenAIEmbeddingProvider:
                     f"Generating embeddings for {len(texts)} texts (attempt {attempt + 1})"
                 )
 
-                response = await self._client.embeddings.create(
-                    model=self._get_deployment_model(),
-                    input=texts,
-                    timeout=self._timeout,
-                )
+                # Build kwargs; add dimensions for server-side matryoshka truncation
+                embed_kwargs: dict[str, Any] = {
+                    "model": self._get_deployment_model(),
+                    "input": texts,
+                    "timeout": self._timeout,
+                }
+                if self._output_dims is not None and not self._client_side_truncation:
+                    embed_kwargs["dimensions"] = self._output_dims
+                response = await self._client.embeddings.create(**embed_kwargs)
 
                 # Extract embeddings from response, sorted by original input order
                 # OpenAI API does not guarantee response order - each data object
                 # has an 'index' field indicating its position in the input array
                 embeddings: list[list[float] | None] = [None] * len(texts)
+                raw_dim: int | None = None
                 for data in response.data:
-                    embeddings[data.index] = data.embedding
+                    embedding = data.embedding
+                    if raw_dim is None:
+                        raw_dim = len(embedding)
+                    # Client-side truncation + L2 normalize
+                    if self._client_side_truncation and self._output_dims is not None:
+                        embedding = l2_normalize(embedding[: self._output_dims])
+                    embeddings[data.index] = embedding
 
                 # Validate all indices were filled (defensive check)
                 if None in embeddings:
@@ -755,6 +909,25 @@ class OpenAIEmbeddingProvider:
                     self._usage_stats["tokens_used"] += response.usage.total_tokens
 
                 logger.debug(f"Successfully generated {len(embeddings)} embeddings")
+
+                # Discover native dims and validate output dims (INV-1)
+                actual_dims = len(cast(list[float], embeddings[0]))
+                # Only discover when raw_dim reflects the true native size:
+                # skip when server-side truncation is active (API already truncated).
+                server_side_truncation = (
+                    self._output_dims is not None and not self._client_side_truncation
+                )
+                if (
+                    self._discovered_dims is None
+                    and self._get_model_config() is None
+                    and not server_side_truncation
+                ):
+                    self._discovered_dims = cast(int, raw_dim)
+                    logger.debug(
+                        f"Discovered native embedding dimension: {self._discovered_dims}"
+                    )
+                validate_embedding_dims(actual_dims, self.dims)
+
                 return cast(list[list[float]], embeddings)
 
             except Exception as rate_error:
@@ -933,6 +1106,8 @@ class OpenAIEmbeddingProvider:
         """Update provider configuration."""
         if "model" in kwargs:
             self._model = kwargs["model"]
+            self._warned_default_dims = False
+            self._discovered_dims = None
         if "batch_size" in kwargs:
             self._batch_size = kwargs["batch_size"]
         if "timeout" in kwargs:

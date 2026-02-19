@@ -24,7 +24,7 @@ from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_config import EmbeddingConfig
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.core.config.openai_utils import is_official_openai_endpoint
-from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
+from chunkhound.core.constants import OPENAI_DEFAULT_MODEL, VOYAGE_DEFAULT_MODEL
 from chunkhound.version import __version__
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 _console = Console()
 
 
-def console_print(message: str, style: str = None) -> None:
+def console_print(message: str, style: str | None = None) -> None:
     """Print with colors using Rich console or fallback to plain print."""
     try:
         if style:
@@ -516,8 +516,8 @@ async def _fetch_available_models(
         # Check if it's an authentication error
         if e.response.status_code in [401, 403]:
             return (None, True)  # Definitely needs authentication
-        elif e.response.status_code in [200, 404]:
-            return (None, False)  # Clear no-auth cases (success or not found)
+        elif e.response.status_code == 404:
+            return (None, False)  # Not found - no auth issue
         else:
             # Other HTTP errors (500, etc.) - assume auth needed to be safe
             return (None, True)
@@ -1507,7 +1507,7 @@ async def _validate_detected_config(
         elif provider == "openai":
             api_key = config_data.get("api_key")
             base_url = config_data.get("base_url")
-            model = config_data.get("model", "text-embedding-3-small")
+            model = config_data.get("model", OPENAI_DEFAULT_MODEL)
 
             if not api_key:
                 formatter.error("OpenAI API key not found")
@@ -1956,7 +1956,7 @@ async def _validate_provider_config(
     elif provider == "openai":
         api_key = config_data.get("api_key")
         base_url = config_data.get("base_url")
-        model = config_data.get("model", "text-embedding-3-small")
+        model = config_data.get("model", OPENAI_DEFAULT_MODEL)
 
         # Only require API key for official OpenAI endpoints
         if is_official_openai_endpoint(base_url):
