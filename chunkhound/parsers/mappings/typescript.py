@@ -46,7 +46,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
     def extract_constants(
         self,
         concept: "UniversalConcept",
-        captures: dict[str, "TSNode"],
+        captures: dict[str, TSNode],
         content: bytes,
     ) -> list[dict[str, str]] | None:
         """Extract constants using JSFamilyExtraction implementation.
@@ -247,7 +247,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             (comment) @tsdoc
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract function name from a TypeScript function definition node.
 
         Args:
@@ -287,7 +287,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             logger.error(f"Failed to extract TypeScript function name: {e}")
             return self.get_fallback_name(node, "function")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract class name from a TypeScript class definition node.
 
         Args:
@@ -310,7 +310,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             logger.error(f"Failed to extract TypeScript class name: {e}")
             return self.get_fallback_name(node, "class")
 
-    def extract_interface_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_interface_name(self, node: TSNode | None, source: str) -> str:
         """Extract interface name from a TypeScript interface definition node.
 
         Args:
@@ -333,7 +333,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             logger.error(f"Failed to extract TypeScript interface name: {e}")
             return self.get_fallback_name(node, "interface")
 
-    def extract_enum_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_enum_name(self, node: TSNode | None, source: str) -> str:
         """Extract enum name from a TypeScript enum definition node.
 
         Args:
@@ -356,7 +356,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             logger.error(f"Failed to extract TypeScript enum name: {e}")
             return self.get_fallback_name(node, "enum")
 
-    def extract_type_alias_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_type_alias_name(self, node: TSNode | None, source: str) -> str:
         """Extract type alias name from a TypeScript type alias definition node.
 
         Args:
@@ -379,7 +379,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             logger.error(f"Failed to extract TypeScript type alias name: {e}")
             return self.get_fallback_name(node, "type")
 
-    def extract_namespace_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_namespace_name(self, node: TSNode | None, source: str) -> str:
         """Extract namespace name from a TypeScript namespace definition node.
 
         Args:
@@ -402,7 +402,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             logger.error(f"Failed to extract TypeScript namespace name: {e}")
             return self.get_fallback_name(node, "namespace")
 
-    def extract_parameters(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter names and types from a TypeScript function/method node.
 
         Args:
@@ -445,7 +445,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return parameters
 
-    def extract_return_type(self, node: "TSNode | None", source: str) -> str | None:
+    def extract_return_type(self, node: TSNode | None, source: str) -> str | None:
         """Extract return type annotation from a TypeScript function.
 
         Args:
@@ -473,7 +473,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return None
 
-    def extract_type_parameters(self, node: "TSNode | None", source: str) -> str | None:
+    def extract_type_parameters(self, node: TSNode | None, source: str) -> str | None:
         """Extract generic type parameters from a TypeScript declaration.
 
         Args:
@@ -496,7 +496,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return None
 
-    def extract_access_modifiers(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_access_modifiers(self, node: TSNode | None, source: str) -> list[str]:
         """Extract access modifiers from a TypeScript class member.
 
         Args:
@@ -532,7 +532,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return modifiers
 
-    def extract_decorators(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_decorators(self, node: TSNode | None, source: str) -> list[str]:
         """Extract decorators from a TypeScript declaration.
 
         Args:
@@ -559,7 +559,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return decorators
 
-    def is_tsdoc_comment(self, node: "TSNode | None", source: str) -> bool:
+    def is_tsdoc_comment(self, node: TSNode | None, source: str) -> bool:
         """Check if a comment node is a TSDoc comment.
 
         Args:
@@ -617,7 +617,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return "\n".join(cleaned_lines)
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a TypeScript node should be included as a chunk.
 
         Args:
@@ -667,7 +667,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
 
     def create_enhanced_chunk(
         self,
-        node: "TSNode | None",
+        node: TSNode | None,
         source: str,
         file_path: Path,
         chunk_type: ChunkType,

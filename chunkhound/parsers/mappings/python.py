@@ -129,7 +129,7 @@ class PythonMapping(BaseMapping):
             (import_from_statement) @import_from
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract function name from a Python function definition node.
 
         Args:
@@ -151,7 +151,7 @@ class PythonMapping(BaseMapping):
 
         return self.get_fallback_name(node, "function")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract class name from a Python class definition node.
 
         Args:
@@ -173,7 +173,7 @@ class PythonMapping(BaseMapping):
 
         return self.get_fallback_name(node, "class")
 
-    def extract_parameters(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter names from a Python function/method node.
 
         Handles regular parameters, default parameters, *args, **kwargs,
@@ -246,7 +246,7 @@ class PythonMapping(BaseMapping):
 
         return parameters
 
-    def extract_decorators(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_decorators(self, node: TSNode | None, source: str) -> list[str]:
         """Extract decorator names from a Python function or class node.
 
         Args:
@@ -272,7 +272,7 @@ class PythonMapping(BaseMapping):
 
         return decorators
 
-    def extract_inheritance(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_inheritance(self, node: TSNode | None, source: str) -> list[str]:
         """Extract superclass names from a Python class definition.
 
         Args:
@@ -312,7 +312,7 @@ class PythonMapping(BaseMapping):
 
         return superclasses
 
-    def extract_type_hints(self, node: "TSNode | None", source: str) -> dict[str, str]:
+    def extract_type_hints(self, node: TSNode | None, source: str) -> dict[str, str]:
         """Extract type hints from a Python function definition.
 
         Args:
@@ -365,7 +365,7 @@ class PythonMapping(BaseMapping):
 
         return type_hints
 
-    def is_async_function(self, node: "TSNode | None") -> bool:
+    def is_async_function(self, node: TSNode | None) -> bool:
         """Check if a function node represents an async function.
 
         Args:
@@ -379,7 +379,7 @@ class PythonMapping(BaseMapping):
 
         return node.type == "async_function_definition"
 
-    def is_generator_function(self, node: "TSNode | None", source: str) -> bool:
+    def is_generator_function(self, node: TSNode | None, source: str) -> bool:
         """Check if a function contains yield statements (is a generator).
 
         Args:
@@ -397,7 +397,7 @@ class PythonMapping(BaseMapping):
         return len(yield_nodes) > 0
 
     def extract_import_names(
-        self, node: "TSNode | None", source: str
+        self, node: TSNode | None, source: str
     ) -> dict[str, str]:
         """Extract import information from an import statement.
 
@@ -423,7 +423,7 @@ class PythonMapping(BaseMapping):
 
         return import_info
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a Python node should be included as a chunk.
 
         Filters out very small functions/classes and internal methods.
@@ -548,7 +548,7 @@ class PythonMapping(BaseMapping):
         return None
 
     def extract_name(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for this concept.
 
@@ -642,7 +642,7 @@ class PythonMapping(BaseMapping):
         return "unnamed"
 
     def extract_content(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for this concept.
 
@@ -671,7 +671,7 @@ class PythonMapping(BaseMapping):
         return ""
 
     def extract_metadata(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract Python-specific metadata from captures.
 
@@ -786,7 +786,7 @@ class PythonMapping(BaseMapping):
         return metadata
 
     def extract_constants(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> list[dict[str, str]] | None:
         """Extract constant definitions from Python code.
 

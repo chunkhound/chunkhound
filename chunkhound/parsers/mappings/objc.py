@@ -80,7 +80,7 @@ class ObjCMapping(BaseMapping):
         (property_declaration) @property_def
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract method name from an Objective-C method definition node.
 
         Handles both instance methods (-) and class methods (+).
@@ -129,7 +129,7 @@ class ObjCMapping(BaseMapping):
 
         return self.get_fallback_name(node, "method")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract class name from an Objective-C class definition node.
 
         Handles @interface, @implementation, categories, and protocols.
@@ -176,7 +176,7 @@ class ObjCMapping(BaseMapping):
 
         return self.get_fallback_name(node, "class")
 
-    def extract_parameters(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter names from an Objective-C method node.
 
         Args:
@@ -212,7 +212,7 @@ class ObjCMapping(BaseMapping):
         return parameters
 
     def extract_property_attributes(
-        self, node: "TSNode | None", source: str
+        self, node: TSNode | None, source: str
     ) -> list[str]:
         """Extract property attributes from an @property declaration.
 
@@ -246,7 +246,7 @@ class ObjCMapping(BaseMapping):
 
         return attributes
 
-    def extract_superclass(self, node: "TSNode | None", source: str) -> str | None:
+    def extract_superclass(self, node: TSNode | None, source: str) -> str | None:
         """Extract superclass name from an Objective-C class interface.
 
         Args:
@@ -273,7 +273,7 @@ class ObjCMapping(BaseMapping):
 
         return None
 
-    def extract_protocols(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_protocols(self, node: TSNode | None, source: str) -> list[str]:
         """Extract protocol names that a class conforms to.
 
         Args:
@@ -305,7 +305,7 @@ class ObjCMapping(BaseMapping):
 
         return protocols
 
-    def is_class_method(self, node: "TSNode | None", source: str) -> bool:
+    def is_class_method(self, node: TSNode | None, source: str) -> bool:
         """Check if a method is a class method (+ prefix) vs instance method (- prefix).
 
         Args:
@@ -329,7 +329,7 @@ class ObjCMapping(BaseMapping):
 
         return False
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if an Objective-C node should be included as a chunk.
 
         Filters out very small nodes and empty definitions.
@@ -413,7 +413,7 @@ class ObjCMapping(BaseMapping):
         return None
 
     def extract_name(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for this concept.
 
@@ -475,7 +475,7 @@ class ObjCMapping(BaseMapping):
         return "unnamed"
 
     def extract_content(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for this concept.
 
@@ -500,7 +500,7 @@ class ObjCMapping(BaseMapping):
         return ""
 
     def extract_metadata(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract Objective-C-specific metadata.
 
@@ -606,7 +606,7 @@ class ObjCMapping(BaseMapping):
         return metadata
 
     def extract_constants(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> list[dict[str, str]] | None:
         """Extract constant definitions from Objective-C code.
 

@@ -140,7 +140,7 @@ class MatlabMapping(BaseMapping):
             (source_file) @script
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract function name from a MATLAB function definition node.
 
         Args:
@@ -162,7 +162,7 @@ class MatlabMapping(BaseMapping):
 
         return self.get_fallback_name(node, "function")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract class name from a MATLAB class definition node.
 
         Args:
@@ -184,7 +184,7 @@ class MatlabMapping(BaseMapping):
 
         return self.get_fallback_name(node, "class")
 
-    def extract_parameters(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter names from a MATLAB function/method node.
 
         Handles regular parameters and varargin.
@@ -214,7 +214,7 @@ class MatlabMapping(BaseMapping):
 
         return parameters
 
-    def extract_return_values(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_return_values(self, node: TSNode | None, source: str) -> list[str]:
         """Extract return value names from a MATLAB function definition.
 
         Args:
@@ -242,7 +242,7 @@ class MatlabMapping(BaseMapping):
 
         return return_values
 
-    def extract_superclasses(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_superclasses(self, node: TSNode | None, source: str) -> list[str]:
         """Extract superclass names from a MATLAB class definition.
 
         Args:
@@ -284,7 +284,7 @@ class MatlabMapping(BaseMapping):
 
         return superclasses
 
-    def extract_properties(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_properties(self, node: TSNode | None, source: str) -> list[str]:
         """Extract property names from a MATLAB class definition.
 
         Args:
@@ -312,7 +312,7 @@ class MatlabMapping(BaseMapping):
 
         return properties
 
-    def is_script_file(self, node: "TSNode | None", source: str) -> bool:
+    def is_script_file(self, node: TSNode | None, source: str) -> bool:
         """Determine if this is a MATLAB script file (no function definitions).
 
         Args:
@@ -332,7 +332,7 @@ class MatlabMapping(BaseMapping):
 
         return True
 
-    def is_help_comment(self, node: "TSNode | None", source: str) -> bool:
+    def is_help_comment(self, node: TSNode | None, source: str) -> bool:
         """Check if a comment node is MATLAB help text (starts with %%).
 
         Args:
@@ -348,7 +348,7 @@ class MatlabMapping(BaseMapping):
         comment_text = self.get_node_text(node, source).strip()
         return comment_text.startswith("%%")
 
-    def is_function_handle(self, node: "TSNode | None", source: str) -> bool:
+    def is_function_handle(self, node: TSNode | None, source: str) -> bool:
         """Check if a node represents a MATLAB function handle.
 
         Args:
@@ -452,7 +452,7 @@ class MatlabMapping(BaseMapping):
         return None
 
     def extract_name(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for MATLAB nodes.
 
@@ -507,7 +507,7 @@ class MatlabMapping(BaseMapping):
         return self.get_fallback_name(def_node, "definition")
 
     def extract_content(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for MATLAB nodes.
 
@@ -539,7 +539,7 @@ class MatlabMapping(BaseMapping):
         return self.get_node_text(def_node, source)
 
     def extract_metadata(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract metadata from captures for MATLAB nodes.
 
@@ -553,7 +553,7 @@ class MatlabMapping(BaseMapping):
         """
         return {}
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a MATLAB node should be included as a chunk.
 
         Filters out very small nodes and empty function/class definitions.
@@ -592,7 +592,7 @@ class MatlabMapping(BaseMapping):
         return True
 
     def extract_constants(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> list[dict[str, str]] | None:
         """Extract constant definitions from MATLAB code.
 

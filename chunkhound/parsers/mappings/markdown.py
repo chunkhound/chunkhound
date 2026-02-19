@@ -150,7 +150,7 @@ class MarkdownMapping(BaseMapping):
             (link_reference_definition) @link_ref_def
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract name from a Markdown code block.
 
         For code blocks, attempts to extract language name or use fallback.
@@ -177,7 +177,7 @@ class MarkdownMapping(BaseMapping):
         # For any code block, use line number for identification
         return self.get_fallback_name(node, "code_block")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract title from a Markdown heading.
 
         Args:
@@ -217,7 +217,7 @@ class MarkdownMapping(BaseMapping):
 
         return self.get_fallback_name(node, "heading")
 
-    def extract_heading_level(self, node: "TSNode | None", source: str) -> int:
+    def extract_heading_level(self, node: TSNode | None, source: str) -> int:
         """Extract heading level from a Markdown heading node.
 
         Args:
@@ -257,7 +257,7 @@ class MarkdownMapping(BaseMapping):
 
         return 1
 
-    def extract_code_language(self, node: "TSNode | None", source: str) -> str:
+    def extract_code_language(self, node: TSNode | None, source: str) -> str:
         """Extract language from a fenced code block.
 
         Args:
@@ -279,7 +279,7 @@ class MarkdownMapping(BaseMapping):
 
         return ""
 
-    def extract_list_type(self, node: "TSNode | None", source: str) -> str:
+    def extract_list_type(self, node: TSNode | None, source: str) -> str:
         """Extract list type (ordered/unordered) from a list node.
 
         Args:
@@ -311,7 +311,7 @@ class MarkdownMapping(BaseMapping):
 
         return "unordered"
 
-    def extract_link_url(self, node: "TSNode | None", source: str) -> str:
+    def extract_link_url(self, node: TSNode | None, source: str) -> str:
         """Extract URL from a link reference definition node.
 
         Args:
@@ -335,7 +335,7 @@ class MarkdownMapping(BaseMapping):
 
         return ""
 
-    def extract_link_text(self, node: "TSNode | None", source: str) -> str:
+    def extract_link_text(self, node: TSNode | None, source: str) -> str:
         """Extract label text from a link reference definition.
 
         Args:
@@ -359,7 +359,7 @@ class MarkdownMapping(BaseMapping):
 
         return ""
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a Markdown node should be included as a chunk.
 
         Filters out very small content and some structural elements.
@@ -404,7 +404,7 @@ class MarkdownMapping(BaseMapping):
         return True
 
     def create_heading_chunk(
-        self, node: "TSNode | None", source: str, file_path, name: str
+        self, node: TSNode | None, source: str, file_path, name: str
     ) -> dict[str, Any]:
         """Create a chunk dictionary for a Markdown heading.
 
@@ -435,7 +435,7 @@ class MarkdownMapping(BaseMapping):
         )
 
     def create_code_block_chunk(
-        self, node: "TSNode | None", source: str, file_path, name: str
+        self, node: TSNode | None, source: str, file_path, name: str
     ) -> dict[str, Any]:
         """Create a chunk dictionary for a Markdown code block.
 
@@ -469,7 +469,7 @@ class MarkdownMapping(BaseMapping):
         )
 
     def create_list_chunk(
-        self, node: "TSNode | None", source: str, file_path, name: str
+        self, node: TSNode | None, source: str, file_path, name: str
     ) -> dict[str, Any]:
         """Create a chunk dictionary for a Markdown list.
 
@@ -566,7 +566,7 @@ class MarkdownMapping(BaseMapping):
             return None
 
     def extract_name(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for this concept."""
 
@@ -656,7 +656,7 @@ class MarkdownMapping(BaseMapping):
             return f"unnamed_{concept.value}"
 
     def extract_content(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for this concept.
 
@@ -672,7 +672,7 @@ class MarkdownMapping(BaseMapping):
         return ""
 
     def extract_metadata(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract markdown-specific metadata."""
 
@@ -711,8 +711,8 @@ class MarkdownMapping(BaseMapping):
         return metadata
 
     def _find_definition_node(
-        self, captures: dict[str, "TSNode"]
-    ) -> Optional["TSNode"]:
+        self, captures: dict[str, TSNode]
+    ) -> Optional[TSNode]:
         """Find the main definition node from captures.
 
         Args:

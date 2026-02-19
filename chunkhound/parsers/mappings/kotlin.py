@@ -104,7 +104,7 @@ class KotlinMapping(BaseMapping):
         (block_comment) @kdoc
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract function name from a Kotlin function definition node.
 
         Args:
@@ -133,7 +133,7 @@ class KotlinMapping(BaseMapping):
 
         return self.get_fallback_name(node, "function")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract class name from a Kotlin class definition node.
 
         Args:
@@ -162,7 +162,7 @@ class KotlinMapping(BaseMapping):
 
         return self.get_fallback_name(node, "class")
 
-    def extract_method_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_method_name(self, node: TSNode | None, source: str) -> str:
         """Extract method name from a Kotlin method definition node.
 
         Args:
@@ -175,7 +175,7 @@ class KotlinMapping(BaseMapping):
         # In Kotlin, methods are functions, so delegate to function name extraction
         return self.extract_function_name(node, source)
 
-    def extract_parameters(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter names and types from a Kotlin function node.
 
         Args:
@@ -224,7 +224,7 @@ class KotlinMapping(BaseMapping):
 
         return parameters
 
-    def extract_package_name(self, root_node: "TSNode | None", source: str) -> str:
+    def extract_package_name(self, root_node: TSNode | None, source: str) -> str:
         """Extract package name from Kotlin file.
 
         Args:
@@ -256,7 +256,7 @@ class KotlinMapping(BaseMapping):
 
         return ""
 
-    def extract_annotations(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_annotations(self, node: TSNode | None, source: str) -> list[str]:
         """Extract Kotlin annotations from a node.
 
         Args:
@@ -294,7 +294,7 @@ class KotlinMapping(BaseMapping):
 
         return annotations
 
-    def extract_type_parameters(self, node: "TSNode | None", source: str) -> str:
+    def extract_type_parameters(self, node: TSNode | None, source: str) -> str:
         """Extract generic type parameters from a Kotlin node.
 
         Args:
@@ -317,7 +317,7 @@ class KotlinMapping(BaseMapping):
 
         return ""
 
-    def extract_return_type(self, node: "TSNode | None", source: str) -> str | None:
+    def extract_return_type(self, node: TSNode | None, source: str) -> str | None:
         """Extract return type from a Kotlin function node.
 
         Args:
@@ -346,7 +346,7 @@ class KotlinMapping(BaseMapping):
 
         return None
 
-    def is_suspend_function(self, node: "TSNode | None", source: str) -> bool:
+    def is_suspend_function(self, node: TSNode | None, source: str) -> bool:
         """Check if a Kotlin function is a suspend function (coroutine).
 
         Args:
@@ -371,7 +371,7 @@ class KotlinMapping(BaseMapping):
 
         return False
 
-    def is_extension_function(self, node: "TSNode | None", source: str) -> bool:
+    def is_extension_function(self, node: TSNode | None, source: str) -> bool:
         """Check if a Kotlin function is an extension function.
 
         Args:
@@ -395,7 +395,7 @@ class KotlinMapping(BaseMapping):
 
         return False
 
-    def extract_class_modifiers(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_class_modifiers(self, node: TSNode | None, source: str) -> list[str]:
         """Extract Kotlin class modifiers (data, sealed, abstract, etc.).
 
         Args:
@@ -434,7 +434,7 @@ class KotlinMapping(BaseMapping):
 
         return modifiers
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a Kotlin node should be included as a chunk.
 
         Args:
@@ -511,7 +511,7 @@ class KotlinMapping(BaseMapping):
 
     def get_qualified_name(
         self,
-        node: "TSNode | None",
+        node: TSNode | None,
         source: str,
         package_name: str = "",
         parent_name: str = "",
@@ -605,7 +605,7 @@ class KotlinMapping(BaseMapping):
     def extract_constants(
         self,
         concept: UniversalConcept,
-        captures: dict[str, "TSNode"],
+        captures: dict[str, TSNode],
         content: bytes,
     ) -> list[dict[str, str]] | None:
         """Extract constant definitions from Kotlin code.

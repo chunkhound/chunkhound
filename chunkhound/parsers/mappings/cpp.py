@@ -219,7 +219,7 @@ class CppMapping(BaseMapping):
             ) @destructor_def
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract function name from a C++ function definition node.
 
         Args:
@@ -247,7 +247,7 @@ class CppMapping(BaseMapping):
 
         return self.get_fallback_name(node, "function")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract class name from a C++ class definition node.
 
         Args:
@@ -276,7 +276,7 @@ class CppMapping(BaseMapping):
 
         return self.get_fallback_name(node, "class")
 
-    def extract_namespace_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_namespace_name(self, node: TSNode | None, source: str) -> str:
         """Extract namespace name from a C++ namespace definition.
 
         Args:
@@ -311,7 +311,7 @@ class CppMapping(BaseMapping):
         return self.get_fallback_name(node, "namespace")
 
     def extract_template_parameters(
-        self, node: "TSNode | None", source: str
+        self, node: TSNode | None, source: str
     ) -> list[str]:
         """Extract template parameters from a template declaration.
 
@@ -346,7 +346,7 @@ class CppMapping(BaseMapping):
         return parameters
 
     def extract_inheritance(
-        self, node: "TSNode | None", source: str
+        self, node: TSNode | None, source: str
     ) -> list[dict[str, str]]:
         """Extract inheritance information from a C++ class definition.
 
@@ -385,7 +385,7 @@ class CppMapping(BaseMapping):
 
         return inheritance_info
 
-    def extract_parameters(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter names and types from a C++ function node.
 
         Args:
@@ -414,7 +414,7 @@ class CppMapping(BaseMapping):
 
         return parameters
 
-    def is_constructor(self, node: "TSNode | None", source: str) -> bool:
+    def is_constructor(self, node: TSNode | None, source: str) -> bool:
         """Check if a function node represents a constructor.
 
         Args:
@@ -440,7 +440,7 @@ class CppMapping(BaseMapping):
 
         return False
 
-    def is_destructor(self, node: "TSNode | None", source: str) -> bool:
+    def is_destructor(self, node: TSNode | None, source: str) -> bool:
         """Check if a function node represents a destructor.
 
         Args:
@@ -460,7 +460,7 @@ class CppMapping(BaseMapping):
 
         return False
 
-    def is_template(self, node: "TSNode | None") -> bool:
+    def is_template(self, node: TSNode | None) -> bool:
         """Check if a node is part of a template declaration.
 
         Args:
@@ -596,7 +596,7 @@ class CppMapping(BaseMapping):
         return None
 
     def extract_name(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for this concept."""
 
@@ -672,7 +672,7 @@ class CppMapping(BaseMapping):
         return "unnamed"
 
     def extract_content(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for this concept."""
 
@@ -690,7 +690,7 @@ class CppMapping(BaseMapping):
         return ""
 
     def extract_metadata(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract C++-specific metadata."""
 
@@ -802,7 +802,7 @@ class CppMapping(BaseMapping):
 
         return metadata
 
-    def _extract_return_type(self, func_node: "TSNode", source: str) -> str | None:
+    def _extract_return_type(self, func_node: TSNode, source: str) -> str | None:
         """Extract return type from a C++ function node."""
         if func_node is None:
             return None
@@ -820,7 +820,7 @@ class CppMapping(BaseMapping):
 
         return None
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a C++ node should be included as a chunk.
 
         Filters out very small nodes, forward declarations, and access specifiers.
@@ -858,7 +858,7 @@ class CppMapping(BaseMapping):
         return True
 
     def extract_constants(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> list[dict[str, str]] | None:
         """Extract constant definitions from C++ code.
 
