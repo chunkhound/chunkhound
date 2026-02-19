@@ -100,6 +100,7 @@ class UniversalParser:
         engine: TreeSitterEngine,
         mapping: BaseMapping,
         cast_config: CASTConfig | None = None,
+        detect_embedded_sql: bool = False,
     ):
         """Initialize universal parser.
 
@@ -107,6 +108,7 @@ class UniversalParser:
             engine: TreeSitterEngine for this language
             mapping: BaseMapping for this language (adapted if needed)
             cast_config: Configuration for cAST algorithm
+            detect_embedded_sql: Whether to detect SQL in string literals
         """
         self.engine = engine
         self.base_mapping = mapping
@@ -124,6 +126,13 @@ class UniversalParser:
         self.mapping = adapted_mapping
         self.extractor = ConceptExtractor(engine, adapted_mapping)
         self.cast_config = cast_config or CASTConfig()
+        self.detect_embedded_sql = detect_embedded_sql
+
+        # Initialize embedded SQL detector if enabled
+        self.sql_detector = None
+        if detect_embedded_sql and self.base_mapping:
+            from .embedded_sql_detector import EmbeddedSqlDetector
+            self.sql_detector = EmbeddedSqlDetector(self.base_mapping.language)
 
         # Statistics
         self._total_files_parsed = 0
@@ -270,6 +279,13 @@ class UniversalParser:
 
         # Convert to standard Chunk format
         chunks = self._convert_to_chunks(optimized_chunks, content, file_path, file_id)
+
+        # Detect embedded SQL if enabled
+        if self.sql_detector and ast_tree:
+            embedded_sql_chunks = self._detect_embedded_sql(
+                ast_tree, content_bytes, content, file_path, file_id
+            )
+            chunks.extend(embedded_sql_chunks)
 
         # Update statistics
         self._total_files_parsed += 1
@@ -1177,6 +1193,60 @@ class UniversalParser:
         result.append(current_chunk)
 
         return result
+
+    def _detect_embedded_sql(
+        self,
+        ast_tree: Tree,
+        content_bytes: bytes,
+        content: str,
+        file_path: Path | None,
+        file_id: FileId | None,
+    ) -> list[Chunk]:
+        """Detect and extract embedded SQL from string literals.
+
+        Args:
+            ast_tree: Parsed AST tree
+            content_bytes: Source code as bytes
+            content: Source code as string
+            file_path: Optional file path
+            file_id: Optional file ID
+
+        Returns:
+            List of chunks representing embedded SQL
+        """
+        if not self.sql_detector:
+            return []
+
+        # Detect SQL in string literals
+        sql_matches = self.sql_detector.detect_in_tree(
+            ast_tree.root_node, content_bytes
+        )
+
+        if not sql_matches:
+            return []
+
+        # Convert matches to UniversalChunk objects
+        universal_chunks = self.sql_detector.create_embedded_sql_chunks(
+            sql_matches
+        )
+
+        # Apply dedup and size validation (but not merging, since each
+        # embedded SQL string is a distinct semantic unit)
+        universal_chunks = deduplicate_chunks(
+            universal_chunks, self.language_name
+        )
+        validated_chunks = []
+        for chunk in universal_chunks:
+            validated_chunks.extend(
+                self._validate_and_split_chunk(chunk, content)
+            )
+
+        # Convert to standard Chunk format
+        chunks = self._convert_to_chunks(
+            validated_chunks, content, file_path, file_id
+        )
+
+        return chunks
 
     def _convert_to_chunks(
         self,

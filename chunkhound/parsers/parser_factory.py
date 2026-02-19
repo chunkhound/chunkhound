@@ -518,12 +518,14 @@ class ParserFactory:
         self,
         language: Language,
         cast_config: CASTConfig | None = None,
+        detect_embedded_sql: bool = False,
     ) -> LanguageParser:
         """Create a universal parser for the specified language.
 
         Args:
             language: Programming language to create parser for
             cast_config: Optional cAST configuration (uses default if not provided)
+            detect_embedded_sql: Whether to detect SQL in string literals
 
         Returns:
             UniversalParser instance configured for the language
@@ -545,7 +547,7 @@ class ParserFactory:
             return SvelteParser(cast_config)
 
         # Use cache to avoid recreating parsers
-        cache_key = self._cache_key(language)
+        cache_key = self._cache_key(language, detect_embedded_sql)
         if cache_key in self._parser_cache:
             return self._parser_cache[cache_key]
 
@@ -576,7 +578,9 @@ class ParserFactory:
         if language in (Language.TEXT, Language.PDF):
             # Text and PDF mappings don't need tree-sitter engine
             mapping = config.mapping_class()
-            parser = UniversalParser(None, mapping, cast_config)  # type: ignore[arg-type]
+            parser = UniversalParser(
+                None, mapping, cast_config, detect_embedded_sql
+            )  # type: ignore[arg-type]
             wrapped = self._maybe_wrap_yaml_parser(language, parser)
             self._parser_cache[cache_key] = wrapped
             return wrapped
@@ -604,6 +608,7 @@ class ParserFactory:
                 engine,
                 mapping,
                 cast_config,
+                detect_embedded_sql,
             )
 
             parser = self._maybe_wrap_yaml_parser(language, universal_parser)
@@ -672,11 +677,15 @@ class ParserFactory:
             return parser
         return RapidYamlParser(parser)
 
-    def _cache_key(self, language: Language) -> tuple[Language, str]:
+    def _cache_key(
+        self, language: Language, detect_embedded_sql: bool = False
+    ) -> tuple[Language, str]:
         if language == Language.YAML:
             mode = os.environ.get("CHUNKHOUND_YAML_ENGINE", "").strip().lower()
-            token = mode or "rapid"
+            token = f"{mode or 'rapid'}{'_sql' if detect_embedded_sql else ''}"
             return (language, token)
+        if detect_embedded_sql:
+            return (language, "embedded_sql")
         return (language, "default")
 
     def get_available_languages(self) -> dict[Language, bool]:
@@ -808,16 +817,19 @@ def create_parser_for_file(
 
 
 def create_parser_for_language(
-    language: Language, cast_config: CASTConfig | None = None
+    language: Language,
+    cast_config: CASTConfig | None = None,
+    detect_embedded_sql: bool = False,
 ) -> LanguageParser:
     """Convenience function to create a parser for a language.
 
     Args:
         language: Programming language to create parser for
         cast_config: Optional cAST configuration
+        detect_embedded_sql: Whether to detect SQL in string literals
 
     Returns:
         LanguageParser instance configured for the language
     """
     factory = get_parser_factory(cast_config)
-    return factory.create_parser(language, cast_config)
+    return factory.create_parser(language, cast_config, detect_embedded_sql)
