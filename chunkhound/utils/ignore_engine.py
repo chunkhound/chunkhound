@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import shutil
 from pathlib import Path
 from typing import Iterable, Optional, Dict, List, Tuple
 from loguru import logger
@@ -172,7 +173,12 @@ def _collect_gitignore_patterns(root: Path, pre_exclude_spec: Optional["PathSpec
     return out
 
 
-def _detect_repo_roots(root: Path, pre_exclude_spec: Optional["PathSpec"] = None) -> list[Path]:
+def _detect_repo_roots(
+    root: Path,
+    pre_exclude_spec: Optional["PathSpec"] = None,
+    *,
+    prune_ignored_gitfile_roots: bool = False,
+) -> list[Path]:
     """Detect Git repository roots under root by looking for .git dir or file.
 
     Prunes excluded subtrees using pre_exclude_spec (e.g., node_modules) to
@@ -180,6 +186,42 @@ def _detect_repo_roots(root: Path, pre_exclude_spec: Optional["PathSpec"] = None
     """
     roots: list[Path] = []
     root = root.resolve()
+    ignored_cache: dict[tuple[str, str], bool] = {}
+    prune_debug_logged = False
+
+    def _log_prune_debug(msg: str, *args: object) -> None:
+        nonlocal prune_debug_logged
+        if prune_debug_logged:
+            return
+        prune_debug_logged = True
+        try:
+            logger.debug(msg, *args)
+        except Exception:
+            # Avoid raising during best-effort logging
+            pass
+
+    git_available = False
+    git_check_ignored_fn = None
+    if prune_ignored_gitfile_roots:
+        try:
+            git_available = shutil.which("git") is not None
+        except Exception as e:
+            git_available = False
+            _log_prune_debug(
+                "Worktree ignore pruning: failed to check git availability: {}",
+                e,
+            )
+        if git_available:
+            try:
+                from chunkhound.utils.git_safe import git_check_ignored as _git_check_ignored
+
+                git_check_ignored_fn = _git_check_ignored
+            except Exception as e:
+                git_check_ignored_fn = None
+                _log_prune_debug(
+                    "Worktree ignore pruning: failed to import git_check_ignored: {}",
+                    e,
+                )
     for dirpath, dirnames, filenames in os.walk(root, topdown=True):
         dpath = Path(dirpath)
 
@@ -194,8 +236,76 @@ def _detect_repo_roots(root: Path, pre_exclude_spec: Optional["PathSpec"] = None
             for dn in to_remove:
                 dirnames.remove(dn)
 
-        # Repo root if .git dir exists or .git file exists (submodule)
-        if (dpath / ".git").is_dir() or (dpath / ".git").is_file():
+        # Repo root if .git dir exists or .git file exists (worktree/submodule)
+        git_dir = (dpath / ".git").is_dir()
+        git_file = (dpath / ".git").is_file()
+        if git_dir or git_file:
+            if git_dir:
+                # Full nested repos remain strict boundaries: do not consult parent
+                # ignore rules here (by design; see repo boundary tests).
+                roots.append(dpath)
+                continue
+
+            # `.git` file (linked worktree/submodule): optional guard. When enabled,
+            # if this repo root directory is ignored by an ancestor repo's gitignore
+            # rules, do NOT treat it as a boundary.
+            if (
+                not prune_ignored_gitfile_roots
+                or (not git_available)
+                or git_check_ignored_fn is None
+            ):
+                roots.append(dpath)
+                continue
+
+            # This avoids surprising discovery behavior when a parent repo ignores
+            # a subtree (e.g. `.gitignored/`) that contains linked worktrees.
+            parent: Path | None = None
+            for rr in reversed(roots):
+                try:
+                    dpath.resolve().relative_to(rr.resolve())
+                    parent = rr
+                    break
+                except Exception:
+                    continue
+
+            if parent is not None:
+                try:
+                    try:
+                        rel = dpath.resolve().relative_to(parent.resolve()).as_posix()
+                    except Exception:
+                        rel = ""
+                    if rel:
+                        try:
+                            parent_key = str(parent.resolve())
+                        except Exception:
+                            parent_key = str(parent)
+                        key = (parent_key, rel)
+                        ign = ignored_cache.get(key)
+                        if ign is None:
+                            ign = git_check_ignored_fn(
+                                repo_root=parent,
+                                rel_path=rel,
+                                timeout_s=5.0,
+                                on_error=lambda e, _dpath=dpath, _parent=parent: _log_prune_debug(
+                                    "Worktree ignore pruning: git check failed for {} (parent={}): {}",
+                                    _dpath,
+                                    _parent,
+                                    e,
+                                ),
+                            )
+                            ignored_cache[key] = ign
+                        if ign:
+                            # Prune traversal below this directory as well.
+                            dirnames[:] = []
+                            continue
+                except Exception as e:
+                    _log_prune_debug(
+                        "Worktree ignore pruning: unexpected failure for {} (parent={}): {}",
+                        dpath,
+                        parent,
+                        e,
+                    )
+
             roots.append(dpath)
     # Sort deepest first for nearest-ancestor selection convenience later
     roots.sort(key=lambda p: len(p.as_posix()))
@@ -283,7 +393,11 @@ def build_repo_aware_ignore_engine(
     workspace_root_only_gitignore: Optional[bool] = None,
 ) -> RepoAwareIgnoreEvaluator:
     pre_spec = _compile_gitwildmatch(config_exclude or []) if (config_exclude) else None
-    repo_roots = _detect_repo_roots(root, pre_spec)
+    repo_roots = _detect_repo_roots(
+        root,
+        pre_spec,
+        prune_ignored_gitfile_roots=("gitignore" in (sources or [])),
+    )
     if backend == "libgit2":
         eng = _try_build_libgit2_repo_aware(root, repo_roots, sources, chignore_file, config_exclude)
         if eng is not None:
@@ -377,14 +491,23 @@ def _transform_gitignore_line(dir_rel: str, line: str) -> list[str]:
     return parts
 
 
-def detect_repo_roots(root: Path, config_exclude: Optional[Iterable[str]] = None) -> list[Path]:
+def detect_repo_roots(
+    root: Path,
+    config_exclude: Optional[Iterable[str]] = None,
+    *,
+    prune_ignored_gitfile_roots: bool = False,
+) -> list[Path]:
     """Public helper to detect repo roots under a workspace root.
 
     Applies pruning using config_exclude (gitwildmatch semantics) to avoid
     descending into heavy trees (e.g., node_modules) while scanning.
     """
     pre_spec = _compile_gitwildmatch(config_exclude or []) if config_exclude else None
-    return _detect_repo_roots(root, pre_spec)
+    return _detect_repo_roots(
+        root,
+        pre_spec,
+        prune_ignored_gitfile_roots=prune_ignored_gitfile_roots,
+    )
 
 
 def build_repo_aware_ignore_engine_from_roots(
