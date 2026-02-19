@@ -682,7 +682,7 @@ class ParserFactory:
     ) -> tuple[Language, str]:
         if language == Language.YAML:
             mode = os.environ.get("CHUNKHOUND_YAML_ENGINE", "").strip().lower()
-            token = mode or "rapid"
+            token = f"{mode or 'rapid'}{'_sql' if detect_embedded_sql else ''}"
             return (language, token)
         if detect_embedded_sql:
             return (language, "embedded_sql")
