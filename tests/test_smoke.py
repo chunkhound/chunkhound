@@ -20,7 +20,10 @@ import pytest
 from pathlib import Path
 
 # Import Windows-safe subprocess utilities
-from tests.utils.windows_subprocess import create_subprocess_exec_safe, get_safe_subprocess_env
+from tests.utils.windows_subprocess import (
+    create_subprocess_exec_safe,
+    get_safe_subprocess_env,
+)
 from tests.utils.windows_compat import windows_safe_tempdir
 from tests.utils import SubprocessJsonRpcClient
 
@@ -118,6 +121,7 @@ class TestCLICommands:
             f"Command {' '.join(command)} produced no output"
         )
 
+
 class TestServerStartup:
     """Test that servers can at least start without immediate crashes."""
 
@@ -152,23 +156,24 @@ class TestServerStartup:
         # Create a temporary directory to avoid indexing the current directory
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            
+
             # Create minimal config file (required for Config() creation)
             config_path = temp_path / ".chunkhound.json"
             db_path = temp_path / ".chunkhound" / "test.db"
             db_path.parent.mkdir(exist_ok=True)
-            
+
             config = {
                 "database": {"path": str(db_path), "provider": "duckdb"},
-                "indexing": {"include": ["*.py"]}
+                "indexing": {"include": ["*.py"]},
             }
             config_path.write_text(json.dumps(config))
-            
+
             # Test that the server starts without crashing
             proc = await create_subprocess_exec_safe(
                 "uv",
                 "run",
-                "python", "-c",
+                "python",
+                "-c",
                 f'''
 import sys
 import os
@@ -204,17 +209,21 @@ sys.exit(asyncio.run(test()))
             )
 
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
-                
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=10.0
+                )
+
                 if proc.returncode != 0:
                     pytest.fail(
                         f"MCP stdio server initialization failed with code {proc.returncode}\n"
                         f"stdout: {stdout.decode()}\n"
                         f"stderr: {stderr.decode()}"
                     )
-                
+
                 # Check for success message
-                assert "SUCCESS:" in stdout.decode(), f"Expected success message, got: {stdout.decode()}"
+                assert "SUCCESS:" in stdout.decode(), (
+                    f"Expected success message, got: {stdout.decode()}"
+                )
 
             except asyncio.TimeoutError:
                 proc.kill()
@@ -225,21 +234,20 @@ sys.exit(asyncio.run(test()))
     async def test_mcp_stdio_protocol_handshake(self):
         """Test MCP stdio server completes full protocol handshake with tool discovery."""
         import json
-        
+
         with windows_safe_tempdir() as temp_path:
-            
             # Create minimal test content (server will auto-index on startup)
             test_file = temp_path / "test.py"
             test_file.write_text("def hello(): return 'world'")
-            
+
             # Create minimal config
             config_path = temp_path / ".chunkhound.json"
             db_path = temp_path / ".chunkhound" / "test.db"
             db_path.parent.mkdir(exist_ok=True)
-            
+
             config = {
                 "database": {"path": str(db_path), "provider": "duckdb"},
-                "indexing": {"include": ["*.py"]}
+                "indexing": {"include": ["*.py"]},
             }
 
             # Add embedding config if API key available
@@ -248,7 +256,7 @@ sys.exit(asyncio.run(test()))
             if api_key:
                 config["embedding"] = {
                     "provider": "openai",
-                    "model": "text-embedding-3-small"
+                    "model": "text-embedding-3-small",
                 }
 
             config_path.write_text(json.dumps(config))
@@ -256,16 +264,20 @@ sys.exit(asyncio.run(test()))
             # Start MCP server (it will auto-index on startup)
             mcp_env = get_safe_subprocess_env(os.environ)
             mcp_env["CHUNKHOUND_MCP_MODE"] = "1"
-            
+
             proc = await create_subprocess_exec_safe(
-                "uv", "run", "chunkhound", "mcp", str(temp_path),
+                "uv",
+                "run",
+                "chunkhound",
+                "mcp",
+                str(temp_path),
                 cwd=str(temp_path),
                 env=mcp_env,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
             )
-            
+
             client = SubprocessJsonRpcClient(proc)
             await client.start()
 
@@ -276,13 +288,15 @@ sys.exit(asyncio.run(test()))
                     {
                         "protocolVersion": "2024-11-05",
                         "capabilities": {},
-                        "clientInfo": {"name": "test", "version": "1.0"}
+                        "clientInfo": {"name": "test", "version": "1.0"},
                     },
-                    timeout=10.0
+                    timeout=10.0,
                 )
 
                 # Verify response structure
-                assert "serverInfo" in init_result, f"No serverInfo in result: {init_result}"
+                assert "serverInfo" in init_result, (
+                    f"No serverInfo in result: {init_result}"
+                )
                 assert init_result["serverInfo"]["name"] == "ChunkHound Code Search"
 
                 # 2. Send initialized notification
@@ -305,6 +319,7 @@ sys.exit(asyncio.run(test()))
                 pytest.fail("MCP stdio protocol handshake timed out")
             finally:
                 await client.close()
+
 
 class TestParserLoading:
     """Test that all parsers can be loaded and created."""
@@ -358,8 +373,12 @@ class TestParserLoading:
                 # Actually test parsing to trigger tree-sitter Language initialization
                 sample_code = language_samples.get(language, "")
                 if sample_code:
-                    chunks = parser.parse_content(sample_code, f"test.{language.value}", FileId(1))
-                    assert isinstance(chunks, list), f"Parser for {language.value} didn't return a list"
+                    chunks = parser.parse_content(
+                        sample_code, f"test.{language.value}", FileId(1)
+                    )
+                    assert isinstance(chunks, list), (
+                        f"Parser for {language.value} didn't return a list"
+                    )
 
             except SetupError as e:
                 # SetupError indicates critical issues like version incompatibility
@@ -460,6 +479,41 @@ class TestConfigurationSmoke:
             base_url="http://localhost:8001",
         )
         assert config_auto.rerank_format == "auto"
+
+    def test_dotenv_file_loading(self, clean_environment):
+        """Verify .env file loading doesn't break config initialization.
+
+        This test ensures that dotenv support is properly integrated and
+        doesn't cause import or initialization errors.
+        """
+        import tempfile
+        from chunkhound.core.config.config import Config
+
+        # Create temp directory with .env file
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+            dotenv_path = tmppath / ".env"
+
+            # Write a simple .env file
+            dotenv_path.write_text(
+                "CHUNKHOUND_EMBEDDING__PROVIDER=openai\n"
+                "CHUNKHOUND_EMBEDDING__API_KEY=sk-test-from-dotenv\n"
+            )
+
+            # Should not raise during config initialization
+            config = Config(target_dir=tmppath)
+
+            # Verify .env was loaded
+            assert config.embedding is not None
+            assert config.embedding.provider == "openai"
+            assert config.embedding.api_key.get_secret_value() == "sk-test-from-dotenv"
+
+        # Test that missing .env doesn't break anything
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+            # No .env file - should work fine
+            config = Config(target_dir=tmppath)
+            assert config is not None
 
 
 if __name__ == "__main__":
