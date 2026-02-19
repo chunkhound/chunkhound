@@ -1,14 +1,18 @@
 """Run command module - handles directory indexing operations."""
 
 import argparse
+import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
 from chunkhound.core.config.config import Config
+from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector
+from chunkhound.core.diagnostics.perf_analyzer import PerfAnalyzer
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.registry import configure_registry, create_indexing_coordinator
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
@@ -77,6 +81,11 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
         # Configure registry with the Config object
         configure_registry(config)
 
+        # Initialize metrics collector if diagnostics enabled
+        metrics_collector = None
+        if getattr(args, "perf_diagnostics", False):
+            metrics_collector = BatchMetricsCollector()
+
         formatter.success(f"Service layer initialized: {args.db}")
 
         # Create progress manager for modern UI
@@ -111,12 +120,34 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
                 config=config,
                 progress_callback=progress_callback,
                 progress=progress_instance,
+                metrics_collector=metrics_collector,
             )
 
             # Process directory - service layers will add subtasks to progress_instance
             stats = await indexing_service.process_directory(
                 Path(args.path), no_embeddings=args.no_embeddings
             )
+
+        # Performance diagnostics analysis
+        if metrics_collector and metrics_collector.batches:
+            analyzer = PerfAnalyzer()
+            diagnostics = analyzer.analyze(metrics_collector)
+
+            # Determine output path
+            if getattr(args, "perf_output", None):
+                output_path = Path(args.perf_output)
+            else:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                output_path = db_path.parent / f"perf_diagnostics_{timestamp}.json"
+
+            # Write JSON file
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(json.dumps(diagnostics.to_dict(), indent=2))
+            formatter.info(f"Performance diagnostics written to: {output_path}")
+
+            # Display warnings
+            for warning in diagnostics.warnings:
+                formatter.warning(warning)
 
         # Display results
         _print_completion_summary(stats, formatter)

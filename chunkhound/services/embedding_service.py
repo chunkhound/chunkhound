@@ -6,6 +6,7 @@ from typing import Any
 from loguru import logger
 from rich.progress import Progress, TaskID
 
+from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector, BatchTiming
 from chunkhound.core.types.common import ChunkId
 from chunkhound.core.utils import estimate_tokens
 from chunkhound.interfaces.database_provider import DatabaseProvider
@@ -26,6 +27,7 @@ class EmbeddingService(BaseService):
         max_concurrent_batches: int | None = None,
         optimization_batch_frequency: int = 1000,
         progress: Progress | None = None,
+        metrics_collector: BatchMetricsCollector | None = None,
     ):
         """Initialize embedding service.
 
@@ -37,11 +39,13 @@ class EmbeddingService(BaseService):
             max_concurrent_batches: Maximum concurrent batches (None = auto-detect from provider)
             optimization_batch_frequency: Optimize DB every N batches (provider-aware)
             progress: Optional Rich Progress instance for hierarchical progress display
+            metrics_collector: Optional collector for per-batch timing metrics
         """
         super().__init__(database_provider)
         self._embedding_provider = embedding_provider
         self._embedding_batch_size = embedding_batch_size
         self._db_batch_size = db_batch_size
+        self._metrics_collector = metrics_collector
 
         # Auto-detect optimal concurrency from provider if not explicitly set
         if max_concurrent_batches is None:
@@ -508,10 +512,17 @@ class EmbeddingService(BaseService):
         semaphore = asyncio.Semaphore(self._max_concurrent_batches)
 
         async def process_batch(
-            batch: list[tuple[ChunkId, str]], batch_num: int, retry_depth: int = 0
+            batch: list[tuple[ChunkId, str]],
+            batch_num: int,
+            retry_depth: int = 0,
         ) -> int:
             """Process a single batch of embeddings."""
             async with semaphore:
+                # Timing is only created for top-level calls (retry_depth == 0);
+                # retries have timing=None and skip all instrumentation.
+                timing: BatchTiming | None = None
+                if self._metrics_collector and retry_depth == 0:
+                    timing = self._metrics_collector.start_batch(batch_num, len(batch))
                 try:
                     logger.debug(
                         f"Processing batch {batch_num + 1}/{len(batches)} with {len(batch)} chunks"
@@ -524,7 +535,11 @@ class EmbeddingService(BaseService):
                     # Generate embeddings
                     if not self._embedding_provider:
                         return 0
+                    if timing:
+                        timing.mark_embed_api_start()
                     embedding_results = await self._embedding_provider.embed(texts)
+                    if timing:
+                        timing.mark_embed_api_end()
 
                     if len(embedding_results) != len(chunk_ids):
                         logger.warning(
@@ -550,9 +565,13 @@ class EmbeddingService(BaseService):
                         )
 
                     # Store in database with configurable batch size
+                    if timing:
+                        timing.mark_db_insert_start()
                     stored_count = self._db.insert_embeddings_batch(
                         embeddings_data, self._db_batch_size
                     )
+                    if timing:
+                        timing.mark_db_insert_end()
                     logger.debug(
                         f"Batch {batch_num + 1} completed: {stored_count} embeddings stored"
                     )
@@ -611,6 +630,9 @@ class EmbeddingService(BaseService):
                         f"[EmbSvc-BatchProcess] Batch {batch_num + 1} failed (chunks: {len(batch)}, max_chars: {max_size}): {e}"
                     )
                     return 0
+                finally:
+                    if timing and self._metrics_collector:
+                        self._metrics_collector.end_batch(timing)
 
         # Create progress task for embedding generation if requested
         embed_task: TaskID | None = None
