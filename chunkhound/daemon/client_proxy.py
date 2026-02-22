@@ -61,7 +61,20 @@ class ClientProxy:
                 pass
 
     async def _forward_stdin_to_socket(self, writer: asyncio.StreamWriter) -> None:
-        """Read JSON lines from stdin, parse, and write as IPC frames to the socket."""
+        """Read JSON lines from stdin, parse, and write as IPC frames to the socket.
+
+        Windows uses a thread-executor approach because ProactorEventLoop's
+        connect_read_pipe() requires overlapped-I/O handles, but inherited stdin
+        pipes are synchronous from the child's perspective and fail silently.
+        Unix uses connect_read_pipe() for true async I/O.
+        """
+        if sys.platform == "win32":
+            await self._forward_stdin_threaded(writer)
+        else:
+            await self._forward_stdin_async(writer)
+
+    async def _forward_stdin_async(self, writer: asyncio.StreamWriter) -> None:
+        """Unix: async stdin reading via connect_read_pipe."""
         loop = asyncio.get_event_loop()
         stdin = asyncio.StreamReader()
         transport, _ = await loop.connect_read_pipe(
@@ -80,6 +93,24 @@ class ClientProxy:
                 await writer.drain()
         finally:
             transport.close()
+
+    async def _forward_stdin_threaded(self, writer: asyncio.StreamWriter) -> None:
+        """Windows: thread-based stdin reading via run_in_executor.
+
+        Blocking readline() in a thread pool avoids the IOCP handle
+        requirement that makes connect_read_pipe() fail on inherited pipes.
+        """
+        loop = asyncio.get_event_loop()
+        while True:
+            line = await loop.run_in_executor(None, sys.stdin.buffer.readline)
+            if not line:
+                break
+            try:
+                msg = json.loads(line.decode())
+            except json.JSONDecodeError:
+                continue
+            ipc.write_frame(writer, msg)
+            await writer.drain()
 
     async def _forward_socket_to_stdout(self, reader: asyncio.StreamReader) -> None:
         """Read IPC frames from socket, serialize as JSON lines, write to stdout."""
