@@ -53,9 +53,13 @@ async def mcp_command(args: argparse.Namespace, config) -> None:
     except ImportError:
         pass
 
-    # Daemon mode: route through ClientProxy unless explicitly disabled
-    no_daemon = getattr(args, "no_daemon", False) or (
-        os.getenv("CHUNKHOUND_DAEMON_MODE", "").lower() == "false"
+    # Daemon mode: route through ClientProxy unless explicitly disabled.
+    # --stdio predates the daemon and implies single-process direct mode for
+    # backwards compatibility.
+    no_daemon = (
+        getattr(args, "no_daemon", False)
+        or getattr(args, "stdio", False)
+        or os.getenv("CHUNKHOUND_DAEMON_MODE", "").lower() == "false"
     )
 
     if no_daemon:

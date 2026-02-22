@@ -17,7 +17,6 @@ import asyncio
 import json
 import os
 import shutil
-import sys
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -28,7 +27,7 @@ from tests.helpers.daemon_test_helpers import (
     wait_for_daemon_shutdown,
     wait_for_daemon_start,
 )
-from tests.utils import SubprocessJsonRpcClient, get_safe_subprocess_env
+from tests.utils import SubprocessJsonRpcClient, create_subprocess_exec_safe, get_safe_subprocess_env
 
 
 def _chunkhound_exe() -> str:
@@ -70,7 +69,7 @@ def _make_env(project_dir: Path) -> dict[str, str]:
 async def _start_proxy(project_dir: Path) -> tuple[asyncio.subprocess.Process, SubprocessJsonRpcClient]:
     """Launch a ``chunkhound mcp`` proxy subprocess and return (proc, client)."""
     env = _make_env(project_dir)
-    proc = await asyncio.create_subprocess_exec(
+    proc = await create_subprocess_exec_safe(
         _chunkhound_exe(), "mcp", str(project_dir),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,

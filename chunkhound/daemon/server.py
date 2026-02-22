@@ -124,9 +124,8 @@ class ChunkHoundDaemon(MCPServerBase):
 
         except Exception as e:
             self.debug_log(f"Daemon run() error: {e}")
-            if self.debug_mode:
-                import traceback
-                traceback.print_exc(file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
         finally:
             await self._graceful_shutdown()
 

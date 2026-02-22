@@ -86,7 +86,7 @@ class DaemonDiscovery:
         tmp_path = lock_path.with_suffix(".lock.tmp")
         with open(tmp_path, "w") as f:
             json.dump(data, f)
-        tmp_path.rename(lock_path)
+        tmp_path.replace(lock_path)  # replace() is atomic and overwrites on Windows
 
     def remove_lock(self) -> None:
         """Remove the lock file, ignoring errors if it does not exist."""
@@ -179,15 +179,24 @@ class DaemonDiscovery:
         env = os.environ.copy()
         env["CHUNKHOUND_DAEMON_MODE"] = "true"
 
-        subprocess.Popen(
-            cmd,
-            start_new_session=True,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=env,
-            cwd=str(self._project_dir),
-        )
+        # Route daemon stdout/stderr to a log file so startup failures are
+        # diagnosable (especially on Windows where the IPC transport may fail).
+        log_path = self._project_dir / ".chunkhound" / "daemon.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file = open(log_path, "w")  # child inherits the fd; parent closes immediately
+
+        try:
+            subprocess.Popen(
+                cmd,
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=log_file,
+                env=env,
+                cwd=str(self._project_dir),
+            )
+        finally:
+            log_file.close()
 
     async def find_or_start_daemon(self, args: Any) -> str:
         """Return the IPC address of the running daemon, starting one if needed.

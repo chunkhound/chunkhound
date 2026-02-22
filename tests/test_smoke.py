@@ -258,7 +258,7 @@ sys.exit(asyncio.run(test()))
             mcp_env["CHUNKHOUND_MCP_MODE"] = "1"
             
             proc = await create_subprocess_exec_safe(
-                "uv", "run", "chunkhound", "mcp", str(temp_path),
+                "uv", "run", "chunkhound", "mcp", "--no-daemon", str(temp_path),
                 cwd=str(temp_path),
                 env=mcp_env,
                 stdin=asyncio.subprocess.PIPE,
