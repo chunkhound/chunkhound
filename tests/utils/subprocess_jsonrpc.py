@@ -264,6 +264,17 @@ class SubprocessJsonRpcClient:
                 future.cancel()
         self._pending_requests.clear()
 
+        # Close stdin explicitly before terminating.
+        # On Windows with ProactorEventLoop, not closing pipe transports before GC
+        # causes _ProactorBasePipeTransport.__del__ to raise ValueError, which
+        # triggers a spurious KeyboardInterrupt during event loop shutdown.
+        if self._process.stdin is not None:
+            try:
+                self._process.stdin.close()
+                await self._process.stdin.wait_closed()
+            except Exception:
+                pass
+
         # Terminate subprocess
         if self._process.returncode is None:
             self._process.terminate()
@@ -273,6 +284,15 @@ class SubprocessJsonRpcClient:
                 logger.warning("Subprocess didn't terminate, killing it")
                 self._process.kill()
                 await self._process.wait()
+
+        # Drain stdout after the process exits to release the pipe transport.
+        # This prevents Windows ProactorEventLoop from leaving unclosed
+        # _ProactorBasePipeTransport objects that cause KeyboardInterrupt on teardown.
+        if self._process.stdout is not None:
+            try:
+                await asyncio.wait_for(self._process.stdout.read(), timeout=1.0)
+            except Exception:
+                pass
 
     async def _read_responses(self) -> None:
         """Background task that continuously reads responses from stdout.

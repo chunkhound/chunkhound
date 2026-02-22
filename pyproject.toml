@@ -175,8 +175,12 @@ addopts = [
 filterwarnings = [
     # Suppress SWIG-related warnings from tree-sitter bindings
     "ignore:builtin type.*has no __module__ attribute:DeprecationWarning",
-    # Suppress asyncio subprocess transport cleanup warnings in tests
+    # Suppress asyncio subprocess/pipe transport cleanup warnings in tests.
+    # On Windows, _ProactorBasePipeTransport raises during GC if pipes are
+    # not explicitly closed before the event loop shuts down.
     "ignore:Exception ignored in.*BaseSubprocessTransport:pytest.PytestUnraisableExceptionWarning",
+    "ignore:Exception ignored in.*ProactorBasePipeTransport:pytest.PytestUnraisableExceptionWarning",
+    "ignore:Exception ignored in.*PipeTransport:pytest.PytestUnraisableExceptionWarning",
     # Allow other warnings to be displayed
 ]
 markers = [
