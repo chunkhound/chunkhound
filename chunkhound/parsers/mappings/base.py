@@ -487,6 +487,28 @@ class BaseMapping(ABC):
         """
         return None
 
+    def resolve_import_paths(
+        self,
+        import_text: str,
+        base_dir: Path,
+        source_file: Path,
+    ) -> list[Path]:
+        """Resolve import statement to multiple file paths.
+
+        Default implementation wraps resolve_import_path for backward compatibility.
+        Override in subclasses to support multi-path resolution.
+
+        Args:
+            import_text: The raw import statement text
+            base_dir: Project root directory
+            source_file: File containing the import
+
+        Returns:
+            List of resolved file paths (empty list if not found/external)
+        """
+        result = self.resolve_import_path(import_text, base_dir, source_file)
+        return [result] if result else []
+
     def extract_constants(
         self,
         concept: "UniversalConcept",

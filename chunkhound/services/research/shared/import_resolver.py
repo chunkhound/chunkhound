@@ -46,8 +46,8 @@ class ImportResolverService:
         """
         self._parser_factory = parser_factory
         self._import_context_service = ImportContextService(parser_factory)
-        # Cache: (file_path, import_text) -> resolved_path | None
-        self._resolution_cache: dict[tuple[str, str], Path | None] = {}
+        # Cache: (file_path, import_text) -> resolved_paths
+        self._resolution_cache: dict[tuple[str, str], list[Path]] = {}
 
     async def resolve_imports(
         self,
@@ -107,24 +107,24 @@ class ImportResolverService:
                 # Check cache first
                 cache_key = (file_path, import_text)
                 if cache_key in self._resolution_cache:
-                    cached_path = self._resolution_cache[cache_key]
-                    if cached_path is not None:
-                        resolved_paths.append(cached_path)
+                    cached_paths = self._resolution_cache[cache_key]
+                    if cached_paths:
+                        resolved_paths.extend(cached_paths)
                     continue
 
-                # Call language-specific resolver
-                resolved_path = mapping.resolve_import_path(
+                # Call language-specific resolver (supports multi-import)
+                paths_for_import = mapping.resolve_import_paths(
                     import_text, base_dir, source_file
                 )
 
-                # Cache result (including None for external imports)
-                self._resolution_cache[cache_key] = resolved_path
+                # Cache result (including empty list for external imports)
+                self._resolution_cache[cache_key] = paths_for_import
 
-                # Add to results if resolved (skip None)
-                if resolved_path is not None:
-                    resolved_paths.append(resolved_path)
+                # Add to results if resolved (skip empty)
+                if paths_for_import:
+                    resolved_paths.extend(paths_for_import)
                     logger.debug(
-                        f"Resolved import '{import_text}' -> {resolved_path}"
+                        f"Resolved import '{import_text}' -> {paths_for_import}"
                     )
                 else:
                     logger.debug(
@@ -135,8 +135,8 @@ class ImportResolverService:
                 logger.warning(
                     f"Failed to resolve import '{import_text}' in {file_path}: {e}"
                 )
-                # Cache None to avoid retrying failed resolutions
-                self._resolution_cache[(file_path, import_text)] = None
+                # Cache empty list to avoid retrying failed resolutions
+                self._resolution_cache[(file_path, import_text)] = []
                 continue
 
         logger.debug(

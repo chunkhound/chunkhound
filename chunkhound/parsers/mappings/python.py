@@ -883,6 +883,30 @@ class PythonMapping(BaseMapping):
 
         return None
 
+    def _resolve_module_to_path(self, module: str, base_dir: Path) -> Path | None:
+        """Resolve a Python module name to its file path.
+
+        Args:
+            module: Dot-separated module name (e.g., "x.y.z")
+            base_dir: The base directory of the codebase
+
+        Returns:
+            Path to the module file, or None if not found
+        """
+        # Try as .py file
+        rel_path = module.replace(".", "/") + ".py"
+        full_path = base_dir / rel_path
+        if full_path.exists():
+            return full_path
+
+        # Try as package __init__.py
+        pkg_path = module.replace(".", "/") + "/__init__.py"
+        full_path = base_dir / pkg_path
+        if full_path.exists():
+            return full_path
+
+        return None
+
     def resolve_import_path(
         self, import_text: str, base_dir: Path, source_file: Path
     ) -> Path | None:
@@ -898,7 +922,6 @@ class PythonMapping(BaseMapping):
             Path to the imported module file, or None if not found or
             is external package
         """
-        # Handle "from x.y.z import W" or "import x.y.z"
         match = re.search(r"from\s+([\w.]+)\s+import|import\s+([\w.]+)", import_text)
         if not match:
             return None
@@ -907,17 +930,78 @@ class PythonMapping(BaseMapping):
         if not module:
             return None
 
-        # Convert module.path to module/path.py
-        rel_path = module.replace(".", "/") + ".py"
-        full_path = base_dir / rel_path
-        if full_path.exists():
-            return full_path
+        return self._resolve_module_to_path(module, base_dir)
 
-        # Try as package __init__.py
-        pkg_path = module.replace(".", "/") + "/__init__.py"
-        full_path = base_dir / pkg_path
-        if full_path.exists():
-            return full_path
+    def resolve_import_paths(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> list[Path]:
+        """Resolve Python imports, supporting multi-import statements.
 
-        # External package - return None
-        return None
+        Handles:
+        - `import x.y.z` -> single path
+        - `import a, b, c` -> multiple paths
+        - `import a as x, b as y` -> multiple paths (aliases stripped)
+        - `from x import a, b, c` -> multiple paths if a, b, c are submodules
+
+        Args:
+            import_text: The import statement text
+            base_dir: The base directory of the codebase
+            source_file: The file containing the import statement
+
+        Returns:
+            List of resolved file paths (empty list if not found/external)
+        """
+        # Check for multi-import: from x import a, b, c
+        from_match = re.search(r"from\s+([\w.]+)\s+import\s+(.+)", import_text, re.DOTALL)
+        if from_match:
+            base_module = from_match.group(1)
+            imports_part = from_match.group(2)
+
+            # Parse imported names (handle aliases and parentheses)
+            imports_part = imports_part.strip().strip("()")
+            imported_names = [
+                name.split(" as ")[0].strip()
+                for name in imports_part.split(",")
+                if name.strip()
+            ]
+
+            paths = []
+            for name in imported_names:
+                # Try as submodule: base_module.name
+                full_module = f"{base_module}.{name}"
+                resolved = self._resolve_module_to_path(full_module, base_dir)
+                if resolved:
+                    paths.append(resolved)
+
+            if paths:
+                # If not all names resolved as submodules, add base module
+                # for symbol imports (e.g., from pkg import Class)
+                if len(paths) < len(imported_names):
+                    base_path = self._resolve_module_to_path(base_module, base_dir)
+                    if base_path and base_path not in paths:
+                        paths.append(base_path)
+                return paths
+
+        # Check for direct multi-import: import a, b, c or import a as x, b as y
+        import_match = re.match(r"import\s+(.+)", import_text)
+        if import_match and "," in import_match.group(1):
+            imports_part = import_match.group(1)
+            # Parse module names (handle aliases)
+            modules = [
+                name.split(" as ")[0].strip()
+                for name in imports_part.split(",")
+                if name.strip()
+            ]
+
+            paths = []
+            for module in modules:
+                resolved = self._resolve_module_to_path(module, base_dir)
+                if resolved:
+                    paths.append(resolved)
+
+            if paths:
+                return paths
+
+        # Fallback to single-path resolution
+        single = self.resolve_import_path(import_text, base_dir, source_file)
+        return [single] if single else []

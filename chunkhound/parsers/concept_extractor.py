@@ -73,6 +73,27 @@ class LanguageMapping(Protocol):
         """
         ...
 
+    def resolve_import_paths(
+        self,
+        import_text: str,
+        base_dir: Path,
+        source_file: Path,
+    ) -> list[Path]:
+        """Resolve import to multiple file paths.
+
+        Supports multi-import statements (e.g., `from x import a, b, c`).
+        Returns empty list if not found or external.
+
+        Args:
+            import_text: The raw import statement text
+            base_dir: Project root directory
+            source_file: File containing the import
+
+        Returns:
+            List of resolved file paths (empty list if not found/external)
+        """
+        ...
+
 
 class ConceptExtractor:
     """Extracts universal concepts using language-specific mappings."""
