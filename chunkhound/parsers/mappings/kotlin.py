@@ -8,7 +8,7 @@ properties, coroutines, and KDoc comments.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from loguru import logger
 
@@ -17,8 +17,7 @@ from chunkhound.parsers.universal_engine import UniversalConcept
 
 from .base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
+from tree_sitter import Node as TSNode
 
 
 class KotlinMapping(BaseMapping):

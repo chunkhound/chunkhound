@@ -29,10 +29,29 @@ from chunkhound.services.research.shared.models import (
     REGEX_MIN_RESULTS,
     ResearchContext,
 )
+from chunkhound.utils.metadata import extract_parameter_names, extract_parameter_types
 
 
 class UnifiedSearch:
     """Orchestrates unified semantic + symbol-based regex search."""
+
+    @staticmethod
+    def _build_symbol_regex(symbol: str) -> str:
+        """Build a safe regex pattern for a symbol across backends.
+
+        Note: Some backends (e.g., DuckDB/RE2) do not support lookbehind, so
+        patterns must avoid it.
+        """
+        escaped = re.escape(symbol)
+        if not symbol:
+            return escaped
+
+        starts_word = bool(re.match(r"[A-Za-z0-9_]", symbol[0]))
+        ends_word = bool(re.match(r"[A-Za-z0-9_]", symbol[-1]))
+
+        prefix = r"\b" if starts_word else r"(?:^|\W)"
+        suffix = r"\b" if ends_word else r"(?:$|\W)"
+        return f"{prefix}{escaped}{suffix}"
 
     def __init__(
         self,
@@ -67,7 +86,8 @@ class UnifiedSearch:
         Algorithm steps:
         1. Multi-hop semantic search with internal reranking (Step 2)
         2. Extract symbols from semantic results (Step 3)
-        3. Select top N symbols (Step 4) - already in relevance order from reranked results
+        3. Select top N symbols (Step 4) - already in relevance order from reranked
+           results
         4. Regex search for top symbols (Step 5)
         5. Unify results at chunk level (Step 6)
         6. Unified rerank semantic + regex against ROOT query (Step 7)
@@ -80,8 +100,10 @@ class UnifiedSearch:
         Args:
             query: Search query
             context: Research context with root query and ancestors
-            expanded_queries: Optional list of expanded queries (if query expansion already done)
-            rerank_queries: Optional list of queries for compound reranking (default: use root query only)
+            expanded_queries: Optional list of expanded queries (if query expansion
+                already done)
+            rerank_queries: Optional list of queries for compound reranking
+                (default: use root query only)
             emit_event_callback: Optional callback for emitting events
             node_id: Optional BFS node ID for event emission
             depth: Optional BFS depth for event emission
@@ -97,12 +119,15 @@ class UnifiedSearch:
             if emit_event_callback:
                 await emit_event_callback(event_type, message, **kwargs)
 
-        # Step 2: Multi-hop semantic search with reranking (optionally with query expansion)
+        # Step 2: Multi-hop semantic search with reranking (optionally with query
+        # expansion)
         if QUERY_EXPANSION_ENABLED and expanded_queries:
             # Use provided expanded queries (expansion events emitted by caller)
             logger.debug("Step 2a: Using expanded queries for diverse semantic search")
             logger.debug(
-                f"Query expansion: 1 original + {len(expanded_queries) - 1} LLM-generated = {len(expanded_queries)} total: {expanded_queries}"
+                "Query expansion: 1 original + "
+                f"{len(expanded_queries) - 1} LLM-generated = {len(expanded_queries)} "
+                f"total: {expanded_queries}"
             )
 
             # Run all semantic searches in parallel
@@ -110,15 +135,20 @@ class UnifiedSearch:
                 f"Step 2b: Running {len(expanded_queries)} parallel semantic searches"
             )
             # Determine time and result limits from config (if available)
-            time_limit = self._config.get_effective_time_limit() if self._config else None
-            result_limit = self._config.get_effective_result_limit() if self._config else None
+            time_limit = (
+                self._config.get_effective_time_limit() if self._config else None
+            )
+            result_limit = (
+                self._config.get_effective_result_limit() if self._config else None
+            )
 
             page_size = self._config.initial_page_size if self._config else 30
             search_tasks = [
                 search_service.search_semantic(
                     query=expanded_q,
                     page_size=page_size,
-                    threshold=None,  # No threshold filtering - elbow detection computes threshold
+                    # No threshold filtering; elbow detection computes threshold.
+                    threshold=None,
                     force_strategy="multi_hop",
                     path_filter=path_filter,
                     time_limit=time_limit,
@@ -126,9 +156,12 @@ class UnifiedSearch:
                 )
                 for expanded_q in expanded_queries
             ]
-            search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+            search_results = await asyncio.gather(
+                *search_tasks, return_exceptions=True
+            )
 
-            # Unify results: deduplicate by chunk_id (same pattern as semantic+regex unification)
+            # Unify results: deduplicate by chunk_id (same pattern as semantic+regex
+            # unification).
             semantic_map = {}
             for result in search_results:
                 if isinstance(result, Exception):
@@ -154,7 +187,8 @@ class UnifiedSearch:
                 if not isinstance(r, BaseException):
                     total_chunks += len(r[0])
             logger.debug(
-                f"Unified {total_chunks} results from {len(expanded_queries)} searches -> {len(semantic_results)} unique chunks"
+                f"Unified {total_chunks} results from {len(expanded_queries)} "
+                f"searches -> {len(semantic_results)} unique chunks"
             )
 
             # Emit search results event
@@ -178,14 +212,19 @@ class UnifiedSearch:
             )
 
             # Determine time and result limits from config (if available)
-            time_limit = self._config.get_effective_time_limit() if self._config else None
-            result_limit = self._config.get_effective_result_limit() if self._config else None
+            time_limit = (
+                self._config.get_effective_time_limit() if self._config else None
+            )
+            result_limit = (
+                self._config.get_effective_result_limit() if self._config else None
+            )
 
             page_size = self._config.initial_page_size if self._config else 30
             semantic_results, _ = await search_service.search_semantic(
                 query=query,
                 page_size=page_size,
-                threshold=None,  # No threshold filtering - elbow detection computes threshold
+                # No threshold filtering; elbow detection computes threshold.
+                threshold=None,
                 force_strategy="multi_hop",
                 path_filter=path_filter,
                 time_limit=time_limit,
@@ -214,20 +253,24 @@ class UnifiedSearch:
             symbols = await self.extract_symbols_from_chunks(semantic_results)
 
             if symbols:
-                # Step 4: Select top symbols (already in relevance order from reranked semantic results)
-                max_symbols = self._config.max_symbols if self._config else MAX_SYMBOLS_TO_SEARCH
+                # Step 4: Select top symbols (deterministic first-seen order from
+                # semantic results).
+                max_symbols = (
+                    self._config.max_symbols
+                    if self._config
+                    else MAX_SYMBOLS_TO_SEARCH
+                )
                 logger.debug(
-                    f"Step 4: Selecting top {max_symbols} symbols from {len(symbols)} extracted symbols"
+                    f"Step 4: Selecting top {max_symbols} symbols from {len(symbols)} "
+                    "extracted symbols"
                 )
                 top_symbols = symbols[:max_symbols]
 
                 # Emit symbol extraction results
-                symbols_preview = ", ".join(top_symbols[:5])
-                if len(top_symbols) > 5:
-                    symbols_preview += "..."
                 await emit_event(
                     "extract_symbols_complete",
-                    f"Extracted {len(symbols)} symbols, searching top {len(top_symbols)}",
+                    f"Extracted {len(symbols)} symbols, searching top "
+                    f"{len(top_symbols)}",
                     node_id=node_id,
                     depth=depth,
                     symbols=len(symbols),
@@ -236,8 +279,16 @@ class UnifiedSearch:
                 if top_symbols:
                     # Step 5: Regex search for top symbols
                     # Compute dynamic target using config values with fallback
-                    regex_min = self._config.regex_min_results if self._config else REGEX_MIN_RESULTS
-                    regex_ratio = self._config.regex_augmentation_ratio if self._config else REGEX_AUGMENTATION_RATIO
+                    regex_min = (
+                        self._config.regex_min_results
+                        if self._config
+                        else REGEX_MIN_RESULTS
+                    )
+                    regex_ratio = (
+                        self._config.regex_augmentation_ratio
+                        if self._config
+                        else REGEX_AUGMENTATION_RATIO
+                    )
                     target_count = max(
                         regex_min,
                         int(len(semantic_results) * regex_ratio),
@@ -281,7 +332,8 @@ class UnifiedSearch:
 
         # Step 6: Unify results at chunk level (deduplicate by chunk_id)
         logger.debug(
-            f"Step 6: Unifying {len(semantic_results)} semantic + {len(regex_results)} regex results"
+            f"Step 6: Unifying {len(semantic_results)} semantic + "
+            f"{len(regex_results)} regex results"
         )
         unified_map = {}
 
@@ -316,7 +368,8 @@ class UnifiedSearch:
                 # Compound reranking: rerank against each query and average scores
                 if rerank_queries and len(rerank_queries) > 1:
                     logger.debug(
-                        f"Step 7: Compound reranking against {len(rerank_queries)} queries"
+                        f"Step 7: Compound reranking against {len(rerank_queries)} "
+                        "queries"
                     )
 
                     # Rerank against each query
@@ -343,7 +396,8 @@ class UnifiedSearch:
                         combined_pool[idx]["rerank_score"] = compound_score
 
                     logger.debug(
-                        f"Step 7: Compound rerank complete - averaged scores from {len(rerank_queries)} queries"
+                        "Step 7: Compound rerank complete - averaged scores from "
+                        f"{len(rerank_queries)} queries"
                     )
                 else:
                     # Single query reranking (default behavior)
@@ -363,7 +417,8 @@ class UnifiedSearch:
                             )
 
                     logger.debug(
-                        f"Step 7: Unified rerank complete - {len(combined_pool)} chunks reranked against root query"
+                        f"Step 7: Unified rerank complete - {len(combined_pool)} "
+                        "chunks reranked against root query"
                     )
 
                 # Sort by rerank score descending
@@ -393,34 +448,54 @@ class UnifiedSearch:
         Returns:
             Deduplicated list of symbol names
         """
-        symbols = set()
+        ordered_symbols: list[str] = []
+        seen: set[str] = set()
+        deferred_types: list[str] = []
+
+        def add_symbol(symbol: str) -> None:
+            stripped = symbol.strip()
+            if not stripped:
+                return
+            if stripped in seen:
+                return
+            seen.add(stripped)
+            ordered_symbols.append(stripped)
 
         for chunk in chunks:
             # Primary: Extract symbol name (function/class/method name)
             # This field is populated by UniversalParser for all languages
-            if symbol := chunk.get("symbol"):
-                if symbol and symbol.strip():
-                    symbols.add(symbol.strip())
-
-            # Secondary: Extract parameters as potential searchable symbols
-            # Many functions/methods have meaningful parameter names
-            metadata = chunk.get("metadata", {})
-            if params := metadata.get("parameters"):
-                if isinstance(params, list):
-                    symbols.update(p.strip() for p in params if p and p.strip())
+            symbol = chunk.get("symbol")
+            if isinstance(symbol, str):
+                add_symbol(symbol)
 
             # Tertiary: Extract from chunk_type-specific metadata
             # Some chunks have additional symbol information
-            if chunk_type := metadata.get("kind"):
+            metadata = chunk.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+
+            chunk_type = metadata.get("kind")
+            if isinstance(chunk_type, str) and chunk_type:
                 # Skip generic types, focus on specific symbols
                 if chunk_type not in ("block", "comment", "unknown"):
-                    if name := chunk.get("name"):
-                        symbols.add(name.strip())
+                    name = chunk.get("name")
+                    if isinstance(name, str):
+                        add_symbol(name)
+
+            # Secondary: Extract parameters as potential searchable symbols
+            # Many functions/methods have meaningful parameter names
+            params = metadata.get("parameters")
+            for param_name in extract_parameter_names(params):
+                add_symbol(param_name)
+            deferred_types.extend(extract_parameter_types(params))
+
+        for param_type in deferred_types:
+            add_symbol(param_type)
 
         # Filter out common noise (single chars, numbers, common keywords)
         filtered_symbols = [
             s
-            for s in symbols
+            for s in ordered_symbols
             if len(s) > 1
             and not s.isdigit()
             and s.lower() not in {"self", "cls", "this"}
@@ -465,18 +540,20 @@ class UnifiedSearch:
             UNDISCOVERED chunks (chunks not in exclude_ids), as per spec lines 192-216.
             """
             try:
-                # Escape special regex characters
-                escaped = re.escape(symbol)
-                # Match word boundaries to avoid partial matches
-                # This works across all languages (identifier boundaries)
-                pattern = rf"\b{escaped}\b"
+                if not symbol.strip():
+                    return []
+                pattern = self._build_symbol_regex(symbol)
 
-                # Internal pagination loop: keep fetching pages until we have enough undiscovered chunks
+                # Internal pagination loop: keep fetching pages until we have enough
+                # undiscovered chunks.
                 results: list[dict[str, Any]] = []
                 offset = 0
                 # Use config value if available, fall back to 100 (spec default)
-                scan_page_size = self._config.regex_scan_page_size if self._config else 100
-                seen_chunk_ids = exclude_ids.copy()  # Track all seen chunk IDs (excluded + collected)
+                scan_page_size = (
+                    self._config.regex_scan_page_size if self._config else 100
+                )
+                # Track all seen chunk IDs (excluded + collected).
+                seen_chunk_ids = exclude_ids.copy()
                 # Safety limit to prevent infinite loops when exclusions are large
                 max_pages = 20
 
@@ -504,7 +581,8 @@ class UnifiedSearch:
                     pages_fetched += 1
 
                 logger.debug(
-                    f"Found {len(results)} undiscovered chunks for symbol '{symbol}' (target: {target_per_symbol})"
+                    f"Found {len(results)} undiscovered chunks for symbol '{symbol}' "
+                    f"(target: {target_per_symbol})"
                 )
                 return results
 
@@ -513,7 +591,9 @@ class UnifiedSearch:
                 return []
 
         # Run all symbol searches concurrently
-        results_per_symbol = await asyncio.gather(*[search_symbol(s) for s in symbols])
+        results_per_symbol = await asyncio.gather(
+            *[search_symbol(s) for s in symbols]
+        )
 
         # Flatten results
         all_results = []
@@ -521,7 +601,8 @@ class UnifiedSearch:
             all_results.extend(results)
 
         logger.debug(
-            f"Parallel symbol regex search complete: {len(all_results)} chunks from {len(symbols)} symbols (after exclusion)"
+            f"Parallel symbol regex search complete: {len(all_results)} chunks from "
+            f"{len(symbols)} symbols (after exclusion)"
         )
         return all_results
 
@@ -596,7 +677,6 @@ class UnifiedSearch:
         for chunk in expanded_chunks:
             chunk["_window_expanded"] = True
 
-        newly_expanded = len(to_expand) + len(expanded_chunks) - len(chunks)
         logger.debug(
             f"Expanded {len(to_expand)} chunks to {len(expanded_chunks)} chunks "
             f"(+{len(expanded_chunks) - len(chunks)} neighbors, "

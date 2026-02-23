@@ -6,7 +6,7 @@ type annotations, generics, interfaces, enums, namespaces, and decorators.
 """
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from loguru import logger
 
@@ -22,17 +22,7 @@ from chunkhound.parsers.mappings._shared.js_query_patterns import (
 )
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
-
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    # TSNode is already defined in TYPE_CHECKING block
+from tree_sitter import Node as TSNode
 
 
 class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
@@ -267,7 +257,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Function name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "function")
 
         try:
@@ -307,7 +297,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Class name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "class")
 
         try:
@@ -330,7 +320,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Interface name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "interface")
 
         try:
@@ -353,7 +343,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Enum name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "enum")
 
         try:
@@ -376,7 +366,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Type alias name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "type")
 
         try:
@@ -399,7 +389,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Namespace name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "namespace")
 
         try:
@@ -422,7 +412,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             List of parameter strings with types
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         parameters: list[str] = []
@@ -465,7 +455,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Return type string or None if not found
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return None
 
         try:
@@ -493,7 +483,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Type parameters string or None if not found
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return None
 
         try:
@@ -516,7 +506,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             List of access modifiers (public, private, protected, static, readonly, etc.)
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         modifiers: list[str] = []
@@ -552,7 +542,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             List of decorator names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         decorators: list[str] = []
@@ -579,7 +569,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             True if the comment is TSDoc-style (starts with /**)
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         try:
@@ -637,7 +627,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             True if node should be included, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         try:
@@ -701,7 +691,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         display_name = name
 
         # Add TypeScript-specific enhancements
-        if node and TREE_SITTER_AVAILABLE:
+        if node:
             try:
                 # Add type parameters for generics
                 type_params = self.extract_type_parameters(node, source)

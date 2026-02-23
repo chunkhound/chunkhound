@@ -7,8 +7,6 @@ components, hooks, and JSX expressions.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
-
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings._shared.js_query_patterns import (
     COMMONJS_EXPORTS_SHORTHAND,
@@ -19,17 +17,7 @@ from chunkhound.parsers.mappings._shared.js_query_patterns import (
 )
 from chunkhound.parsers.mappings.javascript import JavaScriptMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
-
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = None
+from tree_sitter import Node as TSNode
 
 
 class JSXMapping(JavaScriptMapping):
@@ -241,7 +229,7 @@ class JSXMapping(JavaScriptMapping):
         Returns:
             Component name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return "unknown_component"
 
         # Use base function name extraction
@@ -263,7 +251,7 @@ class JSXMapping(JavaScriptMapping):
         Returns:
             JSX element name or fallback
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return "unknown_element"
 
         # Look for opening tag name
@@ -292,7 +280,7 @@ class JSXMapping(JavaScriptMapping):
         Returns:
             Hook name or fallback
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return "unknown_hook"
 
         # For hook calls
@@ -321,7 +309,7 @@ class JSXMapping(JavaScriptMapping):
         Returns:
             True if the function appears to be a React component
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Check if function returns JSX
@@ -347,7 +335,7 @@ class JSXMapping(JavaScriptMapping):
         Returns:
             List of prop names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         props = []
@@ -384,7 +372,7 @@ class JSXMapping(JavaScriptMapping):
         Returns:
             True if node should be included, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Use base JavaScript filtering first

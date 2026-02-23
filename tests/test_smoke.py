@@ -174,7 +174,9 @@ class TestServerStartup:
                 f'''
 import sys
 import os
-sys.path.insert(0, {cwd_repr})
+
+sys.path.insert(0, {repr(os.getcwd())})
+
 from chunkhound.mcp_server.stdio import main
 import asyncio
 

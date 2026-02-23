@@ -6,22 +6,12 @@ and GitHub Flavored Markdown extensions.
 """
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Optional
 
 from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
-
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = Any  # type: ignore
+from tree_sitter import Node as TSNode
 
 
 class MarkdownMapping(BaseMapping):
@@ -172,7 +162,7 @@ class MarkdownMapping(BaseMapping):
         Returns:
             Code block identifier or fallback name
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "code_block")
 
         # For fenced code blocks, try to get the language
@@ -197,7 +187,7 @@ class MarkdownMapping(BaseMapping):
         Returns:
             Heading text or fallback name
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "heading")
 
         # Extract heading text content
@@ -237,7 +227,7 @@ class MarkdownMapping(BaseMapping):
         Returns:
             Heading level (1-6), defaults to 1 if not determinable
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return 1
 
         if node.type == "atx_heading":
@@ -277,11 +267,7 @@ class MarkdownMapping(BaseMapping):
         Returns:
             Language identifier or empty string
         """
-        if (
-            not TREE_SITTER_AVAILABLE
-            or node is None
-            or node.type != "fenced_code_block"
-        ):
+        if node is None or node.type != "fenced_code_block":
             return ""
 
         # Look for info_string (language specifier)
@@ -303,7 +289,7 @@ class MarkdownMapping(BaseMapping):
         Returns:
             "ordered" or "unordered"
         """
-        if not TREE_SITTER_AVAILABLE or node is None or node.type != "list":
+        if node is None or node.type != "list":
             return "unordered"
 
         # Check the first list item for its marker
@@ -335,7 +321,7 @@ class MarkdownMapping(BaseMapping):
         Returns:
             URL or empty string
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return ""
 
         # Look for link destination (only available in link_reference_definition)
@@ -359,7 +345,7 @@ class MarkdownMapping(BaseMapping):
         Returns:
             Link label text or empty string
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return ""
 
         # Look for link label (the [text] part of [text]: url)
@@ -385,7 +371,7 @@ class MarkdownMapping(BaseMapping):
         Returns:
             True if node should be included, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Get the node text to check size
@@ -431,7 +417,7 @@ class MarkdownMapping(BaseMapping):
         Returns:
             Dictionary representing the heading chunk
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return {}
 
         level = self.extract_heading_level(node, source)
@@ -462,7 +448,7 @@ class MarkdownMapping(BaseMapping):
         Returns:
             Dictionary representing the code block chunk
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return {}
 
         language = (
@@ -496,7 +482,7 @@ class MarkdownMapping(BaseMapping):
         Returns:
             Dictionary representing the list chunk
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return {}
 
         list_type = self.extract_list_type(node, source)

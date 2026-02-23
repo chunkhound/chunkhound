@@ -7,8 +7,6 @@ arrow functions, ES6 classes, JSDoc comments, and modern module syntax.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
-
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings._shared.js_family_extraction import (
     JSFamilyExtraction,
@@ -22,17 +20,7 @@ from chunkhound.parsers.mappings._shared.js_query_patterns import (
 )
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
-
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = None
+from tree_sitter import Node as TSNode
 
 
 class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
@@ -288,7 +276,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Function name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return "unknown_function"
 
         # Try to find identifier node for function name
@@ -332,7 +320,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Class name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return "unknown_class"
 
         # Direct class declaration
@@ -359,7 +347,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Method name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return "unknown_method"
 
         # Method definition in class or object
@@ -387,7 +375,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             List of parameter names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         parameters = []
@@ -451,7 +439,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             True if node should be included, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Filter out very small nodes (likely incomplete)
@@ -477,7 +465,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             True if the method is a constructor
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         if node.type != "method_definition":
@@ -502,7 +490,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             True if the function is async
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Check for async keyword in the node text
@@ -519,7 +507,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             True if the function is a generator (contains *)
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Check for generator syntax in the node text
@@ -538,7 +526,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Dictionary mapping tag names to their values
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return {}
 
         comment_text = self.get_node_text(node, source)

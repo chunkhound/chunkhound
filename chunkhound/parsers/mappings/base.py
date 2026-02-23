@@ -15,17 +15,9 @@ from loguru import logger
 from chunkhound.core.types.common import ChunkType, Language
 
 if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
-
     from chunkhound.parsers.universal_engine import UniversalConcept
 
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = Any  # type: ignore
+from tree_sitter import Node as TSNode
 
 # Maximum length for constant values in metadata (prevents bloat)
 MAX_CONSTANT_VALUE_LENGTH = 50
@@ -114,7 +106,7 @@ class BaseMapping(ABC):
         Returns:
             Text content of the node
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return ""
         source_bytes = source.encode("utf-8")
         return source_bytes[node.start_byte : node.end_byte].decode("utf-8")
@@ -129,7 +121,7 @@ class BaseMapping(ABC):
         Returns:
             First child node of the specified type, or None if not found
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return None
 
         for i in range(node.child_count):
@@ -150,7 +142,7 @@ class BaseMapping(ABC):
         Returns:
             List of child nodes of the specified type
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         children = []
@@ -169,7 +161,7 @@ class BaseMapping(ABC):
         Yields:
             Tree-sitter nodes in depth-first order
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return
 
         yield node
@@ -188,7 +180,7 @@ class BaseMapping(ABC):
         Returns:
             List of all nodes of the specified type
         """
-        if not TREE_SITTER_AVAILABLE or root is None:
+        if root is None:
             return []
 
         nodes = []
@@ -206,7 +198,7 @@ class BaseMapping(ABC):
         Returns:
             Tuple of (start_line, end_line) with 1-based line numbers
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return (1, 1)
         return (node.start_point[0] + 1, node.end_point[0] + 1)
 
@@ -219,7 +211,7 @@ class BaseMapping(ABC):
         Returns:
             Tuple of (start_byte, end_byte)
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return (0, 0)
         return (node.start_byte, node.end_byte)
 
@@ -249,10 +241,8 @@ class BaseMapping(ABC):
         Returns:
             Dictionary representing the chunk
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
-            logger.error(
-                "Cannot create chunk: tree-sitter not available or node is None"
-            )
+        if node is None:
+            logger.error("Cannot create chunk: node is None")
             return {}
 
         code = self.get_node_text(node, source)
@@ -383,7 +373,7 @@ class BaseMapping(ABC):
         Returns:
             Fallback name based on line number
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return f"{prefix}_unknown"
 
         line_num = node.start_point[0] + 1 if hasattr(node, "start_point") else 0

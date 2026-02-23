@@ -6,22 +6,12 @@ for mapping C++ AST nodes to semantic chunks.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
-
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = Any
+from tree_sitter import Node as TSNode
 
 
 class CppMapping(BaseMapping):
@@ -239,7 +229,7 @@ class CppMapping(BaseMapping):
         Returns:
             Function name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "function")
 
         # Look for identifier nodes in the declarator hierarchy
@@ -267,7 +257,7 @@ class CppMapping(BaseMapping):
         Returns:
             Class name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "class")
 
         # Look for the type_identifier child node
@@ -296,7 +286,7 @@ class CppMapping(BaseMapping):
         Returns:
             Namespace name or fallback
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "namespace")
 
         # Look for the identifier child node
@@ -332,7 +322,7 @@ class CppMapping(BaseMapping):
         Returns:
             List of template parameter names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         parameters: list[str] = []
@@ -367,7 +357,7 @@ class CppMapping(BaseMapping):
         Returns:
             List of dictionaries with inheritance information
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         inheritance_info: list[dict[str, str]] = []
@@ -405,7 +395,7 @@ class CppMapping(BaseMapping):
         Returns:
             List of parameter declarations
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         parameters: list[str] = []
@@ -434,7 +424,7 @@ class CppMapping(BaseMapping):
         Returns:
             True if the function is a constructor, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Check if function name matches class name
@@ -460,7 +450,7 @@ class CppMapping(BaseMapping):
         Returns:
             True if the function is a destructor, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Look for destructor_name in the declarator
@@ -479,7 +469,7 @@ class CppMapping(BaseMapping):
         Returns:
             True if the node is templated, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Check if parent is template_declaration
@@ -814,7 +804,7 @@ class CppMapping(BaseMapping):
 
     def _extract_return_type(self, func_node: "TSNode", source: str) -> str | None:
         """Extract return type from a C++ function node."""
-        if not TREE_SITTER_AVAILABLE or func_node is None:
+        if func_node is None:
             return None
 
         # Look for type specifiers before the function declarator
@@ -842,7 +832,7 @@ class CppMapping(BaseMapping):
         Returns:
             True if node should be included, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Get the node text to check size
@@ -884,9 +874,6 @@ class CppMapping(BaseMapping):
         Returns:
             List of dictionaries with "name" and "value" keys, or None
         """
-        if not TREE_SITTER_AVAILABLE:
-            return None
-
         source = content.decode("utf-8")
         constants: list[dict[str, str]] = []
 

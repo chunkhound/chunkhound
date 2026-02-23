@@ -6,21 +6,11 @@ for mapping MATLAB AST nodes to semantic chunks.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
-
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = Any  # type: ignore
+from tree_sitter import Node as TSNode
 
 
 class MatlabMapping(BaseMapping):
@@ -160,7 +150,7 @@ class MatlabMapping(BaseMapping):
         Returns:
             Function name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "function")
 
         # Look for the name child node
@@ -182,7 +172,7 @@ class MatlabMapping(BaseMapping):
         Returns:
             Class name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "class")
 
         # Look for the name child node
@@ -206,7 +196,7 @@ class MatlabMapping(BaseMapping):
         Returns:
             List of parameter names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         parameters: list[str] = []
@@ -234,7 +224,7 @@ class MatlabMapping(BaseMapping):
         Returns:
             List of return value names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         return_values: list[str] = []
@@ -262,7 +252,7 @@ class MatlabMapping(BaseMapping):
         Returns:
             List of superclass names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         superclasses: list[str] = []
@@ -304,7 +294,7 @@ class MatlabMapping(BaseMapping):
         Returns:
             List of property names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         properties: list[str] = []
@@ -332,7 +322,7 @@ class MatlabMapping(BaseMapping):
         Returns:
             True if this is a script file, False if it's a function file
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return True
 
         # Check for top-level function definitions
@@ -352,7 +342,7 @@ class MatlabMapping(BaseMapping):
         Returns:
             True if this is help text, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         comment_text = self.get_node_text(node, source).strip()
@@ -368,7 +358,7 @@ class MatlabMapping(BaseMapping):
         Returns:
             True if this is a function handle, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Function handles start with @
@@ -575,7 +565,7 @@ class MatlabMapping(BaseMapping):
         Returns:
             True if node should be included, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Get the node text to check size
@@ -699,9 +689,6 @@ class MatlabMapping(BaseMapping):
         # MATLAB uses UPPER_CASE convention for constants
         # Look for variable assignments inside function bodies
         if def_node.type == "function_definition":
-            if not TREE_SITTER_AVAILABLE:
-                return None
-
             constants = []
             # Find all assignment nodes in the function body
             for assignment_node in self.find_nodes_by_type(def_node, "assignment"):
