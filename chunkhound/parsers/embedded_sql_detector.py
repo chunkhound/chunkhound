@@ -52,18 +52,17 @@ _DDL_KEYWORDS = {"CREATE", "ALTER", "DROP"}
 _SECONDARY_KEYWORD_PATTERNS = {
     keyword: re.compile(r"\b" + keyword + r"\b")
     for keyword in [
-        "WHERE", "JOIN", "ORDER", "GROUP",
-        "HAVING", "LIMIT", "OFFSET", "SET",
+        "HAVING", "LIMIT", "OFFSET",
     ]
 }
 
 _SQL_PATTERNS = [
     (re.compile(r"\bFROM\s+\w+"), 25),
-    (re.compile(r"\bWHERE\s+\w+"), 10),
-    (re.compile(r"\bJOIN\s+\w+"), 10),
-    (re.compile(r"\bSET\s+\w+\s*="), 10),
-    (re.compile(r"\bORDER\s+BY\b"), 10),
-    (re.compile(r"\bGROUP\s+BY\b"), 10),
+    (re.compile(r"\bWHERE\s+\w+"), 20),
+    (re.compile(r"\bJOIN\s+\w+"), 20),
+    (re.compile(r"\bSET\s+\w+\s*="), 20),
+    (re.compile(r"\bORDER\s+BY\b"), 20),
+    (re.compile(r"\bGROUP\s+BY\b"), 20),
     (re.compile(r"\bINTO\s+\w+"), 20),
     (re.compile(r"\bVALUES\s*\("), 10),
     (re.compile(r"\bTABLE\s+"), 20),

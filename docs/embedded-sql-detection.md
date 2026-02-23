@@ -39,17 +39,20 @@ The detector uses a multi-factor confidence scoring system:
 - SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP
 
 #### Secondary Keywords (10 points each)
-- FROM, WHERE, JOIN, ORDER, GROUP, HAVING, LIMIT, OFFSET, INTO, SET
+- HAVING, LIMIT, OFFSET
 
-#### SQL Patterns (10 points each)
-- `FROM table_name`
-- `WHERE condition`
-- `JOIN table_name`
-- `SET column = value`
-- `ORDER BY ...`
-- `GROUP BY ...`
-- `INTO table_name`
-- `VALUES (...)`
+#### SQL Patterns (variable points)
+- `FROM table_name` (25 points)
+- `WHERE condition` (20 points)
+- `JOIN table_name` (20 points)
+- `SET column = value` (20 points)
+- `ORDER BY ...` (20 points)
+- `GROUP BY ...` (20 points)
+- `INTO table_name` (20 points)
+- `TABLE ...` (20 points)
+- `VALUES (...)` (10 points)
+- `PRIMARY KEY` (10 points)
+- `FOREIGN KEY` (10 points)
 
 **Confidence Threshold**: 0.6 (60 points minimum)
 

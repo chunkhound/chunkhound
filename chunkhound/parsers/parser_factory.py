@@ -525,7 +525,9 @@ class ParserFactory:
         Args:
             language: Programming language to create parser for
             cast_config: Optional cAST configuration (uses default if not provided)
-            detect_embedded_sql: Whether to detect SQL in string literals
+            detect_embedded_sql: Whether to detect SQL in string literals.
+                Note: Ignored for VUE and SVELTE, which use custom parsers
+                that don't support embedded SQL detection.
 
         Returns:
             UniversalParser instance configured for the language
