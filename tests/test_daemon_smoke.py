@@ -174,13 +174,26 @@ async def pre_indexed_project_dir(tmp_path: Path) -> AsyncIterator[Path]:
 
     # --- Cleanup: stop any lingering daemon ---
     from chunkhound.daemon.discovery import DaemonDiscovery
+    import psutil
+
     discovery = DaemonDiscovery(tmp_path)
     lock = discovery.read_lock()
     if lock:
         pid = lock.get("pid")
         if isinstance(pid, int):
             try:
-                os.kill(pid, 15)  # SIGTERM
+                # Use psutil for cross-platform process termination
+                proc = psutil.Process(pid)
+                proc.terminate()  # SIGTERM on Unix, TerminateProcess on Windows
+                # Wait up to 5 seconds for graceful shutdown
+                try:
+                    proc.wait(timeout=5.0)
+                except psutil.TimeoutExpired:
+                    # Force kill if graceful shutdown fails
+                    proc.kill()
+                    proc.wait(timeout=2.0)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
             except Exception:
                 pass
         discovery.remove_lock()
