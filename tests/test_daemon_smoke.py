@@ -17,9 +17,11 @@ import asyncio
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 from typing import AsyncIterator
 
+import psutil
 import pytest
 
 from tests.helpers.daemon_test_helpers import (
@@ -174,7 +176,6 @@ async def pre_indexed_project_dir(tmp_path: Path) -> AsyncIterator[Path]:
 
     # --- Cleanup: stop any lingering daemon ---
     from chunkhound.daemon.discovery import DaemonDiscovery
-    import psutil
 
     discovery = DaemonDiscovery(tmp_path)
     lock = discovery.read_lock()
@@ -356,10 +357,11 @@ async def test_daemon_lock_file_created(pre_indexed_project_dir: Path) -> None:
         pid = lock_data["pid"]
         assert isinstance(pid, int) and pid > 0, f"Invalid PID in lock file: {pid}"
 
-        # PID should belong to a live process
+        # PID should belong to a live process (cross-platform check)
         try:
-            os.kill(pid, 0)  # Signal 0 = check existence only
-        except ProcessLookupError:
+            proc = psutil.Process(pid)
+            assert proc.is_running(), f"Lock file PID {pid} exists but is not running"
+        except psutil.NoSuchProcess:
             pytest.fail(f"Lock file PID {pid} is not a live process")
 
         # Socket path should exist (Unix) or be a valid TCP address (Windows)
