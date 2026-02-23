@@ -184,10 +184,13 @@ async def pre_indexed_project_dir(tmp_path: Path) -> AsyncIterator[Path]:
             except Exception:
                 pass
         discovery.remove_lock()
-    try:
-        os.unlink(discovery.get_socket_path())
-    except Exception:
-        pass
+    # Clean up Unix socket file (not applicable on Windows where TCP is used)
+    socket_path = discovery.get_socket_path()
+    if not socket_path.startswith("tcp:"):
+        try:
+            os.unlink(socket_path)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -346,11 +349,18 @@ async def test_daemon_lock_file_created(pre_indexed_project_dir: Path) -> None:
         except ProcessLookupError:
             pytest.fail(f"Lock file PID {pid} is not a live process")
 
-        # Socket path should exist
+        # Socket path should exist (Unix) or be a valid TCP address (Windows)
         socket_path = lock_data["socket_path"]
-        assert os.path.exists(socket_path), (
-            f"Socket file '{socket_path}' listed in lock file does not exist"
-        )
+        if socket_path.startswith("tcp:"):
+            # On Windows: verify it's a valid TCP address format
+            assert socket_path.startswith("tcp:127.0.0.1:"), (
+                f"Invalid TCP address format in lock file: {socket_path}"
+            )
+        else:
+            # On Unix: verify the socket file exists
+            assert os.path.exists(socket_path), (
+                f"Socket file '{socket_path}' listed in lock file does not exist"
+            )
 
     finally:
         await _teardown_proxy(proc, client)
