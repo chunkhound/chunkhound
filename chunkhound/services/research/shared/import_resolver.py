@@ -8,7 +8,7 @@ extract imports and then calls language-specific resolvers to map imports to fil
 
 Architecture:
 - Extract imports using ImportContextService (via tree-sitter parsers)
-- Resolve each import using LanguageMapping.resolve_import_path()
+- Resolve each import using LanguageMapping.resolve_import_paths()
 - Cache resolved imports to avoid redundant resolution
 - Handle external imports gracefully (returns None, skip from results)
 

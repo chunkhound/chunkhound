@@ -719,12 +719,12 @@ class MatlabMapping(BaseMapping):
 
         return None
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self,
         import_text: str,
         base_dir: Path,
         source_file: Path,
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve MATLAB import to file path.
 
         MATLAB imports map to +package directories:
@@ -737,12 +737,12 @@ class MatlabMapping(BaseMapping):
             source_file: File containing the import
 
         Returns:
-            Resolved file path or None if external/unresolvable
+            Resolved file path (empty list if external/unresolvable)
         """
         # Match import statement
         match = re.search(r"import\s+([\w.]+)", import_text)
         if not match:
-            return None
+            return []
 
         import_path = match.group(1)
         parts = import_path.split(".")
@@ -751,14 +751,14 @@ class MatlabMapping(BaseMapping):
         if parts[-1] == "*":
             parts = parts[:-1]
             if not parts:
-                return None
+                return []
             # Convert to +pkg/+subpkg directory path
             dir_parts = [f"+{p}" for p in parts]
             rel_path = "/".join(dir_parts)
             full_path = base_dir / rel_path
             if full_path.is_dir():
-                return full_path
-            return None
+                return [full_path]
+            return []
 
         # Regular import (pkg.Class or pkg.func)
         # Last part is the class/function, rest are packages
@@ -775,7 +775,7 @@ class MatlabMapping(BaseMapping):
 
             full_path = base_dir / rel_path
             if full_path.exists():
-                return full_path
+                return [full_path]
 
             # Try as @ class directory
             if dir_parts:
@@ -787,6 +787,6 @@ class MatlabMapping(BaseMapping):
                 # Look for class file
                 class_file = class_path / f"{class_or_func}.m"
                 if class_file.exists():
-                    return class_file
+                    return [class_file]
 
-        return None
+        return []

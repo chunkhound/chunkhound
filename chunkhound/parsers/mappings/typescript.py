@@ -741,12 +741,12 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return chunk
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self,
         import_text: str,
         base_dir: Path,
         source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve TypeScript import to file path.
 
         Args:
@@ -755,40 +755,40 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             source_file: The file containing the import
 
         Returns:
-            Resolved file path or None if resolution fails
+            Resolved file path (empty list if resolution fails)
         """
         import re
 
         # Extract import path
         match = re.search(r'''from\s+['"](.+?)['"]''', import_text)
         if not match:
-            return None
+            return []
 
         import_path = match.group(1)
         if not import_path:
-            return None
+            return []
 
         # Skip non-relative imports
         if not import_path.startswith('.'):
-            return None
+            return []
 
         source_dir = self._resolve_source_dir(source_file, base_dir)
         resolved = (source_dir / import_path).resolve()
 
         # Try direct path
         if resolved.exists() and resolved.is_file():
-            return resolved
+            return [resolved]
 
         # Try with TypeScript extensions first, then JS
         for ext in ['.ts', '.tsx', '.d.ts', '.js', '.jsx']:
             with_ext = resolved.with_suffix(ext)
             if with_ext.exists():
-                return with_ext
+                return [with_ext]
 
         # Try index file
         for index in ['index.ts', 'index.tsx', 'index.js']:
             index_path = resolved / index
             if index_path.exists():
-                return index_path
+                return [index_path]
 
-        return None
+        return []

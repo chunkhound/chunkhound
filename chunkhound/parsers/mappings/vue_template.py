@@ -482,12 +482,12 @@ class VueTemplateMapping(BaseMapping):
 
         return metadata
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self,
         import_text: str,
         base_dir: Path,
         source_file: Path,
-    ) -> Path | None:
+    ) -> list[Path]:
         """Vue templates don't have imports.
 
         Imports in Vue SFCs are in the <script> section,
@@ -499,6 +499,6 @@ class VueTemplateMapping(BaseMapping):
             source_file: File containing the import
 
         Returns:
-            None - templates don't have imports
+            Empty list - templates don't have imports
         """
-        return None
+        return []

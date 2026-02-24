@@ -833,9 +833,9 @@ class SwiftMapping(BaseMapping):
 
         return constants if constants else None
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve import path for Swift.
 
         Swift imports are typically framework imports, not file paths.
@@ -846,7 +846,7 @@ class SwiftMapping(BaseMapping):
             source_file: Path to the file containing the import
 
         Returns:
-            None (Swift imports are framework-based, not file-based)
+            Empty list (Swift imports are framework-based, not file-based)
         """
-        # Swift imports are typically framework imports, return None
-        return None
+        # Swift imports are typically framework imports, return empty list
+        return []

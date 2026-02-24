@@ -460,12 +460,12 @@ class JavaMapping(BaseMapping):
             logger.error(f"Failed to get Java qualified name: {e}")
             return self.get_fallback_name(node, "symbol")
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self,
         import_text: str,
         base_dir: Path,
         source_file: Path,
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve Java import to file path.
 
         Args:
@@ -474,17 +474,17 @@ class JavaMapping(BaseMapping):
             source_file: Path to the file containing the import
 
         Returns:
-            Path to the imported file, or None if not found
+            Path to the imported file (empty list if not found)
         """
         # Extract class path: import com.example.Foo;
         # or import static com.example.Foo.bar;
         match = re.search(r"import\s+(?:static\s+)?([\w.]+);", import_text)
         if not match:
-            return None
+            return []
 
         class_path = match.group(1)
         if not class_path:
-            return None
+            return []
 
         # Convert to file path (last part is class name)
         rel_path = class_path.replace(".", "/") + ".java"
@@ -493,9 +493,9 @@ class JavaMapping(BaseMapping):
         for prefix in ["", "src/main/java/", "src/", "app/src/main/java/"]:
             full_path = base_dir / prefix / rel_path
             if full_path.exists():
-                return full_path
+                return [full_path]
 
-        return None
+        return []
 
     def extract_constants(
         self,

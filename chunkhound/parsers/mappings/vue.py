@@ -267,7 +267,7 @@ class VueMapping(TypeScriptMapping):
 
         return sections
 
-    def resolve_import_path(self, import_text: str, base_dir: Path, source_file: Path) -> Path | None:
+    def resolve_import_paths(self, import_text: str, base_dir: Path, source_file: Path) -> list[Path]:
         """Resolve relative import path to absolute file path.
 
         Args:
@@ -276,24 +276,24 @@ class VueMapping(TypeScriptMapping):
             source_file: Source file containing the import
 
         Returns:
-            Resolved absolute path or None if not resolvable
+            Resolved absolute path (empty list if not resolvable)
         """
         match = re.search(r'''(?:from\s+['"](.+?)['"]|require\s*\(\s*['"](.+?)['"]\s*\))''', import_text)
         if not match:
-            return None
+            return []
         import_path = match.group(1) or match.group(2)
         if not import_path or not import_path.startswith('.'):
-            return None
+            return []
         source_dir = self._resolve_source_dir(source_file, base_dir)
         resolved = (source_dir / import_path).resolve()
         if resolved.exists() and resolved.is_file():
-            return resolved
+            return [resolved]
         for ext in ['.vue', '.ts', '.js', '.tsx', '.jsx']:
             with_ext = resolved.with_suffix(ext)
             if with_ext.exists():
-                return with_ext
+                return [with_ext]
         for index in ['index.vue', 'index.ts', 'index.js']:
             index_path = resolved / index
             if index_path.exists():
-                return index_path
-        return None
+                return [index_path]
+        return []

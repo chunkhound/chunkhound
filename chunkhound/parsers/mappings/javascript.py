@@ -555,12 +555,12 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return tags
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self,
         import_text: str,
         base_dir: Path,
         source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve JavaScript import to file path.
 
         Handles ES6 imports and CommonJS require statements, resolving them to
@@ -572,20 +572,20 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
             source_file: Path to the file containing the import
 
         Returns:
-            Resolved file path if found, None if not resolvable (e.g., external package)
+            Resolved file path (empty list if not resolvable, e.g., external package)
 
         Examples:
             >>> # ES6 import
-            >>> resolve_import_path("import X from './utils'", base, source)
-            Path("/project/src/utils.js")
+            >>> resolve_import_paths("import X from './utils'", base, source)
+            [Path("/project/src/utils.js")]
 
             >>> # CommonJS require
-            >>> resolve_import_path("const x = require('../lib')", base, source)
-            Path("/project/lib/index.js")
+            >>> resolve_import_paths("const x = require('../lib')", base, source)
+            [Path("/project/lib/index.js")]
 
             >>> # External package
-            >>> resolve_import_path("import React from 'react'", base, source)
-            None
+            >>> resolve_import_paths("import React from 'react'", base, source)
+            []
         """
         # Extract import path from: import X from 'path' OR require('path')
         match = re.search(
@@ -593,15 +593,15 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
             import_text
         )
         if not match:
-            return None
+            return []
 
         import_path = match.group(1) or match.group(2)
         if not import_path:
-            return None
+            return []
 
         # Skip non-relative imports (external packages)
         if not import_path.startswith('.'):
-            return None
+            return []
 
         # Resolve relative to source file's directory
         source_dir = self._resolve_source_dir(source_file, base_dir)
@@ -609,18 +609,18 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
 
         # Try direct path
         if resolved.exists() and resolved.is_file():
-            return resolved
+            return [resolved]
 
         # Try with extensions
         for ext in ['.js', '.jsx', '.mjs', '.ts', '.tsx']:
             with_ext = resolved.with_suffix(ext)
             if with_ext.exists():
-                return with_ext
+                return [with_ext]
 
         # Try index file
         for index in ['index.js', 'index.jsx', 'index.ts', 'index.tsx']:
             index_path = resolved / index
             if index_path.exists():
-                return index_path
+                return [index_path]
 
-        return None
+        return []

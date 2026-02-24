@@ -52,27 +52,6 @@ class LanguageMapping(Protocol):
         """
         ...
 
-    def resolve_import_path(
-        self,
-        import_text: str,
-        base_dir: Path,
-        source_file: Path,
-    ) -> Path | None:
-        """Resolve import statement to file path.
-
-        Each language implements its own import resolution logic.
-        Returns None for external/unresolvable imports.
-
-        Args:
-            import_text: The raw import statement text
-            base_dir: Project root directory
-            source_file: File containing the import
-
-        Returns:
-            Resolved file path or None if external/unresolvable
-        """
-        ...
-
     def resolve_import_paths(
         self,
         import_text: str,

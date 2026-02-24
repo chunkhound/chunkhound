@@ -907,31 +907,6 @@ class PythonMapping(BaseMapping):
 
         return None
 
-    def resolve_import_path(
-        self, import_text: str, base_dir: Path, source_file: Path
-    ) -> Path | None:
-        """Resolve Python import to file path.
-
-        Args:
-            import_text: The import statement text
-                (e.g., "import x.y.z" or "from x.y import z")
-            base_dir: The base directory of the codebase
-            source_file: The file containing the import statement
-
-        Returns:
-            Path to the imported module file, or None if not found or
-            is external package
-        """
-        match = re.search(r"from\s+([\w.]+)\s+import|import\s+([\w.]+)", import_text)
-        if not match:
-            return None
-
-        module = match.group(1) or match.group(2)
-        if not module:
-            return None
-
-        return self._resolve_module_to_path(module, base_dir)
-
     def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
     ) -> list[Path]:
@@ -1002,6 +977,12 @@ class PythonMapping(BaseMapping):
             if paths:
                 return paths
 
-        # Fallback to single-path resolution
-        single = self.resolve_import_path(import_text, base_dir, source_file)
-        return [single] if single else []
+        # Fallback for simple imports (e.g., "import foo" or "from foo import bar")
+        # when the statement doesn't match multi-import patterns above
+        match = re.search(r"from\s+([\w.]+)\s+import|import\s+([\w.]+)", import_text)
+        if match:
+            module = match.group(1) or match.group(2)
+            if module:
+                resolved = self._resolve_module_to_path(module, base_dir)
+                return [resolved] if resolved else []
+        return []

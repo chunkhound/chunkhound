@@ -939,9 +939,9 @@ class CppMapping(BaseMapping):
 
         return constants if constants else None
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve C++ include to file path.
 
         Args:
@@ -950,7 +950,7 @@ class CppMapping(BaseMapping):
             source_file: Path to the file containing the import
 
         Returns:
-            Resolved absolute path if found, None otherwise (system includes)
+            Resolved absolute path (empty list for system includes or not found)
         """
         # Local includes: #include "file.h"
         local_match = re.search(r'#include\s*"(.+?)"', import_text)
@@ -960,13 +960,13 @@ class CppMapping(BaseMapping):
             # Try relative to source file
             resolved = (source_file.parent / include_path).resolve()
             if resolved.exists():
-                return resolved
+                return [resolved]
 
             # Try relative to base_dir and common include paths
             for prefix in ["", "include/", "src/", "inc/"]:
                 full_path = base_dir / prefix / include_path
                 if full_path.exists():
-                    return full_path
+                    return [full_path]
 
-        # System includes (#include <...>) - external, return None
-        return None
+        # System includes (#include <...>) - external, return empty list
+        return []

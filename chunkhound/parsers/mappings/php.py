@@ -749,9 +749,9 @@ class PHPMapping(BaseMapping):
 
         return constants if constants else None
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve import path for PHP.
 
         Attempts to resolve relative require/include statements.
@@ -762,18 +762,18 @@ class PHPMapping(BaseMapping):
             source_file: Path to the file containing the import
 
         Returns:
-            Path to the imported file if resolvable, None otherwise
+            Path to the imported file (empty list if not found)
         """
         match = re.search(
             r'(?:require|include)(?:_once)?\s*\(\s*[\'"](.+?)[\'"]\s*\)', import_text
         )
         if not match:
-            return None
+            return []
 
         path = match.group(1)
         if path.startswith("./") or path.startswith("../"):
             resolved = (source_file.parent / path).resolve()
             if resolved.exists():
-                return resolved
+                return [resolved]
 
-        return None
+        return []
