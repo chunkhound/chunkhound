@@ -873,6 +873,8 @@ class OpenAIEmbeddingProvider:
         utility. Could be enhanced to use tiktoken for exact OpenAI token
         counting if precision becomes important.
         """
+        if not text:
+            return 0
         return max(1, len(text) // EMBEDDING_CHARS_PER_TOKEN)
 
     def estimate_batch_tokens(self, texts: list[str]) -> int:

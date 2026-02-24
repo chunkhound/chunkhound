@@ -360,6 +360,8 @@ class VoyageAIEmbeddingProvider:
 
         Based on actual measurements: 3.0 chars/token for VoyageAI.
         """
+        if not text:
+            return 0
         return max(1, len(text) // EMBEDDING_CHARS_PER_TOKEN)
 
     def validate_texts(self, texts: list[str]) -> list[str]:
