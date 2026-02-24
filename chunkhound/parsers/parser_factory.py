@@ -752,7 +752,7 @@ class ParserFactory:
         }
 
     def get_mapping_for_file(self, file_path: Path) -> LanguageMapping | None:
-        """Get the language mapping for a file to access resolve_import_path().
+        """Get the language mapping for a file to access resolve_import_paths().
 
         Returns None if no mapping exists for the file type.
 
