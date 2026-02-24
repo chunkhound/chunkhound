@@ -926,6 +926,11 @@ class PythonMapping(BaseMapping):
         Returns:
             List of resolved file paths (empty list if not found/external)
         """
+        # Strip inline comments from all lines
+        import_text = "\n".join(
+            line.split("#")[0] for line in import_text.split("\n")
+        )
+
         # Check for multi-import: from x import a, b, c
         from_match = re.search(r"from\s+([\w.]+)\s+import\s+(.+)", import_text, re.DOTALL)
         if from_match:
@@ -934,6 +939,7 @@ class PythonMapping(BaseMapping):
 
             # Parse imported names (handle aliases and parentheses)
             imports_part = imports_part.strip().strip("()")
+            imports_part = " ".join(imports_part.split("\n"))
             imported_names = [
                 name.split(" as ")[0].strip()
                 for name in imports_part.split(",")
