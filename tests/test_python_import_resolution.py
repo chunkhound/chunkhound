@@ -492,25 +492,169 @@ class TestPythonImportResolution:
     # H. Relative Imports (.a.b) vs Absolute
     # =========================================================================
 
-    def test_relative_import_single(self, tmp_path):
-        """Test `from .foo import bar` returns empty (relative imports not resolved)."""
+    def test_relative_import_single_dot_module(self, tmp_path):
+        """Test `from .foo import bar` resolves to sibling foo.py."""
         mapping = PythonMapping()
 
-        source_file = tmp_path / "main.py"
+        # Create package structure: pkg/sub/source.py importing from .foo
+        pkg_dir = tmp_path / "pkg" / "sub"
+        pkg_dir.mkdir(parents=True)
+        foo_file = pkg_dir / "foo.py"
+        foo_file.write_text("bar = 42")
+
+        source_file = pkg_dir / "source.py"
         import_text = "from .foo import bar"
 
         resolved = mapping.resolve_import_paths(import_text, tmp_path, source_file)
-        assert resolved == []
+        assert len(resolved) == 1
+        assert resolved[0] == foo_file
 
-    def test_relative_import_parent(self, tmp_path):
-        """Test `from ..foo import bar` returns empty (relative imports not resolved)."""
+    def test_relative_import_single_dot_submodule(self, tmp_path):
+        """Test `from .pkg import bar` resolves to sibling pkg/bar.py."""
         mapping = PythonMapping()
 
-        source_file = tmp_path / "main.py"
+        # Create package structure: main/source.py and main/pkg/bar.py
+        main_dir = tmp_path / "main"
+        main_dir.mkdir()
+        pkg_dir = main_dir / "pkg"
+        pkg_dir.mkdir()
+        bar_file = pkg_dir / "bar.py"
+        bar_file.write_text("")
+
+        source_file = main_dir / "source.py"
+        import_text = "from .pkg import bar"
+
+        resolved = mapping.resolve_import_paths(import_text, tmp_path, source_file)
+        assert len(resolved) == 1
+        assert resolved[0] == bar_file
+
+    def test_relative_import_dot_only(self, tmp_path):
+        """Test `from . import foo` resolves to sibling foo.py."""
+        mapping = PythonMapping()
+
+        pkg_dir = tmp_path / "pkg"
+        pkg_dir.mkdir()
+        foo_file = pkg_dir / "foo.py"
+        foo_file.write_text("")
+
+        source_file = pkg_dir / "source.py"
+        import_text = "from . import foo"
+
+        resolved = mapping.resolve_import_paths(import_text, tmp_path, source_file)
+        assert len(resolved) == 1
+        assert resolved[0] == foo_file
+
+    def test_relative_import_double_dot(self, tmp_path):
+        """Test `from .. import utils` resolves to parent utils.py."""
+        mapping = PythonMapping()
+
+        # Create: pkg/utils.py and pkg/sub/source.py
+        pkg_dir = tmp_path / "pkg"
+        pkg_dir.mkdir()
+        utils_file = pkg_dir / "utils.py"
+        utils_file.write_text("")
+
+        sub_dir = pkg_dir / "sub"
+        sub_dir.mkdir()
+        source_file = sub_dir / "source.py"
+        import_text = "from .. import utils"
+
+        resolved = mapping.resolve_import_paths(import_text, tmp_path, source_file)
+        assert len(resolved) == 1
+        assert resolved[0] == utils_file
+
+    def test_relative_import_double_dot_module(self, tmp_path):
+        """Test `from ..foo import bar` resolves to parent's foo.py."""
+        mapping = PythonMapping()
+
+        # Create: pkg/foo.py and pkg/sub/source.py
+        pkg_dir = tmp_path / "pkg"
+        pkg_dir.mkdir()
+        foo_file = pkg_dir / "foo.py"
+        foo_file.write_text("bar = 42")
+
+        sub_dir = pkg_dir / "sub"
+        sub_dir.mkdir()
+        source_file = sub_dir / "source.py"
         import_text = "from ..foo import bar"
 
         resolved = mapping.resolve_import_paths(import_text, tmp_path, source_file)
+        assert len(resolved) == 1
+        assert resolved[0] == foo_file
+
+    def test_relative_import_multi(self, tmp_path):
+        """Test `from ..pkg import a, b, c` resolves multiple submodules."""
+        mapping = PythonMapping()
+
+        # Create: root/sub/pkg/{a,b,c}.py and root/sub/deep/source.py
+        # From deep/source.py, `..` goes up to sub/, then resolves `pkg` there
+        root = tmp_path / "root"
+        root.mkdir()
+        sub_dir = root / "sub"
+        sub_dir.mkdir()
+        pkg_dir = sub_dir / "pkg"
+        pkg_dir.mkdir()
+        a_file = pkg_dir / "a.py"
+        a_file.write_text("")
+        b_file = pkg_dir / "b.py"
+        b_file.write_text("")
+        c_file = pkg_dir / "c.py"
+        c_file.write_text("")
+
+        deep_dir = sub_dir / "deep"
+        deep_dir.mkdir()
+        source_file = deep_dir / "source.py"
+        import_text = "from ..pkg import a, b, c"
+
+        resolved = mapping.resolve_import_paths(import_text, tmp_path, source_file)
+        assert len(resolved) == 3
+        assert set(resolved) == {a_file, b_file, c_file}
+
+    def test_relative_import_too_many_dots(self, tmp_path):
+        """Test relative import with too many dots returns empty."""
+        mapping = PythonMapping()
+
+        # Source file at pkg/source.py trying to go up 5 levels
+        pkg_dir = tmp_path / "pkg"
+        pkg_dir.mkdir()
+        source_file = pkg_dir / "source.py"
+        import_text = "from ..... import foo"
+
+        resolved = mapping.resolve_import_paths(import_text, tmp_path, source_file)
         assert resolved == []
+
+    def test_relative_import_nonexistent(self, tmp_path):
+        """Test relative import to nonexistent module returns empty."""
+        mapping = PythonMapping()
+
+        pkg_dir = tmp_path / "pkg"
+        pkg_dir.mkdir()
+        source_file = pkg_dir / "source.py"
+        import_text = "from .nonexistent import bar"
+
+        resolved = mapping.resolve_import_paths(import_text, tmp_path, source_file)
+        assert resolved == []
+
+    def test_relative_import_dotted_path(self, tmp_path):
+        """Test `from .pkg.sub import x` resolves through dotted path."""
+        mapping = PythonMapping()
+
+        # Create: main/pkg/sub/x.py and main/source.py
+        main_dir = tmp_path / "main"
+        main_dir.mkdir()
+        pkg_dir = main_dir / "pkg"
+        pkg_dir.mkdir()
+        sub_dir = pkg_dir / "sub"
+        sub_dir.mkdir()
+        x_file = sub_dir / "x.py"
+        x_file.write_text("")
+
+        source_file = main_dir / "source.py"
+        import_text = "from .pkg.sub import x"
+
+        resolved = mapping.resolve_import_paths(import_text, tmp_path, source_file)
+        assert len(resolved) == 1
+        assert resolved[0] == x_file
 
     def test_absolute_import(self, tmp_path):
         """Test `from pkg import bar` resolves to pkg.py for absolute import."""

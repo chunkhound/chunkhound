@@ -931,6 +931,23 @@ class PythonMapping(BaseMapping):
             line.split("#")[0] for line in import_text.split("\n")
         )
 
+        # Handle relative imports: convert to absolute-style with adjusted base_dir
+        relative_match = re.match(r"from\s+(\.+)", import_text)
+        if relative_match:
+            dots = relative_match.group(1)
+            dot_count = len(dots)
+
+            # Calculate effective base_dir from source_file location
+            effective_base = source_file.parent
+            for _ in range(dot_count - 1):
+                if effective_base.parent == effective_base:
+                    return []  # Too many dots - invalid
+                effective_base = effective_base.parent
+
+            # Strip the leading dots to make it look like an absolute import
+            import_text = re.sub(r"^from\s+\.+\s*", "from ", import_text)
+            base_dir = effective_base
+
         # Check for multi-import: from x import a, b, c
         from_match = re.search(r"from\s+([\w.]+)\s+import\s+(.+)", import_text, re.DOTALL)
         if from_match:
