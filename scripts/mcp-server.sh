@@ -33,7 +33,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Environment variables:"
             echo "  CHUNKHOUND_DB_PATH           - Default database path"
-            echo "  CHUNKHOUND_EMBEDDING_API_KEY - Required for semantic search"
+            echo "  CHUNKHOUND_EMBEDDING__API_KEY - Required for semantic search"
             echo ""
             echo "Examples:"
             echo "  $0                              # Use default database"
