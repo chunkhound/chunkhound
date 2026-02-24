@@ -55,7 +55,7 @@ class Database:
 
     # CLASS_CONTEXT: Legacy API wrapper for backward compatibility
     # RELATIONSHIP: Delegates_to -> IndexingCoordinator, SearchService, Provider
-    # CONSTRAINT: Must maintain exact API compatibility with v1.x
+    # CONSTRAINT: Delegation layer - preserves core API surface, not strict v1.x compat
     # PERFORMANCE: No overhead - direct delegation to services
     """
 
