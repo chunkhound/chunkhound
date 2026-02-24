@@ -73,14 +73,14 @@ class EmbeddingConfig(BaseSettings):
 
     Configuration Sources (in order of precedence):
     1. CLI arguments
-    2. Environment variables (CHUNKHOUND_EMBEDDING_*)
+    2. Environment variables (CHUNKHOUND_EMBEDDING__*)
     3. Config files
     4. Default values
 
     Environment Variables:
-        CHUNKHOUND_EMBEDDING_API_KEY=sk-...
-        CHUNKHOUND_EMBEDDING_MODEL=text-embedding-3-small
-        CHUNKHOUND_EMBEDDING_BASE_URL=https://api.openai.com/v1
+        CHUNKHOUND_EMBEDDING__API_KEY=sk-...
+        CHUNKHOUND_EMBEDDING__MODEL=text-embedding-3-small
+        CHUNKHOUND_EMBEDDING__BASE_URL=https://api.openai.com/v1
     """
 
     model_config = SettingsConfigDict(
