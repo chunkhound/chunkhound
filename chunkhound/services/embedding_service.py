@@ -7,7 +7,7 @@ from loguru import logger
 from rich.progress import Progress, TaskID
 
 from chunkhound.core.types.common import ChunkId
-from chunkhound.core.utils import estimate_tokens
+from chunkhound.core.utils import DEFAULT_CHARS_PER_TOKEN, estimate_tokens
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 
@@ -736,7 +736,7 @@ class EmbeddingService(BaseService):
                 )
             else:
                 # Fallback for no provider (conservative default)
-                text_tokens = max(1, int(len(text) / 3.5))
+                text_tokens = max(1, int(len(text) / DEFAULT_CHARS_PER_TOKEN))
 
             # Check if adding this chunk would exceed token, document, or chunk limit
             if (
