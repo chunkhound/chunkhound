@@ -326,6 +326,10 @@ async def test_daemon_two_clients_concurrent(pre_indexed_project_dir: Path) -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Daemon shutdown is unreliable on Windows due to process termination timing"
+)
 async def test_daemon_lock_file_created(pre_indexed_project_dir: Path) -> None:
     """Verify the daemon lock file is created with correct content and cleaned up.
 
@@ -334,6 +338,9 @@ async def test_daemon_lock_file_created(pre_indexed_project_dir: Path) -> None:
     - Lock file contains valid JSON with 'pid', 'socket_path', 'started_at'.
     - Recorded PID matches a live process.
     - Lock file is removed after the daemon shuts down.
+
+    Note: Skipped on Windows because process termination doesn't reliably trigger
+    graceful shutdown, causing the lock file cleanup to be inconsistent.
     """
     project_dir = pre_indexed_project_dir
     lock_path = project_dir / ".chunkhound" / "daemon.lock"

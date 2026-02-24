@@ -48,11 +48,25 @@ class ClientProxy:
                 )
 
             # Bidirectional forwarding
-            await asyncio.gather(
-                self._forward_stdin_to_socket(writer),
-                self._forward_socket_to_stdout(reader),
-                return_exceptions=True,
+            # Use wait() with FIRST_COMPLETED so when stdin closes, we immediately
+            # close the socket connection rather than waiting for both tasks.
+            # This is critical on Windows where proc.terminate() may not cleanly
+            # close stdin, leaving the stdin reader blocked.
+            stdin_task = asyncio.create_task(self._forward_stdin_to_socket(writer))
+            stdout_task = asyncio.create_task(self._forward_socket_to_stdout(reader))
+
+            done, pending = await asyncio.wait(
+                {stdin_task, stdout_task},
+                return_when=asyncio.FIRST_COMPLETED
             )
+
+            # Cancel remaining tasks
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         finally:
             try:
                 writer.close()
