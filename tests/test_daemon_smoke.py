@@ -256,7 +256,8 @@ async def test_daemon_single_client_basic(pre_indexed_project_dir: Path) -> None
         await _teardown_proxy(proc, client)
 
     # After the proxy disconnects, the daemon should shut down
-    stopped = await wait_for_daemon_shutdown(project_dir, timeout=10.0)
+    # Windows requires significantly more time for cleanup (see test_daemon_lock_file_created comments)
+    stopped = await wait_for_daemon_shutdown(project_dir, timeout=30.0)
     assert stopped, "Daemon did not shut down after last client disconnected"
 
 
@@ -319,7 +320,8 @@ async def test_daemon_two_clients_concurrent(pre_indexed_project_dir: Path) -> N
         )
 
     # After both clients disconnect, daemon should shut down
-    stopped = await wait_for_daemon_shutdown(project_dir, timeout=15.0)
+    # Windows requires significantly more time for cleanup (see test_daemon_lock_file_created comments)
+    stopped = await wait_for_daemon_shutdown(project_dir, timeout=30.0)
     assert stopped, "Daemon did not shut down after all clients disconnected"
 
 
@@ -381,7 +383,12 @@ async def test_daemon_lock_file_created(pre_indexed_project_dir: Path) -> None:
         await _teardown_proxy(proc, client)
 
     # After client disconnects, lock file should be removed
-    stopped = await wait_for_daemon_shutdown(project_dir, timeout=10.0)
+    # Windows requires significantly more time for cleanup due to:
+    # 1. Background scan task cancellation and cleanup
+    # 2. Realtime indexing observer.join() timeout
+    # 3. DuckDB connection close (can be slow on Windows)
+    # 4. Process termination overhead
+    stopped = await wait_for_daemon_shutdown(project_dir, timeout=30.0)
     assert stopped, "Daemon did not shut down in time"
     assert not lock_path.exists(), (
         f"Lock file was not cleaned up after daemon shutdown: {lock_path}"

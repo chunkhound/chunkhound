@@ -63,6 +63,9 @@ class MCPServerBase(ABC):
         self._initialized = False
         self._init_lock = asyncio.Lock()
 
+        # Background tasks
+        self._scan_task: asyncio.Task | None = None
+
         # Scan progress tracking
         self._scan_complete = False
         self._scan_progress = {
@@ -195,7 +198,7 @@ class MCPServerBase(ABC):
                 self.realtime_indexing.start(target_path)
             )
             # Schedule background scan AFTER monitoring is confirmed ready
-            asyncio.create_task(
+            self._scan_task = asyncio.create_task(
                 self._coordinated_initial_scan(target_path, monitoring_task)
             )
         except Exception as e:
@@ -284,7 +287,16 @@ class MCPServerBase(ABC):
 
         This method is idempotent - safe to call multiple times.
         """
-        # Stop real-time indexing first
+        # Cancel background scan task if still running
+        if self._scan_task is not None and not self._scan_task.done():
+            self.debug_log("Cancelling background scan task")
+            self._scan_task.cancel()
+            try:
+                await self._scan_task
+            except asyncio.CancelledError:
+                pass
+
+        # Stop real-time indexing
         if self.realtime_indexing:
             self.debug_log("Stopping real-time indexing service")
             await self.realtime_indexing.stop()
