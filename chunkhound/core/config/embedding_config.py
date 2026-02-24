@@ -397,16 +397,33 @@ class EmbeddingConfig(BaseSettings):
 
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
-        """Load embedding config from environment variables."""
+        """Load embedding config from environment variables.
+
+        Supports both the canonical double-underscore form (CHUNKHOUND_EMBEDDING__*)
+        and the legacy single-underscore form (CHUNKHOUND_EMBEDDING_*) for the four
+        common fields. The canonical form takes precedence when both are set.
+        """
         config = {}
 
-        if api_key := os.getenv("CHUNKHOUND_EMBEDDING__API_KEY"):
+        if api_key := (
+            os.getenv("CHUNKHOUND_EMBEDDING__API_KEY")
+            or os.getenv("CHUNKHOUND_EMBEDDING_API_KEY")
+        ):
             config["api_key"] = api_key
-        if base_url := os.getenv("CHUNKHOUND_EMBEDDING__BASE_URL"):
+        if base_url := (
+            os.getenv("CHUNKHOUND_EMBEDDING__BASE_URL")
+            or os.getenv("CHUNKHOUND_EMBEDDING_BASE_URL")
+        ):
             config["base_url"] = base_url
-        if provider := os.getenv("CHUNKHOUND_EMBEDDING__PROVIDER"):
+        if provider := (
+            os.getenv("CHUNKHOUND_EMBEDDING__PROVIDER")
+            or os.getenv("CHUNKHOUND_EMBEDDING_PROVIDER")
+        ):
             config["provider"] = provider
-        if model := os.getenv("CHUNKHOUND_EMBEDDING__MODEL"):
+        if model := (
+            os.getenv("CHUNKHOUND_EMBEDDING__MODEL")
+            or os.getenv("CHUNKHOUND_EMBEDDING_MODEL")
+        ):
             config["model"] = model
 
         # Azure OpenAI configuration
