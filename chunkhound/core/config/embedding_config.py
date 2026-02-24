@@ -335,6 +335,10 @@ class EmbeddingConfig(BaseSettings):
             if self.azure_endpoint:
                 if not self.api_key:
                     missing.append("api_key (set CHUNKHOUND_EMBEDDING__API_KEY)")
+                if not self.api_version:
+                    missing.append(
+                        "api_version (set CHUNKHOUND_EMBEDDING__API_VERSION)"
+                    )
             # For OpenAI provider, only require API key for official endpoints
             elif is_official_openai_endpoint(self.base_url) and not self.api_key:
                 missing.append("api_key (set CHUNKHOUND_EMBEDDING__API_KEY)")
