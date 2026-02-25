@@ -54,7 +54,7 @@ mkdir -p "$(dirname "$DB_PATH")"
 # Check if database exists, suggest indexing if not (only in verbose mode)
 if [[ ! -f "$DB_PATH" && $VERBOSE -eq 1 ]]; then
     echo "Warning: Database not found at $DB_PATH" >&2
-    echo "Run 'uv run chunkhound run .' to index the current directory first" >&2
+    echo "Run 'uv run chunkhound index .' to index the current directory first" >&2
     echo "" >&2
 fi
 
