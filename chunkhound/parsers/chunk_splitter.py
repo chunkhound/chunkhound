@@ -128,6 +128,7 @@ class ChunkSplitter:
         result_chunks = []
         current_recipe_group: list[str] = []
         part_num = 1
+        lines_consumed = 0
 
         for recipe_line in recipe_lines:
             test_lines = [target_line] + current_recipe_group + [recipe_line]
@@ -143,34 +144,35 @@ class ChunkSplitter:
             else:
                 if current_recipe_group:
                     chunk_content = "\n".join([target_line] + current_recipe_group)
-                    chunk_lines = len(current_recipe_group) + 1
+                    part_start = chunk.start_line + target_line_idx + lines_consumed
 
                     result_chunks.append(
                         UniversalChunk(
                             concept=chunk.concept,
                             name=f"{chunk.name}_part{part_num}",
                             content=chunk_content,
-                            start_line=chunk.start_line,
-                            end_line=chunk.start_line + chunk_lines - 1,
+                            start_line=part_start,
+                            end_line=part_start + len(current_recipe_group),
                             metadata=chunk.metadata.copy(),
                             language_node_type=chunk.language_node_type,
                         )
                     )
+                    lines_consumed += len(current_recipe_group)
                     part_num += 1
 
                 current_recipe_group = [recipe_line]
 
         if current_recipe_group:
             chunk_content = "\n".join([target_line] + current_recipe_group)
-            chunk_lines = len(current_recipe_group) + 1
+            part_start = chunk.start_line + target_line_idx + lines_consumed
 
             result_chunks.append(
                 UniversalChunk(
                     concept=chunk.concept,
                     name=f"{chunk.name}_part{part_num}",
                     content=chunk_content,
-                    start_line=chunk.start_line,
-                    end_line=chunk.start_line + chunk_lines - 1,
+                    start_line=part_start,
+                    end_line=part_start + len(current_recipe_group),
                     metadata=chunk.metadata.copy(),
                     language_node_type=chunk.language_node_type,
                 )
