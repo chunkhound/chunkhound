@@ -33,7 +33,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Environment variables:"
             echo "  CHUNKHOUND_DB_PATH           - Default database path"
-            echo "  CHUNKHOUND_EMBEDDING_API_KEY - Required for semantic search"
+            echo "  CHUNKHOUND_EMBEDDING__API_KEY - Required for semantic search"
             echo ""
             echo "Examples:"
             echo "  $0                              # Use default database"
@@ -54,7 +54,7 @@ mkdir -p "$(dirname "$DB_PATH")"
 # Check if database exists, suggest indexing if not (only in verbose mode)
 if [[ ! -f "$DB_PATH" && $VERBOSE -eq 1 ]]; then
     echo "Warning: Database not found at $DB_PATH" >&2
-    echo "Run 'uv run chunkhound run .' to index the current directory first" >&2
+    echo "Run 'uv run chunkhound index .' to index the current directory first" >&2
     echo "" >&2
 fi
 

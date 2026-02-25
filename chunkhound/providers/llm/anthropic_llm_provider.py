@@ -14,6 +14,7 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.core.utils import estimate_tokens_llm
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 
 try:
@@ -823,8 +824,7 @@ class AnthropicLLMProvider(LLMProvider):
         Note: For accurate token counting, use the Anthropic SDK's
         count_tokens method. This is a rough estimation.
         """
-        # Rough estimation: ~3.5 chars per token for Claude models
-        return len(text) // 4
+        return estimate_tokens_llm(text)
 
     async def health_check(self) -> dict[str, Any]:
         """Perform health check."""

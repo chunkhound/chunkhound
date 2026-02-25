@@ -219,7 +219,7 @@ class JSXMapping(JavaScriptMapping):
             """
         return None
 
-    def extract_component_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_component_name(self, node: TSNode | None, source: str) -> str:
         """Extract React component name from a function definition.
 
         Args:
@@ -241,7 +241,7 @@ class JSXMapping(JavaScriptMapping):
 
         return name
 
-    def extract_jsx_element_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_jsx_element_name(self, node: TSNode | None, source: str) -> str:
         """Extract JSX element name.
 
         Args:
@@ -270,7 +270,7 @@ class JSXMapping(JavaScriptMapping):
 
         return self.get_fallback_name(node, "jsx_element")
 
-    def extract_hook_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_hook_name(self, node: TSNode | None, source: str) -> str:
         """Extract React hook name from a hook call.
 
         Args:
@@ -299,7 +299,7 @@ class JSXMapping(JavaScriptMapping):
 
         return self.get_fallback_name(node, "hook")
 
-    def is_react_component(self, node: "TSNode | None", source: str) -> bool:
+    def is_react_component(self, node: TSNode | None, source: str) -> bool:
         """Check if a function is a React component.
 
         Args:
@@ -325,7 +325,7 @@ class JSXMapping(JavaScriptMapping):
 
         return False
 
-    def extract_jsx_props(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_jsx_props(self, node: TSNode | None, source: str) -> list[str]:
         """Extract JSX props from a JSX element.
 
         Args:
@@ -360,7 +360,7 @@ class JSXMapping(JavaScriptMapping):
 
         return props
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a JSX node should be included as a chunk.
 
         Extends JavaScript logic with JSX-specific considerations.
