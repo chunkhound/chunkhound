@@ -89,7 +89,7 @@ class ClientProxy:
 
     async def _forward_stdin_async(self, writer: asyncio.StreamWriter) -> None:
         """Unix: async stdin reading via connect_read_pipe."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         stdin = asyncio.StreamReader()
         transport, _ = await loop.connect_read_pipe(
             lambda: asyncio.StreamReaderProtocol(stdin), sys.stdin.buffer
@@ -114,7 +114,7 @@ class ClientProxy:
         Blocking readline() in a thread pool avoids the IOCP handle
         requirement that makes connect_read_pipe() fail on inherited pipes.
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         while True:
             line = await loop.run_in_executor(None, sys.stdin.buffer.readline)
             if not line:

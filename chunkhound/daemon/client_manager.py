@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+
+from .process import pid_alive
 
 _PID_POLL_INTERVAL = 60.0  # seconds between hung-process checks
 
@@ -32,7 +32,6 @@ class ClientManager:
     def __init__(self, on_empty: Callable[[], None]) -> None:
         self._sessions: dict[str, ClientSession] = {}
         self._on_empty = on_empty
-        self._lock = asyncio.Lock()
 
     def register(
         self, client_id: str, pid: int, writer: asyncio.StreamWriter
@@ -52,16 +51,6 @@ class ClientManager:
         """Return the number of currently connected clients."""
         return len(self._sessions)
 
-    def _pid_alive(self, pid: int) -> bool:
-        if sys.platform == "win32":
-            import psutil
-            return psutil.pid_exists(pid)
-        try:
-            os.kill(pid, 0)
-            return True
-        except (ProcessLookupError, PermissionError):
-            return False
-
     async def poll_pids(self) -> None:
         """Background task: evict clients whose proxy process has died.
 
@@ -72,7 +61,7 @@ class ClientManager:
             dead = [
                 cid
                 for cid, sess in list(self._sessions.items())
-                if not self._pid_alive(sess.pid)
+                if not pid_alive(sess.pid)
             ]
             for cid in dead:
                 sess = self._sessions.get(cid)

@@ -19,6 +19,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .process import pid_alive
+
 # Lock file relative to project directory
 _LOCK_FILE_REL = ".chunkhound/daemon.lock"
 # Socket directory (Linux/macOS)
@@ -99,17 +101,6 @@ class DaemonDiscovery:
     # Liveness checks
     # ------------------------------------------------------------------
 
-    def _pid_alive(self, pid: int) -> bool:
-        """Return True if the process with ``pid`` is still running."""
-        if sys.platform == "win32":
-            import psutil
-            return psutil.pid_exists(pid)
-        try:
-            os.kill(pid, 0)
-            return True
-        except (ProcessLookupError, PermissionError):
-            return False
-
     async def _socket_connectable(self, address: str) -> bool:
         """Try to open a short-lived connection to the IPC address.
 
@@ -129,7 +120,7 @@ class DaemonDiscovery:
             return False
         pid = lock.get("pid")
         socket_path = lock.get("socket_path", "")
-        if not isinstance(pid, int) or not self._pid_alive(pid):
+        if not isinstance(pid, int) or not pid_alive(pid):
             return False
         # On Unix verify the socket file exists; on Windows trust the PID check
         if sys.platform != "win32" and not str(socket_path).startswith("tcp:"):
@@ -227,7 +218,7 @@ class DaemonDiscovery:
         if lock is not None:
             pid = lock.get("pid")
             sp_str = str(lock.get("socket_path", initial_address))
-            if isinstance(pid, int) and self._pid_alive(pid):
+            if isinstance(pid, int) and pid_alive(pid):
                 # Daemon process is live — wait for its address to become
                 # connectable (it may still be initializing).
                 deadline = time.monotonic() + _STARTUP_TIMEOUT

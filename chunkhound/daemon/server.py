@@ -12,7 +12,6 @@ IPC handshake (length-prefixed frames):
 from __future__ import annotations
 
 import asyncio
-import copy
 import os
 import sys
 import uuid
@@ -21,8 +20,7 @@ from typing import Any
 
 from chunkhound.core.config.config import Config
 from chunkhound.mcp_server.base import MCPServerBase
-from chunkhound.mcp_server.common import handle_tool_call, has_reranker_support
-from chunkhound.mcp_server.tools import TOOL_REGISTRY
+from chunkhound.mcp_server.common import handle_tool_call
 from chunkhound.version import __version__
 
 from . import ipc
@@ -313,37 +311,7 @@ class ChunkHoundDaemon(MCPServerBase):
 
     def _build_available_tools_as_dicts(self) -> list[dict[str, Any]]:
         """Build a JSON-serialisable list of available tool schemas."""
-        tools = []
-        for tool_name, tool in TOOL_REGISTRY.items():
-            if tool.requires_embeddings and (
-                not self.embedding_manager
-                or not self.embedding_manager.list_providers()
-            ):
-                continue
-            if tool.requires_llm and not self.llm_manager:
-                continue
-            if tool.requires_reranker and not has_reranker_support(
-                self.embedding_manager
-            ):
-                continue
-
-            tool_params = copy.deepcopy(tool.parameters)
-
-            if tool_name == "search" and (
-                not self.embedding_manager
-                or not self.embedding_manager.list_providers()
-            ):
-                if "type" in tool_params.get("properties", {}):
-                    tool_params["properties"]["type"]["enum"] = ["regex"]
-
-            tools.append(
-                {
-                    "name": tool_name,
-                    "description": tool.description,
-                    "inputSchema": tool_params,
-                }
-            )
-        return tools
+        return self._build_filtered_tool_dicts()
 
     # ------------------------------------------------------------------
     # Shutdown
