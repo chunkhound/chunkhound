@@ -77,7 +77,7 @@ def estimate_tokens(
             # Fallback to default estimation when provider not required
             return _estimate_tokens_default(text)
 
-    if provider in ("openai", "azure_openai") and TIKTOKEN_AVAILABLE:
+    if provider in ("openai", "azure_openai"):
         return _estimate_tokens_openai(text, model or "")
     elif provider == "voyageai":
         return _estimate_tokens_voyageai(text)
