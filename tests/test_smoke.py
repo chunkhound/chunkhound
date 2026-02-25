@@ -165,6 +165,8 @@ class TestServerStartup:
             config_path.write_text(json.dumps(config))
             
             # Test that the server starts without crashing
+            # Use repr() to properly escape Windows paths with backslashes
+            cwd_repr = repr(os.getcwd())
             proc = await create_subprocess_exec_safe(
                 "uv",
                 "run",
@@ -172,7 +174,9 @@ class TestServerStartup:
                 f'''
 import sys
 import os
+
 sys.path.insert(0, {repr(os.getcwd())})
+
 from chunkhound.mcp_server.stdio import main
 import asyncio
 
@@ -258,7 +262,7 @@ sys.exit(asyncio.run(test()))
             mcp_env["CHUNKHOUND_MCP_MODE"] = "1"
             
             proc = await create_subprocess_exec_safe(
-                "uv", "run", "chunkhound", "mcp", str(temp_path),
+                "uv", "run", "chunkhound", "mcp", "--no-daemon", str(temp_path),
                 cwd=str(temp_path),
                 env=mcp_env,
                 stdin=asyncio.subprocess.PIPE,

@@ -242,21 +242,25 @@ class SubprocessJsonRpcClient:
     async def close(self) -> None:
         """Clean shutdown of the client and subprocess.
 
-        This cancels the background reader task, terminates the subprocess,
-        and ensures all resources are properly cleaned up.
+        This terminates the subprocess, waits for the reader task to drain
+        stdout naturally, and ensures all resources are properly cleaned up.
+
+        Order matters on Windows (ProactorEventLoop / IOCP):
+        - Stdin must be closed before the subprocess is terminated so the
+          pipe transport is released cleanly.
+        - The subprocess must exit *before* the reader task is cancelled.
+          Cancelling the reader while an IOCP ReadFile is still pending leaves
+          an orphaned kernel operation; when the event loop later closes, the
+          _ProactorBasePipeTransport.__del__ raises ValueError which Python 3.11
+          converts to a spurious KeyboardInterrupt (asyncio/runners.py:123).
+        - After the process exits the pipe is broken, readline() returns b""
+          (EOF), and the reader task exits naturally — properly completing the
+          IOCP operation before the event loop is torn down.
         """
         if self._closed:
             return
 
         self._closed = True
-
-        # Cancel background reader task
-        if self._reader_task is not None:
-            self._reader_task.cancel()
-            try:
-                await self._reader_task
-            except asyncio.CancelledError:
-                pass
 
         # Cancel all pending requests
         for future in self._pending_requests.values():
@@ -264,7 +268,16 @@ class SubprocessJsonRpcClient:
                 future.cancel()
         self._pending_requests.clear()
 
-        # Terminate subprocess
+        # Close stdin first so the subprocess sees EOF and can begin exiting.
+        # This also releases the stdin pipe transport before the loop closes.
+        if self._process.stdin is not None:
+            try:
+                self._process.stdin.close()
+                await self._process.stdin.wait_closed()
+            except Exception:
+                pass
+
+        # Terminate the subprocess so the stdout pipe gets broken (EOF).
         if self._process.returncode is None:
             self._process.terminate()
             try:
@@ -273,6 +286,24 @@ class SubprocessJsonRpcClient:
                 logger.warning("Subprocess didn't terminate, killing it")
                 self._process.kill()
                 await self._process.wait()
+
+        # Now wait for the reader task to exit naturally.  The process has
+        # exited, so the stdout pipe is broken; the pending IOCP ReadFile will
+        # complete with EOF, readline() will return b"", and _read_responses()
+        # will break its loop and finish.  This lets the ProactorEventLoop
+        # process the IOCP completion *before* the event loop is closed,
+        # avoiding the _ProactorBasePipeTransport.__del__ KeyboardInterrupt.
+        if self._reader_task is not None:
+            try:
+                await asyncio.wait_for(self._reader_task, timeout=2.0)
+            except (asyncio.TimeoutError, Exception):
+                # Fallback: forcibly cancel if it didn't drain in time.
+                self._reader_task.cancel()
+                try:
+                    await self._reader_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            self._reader_task = None
 
     async def _read_responses(self) -> None:
         """Background task that continuously reads responses from stdout.
