@@ -1000,9 +1000,9 @@ class CSharpMapping(BaseMapping):
 
         return constants if constants else None
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve import path for C#.
 
         C# using directives map to assemblies, not files.
@@ -1013,7 +1013,7 @@ class CSharpMapping(BaseMapping):
             source_file: Path to the file containing the import
 
         Returns:
-            None (C# using directives are namespace-based, not file-based)
+            Empty list (C# using directives are namespace-based, not file-based)
         """
         # C# using directives map to assemblies, not files
-        return None
+        return []

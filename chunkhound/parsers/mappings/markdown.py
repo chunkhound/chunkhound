@@ -743,11 +743,11 @@ class MarkdownMapping(BaseMapping):
 
         return None
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self,
         import_text: str,
         base_dir: Path,
         source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Data formats don't have imports."""
-        return None
+        return []
