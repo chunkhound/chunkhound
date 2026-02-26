@@ -37,6 +37,12 @@ def add_research_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help="Directory path to research (default: current directory)",
     )
 
+    research_parser.add_argument(
+        "--path-filter",
+        type=str,
+        help="Optional path filter (e.g., 'src/', 'tests/')",
+    )
+
     # Add common arguments
     add_common_arguments(research_parser)
 

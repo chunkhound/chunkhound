@@ -575,9 +575,9 @@ class DartMapping(BaseMapping):
 
         return [{"name": name, "value": value}]
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve import path for Dart.
 
         Attempts to resolve relative imports and local file imports.
@@ -588,22 +588,22 @@ class DartMapping(BaseMapping):
             source_file: Path to the file containing the import
 
         Returns:
-            Path to the imported file if resolvable, None otherwise
+            Path to the imported file (empty list if not found)
         """
         match = re.search(r"import\s+['\"](.+?)['\"]", import_text)
         if not match:
-            return None
+            return []
 
         path = match.group(1)
 
         # External package imports start with 'package:'
         if path.startswith("package:"):
-            return None
+            return []
 
         # Relative imports
         if path.startswith("./") or path.startswith("../"):
             resolved = (source_file.parent / path).resolve()
             if resolved.exists():
-                return resolved
+                return [resolved]
 
-        return None
+        return []

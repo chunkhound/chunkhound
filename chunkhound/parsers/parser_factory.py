@@ -44,6 +44,7 @@ from chunkhound.parsers.mappings import (
     PHPMapping,
     PythonMapping,
     RustMapping,
+    SqlMapping,
     SvelteMapping,
     SwiftMapping,
     TextMapping,
@@ -201,6 +202,9 @@ if not HCL_AVAILABLE:
             HCL_AVAILABLE = True
     except ImportError:
         pass
+
+# SQL language support - direct import (required dependency in pyproject.toml)
+import tree_sitter_sql as ts_sql
 
 try:
     from tree_sitter_language_pack import get_language
@@ -369,6 +373,7 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     ),
     Language.DART: LanguageConfig(ts_dart, DartMapping, DART_AVAILABLE, "dart"),
     Language.OBJC: LanguageConfig(ts_objc, ObjCMapping, OBJC_AVAILABLE, "objc"),
+    Language.SQL: LanguageConfig(ts_sql, SqlMapping, True, "sql"),
     Language.SWIFT: LanguageConfig(ts_swift, SwiftMapping, SWIFT_AVAILABLE, "swift"),
     # Languages that use TypeScript parser
     Language.VUE: LanguageConfig(
@@ -453,6 +458,8 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     ".php4": Language.PHP,
     ".php5": Language.PHP,
     ".phps": Language.PHP,
+    # SQL
+    ".sql": Language.SQL,
     # Swift
     ".swift": Language.SWIFT,
     ".swiftinterface": Language.SWIFT,
@@ -745,7 +752,7 @@ class ParserFactory:
         }
 
     def get_mapping_for_file(self, file_path: Path) -> LanguageMapping | None:
-        """Get the language mapping for a file to access resolve_import_path().
+        """Get the language mapping for a file to access resolve_import_paths().
 
         Returns None if no mapping exists for the file type.
 

@@ -110,7 +110,7 @@ class PHPMapping(BaseMapping):
             (comment) @comment
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract function name from a PHP function definition node."""
         if node is None:
             return self.get_fallback_name(node, "function")
@@ -123,7 +123,7 @@ class PHPMapping(BaseMapping):
 
         return self.get_fallback_name(node, "function")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract class name from a PHP class definition node."""
         if node is None:
             return self.get_fallback_name(node, "class")
@@ -225,7 +225,7 @@ class PHPMapping(BaseMapping):
         return None
 
     def extract_name(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for this concept.
 
@@ -314,7 +314,7 @@ class PHPMapping(BaseMapping):
         return "unnamed"
 
     def extract_content(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for this concept.
 
@@ -342,7 +342,7 @@ class PHPMapping(BaseMapping):
         return ""
 
     def extract_metadata(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract PHP-specific metadata from captures.
 
@@ -459,7 +459,7 @@ class PHPMapping(BaseMapping):
     # PHP-specific helper methods for detailed metadata extraction
 
     def _extract_parameters(
-        self, func_node: "TSNode", source: str
+        self, func_node: TSNode, source: str
     ) -> list[dict[str, str]]:
         """Extract parameter names and types from a PHP function/method node.
 
@@ -506,7 +506,7 @@ class PHPMapping(BaseMapping):
 
         return parameters
 
-    def _extract_return_type(self, func_node: "TSNode", source: str) -> str | None:
+    def _extract_return_type(self, func_node: TSNode, source: str) -> str | None:
         """Extract return type hint from a PHP function/method node.
 
         Args:
@@ -542,7 +542,7 @@ class PHPMapping(BaseMapping):
 
         return None
 
-    def _extract_visibility(self, node: "TSNode", source: str) -> str | None:
+    def _extract_visibility(self, node: TSNode, source: str) -> str | None:
         """Extract visibility modifier (public, private, protected).
 
         Args:
@@ -562,7 +562,7 @@ class PHPMapping(BaseMapping):
 
         return "public"  # Default visibility in PHP
 
-    def _is_static(self, node: "TSNode", source: str) -> bool:
+    def _is_static(self, node: TSNode, source: str) -> bool:
         """Check if method/property has static modifier.
 
         Args:
@@ -582,7 +582,7 @@ class PHPMapping(BaseMapping):
 
         return False
 
-    def _is_abstract(self, node: "TSNode", source: str) -> bool:
+    def _is_abstract(self, node: TSNode, source: str) -> bool:
         """Check if class/method has abstract modifier.
 
         Args:
@@ -602,7 +602,7 @@ class PHPMapping(BaseMapping):
 
         return False
 
-    def _is_final(self, node: "TSNode", source: str) -> bool:
+    def _is_final(self, node: TSNode, source: str) -> bool:
         """Check if class/method has final modifier.
 
         Args:
@@ -622,7 +622,7 @@ class PHPMapping(BaseMapping):
 
         return False
 
-    def _contains_array_expression(self, node: "TSNode", source: str) -> bool:
+    def _contains_array_expression(self, node: TSNode, source: str) -> bool:
         """Return True if the node subtree contains an array creation expression.
 
         Handles both short array syntax `[ ... ]` and classic `array(...)` forms.
@@ -650,7 +650,7 @@ class PHPMapping(BaseMapping):
         return False
 
     def extract_constants(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> list[dict[str, str]] | None:
         """Extract constant definitions from PHP code.
 
@@ -749,9 +749,9 @@ class PHPMapping(BaseMapping):
 
         return constants if constants else None
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve import path for PHP.
 
         Attempts to resolve relative require/include statements.
@@ -762,18 +762,18 @@ class PHPMapping(BaseMapping):
             source_file: Path to the file containing the import
 
         Returns:
-            Path to the imported file if resolvable, None otherwise
+            Path to the imported file (empty list if not found)
         """
         match = re.search(
             r'(?:require|include)(?:_once)?\s*\(\s*[\'"](.+?)[\'"]\s*\)', import_text
         )
         if not match:
-            return None
+            return []
 
         path = match.group(1)
         if path.startswith("./") or path.startswith("../"):
             resolved = (source_file.parent / path).resolve()
             if resolved.exists():
-                return resolved
+                return [resolved]
 
-        return None
+        return []

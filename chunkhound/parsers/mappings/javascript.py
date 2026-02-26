@@ -41,7 +41,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
     def extract_constants(
         self,
         concept: "UniversalConcept",
-        captures: dict[str, "TSNode"],
+        captures: dict[str, TSNode],
         content: bytes,
     ) -> list[dict[str, str]] | None:
         """Extract constants using JSFamilyExtraction implementation.
@@ -264,7 +264,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
         ) @require
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract function name from a JavaScript function definition.
 
         Handles various function patterns and provides meaningful fallbacks.
@@ -310,7 +310,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return self.get_fallback_name(node, "function")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract class name from a JavaScript class definition.
 
         Args:
@@ -337,7 +337,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return self.get_fallback_name(node, "class")
 
-    def extract_method_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_method_name(self, node: TSNode | None, source: str) -> str:
         """Extract method name from a JavaScript method definition.
 
         Args:
@@ -359,7 +359,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return self.get_fallback_name(node, "method")
 
-    def extract_parameters(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter names from a JavaScript function/method.
 
         Handles:
@@ -424,7 +424,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return parameters
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a JavaScript node should be included as a chunk.
 
         Filters out:
@@ -455,7 +455,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return True
 
-    def is_constructor(self, node: "TSNode | None", source: str) -> bool:
+    def is_constructor(self, node: TSNode | None, source: str) -> bool:
         """Check if a method node is a constructor.
 
         Args:
@@ -480,7 +480,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return False
 
-    def is_async_function(self, node: "TSNode | None", source: str) -> bool:
+    def is_async_function(self, node: TSNode | None, source: str) -> bool:
         """Check if a function is async.
 
         Args:
@@ -497,7 +497,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
         node_text = self.get_node_text(node, source)
         return "async " in node_text
 
-    def is_generator_function(self, node: "TSNode | None", source: str) -> bool:
+    def is_generator_function(self, node: TSNode | None, source: str) -> bool:
         """Check if a function is a generator.
 
         Args:
@@ -515,7 +515,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
         return "function*" in node_text or "*" in node_text.split("(")[0]
 
     def extract_jsdoc_tags(
-        self, node: "TSNode | None", source: str
+        self, node: TSNode | None, source: str
     ) -> dict[str, list[str]]:
         """Extract JSDoc tags from a JSDoc comment.
 
@@ -555,12 +555,12 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return tags
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self,
         import_text: str,
         base_dir: Path,
         source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve JavaScript import to file path.
 
         Handles ES6 imports and CommonJS require statements, resolving them to
@@ -572,20 +572,20 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
             source_file: Path to the file containing the import
 
         Returns:
-            Resolved file path if found, None if not resolvable (e.g., external package)
+            Resolved file path (empty list if not resolvable, e.g., external package)
 
         Examples:
             >>> # ES6 import
-            >>> resolve_import_path("import X from './utils'", base, source)
-            Path("/project/src/utils.js")
+            >>> resolve_import_paths("import X from './utils'", base, source)
+            [Path("/project/src/utils.js")]
 
             >>> # CommonJS require
-            >>> resolve_import_path("const x = require('../lib')", base, source)
-            Path("/project/lib/index.js")
+            >>> resolve_import_paths("const x = require('../lib')", base, source)
+            [Path("/project/lib/index.js")]
 
             >>> # External package
-            >>> resolve_import_path("import React from 'react'", base, source)
-            None
+            >>> resolve_import_paths("import React from 'react'", base, source)
+            []
         """
         # Extract import path from: import X from 'path' OR require('path')
         match = re.search(
@@ -593,15 +593,15 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
             import_text
         )
         if not match:
-            return None
+            return []
 
         import_path = match.group(1) or match.group(2)
         if not import_path:
-            return None
+            return []
 
         # Skip non-relative imports (external packages)
         if not import_path.startswith('.'):
-            return None
+            return []
 
         # Resolve relative to source file's directory
         source_dir = self._resolve_source_dir(source_file, base_dir)
@@ -609,18 +609,18 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
 
         # Try direct path
         if resolved.exists() and resolved.is_file():
-            return resolved
+            return [resolved]
 
         # Try with extensions
         for ext in ['.js', '.jsx', '.mjs', '.ts', '.tsx']:
             with_ext = resolved.with_suffix(ext)
             if with_ext.exists():
-                return with_ext
+                return [with_ext]
 
         # Try index file
         for index in ['index.js', 'index.jsx', 'index.ts', 'index.tsx']:
             index_path = resolved / index
             if index_path.exists():
-                return index_path
+                return [index_path]
 
-        return None
+        return []

@@ -70,13 +70,13 @@ def validate_provider_args(
         if is_official_openai_endpoint(base_url) and not api_key:
             logger.error(
                 "OpenAI API key required for official OpenAI endpoints. "
-                "Set CHUNKHOUND_EMBEDDING_API_KEY or use --api-key"
+                "Set CHUNKHOUND_EMBEDDING__API_KEY or use --api-key"
             )
             return False
     elif provider == "voyageai":
         if not api_key:
             logger.error(
-                "VoyageAI API key required. Set CHUNKHOUND_EMBEDDING_API_KEY "
+                "VoyageAI API key required. Set CHUNKHOUND_EMBEDDING__API_KEY "
                 "or use --api-key"
             )
             return False
