@@ -6,7 +6,7 @@ type annotations, generics, interfaces, enums, namespaces, and decorators.
 """
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from loguru import logger
 
@@ -22,17 +22,7 @@ from chunkhound.parsers.mappings._shared.js_query_patterns import (
 )
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
-
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    # TSNode is already defined in TYPE_CHECKING block
+from tree_sitter import Node as TSNode
 
 
 class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
@@ -56,7 +46,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
     def extract_constants(
         self,
         concept: "UniversalConcept",
-        captures: dict[str, "TSNode"],
+        captures: dict[str, TSNode],
         content: bytes,
     ) -> list[dict[str, str]] | None:
         """Extract constants using JSFamilyExtraction implementation.
@@ -257,7 +247,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             (comment) @tsdoc
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract function name from a TypeScript function definition node.
 
         Args:
@@ -267,7 +257,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Function name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "function")
 
         try:
@@ -297,7 +287,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             logger.error(f"Failed to extract TypeScript function name: {e}")
             return self.get_fallback_name(node, "function")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract class name from a TypeScript class definition node.
 
         Args:
@@ -307,7 +297,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Class name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "class")
 
         try:
@@ -320,7 +310,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             logger.error(f"Failed to extract TypeScript class name: {e}")
             return self.get_fallback_name(node, "class")
 
-    def extract_interface_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_interface_name(self, node: TSNode | None, source: str) -> str:
         """Extract interface name from a TypeScript interface definition node.
 
         Args:
@@ -330,7 +320,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Interface name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "interface")
 
         try:
@@ -343,7 +333,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             logger.error(f"Failed to extract TypeScript interface name: {e}")
             return self.get_fallback_name(node, "interface")
 
-    def extract_enum_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_enum_name(self, node: TSNode | None, source: str) -> str:
         """Extract enum name from a TypeScript enum definition node.
 
         Args:
@@ -353,7 +343,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Enum name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "enum")
 
         try:
@@ -366,7 +356,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             logger.error(f"Failed to extract TypeScript enum name: {e}")
             return self.get_fallback_name(node, "enum")
 
-    def extract_type_alias_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_type_alias_name(self, node: TSNode | None, source: str) -> str:
         """Extract type alias name from a TypeScript type alias definition node.
 
         Args:
@@ -376,7 +366,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Type alias name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "type")
 
         try:
@@ -389,7 +379,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             logger.error(f"Failed to extract TypeScript type alias name: {e}")
             return self.get_fallback_name(node, "type")
 
-    def extract_namespace_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_namespace_name(self, node: TSNode | None, source: str) -> str:
         """Extract namespace name from a TypeScript namespace definition node.
 
         Args:
@@ -399,7 +389,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Namespace name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "namespace")
 
         try:
@@ -412,7 +402,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             logger.error(f"Failed to extract TypeScript namespace name: {e}")
             return self.get_fallback_name(node, "namespace")
 
-    def extract_parameters(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter names and types from a TypeScript function/method node.
 
         Args:
@@ -422,7 +412,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             List of parameter strings with types
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         parameters: list[str] = []
@@ -455,7 +445,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return parameters
 
-    def extract_return_type(self, node: "TSNode | None", source: str) -> str | None:
+    def extract_return_type(self, node: TSNode | None, source: str) -> str | None:
         """Extract return type annotation from a TypeScript function.
 
         Args:
@@ -465,7 +455,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Return type string or None if not found
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return None
 
         try:
@@ -483,7 +473,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return None
 
-    def extract_type_parameters(self, node: "TSNode | None", source: str) -> str | None:
+    def extract_type_parameters(self, node: TSNode | None, source: str) -> str | None:
         """Extract generic type parameters from a TypeScript declaration.
 
         Args:
@@ -493,7 +483,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             Type parameters string or None if not found
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return None
 
         try:
@@ -506,7 +496,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return None
 
-    def extract_access_modifiers(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_access_modifiers(self, node: TSNode | None, source: str) -> list[str]:
         """Extract access modifiers from a TypeScript class member.
 
         Args:
@@ -516,7 +506,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             List of access modifiers (public, private, protected, static, readonly, etc.)
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         modifiers: list[str] = []
@@ -542,7 +532,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return modifiers
 
-    def extract_decorators(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_decorators(self, node: TSNode | None, source: str) -> list[str]:
         """Extract decorators from a TypeScript declaration.
 
         Args:
@@ -552,7 +542,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             List of decorator names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         decorators: list[str] = []
@@ -569,7 +559,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return decorators
 
-    def is_tsdoc_comment(self, node: "TSNode | None", source: str) -> bool:
+    def is_tsdoc_comment(self, node: TSNode | None, source: str) -> bool:
         """Check if a comment node is a TSDoc comment.
 
         Args:
@@ -579,7 +569,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             True if the comment is TSDoc-style (starts with /**)
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         try:
@@ -627,7 +617,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return "\n".join(cleaned_lines)
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a TypeScript node should be included as a chunk.
 
         Args:
@@ -637,7 +627,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         Returns:
             True if node should be included, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         try:
@@ -677,7 +667,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
 
     def create_enhanced_chunk(
         self,
-        node: "TSNode | None",
+        node: TSNode | None,
         source: str,
         file_path: Path,
         chunk_type: ChunkType,
@@ -701,7 +691,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         display_name = name
 
         # Add TypeScript-specific enhancements
-        if node and TREE_SITTER_AVAILABLE:
+        if node:
             try:
                 # Add type parameters for generics
                 type_params = self.extract_type_parameters(node, source)
@@ -751,12 +741,12 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
 
         return chunk
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self,
         import_text: str,
         base_dir: Path,
         source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve TypeScript import to file path.
 
         Args:
@@ -765,40 +755,40 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             source_file: The file containing the import
 
         Returns:
-            Resolved file path or None if resolution fails
+            Resolved file path (empty list if resolution fails)
         """
         import re
 
         # Extract import path
         match = re.search(r'''from\s+['"](.+?)['"]''', import_text)
         if not match:
-            return None
+            return []
 
         import_path = match.group(1)
         if not import_path:
-            return None
+            return []
 
         # Skip non-relative imports
         if not import_path.startswith('.'):
-            return None
+            return []
 
         source_dir = self._resolve_source_dir(source_file, base_dir)
         resolved = (source_dir / import_path).resolve()
 
         # Try direct path
         if resolved.exists() and resolved.is_file():
-            return resolved
+            return [resolved]
 
         # Try with TypeScript extensions first, then JS
         for ext in ['.ts', '.tsx', '.d.ts', '.js', '.jsx']:
             with_ext = resolved.with_suffix(ext)
             if with_ext.exists():
-                return with_ext
+                return [with_ext]
 
         # Try index file
         for index in ['index.ts', 'index.tsx', 'index.js']:
             index_path = resolved / index
             if index_path.exists():
-                return index_path
+                return [index_path]
 
-        return None
+        return []

@@ -6,22 +6,10 @@ for mapping Dart AST nodes to semantic chunks.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
-
-if TYPE_CHECKING:
-    from chunkhound.parsers.universal_engine import UniversalConcept
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = Any  # type: ignore
-
-# Import UniversalConcept at runtime
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 
@@ -105,7 +93,7 @@ class DartMapping(BaseMapping):
         Returns:
             Function name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "function")
 
         # Try to find identifier child node for function name
@@ -135,7 +123,7 @@ class DartMapping(BaseMapping):
         Returns:
             Class name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "class")
 
         # Handle regular classes, enums, and mixins
@@ -158,7 +146,7 @@ class DartMapping(BaseMapping):
         Returns:
             Method name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "method")
 
         # Handle method signatures within classes
@@ -197,7 +185,7 @@ class DartMapping(BaseMapping):
         Returns:
             List of parameter names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         parameters: list[str] = []
@@ -231,7 +219,7 @@ class DartMapping(BaseMapping):
         Returns:
             True if node should be included, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Exclude synthetic nodes or nodes without meaningful content
@@ -587,9 +575,9 @@ class DartMapping(BaseMapping):
 
         return [{"name": name, "value": value}]
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve import path for Dart.
 
         Attempts to resolve relative imports and local file imports.
@@ -600,22 +588,22 @@ class DartMapping(BaseMapping):
             source_file: Path to the file containing the import
 
         Returns:
-            Path to the imported file if resolvable, None otherwise
+            Path to the imported file (empty list if not found)
         """
         match = re.search(r"import\s+['\"](.+?)['\"]", import_text)
         if not match:
-            return None
+            return []
 
         path = match.group(1)
 
         # External package imports start with 'package:'
         if path.startswith("package:"):
-            return None
+            return []
 
         # Relative imports
         if path.startswith("./") or path.startswith("../"):
             resolved = (source_file.parent / path).resolve()
             if resolved.exists():
-                return resolved
+                return [resolved]
 
-        return None
+        return []

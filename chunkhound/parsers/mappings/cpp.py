@@ -6,22 +6,12 @@ for mapping C++ AST nodes to semantic chunks.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
-
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = Any
+from tree_sitter import Node as TSNode
 
 
 class CppMapping(BaseMapping):
@@ -229,7 +219,7 @@ class CppMapping(BaseMapping):
             ) @destructor_def
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract function name from a C++ function definition node.
 
         Args:
@@ -239,7 +229,7 @@ class CppMapping(BaseMapping):
         Returns:
             Function name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "function")
 
         # Look for identifier nodes in the declarator hierarchy
@@ -257,7 +247,7 @@ class CppMapping(BaseMapping):
 
         return self.get_fallback_name(node, "function")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract class name from a C++ class definition node.
 
         Args:
@@ -267,7 +257,7 @@ class CppMapping(BaseMapping):
         Returns:
             Class name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "class")
 
         # Look for the type_identifier child node
@@ -286,7 +276,7 @@ class CppMapping(BaseMapping):
 
         return self.get_fallback_name(node, "class")
 
-    def extract_namespace_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_namespace_name(self, node: TSNode | None, source: str) -> str:
         """Extract namespace name from a C++ namespace definition.
 
         Args:
@@ -296,7 +286,7 @@ class CppMapping(BaseMapping):
         Returns:
             Namespace name or fallback
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "namespace")
 
         # Look for the identifier child node
@@ -321,7 +311,7 @@ class CppMapping(BaseMapping):
         return self.get_fallback_name(node, "namespace")
 
     def extract_template_parameters(
-        self, node: "TSNode | None", source: str
+        self, node: TSNode | None, source: str
     ) -> list[str]:
         """Extract template parameters from a template declaration.
 
@@ -332,7 +322,7 @@ class CppMapping(BaseMapping):
         Returns:
             List of template parameter names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         parameters: list[str] = []
@@ -356,7 +346,7 @@ class CppMapping(BaseMapping):
         return parameters
 
     def extract_inheritance(
-        self, node: "TSNode | None", source: str
+        self, node: TSNode | None, source: str
     ) -> list[dict[str, str]]:
         """Extract inheritance information from a C++ class definition.
 
@@ -367,7 +357,7 @@ class CppMapping(BaseMapping):
         Returns:
             List of dictionaries with inheritance information
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         inheritance_info: list[dict[str, str]] = []
@@ -395,7 +385,7 @@ class CppMapping(BaseMapping):
 
         return inheritance_info
 
-    def extract_parameters(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter names and types from a C++ function node.
 
         Args:
@@ -405,7 +395,7 @@ class CppMapping(BaseMapping):
         Returns:
             List of parameter declarations
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         parameters: list[str] = []
@@ -424,7 +414,7 @@ class CppMapping(BaseMapping):
 
         return parameters
 
-    def is_constructor(self, node: "TSNode | None", source: str) -> bool:
+    def is_constructor(self, node: TSNode | None, source: str) -> bool:
         """Check if a function node represents a constructor.
 
         Args:
@@ -434,7 +424,7 @@ class CppMapping(BaseMapping):
         Returns:
             True if the function is a constructor, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Check if function name matches class name
@@ -450,7 +440,7 @@ class CppMapping(BaseMapping):
 
         return False
 
-    def is_destructor(self, node: "TSNode | None", source: str) -> bool:
+    def is_destructor(self, node: TSNode | None, source: str) -> bool:
         """Check if a function node represents a destructor.
 
         Args:
@@ -460,7 +450,7 @@ class CppMapping(BaseMapping):
         Returns:
             True if the function is a destructor, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Look for destructor_name in the declarator
@@ -470,7 +460,7 @@ class CppMapping(BaseMapping):
 
         return False
 
-    def is_template(self, node: "TSNode | None") -> bool:
+    def is_template(self, node: TSNode | None) -> bool:
         """Check if a node is part of a template declaration.
 
         Args:
@@ -479,7 +469,7 @@ class CppMapping(BaseMapping):
         Returns:
             True if the node is templated, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Check if parent is template_declaration
@@ -606,7 +596,7 @@ class CppMapping(BaseMapping):
         return None
 
     def extract_name(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for this concept."""
 
@@ -682,7 +672,7 @@ class CppMapping(BaseMapping):
         return "unnamed"
 
     def extract_content(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for this concept."""
 
@@ -700,7 +690,7 @@ class CppMapping(BaseMapping):
         return ""
 
     def extract_metadata(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract C++-specific metadata."""
 
@@ -812,9 +802,9 @@ class CppMapping(BaseMapping):
 
         return metadata
 
-    def _extract_return_type(self, func_node: "TSNode", source: str) -> str | None:
+    def _extract_return_type(self, func_node: TSNode, source: str) -> str | None:
         """Extract return type from a C++ function node."""
-        if not TREE_SITTER_AVAILABLE or func_node is None:
+        if func_node is None:
             return None
 
         # Look for type specifiers before the function declarator
@@ -830,7 +820,7 @@ class CppMapping(BaseMapping):
 
         return None
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a C++ node should be included as a chunk.
 
         Filters out very small nodes, forward declarations, and access specifiers.
@@ -842,7 +832,7 @@ class CppMapping(BaseMapping):
         Returns:
             True if node should be included, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Get the node text to check size
@@ -868,7 +858,7 @@ class CppMapping(BaseMapping):
         return True
 
     def extract_constants(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> list[dict[str, str]] | None:
         """Extract constant definitions from C++ code.
 
@@ -884,9 +874,6 @@ class CppMapping(BaseMapping):
         Returns:
             List of dictionaries with "name" and "value" keys, or None
         """
-        if not TREE_SITTER_AVAILABLE:
-            return None
-
         source = content.decode("utf-8")
         constants: list[dict[str, str]] = []
 
@@ -952,9 +939,9 @@ class CppMapping(BaseMapping):
 
         return constants if constants else None
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve C++ include to file path.
 
         Args:
@@ -963,7 +950,7 @@ class CppMapping(BaseMapping):
             source_file: Path to the file containing the import
 
         Returns:
-            Resolved absolute path if found, None otherwise (system includes)
+            Resolved absolute path (empty list for system includes or not found)
         """
         # Local includes: #include "file.h"
         local_match = re.search(r'#include\s*"(.+?)"', import_text)
@@ -973,13 +960,13 @@ class CppMapping(BaseMapping):
             # Try relative to source file
             resolved = (source_file.parent / include_path).resolve()
             if resolved.exists():
-                return resolved
+                return [resolved]
 
             # Try relative to base_dir and common include paths
             for prefix in ["", "include/", "src/", "inc/"]:
                 full_path = base_dir / prefix / include_path
                 if full_path.exists():
-                    return full_path
+                    return [full_path]
 
-        # System includes (#include <...>) - external, return None
-        return None
+        # System includes (#include <...>) - external, return empty list
+        return []

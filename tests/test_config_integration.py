@@ -219,3 +219,31 @@ def test_embedding_config_rerank_batch_size_invalid_silently_ignored(monkeypatch
 
     # Invalid value should be silently ignored (not in config dict)
     assert "rerank_batch_size" not in config
+
+
+def test_embedding_config_legacy_env_vars(monkeypatch, clean_environment):
+    """Test that single-underscore legacy env vars are read as fallbacks."""
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING_API_KEY", "legacy-key")
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING_BASE_URL", "http://legacy-url")
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING_PROVIDER", "legacy-provider")
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING_MODEL", "legacy-model")
+
+    config = EmbeddingConfig.load_from_env()
+
+    assert config["api_key"] == "legacy-key"
+    assert config["base_url"] == "http://legacy-url"
+    assert config["provider"] == "legacy-provider"
+    assert config["model"] == "legacy-model"
+
+
+def test_embedding_config_new_env_vars_take_precedence(monkeypatch, clean_environment):
+    """Test that canonical double-underscore env vars override legacy single-underscore vars."""
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING__API_KEY", "canonical-key")
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING_API_KEY", "legacy-key")
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING__MODEL", "canonical-model")
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING_MODEL", "legacy-model")
+
+    config = EmbeddingConfig.load_from_env()
+
+    assert config["api_key"] == "canonical-key"
+    assert config["model"] == "canonical-model"

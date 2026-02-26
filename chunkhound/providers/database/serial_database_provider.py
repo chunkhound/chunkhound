@@ -520,3 +520,14 @@ class SerialDatabaseProvider(ABC):
         """Optimize tables by compacting fragments and rebuilding indexes."""
         # Default no-op implementation
         pass
+
+    def should_optimize(self, operation: str = "") -> bool:
+        """Check if optimization is warranted.
+
+        Default returns False: assumes database self-manages optimization
+        (e.g., DuckDB's WAL/MVCC automatic checkpointing).
+
+        Override in providers that require explicit optimization decisions
+        (e.g., LanceDB fragment compaction threshold).
+        """
+        return False

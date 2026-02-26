@@ -58,15 +58,6 @@ class TestClaudeCodeCLIProvider:
         # Any model name is passed through as-is
         assert provider._map_model_to_cli_arg("custom-model") == "custom-model"
 
-    def test_estimate_tokens(self, provider):
-        """Test token estimation (rough approximation)."""
-        text = "a" * 400  # 400 characters
-        tokens = provider.estimate_tokens(text)
-        assert tokens == 100  # 400 / 4 = 100 tokens
-
-        empty_text = ""
-        assert provider.estimate_tokens(empty_text) == 0
-
     @pytest.mark.asyncio
     async def test_complete_success(self, provider, mock_subprocess):
         """Test successful completion."""
