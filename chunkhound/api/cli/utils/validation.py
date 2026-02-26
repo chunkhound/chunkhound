@@ -74,10 +74,10 @@ def validate_provider_args(
             )
             return False
     elif provider == "voyageai":
-        if not api_key:
+        if not api_key and not base_url:
             logger.error(
                 "VoyageAI API key required. Set CHUNKHOUND_EMBEDDING__API_KEY "
-                "or use --api-key"
+                "or use --api-key (not required when using a custom --base-url)"
             )
             return False
     else:

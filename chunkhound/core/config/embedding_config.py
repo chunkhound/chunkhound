@@ -318,7 +318,9 @@ class EmbeddingConfig(BaseSettings):
                 # Custom endpoints don't require API key
                 return True
         else:
-            # For other providers (voyageai, etc.), always require API key
+            # For voyageai with a custom endpoint, API key is optional
+            if self.base_url:
+                return True
             return self.api_key is not None
 
     def get_missing_config(self) -> list[str]:
@@ -343,8 +345,8 @@ class EmbeddingConfig(BaseSettings):
             elif is_official_openai_endpoint(self.base_url) and not self.api_key:
                 missing.append("api_key (set CHUNKHOUND_EMBEDDING__API_KEY)")
         else:
-            # For other providers (voyageai, etc.), always require API key
-            if not self.api_key:
+            # For voyageai with a custom endpoint, API key is optional
+            if not self.api_key and not self.base_url:
                 missing.append("api_key (set CHUNKHOUND_EMBEDDING__API_KEY)")
 
         return missing

@@ -120,6 +120,7 @@ class VoyageAIEmbeddingProvider:
         retry_delay: float = 1.0,
         max_tokens: int | None = None,
         rerank_batch_size: int | None = None,
+        base_url: str | None = None,
     ):
         """Initialize VoyageAI embedding provider.
 
@@ -133,6 +134,7 @@ class VoyageAIEmbeddingProvider:
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
             rerank_batch_size: Max documents per rerank batch (overrides default of 1000)
+            base_url: Custom API base URL (overrides https://api.voyageai.com/v1)
         """
         if not VOYAGEAI_AVAILABLE:
             raise ImportError(
@@ -160,11 +162,20 @@ class VoyageAIEmbeddingProvider:
         self._retry_delay = retry_delay
         self._max_tokens = max_tokens or model_config["context_length"]
         self._api_key = api_key
+        self._base_url = base_url
         self._model_config = model_config
         self._rerank_batch_size = rerank_batch_size
 
+        # Override SDK base URL for custom endpoints
+        if base_url:
+            voyageai.api_base = base_url
+
+        # For custom endpoints without an API key, pass a placeholder to satisfy
+        # the SDK's requirement — the server is expected to ignore the auth header
+        effective_api_key = api_key if api_key else ("no-key" if base_url else None)
+
         # Initialize client
-        self._client = voyageai.Client(api_key=api_key)
+        self._client = voyageai.Client(api_key=effective_api_key)
 
         # Model dimension mapping - built from configuration
         self._dimensions_map = {

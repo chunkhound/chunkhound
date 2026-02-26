@@ -142,6 +142,7 @@ class EmbeddingProviderFactory:
 
         # Extract VoyageAI-specific parameters
         api_key = config.get("api_key")
+        base_url = config.get("base_url")
         model = config.get("model")
         rerank_model = config.get("rerank_model")
         rerank_batch_size = config.get("rerank_batch_size")
@@ -152,7 +153,7 @@ class EmbeddingProviderFactory:
 
         logger.debug(
             f"Creating VoyageAI provider: model={model}, "
-            f"api_key={'***' if api_key else None}, "
+            f"base_url={base_url}, api_key={'***' if api_key else None}, "
             f"rerank_model={rerank_model}, "
             f"rerank_batch_size={rerank_batch_size}"
         )
@@ -167,6 +168,8 @@ class EmbeddingProviderFactory:
                 "timeout": config.get("timeout", 30),
                 "retry_attempts": config.get("max_retries", 3),
             }
+            if base_url is not None:
+                kwargs["base_url"] = base_url
             if rerank_model is not None:
                 kwargs["rerank_model"] = rerank_model
             if rerank_batch_size is not None:
