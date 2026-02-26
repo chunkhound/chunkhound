@@ -52,6 +52,7 @@ class ChunkHoundDaemon(MCPServerBase):
         self._initialization_complete = asyncio.Event()
         self._pid_poll_task: asyncio.Task | None = None
         self._client_manager = ClientManager(on_empty=self._on_all_clients_gone)
+        self._lock_written = False  # True only after we successfully bound the socket and wrote the lock
         delay_str = os.environ.get(
             "CHUNKHOUND_DAEMON_SHUTDOWN_DELAY", str(_DEFAULT_SHUTDOWN_DELAY)
         )
@@ -104,6 +105,7 @@ class ChunkHoundDaemon(MCPServerBase):
 
             # Write lock file so proxies can discover us
             self._discovery.write_lock(os.getpid(), self._socket_path)
+            self._lock_written = True
             self.debug_log(
                 f"Lock file written (pid={os.getpid()}, address={self._socket_path})"
             )
@@ -320,7 +322,8 @@ class ChunkHoundDaemon(MCPServerBase):
     async def _graceful_shutdown(self) -> None:
         """Stop background tasks, clean up services, remove lock file.
 
-        Always removes the lock file and socket, even if cleanup fails.
+        Only removes the lock file and socket if this daemon instance
+        successfully wrote the lock (i.e. won the startup race).
         """
         if self._pid_poll_task is not None and not self._pid_poll_task.done():
             self._pid_poll_task.cancel()
@@ -334,14 +337,17 @@ class ChunkHoundDaemon(MCPServerBase):
         except (asyncio.TimeoutError, Exception) as e:
             self.debug_log(f"Cleanup error (non-fatal): {e}")
 
-        # Always remove lock file and socket regardless of cleanup outcome
-        self._discovery.remove_lock()
+        # Only remove lock file and socket if we successfully bound the server.
+        # If two daemons race to start, the loser must not delete the winner's
+        # lock file or socket path — doing so would make the winner unreachable.
+        if self._lock_written:
+            self._discovery.remove_lock()
 
-        # Remove socket file on Unix; TCP loopback needs no cleanup
-        if sys.platform != "win32" and not self._socket_path.startswith("tcp:"):
-            try:
-                os.unlink(self._socket_path)
-            except FileNotFoundError:
-                pass
+            # Remove socket file on Unix; TCP loopback needs no cleanup
+            if sys.platform != "win32" and not self._socket_path.startswith("tcp:"):
+                try:
+                    os.unlink(self._socket_path)
+                except FileNotFoundError:
+                    pass
 
         self.debug_log("Daemon shutdown complete")
