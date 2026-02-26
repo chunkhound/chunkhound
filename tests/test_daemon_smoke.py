@@ -53,7 +53,7 @@ _MCP_INIT_PARAMS = {
 
 _SEARCH_REGEX_PARAMS = {
     "name": "search",
-    "arguments": {"pattern": "def authenticate", "type": "regex"},
+    "arguments": {"query": "def authenticate", "type": "regex"},
 }
 
 
@@ -160,7 +160,7 @@ async def pre_indexed_project_dir(tmp_path: Path) -> AsyncIterator[Path]:
     (tmp_path / ".chunkhound.json").write_text(json.dumps(config))
 
     # --- Index files (no embeddings — keeps tests API-key-free) ---
-    index_proc = await asyncio.create_subprocess_exec(
+    index_proc = await create_subprocess_exec_safe(
         _chunkhound_exe(), "index", str(tmp_path), "--no-embeddings",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -248,8 +248,8 @@ async def test_daemon_single_client_basic(pre_indexed_project_dir: Path) -> None
         # The result is a JSON string; parse and check for matches
         parsed = json.loads(text) if text.startswith("{") or text.startswith("[") else {"raw": text}
         # Should find 'def authenticate' in auth.py
-        assert "auth" in text.lower() or "authenticate" in text.lower() or parsed.get("total_results", 0) >= 0, (
-            f"Unexpected search result: {text[:500]}"
+        assert "auth" in text.lower() or "authenticate" in text.lower(), (
+            f"Expected auth-related results in search output: {text[:500]}"
         )
 
     finally:

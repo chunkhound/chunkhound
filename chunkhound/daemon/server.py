@@ -53,6 +53,7 @@ class ChunkHoundDaemon(MCPServerBase):
         self._pid_poll_task: asyncio.Task | None = None
         self._client_manager = ClientManager(on_empty=self._on_all_clients_gone)
         self._lock_written = False  # True only after we successfully bound the socket and wrote the lock
+        self._auth_token: str | None = None  # Set after reading the lock file we wrote
         delay_str = os.environ.get(
             "CHUNKHOUND_DAEMON_SHUTDOWN_DELAY", str(_DEFAULT_SHUTDOWN_DELAY)
         )
@@ -84,7 +85,7 @@ class ChunkHoundDaemon(MCPServerBase):
                 self.debug_log("Signal received — initiating graceful shutdown")
                 self._shutdown_event.set()
 
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             try:
                 loop.add_signal_handler(_signal.SIGTERM, _on_signal)
                 loop.add_signal_handler(_signal.SIGINT, _on_signal)
@@ -105,7 +106,21 @@ class ChunkHoundDaemon(MCPServerBase):
 
             # Write lock file so proxies can discover us
             self._discovery.write_lock(os.getpid(), self._socket_path)
+
+            # Post-write validation: on Windows two daemons can race to bind
+            # different OS-assigned ports and both write the lock.  Verify our
+            # PID is the one recorded; if not, the other daemon won — shut down.
+            written_lock = self._discovery.read_lock()
+            if written_lock is None or written_lock.get("pid") != os.getpid():
+                self.debug_log(
+                    "Lock file PID mismatch after write — another daemon won the race; "
+                    "shutting down"
+                )
+                self._shutdown_event.set()
+                return
+
             self._lock_written = True
+            self._auth_token = written_lock.get("auth_token")
             self.debug_log(
                 f"Lock file written (pid={os.getpid()}, address={self._socket_path})"
             )
@@ -161,6 +176,11 @@ class ChunkHoundDaemon(MCPServerBase):
             except asyncio.IncompleteReadError:
                 return
             if not isinstance(reg, dict) or reg.get("type") != "register":
+                return
+
+            # Auth token check — reject unknown clients silently to avoid
+            # leaking information about the expected token value.
+            if self._auth_token is not None and reg.get("auth_token") != self._auth_token:
                 return
 
             pid: int = reg.get("pid", 0)

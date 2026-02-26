@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -23,6 +24,8 @@ from .process import pid_alive
 
 # Lock file relative to project directory
 _LOCK_FILE_REL = ".chunkhound/daemon.lock"
+# Starter lock — prevents two proxies from both spawning a daemon simultaneously
+_STARTER_LOCK_REL = ".chunkhound/daemon.starter.lock"
 # Socket directory (Linux/macOS)
 _SOCKET_DIR = "/tmp"
 # Startup polling interval and timeout
@@ -43,6 +46,10 @@ class DaemonDiscovery:
     def get_lock_path(self) -> Path:
         """Return the absolute path of the lock file."""
         return self._project_dir / _LOCK_FILE_REL
+
+    def get_starter_lock_path(self) -> Path:
+        """Return the absolute path of the starter lock file."""
+        return self._project_dir / _STARTER_LOCK_REL
 
     def get_ipc_address(self) -> str:
         """Derive a unique IPC address from the project directory.
@@ -67,8 +74,8 @@ class DaemonDiscovery:
         """Read and parse the lock file.
 
         Returns:
-            Dict with keys ``pid``, ``socket_path``, ``started_at``, or ``None``
-            if the file does not exist or is corrupt.
+            Dict with keys ``pid``, ``socket_path``, ``started_at``,
+            ``auth_token``, or ``None`` if the file does not exist or is corrupt.
         """
         lock_path = self.get_lock_path()
         try:
@@ -81,20 +88,87 @@ class DaemonDiscovery:
             return None
 
     def write_lock(self, pid: int, socket_path: str) -> None:
-        """Write the lock file atomically."""
+        """Write the lock file atomically with a fresh auth token.
+
+        On POSIX the file is chmod'd to 0o600 so only the owning user can
+        read the auth token.
+        """
         lock_path = self.get_lock_path()
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"pid": pid, "socket_path": socket_path, "started_at": time.time()}
+        data = {
+            "pid": pid,
+            "socket_path": socket_path,
+            "started_at": time.time(),
+            "auth_token": secrets.token_hex(32),
+        }
         tmp_path = lock_path.with_suffix(".lock.tmp")
         with open(tmp_path, "w") as f:
             json.dump(data, f)
         tmp_path.replace(lock_path)  # replace() is atomic and overwrites on Windows
+        if sys.platform != "win32":
+            try:
+                os.chmod(lock_path, 0o600)
+            except OSError:
+                pass
 
     def remove_lock(self) -> None:
         """Remove the lock file, ignoring errors if it does not exist."""
         try:
             self.get_lock_path().unlink()
         except FileNotFoundError:
+            pass
+
+    # ------------------------------------------------------------------
+    # Starter lock (prevents duplicate-daemon race on concurrent proxy start)
+    # ------------------------------------------------------------------
+
+    def _acquire_starter_lock(self) -> bool:
+        """Try to atomically acquire the starter lock.
+
+        Uses ``open(..., 'x')`` which maps to ``O_CREAT|O_EXCL`` — atomic on
+        POSIX and Windows NTFS.  If the lock file already exists, checks whether
+        the stored PID is still alive; if it is dead (stale lock), removes the
+        file and retries once.
+
+        Returns:
+            True if this process acquired the lock, False if another live
+            process already holds it.
+        """
+        starter_path = self.get_starter_lock_path()
+        starter_path.parent.mkdir(parents=True, exist_ok=True)
+
+        for attempt in range(2):
+            try:
+                with open(starter_path, "x") as f:
+                    json.dump({"pid": os.getpid()}, f)
+                return True
+            except FileExistsError:
+                # Check whether the holder is still alive
+                try:
+                    with open(starter_path) as f:
+                        holder = json.load(f)
+                    holder_pid = holder.get("pid", 0)
+                    if isinstance(holder_pid, int) and pid_alive(holder_pid):
+                        return False  # Another live process holds the lock
+                    # Stale — remove and retry once
+                    starter_path.unlink(missing_ok=True)
+                except (FileNotFoundError, json.JSONDecodeError, OSError):
+                    # Race: file disappeared between exists-check and open
+                    if attempt == 0:
+                        continue
+                    return False
+
+        return False
+
+    def _release_starter_lock(self) -> None:
+        """Release the starter lock if this process holds it."""
+        starter_path = self.get_starter_lock_path()
+        try:
+            with open(starter_path) as f:
+                holder = json.load(f)
+            if holder.get("pid") == os.getpid():
+                starter_path.unlink(missing_ok=True)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
             pass
 
     # ------------------------------------------------------------------
@@ -174,9 +248,7 @@ class DaemonDiscovery:
         # diagnosable (especially on Windows where the IPC transport may fail).
         log_path = self._project_dir / ".chunkhound" / "daemon.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_file = open(log_path, "w")  # child inherits the fd; parent closes immediately
-
-        try:
+        with open(log_path, "w") as log_file:
             subprocess.Popen(
                 cmd,
                 start_new_session=True,
@@ -186,16 +258,13 @@ class DaemonDiscovery:
                 env=env,
                 cwd=str(self._project_dir),
             )
-        finally:
-            log_file.close()
 
     async def find_or_start_daemon(self, args: Any) -> str:
         """Return the IPC address of the running daemon, starting one if needed.
 
-        If a daemon is already starting (lock file with live PID exists but
-        not yet connectable), waits for it rather than starting a second
-        daemon.  This prevents duplicate-daemon races when two proxies start
-        simultaneously.
+        Uses an atomic starter lock to prevent two proxies from simultaneously
+        spawning duplicate daemons (TOCTOU race).  The proxy that acquires the
+        lock is the sole daemon starter; others skip straight to polling.
 
         On Windows the port is OS-assigned at bind time and stored in the lock
         file, so we always read the lock file to obtain the actual address
@@ -239,21 +308,49 @@ class DaemonDiscovery:
                 except FileNotFoundError:
                     pass
 
-        # No live daemon — start one
-        self._start_daemon_subprocess(args)
+        # No live daemon — race to become the sole daemon starter.
+        if self._acquire_starter_lock():
+            try:
+                self._start_daemon_subprocess(args)
+            finally:
+                # Release after daemon is running (or failed to start); poll
+                # loop below handles the "not yet connectable" case.
+                # We keep the lock until the daemon wrote its lock file so that
+                # concurrent proxies that lose the race don't prematurely try to
+                # spawn a second daemon — they'll poll in the section below.
+                pass
+            # Poll until connectable; read the lock file to get the actual address
+            # (critical on Windows where the port is only known after daemon binds)
+            deadline = time.monotonic() + _STARTUP_TIMEOUT
+            try:
+                while time.monotonic() < deadline:
+                    lock = self.read_lock()
+                    if lock is not None:
+                        actual_address = str(lock.get("socket_path", initial_address))
+                        if await self._socket_connectable(actual_address):
+                            return actual_address
+                    await asyncio.sleep(_STARTUP_POLL_INTERVAL)
+            finally:
+                self._release_starter_lock()
 
-        # Poll until connectable; read the lock file to get the actual address
-        # (critical on Windows where the port is only known after daemon binds)
-        deadline = time.monotonic() + _STARTUP_TIMEOUT
-        while time.monotonic() < deadline:
-            lock = self.read_lock()
-            if lock is not None:
-                actual_address = str(lock.get("socket_path", initial_address))
-                if await self._socket_connectable(actual_address):
-                    return actual_address
-            await asyncio.sleep(_STARTUP_POLL_INTERVAL)
+            raise RuntimeError(
+                f"ChunkHound daemon did not start within {_STARTUP_TIMEOUT}s "
+                f"(address: {initial_address})"
+            )
+        else:
+            # Another proxy is starting the daemon — poll until it's ready.
+            deadline = time.monotonic() + _STARTUP_TIMEOUT
+            while time.monotonic() < deadline:
+                lock = self.read_lock()
+                if lock is not None:
+                    pid = lock.get("pid")
+                    actual_address = str(lock.get("socket_path", initial_address))
+                    if isinstance(pid, int) and pid_alive(pid):
+                        if await self._socket_connectable(actual_address):
+                            return actual_address
+                await asyncio.sleep(_STARTUP_POLL_INTERVAL)
 
-        raise RuntimeError(
-            f"ChunkHound daemon did not start within {_STARTUP_TIMEOUT}s "
-            f"(address: {initial_address})"
-        )
+            raise RuntimeError(
+                f"ChunkHound daemon did not become reachable within "
+                f"{_STARTUP_TIMEOUT}s (address: {initial_address})"
+            )
