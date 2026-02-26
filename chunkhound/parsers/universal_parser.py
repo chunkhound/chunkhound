@@ -368,7 +368,7 @@ class UniversalParser:
         return result
 
     def _validate_and_split_chunk(
-        self, chunk: UniversalChunk
+        self, chunk: UniversalChunk, content: str | None = None
     ) -> list[UniversalChunk]:
         """Validate chunk size and split if necessary.
 
