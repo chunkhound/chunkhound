@@ -21,7 +21,7 @@ from pathlib import Path
 
 # Import Windows-safe subprocess utilities
 from tests.utils.windows_subprocess import create_subprocess_exec_safe, get_safe_subprocess_env
-from tests.utils.windows_compat import windows_safe_tempdir
+from tests.utils.windows_compat import windows_safe_tempdir, get_fs_event_timeout
 from tests.utils import SubprocessJsonRpcClient
 
 # Add parent directory to path to import chunkhound
@@ -275,6 +275,9 @@ sys.exit(asyncio.run(test()))
 
             try:
                 # 1. Send initialize request
+                # Use a platform-aware timeout: Windows CI needs more time for
+                # uv run startup (often 20-30s on hosted runners).
+                init_timeout = max(10.0, get_fs_event_timeout())
                 init_result = await client.send_request(
                     "initialize",
                     {
@@ -282,7 +285,7 @@ sys.exit(asyncio.run(test()))
                         "capabilities": {},
                         "clientInfo": {"name": "test", "version": "1.0"}
                     },
-                    timeout=10.0
+                    timeout=init_timeout
                 )
 
                 # Verify response structure
