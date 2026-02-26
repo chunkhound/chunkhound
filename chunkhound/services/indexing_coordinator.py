@@ -2655,11 +2655,7 @@ class IndexingCoordinator(BaseService):
                 sorted(
                     [
                         str(x)
-                        for x in (
-                            list(cfg_excludes)
-                            if not isinstance(cfg_excludes, tuple)
-                            else list(cfg_excludes)
-                        )
+                        for x in list(cfg_excludes)
                     ]
                 )
             )
