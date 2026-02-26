@@ -219,7 +219,7 @@ class JSXMapping(JavaScriptMapping):
             """
         return None
 
-    def extract_component_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_component_name(self, node: TSNode | None, source: str) -> str:
         """Extract React component name from a function definition.
 
         Args:
@@ -241,7 +241,7 @@ class JSXMapping(JavaScriptMapping):
 
         return name
 
-    def extract_jsx_element_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_jsx_element_name(self, node: TSNode | None, source: str) -> str:
         """Extract JSX element name.
 
         Args:
@@ -270,7 +270,7 @@ class JSXMapping(JavaScriptMapping):
 
         return self.get_fallback_name(node, "jsx_element")
 
-    def extract_hook_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_hook_name(self, node: TSNode | None, source: str) -> str:
         """Extract React hook name from a hook call.
 
         Args:
@@ -299,7 +299,7 @@ class JSXMapping(JavaScriptMapping):
 
         return self.get_fallback_name(node, "hook")
 
-    def is_react_component(self, node: "TSNode | None", source: str) -> bool:
+    def is_react_component(self, node: TSNode | None, source: str) -> bool:
         """Check if a function is a React component.
 
         Args:
@@ -325,7 +325,7 @@ class JSXMapping(JavaScriptMapping):
 
         return False
 
-    def extract_jsx_props(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_jsx_props(self, node: TSNode | None, source: str) -> list[str]:
         """Extract JSX props from a JSX element.
 
         Args:
@@ -360,7 +360,7 @@ class JSXMapping(JavaScriptMapping):
 
         return props
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a JSX node should be included as a chunk.
 
         Extends JavaScript logic with JSX-specific considerations.
@@ -420,7 +420,7 @@ class JSXMapping(JavaScriptMapping):
         # Use base JavaScript cleaning
         return self.clean_comment_text(text)
 
-    def resolve_import_path(self, import_text: str, base_dir: Path, source_file: Path) -> Path | None:
+    def resolve_import_paths(self, import_text: str, base_dir: Path, source_file: Path) -> list[Path]:
         """Resolve relative import path to absolute file path.
 
         Args:
@@ -429,24 +429,24 @@ class JSXMapping(JavaScriptMapping):
             source_file: Source file containing the import
 
         Returns:
-            Resolved absolute path or None if not resolvable
+            Resolved absolute path (empty list if not resolvable)
         """
         match = re.search(r'''(?:from\s+['"](.+?)['"]|require\s*\(\s*['"](.+?)['"]\s*\))''', import_text)
         if not match:
-            return None
+            return []
         import_path = match.group(1) or match.group(2)
         if not import_path or not import_path.startswith('.'):
-            return None
+            return []
         source_dir = self._resolve_source_dir(source_file, base_dir)
         resolved = (source_dir / import_path).resolve()
         if resolved.exists() and resolved.is_file():
-            return resolved
+            return [resolved]
         for ext in ['.js', '.jsx', '.ts', '.tsx']:
             with_ext = resolved.with_suffix(ext)
             if with_ext.exists():
-                return with_ext
+                return [with_ext]
         for index in ['index.js', 'index.jsx', 'index.ts', 'index.tsx']:
             index_path = resolved / index
             if index_path.exists():
-                return index_path
-        return None
+                return [index_path]
+        return []

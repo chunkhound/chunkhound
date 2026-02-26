@@ -349,16 +349,16 @@ class HclMapping(BaseMapping):
             return "expression"
         return t
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self,
         import_text: str,
         base_dir: Path,
         source_file: Path,
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve HCL module source to file path.
 
         HCL modules use source = "./path" for local modules.
-        Remote sources (registry, git, s3) return None.
+        Remote sources (registry, git, s3) return empty list.
 
         Args:
             import_text: The raw import statement text (module block)
@@ -366,18 +366,18 @@ class HclMapping(BaseMapping):
             source_file: File containing the import
 
         Returns:
-            Resolved file path or None if external/unresolvable
+            Resolved file path (empty list if external/unresolvable)
         """
         # Look for source = "..." pattern
         match = re.search(r'source\s*=\s*"([^"]+)"', import_text)
         if not match:
-            return None
+            return []
 
         source = match.group(1)
 
         # Only resolve local paths (start with ./ or ../)
         if not source.startswith(("./", "../")):
-            return None  # Remote module (registry, git, etc.)
+            return []  # Remote module (registry, git, etc.)
 
         # Resolve relative to source file's directory
         source_dir = source_file.parent
@@ -387,13 +387,13 @@ class HclMapping(BaseMapping):
         if resolved.is_dir():
             main_tf = resolved / "main.tf"
             if main_tf.exists():
-                return main_tf
+                return [main_tf]
             # Try any .tf file
             tf_files = list(resolved.glob("*.tf"))
             if tf_files:
-                return tf_files[0]
+                return [tf_files[0]]
 
-        return None
+        return []
 
     def extract_constants(
         self,

@@ -66,7 +66,7 @@ class VueTemplateMapping(BaseMapping):
             (comment) @definition
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Not applicable for Vue templates.
 
         Args:
@@ -78,7 +78,7 @@ class VueTemplateMapping(BaseMapping):
         """
         return ""
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Not applicable for Vue templates.
 
         Args:
@@ -236,7 +236,7 @@ class VueTemplateMapping(BaseMapping):
         """
 
     def extract_name(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for this concept.
 
@@ -338,7 +338,7 @@ class VueTemplateMapping(BaseMapping):
         return "unnamed"
 
     def extract_content(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for this concept.
 
@@ -366,7 +366,7 @@ class VueTemplateMapping(BaseMapping):
         return ""
 
     def extract_metadata(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract Vue template-specific metadata from captures.
 
@@ -482,12 +482,12 @@ class VueTemplateMapping(BaseMapping):
 
         return metadata
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self,
         import_text: str,
         base_dir: Path,
         source_file: Path,
-    ) -> Path | None:
+    ) -> list[Path]:
         """Vue templates don't have imports.
 
         Imports in Vue SFCs are in the <script> section,
@@ -499,6 +499,6 @@ class VueTemplateMapping(BaseMapping):
             source_file: File containing the import
 
         Returns:
-            None - templates don't have imports
+            Empty list - templates don't have imports
         """
-        return None
+        return []

@@ -195,7 +195,7 @@ class TSXMapping(TypeScriptMapping):
 
         return base_query + tsx_comment_query
 
-    def extract_component_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_component_name(self, node: TSNode | None, source: str) -> str:
         """Extract React component name from a typed function definition.
 
         Args:
@@ -217,7 +217,7 @@ class TSXMapping(TypeScriptMapping):
 
         return name
 
-    def extract_jsx_element_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_jsx_element_name(self, node: TSNode | None, source: str) -> str:
         """Extract JSX element name.
 
         Args:
@@ -246,7 +246,7 @@ class TSXMapping(TypeScriptMapping):
 
         return self.get_fallback_name(node, "jsx_element")
 
-    def extract_hook_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_hook_name(self, node: TSNode | None, source: str) -> str:
         """Extract React hook name from a typed hook call.
 
         Args:
@@ -276,7 +276,7 @@ class TSXMapping(TypeScriptMapping):
         return self.get_fallback_name(node, "hook")
 
     def extract_component_props_type(
-        self, node: "TSNode | None", source: str
+        self, node: TSNode | None, source: str
     ) -> str | None:
         """Extract component props type annotation.
 
@@ -322,7 +322,7 @@ class TSXMapping(TypeScriptMapping):
 
         return None
 
-    def extract_hook_types(self, node: "TSNode | None", source: str) -> dict[str, str]:
+    def extract_hook_types(self, node: TSNode | None, source: str) -> dict[str, str]:
         """Extract type information from a typed React hook.
 
         Args:
@@ -368,7 +368,7 @@ class TSXMapping(TypeScriptMapping):
 
         return types
 
-    def is_react_component(self, node: "TSNode | None", source: str) -> bool:
+    def is_react_component(self, node: TSNode | None, source: str) -> bool:
         """Check if a function is a typed React component.
 
         Args:
@@ -398,7 +398,7 @@ class TSXMapping(TypeScriptMapping):
 
         return False
 
-    def extract_jsx_props(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_jsx_props(self, node: TSNode | None, source: str) -> list[str]:
         """Extract JSX props from a JSX element.
 
         Args:
@@ -433,7 +433,7 @@ class TSXMapping(TypeScriptMapping):
 
         return props
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a TSX node should be included as a chunk.
 
         Extends TypeScript logic with TSX-specific considerations.
@@ -505,7 +505,7 @@ class TSXMapping(TypeScriptMapping):
 
     def create_enhanced_chunk(
         self,
-        node: "TSNode | None",
+        node: TSNode | None,
         source: str,
         file_path: Path,
         chunk_type: ChunkType,
@@ -561,7 +561,7 @@ class TSXMapping(TypeScriptMapping):
 
         return chunk
 
-    def resolve_import_path(self, import_text: str, base_dir: Path, source_file: Path) -> Path | None:
+    def resolve_import_paths(self, import_text: str, base_dir: Path, source_file: Path) -> list[Path]:
         """Resolve relative import path to absolute file path.
 
         Args:
@@ -570,24 +570,24 @@ class TSXMapping(TypeScriptMapping):
             source_file: Source file containing the import
 
         Returns:
-            Resolved absolute path or None if not resolvable
+            Resolved absolute path (empty list if not resolvable)
         """
         match = re.search(r'''from\s+['"](.+?)['"]''', import_text)
         if not match:
-            return None
+            return []
         import_path = match.group(1)
         if not import_path or not import_path.startswith('.'):
-            return None
+            return []
         source_dir = self._resolve_source_dir(source_file, base_dir)
         resolved = (source_dir / import_path).resolve()
         if resolved.exists() and resolved.is_file():
-            return resolved
+            return [resolved]
         for ext in ['.ts', '.tsx', '.d.ts', '.js', '.jsx']:
             with_ext = resolved.with_suffix(ext)
             if with_ext.exists():
-                return with_ext
+                return [with_ext]
         for index in ['index.ts', 'index.tsx', 'index.js']:
             index_path = resolved / index
             if index_path.exists():
-                return index_path
-        return None
+                return [index_path]
+        return []

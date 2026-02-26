@@ -138,7 +138,7 @@ class CMapping(BaseMapping):
             ) @init_var_declaration
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract function name from a C function definition node.
 
         Args:
@@ -166,7 +166,7 @@ class CMapping(BaseMapping):
 
         return self.get_fallback_name(node, "function")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract struct/union/enum name from a C definition node.
 
         Args:
@@ -195,7 +195,7 @@ class CMapping(BaseMapping):
 
         return self.get_fallback_name(node, "struct")
 
-    def extract_parameters(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter names and types from a C function node.
 
         Args:
@@ -224,7 +224,7 @@ class CMapping(BaseMapping):
 
         return parameters
 
-    def extract_preprocessor_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_preprocessor_name(self, node: TSNode | None, source: str) -> str:
         """Extract name from a preprocessor directive.
 
         Args:
@@ -260,7 +260,7 @@ class CMapping(BaseMapping):
 
         return self.get_fallback_name(node, "preprocessor")
 
-    def extract_variable_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_variable_name(self, node: TSNode | None, source: str) -> str:
         """Extract variable name from a C variable declaration.
 
         Args:
@@ -285,7 +285,7 @@ class CMapping(BaseMapping):
 
         return self.get_fallback_name(node, "variable")
 
-    def extract_typedef_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_typedef_name(self, node: TSNode | None, source: str) -> str:
         """Extract typedef name from a C typedef definition.
 
         Args:
@@ -396,7 +396,7 @@ class CMapping(BaseMapping):
         return None
 
     def extract_name(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for this concept."""
 
@@ -453,7 +453,7 @@ class CMapping(BaseMapping):
         return "unnamed"
 
     def extract_content(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for this concept."""
 
@@ -471,7 +471,7 @@ class CMapping(BaseMapping):
         return ""
 
     def extract_metadata(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract C-specific metadata."""
 
@@ -544,7 +544,7 @@ class CMapping(BaseMapping):
 
         return metadata
 
-    def _extract_return_type(self, func_node: "TSNode", source: str) -> str | None:
+    def _extract_return_type(self, func_node: TSNode, source: str) -> str | None:
         """Extract return type from a C function node."""
         if func_node is None:
             return None
@@ -563,7 +563,7 @@ class CMapping(BaseMapping):
         return None
 
     def _extract_typedef_underlying_type(
-        self, typedef_node: "TSNode", source: str
+        self, typedef_node: TSNode, source: str
     ) -> str | None:
         """Extract underlying type from a typedef definition."""
         if typedef_node is None:
@@ -583,7 +583,7 @@ class CMapping(BaseMapping):
 
         return None
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a C node should be included as a chunk.
 
         Filters out very small nodes and forward declarations.
@@ -615,7 +615,7 @@ class CMapping(BaseMapping):
         return True
 
     def extract_constants(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> list[dict[str, str]] | None:
         """Extract constant definitions from C code.
 
@@ -724,9 +724,9 @@ class CMapping(BaseMapping):
 
         return constants if constants else None
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve C include to file path.
 
         Args:
@@ -735,7 +735,7 @@ class CMapping(BaseMapping):
             source_file: Path to the file containing the import
 
         Returns:
-            Resolved absolute path if found, None otherwise (system includes)
+            Resolved absolute path (empty list for system includes or not found)
         """
         # Local includes: #include "file.h"
         local_match = re.search(r'#include\s*"(.+?)"', import_text)
@@ -745,13 +745,13 @@ class CMapping(BaseMapping):
             # Try relative to source file
             resolved = (source_file.parent / include_path).resolve()
             if resolved.exists():
-                return resolved
+                return [resolved]
 
             # Try relative to base_dir and common include paths
             for prefix in ["", "include/", "src/", "inc/"]:
                 full_path = base_dir / prefix / include_path
                 if full_path.exists():
-                    return full_path
+                    return [full_path]
 
-        # System includes (#include <...>) - external, return None
-        return None
+        # System includes (#include <...>) - external, return empty list
+        return []

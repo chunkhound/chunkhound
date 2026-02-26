@@ -374,13 +374,13 @@ class MappingAdapter(LanguageMapping):
             return self.base_mapping.extract_constants(concept, captures, content)
         return None
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self,
         import_text: str,
         base_dir: Path,
         source_file: Path,
-    ) -> Path | None:
-        """Resolve import statement to file path by delegating to base mapping.
+    ) -> list[Path]:
+        """Resolve import statement to file paths by delegating to base mapping.
 
         Args:
             import_text: The import statement text to resolve
@@ -388,8 +388,8 @@ class MappingAdapter(LanguageMapping):
             source_file: Path to the source file containing the import
 
         Returns:
-            Resolved path or None if unresolvable
+            List of resolved paths (empty list if unresolvable)
         """
-        return self.base_mapping.resolve_import_path(
+        return self.base_mapping.resolve_import_paths(
             import_text, base_dir, source_file
         )

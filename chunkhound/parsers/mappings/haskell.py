@@ -495,9 +495,9 @@ class HaskellMapping(BaseMapping):
 
         return False
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve import path for Haskell.
 
         Haskell module resolution is complex and typically handled by the build system.
@@ -508,7 +508,7 @@ class HaskellMapping(BaseMapping):
             source_file: Path to the file containing the import
 
         Returns:
-            None (Haskell module resolution is complex, not file-based)
+            Empty list (Haskell module resolution is complex, not file-based)
         """
-        # Haskell module resolution is complex, return None
-        return None
+        # Haskell module resolution is complex, return empty list
+        return []
