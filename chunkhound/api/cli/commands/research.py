@@ -101,6 +101,7 @@ async def research_command(args: argparse.Namespace, config: Config) -> None:
                 llm_manager=llm_manager,
                 query=args.query,
                 progress=tree_progress,
+                path=args.path_filter,
                 config=config,
             )
 

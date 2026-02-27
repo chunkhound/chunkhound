@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import sys
-import os
 import logging
+import os
+import sys
 import warnings
 
 # CRITICAL: Suppress SWIG warnings that break JSON-RPC protocol in CI
@@ -22,21 +22,19 @@ import warnings
 warnings.filterwarnings(
     "ignore", message=".*swigvarlink.*", category=DeprecationWarning
 )
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from typing import Any
-
-from typing import TYPE_CHECKING
+from collections.abc import AsyncIterator  # noqa: E402
+from contextlib import asynccontextmanager  # noqa: E402
+from typing import TYPE_CHECKING, Any  # noqa: E402
 
 # Try to import the official MCP SDK; if unavailable, we'll fall back to a
 # minimal stdio JSON-RPC loop sufficient for tests that only exercise the
 # initialize handshake.
 _MCP_AVAILABLE = True
 try:  # runtime path
-    import mcp.server.stdio  # type: ignore
-    import mcp.types as types  # type: ignore
-    from mcp.server import Server  # type: ignore
-    from mcp.server.models import InitializationOptions  # type: ignore
+    import mcp.server.stdio  # type: ignore  # noqa: E402
+    import mcp.types as types  # type: ignore  # noqa: E402
+    from mcp.server import Server  # type: ignore  # noqa: E402
+    from mcp.server.models import InitializationOptions  # type: ignore  # noqa: E402
 except ImportError:  # pragma: no cover - optional dependency path
     _MCP_AVAILABLE = False
 
@@ -46,12 +44,12 @@ if TYPE_CHECKING:  # type-checkers only; avoid runtime hard deps at import
     from mcp.server import Server  # noqa: F401
     from mcp.server.models import InitializationOptions  # noqa: F401
 
-from chunkhound.core.config.config import Config
-from chunkhound.version import __version__
+from chunkhound.core.config.config import Config  # noqa: E402
+from chunkhound.version import __version__  # noqa: E402
 
-from .base import MCPServerBase
-from .common import handle_tool_call, has_reranker_support
-from .tools import TOOL_REGISTRY
+from .base import MCPServerBase  # noqa: E402
+from .common import handle_tool_call, has_reranker_support  # noqa: E402
+from .tools import TOOL_REGISTRY  # noqa: E402
 
 # CRITICAL: Disable ALL logging to prevent JSON-RPC corruption
 logging.disable(logging.CRITICAL)
@@ -96,17 +94,21 @@ class StdioMCPServer(MCPServerBase):
                             sys.path.insert(0, path)
                 # Best-effort: import test helper if available
                 try:
-                    __import__("sitecustomize")  # noqa: WPS433
+                    __import__("sitecustomize")
                 except Exception:
                     pass
 
                 # Also patch Codex provider directly to guarantee stubbed exec
                 try:
-                    from chunkhound.providers.llm.codex_cli_provider import (  # noqa: WPS433
+                    from chunkhound.providers.llm.codex_cli_provider import (
                         CodexCLIProvider,
                     )
 
-                    async def _stub_run_exec(self, text, cwd=None, max_tokens=1024, timeout=None, model=None):  # type: ignore[override]
+                    async def _stub_run_exec(  # type: ignore[override]
+                        self, text, cwd=None,
+                        max_tokens=1024, timeout=None,
+                        model=None,
+                    ):
                         mark = os.getenv("CH_TEST_CODEX_MARK_FILE")
                         if mark:
                             try:
@@ -132,7 +134,7 @@ class StdioMCPServer(MCPServerBase):
             # Defer server creation; fallback path implemented in run()
             self.server = None  # type: ignore
         else:
-            from mcp.server import Server  # noqa: WPS433
+            from mcp.server import Server
             self.server: Server = Server("ChunkHound Code Search")
 
         # Event to signal initialization completion
@@ -256,8 +258,8 @@ class StdioMCPServer(MCPServerBase):
         try:
             if _MCP_AVAILABLE:
                 # Set initialization options with capabilities
-                from mcp.server.lowlevel import NotificationOptions  # noqa: WPS433
-                from mcp.server.models import InitializationOptions  # noqa: WPS433
+                from mcp.server.lowlevel import NotificationOptions
+                from mcp.server.models import InitializationOptions
 
                 init_options = InitializationOptions(
                     server_name="ChunkHound Code Search",
@@ -271,7 +273,7 @@ class StdioMCPServer(MCPServerBase):
                 # Run with lifespan management
                 async with self.server_lifespan():
                     # Run the stdio server
-                    import mcp.server.stdio  # noqa: WPS433
+                    import mcp.server.stdio
                     async with mcp.server.stdio.stdio_server() as (
                         read_stream,
                         write_stream,
@@ -283,8 +285,9 @@ class StdioMCPServer(MCPServerBase):
                             init_options,
                         )
             else:
-                # Minimal fallback stdio: read initialize request, respond with matching ID
-                # so tests can proceed without the official MCP SDK.
+                # Minimal fallback stdio: read initialize request,
+                # respond with matching ID so tests can proceed
+                # without the official MCP SDK.
                 import json
 
                 # Read one line from stdin (the initialize request)
@@ -302,7 +305,10 @@ class StdioMCPServer(MCPServerBase):
                     "id": request_id,  # Match client's request ID per JSON-RPC spec
                     "result": {
                         "protocolVersion": "2024-11-05",
-                        "serverInfo": {"name": "ChunkHound Code Search", "version": __version__},
+                        "serverInfo": {
+                            "name": "ChunkHound Code Search",
+                            "version": __version__,
+                        },
                         "capabilities": {"tools": {}},  # Advertise tools capability
                     },
                 }

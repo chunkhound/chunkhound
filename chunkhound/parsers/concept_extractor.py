@@ -52,16 +52,16 @@ class LanguageMapping(Protocol):
         """
         ...
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self,
         import_text: str,
         base_dir: Path,
         source_file: Path,
-    ) -> Path | None:
-        """Resolve import statement to file path.
+    ) -> list[Path]:
+        """Resolve import to multiple file paths.
 
-        Each language implements its own import resolution logic.
-        Returns None for external/unresolvable imports.
+        Supports multi-import statements (e.g., `from x import a, b, c`).
+        Returns empty list if not found or external.
 
         Args:
             import_text: The raw import statement text
@@ -69,7 +69,7 @@ class LanguageMapping(Protocol):
             source_file: File containing the import
 
         Returns:
-            Resolved file path or None if external/unresolvable
+            List of resolved file paths (empty list if not found/external)
         """
         ...
 

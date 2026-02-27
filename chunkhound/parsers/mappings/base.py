@@ -466,15 +466,15 @@ class BaseMapping(ABC):
             source_dir = base_dir / source_file.parent
         return source_dir
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self,
         import_text: str,
         base_dir: Path,
         source_file: Path,
-    ) -> Path | None:
-        """Resolve import statement to file path.
+    ) -> list[Path]:
+        """Resolve import statement to file paths.
 
-        Default implementation returns None (no import resolution).
+        Default implementation returns empty list (no import resolution).
         Override in language-specific subclasses.
 
         Args:
@@ -483,14 +483,14 @@ class BaseMapping(ABC):
             source_file: File containing the import
 
         Returns:
-            Resolved file path or None if external/unresolvable
+            List of resolved file paths (empty list if not found/external)
         """
-        return None
+        return []
 
     def extract_constants(
         self,
         concept: "UniversalConcept",
-        captures: dict[str, "TSNode"],
+        captures: dict[str, TSNode],
         content: bytes,
     ) -> list[dict[str, str]] | None:
         """Extract constants from captures.

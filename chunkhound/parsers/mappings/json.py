@@ -253,7 +253,7 @@ class JsonMapping(BaseMapping):
             # Store formatted version in metadata for cases where pretty-printed JSON is needed
             try:
                 metadata["formatted_json"] = json.dumps(data, indent=2)
-            except:
+            except Exception:
                 pass  # Skip if formatting fails
 
         return metadata
@@ -284,14 +284,14 @@ class JsonMapping(BaseMapping):
         else:
             return 1
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self,
         import_text: str,
         base_dir: Path,
         source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Data formats don't have imports."""
-        return None
+        return []
 
     def extract_constants(
         self,
