@@ -12,7 +12,7 @@ Purpose: Transform codebases into searchable knowledge bases for AI assistants
 - NEVER Use forward references (quotes) in type annotations unless needed
 
 **ALWAYS:**
-- ALWAYS Run smoke tests before committing: `uv run pytest tests/test_smoke.py`
+- ALWAYS Run smoke tests before committing: `uv run pytest tests/test_smoke.py -v -n auto`
 - ALWAYS Batch embeddings (min: 100, max: provider_limit)
 - ALWAYS Drop HNSW indexes for bulk inserts > 50 rows
 - ALWAYS Use uv for all Python operations
@@ -57,7 +57,7 @@ NEVER manually edit version strings - ALWAYS create git tags instead.
 uv run scripts/update_version.py X.Y.Z
 
 # 2. Run smoke tests (MANDATORY)
-uv run pytest tests/test_smoke.py -v
+uv run pytest tests/test_smoke.py -v -n auto
 
 # 3. Prepare release
 ./scripts/prepare_release.sh

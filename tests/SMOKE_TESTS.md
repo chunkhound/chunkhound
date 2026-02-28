@@ -15,7 +15,7 @@ Catch critical failures BEFORE they reach users. These tests run in ~10 seconds 
 ## HOW_TO_RUN
 ```bash
 # Quick smoke test (10 seconds)
-uv run pytest tests/test_smoke.py -v
+uv run pytest tests/test_smoke.py -v -n auto
 
 # Just import tests (2 seconds)
 uv run pytest tests/test_smoke.py::TestModuleImports -v
