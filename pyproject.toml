@@ -5,16 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "chunkhound"
 dynamic = ["version"]
-description = "Codebase intelligence infrastructure for AI coding agents—semantic search, code research, and architectural understanding via MCP"
+description = "Local-first codebase intelligence for AI assistants via MCP"
 readme = "README.md"
 keywords = [
-    "code research",
-    "codebase intelligence",
-    "AI agents",
-    "CAST algorithm",
+    "code search",
     "semantic search",
     "MCP",
-    "code search",
+    "AI agents",
+    "CAST algorithm",
     "vector search",
 ]
 requires-python = ">=3.10,<3.14"
@@ -63,6 +61,7 @@ dependencies = [
     "xxhash>=3.0.0",
     "tree-sitter-bash>=0.25.0",
     "tree-sitter-c>=0.24.1",
+    "tree-sitter-c-sharp>=0.23.1",
     "tree-sitter-cpp>=0.23.4",
     "tree-sitter-java>=0.23.5",
     "tree-sitter-javascript>=0.25.0",
