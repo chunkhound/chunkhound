@@ -3,10 +3,8 @@
 Makefile rules need special handling because:
 1. Each split chunk must contain target line + recipe lines for semantic coherence
 2. Splitting in the middle of a recipe breaks the target/recipe relationship
-3. The parser handles oversized rules by splitting during parsing, never reaching
-   ChunkSplitter's generic splitting
+3. Non-rule chunks and within-limit rules delegate to ChunkSplitter's generic path
 
-This follows the same pattern as VueParser and SvelteParser.
 """
 
 from chunkhound.parsers.chunk_splitter import (
@@ -36,21 +34,16 @@ class MakefileChunkSplitter(ChunkSplitter):
         For Makefile rules, uses specialized splitting that preserves
         target/recipe relationships.
         """
-        metrics = ChunkMetrics.from_content(chunk.content)
-        estimated_tokens = self._estimate_tokens(chunk.content)
-
-        if (
-            metrics.non_whitespace_chars <= self.config.max_chunk_size
-            and estimated_tokens <= self.config.safe_token_limit
-        ):
-            return [chunk]
-
-        # Makefile rules use specialized splitting
         if chunk.metadata.get("kind") == "rule":
-            return self._split_makefile_rule(chunk)
-
-        # All other chunks use generic recursive splitting
-        return self._recursive_split(chunk)
+            metrics = ChunkMetrics.from_content(chunk.content)
+            estimated_tokens = self._estimate_tokens(chunk.content)
+            if (
+                metrics.non_whitespace_chars > self.config.max_chunk_size
+                or estimated_tokens > self.config.safe_token_limit
+            ):
+                return self._split_makefile_rule(chunk)
+            return [chunk]  # within-limit rule — skip redundant super() check
+        return super().validate_and_split(chunk)
 
     def _split_makefile_rule(self, chunk: UniversalChunk) -> list[UniversalChunk]:
         """Split Makefile rule preserving target/recipe coherence.
@@ -61,25 +54,18 @@ class MakefileChunkSplitter(ChunkSplitter):
 
         This ensures that each chunk is semantically valid - recipe lines
         always have their associated target.
+
+        Exception: if a single recipe line + target exceeds the size limit,
+        that chunk is emergency-split by characters, losing the target prefix.
         """
         lines = chunk.content.split("\n")
 
-        # Find target line (contains ':' and not a comment)
-        target_line = ""
-        target_idx = -1
-        for i, line in enumerate(lines):
-            if ":" in line and not line.strip().startswith("#"):
-                target_line = line
-                target_idx = i
-                break
-
-        if target_idx == -1:
-            # No target found - fall back to generic splitting
-            return self._recursive_split(chunk)
-
-        recipe_lines = lines[target_idx + 1 :]
+        # Tree-sitter places the target on the first line of a 'rule' node;
+        # guard against unexpected structure defensively.
+        target_line = lines[0]
+        recipe_lines = lines[1:]
         if not recipe_lines:
-            return [chunk]
+            return self._recursive_split(chunk)
 
         # Group recipe lines into size-limited chunks
         result: list[UniversalChunk] = []
@@ -123,9 +109,6 @@ class MakefileChunkSplitter(ChunkSplitter):
                 )
             )
 
-        if not result:
-            return [chunk]
-
         # Validate all result chunks - fall back to emergency split for any oversized
         # This handles the case where a single recipe line + target exceeds size limit
         validated_result: list[UniversalChunk] = []
@@ -141,7 +124,7 @@ class MakefileChunkSplitter(ChunkSplitter):
             else:
                 validated_result.append(rule_chunk)
 
-        return validated_result if validated_result else [chunk]
+        return validated_result
 
     def _create_rule_chunk(
         self,
@@ -154,13 +137,13 @@ class MakefileChunkSplitter(ChunkSplitter):
         """Create a split rule chunk with target + recipe subset.
 
         Each chunk includes the target line for semantic coherence.
-        start_line matches the target line; end_line uses recipe_offset
-        for distinct spans per chunk.
+        Part 1 starts at the target line; parts 2+ start at their recipe
+        range to avoid overlapping line spans across split chunks.
         """
         content = "\n".join([target] + recipe_lines)
 
-        start_line = original.start_line
         recipe_start = original.start_line + 1 + recipe_offset
+        start_line = original.start_line if part == 1 else recipe_start
         end_line = min(original.end_line, recipe_start + len(recipe_lines) - 1)
 
         return UniversalChunk(
