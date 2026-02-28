@@ -225,30 +225,20 @@ class ChunkSplitter:
             for vc in validated
         ]
 
-    def _analyze_lines(self, lines: list[str]) -> tuple[bool, bool]:
+    def _analyze_lines(self, lines: list[str]) -> bool:
         """Analyze line length statistics to choose optimal splitting strategy.
 
         Returns:
-            (has_very_long_lines, is_regular_code)
+            has_very_long_lines: True if any line exceeds 20% of max_chunk_size
         """
         if not lines:
-            return False, False
+            return False
 
-        lengths = [len(line) for line in lines]
-        max_length = max(lengths)
-        avg_length = sum(lengths) / len(lengths)
+        max_length = max(len(line) for line in lines)
 
         # 20% of chunk size threshold for detecting minified/concatenated code
         long_line_threshold = self.config.max_chunk_size * 0.2
-        has_very_long_lines = max_length > long_line_threshold
-
-        # Regular code heuristics:
-        # - >10 lines: meaningful code block, not snippet
-        # - <200 chars: typical editor width
-        # - <100 avg: normal code density
-        is_regular_code = len(lines) > 10 and max_length < 200 and avg_length < 100.0
-
-        return has_very_long_lines, is_regular_code
+        return max_length > long_line_threshold
 
     def _recursive_split(self, chunk: UniversalChunk) -> list[UniversalChunk]:
         """Smart content-aware splitting that chooses the optimal strategy.
@@ -268,30 +258,18 @@ class ChunkSplitter:
 
         # Second: Analyze the content structure
         lines = chunk.content.split("\n")
-        has_very_long_lines, is_regular_code = self._analyze_lines(lines)
+        has_very_long_lines = self._analyze_lines(lines)
 
         # Third: Choose splitting strategy based on content analysis
         if len(lines) <= 2 or has_very_long_lines:
-            # Case 1: Single/few lines OR any line is very long
-            # Use character-based emergency splitting
             return self._emergency_split(chunk)
 
-        elif is_regular_code:
-            # Case 2: Many short lines (normal code)
-            # Use simple line-based splitting
-            return self._split_by_lines_simple(chunk, lines)
-
-        else:
-            # Case 3: Mixed content - try line-based with emergency fallback
-            return self._split_by_lines_with_fallback(chunk, lines)
+        return self._split_by_lines_simple(chunk, lines)
 
     def _split_by_lines_simple(
         self, chunk: UniversalChunk, lines: list[str]
     ) -> list[UniversalChunk]:
         """Split chunk by lines for regular code with short lines."""
-        if len(lines) <= 2:
-            return [chunk]
-
         mid_point = len(lines) // 2
 
         # Create two sub-chunks
@@ -329,45 +307,12 @@ class ChunkSplitter:
             language_node_type=chunk.language_node_type,
         )
 
-        # Recursively check if sub-chunks still need splitting
+        # Recursively validate sub-chunks (splits further if needed)
         result = []
         for sub_chunk in [chunk1, chunk2]:
-            sub_metrics = ChunkMetrics.from_content(sub_chunk.content)
-            sub_tokens = self._estimate_tokens(sub_chunk.content)
-
-            if (
-                sub_metrics.non_whitespace_chars > self.config.max_chunk_size
-                or sub_tokens > self.config.safe_token_limit
-            ):
-                result.extend(self._recursive_split(sub_chunk))
-            else:
-                result.append(sub_chunk)
+            result.extend(self._recursive_split(sub_chunk))
 
         return result
-
-    def _split_by_lines_with_fallback(
-        self, chunk: UniversalChunk, lines: list[str]
-    ) -> list[UniversalChunk]:
-        """Split by lines but fall back to emergency split if needed."""
-        # Try line-based splitting first
-        line_split_result = self._split_by_lines_simple(chunk, lines)
-
-        # Check if any chunks still exceed limits
-        validated_result = []
-        for sub_chunk in line_split_result:
-            sub_metrics = ChunkMetrics.from_content(sub_chunk.content)
-            sub_tokens = self._estimate_tokens(sub_chunk.content)
-
-            # If still over limit, use emergency split
-            if (
-                sub_metrics.non_whitespace_chars > self.config.max_chunk_size
-                or sub_tokens > self.config.safe_token_limit
-            ):
-                validated_result.extend(self._emergency_split(sub_chunk))
-            else:
-                validated_result.append(sub_chunk)
-
-        return validated_result
 
     def _emergency_split(self, chunk: UniversalChunk) -> list[UniversalChunk]:
         """Smart code splitting for minified/large single-line files."""
