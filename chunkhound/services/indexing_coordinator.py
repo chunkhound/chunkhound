@@ -1858,10 +1858,25 @@ class IndexingCoordinator(BaseService):
         precomputed_roots = []
         try:
             from chunkhound.utils.ignore_engine import detect_repo_roots  # type: ignore
+        except ImportError:
+            detect_repo_roots = None  # type: ignore[assignment]
 
-            precomputed_roots = detect_repo_roots(directory, effective_excludes)
-        except Exception:
-            precomputed_roots = []
+        if detect_repo_roots is not None:
+            prune_gitfile_roots = (
+                self.config is not None
+                and "gitignore" in self.config.indexing.resolve_ignore_sources()
+            )
+            try:
+                precomputed_roots = detect_repo_roots(
+                    directory,
+                    effective_excludes,
+                    prune_ignored_gitfile_roots=prune_gitfile_roots,
+                )
+            except Exception as e:
+                logger.debug(
+                    "Failed to precompute repo roots for parallel discovery: %s", e
+                )
+                precomputed_roots = []
 
         # Determine number of workers for directory discovery
         # Scale based on number of subtrees and available cores
@@ -2128,7 +2143,9 @@ class IndexingCoordinator(BaseService):
             # avoid re-detecting per process
             try:
                 roots = self._get_or_detect_repo_roots(
-                    directory.resolve(), list(cfg_excludes)
+                    directory.resolve(),
+                    list(cfg_excludes),
+                    prune_ignored_gitfile_roots=("gitignore" in (sources or [])),
                 )
                 if roots:
                     engine_args["roots"] = roots
@@ -2404,9 +2421,21 @@ class IndexingCoordinator(BaseService):
         except Exception:
             pass
 
+        prune_gitfile_roots = False
+        try:
+            idx = getattr(getattr(self, "config", None), "indexing", None)
+            sources = idx.resolve_ignore_sources() if idx is not None else []
+            prune_gitfile_roots = "gitignore" in (sources or [])
+        except Exception:
+            prune_gitfile_roots = False
+
         # Detect repo roots under directory (pruned by effective_excludes) with cache reuse
         try:
-            repo_roots = self._get_or_detect_repo_roots(directory, effective_excludes)
+            repo_roots = self._get_or_detect_repo_roots(
+                directory,
+                effective_excludes,
+                prune_ignored_gitfile_roots=prune_gitfile_roots,
+            )
         except Exception:
             repo_roots = []
         # Expose whether any repos were detected for caller decisions
@@ -2611,8 +2640,12 @@ class IndexingCoordinator(BaseService):
 
     # --------------------------- Repo-roots caching ---------------------------
     def _repo_roots_cache_key(
-        self, root: Path, cfg_excludes: list[str] | tuple[str, ...]
-    ) -> tuple[str, tuple[str, ...]]:
+        self,
+        root: Path,
+        cfg_excludes: list[str] | tuple[str, ...],
+        *,
+        prune_ignored_gitfile_roots: bool = False,
+    ) -> tuple[str, tuple[str, ...], int]:
         try:
             base = str(root.resolve())
         except Exception:
@@ -2622,29 +2655,37 @@ class IndexingCoordinator(BaseService):
                 sorted(
                     [
                         str(x)
-                        for x in (
-                            list(cfg_excludes)
-                            if not isinstance(cfg_excludes, tuple)
-                            else list(cfg_excludes)
-                        )
+                        for x in list(cfg_excludes)
                     ]
                 )
             )
         except Exception:
             items = tuple()
-        return (base, items)
+        return (base, items, 1 if prune_ignored_gitfile_roots else 0)
 
     def _get_or_detect_repo_roots(
-        self, root: Path, cfg_excludes: list[str] | tuple[str, ...]
+        self,
+        root: Path,
+        cfg_excludes: list[str] | tuple[str, ...],
+        *,
+        prune_ignored_gitfile_roots: bool = False,
     ) -> list[Path]:
-        key = self._repo_roots_cache_key(root, cfg_excludes)
+        key = self._repo_roots_cache_key(
+            root,
+            cfg_excludes,
+            prune_ignored_gitfile_roots=prune_ignored_gitfile_roots,
+        )
         cached = self._repo_roots_cache.get(key)
         if cached is not None:
             return cached
         try:
             from chunkhound.utils.ignore_engine import detect_repo_roots as _detect
 
-            roots = _detect(root, cfg_excludes)  # type: ignore[arg-type]
+            roots = _detect(
+                root,
+                cfg_excludes,  # type: ignore[arg-type]
+                prune_ignored_gitfile_roots=prune_ignored_gitfile_roots,
+            )
         except Exception:
             roots = []
         self._repo_roots_cache[key] = roots

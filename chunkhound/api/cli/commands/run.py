@@ -627,16 +627,10 @@ async def _check_ignores(args: argparse.Namespace, config: Config) -> None:
 
     def _git_ignored(repo_root: Path, rel_path: str) -> bool:
         try:
-            from chunkhound.utils.git_safe import run_git
-
-            proc = run_git(
-                ["check-ignore", "-q", "--no-index", rel_path],
-                cwd=repo_root,
-                timeout_s=5.0,
-            )
-            return proc.returncode == 0
-        except Exception:
+            from chunkhound.utils.git_safe import git_check_ignored
+        except ImportError:
             return False
+        return git_check_ignored(repo_root=repo_root, rel_path=rel_path, timeout_s=5.0)
 
     def _ch_ignored(root: Path, file_path: Path) -> bool:
         try:
