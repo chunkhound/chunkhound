@@ -726,8 +726,7 @@ async def run_setup_wizard(target_path: Path, args=None) -> Config | None:
     provider_choice = await _select_provider()
     if provider_choice == "skip":
         formatter.info(
-            "Skipping provider setup. You can configure later in .chunkhound.json\n"
-            "Need help? See https://chunkhound.github.io/quickstart"
+            "Skipping provider setup. You can configure later in .chunkhound.json"
         )
         return None
 
@@ -742,9 +741,7 @@ async def run_setup_wizard(target_path: Path, args=None) -> Config | None:
 
     if not embedding_config:
         formatter.warning(
-            "Setup cancelled. No worries! You can configure later using "
-            ".chunkhound.json\n"
-            "For step-by-step instructions: https://chunkhound.github.io/quickstart"
+            "Setup cancelled. You can configure later using .chunkhound.json"
         )
         return None
 
@@ -759,7 +756,6 @@ async def run_setup_wizard(target_path: Path, args=None) -> Config | None:
         await _run_agent_setup(target_path, formatter)
 
         print("\nReady to start indexing your codebase!")
-        print("Need help? Visit https://chunkhound.github.io or join us at https://discord.gg/BAepHEXXnX")
         # Return a new config object that will pick up the saved file
         return Config(args=args) if args else Config()
     elif status == "cancelled":
@@ -881,7 +877,6 @@ def _show_claude_installation_instructions(formatter: RichOutputFormatter) -> No
             "Create .mcp.json file in your project root with ChunkHound configuration",
         ]
     )
-    print("\nNeed help? Check our MCP setup guide: https://chunkhound.github.io/mcp")
 
 
 def _show_manual_claude_instructions(
@@ -906,7 +901,6 @@ def _show_manual_claude_instructions(
                 "Claude Code will prompt to approve the server on first use",
             ]
         )
-    print("\nFull instructions: https://chunkhound.github.io/mcp")
 
 
 def _detect_vscode_workspace(target_path: Path) -> Path | None:
@@ -1009,7 +1003,7 @@ async def _setup_vscode(target_path: Path, formatter: RichOutputFormatter) -> bo
     vscode_dir = _detect_vscode_workspace(target_path)
 
     if vscode_dir:
-        formatter.info(f"✓ VS Code workspace detected: {vscode_dir.parent}")
+        formatter.info(f"VS Code workspace detected: {vscode_dir.parent}")
         mcp_path = vscode_dir / "mcp.json"
 
         # Read existing configuration
@@ -1068,10 +1062,7 @@ async def _setup_vscode(target_path: Path, formatter: RichOutputFormatter) -> bo
                 return True
             else:
                 formatter.error(f"Failed to create {mcp_path}")
-                print(
-                    "This might be a permissions issue. "
-                    "Try creating the file manually."
-                )
+                print("This might be a permissions issue. Try creating the file manually.")
                 _show_manual_vscode_instructions(formatter, mcp_path)
                 return False
         else:
@@ -1101,7 +1092,6 @@ def _show_manual_vscode_instructions(
                 "Restart VS Code to load the MCP server",
             ]
         )
-    print("\nFull instructions: https://chunkhound.github.io/mcp")
 
 
 def _show_manual_opencode_instructions(
@@ -1125,7 +1115,6 @@ def _show_manual_opencode_instructions(
                 'Add: { "mcp": { "chunkhound": { "type": "local", "command": ["chunkhound", "mcp"] } }, "$schema": "https://opencode.ai/config.json" }',
             ]
         )
-    print("\nFull instructions: https://chunkhound.github.io/mcp")
 
 
 async def _setup_opencode(target_path: Path, formatter: RichOutputFormatter) -> bool:
@@ -1217,13 +1206,11 @@ async def _run_agent_setup(target_path: Path, formatter: RichOutputFormatter) ->
             "Agent setup incomplete. ChunkHound will still work via command line."
         )
         print("Run 'chunkhound mcp' to test the MCP server manually.")
-        print("Need help? Visit https://chunkhound.github.io/mcp or https://discord.gg/BAepHEXXnX")
 
 
 async def _configure_voyageai(formatter: RichOutputFormatter) -> dict[str, Any] | None:
     """Configure VoyageAI provider with signup assistance"""
-    print("Excellent choice! VoyageAI offers specialized code embeddings.")
-    print("They have a generous free tier to get you started.\n")
+    print("Excellent choice! VoyageAI offers specialized code embeddings.\n")
 
     # Check for existing API key
     from .env_detector import _detect_voyageai
@@ -1571,7 +1558,7 @@ async def _validate_voyageai_key(api_key: str, formatter: RichOutputFormatter) -
 
     except Exception as e:
         formatter.error(f"Validation failed: {e}")
-        print("Double-check your API key and try again. Get a new key at https://www.voyageai.com")
+        print("Double-check your API key and try again.")
         return False
 
 
@@ -1599,7 +1586,7 @@ async def _validate_openai_key(
 
     except Exception as e:
         formatter.error(f"Validation failed: {e}")
-        print("Double-check your API key and try again. Get a new key at https://platform.openai.com/api-keys")
+        print("Double-check your API key and try again.")
         return False
 
 
@@ -1634,10 +1621,7 @@ async def _validate_openai_compatible(
 
     except Exception as e:
         formatter.error(f"Connection failed: {e}")
-        print(
-            "Make sure the endpoint is running and accessible. "
-            "Check the URL and try again."
-        )
+        print("Make sure the endpoint is running and accessible.")
         return False
 
 
@@ -1960,7 +1944,6 @@ async def _configure_provider_unified(
         return config_data
     else:
         formatter.error("Configuration validation failed. Please try again.")
-        print("Need help? Visit https://chunkhound.github.io/quickstart or https://discord.gg/BAepHEXXnX")
         return None
 
 
@@ -2046,9 +2029,5 @@ async def _save_configuration(
         print(
             "This might be a permissions issue. "
             "Try running with appropriate permissions."
-        )
-        print(
-            "Need help? Visit https://chunkhound.github.io "
-            "or https://discord.gg/BAepHEXXnX"
         )
         return None, "error"

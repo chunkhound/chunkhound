@@ -132,11 +132,9 @@ async def async_main() -> None:
             # If embedding error and not in interactive mode, show helpful messages to stdout
             if embedding_error and args.command in [None, "index"]:
                 # Use print() for stdout output to match test expectations
-                print("\nNo worries! Here's how to fix this:")
+                print("To fix this, you can:")
                 print("  1. Create a .chunkhound.json config file with embeddings")
-                print("  2. Use --no-embeddings to skip embeddings (regex search only)")
-                print("\nNeed help? Check the quickstart guide: https://chunkhound.github.io/quickstart")
-                print("Or join our Discord community: https://discord.gg/BAepHEXXnX")
+                print("  2. Use --no-embeddings to skip embeddings")
 
             sys.exit(1)
 
@@ -177,19 +175,16 @@ async def async_main() -> None:
             await calibrate_command(args, config)
         # 'diagnose' command retired; use: chunkhound index --check-ignores --vs git
         else:
-            logger.error(
-                f"Unknown command: {args.command}. "
-                "Run 'chunkhound --help' to see available commands."
-            )
+            logger.error(f"Unknown command: {args.command}")
+            logger.info("Run 'chunkhound --help' for available commands.")
             sys.exit(1)
 
     except KeyboardInterrupt:
-        logger.info("Interrupted by user. No worries, you can resume anytime!")
+        logger.info("Interrupted by user")
         sys.exit(0)
     except Exception as e:
         logger.error(f"Command failed: {e}")
         logger.exception("Full error details:")
-        logger.info("Need help? Visit https://chunkhound.github.io or https://discord.gg/BAepHEXXnX")
         sys.exit(1)
 
 
@@ -204,7 +199,7 @@ def main() -> None:
         logger.error(f"Import error: {e}")
         logger.info(
             "This usually means a dependency is missing. "
-            "Try reinstalling with: pip install chunkhound"
+            "Try: uv tool install chunkhound"
         )
         import traceback
 
@@ -221,8 +216,7 @@ def main() -> None:
                 "Embedding provider must be specified. "
                 "Choose from: openai, voyageai, or use an OpenAI-compatible endpoint.\n"
                 "Set via --provider, CHUNKHOUND_EMBEDDING__PROVIDER environment "
-                "variable, or in config file.\n"
-                "See https://chunkhound.github.io/quickstart for setup instructions."
+                "variable, or in config file."
             )
         else:
             error_type = type(e).__name__
@@ -234,7 +228,6 @@ def main() -> None:
                     "This appears to be a terminal compatibility issue. "
                     "Try running with CHUNKHOUND_NO_RICH=1 environment variable."
                 )
-            logger.info("Need help? Visit https://chunkhound.github.io or https://discord.gg/BAepHEXXnX")
         sys.exit(1)
 
 
