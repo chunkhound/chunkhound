@@ -185,7 +185,7 @@ class EmbeddingConfig(BaseSettings):
     output_dims: int | None = Field(
         default=None,
         description="Output embedding dimension. If None, uses model default. "
-        "Must be in model's supported_dimensions list.",
+        "Validated against model's supported dimensions at provider initialization.",
     )
 
     client_side_truncation: bool = Field(
