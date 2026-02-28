@@ -795,7 +795,7 @@ class UniversalParser:
         validated_chunks = []
         for chunk in universal_chunks:
             validated_chunks.extend(
-                self._validate_and_split_chunk(chunk, content)
+                self._validate_and_split_chunk(chunk)
             )
 
         # Convert to standard Chunk format
