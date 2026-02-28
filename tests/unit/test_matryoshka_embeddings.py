@@ -398,6 +398,20 @@ class TestDimensionValidation:
         error = EmbeddingDimensionError("API returned wrong dimension")
         assert "wrong dimension" in str(error)
 
+    def test_validate_embedding_dims_raises_on_mismatch(self):
+        """validate_embedding_dims raises EmbeddingDimensionError on mismatch."""
+        from chunkhound.interfaces.embedding_provider import EmbeddingDimensionError
+        from chunkhound.providers.embeddings.shared_utils import validate_embedding_dims
+
+        with pytest.raises(EmbeddingDimensionError):
+            validate_embedding_dims(512, 1536)
+
+    def test_validate_embedding_dims_passes_on_match(self):
+        """validate_embedding_dims does not raise when dimensions match."""
+        from chunkhound.providers.embeddings.shared_utils import validate_embedding_dims
+
+        validate_embedding_dims(1536, 1536)  # should not raise
+
 
 class TestClientSideTruncation:
     """Test client-side truncation for APIs that don't support dimensions parameter."""
