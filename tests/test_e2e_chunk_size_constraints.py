@@ -35,7 +35,11 @@ _config = CASTConfig()
 # Production paths may be longer; this test validates content size, not header+content.
 HEADER_OVERHEAD = 150
 MAX_CHUNK_SIZE = _config.max_chunk_size + HEADER_OVERHEAD  # non-ws chars
-MIN_CHUNK_SIZE = 25  # soft threshold for suspiciously small
+# Intentionally lower than CASTConfig.min_chunk_size (50) — this is a soft
+# warning threshold for the test harness, not an enforcement limit. Using a
+# lower value avoids false-positive warnings from legitimate small chunks
+# produced by real parsers (e.g., short import blocks, single-line rules).
+MIN_CHUNK_SIZE = 25
 SAFE_TOKEN_LIMIT = _config.safe_token_limit
 
 # Languages with binary content (cannot test with text samples)
@@ -495,8 +499,7 @@ async def test_all_parsers_respect_chunk_size_constraints(validating_db):
     # Log known limitations from non-enforced parsers
     if non_enforced_char_violations:
         logger.warning(
-            "%d oversized chunks from parsers without size enforcement "
-            "(TEXT, UNKNOWN)",
+            "%d oversized chunks from parsers without size enforcement (TEXT, UNKNOWN)",
             len(non_enforced_char_violations),
         )
 
