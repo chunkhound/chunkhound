@@ -79,11 +79,23 @@ class SingleHopStrategy:
                 f"client_side_truncation={self._embedding_provider.client_side_truncation}"
             )
 
+        # Use injected provider identity to guarantee embedding space consistency.
+        # The provider/model params exist for protocol compatibility but are always
+        # overridden to prevent accidental cross-embedding-space searches.
+        effective_provider = self._embedding_provider.name
+        effective_model = self._embedding_provider.model
+        if provider != effective_provider or model != effective_model:
+            logger.debug(
+                f"Search provider/model ({provider}/{model}) differs from "
+                f"embedding provider ({effective_provider}/{effective_model}). "
+                f"Using embedding provider identity for consistent results."
+            )
+
         # Perform vector similarity search
         results, pagination = self._db.search_semantic(
             query_embedding=query_vector,
-            provider=provider,
-            model=model,
+            provider=effective_provider,
+            model=effective_model,
             page_size=page_size,
             offset=offset,
             threshold=threshold,
