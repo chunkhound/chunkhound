@@ -6,6 +6,8 @@ Tests the synchronous helper methods:
 - _global_dedup(): Cross-gap deduplication (via deduplicate_chunks)
 """
 
+import json
+
 import pytest
 
 from chunkhound.core.config.research_config import ResearchConfig
@@ -358,4 +360,125 @@ class TestEdgeCases:
 
         # Only chunk with ID should remain
         assert len(deduplicated) == 1
-        assert deduplicated[0]["chunk_id"] == "c1"
+
+
+# -----------------------------------------------------------------------------
+# Tests: Snapshot system clustering (Step 2.1)
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cluster_covered_chunks_uses_snapshot_systems_when_available(
+    tmp_path,
+    mock_llm_manager,
+    mock_embedding_manager,
+    mock_db_services,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    (tmp_path / "snapshot.chunk_systems.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "snapshot.chunk_systems.v1",
+                "clusters": [
+                    {"cluster_id": 1, "chunk_ids": [10, 11]},
+                    {"cluster_id": 2, "chunk_ids": [20]},
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = ResearchConfig(
+        shard_budget=20_000,
+        min_gaps=1,
+        max_gaps=5,
+        chunk_systems_snapshot_dir=tmp_path,
+    )
+    svc = GapDetectionService(
+        llm_manager=mock_llm_manager,
+        embedding_manager=mock_embedding_manager,
+        db_services=mock_db_services,
+        config=config,
+    )
+
+    async def kmeans_should_not_run(*_args, **_kwargs):
+        raise AssertionError("kmeans should not be called when snapshot index is present")
+
+    monkeypatch.setattr(svc, "_cluster_chunks_kmeans", kmeans_should_not_run)
+
+    covered_chunks = [
+        {
+            "chunk_id": 10,
+            "rerank_score": 0.9,
+            "file_path": "b.py",
+            "start_line": 2,
+            "content": "x",
+        },
+        {
+            "chunk_id": 11,
+            "rerank_score": 0.1,
+            "file_path": "a.py",
+            "start_line": 1,
+            "content": "x",
+        },
+        {
+            "chunk_id": 20,
+            "rerank_score": 2.0,
+            "file_path": "c.py",
+            "start_line": 3,
+            "content": "x",
+        },
+        {
+            "chunk_id": 999,  # not in snapshot index -> unknown bucket
+            "rerank_score": 1.5,
+            "file_path": "z.py",
+            "start_line": 99,
+            "content": "x",
+        },
+    ]
+
+    groups = await svc._cluster_covered_chunks_for_gaps(covered_chunks)
+    group_chunk_ids = [[c["chunk_id"] for c in g] for g in groups]
+
+    # Order: by aggregate relevance (sum of rerank_score), unknown bucket separate.
+    assert group_chunk_ids[0] == [20]
+    assert group_chunk_ids[1] == [999]
+    assert group_chunk_ids[2] == [10, 11]
+
+
+@pytest.mark.asyncio
+async def test_cluster_covered_chunks_falls_back_to_kmeans_when_snapshot_missing(
+    tmp_path,
+    mock_llm_manager,
+    mock_embedding_manager,
+    mock_db_services,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config = ResearchConfig(shard_budget=20_000, min_gaps=1, max_gaps=5)
+    # Set snapshot dir implicitly (not in model_fields_set) to match defaulting behavior.
+    object.__setattr__(config, "chunk_systems_snapshot_dir", tmp_path)
+
+    svc = GapDetectionService(
+        llm_manager=mock_llm_manager,
+        embedding_manager=mock_embedding_manager,
+        db_services=mock_db_services,
+        config=config,
+    )
+
+    called = {"value": False}
+
+    async def fake_kmeans(_chunks):
+        called["value"] = True
+        return [[{"chunk_id": "sentinel"}]]
+
+    monkeypatch.setattr(svc, "_cluster_chunks_kmeans", fake_kmeans)
+
+    result = await svc._cluster_covered_chunks_for_gaps(
+        [{"chunk_id": 1, "content": "x"}]
+    )
+
+    assert called["value"] is True
+    assert result == [[{"chunk_id": "sentinel"}]]

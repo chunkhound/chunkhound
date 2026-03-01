@@ -8,6 +8,7 @@ sources (environment variables, config files, CLI arguments).
 
 import argparse
 import os
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import Field
@@ -60,6 +61,19 @@ class ResearchConfig(BaseSettings):
             "synthesis + wide coverage exploration, v3=parallel BFS + wide "
             "coverage). Note: v3 (default) runs parallel exploration and uses "
             "more LLM tokens than v1/v2."
+        ),
+    )
+
+    # Optional snapshot chunk-systems artifacts (consumer-only).
+    # Can point to either:
+    # - a snapshot root dir containing snapshot.latest.json and runs/...
+    # - a run dir directly containing snapshot.chunk_systems.json
+    chunk_systems_snapshot_dir: Path | None = Field(
+        default=None,
+        description=(
+            "Optional directory containing snapshot chunk-systems artifacts. "
+            "If it contains snapshot.latest.json, the loader will follow the pointer; "
+            "otherwise it is treated as a run dir directly."
         ),
     )
 
@@ -335,6 +349,15 @@ class ResearchConfig(BaseSettings):
             help="Research algorithm version (v1=BFS exploration, v2=hybrid v1 synthesis + wide coverage exploration, v3=parallel BFS + wide coverage)",
         )
         parser.add_argument(
+            "--chunk-systems-snapshot-dir",
+            type=Path,
+            help=(
+                "Optional directory containing snapshot chunk-systems artifacts. "
+                "May be a snapshot root (with snapshot.latest.json) or a run dir "
+                "(with snapshot.chunk_systems.json)."
+            ),
+        )
+        parser.add_argument(
             "--exhaustive-mode",
             action="store_true",
             default=None,
@@ -358,6 +381,9 @@ class ResearchConfig(BaseSettings):
 
         if algorithm := os.getenv("CHUNKHOUND_RESEARCH_ALGORITHM"):
             config["algorithm"] = algorithm.strip().lower()
+
+        if snapshot_dir := os.getenv("CHUNKHOUND_RESEARCH_CHUNK_SYSTEMS_SNAPSHOT_DIR"):
+            config["chunk_systems_snapshot_dir"] = Path(snapshot_dir)
 
         if query_exp := os.getenv("CHUNKHOUND_RESEARCH_QUERY_EXPANSION_ENABLED"):
             config["query_expansion_enabled"] = query_exp.lower() in (
@@ -491,6 +517,12 @@ class ResearchConfig(BaseSettings):
 
         if hasattr(args, "research_algorithm") and args.research_algorithm:
             overrides["algorithm"] = args.research_algorithm
+
+        if (
+            hasattr(args, "chunk_systems_snapshot_dir")
+            and args.chunk_systems_snapshot_dir is not None
+        ):
+            overrides["chunk_systems_snapshot_dir"] = args.chunk_systems_snapshot_dir
 
         if hasattr(args, "exhaustive_mode") and args.exhaustive_mode is not None:
             overrides["exhaustive_mode"] = args.exhaustive_mode

@@ -40,6 +40,7 @@ from chunkhound.services.research.shared.chunk_context_builder import (
 )
 from chunkhound.services.research.shared.chunk_dedup import (
     deduplicate_chunks,
+    get_chunk_id,
     merge_chunk_lists,
 )
 from chunkhound.services.research.shared.elbow_detection import (
@@ -94,6 +95,126 @@ class GapDetectionService:
         self._import_resolver = import_resolver
         self._import_context_service = import_context_service
         self._unified_search = UnifiedSearch(db_services, embedding_manager, config)
+        self._chunk_systems_snapshot_index_loaded = False
+        self._chunk_systems_snapshot_index: dict[int, int] | None = None
+
+    def _get_chunk_systems_snapshot_index(self) -> dict[int, int] | None:
+        if self._chunk_systems_snapshot_index_loaded:
+            return self._chunk_systems_snapshot_index
+
+        self._chunk_systems_snapshot_index_loaded = True
+
+        snapshot_dir = self._config.chunk_systems_snapshot_dir
+        if snapshot_dir is None:
+            self._chunk_systems_snapshot_index = None
+            return None
+
+        explicit = "chunk_systems_snapshot_dir" in self._config.model_fields_set
+        try:
+            from chunkhound.services.research.shared.chunk_systems_snapshot_index import (
+                load_chunk_id_to_system_id,
+            )
+
+            idx = load_chunk_id_to_system_id(snapshot_dir=snapshot_dir, explicit=explicit)
+        except Exception as exc:
+            if explicit:
+                logger.warning(
+                    f"Failed to load chunk-systems snapshot index from {snapshot_dir}: {exc}"
+                )
+            idx = None
+
+        # Treat an empty mapping the same as "not available".
+        self._chunk_systems_snapshot_index = idx if idx else None
+        return self._chunk_systems_snapshot_index
+
+    @staticmethod
+    def _chunk_score(chunk: dict) -> float:
+        for key in ("rerank_score", "score", "similarity"):
+            value = chunk.get(key)
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except Exception:
+                continue
+        return 1.0
+
+    @staticmethod
+    def _chunk_path(chunk: dict) -> str:
+        value = chunk.get("file_path") or chunk.get("path") or ""
+        try:
+            return str(value)
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _chunk_start_line(chunk: dict) -> int:
+        value = chunk.get("start_line")
+        try:
+            return int(value)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _chunk_id_int(chunk: dict) -> int | None:
+        value = get_chunk_id(chunk)
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _cluster_chunks_by_system_snapshot(
+        self, chunks: list[dict], idx: dict[int, int]
+    ) -> list[list[dict]]:
+        """Cluster covered chunks by snapshot system membership.
+
+        Unknown/missing chunk IDs are placed in a separate bucket.
+        """
+        known: dict[int, list[dict]] = {}
+        unknown: list[dict] = []
+
+        for chunk in chunks:
+            chunk_id = self._chunk_id_int(chunk)
+            system_id = idx.get(chunk_id) if chunk_id is not None else None
+            if system_id is None:
+                unknown.append(chunk)
+                continue
+            known.setdefault(int(system_id), []).append(chunk)
+
+        def stable_chunk_sort_key(item: dict) -> tuple[float, str, int, int]:
+            score = self._chunk_score(item)
+            path = self._chunk_path(item)
+            start_line = self._chunk_start_line(item)
+            chunk_id = self._chunk_id_int(item)
+            stable_chunk_id = chunk_id if chunk_id is not None else (2**31 - 1)
+            return (-score, path, start_line, stable_chunk_id)
+
+        for bucket in known.values():
+            bucket.sort(key=stable_chunk_sort_key)
+        unknown.sort(key=stable_chunk_sort_key)
+
+        buckets: list[tuple[float, int, int, list[dict]]] = []
+        for system_id, bucket in known.items():
+            bucket_score = float(sum(self._chunk_score(c) for c in bucket))
+            buckets.append((bucket_score, 0, int(system_id), bucket))
+        if unknown:
+            unknown_score = float(sum(self._chunk_score(c) for c in unknown))
+            buckets.append((unknown_score, 1, 0, unknown))
+
+        buckets.sort(key=lambda b: (-b[0], b[1], b[2]))
+        return [b[3] for b in buckets]
+
+    async def _cluster_covered_chunks_for_gaps(
+        self, chunks: list[dict]
+    ) -> list[list[dict]]:
+        idx = self._get_chunk_systems_snapshot_index()
+        if idx:
+            return self._cluster_chunks_by_system_snapshot(chunks, idx)
+        return await self._cluster_chunks_kmeans(chunks)
 
     async def detect_and_fill_gaps(
         self,
@@ -129,8 +250,8 @@ class GapDetectionService:
             f"Phase 2: Gap detection starting with {len(covered_chunks)} covered chunks"
         )
 
-        # Step 2.1: Cluster chunks with k-means
-        cluster_groups = await self._cluster_chunks_kmeans(covered_chunks)
+        # Step 2.1: Cluster covered chunks (snapshot system grouping when available)
+        cluster_groups = await self._cluster_covered_chunks_for_gaps(covered_chunks)
         logger.info(f"Step 2.1: Clustered into {len(cluster_groups)} semantic groups")
 
         # Step 2.2: Shard by token budget

@@ -310,8 +310,22 @@ class Config(BaseModel):
             self.database.path = project_root / ".chunkhound" / "db"
 
         # Ensure database path is resolved to canonical form (handles symlinks)
-        if self.database.path:
+        is_memory_db = bool(self.database.path and str(self.database.path) == ":memory:")
+        if self.database.path and not is_memory_db:
             self.database.path = self.database.path.resolve()
+
+        # Default research snapshot dir (implicit): derived from the DB base directory.
+        # Must not be marked as explicitly user-supplied (model_fields_set must remain unchanged).
+        if (
+            self.research.chunk_systems_snapshot_dir is None
+            and self.database.path is not None
+            and not is_memory_db
+        ):
+            object.__setattr__(
+                self.research,
+                "chunk_systems_snapshot_dir",
+                self.database.path / "chunk_systems_snapshot",
+            )
 
         return self
 
