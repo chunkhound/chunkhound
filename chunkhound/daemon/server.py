@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import sys
 import uuid
 from pathlib import Path
@@ -52,8 +53,9 @@ class ChunkHoundDaemon(MCPServerBase):
         self._initialization_complete = asyncio.Event()
         self._pid_poll_task: asyncio.Task | None = None
         self._client_manager = ClientManager(on_empty=self._on_all_clients_gone)
-        self._lock_written = False  # True only after we successfully bound the socket and wrote the lock
-        self._auth_token: str | None = None  # Set after reading the lock file we wrote
+        # True only after we successfully bound the socket and wrote the lock
+        self._lock_written = False
+        self._auth_token: str | None = None  # Set before accepting connections
         delay_str = os.environ.get(
             "CHUNKHOUND_DAEMON_SHUTDOWN_DELAY", str(_DEFAULT_SHUTDOWN_DELAY)
         )
@@ -98,6 +100,11 @@ class ChunkHoundDaemon(MCPServerBase):
             self._initialization_complete.set()
             self.debug_log("Daemon initialised")
 
+            # Generate auth token BEFORE accepting connections so every client
+            # sees a non-None token in _handle_client from the very first frame.
+            auth_token = secrets.token_hex(32)
+            self._auth_token = auth_token
+
             # Start IPC server; on Windows actual address differs (port 0 → real port)
             server, actual_address = await ipc.create_server(
                 self._socket_path, self._handle_client
@@ -105,7 +112,9 @@ class ChunkHoundDaemon(MCPServerBase):
             self._socket_path = actual_address
 
             # Write lock file so proxies can discover us
-            self._discovery.write_lock(os.getpid(), self._socket_path)
+            self._discovery.write_lock(
+                os.getpid(), self._socket_path, auth_token=auth_token
+            )
 
             # Post-write validation: on Windows two daemons can race to bind
             # different OS-assigned ports and both write the lock.  Verify our
@@ -120,7 +129,6 @@ class ChunkHoundDaemon(MCPServerBase):
                 return
 
             self._lock_written = True
-            self._auth_token = written_lock.get("auth_token")
             self.debug_log(
                 f"Lock file written (pid={os.getpid()}, address={self._socket_path})"
             )
@@ -180,7 +188,9 @@ class ChunkHoundDaemon(MCPServerBase):
 
             # Auth token check — reject unknown clients silently to avoid
             # leaking information about the expected token value.
-            if self._auth_token is not None and reg.get("auth_token") != self._auth_token:
+            if self._auth_token is not None and (
+                reg.get("auth_token") != self._auth_token
+            ):
                 return
 
             pid: int = reg.get("pid", 0)

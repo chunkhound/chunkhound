@@ -87,11 +87,14 @@ class DaemonDiscovery:
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return None
 
-    def write_lock(self, pid: int, socket_path: str) -> None:
-        """Write the lock file atomically with a fresh auth token.
+    def write_lock(
+        self, pid: int, socket_path: str, auth_token: str | None = None
+    ) -> None:
+        """Write the lock file atomically.
 
-        On POSIX the file is chmod'd to 0o600 so only the owning user can
-        read the auth token.
+        If *auth_token* is provided it is written as-is; otherwise a fresh
+        token is generated.  On POSIX the file is chmod'd to 0o600 so only
+        the owning user can read the auth token.
         """
         lock_path = self.get_lock_path()
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -99,7 +102,9 @@ class DaemonDiscovery:
             "pid": pid,
             "socket_path": socket_path,
             "started_at": time.time(),
-            "auth_token": secrets.token_hex(32),
+            "auth_token": (
+                auth_token if auth_token is not None else secrets.token_hex(32)
+            ),
         }
         tmp_path = lock_path.with_suffix(".lock.tmp")
         with open(tmp_path, "w") as f:
@@ -217,10 +222,12 @@ class DaemonDiscovery:
         """
         socket_path = self.get_ipc_address()
 
-        cmd = [sys.executable, "-m", "chunkhound.api.cli.main",
-               "_daemon",
-               "--project-dir", str(self._project_dir),
-               "--socket-path", socket_path]
+        cmd = [
+            sys.executable, "-m", "chunkhound.api.cli.main",
+            "_daemon",
+            "--project-dir", str(self._project_dir),
+            "--socket-path", socket_path,
+        ]
 
         # Forward relevant config flags if present
         flag_map = {
