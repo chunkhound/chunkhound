@@ -1179,11 +1179,13 @@ class OpenAIEmbeddingProvider:
 
     def get_request_headers(self) -> dict[str, str]:
         """Get headers for API requests."""
-        return {
-            "Authorization": f"Bearer {self._api_key}",
+        headers: dict[str, str] = {
             "Content-Type": "application/json",
             "User-Agent": "ChunkHound-OpenAI-Provider",
         }
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        return headers
 
     def get_max_documents_per_batch(self) -> int:
         """Get maximum documents per batch for OpenAI provider."""
