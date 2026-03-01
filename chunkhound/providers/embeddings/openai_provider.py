@@ -777,16 +777,13 @@ class OpenAIEmbeddingProvider:
             total_chars = sum(text_sizes)
             max_chars = max(text_sizes) if text_sizes else 0
 
-            # Find and log oversized chunks with their content preview
+            # Find and log oversized chunks (sizes only, no content)
             oversized_chunks = []
             for i, text in enumerate(validated_texts):
                 if (
                     len(text) > 100000
                 ):  # Chunks over 100k chars are definitely problematic
-                    preview = text[:200] + "..." if len(text) > 200 else text
-                    oversized_chunks.append(
-                        f"#{i}: {len(text)} chars, starts: {preview}"
-                    )
+                    oversized_chunks.append(f"#{i}: {len(text)} chars")
 
             if oversized_chunks:
                 logger.error(
@@ -999,9 +996,6 @@ class OpenAIEmbeddingProvider:
                     if hasattr(rate_error, "response"):
                         error_details["response_status"] = getattr(
                             rate_error.response, "status_code", None
-                        )
-                        error_details["response_headers"] = dict(
-                            getattr(rate_error.response, "headers", {})
                         )
 
                     logger.warning(
@@ -1596,8 +1590,9 @@ class OpenAIEmbeddingProvider:
         except httpx.HTTPStatusError as e:
             # HTTP error response from service
             self._usage_stats["errors"] += 1
+            response_text = e.response.text[:200] if e.response.text else ""
             logger.error(
-                f"Rerank service returned error {e.response.status_code}: {e.response.text}"
+                f"Rerank service returned error {e.response.status_code}: {response_text}"
             )
             raise
         except ValueError as e:
