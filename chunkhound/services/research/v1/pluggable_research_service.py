@@ -27,6 +27,7 @@ from chunkhound.services.research.shared.citation_manager import CitationManager
 from chunkhound.services.research.shared.evidence_ledger import (
     EvidenceLedger,
     extract_facts_with_clustering,
+    extract_facts_with_system_clustering,
 )
 from chunkhound.services.research.shared.exploration import ExplorationStrategy
 from chunkhound.services.research.shared.models import (
@@ -101,6 +102,9 @@ class PluggableResearchService:
             config=config,
         )
 
+        self._chunk_systems_snapshot_index_loaded = False
+        self._chunk_systems_snapshot_index: dict[int, int] | None = None
+
         # Store exploration strategy (required - pluggable algorithm for chunk discovery)
         self._exploration_strategy = exploration_strategy
 
@@ -117,6 +121,105 @@ class PluggableResearchService:
         if self._config is not None:
             return self._config.num_expanded_queries
         return NUM_LLM_EXPANDED_QUERIES
+
+    def _get_chunk_systems_snapshot_index(self) -> dict[int, int] | None:
+        if self._chunk_systems_snapshot_index_loaded:
+            return self._chunk_systems_snapshot_index
+
+        self._chunk_systems_snapshot_index_loaded = True
+
+        if self._config is None or self._config.algorithm != "v4":
+            self._chunk_systems_snapshot_index = None
+            return None
+
+        snapshot_dir = self._config.chunk_systems_snapshot_dir
+        if snapshot_dir is None:
+            self._chunk_systems_snapshot_index = None
+            return None
+
+        explicit = "chunk_systems_snapshot_dir" in self._config.model_fields_set
+        try:
+            from chunkhound.services.research.shared.chunk_systems_snapshot_index import (
+                load_chunk_id_to_system_id,
+            )
+
+            idx = load_chunk_id_to_system_id(snapshot_dir=snapshot_dir, explicit=explicit)
+        except Exception:
+            idx = None
+
+        self._chunk_systems_snapshot_index = idx if idx else None
+        return self._chunk_systems_snapshot_index
+
+    @staticmethod
+    def _chunk_score(chunk: dict[str, Any]) -> float:
+        for key in ("rerank_score", "score", "similarity"):
+            value = chunk.get(key)
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except Exception:
+                continue
+        return 1.0
+
+    @staticmethod
+    def _chunk_path(chunk: dict[str, Any]) -> str:
+        value = chunk.get("file_path") or chunk.get("path") or ""
+        try:
+            return str(value)
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _chunk_id_int(chunk: dict[str, Any]) -> int | None:
+        value = get_chunk_id(chunk)
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _build_file_to_snapshot_system_id(
+        self,
+        *,
+        prioritized_chunks: list[dict[str, Any]],
+        budgeted_files: dict[str, str],
+        idx: dict[int, int],
+    ) -> dict[str, int | None]:
+        votes: dict[str, dict[int, float]] = {}
+
+        for chunk in prioritized_chunks:
+            file_path = self._chunk_path(chunk)
+            if not file_path:
+                continue
+
+            chunk_id = self._chunk_id_int(chunk)
+            if chunk_id is None:
+                continue
+
+            system_id = idx.get(int(chunk_id))
+            if system_id is None:
+                continue
+
+            votes.setdefault(file_path, {})
+            votes[file_path][int(system_id)] = votes[file_path].get(int(system_id), 0.0) + float(
+                self._chunk_score(chunk)
+            )
+
+        out: dict[str, int | None] = {}
+        for file_path in budgeted_files:
+            by_system = votes.get(file_path)
+            if not by_system:
+                out[file_path] = None
+                continue
+
+            best = max(by_system.items(), key=lambda item: (item[1], -item[0]))
+            out[file_path] = int(best[0])
+
+        return out
 
     async def _emit_event(
         self,
@@ -309,12 +412,34 @@ class PluggableResearchService:
             f"Clustering and extracting facts from {len(budgeted_files)} files",
             files=len(budgeted_files),
         )
-        extraction_result = await extract_facts_with_clustering(
-            files=budgeted_files,
-            root_query=query,
-            llm_provider=self._llm_manager.get_utility_provider(),
-            embedding_provider=self._embedding_manager.get_provider(),
-        )
+        utility_provider = self._llm_manager.get_utility_provider()
+        if self._config is not None and self._config.algorithm == "v4":
+            idx = self._get_chunk_systems_snapshot_index()
+            if not idx:
+                raise ValueError(
+                    "Research algorithm v4 requires snapshot chunk-systems artifacts "
+                    "(snapshot.chunk_systems.json). Configure research.chunk_systems_snapshot_dir "
+                    "or use --chunk-systems-snapshot-dir."
+                )
+
+            file_to_system_id = self._build_file_to_snapshot_system_id(
+                prioritized_chunks=prioritized_chunks,
+                budgeted_files=budgeted_files,
+                idx=idx,
+            )
+            extraction_result = await extract_facts_with_system_clustering(
+                files=budgeted_files,
+                root_query=query,
+                llm_provider=utility_provider,
+                file_to_system_id=file_to_system_id,
+            )
+        else:
+            extraction_result = await extract_facts_with_clustering(
+                files=budgeted_files,
+                root_query=query,
+                llm_provider=utility_provider,
+                embedding_provider=self._embedding_manager.get_provider(),
+            )
         cluster_groups = extraction_result.cluster_groups
         cluster_metadata = extraction_result.cluster_metadata
         evidence_ledger = evidence_ledger.merge(extraction_result.evidence_ledger)

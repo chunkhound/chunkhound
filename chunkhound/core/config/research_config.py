@@ -54,13 +54,14 @@ class ResearchConfig(BaseSettings):
     )
 
     # Feature Flag
-    algorithm: Literal["v1", "v2", "v3"] = Field(
+    algorithm: Literal["v1", "v2", "v3", "v4"] = Field(
         default="v3",
         description=(
             "Research algorithm version (v1=BFS exploration, v2=hybrid v1 "
             "synthesis + wide coverage exploration, v3=parallel BFS + wide "
-            "coverage). Note: v3 (default) runs parallel exploration and uses "
-            "more LLM tokens than v1/v2."
+            "coverage, v4=v3 + snapshot-driven clustering for gaps + fact extraction). "
+            "Note: v3 (default) runs parallel exploration and uses more LLM tokens than "
+            "v1/v2. v4 requires snapshot chunk-systems artifacts."
         ),
     )
 
@@ -345,8 +346,12 @@ class ResearchConfig(BaseSettings):
         """Add research-related CLI arguments."""
         parser.add_argument(
             "--research-algorithm",
-            choices=["v1", "v2", "v3"],
-            help="Research algorithm version (v1=BFS exploration, v2=hybrid v1 synthesis + wide coverage exploration, v3=parallel BFS + wide coverage)",
+            choices=["v1", "v2", "v3", "v4"],
+            help=(
+                "Research algorithm version (v1=BFS exploration, v2=hybrid v1 synthesis + "
+                "wide coverage exploration, v3=parallel BFS + wide coverage, "
+                "v4=v3 + snapshot-driven clustering for gaps + fact extraction)"
+            ),
         )
         parser.add_argument(
             "--chunk-systems-snapshot-dir",

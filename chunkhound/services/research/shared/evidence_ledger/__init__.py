@@ -4,12 +4,14 @@ Provides:
 1. EvidenceLedger - Unified collection of constants and facts
 2. FactExtractor - LLM-based fact extraction from code clusters
 3. extract_facts_with_clustering - Clustered extraction with reusable clusters
-4. Data models and prompt templates
+4. extract_facts_with_system_clustering - Snapshot system clustering + deterministic token packing
+5. Data models and prompt templates
 """
 
 from chunkhound.services.research.shared.evidence_ledger.clustered_extractor import (
     ClusteredExtractionResult,
     extract_facts_with_clustering,
+    extract_facts_with_system_clustering,
 )
 from chunkhound.services.research.shared.evidence_ledger.extractor import FactExtractor
 from chunkhound.services.research.shared.evidence_ledger.ledger import EvidenceLedger
@@ -37,6 +39,7 @@ __all__ = [
     # Clustered extraction
     "ClusteredExtractionResult",
     "extract_facts_with_clustering",
+    "extract_facts_with_system_clustering",
     # Models
     "ConfidenceLevel",
     "ConstantEntry",

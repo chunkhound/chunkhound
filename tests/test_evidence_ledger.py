@@ -23,7 +23,10 @@ from chunkhound.services.research.shared.evidence_ledger import (
     FactConflict,
     FactEntry,
     FactExtractor,
+    extract_facts_with_system_clustering,
 )
+from chunkhound.services.clustering_service import ClusteringService
+from tests.fixtures.fake_providers import FakeLLMProvider
 
 
 # =============================================================================
@@ -1860,3 +1863,72 @@ class TestReplaceConstantsFromChunks:
         # Original should be unchanged
         assert ledger.constants_count == original_const_count
         assert ledger.facts_count == original_fact_count
+
+
+# =============================================================================
+# v4 snapshot system clustering tests
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_extract_facts_with_system_clustering_token_bounds_and_determinism():
+    llm = FakeLLMProvider()
+
+    # tokens ~= len(text)//4 (FakeLLMProvider). Use small bounds to make behavior observable.
+    files = {
+        "f1.py": "x" * 280,  # 70 tokens
+        "f2.py": "x" * 200,  # 50 tokens
+        "f3.py": "x" * 160,  # 40 tokens
+        "f4.py": "x" * 120,  # 30 tokens (will merge)
+        "big.py": "x" * 440,  # 110 tokens -> overflow
+    }
+    file_to_system_id = {
+        "f1.py": 1,
+        "f2.py": 1,
+        "f3.py": 1,
+        "f4.py": 2,
+        "big.py": 3,
+    }
+
+    async def fake_extract_from_clusters(self, clusters, root_query, max_concurrency=4):
+        return EvidenceLedger()
+
+    with patch.object(
+        FactExtractor, "extract_from_clusters", new=fake_extract_from_clusters
+    ), patch.object(ClusteringService, "__init__", side_effect=AssertionError("HDBSCAN path should not be used")):
+        result1 = await extract_facts_with_system_clustering(
+            files=files,
+            root_query="q",
+            llm_provider=llm,
+            file_to_system_id=file_to_system_id,
+            min_tokens_per_cluster=60,
+            max_tokens_per_cluster=100,
+        )
+        result2 = await extract_facts_with_system_clustering(
+            files=files,
+            root_query="q",
+            llm_provider=llm,
+            file_to_system_id=file_to_system_id,
+            min_tokens_per_cluster=60,
+            max_tokens_per_cluster=100,
+        )
+
+    def shape(res):
+        return [
+            (sorted(group.file_paths), int(group.total_tokens))
+            for group in res.cluster_groups
+        ]
+
+    assert shape(result1) == shape(result2)
+
+    # All non-overflow clusters must respect max tokens; overflow allowed only as single-file bins.
+    assert any(g.total_tokens > 100 for g in result1.cluster_groups)  # overflow exists
+    for group in result1.cluster_groups:
+        if group.total_tokens <= 100:
+            continue
+        assert len(group.file_paths) == 1
+        fp = group.file_paths[0]
+        assert llm.estimate_tokens(files[fp]) == group.total_tokens
+
+    # Ensure the small single-file cluster (f4.py) is merged (not alone).
+    assert not any(g.file_paths == ["f4.py"] for g in result1.cluster_groups)

@@ -104,6 +104,10 @@ class GapDetectionService:
 
         self._chunk_systems_snapshot_index_loaded = True
 
+        if self._config.algorithm != "v4":
+            self._chunk_systems_snapshot_index = None
+            return None
+
         snapshot_dir = self._config.chunk_systems_snapshot_dir
         if snapshot_dir is None:
             self._chunk_systems_snapshot_index = None

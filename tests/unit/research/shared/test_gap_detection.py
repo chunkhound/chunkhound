@@ -395,6 +395,7 @@ async def test_cluster_covered_chunks_uses_snapshot_systems_when_available(
         shard_budget=20_000,
         min_gaps=1,
         max_gaps=5,
+        algorithm="v4",
         chunk_systems_snapshot_dir=tmp_path,
     )
     svc = GapDetectionService(
@@ -478,6 +479,57 @@ async def test_cluster_covered_chunks_falls_back_to_kmeans_when_snapshot_missing
 
     result = await svc._cluster_covered_chunks_for_gaps(
         [{"chunk_id": 1, "content": "x"}]
+    )
+
+    assert called["value"] is True
+    assert result == [[{"chunk_id": "sentinel"}]]
+
+
+@pytest.mark.asyncio
+async def test_cluster_covered_chunks_does_not_use_snapshot_systems_in_v3(
+    tmp_path,
+    mock_llm_manager,
+    mock_embedding_manager,
+    mock_db_services,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    (tmp_path / "snapshot.chunk_systems.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "snapshot.chunk_systems.v1",
+                "clusters": [{"cluster_id": 1, "chunk_ids": [10]}],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config = ResearchConfig(
+        shard_budget=20_000,
+        min_gaps=1,
+        max_gaps=5,
+        algorithm="v3",
+        chunk_systems_snapshot_dir=tmp_path,
+    )
+    svc = GapDetectionService(
+        llm_manager=mock_llm_manager,
+        embedding_manager=mock_embedding_manager,
+        db_services=mock_db_services,
+        config=config,
+    )
+
+    called = {"value": False}
+
+    async def fake_kmeans(_chunks):
+        called["value"] = True
+        return [[{"chunk_id": "sentinel"}]]
+
+    monkeypatch.setattr(svc, "_cluster_chunks_kmeans", fake_kmeans)
+
+    result = await svc._cluster_covered_chunks_for_gaps(
+        [{"chunk_id": 10, "content": "x"}]
     )
 
     assert called["value"] is True

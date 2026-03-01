@@ -61,7 +61,7 @@ async def run_deep_research(
     # Create config from environment
     config = Config.from_environment()
 
-    # Create research service using factory (v1/v2/v3 based on config)
+    # Create research service using factory (v1-v4 based on config)
     research_service = ResearchServiceFactory.create(
         config=config,
         db_services=services,

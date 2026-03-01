@@ -543,7 +543,7 @@ async def deep_research_impl(
     if config is None:
         config = Config.from_environment()
 
-    # Create code research service using factory (v1 or v2 based on config)
+    # Create code research service using factory (v1-v4 based on config)
     # This ensures followup suggestions automatically update if tool is renamed
     research_service = ResearchServiceFactory.create(
         config=config,
