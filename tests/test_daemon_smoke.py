@@ -1,6 +1,6 @@
 """Daemon smoke tests — verifies multi-client MCP daemon architecture.
 
-These tests cover the critical ALGINF-5316 use case: multiple Claude instances
+These tests cover the multi-client use case: multiple Claude instances
 sharing one DuckDB connection via the ChunkHound daemon.
 
 Run with:
@@ -245,8 +245,6 @@ async def test_daemon_single_client_basic(pre_indexed_project_dir: Path) -> None
         assert isinstance(content, list) and len(content) > 0
 
         text = content[0].get("text", "")
-        # The result is a JSON string; parse and check for matches
-        parsed = json.loads(text) if text.startswith("{") or text.startswith("[") else {"raw": text}
         # Should find 'def authenticate' in auth.py
         assert "auth" in text.lower() or "authenticate" in text.lower(), (
             f"Expected auth-related results in search output: {text[:500]}"

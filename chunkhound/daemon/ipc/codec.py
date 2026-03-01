@@ -14,6 +14,7 @@ from typing import Any
 import msgpack as _msgpack  # type: ignore[import-untyped]
 
 _HEADER = struct.Struct(">I")  # big-endian uint32
+MAX_FRAME_BYTES = 100 * 1024 * 1024  # 100 MB
 
 
 def encode(obj: Any) -> bytes:
@@ -37,5 +38,7 @@ async def read_frame(reader: asyncio.StreamReader) -> Any:
     """Read a length-prefixed frame from *reader* and decode it."""
     header = await reader.readexactly(_HEADER.size)
     (length,) = _HEADER.unpack(header)
+    if length > MAX_FRAME_BYTES:
+        raise ValueError(f"IPC frame too large: {length} bytes (max {MAX_FRAME_BYTES})")
     payload = await reader.readexactly(length)
     return decode(payload)

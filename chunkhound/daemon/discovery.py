@@ -232,18 +232,28 @@ class DaemonDiscovery:
         # Forward relevant config flags if present
         flag_map = {
             "config": "--config",
-            "db_path": "--db-path",
-            "embedding_provider": "--embedding-provider",
-            "embedding_model": "--embedding-model",
-            "embedding_api_key": "--embedding-api-key",
-            "embedding_base_url": "--embedding-base-url",
-            "embedding_batch_size": "--embedding-batch-size",
+            # Database
+            "db": "--db",
+            "database_provider": "--database-provider",
+            # Embedding
+            "model": "--model",
+            "api_key": "--api-key",
+            "base_url": "--base-url",
+            "azure_endpoint": "--azure-endpoint",
+            "api_version": "--api-version",
+            "azure_deployment": "--azure-deployment",
+            # LLM
             "llm_provider": "--llm-provider",
+            "llm_api_key": "--llm-api-key",
+            "llm_base_url": "--llm-base-url",
         }
         for attr, flag in flag_map.items():
             val = getattr(args, attr, None)
             if val is not None:
                 cmd += [flag, str(val)]
+
+        if getattr(args, "no_embeddings", False):
+            cmd.append("--no-embeddings")
 
         if getattr(args, "debug", False):
             cmd.append("--debug")
