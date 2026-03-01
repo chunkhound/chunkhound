@@ -70,6 +70,33 @@ def l2_normalize(vector: list[float]) -> list[float]:
     return vector
 
 
+def mean_pool_embeddings(embeddings: list[list[float]]) -> list[float]:
+    """Average multiple embeddings into one L2-normalized vector.
+
+    Used when an oversized text is split into chunks that each produce their own
+    embedding. The mean-pooled result represents the full text as a single vector.
+
+    Args:
+        embeddings: List of equal-dimension embedding vectors.
+
+    Returns:
+        Single L2-normalized embedding vector.
+
+    Raises:
+        ValueError: If embeddings list is empty.
+    """
+    if not embeddings:
+        raise ValueError("Cannot mean-pool an empty list of embeddings")
+    if len(embeddings) == 1:
+        return embeddings[0]
+    dim = len(embeddings[0])
+    if any(len(e) != dim for e in embeddings[1:]):
+        dims = [len(e) for e in embeddings]
+        raise ValueError(f"All embeddings must have equal dimensions, got {dims}")
+    pooled = [sum(col) / len(embeddings) for col in zip(*embeddings)]
+    return l2_normalize(pooled)
+
+
 def validate_embedding_dims(actual_dims: int, expected_dims: int) -> None:
     """Validate embedding dimensions match expected value (INV-1).
 
