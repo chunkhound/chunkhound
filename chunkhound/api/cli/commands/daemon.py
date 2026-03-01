@@ -14,6 +14,15 @@ async def daemon_command(args: argparse.Namespace, config: Config) -> None:
               ``socket_path``).
         config: Pre-validated configuration instance.
     """
+    # CRITICAL: Import numpy early for DuckDB threading safety.
+    # The daemon owns the sole DuckDB connection; this must happen before
+    # initialize() opens the database.
+    # See: https://duckdb.org/docs/stable/clients/python/known_issues.html
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        pass
+
     from chunkhound.daemon.server import ChunkHoundDaemon
 
     # argparse converts --project-dir to args.project_dir (with underscore)

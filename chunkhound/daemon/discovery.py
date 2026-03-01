@@ -210,6 +210,64 @@ class DaemonDiscovery:
     # Daemon startup
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _build_forwarded_args(args: Any) -> list[str]:
+        """Rebuild daemon-compatible argv tokens from the parsed args namespace.
+
+        Both ``mcp`` and ``_daemon`` parsers register identical config flags
+        via ``add_config_arguments()``.  By introspecting the daemon parser's
+        own action list we forward every flag — including those added in future
+        — without maintaining a hand-written map that can fall out of sync.
+
+        Args:
+            args: Parsed ``argparse.Namespace`` from the proxy (mcp) invocation.
+
+        Returns:
+            List of flag tokens ready to append to the daemon subprocess cmd.
+        """
+        import argparse as _ap
+
+        from chunkhound.api.cli.parsers.daemon_parser import add_daemon_subparser
+
+        # Build a temporary daemon parser solely for introspection.
+        _tmp = _ap.ArgumentParser()
+        daemon_parser = add_daemon_subparser(_tmp.add_subparsers())
+
+        # These dests are daemon-specific positional/required args that have
+        # no equivalent in the mcp parser and are already handled explicitly.
+        _skip_dests = {"project_dir", "socket_path", "help"}
+
+        forwarded: list[str] = []
+        for action in daemon_parser._actions:
+            if not action.option_strings:
+                continue  # positional — skip
+            dest = action.dest
+            if dest in _skip_dests:
+                continue
+            val = getattr(args, dest, None)
+            if val is None:
+                continue
+            flag = action.option_strings[0]
+            if action.const is True:
+                # store_true: only add the flag when the value is True
+                if val:
+                    forwarded.append(flag)
+            elif action.const is False:
+                # store_false: only add the flag when the value is False
+                if not val:
+                    forwarded.append(flag)
+            elif isinstance(val, list):
+                # append action (e.g. --include / --exclude)
+                for item in val:
+                    forwarded.extend([flag, str(item)])
+            else:
+                # Regular store action — forward only when explicitly set
+                # (i.e. different from the action's declared default).
+                if val != action.default:
+                    forwarded.extend([flag, str(val)])
+
+        return forwarded
+
     def _start_daemon_subprocess(self, args: Any) -> None:
         """Launch the daemon as a detached subprocess.
 
@@ -229,34 +287,12 @@ class DaemonDiscovery:
             "--socket-path", socket_path,
         ]
 
-        # Forward relevant config flags if present
-        flag_map = {
-            "config": "--config",
-            # Database
-            "db": "--db",
-            "database_provider": "--database-provider",
-            # Embedding
-            "model": "--model",
-            "api_key": "--api-key",
-            "base_url": "--base-url",
-            "azure_endpoint": "--azure-endpoint",
-            "api_version": "--api-version",
-            "azure_deployment": "--azure-deployment",
-            # LLM
-            "llm_provider": "--llm-provider",
-            "llm_api_key": "--llm-api-key",
-            "llm_base_url": "--llm-base-url",
-        }
-        for attr, flag in flag_map.items():
-            val = getattr(args, attr, None)
-            if val is not None:
-                cmd += [flag, str(val)]
-
-        if getattr(args, "no_embeddings", False):
-            cmd.append("--no-embeddings")
-
-        if getattr(args, "debug", False):
-            cmd.append("--debug")
+        # Forward all config flags by introspecting the daemon parser's own
+        # action definitions.  Both `mcp` and `_daemon` register the same
+        # config arguments via add_config_arguments(), so iterating the daemon
+        # parser ensures every current and future flag is forwarded without
+        # maintaining a hand-written flag_map.
+        cmd.extend(self._build_forwarded_args(args))
 
         env = os.environ.copy()
         env["CHUNKHOUND_DAEMON_MODE"] = "true"

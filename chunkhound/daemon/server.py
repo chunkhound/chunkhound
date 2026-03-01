@@ -193,7 +193,11 @@ class ChunkHoundDaemon(MCPServerBase):
             ):
                 return
 
-            pid: int = reg.get("pid", 0)
+            raw_pid = reg.get("pid", 0)
+            try:
+                pid: int = int(raw_pid)
+            except (TypeError, ValueError):
+                return  # Reject malformed registration frame
             client_id = str(uuid.uuid4())
             self._client_manager.register(client_id, pid, writer)
             self.debug_log(f"Client registered: id={client_id} pid={pid}")

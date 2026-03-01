@@ -261,7 +261,7 @@ async def test_daemon_single_client_basic(pre_indexed_project_dir: Path) -> None
 
 @pytest.mark.asyncio
 async def test_daemon_two_clients_concurrent(pre_indexed_project_dir: Path) -> None:
-    """Two proxy clients connect to the SAME daemon concurrently — ALGINF-5316.
+    """Two proxy clients connect to the SAME daemon concurrently.
 
     This is the critical test that proves the DuckDB lock conflict is resolved.
     Without the daemon, opening two 'chunkhound mcp' processes on the same
