@@ -194,6 +194,10 @@ def create_openai_provider(
     api_version: str | None = None,
     azure_endpoint: str | None = None,
     azure_deployment: str | None = None,
+    batch_size: int = 100,
+    timeout: int = 30,
+    retry_attempts: int = 3,
+    verify_ssl: bool = True,
 ) -> "OpenAIEmbeddingProvider":
     """Create an OpenAI embedding provider with default settings.
 
@@ -216,6 +220,10 @@ def create_openai_provider(
         api_version: Azure OpenAI API version (e.g., '2024-02-01')
         azure_endpoint: Azure OpenAI endpoint URL (e.g., 'https://myresource.openai.azure.com')
         azure_deployment: Azure OpenAI deployment name
+        batch_size: Maximum batch size for API requests
+        timeout: Request timeout in seconds
+        retry_attempts: Number of retry attempts for failed requests
+        verify_ssl: Verify SSL certificates (False only for self-signed certs)
 
     Returns:
         Configured OpenAI embedding provider
@@ -236,4 +244,8 @@ def create_openai_provider(
         api_version=api_version,
         azure_endpoint=azure_endpoint,
         azure_deployment=azure_deployment,
+        batch_size=batch_size,
+        timeout=timeout,
+        retry_attempts=retry_attempts,
+        verify_ssl=verify_ssl,
     )

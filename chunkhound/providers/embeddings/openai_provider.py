@@ -291,6 +291,7 @@ class OpenAIEmbeddingProvider:
         api_version: str | None = None,
         azure_endpoint: str | None = None,
         azure_deployment: str | None = None,
+        verify_ssl: bool = True,
     ):
         """Initialize OpenAI embedding provider.
 
@@ -312,6 +313,7 @@ class OpenAIEmbeddingProvider:
             api_version: Azure OpenAI API version (e.g., '2024-02-01')
             azure_endpoint: Azure OpenAI endpoint URL
             azure_deployment: Azure OpenAI deployment name
+            verify_ssl: Verify SSL certificates (False only for self-signed certs)
         """
         if not OPENAI_AVAILABLE:
             raise ImportError(
@@ -342,6 +344,7 @@ class OpenAIEmbeddingProvider:
         self._rerank_batch_size = rerank_batch_size
         self._output_dims = output_dims
         self._client_side_truncation = client_side_truncation
+        self._verify_ssl = verify_ssl
         self._discovered_dims: int | None = None
         self._warned_default_dims = False
 
@@ -487,19 +490,18 @@ class OpenAIEmbeddingProvider:
         if self._base_url:
             client_kwargs["base_url"] = self._base_url
 
-            # For custom endpoints (non-OpenAI), disable SSL verification
-            # These often use self-signed certificates (e.g., corporate servers, Ollama)
+            # For custom endpoints (non-OpenAI), apply configured SSL verification
             if not is_openai_official:
-                # Create httpx client with SSL verification disabled
                 http_client = httpx.AsyncClient(
                     timeout=httpx.Timeout(timeout=self._timeout),
-                    verify=False,  # Disable SSL for custom endpoints
+                    verify=self._verify_ssl,
                 )
                 client_kwargs["http_client"] = http_client
 
-                logger.debug(
-                    f"SSL verification disabled for custom endpoint: {self._base_url}"
-                )
+                if not self._verify_ssl:
+                    logger.debug(
+                        f"SSL verification disabled for custom endpoint: {self._base_url}"
+                    )
 
         # IMPORTANT: Create the client in async context to avoid TaskGroup errors on Ubuntu
         # This ensures the event loop is running when the client initializes its httpx instance
@@ -538,8 +540,11 @@ class OpenAIEmbeddingProvider:
 
     @property
     def name(self) -> str:
-        """Provider name."""
-        # Return azure_openai for Azure endpoints to distinguish in logs/metrics
+        """Provider name for DB index keys.
+
+        Returns 'openai' for both 'openai' and 'openai_compatible' configs,
+        ensuring consistent embedding storage. Returns 'azure_openai' for Azure.
+        """
         if is_azure_openai_endpoint(self._azure_endpoint):
             return "azure_openai"
         return "openai"
@@ -1526,12 +1531,11 @@ class OpenAIEmbeddingProvider:
 
             client_kwargs = {"timeout": self._timeout}
             if not is_official_openai_endpoint(self._base_url):
-                # For custom endpoints, disable SSL verification
-                # These often use self-signed certificates (corporate servers, Ollama)
-                client_kwargs["verify"] = False
-                logger.debug(
-                    f"SSL verification disabled for rerank endpoint: {rerank_endpoint}"
-                )
+                client_kwargs["verify"] = self._verify_ssl
+                if not self._verify_ssl:
+                    logger.debug(
+                        f"SSL verification disabled for rerank endpoint: {rerank_endpoint}"
+                    )
 
             async with httpx.AsyncClient(**client_kwargs) as client:
                 headers = {"Content-Type": "application/json"}

@@ -61,7 +61,7 @@ class EmbeddingProviderFactory:
         provider_config = config.get_provider_config()
 
         # Create provider based on type
-        if config.provider == "openai":
+        if config.provider in ("openai", "openai_compatible"):
             return EmbeddingProviderFactory._create_openai_provider(provider_config)
         elif config.provider == "voyageai":
             return EmbeddingProviderFactory._create_voyageai_provider(provider_config)
@@ -89,6 +89,10 @@ class EmbeddingProviderFactory:
         rerank_batch_size = config.get("rerank_batch_size")
         output_dims = config.get("output_dims")
         client_side_truncation = config.get("client_side_truncation", False)
+        verify_ssl = config.get("verify_ssl", True)
+        batch_size = config.get("batch_size", 100)
+        timeout = config.get("timeout", 30)
+        retry_attempts = config.get("max_retries", 3)
 
         # Azure OpenAI parameters
         api_version = config.get("api_version")
@@ -108,7 +112,8 @@ class EmbeddingProviderFactory:
                 f"api_key={'***' if api_key else None}, "
                 f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
                 f"rerank_batch_size={rerank_batch_size}, output_dims={output_dims}, "
-                f"client_side_truncation={client_side_truncation}"
+                f"client_side_truncation={client_side_truncation}, "
+                f"verify_ssl={verify_ssl}"
             )
         else:
             logger.debug(
@@ -116,7 +121,8 @@ class EmbeddingProviderFactory:
                 f"base_url={base_url}, api_key={'***' if api_key else None}, "
                 f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
                 f"rerank_batch_size={rerank_batch_size}, output_dims={output_dims}, "
-                f"client_side_truncation={client_side_truncation}"
+                f"client_side_truncation={client_side_truncation}, "
+                f"verify_ssl={verify_ssl}"
             )
 
         try:
@@ -133,6 +139,10 @@ class EmbeddingProviderFactory:
                 api_version=api_version,
                 azure_endpoint=azure_endpoint,
                 azure_deployment=azure_deployment,
+                batch_size=batch_size,
+                timeout=timeout,
+                retry_attempts=retry_attempts,
+                verify_ssl=verify_ssl,
             )
         except Exception as e:
             raise ValueError(f"Failed to create OpenAI provider: {e}") from e
@@ -215,7 +225,7 @@ class EmbeddingProviderFactory:
 
         # Try to import the required create function
         try:
-            if provider == "openai":
+            if provider in ("openai", "openai_compatible"):
                 from chunkhound.embeddings import create_openai_provider  # noqa: F401
             elif provider == "voyageai":
                 from chunkhound.providers.embeddings.voyageai_provider import (  # noqa: F401
@@ -327,7 +337,7 @@ class EmbeddingProviderFactory:
                     "base_url": "https://api.openai.com",
                     "requires_api_key": True,
                     "supports_model_listing": False,
-                    "supports_reranking": False,
+                    "supports_reranking": True,
                     "default_models": get_openai_display_models(),
                     "default_rerankers": [],
                     "default_selection": OPENAI_DEFAULT_MODEL,
@@ -364,8 +374,8 @@ class EmbeddingProviderFactory:
             info.update(
                 {
                     "description": "OpenAI-compatible API server",
-                    "requires": [],  # May or may not need API key
-                    "optional": ["api_key", "base_url", "model"],
+                    "requires": ["base_url"],
+                    "optional": ["api_key", "model"],
                     "supported_models": [],  # Discovered dynamically
                     # UI-specific metadata for setup wizard
                     "display_name": "OpenAI-Compatible",

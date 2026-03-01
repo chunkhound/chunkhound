@@ -208,3 +208,83 @@ chunkhound index . --force-reindex
 3. **Full CLI Support**: Configure everything from command line
 4. **Better Debugging**: Clear configuration hierarchy
 5. **Consistent Naming**: All ChunkHound vars use same prefix
+
+## Matryoshka Embeddings (output_dims)
+
+Some models (e.g., `text-embedding-3-large`, `text-embedding-3-small`) support
+matryoshka representation learning: embeddings can be truncated to smaller
+dimensions without retraining, trading accuracy for speed/storage.
+
+### Configuration
+
+```bash
+# Via CLI
+chunkhound index . --output-dims 256
+
+# Via environment variable
+export CHUNKHOUND_EMBEDDING__OUTPUT_DIMS=256
+
+# Client-side truncation (for APIs that don't support the dimensions parameter)
+chunkhound index . --output-dims 256 --client-side-truncation
+export CHUNKHOUND_EMBEDDING__CLIENT_SIDE_TRUNCATION=true
+```
+
+### Supported dimensions by model
+
+| Model | Native dims | Min dims | Recommended min |
+|-------|-------------|----------|-----------------|
+| `text-embedding-3-large` | 3072 | 1 | 256 |
+| `text-embedding-3-small` | 1536 | 1 | 512 |
+
+### Impact
+
+- **Existing indexes are incompatible** — changing `output_dims` changes the
+  embedding dimension, which requires a full reindex.
+- **Smaller dimensions** = faster search, less storage, slightly lower accuracy.
+- **Use `--force-reindex`** after changing `output_dims`.
+
+## TLS Verification Default Change
+
+SSL certificate verification is now **enabled by default** for all custom
+endpoints. Previously, `verify=False` was used unconditionally for any
+non-OpenAI endpoint (Ollama, vLLM, etc.), creating a MITM risk when API keys
+are transmitted.
+
+### If you use self-signed certificates
+
+```bash
+# Via CLI
+chunkhound index . --no-verify-ssl
+
+# Via environment variable
+export CHUNKHOUND_EMBEDDING__VERIFY_SSL=false
+```
+
+**Note:** `setup_wizard.py` still uses `verify=False` during interactive endpoint
+probing, where certificate validation would prevent discovery of local servers.
+
+## OpenAI-Compatible Provider
+
+Custom OpenAI-compatible endpoints (Ollama, vLLM, LM Studio, etc.) now have a
+dedicated `openai_compatible` provider type, giving clearer semantics:
+
+```bash
+# Via CLI
+chunkhound index . \
+  --provider openai_compatible \
+  --base-url http://localhost:11434/v1 \
+  --model nomic-embed-text
+
+# Via environment variables
+export CHUNKHOUND_EMBEDDING__PROVIDER=openai_compatible
+export CHUNKHOUND_EMBEDDING__BASE_URL=http://localhost:11434/v1
+export CHUNKHOUND_EMBEDDING__MODEL=nomic-embed-text
+```
+
+`base_url` is **required** for `openai_compatible`. An API key is optional
+(local servers typically don't require one).
+
+**Note on DB key:** `openai_compatible` stores embeddings under the same DB
+key as `openai` (`provider=openai, model=<model_name>`). If you switch between
+official OpenAI and a custom endpoint using the **same model name**, run
+`--force-reindex` — the vectors are incompatible despite sharing a key.
