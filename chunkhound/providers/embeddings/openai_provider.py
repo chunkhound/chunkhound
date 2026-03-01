@@ -21,7 +21,7 @@ from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 
 from .batch_utils import handle_token_limit_error
-from .shared_utils import l2_normalize, validate_embedding_dims
+from .shared_utils import l2_normalize, mean_pool_embeddings, validate_embedding_dims
 
 try:
     import openai
@@ -829,11 +829,15 @@ class OpenAIEmbeddingProvider:
                     current_batch = []
                     current_tokens = 0
 
-                # Split oversized text and process chunks
+                # Split oversized text and process chunks, then mean-pool into single vector
                 chunks = self.chunk_text_by_tokens(text, token_limit)
-                for chunk in chunks:
-                    chunk_embedding = await self._embed_batch_internal([chunk])
-                    all_embeddings.extend(chunk_embedding)
+                chunk_embeddings = await self._embed_batch_internal(chunks)
+                if not chunk_embeddings:
+                    raise RuntimeError(
+                        f"No embeddings produced for oversized text ({text_tokens} tokens). "
+                        "chunk_text_by_tokens returned no processable chunks."
+                    )
+                all_embeddings.append(mean_pool_embeddings(chunk_embeddings))
                 continue
 
             # Check if adding this text would exceed token limit
