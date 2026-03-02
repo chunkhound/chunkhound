@@ -366,11 +366,11 @@ class DaemonDiscovery:
             try:
                 self._start_daemon_subprocess(args)
             finally:
-                # Release after daemon is running (or failed to start); poll
-                # loop below handles the "not yet connectable" case.
-                # We keep the lock until the daemon wrote its lock file so that
-                # concurrent proxies that lose the race don't prematurely try to
-                # spawn a second daemon — they'll poll in the section below.
+                # The starter lock is NOT released here; it is held until the polling
+                # loop's finally block below (line ~387) so concurrent proxies don't
+                # race to spawn a second daemon. If _start_daemon_subprocess() raises,
+                # the lock leaks until the outer finally fires or stale-PID cleanup
+                # on the next invocation — acceptable, as the lock is process-scoped.
                 pass
             # Poll until connectable; read the lock file to get the actual address
             # (critical on Windows where the port is only known after daemon binds)

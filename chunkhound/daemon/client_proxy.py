@@ -71,7 +71,11 @@ class ClientProxy:
             # "Task exception was never retrieved" noise on stderr.
             for task in done:
                 if not task.cancelled():
-                    task.exception()  # retrieve to suppress asyncio warning
+                    exc = task.exception()
+                    if exc is not None:
+                        msg = f"[chunkhound] client_proxy task error: {exc!r}\n"
+                        sys.stderr.write(msg)
+                        sys.stderr.flush()
 
             # Cancel remaining tasks
             for task in pending:

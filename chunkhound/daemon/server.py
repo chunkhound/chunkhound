@@ -305,7 +305,7 @@ class ChunkHoundDaemon(MCPServerBase):
         except asyncio.TimeoutError:
             pass
 
-        tools = self._build_available_tools_as_dicts()
+        tools = self._build_filtered_tool_dicts()
         return {
             "jsonrpc": "2.0",
             "id": msg.get("id"),
@@ -340,14 +340,6 @@ class ChunkHoundDaemon(MCPServerBase):
             "id": msg.get("id"),
             "result": {"content": content, "isError": False},
         }
-
-    # ------------------------------------------------------------------
-    # Tool schema building (mirrors StdioMCPServer.build_available_tools)
-    # ------------------------------------------------------------------
-
-    def _build_available_tools_as_dicts(self) -> list[dict[str, Any]]:
-        """Build a JSON-serialisable list of available tool schemas."""
-        return self._build_filtered_tool_dicts()
 
     # ------------------------------------------------------------------
     # Shutdown
