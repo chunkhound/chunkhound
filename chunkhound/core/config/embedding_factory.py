@@ -146,6 +146,9 @@ class EmbeddingProviderFactory:
         model = config.get("model")
         rerank_model = config.get("rerank_model")
         rerank_batch_size = config.get("rerank_batch_size")
+        rerank_url = config.get("rerank_url")
+        rerank_format = config.get("rerank_format", "auto")
+        max_concurrent_batches = config.get("max_concurrent_batches")
 
         # Model should come from config, but handle None case safely
         if not model:
@@ -154,8 +157,8 @@ class EmbeddingProviderFactory:
         logger.debug(
             f"Creating VoyageAI provider: model={model}, "
             f"base_url={base_url}, api_key={'***' if api_key else None}, "
-            f"rerank_model={rerank_model}, "
-            f"rerank_batch_size={rerank_batch_size}"
+            f"rerank_model={rerank_model}, rerank_url={rerank_url}, "
+            f"rerank_format={rerank_format}, rerank_batch_size={rerank_batch_size}"
         )
 
         try:
@@ -174,6 +177,12 @@ class EmbeddingProviderFactory:
                 kwargs["rerank_model"] = rerank_model
             if rerank_batch_size is not None:
                 kwargs["rerank_batch_size"] = rerank_batch_size
+            # rerank_url: only pass absolute URLs (relative paths don't make sense for VoyageAI)
+            if rerank_url and rerank_url.startswith(("http://", "https://")):
+                kwargs["rerank_url"] = rerank_url
+                kwargs["rerank_format"] = rerank_format
+            if max_concurrent_batches is not None:
+                kwargs["max_concurrent_batches"] = max_concurrent_batches
 
             return VoyageAIEmbeddingProvider(**kwargs)
         except Exception as e:

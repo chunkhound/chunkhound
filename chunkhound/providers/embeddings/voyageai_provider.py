@@ -4,6 +4,8 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
+
 from loguru import logger
 
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERANK_MODEL
@@ -121,13 +123,16 @@ class VoyageAIEmbeddingProvider:
         max_tokens: int | None = None,
         rerank_batch_size: int | None = None,
         base_url: str | None = None,
+        rerank_url: str | None = None,
+        rerank_format: str = "auto",
+        max_concurrent_batches: int | None = None,
     ):
         """Initialize VoyageAI embedding provider.
 
         Args:
             api_key: VoyageAI API key (defaults to VOYAGE_API_KEY env var)
             model: Model name to use for embeddings
-            rerank_model: Model name to use for reranking
+            rerank_model: Model name to use for reranking (SDK path only)
             batch_size: Maximum batch size for API requests
             timeout: Request timeout in seconds
             retry_attempts: Number of retry attempts for failed requests
@@ -135,6 +140,16 @@ class VoyageAIEmbeddingProvider:
             max_tokens: Maximum tokens per request (if applicable)
             rerank_batch_size: Max documents per rerank batch (overrides default of 1000)
             base_url: Custom API base URL (overrides https://api.voyageai.com/v1)
+            rerank_url: Separate reranker endpoint URL (absolute http/https).
+                When set, reranking uses HTTP instead of the VoyageAI SDK.
+            rerank_format: Reranking API format when using rerank_url.
+                'cohere' for Cohere-compatible APIs (requires rerank_model),
+                'tei' for HuggingFace TEI (model set at deployment),
+                'auto' to detect from response (default).
+            max_concurrent_batches: Maximum number of concurrent embed() calls.
+                Defaults to 1 for custom endpoints (e.g. Azure ML) to avoid
+                HTTP 424 "Failed Dependency" from concurrent-request overload,
+                and to RECOMMENDED_CONCURRENCY for the official VoyageAI API.
         """
         if not VOYAGEAI_AVAILABLE:
             raise ImportError(
@@ -163,6 +178,8 @@ class VoyageAIEmbeddingProvider:
         self._max_tokens = max_tokens or model_config["context_length"]
         self._api_key = api_key
         self._base_url = base_url
+        self._rerank_url = rerank_url
+        self._rerank_format = rerank_format
         self._model_config = model_config
         self._rerank_batch_size = rerank_batch_size
 
@@ -174,8 +191,17 @@ class VoyageAIEmbeddingProvider:
         # the SDK's requirement — the server is expected to ignore the auth header
         effective_api_key = api_key if api_key else ("no-key" if base_url else None)
 
+        # Use the system CA bundle when available so that corporate proxy CAs
+        # (e.g. Blue Coat / AMAT) are trusted without patching certifi.
+        # REQUESTS_CA_BUNDLE is honoured by the requests library used by the SDK.
+        import os as _os
+        _sys_ca = "/etc/ssl/certs/ca-certificates.crt"
+        if _os.path.exists(_sys_ca) and not _os.environ.get("REQUESTS_CA_BUNDLE"):
+            _os.environ["REQUESTS_CA_BUNDLE"] = _sys_ca
+            _os.environ["SSL_CERT_FILE"] = _sys_ca
+
         # Initialize client
-        self._client = voyageai.Client(api_key=effective_api_key)
+        self._client = voyageai.Client(api_key=effective_api_key, timeout=timeout)
 
         # Model dimension mapping - built from configuration
         self._dimensions_map = {
@@ -187,6 +213,13 @@ class VoyageAIEmbeddingProvider:
         self._requests_made = 0
         self._tokens_used = 0
         self._embeddings_generated = 0
+
+        # Concurrency limiter: custom endpoints (e.g. Azure ML) often reject
+        # simultaneous requests with HTTP 424. Default to 1 for custom base_url,
+        # high value for the official API which supports 2000 RPM.
+        if max_concurrent_batches is None:
+            max_concurrent_batches = 1 if base_url else self.RECOMMENDED_CONCURRENCY
+        self._embed_semaphore = asyncio.Semaphore(max_concurrent_batches)
 
     @property
     def name(self) -> str:
@@ -237,7 +270,11 @@ class VoyageAIEmbeddingProvider:
         )
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for a list of texts with automatic retry on network errors."""
+        """Generate embeddings for a list of texts with automatic retry on network errors.
+
+        Internally sub-batches to self._batch_size so that custom endpoints
+        (e.g. Azure ML) are never overwhelmed by a single oversized request.
+        """
         if not texts:
             return []
 
@@ -245,12 +282,29 @@ class VoyageAIEmbeddingProvider:
         if not validated_texts:
             return []
 
+        # Sub-batch when input exceeds batch_size (protects custom/low-throughput endpoints)
+        if len(validated_texts) > self._batch_size:
+            all_embeddings: list[list[float]] = []
+            for i in range(0, len(validated_texts), self._batch_size):
+                sub_batch = validated_texts[i : i + self._batch_size]
+                all_embeddings.extend(await self._embed_single_batch(sub_batch))
+            return all_embeddings
+
+        return await self._embed_single_batch(validated_texts)
+
+    async def _embed_single_batch(self, texts: list[str]) -> list[list[float]]:
+        """Send one batch to the API with retry logic."""
+        async with self._embed_semaphore:
+            return await self._embed_single_batch_locked(texts)
+
+    async def _embed_single_batch_locked(self, texts: list[str]) -> list[list[float]]:
+        """Inner embed implementation, called while holding the semaphore."""
         # Retry loop for transient network errors
         for attempt in range(self._retry_attempts):
             try:
                 result = await asyncio.to_thread(
                     self._client.embed,
-                    texts=validated_texts,
+                    texts=texts,
                     model=self._model,
                     input_type="document",
                     truncation=True,
@@ -266,8 +320,9 @@ class VoyageAIEmbeddingProvider:
                 # Classify error type for retry decision
                 error_type = type(e).__name__
                 error_module = type(e).__module__
+                error_str = str(e)
 
-                # Network errors that should be retried
+                # Network / transient errors that should be retried
                 is_network_error = any([
                     "APIConnectionError" in error_type,
                     "ConnectionError" in error_type,
@@ -276,9 +331,16 @@ class VoyageAIEmbeddingProvider:
                     "TimeoutError" in error_type,
                 ])
 
-                if is_network_error and attempt < self._retry_attempts - 1:
-                    # Exponential backoff for network errors
-                    delay = self._retry_delay * (2 ** attempt)
+                # HTTP 408 (upstream request timeout) from Azure ML / proxies:
+                # treat as transient and retry with a longer initial backoff
+                is_upstream_timeout = "408" in error_str or (
+                    "upstream request timeout" in error_str.lower()
+                )
+
+                if (is_network_error or is_upstream_timeout) and attempt < self._retry_attempts - 1:
+                    # Longer backoff for upstream timeouts — endpoint needs time to recover
+                    base_delay = 10.0 if is_upstream_timeout else self._retry_delay
+                    delay = base_delay * (2 ** attempt)
                     logger.warning(
                         f"VoyageAI embedding failed with {error_module}.{error_type} "
                         f"(attempt {attempt + 1}/{self._retry_attempts}): {e}. "
@@ -288,7 +350,7 @@ class VoyageAIEmbeddingProvider:
                     continue
                 else:
                     # Non-retryable error or last attempt - log and raise
-                    if is_network_error:
+                    if is_network_error or is_upstream_timeout:
                         logger.error(
                             f"VoyageAI embedding failed after {self._retry_attempts} attempts: {e}"
                         )
@@ -473,17 +535,36 @@ class VoyageAIEmbeddingProvider:
 
     # Reranking Operations
     def supports_reranking(self) -> bool:
-        """VoyageAI provider supports reranking."""
+        """Return True if reranking is available with the current configuration.
+
+        - Custom base_url (e.g. Azure ML): only supported when rerank_url is
+          explicitly configured, since the embedding endpoint does not expose /rerank.
+        - Official VoyageAI API (no base_url): always supported via SDK.
+        """
+        if self._base_url:
+            return self._rerank_url is not None
         return True
 
     async def rerank(
         self, query: str, documents: list[str], top_k: int | None = None
     ) -> list[RerankResult]:
-        """Rerank documents by relevance to query using VoyageAI reranker with automatic retry on network errors."""
+        """Rerank documents by relevance to query.
+
+        Dispatches to HTTP-based reranking when rerank_url is configured,
+        otherwise uses the VoyageAI SDK (official API only).
+        """
         if not documents:
             return []
 
-        # Retry loop for transient network errors
+        if self._rerank_url:
+            return await self._rerank_via_http(query, documents, top_k)
+
+        return await self._rerank_via_sdk(query, documents, top_k)
+
+    async def _rerank_via_sdk(
+        self, query: str, documents: list[str], top_k: int | None
+    ) -> list[RerankResult]:
+        """Rerank using the VoyageAI SDK (official API)."""
         for attempt in range(self._retry_attempts):
             try:
                 logger.debug(
@@ -500,7 +581,6 @@ class VoyageAIEmbeddingProvider:
 
                 self._requests_made += 1
 
-                # Check if we got valid results
                 if not hasattr(result, "results") or not result.results:
                     logger.warning(
                         f"VoyageAI rerank returned no results for query: {query[:100]}"
@@ -522,15 +602,11 @@ class VoyageAIEmbeddingProvider:
                 return rerank_results
 
             except AttributeError as e:
-                # Response format error - don't retry
                 logger.error(f"VoyageAI rerank response format error: {e}")
                 raise ValueError(f"Invalid rerank response format: {e}") from e
             except Exception as e:
-                # Classify error type for retry decision
                 error_type = type(e).__name__
                 error_module = type(e).__module__
-
-                # Network errors that should be retried
                 is_network_error = any([
                     "APIConnectionError" in error_type,
                     "ConnectionError" in error_type,
@@ -538,9 +614,7 @@ class VoyageAIEmbeddingProvider:
                     "Timeout" in error_type,
                     "TimeoutError" in error_type,
                 ])
-
                 if is_network_error and attempt < self._retry_attempts - 1:
-                    # Exponential backoff for network errors
                     delay = self._retry_delay * (2 ** attempt)
                     logger.warning(
                         f"VoyageAI reranking failed with {error_module}.{error_type} "
@@ -550,7 +624,6 @@ class VoyageAIEmbeddingProvider:
                     await asyncio.sleep(delay)
                     continue
                 else:
-                    # Non-retryable error or last attempt - log and raise
                     if is_network_error:
                         logger.error(
                             f"VoyageAI reranking failed after {self._retry_attempts} attempts: {e}"
@@ -559,5 +632,111 @@ class VoyageAIEmbeddingProvider:
                         logger.error(f"VoyageAI reranking failed with non-retryable error: {e}")
                     raise RuntimeError(f"Reranking failed: {e}") from e
 
-        # Should never reach here, but provide clear error if we do
         raise RuntimeError(f"Reranking failed after {self._retry_attempts} attempts")
+
+    async def _rerank_via_http(
+        self, query: str, documents: list[str], top_k: int | None
+    ) -> list[RerankResult]:
+        """Rerank using a separate HTTP reranker service (TEI or Cohere format).
+
+        Handles batching when document count exceeds rerank_batch_size.
+        """
+        batch_limit = self.get_max_rerank_batch_size()
+
+        if len(documents) <= batch_limit:
+            results = await self._rerank_http_batch(query, documents, top_k)
+            if top_k is not None:
+                results = results[:top_k]
+            return results
+
+        # Split into batches and aggregate
+        all_results: list[RerankResult] = []
+        for start in range(0, len(documents), batch_limit):
+            batch = documents[start : start + batch_limit]
+            batch_results = await self._rerank_http_batch(query, batch, top_k=None)
+            for r in batch_results:
+                all_results.append(RerankResult(index=r.index + start, score=r.score))
+
+        all_results.sort(key=lambda r: r.score, reverse=True)
+        if top_k is not None:
+            all_results = all_results[:top_k]
+        return all_results
+
+    async def _rerank_http_batch(
+        self, query: str, documents: list[str], top_k: int | None
+    ) -> list[RerankResult]:
+        """Send one batch to the HTTP reranker and return parsed results."""
+        payload = self._build_rerank_payload(query, documents, top_k)
+
+        logger.debug(
+            f"HTTP reranking {len(documents)} documents at {self._rerank_url} "
+            f"(format={self._rerank_format})"
+        )
+
+        # Use system CA bundle so corporate proxy CAs are trusted
+        import os as _os
+        ssl_context = _os.environ.get("REQUESTS_CA_BUNDLE") or True
+
+        async with httpx.AsyncClient(timeout=self._timeout, verify=ssl_context) as client:
+            headers = {"Content-Type": "application/json"}
+            if self._api_key:
+                headers["Authorization"] = f"Bearer {self._api_key}"
+
+            response = await client.post(self._rerank_url, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+
+        # Normalise bare-array response (TEI) to dict form
+        if isinstance(data, list):
+            data = {"results": data}
+
+        if isinstance(data, dict) and "error" in data:
+            raise ValueError(f"Rerank service error: {data['error']}")
+
+        return self._parse_rerank_response(data, len(documents))
+
+    def _build_rerank_payload(
+        self, query: str, documents: list[str], top_k: int | None
+    ) -> dict:
+        """Build rerank request payload for TEI or Cohere format."""
+        fmt = self._rerank_format
+        if fmt == "tei":
+            return {"query": query, "texts": documents}
+        elif fmt == "cohere":
+            payload: dict = {"query": query, "documents": documents}
+            if self._rerank_model:
+                payload["model"] = self._rerank_model
+            if top_k is not None:
+                payload["top_n"] = top_k
+            return payload
+        else:  # auto: try Cohere if model provided, else TEI
+            if self._rerank_model:
+                payload = {"query": query, "documents": documents, "model": self._rerank_model}
+                if top_k is not None:
+                    payload["top_n"] = top_k
+                return payload
+            return {"query": query, "texts": documents}
+
+    def _parse_rerank_response(self, data: dict, num_documents: int) -> list[RerankResult]:
+        """Parse reranker HTTP response (Cohere or TEI format) into RerankResult list."""
+        if "results" not in data:
+            raise ValueError(
+                f"Invalid rerank response: missing 'results' field. Got: {list(data.keys())}"
+            )
+
+        results = []
+        for item in data["results"]:
+            # Cohere: {"index": N, "relevance_score": F}
+            # TEI:    {"index": N, "score": F}
+            idx = item.get("index")
+            score = item.get("relevance_score") or item.get("score")
+            if idx is None or score is None:
+                logger.warning(f"Skipping malformed rerank result: {item}")
+                continue
+            if not (0 <= idx < num_documents):
+                logger.warning(f"Rerank index {idx} out of range ({num_documents} docs), skipping")
+                continue
+            results.append(RerankResult(index=idx, score=score))
+
+        results.sort(key=lambda r: r.score, reverse=True)
+        return results

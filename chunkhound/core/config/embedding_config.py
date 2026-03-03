@@ -347,13 +347,20 @@ class EmbeddingConfig(BaseSettings):
         else:
             # For voyageai with a custom endpoint, API key is optional
             if not self.api_key and not self.base_url:
-                missing.append("api_key (set CHUNKHOUND_EMBEDDING__API_KEY)")
+                missing.append("api_key (set VOYAGE_API_KEY or CHUNKHOUND_EMBEDDING__API_KEY)")
 
         return missing
 
     @classmethod
     def add_cli_arguments(cls, parser: argparse.ArgumentParser) -> None:
         """Add embedding-related CLI arguments."""
+        parser.add_argument(
+            "--provider",
+            "--embedding-provider",
+            choices=["openai", "voyageai"],
+            help="Embedding provider (openai or voyageai)",
+        )
+
         parser.add_argument(
             "--model",
             "--embedding-model",
@@ -436,6 +443,15 @@ class EmbeddingConfig(BaseSettings):
         if azure_deployment := os.getenv("CHUNKHOUND_EMBEDDING__AZURE_DEPLOYMENT"):
             config["azure_deployment"] = azure_deployment
 
+        # Fallback: provider-specific env vars (lower priority than CHUNKHOUND_EMBEDDING__ vars)
+        if "api_key" not in config:
+            provider_hint = config.get("provider") or os.getenv("CHUNKHOUND_EMBEDDING__PROVIDER") or os.getenv("CHUNKHOUND_EMBEDDING_PROVIDER")
+            if not provider_hint or provider_hint == "voyageai":
+                if voyage_key := os.getenv("VOYAGE_API_KEY"):
+                    config["api_key"] = voyage_key
+                    if not provider_hint:
+                        config.setdefault("provider", "voyageai")
+
         # Reranking configuration
         if rerank_model := os.getenv("CHUNKHOUND_EMBEDDING__RERANK_MODEL"):
             config["rerank_model"] = rerank_model
@@ -455,6 +471,12 @@ class EmbeddingConfig(BaseSettings):
     def extract_cli_overrides(cls, args: Any) -> dict[str, Any]:
         """Extract embedding config from CLI arguments."""
         overrides = {}
+
+        # Handle provider arguments (both variations)
+        if hasattr(args, "provider") and args.provider:
+            overrides["provider"] = args.provider
+        if hasattr(args, "embedding_provider") and args.embedding_provider:
+            overrides["provider"] = args.embedding_provider
 
         # Handle model arguments (both variations)
         if hasattr(args, "model") and args.model:
