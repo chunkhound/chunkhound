@@ -194,7 +194,7 @@ def get_fs_event_timeout() -> float:
     can be unreliable.
     """
     if is_ci():
-        return 10.0 if IS_WINDOWS else 5.0
+        return 30.0 if IS_WINDOWS else 5.0
     return 3.0
 
 

@@ -110,27 +110,23 @@ def test_capability_flags():
 
 
 def test_stdio_server_uses_registry_descriptions():
-    """Verify stdio server imports and uses TOOL_REGISTRY for descriptions.
+    """Verify MCP server base imports and uses TOOL_REGISTRY for descriptions.
 
-    This is a structural test - it ensures the stdio server code references
-    TOOL_REGISTRY to prevent regression to hardcoded descriptions.
+    This is a structural test - it ensures the shared filtering logic in
+    MCPServerBase references TOOL_REGISTRY to prevent regression to hardcoded
+    descriptions.  The filtering now lives in base.py (used by both the stdio
+    server and the daemon), so that is the canonical place to check.
     """
     from pathlib import Path
 
-    stdio_server_path = (
-        Path(__file__).parent.parent / "chunkhound" / "mcp_server" / "stdio.py"
+    base_server_path = (
+        Path(__file__).parent.parent / "chunkhound" / "mcp_server" / "base.py"
     )
-    content = stdio_server_path.read_text()
+    content = base_server_path.read_text()
 
-    # Check that TOOL_REGISTRY is imported
-    assert "from .tools import" in content and "TOOL_REGISTRY" in content, (
-        "Stdio server should import TOOL_REGISTRY"
-    )
-
-    # Check that tools are registered from TOOL_REGISTRY
-    # The server should iterate over TOOL_REGISTRY to expose tools
+    # Check that TOOL_REGISTRY is referenced in the shared base
     assert "TOOL_REGISTRY" in content, (
-        "Server should reference TOOL_REGISTRY for tool definitions"
+        "MCPServerBase should reference TOOL_REGISTRY for tool definitions"
     )
 
 
