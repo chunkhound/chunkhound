@@ -933,7 +933,7 @@ class OpenAIEmbeddingProvider:
                     logger.debug(
                         f"Discovered native embedding dimension: {self._discovered_dims}"
                     )
-                validate_embedding_dims(actual_dims, self.dims)
+                validate_embedding_dims(actual_dims, self.dims, model=self._model)
 
                 return cast(list[list[float]], embeddings)
 

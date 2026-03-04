@@ -343,7 +343,7 @@ class VoyageAIEmbeddingProvider:
 
                 # Validate embedding dimensions match expected dims (INV-1)
                 if embeddings:
-                    validate_embedding_dims(len(embeddings[0]), self.dims)
+                    validate_embedding_dims(len(embeddings[0]), self.dims, model=self._model)
 
                 return embeddings
 

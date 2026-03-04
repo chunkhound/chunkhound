@@ -97,13 +97,21 @@ def mean_pool_embeddings(embeddings: list[list[float]]) -> list[float]:
     return l2_normalize(pooled)
 
 
-def validate_embedding_dims(actual_dims: int, expected_dims: int) -> None:
+def validate_embedding_dims(
+    actual_dims: int,
+    expected_dims: int,
+    *,
+    model: str | None = None,
+) -> None:
     """Validate embedding dimensions match expected value (INV-1).
 
     Raises:
         EmbeddingDimensionError: If dimensions don't match.
     """
     if actual_dims != expected_dims:
-        raise EmbeddingDimensionError(
+        msg = (
             f"Embedding dimension mismatch: got {actual_dims}, expected {expected_dims}"
         )
+        if model:
+            msg += f" (model={model})"
+        raise EmbeddingDimensionError(msg)
