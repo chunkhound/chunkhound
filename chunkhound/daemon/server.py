@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import sys
 import uuid
 from pathlib import Path
@@ -52,7 +53,9 @@ class ChunkHoundDaemon(MCPServerBase):
         self._initialization_complete = asyncio.Event()
         self._pid_poll_task: asyncio.Task | None = None
         self._client_manager = ClientManager(on_empty=self._on_all_clients_gone)
-        self._lock_written = False  # True only after we successfully bound the socket and wrote the lock
+        # True only after we successfully bound the socket and wrote the lock
+        self._lock_written = False
+        self._auth_token: str | None = None  # Set before accepting connections
         delay_str = os.environ.get(
             "CHUNKHOUND_DAEMON_SHUTDOWN_DELAY", str(_DEFAULT_SHUTDOWN_DELAY)
         )
@@ -84,7 +87,7 @@ class ChunkHoundDaemon(MCPServerBase):
                 self.debug_log("Signal received — initiating graceful shutdown")
                 self._shutdown_event.set()
 
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             try:
                 loop.add_signal_handler(_signal.SIGTERM, _on_signal)
                 loop.add_signal_handler(_signal.SIGINT, _on_signal)
@@ -97,6 +100,11 @@ class ChunkHoundDaemon(MCPServerBase):
             self._initialization_complete.set()
             self.debug_log("Daemon initialised")
 
+            # Generate auth token BEFORE accepting connections so every client
+            # sees a non-None token in _handle_client from the very first frame.
+            auth_token = secrets.token_hex(32)
+            self._auth_token = auth_token
+
             # Start IPC server; on Windows actual address differs (port 0 → real port)
             server, actual_address = await ipc.create_server(
                 self._socket_path, self._handle_client
@@ -104,7 +112,22 @@ class ChunkHoundDaemon(MCPServerBase):
             self._socket_path = actual_address
 
             # Write lock file so proxies can discover us
-            self._discovery.write_lock(os.getpid(), self._socket_path)
+            self._discovery.write_lock(
+                os.getpid(), self._socket_path, auth_token=auth_token
+            )
+
+            # Post-write validation: on Windows two daemons can race to bind
+            # different OS-assigned ports and both write the lock.  Verify our
+            # PID is the one recorded; if not, the other daemon won — shut down.
+            written_lock = self._discovery.read_lock()
+            if written_lock is None or written_lock.get("pid") != os.getpid():
+                self.debug_log(
+                    "Lock file PID mismatch after write — another daemon won the race; "
+                    "shutting down"
+                )
+                self._shutdown_event.set()
+                return
+
             self._lock_written = True
             self.debug_log(
                 f"Lock file written (pid={os.getpid()}, address={self._socket_path})"
@@ -163,7 +186,18 @@ class ChunkHoundDaemon(MCPServerBase):
             if not isinstance(reg, dict) or reg.get("type") != "register":
                 return
 
-            pid: int = reg.get("pid", 0)
+            # Auth token check — reject unknown clients silently to avoid
+            # leaking information about the expected token value.
+            if self._auth_token is not None and (
+                reg.get("auth_token") != self._auth_token
+            ):
+                return
+
+            raw_pid = reg.get("pid", 0)
+            try:
+                pid: int = int(raw_pid)
+            except (TypeError, ValueError):
+                return  # Reject malformed registration frame
             client_id = str(uuid.uuid4())
             self._client_manager.register(client_id, pid, writer)
             self.debug_log(f"Client registered: id={client_id} pid={pid}")
@@ -271,7 +305,7 @@ class ChunkHoundDaemon(MCPServerBase):
         except asyncio.TimeoutError:
             pass
 
-        tools = self._build_available_tools_as_dicts()
+        tools = self._build_filtered_tool_dicts()
         return {
             "jsonrpc": "2.0",
             "id": msg.get("id"),
@@ -306,14 +340,6 @@ class ChunkHoundDaemon(MCPServerBase):
             "id": msg.get("id"),
             "result": {"content": content, "isError": False},
         }
-
-    # ------------------------------------------------------------------
-    # Tool schema building (mirrors StdioMCPServer.build_available_tools)
-    # ------------------------------------------------------------------
-
-    def _build_available_tools_as_dicts(self) -> list[dict[str, Any]]:
-        """Build a JSON-serialisable list of available tool schemas."""
-        return self._build_filtered_tool_dicts()
 
     # ------------------------------------------------------------------
     # Shutdown

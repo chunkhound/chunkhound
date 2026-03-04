@@ -29,7 +29,7 @@ def add_daemon_subparser(subparsers: Any) -> argparse.ArgumentParser:
     parser.add_argument(
         "--socket-path",
         required=True,
-        help="Unix socket path the daemon should listen on",
+        help="Unix socket (POSIX) or TCP loopback address (Windows) for the daemon",
     )
 
     add_common_arguments(parser)

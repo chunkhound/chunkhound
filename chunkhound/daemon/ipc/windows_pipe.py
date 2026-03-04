@@ -1,3 +1,5 @@
+# NOTE: Despite the filename, this module uses TCP loopback (127.0.0.1),
+# not Windows named pipes. See ipc/__init__.py for platform dispatch.
 """TCP loopback IPC transport for Windows.
 
 Named pipes require pywin32 which is not a dependency.  TCP on 127.0.0.1 is
