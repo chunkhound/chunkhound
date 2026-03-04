@@ -66,18 +66,25 @@ class SvelteParser:
     Note: Similar to VueParser but simpler (no cross-references in phase 1)
     """
 
-    def __init__(self, cast_config: CASTConfig | None = None):
+    def __init__(
+        self,
+        cast_config: CASTConfig | None = None,
+        detect_embedded_sql: bool = True,
+    ):
         """Initialize Svelte parser.
 
         Args:
             cast_config: Configuration for cAST chunking algorithm
-        """
+            detect_embedded_sql: Whether to detect SQL in string literals (script sections only)
+        """  # noqa: E501
         self.svelte_mapping = SvelteMapping()
         self.cast_config = cast_config or CASTConfig()
         self.chunk_splitter = ChunkSplitter(self.cast_config)
 
         # Create TypeScript parser for script sections
-        self.ts_parser = create_parser_for_language(Language.TYPESCRIPT, cast_config)
+        self.ts_parser = create_parser_for_language(
+            Language.TYPESCRIPT, cast_config, detect_embedded_sql
+        )
 
     def parse_file(self, file_path: Path, file_id: FileId) -> list[Chunk]:
         """Parse a Svelte SFC file.

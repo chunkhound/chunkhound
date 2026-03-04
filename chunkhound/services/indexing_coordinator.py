@@ -29,7 +29,7 @@ from chunkhound.core.detection import detect_language
 from chunkhound.core.exceptions import DiskUsageLimitExceededError
 from chunkhound.core.models import Chunk, File
 from chunkhound.core.types.common import FilePath, Language
-from chunkhound.core.utils import estimate_tokens
+from chunkhound.core.utils import estimate_tokens_chunking
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
@@ -55,26 +55,57 @@ from .base_service import BaseService
 from .batch_processor import ParsedFileResult, process_file_batch
 from .chunk_cache_service import ChunkCacheService
 
-# CRITICAL FIX: Force spawn multiprocessing start method to prevent fork + asyncio issues
-# RATIONALE: Linux defaults to 'fork' which is unsafe with asyncio event loops
-# - Forking an active asyncio event loop causes segfaults (background threads/locks copied)
-# - 'spawn' starts fresh Python interpreter, avoiding fork-related issues
-# - Windows/macOS already use 'spawn' by default
-# - Python 3.14 will make 'spawn' the default on all platforms
-# - See: https://github.com/chunkhound/chunkhound/pull/47
-desired_mp_method = os.getenv("CHUNKHOUND_MP_START_METHOD", "spawn")
-current_mp_method = multiprocessing.get_start_method(allow_none=True)
-if current_mp_method != desired_mp_method:
+# Lazy multiprocessing start-method guard — applied once before pool creation.
+# RATIONALE: Linux defaults to 'fork' which is unsafe with asyncio event loops.
+# 'spawn' starts a fresh Python interpreter, avoiding fork-related segfaults.
+# Windows/macOS already use 'spawn'; Python 3.14 will make it the default everywhere.
+_mp_configured = False
+
+
+def _ensure_mp_start_method() -> None:
+    """Set the multiprocessing start method once, lazily, before pool creation."""
+    global _mp_configured
+    if _mp_configured:
+        return
+    desired = os.getenv("CHUNKHOUND_MP_START_METHOD", "spawn")
+    current = multiprocessing.get_start_method(allow_none=True)
+    if current != desired:
+        try:
+            multiprocessing.set_start_method(desired, force=True)
+            logger.debug(f"Set multiprocessing start method to '{desired}' (was {current})")
+        except RuntimeError:
+            logger.debug(
+                f"Multiprocessing start method remains '{multiprocessing.get_start_method()}'; desired '{desired}'"
+            )
+    _mp_configured = True
+
+
+class _StatResult:
+    """Lightweight stat-like object used in _store_parsed_results."""
+
+    def __init__(self, size: int, mtime: float) -> None:
+        self.st_size = size
+        self.st_mtime = mtime
+
+
+def _mem_available_bytes() -> int:
+    """Return available memory in bytes, or 0 if unavailable."""
     try:
-        multiprocessing.set_start_method(desired_mp_method, force=True)
-        logger.debug(
-            f"Set multiprocessing start method to '{desired_mp_method}' (was {current_mp_method})"
-        )
-    except RuntimeError:
-        # Start method may already be set elsewhere; log and continue
-        logger.debug(
-            f"Multiprocessing start method remains '{multiprocessing.get_start_method()}'; desired '{desired_mp_method}'"
-        )
+        import psutil  # type: ignore
+
+        return int(getattr(psutil.virtual_memory(), "available", 0)) or 0
+    except Exception:
+        pass
+    try:
+        with open("/proc/meminfo", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1]) * 1024  # kB → B
+    except Exception:
+        pass
+    return 0
 
 
 # Performance tuning constants for parallel operations
@@ -335,26 +366,6 @@ class IndexingCoordinator(BaseService):
         # - Budget 10% of available RAM (min 64MB, max 512MB)
         # - Estimate average bytes per chunk from a sample (code length dominates)
         # - Constrain final batch size to [1000, 20000]
-        def _mem_available_bytes() -> int:
-            # Try psutil first
-            try:
-                import psutil  # type: ignore
-
-                return int(getattr(psutil.virtual_memory(), "available", 0)) or 0
-            except Exception:
-                pass
-            # Linux /proc/meminfo
-            try:
-                with open("/proc/meminfo", encoding="utf-8", errors="ignore") as f:
-                    for line in f:
-                        if line.startswith("MemAvailable:"):
-                            parts = line.split()
-                            if len(parts) >= 2:
-                                return int(parts[1]) * 1024  # kB → B
-            except Exception:
-                pass
-            return 0
-
         avail = _mem_available_bytes()
         if avail <= 0:
             # Fallback when unknown: adopt a conservative default
@@ -460,15 +471,8 @@ class IndexingCoordinator(BaseService):
                 return {"status": "skipped", "reason": result.error, "chunks": 0}
 
             # Store the single file result
-            store_result = await self._store_parsed_results([result], file_task=None)
-
-            # Handle tuple return for single-file case
-            if isinstance(store_result, tuple):
-                stats, file_id = store_result
-            else:
-                # Should not happen for single file, but handle gracefully
-                stats = store_result
-                file_id = None
+            stats = await self._store_parsed_results([result], file_task=None)
+            file_id = stats.get("file_id")
 
             # Check for disk limit exceeded error and raise it immediately
             for error in stats.get("errors", []):
@@ -573,6 +577,15 @@ class IndexingCoordinator(BaseService):
         except Exception:
             timeout_s_probe = 0.0
 
+        min_timeout_kb = 128
+        try:
+            if self.config and getattr(self.config, "indexing", None):
+                min_timeout_kb = int(
+                    getattr(self.config.indexing, "per_file_timeout_min_size_kb", 128)
+                )
+        except Exception:
+            min_timeout_kb = 128
+
         # Inspect explicit concurrency override
         max_concurrent = 0
         try:
@@ -582,6 +595,10 @@ class IndexingCoordinator(BaseService):
                 )
         except Exception:
             max_concurrent = 0
+
+        detect_embedded_sql = getattr(
+            getattr(self.config, "indexing", None), "detect_embedded_sql", True
+        )
 
         # Default behavior:
         # - If timeouts are enabled and no explicit max_concurrent given,
@@ -604,26 +621,7 @@ class IndexingCoordinator(BaseService):
         # and removes overhead when there is nothing to parallelize.
         if file_count == 1:
             # Build the same config dict as the parallel branch uses
-            try:
-                timeout_s = 0.0
-                if self.config and getattr(self.config, "indexing", None):
-                    timeout_s = float(
-                        getattr(self.config.indexing, "per_file_timeout_seconds", 0.0)
-                        or 0.0
-                    )
-            except Exception:
-                timeout_s = 0.0
-
-            try:
-                min_timeout_kb = 128
-                if self.config and getattr(self.config, "indexing", None):
-                    min_timeout_kb = int(
-                        getattr(
-                            self.config.indexing, "per_file_timeout_min_size_kb", 128
-                        )
-                    )
-            except Exception:
-                min_timeout_kb = 128
+            timeout_s = timeout_s_probe
 
             config_dict = {
                 "config_file_size_threshold_kb": config_file_size_threshold_kb,
@@ -631,6 +629,7 @@ class IndexingCoordinator(BaseService):
                 "per_file_timeout_min_size_kb": min_timeout_kb,
                 # Cap concurrent timeout children to avoid resource exhaustion
                 "max_concurrent_timeouts": min(max(1, num_workers) * 2, 32),
+                "detect_embedded_sql": detect_embedded_sql,
             }
 
             # Normalize to the batch-processor input format
@@ -683,39 +682,19 @@ class IndexingCoordinator(BaseService):
         ]
 
         # Process batches in parallel using ProcessPoolExecutor
+        _ensure_mp_start_method()
         loop = asyncio.get_running_loop()
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
             # Submit all batches for concurrent processing
             # Pass config for structured file size filtering (JSON/YAML/TOML)
-            # Include optional per-file timeout (seconds) if configured
-            timeout_s = 0.0
-            try:
-                if self.config and getattr(self.config, "indexing", None):
-                    timeout_s = float(
-                        getattr(self.config.indexing, "per_file_timeout_seconds", 0.0)
-                        or 0.0
-                    )
-            except Exception:
-                timeout_s = 0.0
-
-            min_timeout_kb = 128
-            try:
-                if self.config and getattr(self.config, "indexing", None):
-                    # Respect explicit 0 so users can apply timeout to all file sizes.
-                    min_timeout_kb = int(
-                        getattr(
-                            self.config.indexing, "per_file_timeout_min_size_kb", 128
-                        )
-                    )
-            except Exception:
-                min_timeout_kb = 128
-
+            timeout_s = timeout_s_probe
             config_dict = {
                 "config_file_size_threshold_kb": config_file_size_threshold_kb,
                 "per_file_timeout_seconds": timeout_s,
                 "per_file_timeout_min_size_kb": min_timeout_kb,
                 # Cap concurrent timeout children to avoid resource exhaustion
                 "max_concurrent_timeouts": min(num_workers * 2, 32),
+                "detect_embedded_sql": detect_embedded_sql,
             }
             futures = [
                 loop.run_in_executor(executor, process_file_batch, batch, config_dict)
@@ -831,7 +810,7 @@ class IndexingCoordinator(BaseService):
         split_count = 0
         for chunk in chunks:
             metrics = ChunkMetrics.from_content(chunk.code or "")
-            estimated_tokens = estimate_tokens(chunk.code or "")
+            estimated_tokens = estimate_tokens_chunking(chunk.code or "")
 
             # Dual constraint: check BOTH character AND token limits
             chars_exceeded = metrics.non_whitespace_chars > config.max_chunk_size
@@ -878,7 +857,7 @@ class IndexingCoordinator(BaseService):
         results: list[ParsedFileResult],
         file_task: TaskID | None = None,
         cumulative_counters: dict[str, int] | None = None,
-    ) -> dict[str, Any] | tuple[dict[str, Any], int]:
+    ) -> dict[str, Any]:
         """Store all parsed results in database (single-threaded).
 
         Args:
@@ -886,8 +865,8 @@ class IndexingCoordinator(BaseService):
             file_task: Optional progress task ID for tracking
 
         Returns:
-            For multiple files: Dictionary with processing statistics
-            For single file: Tuple of (statistics dict, file_id)
+            Dictionary with processing statistics. For single-file callers,
+            ``stats["file_id"]`` is set when the file was successfully stored.
         """
         stats = {
             "total_files": 0,
@@ -965,19 +944,8 @@ class IndexingCoordinator(BaseService):
             # Per-file transaction boundaries
             self._db.begin_transaction()
             try:
-                # Store file metadata
-                file_stat_dict = {
-                    "st_size": result.file_size,
-                    "st_mtime": result.file_mtime,
-                }
-
-                # Create mock stat object for _store_file_record
-                class StatResult:
-                    def __init__(self, size: int, mtime: float):
-                        self.st_size = size
-                        self.st_mtime = mtime
-
-                file_stat = StatResult(result.file_size, result.file_mtime)
+                # Create stat object for _store_file_record
+                file_stat = _StatResult(result.file_size, result.file_mtime)
                 # Extract content hash if available (from parsing result or precomputed)
                 content_hash = getattr(result, "content_hash", None)
                 file_id = self._store_file_record(
@@ -1057,13 +1025,7 @@ class IndexingCoordinator(BaseService):
                 stats["total_files"] += 1
 
                 # Commit per-file
-                try:
-                    self._db.commit_transaction()
-                except TypeError:
-                    try:
-                        self._db.commit_transaction(force_checkpoint=True)
-                    except Exception:
-                        pass
+                self._db.commit_transaction(force_checkpoint=True)
 
                 # Update progress
                 if file_task is not None and self.progress:
@@ -1098,9 +1060,9 @@ class IndexingCoordinator(BaseService):
                 cumulative_counters.get("files", 0) + stats["total_files"]
             )
 
-        # Return file_id for single-file case
+        # Expose file_id for single-file callers via the stats dict
         if len(results) == 1 and file_ids and file_ids[0] is not None:
-            return stats, file_ids[0]
+            stats["file_id"] = file_ids[0]
         return stats
 
     async def process_directory(
@@ -1125,6 +1087,7 @@ class IndexingCoordinator(BaseService):
             import time as _t
 
             _t0 = _t.perf_counter() if getattr(self, "profile_startup", False) else None
+            _t2 = _t3 = _t4 = _t5 = None
             # Phase 1: Discovery - Discover files in directory (now parallelized)
             files = await self._discover_files(directory, patterns, exclude_patterns)
             _t1 = _t.perf_counter() if _t0 is not None else None
@@ -1371,8 +1334,6 @@ class IndexingCoordinator(BaseService):
                 stats_part = await self._store_parsed_results(
                     batch, store_task, cumulative_counters=store_progress_counters
                 )
-                if isinstance(stats_part, tuple):
-                    stats_part = stats_part[0]
 
                 agg_total_files += stats_part.get("total_files", 0)
                 agg_total_chunks += stats_part.get("total_chunks", 0)
@@ -1380,7 +1341,8 @@ class IndexingCoordinator(BaseService):
 
             # Parse files (streaming progress as batches complete and store concurrently)
             # Pass files_to_process directly - preserves hash for each file
-            parsed_results = await self._process_files_in_batches(
+            # Results flow to storage via on_batch=_on_batch_store; return value unused.
+            await self._process_files_in_batches(
                 files_to_process,
                 config_file_size_threshold_kb,
                 parse_task,
@@ -1393,13 +1355,10 @@ class IndexingCoordinator(BaseService):
                 if task.total:
                     self.progress.update(parse_task, completed=task.total)
 
-            # Optimize tables after parsing/chunking if fragmentation high
-            if agg_total_chunks > 0 and hasattr(self._db, "optimize_tables"):
-                if hasattr(self._db, "should_optimize") and self._db.should_optimize(
-                    "post-chunking"
-                ):
-                    logger.debug("Optimizing database after chunking phase...")
-                    self._db.optimize_tables()
+            # Optimize tables after parsing/chunking (only if fragmentation warrants it)
+            if agg_total_chunks > 0 and self._db.should_optimize(operation="post-chunking"):
+                logger.debug("Optimizing database after chunking phase...")
+                self._db.optimize_tables()
 
             # Record startup profile if enabled (before heavy parse+store dominates totals)
             if _t0 is not None:
@@ -1409,20 +1368,12 @@ class IndexingCoordinator(BaseService):
                             ((_t1 - _t0) if (_t1 and _t0) else 0.0) * 1000.0, 3
                         ),
                         "cleanup_ms": round(
-                            (
-                                (_t3 - _t2)
-                                if (locals().get("_t3") and locals().get("_t2"))
-                                else 0.0
-                            )
+                            ((_t3 - _t2) if (_t3 is not None and _t2 is not None) else 0.0)
                             * 1000.0,
                             3,
                         ),
                         "change_scan_ms": round(
-                            (
-                                (_t5 - _t4)
-                                if (locals().get("_t5") and locals().get("_t4"))
-                                else 0.0
-                            )
+                            ((_t5 - _t4) if (_t5 is not None and _t4 is not None) else 0.0)
                             * 1000.0,
                             3,
                         ),
@@ -1465,20 +1416,10 @@ class IndexingCoordinator(BaseService):
             # Note: Embedding generation is handled separately via generate_missing_embeddings()
             # to provide a unified progress experience
 
-            # Optimize tables after bulk operations (provider-specific)
-            if total_chunks > 0 and hasattr(self._db, "optimize_tables"):
-                if hasattr(self._db, "should_optimize") and self._db.should_optimize(
-                    "post-bulk"
-                ):
-                    logger.debug("Optimizing database tables after bulk operations...")
-                    self._db.optimize_tables()
-
-            # FINAL PASS: Always optimize at end of indexing for consistent UX
-            # Even if fragments are below threshold (e.g., 90 → 20), users expect
-            # the database to be in optimal state after indexing completes.
-            # This ensures predictable search performance regardless of threshold tuning.
-            if hasattr(self._db, "optimize_tables"):
-                logger.debug("Final optimization pass at end of indexing...")
+            # FINAL: Unified optimization (CHECKPOINT + HNSW compact + full compaction)
+            # Only run if fragmentation warrants it
+            if self._db.should_optimize(operation="post-indexing"):
+                logger.info("Running final database optimization...")
                 self._db.optimize_tables()
 
             # Check for disk limit exceeded errors
@@ -1516,6 +1457,12 @@ class IndexingCoordinator(BaseService):
                 }
             else:
                 return {"status": "error", "error": str(e)}
+
+    def finalize_optimization(self) -> None:
+        """Run post-embedding optimization if warranted."""
+        if self._db.should_optimize(operation="post-embedding"):
+            logger.info("Running post-embedding database optimization...")
+            self._db.optimize_tables()
 
     def _extract_file_id(self, file_record: dict[str, Any] | File) -> int | None:
         """Safely extract file ID from either dict or File model."""
@@ -1636,11 +1583,7 @@ class IndexingCoordinator(BaseService):
         try:
             # Convert path to relative format for database lookup
             file_path_obj = Path(file_path)
-            if file_path_obj.is_absolute():
-                base_dir = self._base_directory
-                relative_path = file_path_obj.relative_to(base_dir).as_posix()
-            else:
-                relative_path = file_path_obj.as_posix()
+            relative_path = self._get_relative_path(file_path_obj).as_posix()
 
             # Get file record to get chunk count before deletion
             file_record = self._db.get_file_by_path(relative_path)
@@ -1691,23 +1634,17 @@ class IndexingCoordinator(BaseService):
             # Use EmbeddingService for embedding generation
             from .embedding_service import EmbeddingService
 
-            # Get optimization frequency from config or use default
-            optimization_batch_frequency = 1000
-            if hasattr(self._db, "_config") and self._db._config:
-                optimization_batch_frequency = getattr(
-                    self._db._config.embedding, "optimization_batch_frequency", 1000
-                )
-
             embedding_service = EmbeddingService(
                 database_provider=self._db,
                 embedding_provider=self._embedding_provider,
-                optimization_batch_frequency=optimization_batch_frequency,
                 progress=self.progress,
             )
 
-            return await embedding_service.generate_missing_embeddings(
+            result = await embedding_service.generate_missing_embeddings(
                 exclude_patterns=exclude_patterns
             )
+            self.finalize_optimization()
+            return result
 
         except Exception as e:
             logger.error(
@@ -1951,10 +1888,25 @@ class IndexingCoordinator(BaseService):
         precomputed_roots = []
         try:
             from chunkhound.utils.ignore_engine import detect_repo_roots  # type: ignore
+        except ImportError:
+            detect_repo_roots = None  # type: ignore[assignment]
 
-            precomputed_roots = detect_repo_roots(directory, effective_excludes)
-        except Exception:
-            precomputed_roots = []
+        if detect_repo_roots is not None:
+            prune_gitfile_roots = (
+                self.config is not None
+                and "gitignore" in self.config.indexing.resolve_ignore_sources()
+            )
+            try:
+                precomputed_roots = detect_repo_roots(
+                    directory,
+                    effective_excludes,
+                    prune_ignored_gitfile_roots=prune_gitfile_roots,
+                )
+            except Exception as e:
+                logger.debug(
+                    "Failed to precompute repo roots for parallel discovery: %s", e
+                )
+                precomputed_roots = []
 
         # Determine number of workers for directory discovery
         # Scale based on number of subtrees and available cores
@@ -2221,7 +2173,9 @@ class IndexingCoordinator(BaseService):
             # avoid re-detecting per process
             try:
                 roots = self._get_or_detect_repo_roots(
-                    directory.resolve(), list(cfg_excludes)
+                    directory.resolve(),
+                    list(cfg_excludes),
+                    prune_ignored_gitfile_roots=("gitignore" in (sources or [])),
                 )
                 if roots:
                     engine_args["roots"] = roots
@@ -2496,9 +2450,21 @@ class IndexingCoordinator(BaseService):
         except Exception:
             pass
 
+        prune_gitfile_roots = False
+        try:
+            idx = getattr(getattr(self, "config", None), "indexing", None)
+            sources = idx.resolve_ignore_sources() if idx is not None else []
+            prune_gitfile_roots = "gitignore" in (sources or [])
+        except Exception:
+            prune_gitfile_roots = False
+
         # Detect repo roots under directory (pruned by effective_excludes) with cache reuse
         try:
-            repo_roots = self._get_or_detect_repo_roots(directory, effective_excludes)
+            repo_roots = self._get_or_detect_repo_roots(
+                directory,
+                effective_excludes,
+                prune_ignored_gitfile_roots=prune_gitfile_roots,
+            )
         except Exception:
             repo_roots = []
         # Expose whether any repos were detected for caller decisions
@@ -2703,8 +2669,12 @@ class IndexingCoordinator(BaseService):
 
     # --------------------------- Repo-roots caching ---------------------------
     def _repo_roots_cache_key(
-        self, root: Path, cfg_excludes: list[str] | tuple[str, ...]
-    ) -> tuple[str, tuple[str, ...]]:
+        self,
+        root: Path,
+        cfg_excludes: list[str] | tuple[str, ...],
+        *,
+        prune_ignored_gitfile_roots: bool = False,
+    ) -> tuple[str, tuple[str, ...], int]:
         try:
             base = str(root.resolve())
         except Exception:
@@ -2714,29 +2684,37 @@ class IndexingCoordinator(BaseService):
                 sorted(
                     [
                         str(x)
-                        for x in (
-                            list(cfg_excludes)
-                            if not isinstance(cfg_excludes, tuple)
-                            else list(cfg_excludes)
-                        )
+                        for x in list(cfg_excludes)
                     ]
                 )
             )
         except Exception:
             items = tuple()
-        return (base, items)
+        return (base, items, 1 if prune_ignored_gitfile_roots else 0)
 
     def _get_or_detect_repo_roots(
-        self, root: Path, cfg_excludes: list[str] | tuple[str, ...]
+        self,
+        root: Path,
+        cfg_excludes: list[str] | tuple[str, ...],
+        *,
+        prune_ignored_gitfile_roots: bool = False,
     ) -> list[Path]:
-        key = self._repo_roots_cache_key(root, cfg_excludes)
+        key = self._repo_roots_cache_key(
+            root,
+            cfg_excludes,
+            prune_ignored_gitfile_roots=prune_ignored_gitfile_roots,
+        )
         cached = self._repo_roots_cache.get(key)
         if cached is not None:
             return cached
         try:
             from chunkhound.utils.ignore_engine import detect_repo_roots as _detect
 
-            roots = _detect(root, cfg_excludes)  # type: ignore[arg-type]
+            roots = _detect(
+                root,
+                cfg_excludes,  # type: ignore[arg-type]
+                prune_ignored_gitfile_roots=prune_ignored_gitfile_roots,
+            )
         except Exception:
             roots = []
         self._repo_roots_cache[key] = roots

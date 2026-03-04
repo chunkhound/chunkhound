@@ -53,7 +53,10 @@ class IndexingConfig(BaseModel):
     )
     chunk_overlap: int = Field(default=50, description="Internal chunk overlap")
     min_chunk_size: int = Field(default=50, description="Internal min chunk size")
-    max_chunk_size: int = Field(default=2000, description="Internal max chunk size")
+    detect_embedded_sql: bool = Field(
+        default=True,
+        description="Detect and index SQL embedded in string literals",
+    )
 
     # File parsing safety
     per_file_timeout_seconds: float = Field(
@@ -265,16 +268,6 @@ class IndexingConfig(BaseModel):
         """Get maximum file size in bytes."""
         return self.max_file_size_mb * 1024 * 1024
 
-    def should_index_file(self, file_path: str) -> bool:
-        """Check if a file should be indexed based on patterns.
-
-        Note: This is a simplified check. The actual implementation
-        should use proper glob matching.
-        """
-        # This is a placeholder - actual implementation would use
-        # pathlib and fnmatch for proper pattern matching
-        return True
-
     @classmethod
     def add_cli_arguments(cls, parser: argparse.ArgumentParser) -> None:
         """Add indexing-related CLI arguments."""
@@ -356,6 +349,11 @@ class IndexingConfig(BaseModel):
                 "continue to follow their native Git rules"
             ),
         )
+        parser.add_argument(
+            "--no-detect-embedded-sql",
+            action="store_true",
+            help="Disable detection of SQL code embedded in string literals",
+        )
 
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
@@ -428,6 +426,9 @@ class IndexingConfig(BaseModel):
         if wr := os.getenv("CHUNKHOUND_INDEXING__WORKSPACE_GITIGNORE_NONREPO"):
             config["workspace_gitignore_nonrepo"] = wr.strip().lower() not in ("0", "false", "no")
 
+        if sql_detect := os.getenv("CHUNKHOUND_INDEXING__DETECT_EMBEDDED_SQL"):
+            config["detect_embedded_sql"] = sql_detect.lower() in ("true", "1", "yes")
+
         return config
 
     @model_validator(mode="before")
@@ -460,7 +461,7 @@ class IndexingConfig(BaseModel):
                     elif isinstance(exc, str) and exc == ".chignore":
                         # No longer supported: drop the key so defaults apply
                         data.pop("exclude", None)
-        except Exception:
+        except (KeyError, TypeError, AttributeError):
             # Be permissive; validation will catch true errors later
             pass
         return data
@@ -558,6 +559,9 @@ class IndexingConfig(BaseModel):
         # Discovery backend override via CLI (if present)
         if hasattr(args, "discovery_backend") and args.discovery_backend is not None:
             overrides["discovery_backend"] = str(args.discovery_backend)
+
+        if hasattr(args, "no_detect_embedded_sql") and args.no_detect_embedded_sql:
+            overrides["detect_embedded_sql"] = False
 
         return overrides
 

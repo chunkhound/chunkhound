@@ -73,19 +73,26 @@ class VueParser:
     See: vue_cross_ref.py for reference linking implementation
     """
 
-    def __init__(self, cast_config: CASTConfig | None = None):
+    def __init__(
+        self,
+        cast_config: CASTConfig | None = None,
+        detect_embedded_sql: bool = True,
+    ):
         """Initialize Vue parser.
 
         Args:
             cast_config: Configuration for cAST chunking algorithm
-        """
+            detect_embedded_sql: Whether to detect SQL in string literals (script sections only)
+        """  # noqa: E501
         self.vue_mapping = VueMapping()
         self.vue_template_mapping = VueTemplateMapping()
         self.cast_config = cast_config or CASTConfig()
         self.chunk_splitter = ChunkSplitter(self.cast_config)
 
         # Create TypeScript parser for script sections
-        self.ts_parser = create_parser_for_language(Language.TYPESCRIPT, cast_config)
+        self.ts_parser = create_parser_for_language(
+            Language.TYPESCRIPT, cast_config, detect_embedded_sql
+        )
 
         # Create template parser using tree-sitter-vue
         self.template_parser = self._create_template_parser()
@@ -107,8 +114,13 @@ class VueParser:
             # Create TreeSitterEngine for Vue templates
             engine = TreeSitterEngine("vue", vue_lang)
 
-            # Create UniversalParser with VueTemplateMapping
-            return UniversalParser(engine, self.vue_template_mapping, self.cast_config)
+            # Create UniversalParser with VueTemplateMapping (no SQL in templates)
+            return UniversalParser(
+                engine,
+                self.vue_template_mapping,
+                self.cast_config,
+                detect_embedded_sql=False,
+            )
 
         except ImportError:
             # tree-sitter-language-pack not available

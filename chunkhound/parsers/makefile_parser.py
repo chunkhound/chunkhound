@@ -7,6 +7,7 @@ Makefile rules need special handling because:
 
 """
 
+from chunkhound.core.utils import estimate_tokens_chunking
 from chunkhound.parsers.chunk_splitter import (
     CASTConfig,
     ChunkMetrics,
@@ -36,7 +37,7 @@ class MakefileChunkSplitter(ChunkSplitter):
         """
         if chunk.metadata.get("kind") == "rule":
             metrics = ChunkMetrics.from_content(chunk.content)
-            estimated_tokens = self._estimate_tokens(chunk.content)
+            estimated_tokens = estimate_tokens_chunking(chunk.content)
             if (
                 metrics.non_whitespace_chars > self.config.max_chunk_size
                 or estimated_tokens > self.config.safe_token_limit
@@ -76,7 +77,7 @@ class MakefileChunkSplitter(ChunkSplitter):
         for recipe_line in recipe_lines:
             test_content = "\n".join([target_line] + current_group + [recipe_line])
             test_metrics = ChunkMetrics.from_content(test_content)
-            test_tokens = self._estimate_tokens(test_content)
+            test_tokens = estimate_tokens_chunking(test_content)
 
             if (
                 test_metrics.non_whitespace_chars <= self.config.max_chunk_size
@@ -114,7 +115,7 @@ class MakefileChunkSplitter(ChunkSplitter):
         validated_result: list[UniversalChunk] = []
         for rule_chunk in result:
             metrics = ChunkMetrics.from_content(rule_chunk.content)
-            tokens = self._estimate_tokens(rule_chunk.content)
+            tokens = estimate_tokens_chunking(rule_chunk.content)
             if (
                 metrics.non_whitespace_chars > self.config.max_chunk_size
                 or tokens > self.config.safe_token_limit
@@ -164,10 +165,14 @@ class MakefileParser(UniversalParser):
     to handle oversized rules with target/recipe coherence.
     """
 
-    def __init__(self, cast_config: CASTConfig | None = None):
+    def __init__(
+        self, cast_config: CASTConfig | None = None, detect_embedded_sql: bool = True
+    ):
         engine = self._create_makefile_engine()
         mapping = MakefileMapping()
-        super().__init__(engine, mapping, cast_config)
+        super().__init__(
+            engine, mapping, cast_config, detect_embedded_sql=detect_embedded_sql
+        )
         # Override with Makefile-aware chunk splitter
         self.chunk_splitter = MakefileChunkSplitter(self.cast_config)
 
