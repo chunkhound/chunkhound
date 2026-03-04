@@ -464,6 +464,8 @@ class LLMConfig(BaseSettings):
             return ("claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929")
         elif self.provider == "grok":
             # Grok: Use the same flagship model for both utility and synthesis
+            # Intentional: Grok reasoning models (especially grok-4-1-fast-reasoning)
+            # are extremely strong across both roles — no benefit to splitting them.
             # grok-4-1-fast-reasoning: Advanced reasoning, structured outputs, tool calling
             return ("grok-4-1-fast-reasoning", "grok-4-1-fast-reasoning")
         else:

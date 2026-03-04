@@ -47,7 +47,7 @@ Your AI assistant searches code but doesn't understand it. ChunkHound researches
 - [uv package manager](https://docs.astral.sh/uv/)
 - API keys (optional - regex search works without any keys)
   - **Embeddings**: [VoyageAI](https://dash.voyageai.com/) (recommended) | [OpenAI](https://platform.openai.com/api-keys) | [Local with Ollama](https://ollama.ai/)
-  - **LLM (for Code Research)**: Claude Code CLI or Codex CLI (no API key needed) | [Anthropic](https://console.anthropic.com/) | [OpenAI](https://platform.openai.com/api-keys)
+    - **LLM (for Code Research)**: Claude Code CLI or Codex CLI (no API key needed) | [Anthropic](https://console.anthropic.com/) | [OpenAI](https://platform.openai.com/api-keys) | [Grok (xAI)](https://console.x.ai) (`XAI_API_KEY` or `GROK_API_KEY`)[OpenAI](https://platform.openai.com/api-keys)
 
 ## Installation
 
