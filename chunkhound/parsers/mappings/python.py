@@ -6,22 +6,12 @@ for mapping Python AST nodes to semantic chunks.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
-
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = Any  # type: ignore
+from tree_sitter import Node as TSNode
 
 
 class PythonMapping(BaseMapping):
@@ -139,7 +129,7 @@ class PythonMapping(BaseMapping):
             (import_from_statement) @import_from
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract function name from a Python function definition node.
 
         Args:
@@ -149,7 +139,7 @@ class PythonMapping(BaseMapping):
         Returns:
             Function name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "function")
 
         # Look for the name child node
@@ -161,7 +151,7 @@ class PythonMapping(BaseMapping):
 
         return self.get_fallback_name(node, "function")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract class name from a Python class definition node.
 
         Args:
@@ -171,7 +161,7 @@ class PythonMapping(BaseMapping):
         Returns:
             Class name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "class")
 
         # Look for the name child node
@@ -183,7 +173,7 @@ class PythonMapping(BaseMapping):
 
         return self.get_fallback_name(node, "class")
 
-    def extract_parameters(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter names from a Python function/method node.
 
         Handles regular parameters, default parameters, *args, **kwargs,
@@ -196,7 +186,7 @@ class PythonMapping(BaseMapping):
         Returns:
             List of parameter names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         parameters: list[str] = []
@@ -256,7 +246,7 @@ class PythonMapping(BaseMapping):
 
         return parameters
 
-    def extract_decorators(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_decorators(self, node: TSNode | None, source: str) -> list[str]:
         """Extract decorator names from a Python function or class node.
 
         Args:
@@ -266,7 +256,7 @@ class PythonMapping(BaseMapping):
         Returns:
             List of decorator names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         decorators = []
@@ -282,7 +272,7 @@ class PythonMapping(BaseMapping):
 
         return decorators
 
-    def extract_inheritance(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_inheritance(self, node: TSNode | None, source: str) -> list[str]:
         """Extract superclass names from a Python class definition.
 
         Args:
@@ -292,7 +282,7 @@ class PythonMapping(BaseMapping):
         Returns:
             List of superclass names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         superclasses: list[str] = []
@@ -322,7 +312,7 @@ class PythonMapping(BaseMapping):
 
         return superclasses
 
-    def extract_type_hints(self, node: "TSNode | None", source: str) -> dict[str, str]:
+    def extract_type_hints(self, node: TSNode | None, source: str) -> dict[str, str]:
         """Extract type hints from a Python function definition.
 
         Args:
@@ -332,7 +322,7 @@ class PythonMapping(BaseMapping):
         Returns:
             Dictionary mapping parameter names to their type hints
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return {}
 
         type_hints: dict[str, str] = {}
@@ -375,7 +365,7 @@ class PythonMapping(BaseMapping):
 
         return type_hints
 
-    def is_async_function(self, node: "TSNode | None") -> bool:
+    def is_async_function(self, node: TSNode | None) -> bool:
         """Check if a function node represents an async function.
 
         Args:
@@ -384,12 +374,12 @@ class PythonMapping(BaseMapping):
         Returns:
             True if the function is async, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         return node.type == "async_function_definition"
 
-    def is_generator_function(self, node: "TSNode | None", source: str) -> bool:
+    def is_generator_function(self, node: TSNode | None, source: str) -> bool:
         """Check if a function contains yield statements (is a generator).
 
         Args:
@@ -399,7 +389,7 @@ class PythonMapping(BaseMapping):
         Returns:
             True if the function contains yield statements, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Look for yield expressions in the function body
@@ -407,7 +397,7 @@ class PythonMapping(BaseMapping):
         return len(yield_nodes) > 0
 
     def extract_import_names(
-        self, node: "TSNode | None", source: str
+        self, node: TSNode | None, source: str
     ) -> dict[str, str]:
         """Extract import information from an import statement.
 
@@ -418,7 +408,7 @@ class PythonMapping(BaseMapping):
         Returns:
             Dictionary with import information
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return {}
 
         import_info = {}
@@ -433,7 +423,7 @@ class PythonMapping(BaseMapping):
 
         return import_info
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a Python node should be included as a chunk.
 
         Filters out very small functions/classes and internal methods.
@@ -445,7 +435,7 @@ class PythonMapping(BaseMapping):
         Returns:
             True if node should be included, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Get the node text to check size
@@ -558,7 +548,7 @@ class PythonMapping(BaseMapping):
         return None
 
     def extract_name(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for this concept.
 
@@ -652,7 +642,7 @@ class PythonMapping(BaseMapping):
         return "unnamed"
 
     def extract_content(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for this concept.
 
@@ -681,7 +671,7 @@ class PythonMapping(BaseMapping):
         return ""
 
     def extract_metadata(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract Python-specific metadata from captures.
 
@@ -796,7 +786,7 @@ class PythonMapping(BaseMapping):
         return metadata
 
     def extract_constants(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> list[dict[str, str]] | None:
         """Extract constant definitions from Python code.
 
@@ -893,41 +883,106 @@ class PythonMapping(BaseMapping):
 
         return None
 
-    def resolve_import_path(
+    def _resolve_module_to_path(self, module: str, base_dir: Path) -> Path | None:
+        """Resolve a Python module name to its file path.
+
+        Args:
+            module: Dot-separated module name (e.g., "x.y.z")
+            base_dir: The base directory of the codebase
+
+        Returns:
+            Path to the module file, or None if not found
+        """
+        for suffix in [".py", "/__init__.py"]:
+            full_path = base_dir / (module.replace(".", "/") + suffix)
+            if full_path.exists():
+                return full_path
+        return None
+
+    def _parse_import_names(self, imports_part: str) -> list[str]:
+        """Parse comma-separated import names, stripping aliases and whitespace.
+
+        Args:
+            imports_part: The imports portion (e.g., "a, b as x, c")
+
+        Returns:
+            List of clean module/symbol names without aliases
+        """
+        # Normalize: remove parentheses and collapse newlines
+        imports_part = imports_part.strip().strip("()")
+        imports_part = " ".join(imports_part.split())
+        return [
+            name.split(" as ")[0].strip()
+            for name in imports_part.split(",")
+            if name.strip()
+        ]
+
+    def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
-    ) -> Path | None:
-        """Resolve Python import to file path.
+    ) -> list[Path]:
+        """Resolve Python imports, supporting multi-import statements.
+
+        Handles:
+        - `import x.y.z` -> single path
+        - `import a, b, c` -> multiple paths
+        - `import a as x, b as y` -> multiple paths (aliases stripped)
+        - `from x import a, b, c` -> multiple paths if a, b, c are submodules
+        - `from . import x` -> resolve x relative to current package
+        - `from ..pkg import y` -> resolve relative to parent package
 
         Args:
             import_text: The import statement text
-                (e.g., "import x.y.z" or "from x.y import z")
             base_dir: The base directory of the codebase
             source_file: The file containing the import statement
 
         Returns:
-            Path to the imported module file, or None if not found or
-            is external package
+            List of resolved file paths (empty list if not found/external)
         """
-        # Handle "from x.y.z import W" or "import x.y.z"
-        match = re.search(r"from\s+([\w.]+)\s+import|import\s+([\w.]+)", import_text)
-        if not match:
-            return None
+        # Strip inline comments from all lines
+        import_text = "\n".join(
+            line.split("#")[0] for line in import_text.split("\n")
+        )
 
-        module = match.group(1) or match.group(2)
-        if not module:
-            return None
+        # Handle "from ... import ..."
+        from_match = re.match(
+            r"from\s+(\.*)([a-zA-Z_][\w.]*|)\s+import\s+(.+)", import_text, re.DOTALL
+        )
+        if from_match:
+            dots, module_part, imports_part = from_match.groups()
+            module_part = module_part.strip()
 
-        # Convert module.path to module/path.py
-        rel_path = module.replace(".", "/") + ".py"
-        full_path = base_dir / rel_path
-        if full_path.exists():
-            return full_path
+            # Calculate effective base for relative imports
+            effective_base = base_dir
+            if dots:
+                effective_base = source_file.parent
+                for _ in range(len(dots) - 1):
+                    if effective_base.parent == effective_base:
+                        return []
+                    effective_base = effective_base.parent
 
-        # Try as package __init__.py
-        pkg_path = module.replace(".", "/") + "/__init__.py"
-        full_path = base_dir / pkg_path
-        if full_path.exists():
-            return full_path
+            imported_names = self._parse_import_names(imports_part)
 
-        # External package - return None
-        return None
+            # Resolve imported names (as submodules if module_part exists)
+            paths: list[Path] = []
+            for name in imported_names:
+                full_module = f"{module_part}.{name}" if module_part else name
+                if resolved := self._resolve_module_to_path(full_module, effective_base):
+                    paths.append(resolved)
+
+            # Fallback: if not all resolved as submodules, try base module
+            if module_part and len(paths) != len(imported_names):
+                if base := self._resolve_module_to_path(module_part, effective_base):
+                    if base not in paths:
+                        paths.append(base)
+
+            return paths
+
+        # Handle "import a, b, c"
+        if import_match := re.match(r"import\s+(.+)", import_text):
+            modules = self._parse_import_names(import_match.group(1))
+            return [
+                resolved for module in modules
+                if (resolved := self._resolve_module_to_path(module, base_dir))
+            ]
+
+        return []

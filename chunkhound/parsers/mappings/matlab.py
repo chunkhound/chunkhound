@@ -6,21 +6,11 @@ for mapping MATLAB AST nodes to semantic chunks.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
-
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = Any  # type: ignore
+from tree_sitter import Node as TSNode
 
 
 class MatlabMapping(BaseMapping):
@@ -150,7 +140,7 @@ class MatlabMapping(BaseMapping):
             (source_file) @script
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract function name from a MATLAB function definition node.
 
         Args:
@@ -160,7 +150,7 @@ class MatlabMapping(BaseMapping):
         Returns:
             Function name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "function")
 
         # Look for the name child node
@@ -172,7 +162,7 @@ class MatlabMapping(BaseMapping):
 
         return self.get_fallback_name(node, "function")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract class name from a MATLAB class definition node.
 
         Args:
@@ -182,7 +172,7 @@ class MatlabMapping(BaseMapping):
         Returns:
             Class name or fallback name if extraction fails
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "class")
 
         # Look for the name child node
@@ -194,7 +184,7 @@ class MatlabMapping(BaseMapping):
 
         return self.get_fallback_name(node, "class")
 
-    def extract_parameters(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter names from a MATLAB function/method node.
 
         Handles regular parameters and varargin.
@@ -206,7 +196,7 @@ class MatlabMapping(BaseMapping):
         Returns:
             List of parameter names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         parameters: list[str] = []
@@ -224,7 +214,7 @@ class MatlabMapping(BaseMapping):
 
         return parameters
 
-    def extract_return_values(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_return_values(self, node: TSNode | None, source: str) -> list[str]:
         """Extract return value names from a MATLAB function definition.
 
         Args:
@@ -234,7 +224,7 @@ class MatlabMapping(BaseMapping):
         Returns:
             List of return value names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         return_values: list[str] = []
@@ -252,7 +242,7 @@ class MatlabMapping(BaseMapping):
 
         return return_values
 
-    def extract_superclasses(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_superclasses(self, node: TSNode | None, source: str) -> list[str]:
         """Extract superclass names from a MATLAB class definition.
 
         Args:
@@ -262,7 +252,7 @@ class MatlabMapping(BaseMapping):
         Returns:
             List of superclass names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         superclasses: list[str] = []
@@ -294,7 +284,7 @@ class MatlabMapping(BaseMapping):
 
         return superclasses
 
-    def extract_properties(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_properties(self, node: TSNode | None, source: str) -> list[str]:
         """Extract property names from a MATLAB class definition.
 
         Args:
@@ -304,7 +294,7 @@ class MatlabMapping(BaseMapping):
         Returns:
             List of property names
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return []
 
         properties: list[str] = []
@@ -322,7 +312,7 @@ class MatlabMapping(BaseMapping):
 
         return properties
 
-    def is_script_file(self, node: "TSNode | None", source: str) -> bool:
+    def is_script_file(self, node: TSNode | None, source: str) -> bool:
         """Determine if this is a MATLAB script file (no function definitions).
 
         Args:
@@ -332,7 +322,7 @@ class MatlabMapping(BaseMapping):
         Returns:
             True if this is a script file, False if it's a function file
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return True
 
         # Check for top-level function definitions
@@ -342,7 +332,7 @@ class MatlabMapping(BaseMapping):
 
         return True
 
-    def is_help_comment(self, node: "TSNode | None", source: str) -> bool:
+    def is_help_comment(self, node: TSNode | None, source: str) -> bool:
         """Check if a comment node is MATLAB help text (starts with %%).
 
         Args:
@@ -352,13 +342,13 @@ class MatlabMapping(BaseMapping):
         Returns:
             True if this is help text, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         comment_text = self.get_node_text(node, source).strip()
         return comment_text.startswith("%%")
 
-    def is_function_handle(self, node: "TSNode | None", source: str) -> bool:
+    def is_function_handle(self, node: TSNode | None, source: str) -> bool:
         """Check if a node represents a MATLAB function handle.
 
         Args:
@@ -368,7 +358,7 @@ class MatlabMapping(BaseMapping):
         Returns:
             True if this is a function handle, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Function handles start with @
@@ -462,7 +452,7 @@ class MatlabMapping(BaseMapping):
         return None
 
     def extract_name(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for MATLAB nodes.
 
@@ -517,7 +507,7 @@ class MatlabMapping(BaseMapping):
         return self.get_fallback_name(def_node, "definition")
 
     def extract_content(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for MATLAB nodes.
 
@@ -549,7 +539,7 @@ class MatlabMapping(BaseMapping):
         return self.get_node_text(def_node, source)
 
     def extract_metadata(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract metadata from captures for MATLAB nodes.
 
@@ -563,7 +553,7 @@ class MatlabMapping(BaseMapping):
         """
         return {}
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a MATLAB node should be included as a chunk.
 
         Filters out very small nodes and empty function/class definitions.
@@ -575,7 +565,7 @@ class MatlabMapping(BaseMapping):
         Returns:
             True if node should be included, False otherwise
         """
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return False
 
         # Get the node text to check size
@@ -602,7 +592,7 @@ class MatlabMapping(BaseMapping):
         return True
 
     def extract_constants(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> list[dict[str, str]] | None:
         """Extract constant definitions from MATLAB code.
 
@@ -699,9 +689,6 @@ class MatlabMapping(BaseMapping):
         # MATLAB uses UPPER_CASE convention for constants
         # Look for variable assignments inside function bodies
         if def_node.type == "function_definition":
-            if not TREE_SITTER_AVAILABLE:
-                return None
-
             constants = []
             # Find all assignment nodes in the function body
             for assignment_node in self.find_nodes_by_type(def_node, "assignment"):
@@ -732,12 +719,12 @@ class MatlabMapping(BaseMapping):
 
         return None
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self,
         import_text: str,
         base_dir: Path,
         source_file: Path,
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve MATLAB import to file path.
 
         MATLAB imports map to +package directories:
@@ -750,12 +737,12 @@ class MatlabMapping(BaseMapping):
             source_file: File containing the import
 
         Returns:
-            Resolved file path or None if external/unresolvable
+            Resolved file path (empty list if external/unresolvable)
         """
         # Match import statement
         match = re.search(r"import\s+([\w.]+)", import_text)
         if not match:
-            return None
+            return []
 
         import_path = match.group(1)
         parts = import_path.split(".")
@@ -764,14 +751,14 @@ class MatlabMapping(BaseMapping):
         if parts[-1] == "*":
             parts = parts[:-1]
             if not parts:
-                return None
+                return []
             # Convert to +pkg/+subpkg directory path
             dir_parts = [f"+{p}" for p in parts]
             rel_path = "/".join(dir_parts)
             full_path = base_dir / rel_path
             if full_path.is_dir():
-                return full_path
-            return None
+                return [full_path]
+            return []
 
         # Regular import (pkg.Class or pkg.func)
         # Last part is the class/function, rest are packages
@@ -788,7 +775,7 @@ class MatlabMapping(BaseMapping):
 
             full_path = base_dir / rel_path
             if full_path.exists():
-                return full_path
+                return [full_path]
 
             # Try as @ class directory
             if dir_parts:
@@ -800,6 +787,6 @@ class MatlabMapping(BaseMapping):
                 # Look for class file
                 class_file = class_path / f"{class_or_func}.m"
                 if class_file.exists():
-                    return class_file
+                    return [class_file]
 
-        return None
+        return []

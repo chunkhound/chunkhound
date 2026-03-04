@@ -385,9 +385,9 @@ class LuaMapping(BaseMapping):
 
         return cleaned.strip()
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve import path from Lua require/dofile/loadfile.
 
         Args:
@@ -396,7 +396,7 @@ class LuaMapping(BaseMapping):
             source_file: Path to the file containing the import
 
         Returns:
-            Resolved absolute path if found, None otherwise
+            Resolved absolute path (empty list if not found)
         """
         # require("module.submodule") -> module/submodule.lua
         match = re.search(r'require\s*[\(\s]*["\']([^"\']+)["\']', import_text)
@@ -406,12 +406,12 @@ class LuaMapping(BaseMapping):
             # Try relative to source file first
             resolved = (source_file.parent / module_path).resolve()
             if resolved.exists():
-                return resolved
+                return [resolved]
 
             # Try relative to base directory
             full_path = base_dir / module_path
             if full_path.exists():
-                return full_path
+                return [full_path]
 
         # dofile/loadfile with direct path
         match = re.search(r'(?:dofile|loadfile)\s*[\(\s]*["\']([^"\']+)["\']', import_text)
@@ -422,14 +422,14 @@ class LuaMapping(BaseMapping):
             if path.startswith("./") or path.startswith("../"):
                 resolved = (source_file.parent / path).resolve()
                 if resolved.exists():
-                    return resolved
+                    return [resolved]
 
             # Try relative to base directory
             full_path = base_dir / path
             if full_path.exists():
-                return full_path
+                return [full_path]
 
-        return None
+        return []
 
     def extract_constants(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes

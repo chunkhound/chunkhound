@@ -9,22 +9,12 @@ fed into the universal ConceptExtractor.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
-
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:  # pragma: no cover - handled in runtime environments
-    TREE_SITTER_AVAILABLE = False
-    TSNode = Any  # type: ignore
+from tree_sitter import Node as TSNode
 
 
 class HaskellMapping(BaseMapping):
@@ -143,7 +133,7 @@ class HaskellMapping(BaseMapping):
 
     def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract the bound function name, falling back when necessary."""
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "function")
 
         # Functions and binds expose 'name'; pattern synonyms expose 'synonym'
@@ -162,7 +152,7 @@ class HaskellMapping(BaseMapping):
 
     def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract the declared type name for data/newtype/class/type synonym."""
-        if not TREE_SITTER_AVAILABLE or node is None:
+        if node is None:
             return self.get_fallback_name(node, "type")
 
         name_node = node.child_by_field_name("name")
@@ -505,9 +495,9 @@ class HaskellMapping(BaseMapping):
 
         return False
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve import path for Haskell.
 
         Haskell module resolution is complex and typically handled by the build system.
@@ -518,7 +508,7 @@ class HaskellMapping(BaseMapping):
             source_file: Path to the file containing the import
 
         Returns:
-            None (Haskell module resolution is complex, not file-based)
+            Empty list (Haskell module resolution is complex, not file-based)
         """
-        # Haskell module resolution is complex, return None
-        return None
+        # Haskell module resolution is complex, return empty list
+        return []
