@@ -327,15 +327,15 @@ class DaemonDiscovery:
         log_file = open(log_path, "w")  # child inherits the fd; parent closes immediately
 
         try:
-        with open(log_path, "w") as log_file:
-            subprocess.Popen(
-                cmd,
-                start_new_session=True,
-                stdin=subprocess.DEVNULL,
-                stdout=log_file,
-                stderr=log_file,
-                env=env,
-                cwd=str(self._project_dir),
+            with open(log_path, "w") as log_file:
+                subprocess.Popen(
+                    cmd,
+                    start_new_session=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_file,
+                    stderr=log_file,
+                    env=env,
+                    cwd=str(self._project_dir),
             )
         finally:
             log_file.close()
