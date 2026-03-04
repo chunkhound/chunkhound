@@ -314,6 +314,7 @@ class PluggableResearchService:
             root_query=query,
             llm_provider=self._llm_manager.get_utility_provider(),
             embedding_provider=self._embedding_manager.get_provider(),
+            max_cluster_embed_chars=self._config.max_cluster_embed_chars if self._config is not None else 4000,
         )
         cluster_groups = extraction_result.cluster_groups
         cluster_metadata = extraction_result.cluster_metadata

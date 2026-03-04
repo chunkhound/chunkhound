@@ -211,6 +211,15 @@ class ResearchConfig(BaseSettings):
         description="Minimum cluster size for HDBSCAN clustering",
     )
 
+    max_cluster_embed_chars: int = Field(
+        default=4000,
+        ge=500,
+        le=32000,
+        description="Maximum characters of file content used for clustering embeddings. "
+                    "Truncates input to a semantic fingerprint, preventing oversized "
+                    "requests to custom endpoints (e.g. Azure ML).",
+    )
+
     # Phase 3: Synthesis Parameters
     target_tokens: int = Field(
         default=20_000,
@@ -430,6 +439,9 @@ class ResearchConfig(BaseSettings):
 
         if min_cluster := os.getenv("CHUNKHOUND_RESEARCH_MIN_CLUSTER_SIZE"):
             config["min_cluster_size"] = int(min_cluster)
+
+        if val := os.getenv("CHUNKHOUND_RESEARCH_MAX_CLUSTER_EMBED_CHARS"):
+            config["max_cluster_embed_chars"] = int(val)
 
         if target_tok := os.getenv("CHUNKHOUND_RESEARCH_TARGET_TOKENS"):
             config["target_tokens"] = int(target_tok)
