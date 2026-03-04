@@ -37,8 +37,15 @@ class ClientProxy:
 
         reader, writer = await ipc.create_client(address)
         try:
+            # Read auth token from lock file (written by the daemon)
+            lock = self._discovery.read_lock()
+            auth_token = lock.get("auth_token") if lock else None
+
             # Registration handshake
-            ipc.write_frame(writer, {"type": "register", "pid": os.getpid()})
+            reg_frame: dict = {"type": "register", "pid": os.getpid()}
+            if auth_token is not None:
+                reg_frame["auth_token"] = auth_token
+            ipc.write_frame(writer, reg_frame)
             await writer.drain()
 
             ack = await asyncio.wait_for(ipc.read_frame(reader), timeout=10.0)
@@ -59,6 +66,16 @@ class ClientProxy:
                 {stdin_task, stdout_task},
                 return_when=asyncio.FIRST_COMPLETED
             )
+
+            # Retrieve exceptions from completed tasks to prevent
+            # "Task exception was never retrieved" noise on stderr.
+            for task in done:
+                if not task.cancelled():
+                    exc = task.exception()
+                    if exc is not None:
+                        msg = f"[chunkhound] client_proxy task error: {exc!r}\n"
+                        sys.stderr.write(msg)
+                        sys.stderr.flush()
 
             # Cancel remaining tasks
             for task in pending:
