@@ -48,7 +48,7 @@ RIPGREP_TIMEOUT_SECONDS = 10              # Timeout for ripgrep subprocess
 BASE_OVERHEAD_SECONDS = 60                # Fixture setup, initial scan, etc.
 BUDGET_PER_LANGUAGE_SECONDS = 12          # Per-language budget (Windows CI worst case)
 SEARCH_VALIDATION_BUDGET_SECONDS = 60     # Reserve for parallel searches + assertions
-INDEXING_CAP_SECONDS = 180.0              # Hard cap for indexing wait (fail fast)
+INDEXING_CAP_SECONDS = 200.0              # Hard cap for indexing wait (fail fast)
 SINGLE_FILE_INDEXING_MAX_SECONDS = 10.0   # Max wait for single file indexing
 
 # Threshold Constants
@@ -384,6 +384,7 @@ function qaTestFunction() {
             Language.SWIFT: '// Swift QA test\nfunc qaTestFunction() -> String {\n    return "swift_qa_unique"\n}',
             Language.ZIG: '// Zig QA test\nfn qa_test_function() []const u8 {\n    return "zig_qa_unique";\n}',
             Language.PDF: None,  # PDF is binary, skip content template
+            Language.SQL: '-- SQL QA test\nCREATE TABLE qa_test (\n    id INTEGER PRIMARY KEY,\n    content TEXT DEFAULT \'sql_qa_unique\'\n);',
         }
 
         # Create extension mapping for file creation
@@ -407,7 +408,7 @@ function qaTestFunction() {
             Language.TEXT: ".txt",
             Language.GROOVY: ".groovy",
             Language.KOTLIN: ".kt",
-            Language.MAKEFILE: "Makefile",  # Special case
+            Language.MAKEFILE: ".mk",
             Language.MATLAB: ".m",
             Language.VUE: ".vue",
             Language.SVELTE: ".svelte",
@@ -422,6 +423,7 @@ function qaTestFunction() {
             Language.SWIFT: ".swift",
             Language.ZIG: ".zig",
             Language.PDF: ".pdf",
+            Language.SQL: ".sql",
         }
 
         # Validate ALL languages have test coverage (fail explicitly for new languages)
@@ -449,10 +451,7 @@ function qaTestFunction() {
                     continue
 
                 ext = extension_map[language]
-                if ext == "Makefile":
-                    filename = f"Makefile.qa_{language.value}"
-                else:
-                    filename = f"qa_test_{language.value}{ext}"
+                filename = f"qa_test_{language.value}{ext}"
 
                 file_path = watch_dir / filename
                 unique_pattern = f"{language.value}_qa_unique"

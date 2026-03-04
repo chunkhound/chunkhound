@@ -30,9 +30,9 @@ logger = logging.getLogger(__name__)
 _config = CASTConfig()
 # Content limit is max_chunk_size non-ws chars, but embedded text includes
 # header overhead. Header format: "# {file_path} ({language})\n"
-# For test files: tmp_path (~30) + filename (~20) + language (~10) ≈ 60 chars
-# Using 150 as conservative bound for platform variations in tmp_path.
-# Production paths may be longer; this test validates content size, not header+content.
+# Components: "# " (2) + tmp_path (varies by OS, up to ~100) + "/" (1)
+# + filename (~20) + " (" (2) + language (~10) + ")\n" (2) ≈ 137 max.
+# Rounded to 150 for safety margin.
 HEADER_OVERHEAD = 150
 MAX_CHUNK_SIZE = _config.max_chunk_size + HEADER_OVERHEAD  # non-ws chars
 # Intentionally lower than CASTConfig.min_chunk_size (50) — this is a soft
@@ -363,6 +363,22 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         ".pdf",
         None,  # PDF requires binary content, skip in tests
         None,
+    ),
+    # === Query Languages ===
+    Language.SQL: (
+        ".sql",
+        # Large: many-column CREATE TABLE triggers splitting
+        "CREATE TABLE large_table (\n"
+        + ",\n".join(
+            f"    col_{i} VARCHAR(255) NOT NULL DEFAULT ''" for i in range(80)
+        )
+        + "\n);",
+        # Normal: simple CREATE TABLE
+        "CREATE TABLE users (\n"
+        "    id INTEGER PRIMARY KEY,\n"
+        "    name VARCHAR(255) NOT NULL,\n"
+        "    email VARCHAR(255) UNIQUE\n"
+        ");",
     ),
     # === Generic/Unknown ===
     Language.UNKNOWN: (

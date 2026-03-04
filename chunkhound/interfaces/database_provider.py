@@ -324,7 +324,7 @@ class DatabaseProvider(Protocol):
         """Begin a database transaction."""
         ...
 
-    def commit_transaction(self) -> None:
+    def commit_transaction(self, force_checkpoint: bool = False) -> None:
         """Commit the current transaction."""
         ...
 
@@ -351,6 +351,18 @@ class DatabaseProvider(Protocol):
     # Health and Diagnostics
     def optimize_tables(self) -> None:
         """Optimize tables by compacting fragments and rebuilding indexes (provider-specific)."""
+        ...
+
+    def should_optimize(self, operation: str = "") -> bool:
+        """Check if optimization is warranted.
+
+        Args:
+            operation: Optional operation context (e.g., "post-chunking", "post-indexing")
+
+        Returns:
+            True if optimization should run, False to skip.
+            Default False assumes database self-manages optimization.
+        """
         ...
 
     def health_check(self) -> dict[str, Any]:

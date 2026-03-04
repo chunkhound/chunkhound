@@ -44,7 +44,7 @@ class _FakeDB:
     def begin_transaction(self):
         return None
 
-    def commit_transaction(self):
+    def commit_transaction(self, force_checkpoint: bool = False):
         return None
 
     def rollback_transaction(self):
@@ -55,6 +55,9 @@ class _FakeDB:
 
     def insert_chunks_batch(self, chunks):
         return []
+
+    def should_optimize(self, operation: str = "") -> bool:
+        return False
 
 
 class _Cfg:
