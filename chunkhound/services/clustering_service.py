@@ -33,18 +33,15 @@ class ClusteringService:
         self,
         embedding_provider: EmbeddingProvider,
         llm_provider: LLMProvider,
-        max_cluster_embed_chars: int = 4000,
     ):
         """Initialize clustering service.
 
         Args:
             embedding_provider: Provider for generating embeddings
             llm_provider: Provider for token estimation
-            max_cluster_embed_chars: Maximum characters per file used for clustering embeddings
         """
         self._embedding_provider = embedding_provider
         self._llm_provider = llm_provider
-        self._max_cluster_embed_chars = max_cluster_embed_chars
 
     async def cluster_files(
         self, files: dict[str, str], n_clusters: int
@@ -104,9 +101,8 @@ class ClusteringService:
         file_paths = list(files.keys())
         file_contents = [files[fp] for fp in file_paths]
 
-        file_contents_for_embed = [c[:self._max_cluster_embed_chars] for c in file_contents]
-        logger.debug(f"Generating embeddings for {len(file_contents_for_embed)} files (truncated to {self._max_cluster_embed_chars} chars each)")
-        embeddings = await self._embedding_provider.embed_batch(file_contents_for_embed)
+        logger.debug(f"Generating embeddings for {len(file_contents)} files")
+        embeddings = await self._embedding_provider.embed_batch(file_contents)
         embeddings_array = np.array(embeddings)
 
         # K-means clustering
@@ -218,9 +214,8 @@ class ClusteringService:
         file_paths = list(files.keys())
         file_contents = [files[fp] for fp in file_paths]
 
-        file_contents_for_embed = [c[:self._max_cluster_embed_chars] for c in file_contents]
-        logger.debug(f"Generating embeddings for {len(file_contents_for_embed)} files (truncated to {self._max_cluster_embed_chars} chars each)")
-        embeddings = await self._embedding_provider.embed_batch(file_contents_for_embed)
+        logger.debug(f"Generating embeddings for {len(file_contents)} files")
+        embeddings = await self._embedding_provider.embed_batch(file_contents)
         embeddings_array = np.array(embeddings)
 
         # HDBSCAN clustering
@@ -426,13 +421,8 @@ class ClusteringService:
         file_paths = list(files.keys())
         file_contents = [files[fp] for fp in file_paths]
 
-        # Truncate for embedding — clustering only needs a semantic fingerprint,
-        # not full file content. Prevents oversized batches on custom endpoints
-        # (e.g. Azure ML) that have lower token budgets than the official API limit.
-        file_contents_for_embed = [c[:self._max_cluster_embed_chars] for c in file_contents]
-
-        logger.debug(f"Generating embeddings for {len(file_contents_for_embed)} files (truncated to {self._max_cluster_embed_chars} chars each)")
-        embeddings = await self._embedding_provider.embed_batch(file_contents_for_embed)
+        logger.debug(f"Generating embeddings for {len(file_contents)} files")
+        embeddings = await self._embedding_provider.embed_batch(file_contents)
         embeddings_array = np.array(embeddings)
 
         # Build file_path -> embedding mapping for later operations

@@ -369,17 +369,33 @@ class VoyageAIEmbeddingProvider:
     async def embed_batch(
         self, texts: list[str], batch_size: int | None = None
     ) -> list[list[float]]:
-        """Generate embeddings in batches for optimal performance."""
+        """Generate embeddings in batches respecting both count and token limits."""
         if not texts:
             return []
 
-        batch_size = batch_size or self._batch_size
-        batches = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
+        effective_batch_size = batch_size or self._batch_size
+        max_tokens_per_batch = self._model_config["max_tokens_per_batch"]
 
-        all_embeddings = []
-        for batch in batches:
-            embeddings = await self.embed(batch)
-            all_embeddings.extend(embeddings)
+        all_embeddings: list[list[float]] = []
+        current_batch: list[str] = []
+        current_tokens = 0
+
+        for text in texts:
+            text_tokens = self.estimate_tokens(text)
+
+            if current_batch and (
+                len(current_batch) >= effective_batch_size
+                or current_tokens + text_tokens > max_tokens_per_batch
+            ):
+                all_embeddings.extend(await self.embed(current_batch))
+                current_batch = []
+                current_tokens = 0
+
+            current_batch.append(text)
+            current_tokens += text_tokens
+
+        if current_batch:
+            all_embeddings.extend(await self.embed(current_batch))
 
         return all_embeddings
 

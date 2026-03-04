@@ -57,7 +57,6 @@ async def extract_facts_with_clustering(
     max_concurrency: int = 4,
     min_tokens_per_cluster: int = MIN_TOKENS_PER_CLUSTER,
     max_tokens_per_cluster: int = MAX_TOKENS_PER_CLUSTER,
-    max_cluster_embed_chars: int = 4000,
 ) -> ClusteredExtractionResult:
     """Extract facts from files using HDBSCAN bounded clustering.
 
@@ -94,7 +93,6 @@ async def extract_facts_with_clustering(
     clustering_service = ClusteringService(
         embedding_provider=embedding_provider,
         llm_provider=llm_provider,
-        max_cluster_embed_chars=max_cluster_embed_chars,
     )
 
     # Use HDBSCAN with token bounds for natural semantic groupings
