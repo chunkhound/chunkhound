@@ -8,6 +8,7 @@ variables, config files, CLI arguments) across MCP server and indexing flows.
 
 import argparse
 import os
+import re
 from typing import Any, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -73,14 +74,14 @@ class EmbeddingConfig(BaseSettings):
 
     Configuration Sources (in order of precedence):
     1. CLI arguments
-    2. Environment variables (CHUNKHOUND_EMBEDDING_*)
+    2. Environment variables (CHUNKHOUND_EMBEDDING__*)
     3. Config files
     4. Default values
 
     Environment Variables:
-        CHUNKHOUND_EMBEDDING_API_KEY=sk-...
-        CHUNKHOUND_EMBEDDING_MODEL=text-embedding-3-small
-        CHUNKHOUND_EMBEDDING_BASE_URL=https://api.openai.com/v1
+        CHUNKHOUND_EMBEDDING__API_KEY=sk-...
+        CHUNKHOUND_EMBEDDING__MODEL=text-embedding-3-small
+        CHUNKHOUND_EMBEDDING__BASE_URL=https://api.openai.com/v1
     """
 
     model_config = SettingsConfigDict(
@@ -131,32 +132,37 @@ class EmbeddingConfig(BaseSettings):
 
     rerank_url: str = Field(
         default="/rerank",
-        description="Rerank endpoint URL. Absolute URLs (http/https) used as-is for separate services. "
-        "Relative paths combined with base_url for same-server reranking.",
+        description=(
+            "Rerank endpoint URL. Absolute URLs (http/https) used "
+            "as-is for separate services. Relative paths combined "
+            "with base_url for same-server reranking."
+        ),
     )
 
     rerank_format: Literal["cohere", "tei", "auto"] = Field(
         default="auto",
-        description="Reranking API format. 'cohere' for Cohere-compatible APIs (requires model in request), "
-        "'tei' for Hugging Face Text Embeddings Inference (model set at deployment), "
-        "'auto' for automatic format detection from response.",
+        description=(
+            "Reranking API format. 'cohere' for Cohere-compatible "
+            "APIs (requires model in request), 'tei' for Hugging "
+            "Face TEI (model set at deployment), 'auto' for "
+            "automatic format detection from response."
+        ),
     )
 
     # Internal settings - not exposed to users
     batch_size: int = Field(default=100, description="Internal batch size")
     rerank_batch_size: int | None = Field(
         default=None,
-        description="Max documents per rerank batch (overrides model defaults, bounded by model caps)",
+        description=(
+            "Max documents per rerank batch "
+            "(overrides model defaults, bounded by model caps)"
+        ),
     )
     timeout: int = Field(default=30, description="Internal timeout")
     max_retries: int = Field(default=3, description="Internal max retries")
     max_concurrent_batches: int | None = Field(
         default=None,
         description="Internal concurrency (auto-detected from provider if not set)",
-    )
-    optimization_batch_frequency: int = Field(
-        default=1000,
-        description="Internal optimization frequency (runs every N batches during indexing)",
     )
 
     @field_validator("rerank_batch_size")
@@ -226,11 +232,21 @@ class EmbeddingConfig(BaseSettings):
                     "(e.g., '2024-02-01')"
                 )
 
+            # Validate api_version format (YYYY-MM-DD or YYYY-MM-DD-<suffix>)
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(-[a-z][a-z0-9]*)?", self.api_version):
+                raise ValueError(
+                    f"api_version must be YYYY-MM-DD or YYYY-MM-DD-<suffix> format "
+                    f"(e.g., '2024-02-01', '2024-02-01-preview', '2024-10-01-preview2'), "
+                    f"got '{self.api_version}'"
+                )
+
             # azure_endpoint and base_url are mutually exclusive
             if self.base_url:
                 raise ValueError(
-                    "azure_endpoint and base_url are mutually exclusive. "
-                    "Use azure_endpoint for Azure OpenAI, base_url for custom OpenAI-compatible endpoints."
+                    "azure_endpoint and base_url are mutually "
+                    "exclusive. Use azure_endpoint for Azure "
+                    "OpenAI, base_url for custom "
+                    "OpenAI-compatible endpoints."
                 )
 
         return self
@@ -303,7 +319,7 @@ class EmbeddingConfig(BaseSettings):
         if self.provider == "openai":
             # Azure OpenAI always requires API key
             if self.azure_endpoint:
-                return self.api_key is not None
+                return self.api_key is not None and self.api_version is not None
             # For OpenAI provider, only require API key for official endpoints
             if is_official_openai_endpoint(self.base_url):
                 return self.api_key is not None
@@ -328,6 +344,10 @@ class EmbeddingConfig(BaseSettings):
             if self.azure_endpoint:
                 if not self.api_key:
                     missing.append("api_key (set CHUNKHOUND_EMBEDDING__API_KEY)")
+                if not self.api_version:
+                    missing.append(
+                        "api_version (set CHUNKHOUND_EMBEDDING__API_VERSION)"
+                    )
             # For OpenAI provider, only require API key for official endpoints
             elif is_official_openai_endpoint(self.base_url) and not self.api_key:
                 missing.append("api_key (set CHUNKHOUND_EMBEDDING__API_KEY)")
@@ -386,16 +406,36 @@ class EmbeddingConfig(BaseSettings):
 
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
-        """Load embedding config from environment variables."""
+        """Load embedding config from environment variables.
+
+        Supports both the canonical double-underscore form (CHUNKHOUND_EMBEDDING__*)
+        and the legacy single-underscore form (CHUNKHOUND_EMBEDDING_*) for the four
+        common fields. The canonical form takes precedence when both are set.
+        """
+        def _first_env(*names: str) -> str | None:
+            for name in names:
+                val = os.getenv(name)
+                if val is not None:
+                    return val
+            return None
+
         config = {}
 
-        if api_key := os.getenv("CHUNKHOUND_EMBEDDING__API_KEY"):
+        if api_key := _first_env(
+            "CHUNKHOUND_EMBEDDING__API_KEY", "CHUNKHOUND_EMBEDDING_API_KEY"
+        ):
             config["api_key"] = api_key
-        if base_url := os.getenv("CHUNKHOUND_EMBEDDING__BASE_URL"):
+        if base_url := _first_env(
+            "CHUNKHOUND_EMBEDDING__BASE_URL", "CHUNKHOUND_EMBEDDING_BASE_URL"
+        ):
             config["base_url"] = base_url
-        if provider := os.getenv("CHUNKHOUND_EMBEDDING__PROVIDER"):
+        if provider := _first_env(
+            "CHUNKHOUND_EMBEDDING__PROVIDER", "CHUNKHOUND_EMBEDDING_PROVIDER"
+        ):
             config["provider"] = provider
-        if model := os.getenv("CHUNKHOUND_EMBEDDING__MODEL"):
+        if model := _first_env(
+            "CHUNKHOUND_EMBEDDING__MODEL", "CHUNKHOUND_EMBEDDING_MODEL"
+        ):
             config["model"] = model
 
         # Azure OpenAI configuration
