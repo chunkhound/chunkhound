@@ -11,6 +11,7 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.core.utils import estimate_tokens_llm
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 from chunkhound.utils.json_extraction import extract_json_from_response
 
@@ -23,8 +24,7 @@ class BaseCLIProvider(LLMProvider):
     - _get_provider_name(): Return the provider name string
     """
 
-    # Constants for token estimation and timeouts
-    TOKEN_CHARS_RATIO = 4  # Approximate characters per token
+    # Constants for timeouts
     HEALTH_CHECK_TIMEOUT = 30  # Seconds to wait for health check
 
     def __init__(
@@ -270,7 +270,7 @@ Respond with JSON only, no additional text."""
         Uses rough approximation since we don't have direct tokenizer access.
         Most models use ~4 characters per token.
         """
-        return len(text) // self.TOKEN_CHARS_RATIO
+        return estimate_tokens_llm(text)
 
     async def health_check(self) -> dict[str, Any]:
         """Perform health check by attempting a simple completion.

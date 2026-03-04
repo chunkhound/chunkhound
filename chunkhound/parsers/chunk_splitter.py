@@ -4,7 +4,7 @@ This module provides the ChunkSplitter class that handles splitting chunks
 that exceed the 1200 non-whitespace character limit. It extracts the splitting
 logic from UniversalParser into a reusable component.
 
-The splitter enforces the cAST algorithm's size constraints:
+The splitter enforces cAST-inspired size constraints:
 - Maximum 1200 non-whitespace characters per chunk
 - Safe token limit of 6000 tokens per chunk
 - Multiple splitting strategies based on content analysis
@@ -17,8 +17,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from loguru import logger
+
 from chunkhound.core.types.common import ChunkType
-from chunkhound.core.utils import estimate_tokens
+from chunkhound.core.utils import estimate_tokens_chunking
+from chunkhound.core.utils.token_utils import EMBEDDING_CHARS_PER_TOKEN
 
 from .universal_engine import UniversalChunk, UniversalConcept
 
@@ -29,23 +32,27 @@ if TYPE_CHECKING:
 
 @dataclass
 class CASTConfig:
-    """Configuration for cAST algorithm.
+    """Configuration for cAST-inspired chunk splitting.
 
-    Based on research paper: "cAST: Enhancing Code Retrieval-Augmented Generation
-    with Structural Chunking via Abstract Syntax Tree"
+    Inspired by: "cAST: Enhancing Code Retrieval-Augmented Generation
+    with Structural Chunking via Abstract Syntax Tree". Uses simplified
+    char/token metrics rather than the full AST-depth approach.
 
     Note: max_chunk_size applies to content only. Embedding providers add
     headers (file path, language) on top of content when creating embeddings.
     """
 
-    max_chunk_size: int = 1200  # Reduced from 2000 (non-whitespace chars)
+    max_chunk_size: int = 1200  # Non-whitespace chars
     min_chunk_size: int = 50  # Minimum chunk size to avoid tiny fragments
     merge_threshold: float = (
         0.8  # Merge siblings if combined size < threshold * max_size
     )
-    preserve_structure: bool = True  # Prioritize syntactic boundaries
     greedy_merge: bool = True  # Greedily merge adjacent sibling nodes
-    safe_token_limit: int = 6000  # Conservative token limit (well under 8191 API limit)
+    safe_token_limit: int = 6000  # Conservative limit for embedding models
+
+    def __post_init__(self) -> None:
+        if self.min_chunk_size < 1:
+            raise ValueError(f"min_chunk_size must be >= 1, got {self.min_chunk_size}")
 
 
 @dataclass
@@ -55,15 +62,14 @@ class ChunkMetrics:
     non_whitespace_chars: int
     total_chars: int
     lines: int
-    ast_depth: int
 
     @classmethod
-    def from_content(cls, content: str, ast_depth: int = 0) -> ChunkMetrics:
+    def from_content(cls, content: str) -> ChunkMetrics:
         """Calculate metrics from content string."""
         non_ws = len(re.sub(r"\s", "", content))
         total = len(content)
         lines = len(content.split("\n"))
-        return cls(non_ws, total, lines, ast_depth)
+        return cls(non_ws, total, lines)
 
 
 def compute_end_line(content: str, start_line: int) -> int:
@@ -105,10 +111,6 @@ class ChunkSplitter:
         """
         self.config = config or CASTConfig()
 
-    def _estimate_tokens(self, content: str) -> int:
-        """Helper method to estimate tokens using centralized utility."""
-        return estimate_tokens(content)
-
     def validate_and_split(self, chunk: UniversalChunk) -> list[UniversalChunk]:
         """Validate chunk size and split if necessary.
 
@@ -124,7 +126,7 @@ class ChunkSplitter:
             (e.g., MakefileChunkSplitter preserves target/recipe coherence).
         """
         metrics = ChunkMetrics.from_content(chunk.content)
-        estimated_tokens = self._estimate_tokens(chunk.content)
+        estimated_tokens = estimate_tokens_chunking(chunk.content)
 
         if (
             metrics.non_whitespace_chars <= self.config.max_chunk_size
@@ -199,7 +201,6 @@ class ChunkSplitter:
         """
         from chunkhound.core.models.chunk import Chunk
         from chunkhound.core.types.common import (
-            ChunkType,
             FileId,
             FilePath,
             LineNumber,
@@ -248,7 +249,7 @@ class ChunkSplitter:
         """
         # First: Check if we even need to split
         metrics = ChunkMetrics.from_content(chunk.content)
-        estimated_tokens = self._estimate_tokens(chunk.content)
+        estimated_tokens = estimate_tokens_chunking(chunk.content)
 
         if (
             metrics.non_whitespace_chars <= self.config.max_chunk_size
@@ -261,7 +262,8 @@ class ChunkSplitter:
         has_very_long_lines = self._analyze_lines(lines)
 
         # Third: Choose splitting strategy based on content analysis
-        if len(lines) <= 2 or has_very_long_lines:
+        line_span = chunk.end_line - chunk.start_line
+        if len(lines) <= 2 or has_very_long_lines or line_span < 2:
             return self._emergency_split(chunk)
 
         return self._split_by_lines_simple(chunk, lines)
@@ -281,11 +283,15 @@ class ChunkSplitter:
         chunk1_end_line = chunk.start_line + chunk1_lines - 1
         chunk2_start_line = chunk1_end_line + 1
 
-        # Ensure valid bounds
+        # Ensure valid bounds — chunk2 must start strictly after chunk1 ends
         chunk1_end_line = max(chunk.start_line, min(chunk1_end_line, chunk.end_line))
         chunk2_start_line = max(
-            chunk.start_line, min(chunk2_start_line, chunk.end_line)
+            chunk1_end_line + 1, min(chunk2_start_line, chunk.end_line)
         )
+
+        # If metadata span is too narrow for two non-overlapping ranges, fall back
+        if chunk2_start_line >= chunk.end_line:
+            return self._emergency_split(chunk)
 
         chunk1 = UniversalChunk(
             concept=chunk.concept,
@@ -316,24 +322,12 @@ class ChunkSplitter:
 
     def _emergency_split(self, chunk: UniversalChunk) -> list[UniversalChunk]:
         """Smart code splitting for minified/large single-line files."""
-        # Use the stricter limit: character limit or token-based limit
-        # Calculate max chars based on token limit using provider-specific estimation
-        estimated_tokens = self._estimate_tokens(chunk.content)
-        if estimated_tokens > 0:
-            # Calculate actual chars-to-token ratio for this content
-            actual_ratio = len(chunk.content) / estimated_tokens
-            max_chars_from_tokens = int(
-                self.config.safe_token_limit * actual_ratio * 0.8
-            )
-        else:
-            # Fallback to conservative estimation
-            max_chars_from_tokens = int(self.config.safe_token_limit * 3.5 * 0.8)
-        max_chars = max(1, min(self.config.max_chunk_size, max_chars_from_tokens))
+        raw_search_window = self.config.safe_token_limit * EMBEDDING_CHARS_PER_TOKEN
 
         metrics = ChunkMetrics.from_content(chunk.content)
         if (
             metrics.non_whitespace_chars <= self.config.max_chunk_size
-            and len(chunk.content) <= max_chars_from_tokens
+            and estimate_tokens_chunking(chunk.content) <= self.config.safe_token_limit
         ):
             return [chunk]
 
@@ -352,7 +346,7 @@ class ChunkSplitter:
             remaining_metrics = ChunkMetrics.from_content(remaining)
             if (
                 remaining_metrics.non_whitespace_chars <= self.config.max_chunk_size
-                and self._estimate_tokens(remaining) <= self.config.safe_token_limit
+                and estimate_tokens_chunking(remaining) <= self.config.safe_token_limit
             ):
                 chunks.append(
                     self._create_split_chunk(
@@ -365,20 +359,47 @@ class ChunkSplitter:
             best_split = 0
             for split_char in split_chars:
                 # Search within character limit
-                search_end = min(max_chars, len(remaining))
+                search_end = min(raw_search_window, len(remaining))
                 pos = remaining.rfind(split_char, 0, search_end)
 
                 if pos > best_split:
                     # Check if this split point gives us valid chunk size
                     test_content = remaining[: pos + 1]
                     test_metrics = ChunkMetrics.from_content(test_content)
-                    if test_metrics.non_whitespace_chars <= self.config.max_chunk_size:
+                    if (
+                        test_metrics.non_whitespace_chars <= self.config.max_chunk_size
+                        and estimate_tokens_chunking(test_content) <= self.config.safe_token_limit
+                    ):
                         best_split = pos + 1  # Include the split character
                         break
 
-            # If no good split found, force split at character limit
+            # If no good split found, force split at raw window limit
             if best_split == 0:
-                best_split = max_chars
+                best_split = min(raw_search_window, len(remaining))
+                # Shrink if force-split chunk exceeds non-ws limit
+                test = ChunkMetrics.from_content(remaining[:best_split])
+                while (
+                    (
+                        test.non_whitespace_chars > self.config.max_chunk_size
+                        or estimate_tokens_chunking(remaining[:best_split]) > self.config.safe_token_limit
+                    )
+                    and best_split > self.config.min_chunk_size
+                ):
+                    best_split = best_split // 2
+                    test = ChunkMetrics.from_content(remaining[:best_split])
+                # Last-resort: chunk may still exceed limits if min_chunk_size reached
+                slice_ = remaining[:best_split]
+                if (
+                    test.non_whitespace_chars > self.config.max_chunk_size
+                    or estimate_tokens_chunking(slice_) > self.config.safe_token_limit
+                ):
+                    logger.warning(
+                        "Chunk '{}' exceeds size limits after max splitting "
+                        "(non_ws={}, limit={})",
+                        chunk.name,
+                        test.non_whitespace_chars,
+                        self.config.max_chunk_size,
+                    )
 
             chunks.append(
                 self._create_split_chunk(
@@ -484,6 +505,7 @@ CHUNK_TYPE_TO_CONCEPT: dict[ChunkType, UniversalConcept] = {
     ChunkType.KEY_VALUE: UniversalConcept.BLOCK,
     ChunkType.ARRAY: UniversalConcept.BLOCK,
     ChunkType.BLOCK: UniversalConcept.BLOCK,
+    ChunkType.EMBEDDED_SQL: UniversalConcept.BLOCK,
     ChunkType.UNKNOWN: UniversalConcept.BLOCK,
 }
 
@@ -513,7 +535,6 @@ def universal_to_chunk(
     """
     from chunkhound.core.models.chunk import Chunk
     from chunkhound.core.types.common import (
-        ChunkType,
         FileId,
         FilePath,
         LineNumber,
@@ -558,6 +579,17 @@ def chunk_to_universal(chunk: Chunk) -> UniversalChunk:
         UniversalChunk instance for validation/splitting
     """
     concept = CHUNK_TYPE_TO_CONCEPT.get(chunk.chunk_type, UniversalConcept.BLOCK)
+
+    # Flat mapping loses DDL/DML distinction — restore from metadata["kind"].
+    # This depends on metadata being preserved through the pipeline. A dedicated
+    # ChunkType.EMBEDDED_SQL_DDL was considered but would require changes across
+    # the DB schema, serialization, and all ChunkType consumers.
+    if (
+        chunk.chunk_type == ChunkType.EMBEDDED_SQL
+        and chunk.metadata
+        and chunk.metadata.get("kind") == "embedded_sql_ddl"
+    ):
+        concept = UniversalConcept.DEFINITION
 
     return UniversalChunk(
         concept=concept,
