@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import voyageai
 
+from chunkhound.core.config.embedding_config import validate_rerank_configuration
 from chunkhound.providers.embeddings.voyageai_provider import (
     VoyageAIEmbeddingProvider,
 )
@@ -65,6 +66,54 @@ def provider_with_rerank_url():
 # ===========================================================================
 # 1. supports_reranking
 # ===========================================================================
+
+
+# ===========================================================================
+# 0. is_available
+# ===========================================================================
+
+
+class TestIsAvailable:
+    def test_is_available_with_api_key(self):
+        p = _make_provider(api_key="test-key")
+        assert p.is_available() is True
+
+    def test_is_available_keyless_azure_ml(self):
+        """Azure ML deployments have no API key but a base_url — must be available."""
+        p = _make_provider(base_url="https://az-endpoint.westus3.inference.ml.azure.com")
+        assert p.is_available() is True
+
+    def test_is_available_no_config(self):
+        p = _make_provider()
+        assert p.is_available() is False
+
+
+# ===========================================================================
+# 0b. validate_rerank_configuration
+# ===========================================================================
+
+
+class TestValidateRerankConfiguration:
+    def test_validate_rerank_cohere_without_model_voyageai_http(self):
+        """VoyageAI + HTTP rerank_url + cohere format + no model → should raise."""
+        with pytest.raises(ValueError):
+            validate_rerank_configuration(
+                provider="voyageai",
+                rerank_format="cohere",
+                rerank_model=None,
+                rerank_url="https://my-reranker.example.com/rerank",
+                base_url=None,
+            )
+
+    def test_validate_rerank_voyageai_sdk_no_url_skips_validation(self):
+        """VoyageAI with no rerank_url → SDK path, no error even without model."""
+        validate_rerank_configuration(
+            provider="voyageai",
+            rerank_format="cohere",
+            rerank_model=None,
+            rerank_url=None,
+            base_url=None,
+        )
 
 
 class TestSupportsReranking:

@@ -33,7 +33,7 @@ def validate_rerank_configuration(
     provider: str,
     rerank_format: str,
     rerank_model: str | None,
-    rerank_url: str,
+    rerank_url: str | None,
     base_url: str | None,
 ) -> None:
     """Validate rerank configuration consistency.
@@ -50,8 +50,8 @@ def validate_rerank_configuration(
     Raises:
         ValueError: If configuration is invalid
     """
-    # VoyageAI uses SDK-based reranking, doesn't need URL configuration
-    if provider == "voyageai":
+    # VoyageAI uses SDK-based reranking when no rerank_url provided
+    if provider == "voyageai" and not rerank_url:
         return
 
     # For Cohere format, rerank_model is required
@@ -63,7 +63,7 @@ def validate_rerank_configuration(
 
     if is_using_reranking:
         # For relative URLs, we need base_url
-        if not rerank_url.startswith(("http://", "https://")) and not base_url:
+        if rerank_url and not rerank_url.startswith(("http://", "https://")) and not base_url:
             raise ValueError(RERANK_BASE_URL_REQUIRED)
 
 
@@ -129,8 +129,8 @@ class EmbeddingConfig(BaseSettings):
         description="Reranking model name (enables multi-hop search if specified)",
     )
 
-    rerank_url: str = Field(
-        default="/rerank",
+    rerank_url: str | None = Field(
+        default=None,
         description=(
             "Rerank endpoint URL. Absolute URLs (http/https) used "
             "as-is for separate services. Relative paths combined "
@@ -475,8 +475,6 @@ class EmbeddingConfig(BaseSettings):
         # Handle provider arguments (both variations)
         if hasattr(args, "provider") and args.provider:
             overrides["provider"] = args.provider
-        if hasattr(args, "embedding_provider") and args.embedding_provider:
-            overrides["provider"] = args.embedding_provider
 
         # Handle model arguments (both variations)
         if hasattr(args, "model") and args.model:
