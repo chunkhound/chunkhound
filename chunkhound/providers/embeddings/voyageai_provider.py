@@ -431,7 +431,7 @@ class VoyageAIEmbeddingProvider:
 
     def is_available(self) -> bool:
         """Check if the provider is available and properly configured."""
-        return VOYAGEAI_AVAILABLE and self._api_key is not None
+        return VOYAGEAI_AVAILABLE and (self._api_key is not None or self._base_url is not None)
 
     async def health_check(self) -> dict[str, Any]:
         """Perform health check and return status information."""

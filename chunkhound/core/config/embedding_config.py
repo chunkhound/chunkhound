@@ -203,6 +203,9 @@ class EmbeddingConfig(BaseSettings):
     @model_validator(mode="after")
     def validate_rerank_config(self) -> Self:
         """Validate rerank configuration using shared validation logic."""
+        # TEI format implies a relative /rerank endpoint when no explicit URL is given
+        if self.rerank_format == "tei" and self.rerank_url is None:
+            self.rerank_url = "/rerank"
         validate_rerank_configuration(
             provider=self.provider,
             rerank_format=self.rerank_format,
