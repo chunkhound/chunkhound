@@ -233,10 +233,12 @@ class EmbeddingConfig(BaseSettings):
                 )
 
             # Validate api_version format (YYYY-MM-DD or YYYY-MM-DD-<suffix>)
-            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(-[a-z][a-z0-9]*)?", self.api_version):
+            if not re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}(-[a-zA-Z][a-zA-Z0-9]*)?", self.api_version
+            ):
                 raise ValueError(
                     f"api_version must be YYYY-MM-DD or YYYY-MM-DD-<suffix> format "
-                    f"(e.g., '2024-02-01', '2024-02-01-preview', '2024-10-01-preview2'), "
+                    f"(e.g., '2024-02-01', '2024-02-01-preview'), "
                     f"got '{self.api_version}'"
                 )
 

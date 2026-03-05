@@ -21,7 +21,7 @@ from pathlib import Path
 
 # Import Windows-safe subprocess utilities
 from tests.utils.windows_subprocess import create_subprocess_exec_safe, get_safe_subprocess_env
-from tests.utils.windows_compat import windows_safe_tempdir
+from tests.utils.windows_compat import windows_safe_tempdir, get_fs_event_timeout
 from tests.utils import SubprocessJsonRpcClient
 
 # Add parent directory to path to import chunkhound
@@ -129,7 +129,7 @@ class TestServerStartup:
             "run",
             "chunkhound",
             "mcp",
-            "--stdio",
+            "--no-daemon",
             "--help",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -165,6 +165,8 @@ class TestServerStartup:
             config_path.write_text(json.dumps(config))
             
             # Test that the server starts without crashing
+            # Use repr() to properly escape Windows paths with backslashes
+            cwd_repr = repr(os.getcwd())
             proc = await create_subprocess_exec_safe(
                 "uv",
                 "run",
@@ -172,7 +174,9 @@ class TestServerStartup:
                 f'''
 import sys
 import os
-sys.path.insert(0, {repr(os.getcwd())})
+
+sys.path.insert(0, {cwd_repr})
+
 from chunkhound.mcp_server.stdio import main
 import asyncio
 
@@ -258,7 +262,7 @@ sys.exit(asyncio.run(test()))
             mcp_env["CHUNKHOUND_MCP_MODE"] = "1"
             
             proc = await create_subprocess_exec_safe(
-                "uv", "run", "chunkhound", "mcp", str(temp_path),
+                "uv", "run", "chunkhound", "mcp", "--no-daemon", str(temp_path),
                 cwd=str(temp_path),
                 env=mcp_env,
                 stdin=asyncio.subprocess.PIPE,
@@ -271,6 +275,9 @@ sys.exit(asyncio.run(test()))
 
             try:
                 # 1. Send initialize request
+                # Use a platform-aware timeout: Windows CI needs more time for
+                # uv run startup (often 20-30s on hosted runners).
+                init_timeout = max(10.0, get_fs_event_timeout())
                 init_result = await client.send_request(
                     "initialize",
                     {
@@ -278,7 +285,7 @@ sys.exit(asyncio.run(test()))
                         "capabilities": {},
                         "clientInfo": {"name": "test", "version": "1.0"}
                     },
-                    timeout=10.0
+                    timeout=init_timeout
                 )
 
                 # Verify response structure

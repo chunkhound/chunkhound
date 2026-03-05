@@ -10,7 +10,6 @@ ARCHITECTURE: Global state required for stdio communication model
 from __future__ import annotations
 
 import asyncio
-import copy
 import logging
 import os
 import sys
@@ -48,8 +47,7 @@ from chunkhound.core.config.config import Config  # noqa: E402
 from chunkhound.version import __version__  # noqa: E402
 
 from .base import MCPServerBase  # noqa: E402
-from .common import handle_tool_call, has_reranker_support  # noqa: E402
-from .tools import TOOL_REGISTRY  # noqa: E402
+from .common import handle_tool_call  # noqa: E402
 
 # CRITICAL: Disable ALL logging to prevent JSON-RPC corruption
 logging.disable(logging.CRITICAL)
@@ -174,51 +172,17 @@ class StdioMCPServer(MCPServerBase):
     def build_available_tools(self) -> list[types.Tool]:
         """Build list of tools available based on current configuration.
 
-        Filters tools based on embedding/LLM/reranker availability.
-        Dynamically restricts schema enums when capabilities unavailable.
-
         Returns:
             List of MCP Tool objects with filtered schemas.
         """
-        tools = []
-        for tool_name, tool in TOOL_REGISTRY.items():
-            # Skip embedding-dependent tools if no providers available
-            if tool.requires_embeddings and (
-                not self.embedding_manager
-                or not self.embedding_manager.list_providers()
-            ):
-                continue
-
-            # Skip LLM-dependent tools if no LLM configured
-            if tool.requires_llm and not self.llm_manager:
-                continue
-
-            # Skip reranker-dependent tools if reranker not available
-            if tool.requires_reranker and not has_reranker_support(
-                self.embedding_manager
-            ):
-                continue
-
-            # Deep copy parameters to avoid mutating registry
-            tool_params = copy.deepcopy(tool.parameters)
-
-            # Hide semantic option if embeddings not available
-            if tool_name == "search" and (
-                not self.embedding_manager
-                or not self.embedding_manager.list_providers()
-            ):
-                if "type" in tool_params.get("properties", {}):
-                    tool_params["properties"]["type"]["enum"] = ["regex"]
-
-            tools.append(
-                types.Tool(
-                    name=tool_name,
-                    description=tool.description,
-                    inputSchema=tool_params,
-                )
+        return [
+            types.Tool(
+                name=d["name"],
+                description=d["description"],
+                inputSchema=d["inputSchema"],
             )
-
-        return tools
+            for d in self._build_filtered_tool_dicts()
+        ]
 
     def _register_list_tools(self) -> None:
         """Register list_tools handler."""
