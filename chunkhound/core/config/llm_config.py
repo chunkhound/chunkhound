@@ -292,10 +292,6 @@ class LLMConfig(BaseSettings):
 
         return v
 
-    @field_validator("model")
-    def validate_model(cls, v: str | None) -> str | None:  # noqa: N805
-        """Validate model field (no-op, handled in model_post_init)."""
-        return v
 
     def model_post_init(self, __context: Any) -> None:
         """Post-initialization hook to handle model field mapping."""

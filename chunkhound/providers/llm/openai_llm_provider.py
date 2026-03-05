@@ -398,16 +398,5 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
         # Use Chat Completions API for standard models via parent implementation
         return await super().complete_structured(prompt, json_schema, system, max_completion_tokens, timeout)
 
-    async def batch_complete(
-        self,
-        prompts: list[str],
-        system: str | None = None,
-        max_completion_tokens: int = 4096,
-    ) -> list[LLMResponse]:
-        """Generate completions for multiple prompts concurrently."""
-        # Use the routing logic from complete() method
-        tasks = [
-            self.complete(prompt, system, max_completion_tokens) for prompt in prompts
-        ]
-        return await asyncio.gather(*tasks)
+
 

@@ -84,13 +84,3 @@ class TestGrokLLMProvider:
         )
         assert str(provider._client.base_url) == "https://custom.api.x.ai/v1/"
 
-    def test_openai_available_check(self):
-        """Test that provider raises error when OpenAI not available."""
-        # Temporarily mock OPENAI_AVAILABLE
-        original_available = GrokLLMProvider.__module__.replace(
-            "grok_llm_provider", "grok_llm_provider"
-        )
-        # This is tricky to test without patching the module constant
-        # For now, just ensure it can be instantiated with valid params
-        provider = GrokLLMProvider(api_key="test-key")
-        assert provider is not None

@@ -12,7 +12,7 @@ import asyncio
 import json
 from typing import Any
 
-from loguru import logger
+from loguru import logger; from chunkhound.core.utils.token_utils import estimate_tokens_llm
 
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 
@@ -300,9 +300,7 @@ class OpenAICompatibleProvider(LLMProvider):
         return await asyncio.gather(*tasks)
 
     def estimate_tokens(self, text: str) -> int:
-        """Estimate token count for text (rough approximation)."""
-        # Rough estimation: ~4 chars per token for most models
-        return len(text) // 4
+        return estimate_tokens_llm(text)
 
     async def health_check(self) -> dict[str, Any]:
         """Perform health check."""
@@ -337,3 +335,4 @@ class OpenAICompatibleProvider(LLMProvider):
             3 for OpenAI-compatible providers (conservative default)
         """
         return 3
+
