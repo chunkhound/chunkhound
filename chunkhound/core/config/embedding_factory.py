@@ -177,7 +177,10 @@ class EmbeddingProviderFactory:
                 kwargs["rerank_model"] = rerank_model
             if rerank_batch_size is not None:
                 kwargs["rerank_batch_size"] = rerank_batch_size
-            # rerank_url: only pass absolute URLs (relative paths don't make sense for VoyageAI)
+            # rerank_url: resolve relative paths against base_url, then forward absolute URLs only
+            if rerank_url and base_url and not rerank_url.startswith(("http://", "https://")):
+                from urllib.parse import urljoin
+                rerank_url = urljoin(base_url.rstrip("/") + "/", rerank_url.lstrip("/"))
             if rerank_url and rerank_url.startswith(("http://", "https://")):
                 kwargs["rerank_url"] = rerank_url
                 kwargs["rerank_format"] = rerank_format

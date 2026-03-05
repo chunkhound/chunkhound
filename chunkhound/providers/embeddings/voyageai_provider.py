@@ -203,7 +203,7 @@ class VoyageAIEmbeddingProvider:
                 "https://",
                 requests.adapters.HTTPAdapter(max_retries=2),
             )
-            voyageai.requestssession = _session
+            self._session = _session   # stored for potential future use, not injected globally
             self._ssl_verify: str | bool = _sys_ca
         else:
             self._ssl_verify = os.environ.get("REQUESTS_CA_BUNDLE") or True
@@ -751,7 +751,7 @@ class VoyageAIEmbeddingProvider:
             # Cohere: {"index": N, "relevance_score": F}
             # TEI:    {"index": N, "score": F}
             idx = item.get("index")
-            score = item.get("relevance_score") or item.get("score")
+            score = item.get("relevance_score") if "relevance_score" in item else item.get("score")
             if idx is None or score is None:
                 logger.warning(f"Skipping malformed rerank result: {item}")
                 continue

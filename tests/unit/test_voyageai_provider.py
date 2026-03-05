@@ -21,6 +21,7 @@ import pytest
 import voyageai
 
 from chunkhound.core.config.embedding_config import validate_rerank_configuration
+from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.providers.embeddings.voyageai_provider import (
     VoyageAIEmbeddingProvider,
 )
@@ -324,6 +325,13 @@ class TestParseRerankResponse:
         data = {"results": [{"index": 0, "relevance_score": 0.95, "score": 0.1}]}
         results = p._parse_rerank_response(data, num_documents=1)
         assert results[0].score == pytest.approx(0.95)
+
+    def test_relevance_score_zero_not_dropped(self, p):
+        # relevance_score = 0.0 is falsy — must NOT fall through to "score" field
+        data = {"results": [{"index": 0, "relevance_score": 0.0, "score": 0.9}]}
+        results = p._parse_rerank_response(data, num_documents=1)
+        assert len(results) == 1
+        assert results[0].score == pytest.approx(0.0)
 
 
 # ===========================================================================
@@ -642,3 +650,42 @@ class TestUpstreamTimeoutRetry:
                 await p._embed_single_batch_locked(["text"])
 
         assert call_count == 1
+
+
+# ===========================================================================
+# 10. Factory — relative rerank_url resolution
+# ===========================================================================
+
+
+class TestFactoryRerankUrlResolution:
+    """Test that the factory resolves relative rerank_url against base_url."""
+
+    def _make_dict(self, **kwargs):
+        base = {"model": "voyage-3", "api_key": "test-key", "rerank_format": "cohere"}
+        base.update(kwargs)
+        return base
+
+    def test_relative_rerank_url_resolved_against_base_url(self):
+        config = self._make_dict(
+            base_url="https://my-endpoint.example.com",
+            rerank_url="/rerank",
+        )
+        with patch.object(voyageai, "Client", return_value=MagicMock()):
+            provider = EmbeddingProviderFactory._create_voyageai_provider(config)
+        assert provider._rerank_url == "https://my-endpoint.example.com/rerank"
+
+    def test_absolute_rerank_url_passed_through_unchanged(self):
+        config = self._make_dict(
+            base_url="https://my-endpoint.example.com",
+            rerank_url="https://other-host.example.com/rerank",
+        )
+        with patch.object(voyageai, "Client", return_value=MagicMock()):
+            provider = EmbeddingProviderFactory._create_voyageai_provider(config)
+        assert provider._rerank_url == "https://other-host.example.com/rerank"
+
+    def test_relative_rerank_url_without_base_url_not_forwarded(self):
+        # No base_url → relative rerank_url cannot be resolved → not passed to provider
+        config = self._make_dict(rerank_url="/rerank")
+        with patch.object(voyageai, "Client", return_value=MagicMock()):
+            provider = EmbeddingProviderFactory._create_voyageai_provider(config)
+        assert provider._rerank_url is None
