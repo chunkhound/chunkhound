@@ -1,11 +1,11 @@
 """VoyageAI embedding provider implementation for ChunkHound - concrete embedding provider using VoyageAI API."""
 
 import asyncio
+import os
 from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
-
 from loguru import logger
 
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERANK_MODEL
@@ -20,10 +20,12 @@ from .shared_utils import (
 )
 
 try:
+    import requests
     import voyageai
 
     VOYAGEAI_AVAILABLE = True
 except ImportError:
+    requests = None  # type: ignore
     voyageai = None  # type: ignore
     VOYAGEAI_AVAILABLE = False
     logger.warning("VoyageAI not available - install with: uv pip install voyageai")
@@ -183,25 +185,33 @@ class VoyageAIEmbeddingProvider:
         self._model_config = model_config
         self._rerank_batch_size = rerank_batch_size
 
-        # Override SDK base URL for custom endpoints
-        if base_url:
-            voyageai.api_base = base_url
-
         # For custom endpoints without an API key, pass a placeholder to satisfy
         # the SDK's requirement — the server is expected to ignore the auth header
         effective_api_key = api_key if api_key else ("no-key" if base_url else None)
 
         # Use the system CA bundle when available so that corporate proxy CAs
         # (e.g. Blue Coat / AMAT) are trusted without patching certifi.
-        # REQUESTS_CA_BUNDLE is honoured by the requests library used by the SDK.
-        import os as _os
+        # Inject a pre-configured requests.Session via voyageai.requestssession —
+        # the SDK's intended injection point (_make_session() in api_requestor.py)
+        # — so that CA configuration is scoped to the session rather than
+        # mutating os.environ process-wide.
         _sys_ca = "/etc/ssl/certs/ca-certificates.crt"
-        if _os.path.exists(_sys_ca) and not _os.environ.get("REQUESTS_CA_BUNDLE"):
-            _os.environ["REQUESTS_CA_BUNDLE"] = _sys_ca
-            _os.environ["SSL_CERT_FILE"] = _sys_ca
+        if os.path.exists(_sys_ca) and not os.environ.get("REQUESTS_CA_BUNDLE"):
+            _session = requests.Session()
+            _session.verify = _sys_ca
+            _session.mount(
+                "https://",
+                requests.adapters.HTTPAdapter(max_retries=2),
+            )
+            voyageai.requestssession = _session
+            self._ssl_verify: str | bool = _sys_ca
+        else:
+            self._ssl_verify = os.environ.get("REQUESTS_CA_BUNDLE") or True
 
         # Initialize client
         self._client = voyageai.Client(api_key=effective_api_key, timeout=timeout)
+        if base_url:
+            self._client._params["api_base"] = base_url  # per-instance, not global
 
         # Model dimension mapping - built from configuration
         self._dimensions_map = {
@@ -689,11 +699,7 @@ class VoyageAIEmbeddingProvider:
             f"(format={self._rerank_format})"
         )
 
-        # Use system CA bundle so corporate proxy CAs are trusted
-        import os as _os
-        ssl_context = _os.environ.get("REQUESTS_CA_BUNDLE") or True
-
-        async with httpx.AsyncClient(timeout=self._timeout, verify=ssl_context) as client:
+        async with httpx.AsyncClient(timeout=self._timeout, verify=self._ssl_verify) as client:
             headers = {"Content-Type": "application/json"}
             if self._api_key:
                 headers["Authorization"] = f"Bearer {self._api_key}"

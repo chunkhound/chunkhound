@@ -280,29 +280,6 @@ class DaemonDiscovery:
         """
         socket_path = self.get_ipc_address()
 
-        cmd = [sys.executable, "-m", "chunkhound.api.cli.main",
-               "_daemon",
-               "--project-dir", str(self._project_dir),
-               "--socket-path", socket_path]
-
-        # Forward relevant config flags if present
-        flag_map = {
-            "config": "--config",
-            "db_path": "--db-path",
-            "embedding_provider": "--embedding-provider",
-            "embedding_model": "--embedding-model",
-            "embedding_api_key": "--embedding-api-key",
-            "embedding_base_url": "--embedding-base-url",
-            "embedding_batch_size": "--embedding-batch-size",
-            "llm_provider": "--llm-provider",
-        }
-        for attr, flag in flag_map.items():
-            val = getattr(args, attr, None)
-            if val is not None:
-                cmd += [flag, str(val)]
-
-        if getattr(args, "debug", False):
-            cmd.append("--debug")
         cmd = [
             sys.executable, "-m", "chunkhound.api.cli.main",
             "_daemon",
@@ -324,21 +301,16 @@ class DaemonDiscovery:
         # diagnosable (especially on Windows where the IPC transport may fail).
         log_path = self._project_dir / ".chunkhound" / "daemon.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_file = open(log_path, "w")  # child inherits the fd; parent closes immediately
-
-        try:
-            with open(log_path, "w") as log_file:
-                subprocess.Popen(
-                    cmd,
-                    start_new_session=True,
-                    stdin=subprocess.DEVNULL,
-                    stdout=log_file,
-                    stderr=log_file,
-                    env=env,
-                    cwd=str(self._project_dir),
+        with open(log_path, "w") as log_file:
+            subprocess.Popen(
+                cmd,
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=log_file,
+                env=env,
+                cwd=str(self._project_dir),
             )
-        finally:
-            log_file.close()
 
     async def find_or_start_daemon(self, args: Any) -> str:
         """Return the IPC address of the running daemon, starting one if needed.
