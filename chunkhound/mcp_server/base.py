@@ -188,7 +188,11 @@ class MCPServerBase(ABC):
                 return
             # Connect to database lazily
             if not self.services.provider.is_connected:
-                self.services.provider.connect()
+                # NOTE: provider.connect() may perform slow, blocking operations
+                # (DuckDB open, extension install, schema/index setup). Run it in a
+                # worker thread so the asyncio loop remains responsive (daemon IPC
+                # registration/requests rely on this loop).
+                await asyncio.to_thread(self.services.provider.connect)
 
             # Start real-time indexing service
             self.debug_log("Starting real-time indexing service (deferred)")
