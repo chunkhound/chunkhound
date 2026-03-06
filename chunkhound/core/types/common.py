@@ -156,6 +156,7 @@ class Language(Enum):
     SQL = "sql"
     SWIFT = "swift"
     DART = "dart"
+    ELIXIR = "elixir"
     LUA = "lua"
 
     # Documentation languages
@@ -248,6 +249,8 @@ class Language(Enum):
             ".sql": cls.SQL,
             ".swift": cls.SWIFT,
             ".swiftinterface": cls.SWIFT,
+            ".ex": cls.ELIXIR,
+            ".exs": cls.ELIXIR,
             ".lua": cls.LUA,
         }
 
@@ -289,6 +292,7 @@ class Language(Enum):
             Language.SVELTE,
             Language.SWIFT,
             Language.DART,
+            Language.ELIXIR,
             Language.LUA,
         }
 
