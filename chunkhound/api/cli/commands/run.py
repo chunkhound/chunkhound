@@ -489,8 +489,10 @@ async def _simulate_index(args: argparse.Namespace, config: Config) -> None:
         sources = config.indexing.resolve_ignore_sources()
         if "gitignore" in (sources or []):
             from chunkhound.utils.ignore_engine import (
-                detect_repo_roots as _detect_roots,
                 build_ignore_engine as _build_root_engine,
+            )
+            from chunkhound.utils.ignore_engine import (
+                detect_repo_roots as _detect_roots,
             )
 
             roots = _detect_roots(

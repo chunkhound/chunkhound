@@ -432,8 +432,7 @@ async def calibrate_provider(
         Calibration results with recommendations
     """
     config = CalibrationConfig(
-        embedding_batch_sizes=embedding_batch_sizes
-        or [32, 64, 128, 256, 512],
+        embedding_batch_sizes=embedding_batch_sizes or [32, 64, 128, 256, 512],
         reranking_batch_sizes=reranking_batch_sizes or [32, 64, 96, 128],
     )
 

@@ -147,13 +147,9 @@ class SqlMapping(BaseMapping):
             elif node_type == "create_index":
                 # Index name is a direct identifier child, not
                 # inside object_reference
-                idx_name = self.find_child_by_type(
-                    node, "identifier"
-                )
+                idx_name = self.find_child_by_type(node, "identifier")
                 if idx_name:
-                    idx_text = self.get_node_text(
-                        idx_name, source
-                    ).strip()
+                    idx_text = self.get_node_text(idx_name, source).strip()
                     return f"index_{idx_text}"
                 return self.get_fallback_name(node, "index")
             elif node_type == "create_trigger":
@@ -163,9 +159,7 @@ class SqlMapping(BaseMapping):
             else:
                 if name:
                     return name
-                return self.get_fallback_name(
-                    node, "definition"
-                )
+                return self.get_fallback_name(node, "definition")
 
         elif concept == UniversalConcept.BLOCK:
             node = captures.get("block")

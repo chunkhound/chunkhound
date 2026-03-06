@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
+
 from chunkhound.utils.file_patterns import normalize_include_patterns
 
 

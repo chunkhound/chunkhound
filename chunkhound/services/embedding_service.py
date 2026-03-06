@@ -115,7 +115,9 @@ class EmbeddingService(BaseService):
         except (AttributeError, IndexError, TypeError, KeyError) as e:
             # Progress display is non-critical, but log for debugging
             logger.opt(exception=e).debug(
-                "[EmbSvc] Progress update skipped: task={} batch={}", embed_task, batch_num
+                "[EmbSvc] Progress update skipped: task={} batch={}",
+                embed_task,
+                batch_num,
             )
 
     async def generate_embeddings_for_chunks(

@@ -134,9 +134,7 @@ class ChunkHoundDaemon(MCPServerBase):
             )
 
             # Start PID poll background task
-            self._pid_poll_task = asyncio.create_task(
-                self._client_manager.poll_pids()
-            )
+            self._pid_poll_task = asyncio.create_task(self._client_manager.poll_pids())
 
             self.debug_log(f"Listening on {self._socket_path}")
 
@@ -148,6 +146,7 @@ class ChunkHoundDaemon(MCPServerBase):
         except Exception as e:
             self.debug_log(f"Daemon run() error: {e}")
             import traceback
+
             traceback.print_exc(file=sys.stderr)
         finally:
             await self._graceful_shutdown()
@@ -299,9 +298,7 @@ class ChunkHoundDaemon(MCPServerBase):
     async def _handle_tools_list(self, msg: dict[str, Any]) -> dict[str, Any]:
         """Respond to the tools/list request with available tool schemas."""
         try:
-            await asyncio.wait_for(
-                self._initialization_complete.wait(), timeout=5.0
-            )
+            await asyncio.wait_for(self._initialization_complete.wait(), timeout=5.0)
         except asyncio.TimeoutError:
             pass
 
@@ -330,10 +327,7 @@ class ChunkHoundDaemon(MCPServerBase):
             config=self.config,
         )
 
-        content = [
-            {"type": tc.type, "text": tc.text}
-            for tc in text_contents
-        ]
+        content = [{"type": tc.type, "text": tc.text} for tc in text_contents]
 
         return {
             "jsonrpc": "2.0",

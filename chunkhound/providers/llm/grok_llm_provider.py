@@ -40,6 +40,7 @@ class GrokLLMProvider(OpenAICompatibleProvider):
         # Explicit env-var fallback as requested in review
         if api_key is None:
             import os
+
             api_key = os.getenv("XAI_API_KEY") or os.getenv("GROK_API_KEY")
 
         super().__init__(

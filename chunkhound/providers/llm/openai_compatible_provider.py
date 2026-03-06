@@ -12,8 +12,9 @@ import asyncio
 import json
 from typing import Any
 
-from loguru import logger; from chunkhound.core.utils.token_utils import estimate_tokens_llm
+from loguru import logger
 
+from chunkhound.core.utils.token_utils import estimate_tokens_llm
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 
 try:
@@ -335,4 +336,3 @@ class OpenAICompatibleProvider(LLMProvider):
             3 for OpenAI-compatible providers (conservative default)
         """
         return 3
-

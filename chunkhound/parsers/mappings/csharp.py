@@ -10,12 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
+from tree_sitter import Node as TSNode
 
 from chunkhound.core.types.common import Language
 
 from .base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
-
-from tree_sitter import Node as TSNode
 
 
 class CSharpMapping(BaseMapping):

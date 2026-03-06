@@ -103,7 +103,9 @@ class LLMConfig(BaseSettings):
         description="Model for final synthesis (large context analysis)",
     )
 
-    codex_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = Field(
+    codex_reasoning_effort: (
+        Literal["minimal", "low", "medium", "high", "xhigh"] | None
+    ) = Field(
         default=None,
         description="Default Codex CLI reasoning effort (Responses API thinking level)",
     )
@@ -148,13 +150,16 @@ class LLMConfig(BaseSettings):
         ),
     )
 
-    map_hyde_reasoning_effort: Literal[
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-    ] | None = Field(
+    map_hyde_reasoning_effort: (
+        Literal[
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+        ]
+        | None
+    ) = Field(
         default=None,
         description=(
             "Codex/OpenAI reasoning effort override for Code Mapper HyDE planning. "
@@ -190,13 +195,16 @@ class LLMConfig(BaseSettings):
         ),
     )
 
-    autodoc_cleanup_reasoning_effort: Literal[
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-    ] | None = Field(
+    autodoc_cleanup_reasoning_effort: (
+        Literal[
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+        ]
+        | None
+    ) = Field(
         default=None,
         description=(
             "Codex/OpenAI reasoning effort override for AutoDoc LLM cleanup. "
@@ -291,7 +299,6 @@ class LLMConfig(BaseSettings):
             raise ValueError("base_url must start with http:// or https://")
 
         return v
-
 
     def model_post_init(self, __context: Any) -> None:
         """Post-initialization hook to handle model field mapping."""
@@ -685,9 +692,7 @@ class LLMConfig(BaseSettings):
         if cleanup_effort := os.getenv(
             "CHUNKHOUND_LLM_AUTODOC_CLEANUP_REASONING_EFFORT"
         ):
-            config["autodoc_cleanup_reasoning_effort"] = (
-                cleanup_effort.strip().lower()
-            )
+            config["autodoc_cleanup_reasoning_effort"] = cleanup_effort.strip().lower()
 
         return config
 
@@ -745,7 +750,10 @@ class LLMConfig(BaseSettings):
             and args.llm_autodoc_cleanup_provider
         ):
             overrides["autodoc_cleanup_provider"] = args.llm_autodoc_cleanup_provider
-        if hasattr(args, "llm_autodoc_cleanup_model") and args.llm_autodoc_cleanup_model:
+        if (
+            hasattr(args, "llm_autodoc_cleanup_model")
+            and args.llm_autodoc_cleanup_model
+        ):
             overrides["autodoc_cleanup_model"] = args.llm_autodoc_cleanup_model
         if (
             hasattr(args, "llm_autodoc_cleanup_reasoning_effort")

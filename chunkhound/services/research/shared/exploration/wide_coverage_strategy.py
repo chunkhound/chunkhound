@@ -55,7 +55,9 @@ class WideCoverageStrategy:
         from chunkhound.services.research.shared.depth_exploration import (
             DepthExplorationService,
         )
-        from chunkhound.services.research.shared.gap_detection import GapDetectionService
+        from chunkhound.services.research.shared.gap_detection import (
+            GapDetectionService,
+        )
 
         self._config = config
         self._llm_manager = llm_manager
@@ -118,14 +120,15 @@ class WideCoverageStrategy:
                 f"WideCoverageStrategy: Starting depth exploration "
                 f"with {len(current_chunks)} chunks"
             )
-            current_chunks, depth_stats = (
-                await self._depth_exploration.explore_coverage_depth(
-                    root_query=root_query,
-                    covered_chunks=current_chunks,
-                    phase1_threshold=phase1_threshold,
-                    path_filter=path_filter,
-                    constants_context=constants_context,
-                )
+            (
+                current_chunks,
+                depth_stats,
+            ) = await self._depth_exploration.explore_coverage_depth(
+                root_query=root_query,
+                covered_chunks=current_chunks,
+                phase1_threshold=phase1_threshold,
+                path_filter=path_filter,
+                constants_context=constants_context,
             )
             stats["depth"] = depth_stats
             logger.info(
@@ -170,9 +173,7 @@ class WideCoverageStrategy:
             llm_manager=self._llm_manager,
             max_tokens=None,  # Unlimited - elbow already filtered
         )
-        logger.info(
-            f"WideCoverageStrategy: Read {len(file_contents)} files"
-        )
+        logger.info(f"WideCoverageStrategy: Read {len(file_contents)} files")
 
         # Aggregate top-level stats
         stats["chunks_before"] = len(initial_chunks)
@@ -218,14 +219,15 @@ class WideCoverageStrategy:
                 f"WideCoverageStrategy.explore_raw: Starting depth exploration "
                 f"with {len(current_chunks)} chunks"
             )
-            current_chunks, depth_stats = (
-                await self._depth_exploration.explore_coverage_depth(
-                    root_query=root_query,
-                    covered_chunks=current_chunks,
-                    phase1_threshold=phase1_threshold,
-                    path_filter=path_filter,
-                    constants_context=constants_context,
-                )
+            (
+                current_chunks,
+                depth_stats,
+            ) = await self._depth_exploration.explore_coverage_depth(
+                root_query=root_query,
+                covered_chunks=current_chunks,
+                phase1_threshold=phase1_threshold,
+                path_filter=path_filter,
+                constants_context=constants_context,
             )
             stats["depth"] = depth_stats
             logger.info(

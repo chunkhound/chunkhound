@@ -138,7 +138,10 @@ class ClaudeCodeCLIProvider(BaseCLIProvider):
 
                 if process.returncode != 0:
                     raw_err = (stderr or stdout or b"").decode("utf-8", errors="ignore")
-                    error_msg = sanitize_error_text(raw_err.strip()) or f"Exit code {process.returncode}"
+                    error_msg = (
+                        sanitize_error_text(raw_err.strip())
+                        or f"Exit code {process.returncode}"
+                    )
                     last_error = RuntimeError(
                         f"CLI command failed (exit {process.returncode}): {error_msg}"
                     )

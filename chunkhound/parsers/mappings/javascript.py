@@ -7,6 +7,9 @@ arrow functions, ES6 classes, JSDoc comments, and modern module syntax.
 
 import re
 from pathlib import Path
+
+from tree_sitter import Node as TSNode
+
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings._shared.js_family_extraction import (
     JSFamilyExtraction,
@@ -20,7 +23,6 @@ from chunkhound.parsers.mappings._shared.js_query_patterns import (
 )
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-from tree_sitter import Node as TSNode
 
 
 class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
@@ -151,10 +153,9 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
           become chunks.
         """
         if concept == UniversalConcept.DEFINITION:
-            return (
-                "\n".join(
-                    [
-                        """
+            return "\n".join(
+                [
+                    """
                         ; Standard definitions
                         (function_declaration
                             name: (identifier) @name
@@ -167,10 +168,10 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
                         ; Top-level export (default or named)
                         (export_statement) @definition
                         """,
-                        LEXICAL_DECLARATION_CONFIG,
-                        VAR_DECLARATION_CONFIG,
-                        # Function/arrow declarators at top level
-                        """
+                    LEXICAL_DECLARATION_CONFIG,
+                    VAR_DECLARATION_CONFIG,
+                    # Function/arrow declarators at top level
+                    """
                         (program
                             (lexical_declaration
                                 (variable_declarator
@@ -204,11 +205,10 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
                             )
                         )
                         """,
-                        COMMONJS_MODULE_EXPORTS,
-                        COMMONJS_NESTED_EXPORTS,
-                        COMMONJS_EXPORTS_SHORTHAND,
-                    ]
-                )
+                    COMMONJS_MODULE_EXPORTS,
+                    COMMONJS_NESTED_EXPORTS,
+                    COMMONJS_EXPORTS_SHORTHAND,
+                ]
             )
 
         elif concept == UniversalConcept.COMMENT:
@@ -556,10 +556,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
         return tags
 
     def resolve_import_paths(
-        self,
-        import_text: str,
-        base_dir: Path,
-        source_file: Path
+        self, import_text: str, base_dir: Path, source_file: Path
     ) -> list[Path]:
         """Resolve JavaScript import to file path.
 
@@ -589,8 +586,8 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
         """
         # Extract import path from: import X from 'path' OR require('path')
         match = re.search(
-            r'''(?:from\s+['"](.+?)['"]|require\s*\(\s*['"](.+?)['"]\s*\))''',
-            import_text
+            r"""(?:from\s+['"](.+?)['"]|require\s*\(\s*['"](.+?)['"]\s*\))""",
+            import_text,
         )
         if not match:
             return []
@@ -600,7 +597,7 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
             return []
 
         # Skip non-relative imports (external packages)
-        if not import_path.startswith('.'):
+        if not import_path.startswith("."):
             return []
 
         # Resolve relative to source file's directory
@@ -612,13 +609,13 @@ class JavaScriptMapping(BaseMapping, JSFamilyExtraction):
             return [resolved]
 
         # Try with extensions
-        for ext in ['.js', '.jsx', '.mjs', '.ts', '.tsx']:
+        for ext in [".js", ".jsx", ".mjs", ".ts", ".tsx"]:
             with_ext = resolved.with_suffix(ext)
             if with_ext.exists():
                 return [with_ext]
 
         # Try index file
-        for index in ['index.js', 'index.jsx', 'index.ts', 'index.tsx']:
+        for index in ["index.js", "index.jsx", "index.ts", "index.tsx"]:
             index_path = resolved / index
             if index_path.exists():
                 return [index_path]

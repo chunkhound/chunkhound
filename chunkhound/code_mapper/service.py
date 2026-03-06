@@ -290,8 +290,7 @@ async def run_code_mapper_pipeline(
             return
         progress_failures.add(event_type)
         logger.debug(
-            "[Code Mapper] Progress emit failed for event_type="
-            f"{event_type}: {exc}"
+            f"[Code Mapper] Progress emit failed for event_type={event_type}: {exc}"
         )
 
     async def _safe_progress_emit(
@@ -343,9 +342,7 @@ async def run_code_mapper_pipeline(
         retry_error: str | None,
     ) -> str:
         lines: list[str] = [f"# {heading} (failed)", ""]
-        lines.append(
-            "This point of interest failed to generate content after a retry."
-        )
+        lines.append("This point of interest failed to generate content after a retry.")
         lines.append("")
         lines.append(
             f"- Point of interest ({idx}/{total_points_of_interest}): {poi.text}"
@@ -563,13 +560,16 @@ async def run_code_mapper_pipeline(
                     pass
             retry_delay = 1.0
             await asyncio.sleep(random.uniform(0.0, retry_delay))
-            retry_heading, retry_result, retry_error, _should_backoff = (
-                await _run_point_once(
-                    idx=idx,
-                    poi=poi,
-                    heading=heading,
-                    poi_progress=poi_progress,
-                )
+            (
+                retry_heading,
+                retry_result,
+                retry_error,
+                _should_backoff,
+            ) = await _run_point_once(
+                idx=idx,
+                poi=poi,
+                heading=heading,
+                poi_progress=poi_progress,
             )
             if retry_result is not None:
                 successful_sections.append((idx, poi, retry_result))

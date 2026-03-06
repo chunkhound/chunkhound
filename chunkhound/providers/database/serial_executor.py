@@ -131,6 +131,7 @@ class SerialDatabaseExecutor:
         # Run in executor synchronously with timeout (env override)
         future = self._db_executor.submit(executor_operation)
         import os
+
         try:
             timeout_s = float(os.getenv("CHUNKHOUND_DB_EXECUTE_TIMEOUT", "30"))
         except Exception:
