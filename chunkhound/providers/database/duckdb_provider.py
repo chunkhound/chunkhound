@@ -1242,10 +1242,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Delete a file and all its chunks/embeddings completely - delegate to file repository."""
         return self._execute_in_db_thread_sync("delete_file_completely", file_path)
 
-    async def delete_file_completely_async(self, file_path: str) -> bool:
-        """Async version of delete_file_completely for non-blocking operation."""
-        return await self._execute_in_db_thread("delete_file_completely", file_path)
-
     def _executor_delete_file_completely(
         self, conn: Any, state: dict[str, Any], file_path: str
     ) -> bool:

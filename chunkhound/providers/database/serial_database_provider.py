@@ -275,18 +275,21 @@ class SerialDatabaseProvider(ABC):
         offset: int = 0,
         path_filter: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Perform regex search if supported (asynchronous).
-
-        This method uses async execution to avoid blocking the event loop,
-        allowing other concurrent operations to proceed while waiting for
-        database operations.
-        """
+        """Async variant of search_regex."""
         if not hasattr(self, "_executor_search_regex"):
             return [], {"error": "Regex search not supported by this provider"}
 
         return await self._execute_in_db_thread(
             "search_regex", pattern, page_size, offset, path_filter
         )
+
+    async def get_stats_async(self) -> dict[str, int]:
+        """Async variant of get_stats."""
+        return await self._execute_in_db_thread("get_stats")
+
+    async def delete_file_completely_async(self, file_path: str) -> bool:
+        """Async variant of delete_file_completely."""
+        return await self._execute_in_db_thread("delete_file_completely", file_path)
 
     def search_chunks_regex(
         self, pattern: str, file_path: str | None = None

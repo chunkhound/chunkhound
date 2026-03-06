@@ -105,6 +105,10 @@ class DatabaseProvider(Protocol):
         """Delete a file and all its chunks/embeddings completely."""
         ...
 
+    async def delete_file_completely_async(self, file_path: str) -> bool:
+        """Delete a file and all its chunks/embeddings completely (asynchronous)."""
+        ...
+
     # Chunk Operations
     def insert_chunk(self, chunk: Chunk) -> int:
         """Insert chunk record and return chunk ID."""
@@ -273,6 +277,16 @@ class DatabaseProvider(Protocol):
         """
         ...
 
+    async def search_regex_async(
+        self,
+        pattern: str,
+        page_size: int = 10,
+        offset: int = 0,
+        path_filter: str | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Perform regex search on code content (asynchronous)."""
+        ...
+
     def search_text(
         self, query: str, page_size: int = 10, offset: int = 0
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -303,6 +317,10 @@ class DatabaseProvider(Protocol):
     # Statistics and Monitoring
     def get_stats(self) -> dict[str, int]:
         """Get database statistics (file count, chunk count, etc.)."""
+        ...
+
+    async def get_stats_async(self) -> dict[str, int]:
+        """Get database statistics (asynchronous)."""
         ...
 
     def get_file_stats(self, file_id: int) -> dict[str, Any]:
