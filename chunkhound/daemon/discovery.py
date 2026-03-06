@@ -16,6 +16,7 @@ import os
 import secrets
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -26,8 +27,12 @@ from .process import pid_alive
 _LOCK_FILE_REL = ".chunkhound/daemon.lock"
 # Starter lock — prevents two proxies from both spawning a daemon simultaneously
 _STARTER_LOCK_REL = ".chunkhound/daemon.starter.lock"
+# User-scoped runtime directory override (used by tests and debugging)
+_RUNTIME_DIR_ENV = "CHUNKHOUND_DAEMON_RUNTIME_DIR"
 # User-scoped registry of running daemons, keyed by canonical project root hash
-_REGISTRY_DIR_REL = ".chunkhound/daemon-registry"
+_REGISTRY_DIR_NAME = "daemon-registry"
+# User-scoped startup lock — serializes overlap checks across project roots
+_GLOBAL_STARTUP_LOCK_NAME = "daemon.global.startup.lock"
 # Socket directory (Linux/macOS)
 _SOCKET_DIR = "/tmp"
 # Startup polling interval and timeout
@@ -51,6 +56,31 @@ def _normalized_project_dir(project_dir: Path) -> Path:
 def _project_dir_identity(project_dir: Path) -> str:
     """Return the stable string identity used for hashing and comparisons."""
     return str(_normalized_project_dir(project_dir))
+
+
+def _runtime_owner_tag() -> str:
+    """Return a filesystem-safe tag for user-scoped runtime state."""
+    if hasattr(os, "getuid"):
+        return str(os.getuid())
+
+    username = os.environ.get("USERNAME") or os.environ.get("USER") or "user"
+    safe = "".join(c if c.isalnum() or c in "-._" else "-" for c in username)
+    return safe or "user"
+
+
+def _default_runtime_dir() -> Path:
+    """Return the user-scoped runtime directory for daemon metadata."""
+    override = os.environ.get(_RUNTIME_DIR_ENV)
+    if override:
+        return Path(override).expanduser()
+
+    suffix = f"chunkhound-{_runtime_owner_tag()}"
+    if sys.platform != "win32":
+        runtime_root = os.environ.get("XDG_RUNTIME_DIR")
+        if runtime_root:
+            return Path(runtime_root) / suffix
+
+    return Path(tempfile.gettempdir()) / suffix
 
 
 def _roots_overlap(root_a: Path, root_b: Path) -> bool:
@@ -79,10 +109,25 @@ def _write_json_atomically(
 ) -> None:
     """Write JSON to *path* atomically using a sibling temp file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f"{path.name}.tmp")
-    with open(tmp_path, "w") as f:
-        json.dump(data, f)
-    tmp_path.replace(path)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        text=True,
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+        tmp_path.replace(path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+        raise
     if private and sys.platform != "win32":
         try:
             os.chmod(path, 0o600)
@@ -108,9 +153,17 @@ class DaemonDiscovery:
         """Return the absolute path of the starter lock file."""
         return self._project_dir / _STARTER_LOCK_REL
 
+    def get_runtime_dir(self) -> Path:
+        """Return the user-scoped runtime directory for daemon metadata."""
+        return _default_runtime_dir()
+
     def get_registry_dir(self) -> Path:
         """Return the user-scoped daemon registry directory."""
-        return Path.home() / _REGISTRY_DIR_REL
+        return self.get_runtime_dir() / _REGISTRY_DIR_NAME
+
+    def get_global_startup_lock_path(self) -> Path:
+        """Return the user-scoped global startup lock path."""
+        return self.get_runtime_dir() / _GLOBAL_STARTUP_LOCK_NAME
 
     def get_registry_entry_path(self) -> Path:
         """Return the registry entry path for this canonical project root."""
@@ -201,6 +254,17 @@ class DaemonDiscovery:
             self.get_registry_entry_path().unlink()
         except FileNotFoundError:
             pass
+
+    def _overlap_error(self, conflict: dict[str, Any]) -> RuntimeError:
+        """Build the overlap error raised when a conflicting daemon is live."""
+        conflict_root = str(conflict["project_dir"])
+        conflict_pid = conflict.get("pid")
+        pid_suffix = f" (pid {conflict_pid})" if isinstance(conflict_pid, int) else ""
+        return RuntimeError(
+            f"Cannot start ChunkHound daemon for '{self._project_dir}' because "
+            f"a daemon is already running for overlapping root '{conflict_root}'"
+            f"{pid_suffix}. Overlapping daemon roots are not supported."
+        )
 
     def _remove_registry_entry_file(self, entry_path: Path) -> None:
         """Best-effort removal for a stale registry entry."""
@@ -294,8 +358,42 @@ class DaemonDiscovery:
         return None
 
     # ------------------------------------------------------------------
-    # Starter lock (prevents duplicate-daemon race on concurrent proxy start)
+    # Startup locks (prevent duplicate-daemon races across and within roots)
     # ------------------------------------------------------------------
+
+    def _acquire_pid_lock(self, lock_path: Path) -> bool:
+        """Try to atomically acquire a PID lock."""
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+        for attempt in range(2):
+            try:
+                with open(lock_path, "x") as f:
+                    json.dump({"pid": os.getpid()}, f)
+                return True
+            except FileExistsError:
+                try:
+                    with open(lock_path) as f:
+                        holder = json.load(f)
+                    holder_pid = holder.get("pid", 0)
+                    if isinstance(holder_pid, int) and pid_alive(holder_pid):
+                        return False
+                    lock_path.unlink(missing_ok=True)
+                except (FileNotFoundError, json.JSONDecodeError, OSError):
+                    if attempt == 0:
+                        continue
+                    return False
+
+        return False
+
+    def _release_pid_lock(self, lock_path: Path) -> None:
+        """Release a PID lock if this process owns it."""
+        try:
+            with open(lock_path) as f:
+                holder = json.load(f)
+            if holder.get("pid") == os.getpid():
+                lock_path.unlink(missing_ok=True)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
 
     def _acquire_starter_lock(self) -> bool:
         """Try to atomically acquire the starter lock.
@@ -309,42 +407,19 @@ class DaemonDiscovery:
             True if this process acquired the lock, False if another live
             process already holds it.
         """
-        starter_path = self.get_starter_lock_path()
-        starter_path.parent.mkdir(parents=True, exist_ok=True)
-
-        for attempt in range(2):
-            try:
-                with open(starter_path, "x") as f:
-                    json.dump({"pid": os.getpid()}, f)
-                return True
-            except FileExistsError:
-                # Check whether the holder is still alive
-                try:
-                    with open(starter_path) as f:
-                        holder = json.load(f)
-                    holder_pid = holder.get("pid", 0)
-                    if isinstance(holder_pid, int) and pid_alive(holder_pid):
-                        return False  # Another live process holds the lock
-                    # Stale — remove and retry once
-                    starter_path.unlink(missing_ok=True)
-                except (FileNotFoundError, json.JSONDecodeError, OSError):
-                    # Race: file disappeared between exists-check and open
-                    if attempt == 0:
-                        continue
-                    return False
-
-        return False
+        return self._acquire_pid_lock(self.get_starter_lock_path())
 
     def _release_starter_lock(self) -> None:
         """Release the starter lock if this process holds it."""
-        starter_path = self.get_starter_lock_path()
-        try:
-            with open(starter_path) as f:
-                holder = json.load(f)
-            if holder.get("pid") == os.getpid():
-                starter_path.unlink(missing_ok=True)
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            pass
+        self._release_pid_lock(self.get_starter_lock_path())
+
+    def _acquire_global_startup_lock(self) -> bool:
+        """Try to acquire the user-scoped global startup lock."""
+        return self._acquire_pid_lock(self.get_global_startup_lock_path())
+
+    def _release_global_startup_lock(self) -> None:
+        """Release the user-scoped global startup lock."""
+        self._release_pid_lock(self.get_global_startup_lock_path())
 
     # ------------------------------------------------------------------
     # Liveness checks
@@ -376,6 +451,42 @@ class DaemonDiscovery:
         if sys.platform != "win32" and not str(socket_path).startswith("tcp:"):
             return os.path.exists(socket_path)
         return True
+
+    def _remove_stale_lock_artifacts(self, initial_address: str) -> None:
+        """Remove stale daemon metadata before attempting a fresh start."""
+        self.remove_lock()
+        if sys.platform != "win32" and not initial_address.startswith("tcp:"):
+            try:
+                os.unlink(initial_address)
+            except FileNotFoundError:
+                pass
+
+    async def _reuse_live_daemon(
+        self,
+        initial_address: str,
+        timeout: float,
+    ) -> str | None:
+        """Return a live daemon address from the lock, or clean up stale state."""
+        lock = self.read_lock()
+        if lock is None:
+            return None
+
+        pid = lock.get("pid")
+        actual_address = str(lock.get("socket_path", initial_address))
+        if isinstance(pid, int) and pid_alive(pid):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if await self._socket_connectable(actual_address):
+                    return actual_address
+                remaining = deadline - time.monotonic()
+                await asyncio.sleep(min(_STARTUP_POLL_INTERVAL, max(remaining, 0.0)))
+            raise RuntimeError(
+                f"ChunkHound daemon (pid={pid}) did not become reachable "
+                f"within {timeout}s (address: {actual_address})"
+            )
+
+        self._remove_stale_lock_artifacts(initial_address)
+        return None
 
     # ------------------------------------------------------------------
     # Daemon startup
@@ -510,88 +621,96 @@ class DaemonDiscovery:
                           ``_STARTUP_TIMEOUT`` seconds.
         """
         initial_address = self.get_ipc_address()
+        existing_address = await self._reuse_live_daemon(
+            initial_address,
+            _STARTUP_TIMEOUT,
+        )
+        if existing_address is not None:
+            return existing_address
 
-        lock = self.read_lock()
-        if lock is not None:
-            pid = lock.get("pid")
-            sp_str = str(lock.get("socket_path", initial_address))
-            if isinstance(pid, int) and pid_alive(pid):
-                # Daemon process is live — wait for its address to become
-                # connectable (it may still be initializing).
-                deadline = time.monotonic() + _STARTUP_TIMEOUT
-                while time.monotonic() < deadline:
-                    if await self._socket_connectable(sp_str):
-                        return sp_str
-                    await asyncio.sleep(_STARTUP_POLL_INTERVAL)
-                raise RuntimeError(
-                    f"ChunkHound daemon (pid={pid}) did not become reachable "
-                    f"within {_STARTUP_TIMEOUT}s (address: {sp_str})"
+        deadline = time.monotonic() + _STARTUP_TIMEOUT
+        while time.monotonic() < deadline:
+            if not self._acquire_global_startup_lock():
+                conflict = self.find_conflicting_daemon()
+                if conflict is not None:
+                    raise self._overlap_error(conflict)
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+
+                existing_address = await self._reuse_live_daemon(
+                    initial_address,
+                    remaining,
                 )
-            # Stale lock (PID dead) — remove before starting fresh daemon
-            self.remove_lock()
-            # Remove stale Unix socket file if it lingers
-            if sys.platform != "win32" and not initial_address.startswith("tcp:"):
-                try:
-                    os.unlink(initial_address)
-                except FileNotFoundError:
-                    pass
+                if existing_address is not None:
+                    return existing_address
 
-        conflict = self.find_conflicting_daemon()
-        if conflict is not None:
-            conflict_root = str(conflict["project_dir"])
-            conflict_pid = conflict.get("pid")
-            pid_suffix = (
-                f" (pid {conflict_pid})" if isinstance(conflict_pid, int) else ""
-            )
-            raise RuntimeError(
-                f"Cannot start ChunkHound daemon for '{self._project_dir}' because "
-                f"a daemon is already running for overlapping root '{conflict_root}'"
-                f"{pid_suffix}. Overlapping daemon roots are not supported."
-            )
+                await asyncio.sleep(min(_STARTUP_POLL_INTERVAL, remaining))
+                continue
 
-        # No live daemon — race to become the sole daemon starter.
-        if self._acquire_starter_lock():
             try:
-                self._start_daemon_subprocess(args)
-            finally:
-                # The starter lock is NOT released here; it is held until the polling
-                # loop's finally block below (line ~387) so concurrent proxies don't
-                # race to spawn a second daemon. If _start_daemon_subprocess() raises,
-                # the lock leaks until the outer finally fires or stale-PID cleanup
-                # on the next invocation — acceptable, as the lock is process-scoped.
-                pass
-            # Poll until connectable; read the lock file to get the actual address
-            # (critical on Windows where the port is only known after daemon binds)
-            deadline = time.monotonic() + _STARTUP_TIMEOUT
-            try:
-                while time.monotonic() < deadline:
-                    lock = self.read_lock()
-                    if lock is not None:
-                        actual_address = str(lock.get("socket_path", initial_address))
-                        if await self._socket_connectable(actual_address):
-                            return actual_address
-                    await asyncio.sleep(_STARTUP_POLL_INTERVAL)
-            finally:
-                self._release_starter_lock()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
 
-            raise RuntimeError(
-                f"ChunkHound daemon did not start within {_STARTUP_TIMEOUT}s "
-                f"(address: {initial_address})"
-            )
-        else:
-            # Another proxy is starting the daemon — poll until it's ready.
-            deadline = time.monotonic() + _STARTUP_TIMEOUT
-            while time.monotonic() < deadline:
-                lock = self.read_lock()
-                if lock is not None:
-                    pid = lock.get("pid")
-                    actual_address = str(lock.get("socket_path", initial_address))
-                    if isinstance(pid, int) and pid_alive(pid):
-                        if await self._socket_connectable(actual_address):
-                            return actual_address
-                await asyncio.sleep(_STARTUP_POLL_INTERVAL)
+                existing_address = await self._reuse_live_daemon(
+                    initial_address,
+                    remaining,
+                )
+                if existing_address is not None:
+                    return existing_address
 
-            raise RuntimeError(
-                f"ChunkHound daemon did not become reachable within "
-                f"{_STARTUP_TIMEOUT}s (address: {initial_address})"
-            )
+                conflict = self.find_conflicting_daemon()
+                if conflict is not None:
+                    raise self._overlap_error(conflict)
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+
+                # No live daemon — race to become the sole daemon starter.
+                if self._acquire_starter_lock():
+                    try:
+                        self._start_daemon_subprocess(args)
+                        poll_deadline = time.monotonic() + remaining
+                        while time.monotonic() < poll_deadline:
+                            lock = self.read_lock()
+                            if lock is not None:
+                                actual_address = str(
+                                    lock.get("socket_path", initial_address)
+                                )
+                                if await self._socket_connectable(actual_address):
+                                    return actual_address
+                            sleep_for = poll_deadline - time.monotonic()
+                            await asyncio.sleep(
+                                min(_STARTUP_POLL_INTERVAL, max(sleep_for, 0.0))
+                            )
+                    finally:
+                        self._release_starter_lock()
+
+                    raise RuntimeError(
+                        f"ChunkHound daemon did not start within {_STARTUP_TIMEOUT}s "
+                        f"(address: {initial_address})"
+                    )
+
+                # Another same-root proxy is already inside startup — wait for its lock.
+                poll_deadline = time.monotonic() + remaining
+                while time.monotonic() < poll_deadline:
+                    wait_for = poll_deadline - time.monotonic()
+                    existing_address = await self._reuse_live_daemon(
+                        initial_address,
+                        wait_for,
+                    )
+                    if existing_address is not None:
+                        return existing_address
+                    await asyncio.sleep(
+                        min(_STARTUP_POLL_INTERVAL, max(wait_for, 0.0))
+                    )
+            finally:
+                self._release_global_startup_lock()
+
+        raise RuntimeError(
+            f"ChunkHound daemon did not become reachable within "
+            f"{_STARTUP_TIMEOUT}s (address: {initial_address})"
+        )

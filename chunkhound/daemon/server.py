@@ -129,7 +129,10 @@ class ChunkHoundDaemon(MCPServerBase):
                 return
 
             self._lock_written = True
-            self._discovery.write_registry_entry(os.getpid(), self._socket_path)
+            try:
+                self._discovery.write_registry_entry(os.getpid(), self._socket_path)
+            except Exception as e:
+                self.debug_log(f"Registry publish failed (non-fatal): {e}")
             self.debug_log(
                 f"Lock file written (pid={os.getpid()}, address={self._socket_path})"
             )
@@ -371,6 +374,9 @@ class ChunkHoundDaemon(MCPServerBase):
                 except FileNotFoundError:
                     pass
 
-            self._discovery.remove_registry_entry()
+            try:
+                self._discovery.remove_registry_entry()
+            except Exception as e:
+                self.debug_log(f"Registry cleanup failed (non-fatal): {e}")
 
         self.debug_log("Daemon shutdown complete")

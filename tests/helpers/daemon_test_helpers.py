@@ -64,9 +64,9 @@ async def wait_for_daemon_start(project_dir: Path, timeout: float = 10.0) -> boo
 async def wait_for_daemon_shutdown(project_dir: Path, timeout: float = 5.0) -> bool:
     """Poll until the daemon lock file for ``project_dir`` is gone.
 
-    We wait for the lock file to be removed (which is the very last step of
-    ``_graceful_shutdown``).  Checking only the PID is not sufficient because
-    the process could die before finishing cleanup.
+    This is sufficient to show that the daemon is no longer discoverable for
+    the project, but it does not guarantee that every cleanup side effect
+    (socket removal, registry cleanup) has completed yet.
 
     Args:
         project_dir: Project root to check.
@@ -79,6 +79,45 @@ async def wait_for_daemon_shutdown(project_dir: Path, timeout: float = 5.0) -> b
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not lock_path.exists():
+            return True
+        await asyncio.sleep(0.1)
+    return False
+
+
+async def wait_for_daemon_full_cleanup(
+    project_dir: Path,
+    *,
+    runtime_dir: Path | None = None,
+    timeout: float = 5.0,
+) -> bool:
+    """Poll until lock, socket, and registry cleanup are all complete."""
+    runtime_key = "CHUNKHOUND_DAEMON_RUNTIME_DIR"
+    previous_runtime_dir = os.environ.get(runtime_key)
+    if runtime_dir is not None:
+        os.environ[runtime_key] = str(runtime_dir)
+
+    try:
+        discovery = DaemonDiscovery(project_dir)
+        lock_path = discovery.get_lock_path()
+        socket_path = discovery.get_socket_path()
+        registry_entry_path = discovery.get_registry_entry_path()
+    finally:
+        if runtime_dir is None:
+            if previous_runtime_dir is None:
+                os.environ.pop(runtime_key, None)
+            else:
+                os.environ[runtime_key] = previous_runtime_dir
+        elif previous_runtime_dir is None:
+            os.environ.pop(runtime_key, None)
+        else:
+            os.environ[runtime_key] = previous_runtime_dir
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        lock_gone = not lock_path.exists()
+        socket_gone = socket_path.startswith("tcp:") or not os.path.exists(socket_path)
+        registry_gone = not registry_entry_path.exists()
+        if lock_gone and socket_gone and registry_gone:
             return True
         await asyncio.sleep(0.1)
     return False

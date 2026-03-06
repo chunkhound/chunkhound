@@ -25,6 +25,7 @@ import psutil
 import pytest
 
 from tests.helpers.daemon_test_helpers import (
+    wait_for_daemon_full_cleanup,
     wait_for_daemon_shutdown,
     wait_for_daemon_start,
 )
@@ -62,11 +63,15 @@ _SEARCH_REGEX_PARAMS = {
 
 
 def _registry_dir(home_dir: Path) -> Path:
-    """Return the daemon registry directory under a test-controlled home."""
-    return home_dir / ".chunkhound" / "daemon-registry"
+    """Return the daemon registry directory under a test runtime directory."""
+    return home_dir / "daemon-registry"
 
 
-def _make_env(project_dir: Path, *, fake_home: Path | None = None) -> dict[str, str]:
+def _make_env(
+    project_dir: Path,
+    *,
+    runtime_dir: Path | None = None,
+) -> dict[str, str]:
     """Return a clean subprocess environment pointing to project_dir."""
     env = get_safe_subprocess_env(os.environ.copy())
     # Clear any stale CHUNKHOUND_* vars that could interfere
@@ -74,29 +79,45 @@ def _make_env(project_dir: Path, *, fake_home: Path | None = None) -> dict[str, 
         if key.startswith("CHUNKHOUND_"):
             del env[key]
     env["CHUNKHOUND_MCP_MODE"] = "1"
-    if fake_home is not None:
-        fake_home.mkdir(parents=True, exist_ok=True)
-        env["HOME"] = str(fake_home)
-        env["USERPROFILE"] = str(fake_home)
+    if runtime_dir is not None:
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        env["CHUNKHOUND_DAEMON_RUNTIME_DIR"] = str(runtime_dir)
     return env
+
+
+async def _start_proxy_process(
+    project_dir: Path,
+    *,
+    runtime_dir: Path | None = None,
+    stdin: int | None = asyncio.subprocess.PIPE,
+    capture_stderr: bool = False,
+) -> asyncio.subprocess.Process:
+    """Launch a ``chunkhound mcp`` proxy subprocess and return the process."""
+    env = _make_env(project_dir, runtime_dir=runtime_dir)
+    stderr = asyncio.subprocess.PIPE if capture_stderr else asyncio.subprocess.DEVNULL
+    return await create_subprocess_exec_safe(
+        _chunkhound_exe(),
+        "mcp",
+        str(project_dir),
+        stdin=stdin,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=stderr,
+        env=env,
+        cwd=str(project_dir),
+    )
 
 
 async def _start_proxy(
     project_dir: Path,
     *,
-    fake_home: Path | None = None,
+    runtime_dir: Path | None = None,
+    capture_stderr: bool = False,
 ) -> tuple[asyncio.subprocess.Process, SubprocessJsonRpcClient]:
     """Launch a ``chunkhound mcp`` proxy subprocess and return (proc, client)."""
-    env = _make_env(project_dir, fake_home=fake_home)
-    proc = await create_subprocess_exec_safe(
-        _chunkhound_exe(),
-        "mcp",
-        str(project_dir),
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-        env=env,
-        cwd=str(project_dir),
+    proc = await _start_proxy_process(
+        project_dir,
+        runtime_dir=runtime_dir,
+        capture_stderr=capture_stderr,
     )
     client = SubprocessJsonRpcClient(proc)
     await client.start()
@@ -106,19 +127,15 @@ async def _start_proxy(
 async def _run_proxy_to_failure(
     project_dir: Path,
     *,
-    fake_home: Path | None = None,
+    runtime_dir: Path | None = None,
     timeout: float = 30.0,
 ) -> tuple[int, str, str]:
     """Run ``chunkhound mcp`` until it exits and capture stdio."""
-    proc = await create_subprocess_exec_safe(
-        _chunkhound_exe(),
-        "mcp",
-        str(project_dir),
+    proc = await _start_proxy_process(
+        project_dir,
+        runtime_dir=runtime_dir,
         stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=_make_env(project_dir, fake_home=fake_home),
-        cwd=str(project_dir),
+        capture_stderr=True,
     )
     stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     return proc.returncode or 0, stdout.decode(), stderr.decode()
@@ -209,10 +226,18 @@ async def _prepare_project_dir(project_dir: Path) -> None:
     )
 
 
-def _cleanup_project_dir(project_dir: Path) -> None:
+def _cleanup_project_dir(
+    project_dir: Path,
+    *,
+    runtime_dir: Path | None = None,
+) -> None:
     """Stop any lingering daemon for a test project and remove local artifacts."""
     from chunkhound.daemon.discovery import DaemonDiscovery
 
+    runtime_key = "CHUNKHOUND_DAEMON_RUNTIME_DIR"
+    previous_runtime_dir = os.environ.get(runtime_key)
+    if runtime_dir is not None:
+        os.environ[runtime_key] = str(runtime_dir)
     discovery = DaemonDiscovery(project_dir)
     lock = discovery.read_lock()
     if lock:
@@ -237,10 +262,14 @@ def _cleanup_project_dir(project_dir: Path) -> None:
             os.unlink(socket_path)
         except Exception:
             pass
+    if previous_runtime_dir is None:
+        os.environ.pop(runtime_key, None)
+    else:
+        os.environ[runtime_key] = previous_runtime_dir
 
 
 async def _wait_for_registry_entry(
-    home_dir: Path,
+    runtime_dir: Path,
     project_dir: Path,
     timeout: float = 10.0,
 ) -> Path | None:
@@ -248,7 +277,7 @@ async def _wait_for_registry_entry(
     deadline = asyncio.get_running_loop().time() + timeout
     expected_root = str(project_dir.resolve())
     while asyncio.get_running_loop().time() < deadline:
-        registry_dir = _registry_dir(home_dir)
+        registry_dir = _registry_dir(runtime_dir)
         if registry_dir.exists():
             for entry_path in registry_dir.glob("*.json"):
                 try:
@@ -487,17 +516,17 @@ async def test_daemon_sibling_roots_allowed(tmp_path: Path) -> None:
     """Sibling project roots should start separate daemons without conflict."""
     root_a = tmp_path / "repo-a"
     root_b = tmp_path / "repo-b"
-    fake_home = tmp_path / "home"
+    runtime_dir = tmp_path / "runtime"
     await _prepare_project_dir(root_a)
     await _prepare_project_dir(root_b)
 
     proc_a = client_a = proc_b = client_b = None
     try:
-        proc_a, client_a = await _start_proxy(root_a, fake_home=fake_home)
+        proc_a, client_a = await _start_proxy(root_a, runtime_dir=runtime_dir)
         await _do_mcp_handshake(client_a, timeout=30.0)
         assert await wait_for_daemon_start(root_a, timeout=15.0)
 
-        proc_b, client_b = await _start_proxy(root_b, fake_home=fake_home)
+        proc_b, client_b = await _start_proxy(root_b, runtime_dir=runtime_dir)
         await _do_mcp_handshake(client_b, timeout=30.0)
         assert await wait_for_daemon_start(root_b, timeout=15.0)
     finally:
@@ -509,8 +538,8 @@ async def test_daemon_sibling_roots_allowed(tmp_path: Path) -> None:
             ],
             return_exceptions=True,
         )
-        _cleanup_project_dir(root_a)
-        _cleanup_project_dir(root_b)
+        _cleanup_project_dir(root_a, runtime_dir=runtime_dir)
+        _cleanup_project_dir(root_b, runtime_dir=runtime_dir)
 
 
 @pytest.mark.asyncio
@@ -518,26 +547,34 @@ async def test_daemon_parent_then_child_blocks(tmp_path: Path) -> None:
     """A nested child root should be rejected while parent daemon is live."""
     parent = tmp_path / "repo"
     child = parent / "subdir"
-    fake_home = tmp_path / "home"
+    runtime_dir = tmp_path / "runtime"
     await _prepare_project_dir(parent)
     await _prepare_project_dir(child)
 
     proc = client = None
     try:
-        proc, client = await _start_proxy(parent, fake_home=fake_home)
+        proc, client = await _start_proxy(parent, runtime_dir=runtime_dir)
         await _do_mcp_handshake(client, timeout=30.0)
         assert await wait_for_daemon_start(parent, timeout=15.0)
 
-        returncode, _, stderr = await _run_proxy_to_failure(child, fake_home=fake_home)
+        returncode, _, stderr = await _run_proxy_to_failure(
+            child,
+            runtime_dir=runtime_dir,
+        )
         assert returncode != 0
         assert "Overlapping daemon roots are not supported." in stderr
         assert str(parent.resolve()) in stderr
         assert str(child.resolve()) in stderr
+        assert await wait_for_daemon_full_cleanup(
+            child,
+            runtime_dir=runtime_dir,
+            timeout=30.0,
+        )
     finally:
         if proc is not None and client is not None:
             await _teardown_proxy(proc, client)
-        _cleanup_project_dir(child)
-        _cleanup_project_dir(parent)
+        _cleanup_project_dir(child, runtime_dir=runtime_dir)
+        _cleanup_project_dir(parent, runtime_dir=runtime_dir)
 
 
 @pytest.mark.asyncio
@@ -545,33 +582,106 @@ async def test_daemon_child_then_parent_blocks(tmp_path: Path) -> None:
     """A parent root should be rejected while child daemon is live."""
     parent = tmp_path / "repo"
     child = parent / "subdir"
-    fake_home = tmp_path / "home"
+    runtime_dir = tmp_path / "runtime"
     await _prepare_project_dir(parent)
     await _prepare_project_dir(child)
 
     proc = client = None
     try:
-        proc, client = await _start_proxy(child, fake_home=fake_home)
+        proc, client = await _start_proxy(child, runtime_dir=runtime_dir)
         await _do_mcp_handshake(client, timeout=30.0)
         assert await wait_for_daemon_start(child, timeout=15.0)
 
-        returncode, _, stderr = await _run_proxy_to_failure(parent, fake_home=fake_home)
+        returncode, _, stderr = await _run_proxy_to_failure(
+            parent,
+            runtime_dir=runtime_dir,
+        )
         assert returncode != 0
         assert "Overlapping daemon roots are not supported." in stderr
         assert str(parent.resolve()) in stderr
         assert str(child.resolve()) in stderr
+        assert await wait_for_daemon_full_cleanup(
+            parent,
+            runtime_dir=runtime_dir,
+            timeout=30.0,
+        )
     finally:
         if proc is not None and client is not None:
             await _teardown_proxy(proc, client)
-        _cleanup_project_dir(child)
-        _cleanup_project_dir(parent)
+        _cleanup_project_dir(child, runtime_dir=runtime_dir)
+        _cleanup_project_dir(parent, runtime_dir=runtime_dir)
+
+
+@pytest.mark.asyncio
+async def test_daemon_concurrent_parent_child_first_start_allows_only_one(
+    tmp_path: Path,
+) -> None:
+    """Concurrent overlap starts should allow one daemon and reject the other."""
+    parent = tmp_path / "repo"
+    child = parent / "subdir"
+    runtime_dir = tmp_path / "runtime"
+    await _prepare_project_dir(parent)
+    await _prepare_project_dir(child)
+
+    parent_proc = parent_client = child_proc = child_client = None
+    try:
+        (parent_proc, parent_client), (child_proc, child_client) = await asyncio.gather(
+            _start_proxy(parent, runtime_dir=runtime_dir, capture_stderr=True),
+            _start_proxy(child, runtime_dir=runtime_dir, capture_stderr=True),
+        )
+
+        parent_result, child_result = await asyncio.gather(
+            _do_mcp_handshake(parent_client, timeout=30.0),
+            _do_mcp_handshake(child_client, timeout=30.0),
+            return_exceptions=True,
+        )
+        parent_ok = not isinstance(parent_result, Exception)
+        child_ok = not isinstance(child_result, Exception)
+        assert parent_ok ^ child_ok, (
+            f"Expected exactly one handshake to succeed, got parent={parent_result!r} "
+            f"child={child_result!r}"
+        )
+
+        winner_root = parent if parent_ok else child
+        loser_root = child if parent_ok else parent
+        loser_proc = child_proc if parent_ok else parent_proc
+
+        assert await wait_for_daemon_start(winner_root, timeout=15.0)
+
+        assert loser_proc is not None
+        loser_returncode = await asyncio.wait_for(loser_proc.wait(), timeout=30.0)
+        assert loser_returncode != 0
+        assert loser_proc.stderr is not None
+        loser_stderr = (await loser_proc.stderr.read()).decode()
+        assert "Overlapping daemon roots are not supported." in loser_stderr
+        assert str(parent.resolve()) in loser_stderr
+        assert str(child.resolve()) in loser_stderr
+        assert await wait_for_daemon_full_cleanup(
+            loser_root,
+            runtime_dir=runtime_dir,
+            timeout=30.0,
+        )
+    finally:
+        await asyncio.gather(
+            *[
+                _teardown_proxy(proc, client)
+                for proc, client in (
+                    (parent_proc, parent_client),
+                    (child_proc, child_client),
+                )
+                if proc is not None and client is not None
+            ],
+            return_exceptions=True,
+        )
+        _cleanup_project_dir(child, runtime_dir=runtime_dir)
+        _cleanup_project_dir(parent, runtime_dir=runtime_dir)
 
 
 @pytest.mark.asyncio
 async def test_daemon_symlink_path_reuses_canonical_root(tmp_path: Path) -> None:
     """A symlinked path to the same project should reuse the existing daemon."""
     project_dir = tmp_path / "repo"
-    fake_home = tmp_path / "home"
+    runtime_dir = tmp_path / "runtime"
     await _prepare_project_dir(project_dir)
 
     alias = tmp_path / "repo-link"
@@ -582,14 +692,14 @@ async def test_daemon_symlink_path_reuses_canonical_root(tmp_path: Path) -> None
 
     proc1 = client1 = proc2 = client2 = None
     try:
-        proc1, client1 = await _start_proxy(project_dir, fake_home=fake_home)
+        proc1, client1 = await _start_proxy(project_dir, runtime_dir=runtime_dir)
         await _do_mcp_handshake(client1, timeout=30.0)
         assert await wait_for_daemon_start(project_dir, timeout=15.0)
         first_pid = json.loads(
             (project_dir / ".chunkhound" / "daemon.lock").read_text()
         )["pid"]
 
-        proc2, client2 = await _start_proxy(alias, fake_home=fake_home)
+        proc2, client2 = await _start_proxy(alias, runtime_dir=runtime_dir)
         await _do_mcp_handshake(client2, timeout=30.0)
         second_pid = json.loads(
             (project_dir / ".chunkhound" / "daemon.lock").read_text()
@@ -605,7 +715,7 @@ async def test_daemon_symlink_path_reuses_canonical_root(tmp_path: Path) -> None
             ],
             return_exceptions=True,
         )
-        _cleanup_project_dir(project_dir)
+        _cleanup_project_dir(project_dir, runtime_dir=runtime_dir)
 
 
 @pytest.mark.asyncio
@@ -618,23 +728,27 @@ async def test_daemon_registry_entry_removed_on_shutdown(
 ) -> None:
     """Daemon should publish and then remove its registry entry on shutdown."""
     project_dir = pre_indexed_project_dir
-    fake_home = project_dir / "_home"
+    runtime_dir = project_dir / "_runtime"
 
-    proc, client = await _start_proxy(project_dir, fake_home=fake_home)
+    proc, client = await _start_proxy(project_dir, runtime_dir=runtime_dir)
     registry_entry = None
     try:
         await _do_mcp_handshake(client, timeout=30.0)
         assert await wait_for_daemon_start(project_dir, timeout=15.0)
 
         registry_entry = await _wait_for_registry_entry(
-            fake_home, project_dir, timeout=15.0
+            runtime_dir, project_dir, timeout=15.0
         )
         assert registry_entry is not None, "Registry entry was not published"
         assert registry_entry.exists()
     finally:
         await _teardown_proxy(proc, client)
 
-    stopped = await wait_for_daemon_shutdown(project_dir, timeout=30.0)
+    stopped = await wait_for_daemon_full_cleanup(
+        project_dir,
+        runtime_dir=runtime_dir,
+        timeout=30.0,
+    )
     assert stopped, "Daemon did not shut down in time"
     assert registry_entry is not None
     assert not registry_entry.exists(), (
