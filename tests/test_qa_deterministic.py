@@ -471,9 +471,9 @@ function qaTestFunction() {
         available_for_indexing = total_timeout - BASE_OVERHEAD_SECONDS - SEARCH_VALIDATION_BUDGET_SECONDS
         max_wait = min(available_for_indexing, INDEXING_CAP_SECONDS)
         poll_interval = INDEXING_POLL_INTERVAL_SECONDS
-        elapsed = 0.0
+        start_time = time.monotonic()
 
-        while elapsed < max_wait:
+        while (elapsed := time.monotonic() - start_time) < max_wait:
             db_stats = await services.indexing_coordinator.get_stats()
             indexed_files = db_stats.get('files', 0)
 
@@ -482,7 +482,6 @@ function qaTestFunction() {
                 break
 
             await asyncio.sleep(poll_interval)
-            elapsed += poll_interval
 
         # Final stats check with informative failure if indexing incomplete
         db_stats = await services.indexing_coordinator.get_stats()
@@ -1081,11 +1080,10 @@ if __name__ == "__main__":
         # Poll until content is searchable
         max_wait = SINGLE_FILE_INDEXING_MAX_SECONDS
         poll_interval = INDEXING_POLL_INTERVAL_SECONDS
-        elapsed = 0.0
+        start_time = time.monotonic()
 
-        while elapsed < max_wait:
+        while (elapsed := time.monotonic() - start_time) < max_wait:
             await asyncio.sleep(poll_interval)
-            elapsed += poll_interval
 
             search_results = await execute_tool("search", services, None, {
                 "type": "regex",
@@ -1095,7 +1093,7 @@ if __name__ == "__main__":
             })
 
             if len(search_results.get('results', [])) > 0:
-                indexing_time = elapsed
+                indexing_time = time.monotonic() - start_time
                 break
         else:
             indexing_time = max_wait  # Timeout
