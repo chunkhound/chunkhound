@@ -218,6 +218,10 @@ mcp.json
 .roo/
 
 # Backup directories
+
+# Local code analysis artifacts
+.tldr/
+.tldrignore
 chunkhound-backup-*/
 .chunkhound.backup/
 
