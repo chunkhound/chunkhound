@@ -72,6 +72,9 @@ class ChunkType(Enum):
     KEY_VALUE = "key_value"
     ARRAY = "array"
 
+    # Dependency types
+    IMPORT = "import"
+
     # Generic types
     BLOCK = "block"
     UNKNOWN = "unknown"
@@ -107,6 +110,7 @@ class ChunkType(Enum):
             ChunkType.VARIABLE,
             ChunkType.TYPE,
             ChunkType.MACRO,
+            ChunkType.IMPORT,
         }
 
     @property
