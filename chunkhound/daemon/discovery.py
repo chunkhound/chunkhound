@@ -679,43 +679,36 @@ class DaemonDiscovery:
                     break
 
                 # No live daemon — race to become the sole daemon starter.
-                if self._acquire_starter_lock():
-                    try:
-                        self._start_daemon_subprocess(args)
-                        poll_deadline = time.monotonic() + remaining
-                        while time.monotonic() < poll_deadline:
-                            lock = self.read_lock()
-                            if lock is not None:
-                                actual_address = str(
-                                    lock.get("socket_path", initial_address)
-                                )
-                                if await self._socket_connectable(actual_address):
-                                    return actual_address
-                            sleep_for = poll_deadline - time.monotonic()
-                            await asyncio.sleep(
-                                min(_STARTUP_POLL_INTERVAL, max(sleep_for, 0.0))
+                # The global startup lock is acquired before the per-root
+                # starter lock and released after it, so no live process can
+                # hold the starter lock while we already hold the global one.
+                if not self._acquire_starter_lock():
+                    raise AssertionError(
+                        "starter lock unavailable while global startup lock is held"
+                    )
+
+                try:
+                    self._start_daemon_subprocess(args)
+                    poll_deadline = time.monotonic() + remaining
+                    while time.monotonic() < poll_deadline:
+                        lock = self.read_lock()
+                        if lock is not None:
+                            actual_address = str(
+                                lock.get("socket_path", initial_address)
                             )
-                    finally:
-                        self._release_starter_lock()
+                            if await self._socket_connectable(actual_address):
+                                return actual_address
+                        sleep_for = poll_deadline - time.monotonic()
+                        await asyncio.sleep(
+                            min(_STARTUP_POLL_INTERVAL, max(sleep_for, 0.0))
+                        )
+                finally:
+                    self._release_starter_lock()
 
-                    raise RuntimeError(
-                        f"ChunkHound daemon did not start within {_STARTUP_TIMEOUT}s "
-                        f"(address: {initial_address})"
-                    )
-
-                # Another same-root proxy is already inside startup — wait for its lock.
-                poll_deadline = time.monotonic() + remaining
-                while time.monotonic() < poll_deadline:
-                    wait_for = poll_deadline - time.monotonic()
-                    existing_address = await self._reuse_live_daemon(
-                        initial_address,
-                        wait_for,
-                    )
-                    if existing_address is not None:
-                        return existing_address
-                    await asyncio.sleep(
-                        min(_STARTUP_POLL_INTERVAL, max(wait_for, 0.0))
-                    )
+                raise RuntimeError(
+                    f"ChunkHound daemon did not start within {_STARTUP_TIMEOUT}s "
+                    f"(address: {initial_address})"
+                )
             finally:
                 self._release_global_startup_lock()
 

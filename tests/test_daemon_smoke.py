@@ -25,6 +25,7 @@ import psutil
 import pytest
 
 from tests.helpers.daemon_test_helpers import (
+    runtime_dir_env,
     wait_for_daemon_full_cleanup,
     wait_for_daemon_shutdown,
     wait_for_daemon_start,
@@ -62,9 +63,12 @@ _SEARCH_REGEX_PARAMS = {
 }
 
 
-def _registry_dir(home_dir: Path) -> Path:
+def _registry_dir(project_dir: Path, runtime_dir: Path) -> Path:
     """Return the daemon registry directory under a test runtime directory."""
-    return home_dir / "daemon-registry"
+    from chunkhound.daemon.discovery import DaemonDiscovery
+
+    with runtime_dir_env(runtime_dir):
+        return DaemonDiscovery(project_dir).get_registry_dir()
 
 
 def _make_env(
@@ -234,11 +238,8 @@ def _cleanup_project_dir(
     """Stop any lingering daemon for a test project and remove local artifacts."""
     from chunkhound.daemon.discovery import DaemonDiscovery
 
-    runtime_key = "CHUNKHOUND_DAEMON_RUNTIME_DIR"
-    previous_runtime_dir = os.environ.get(runtime_key)
-    if runtime_dir is not None:
-        os.environ[runtime_key] = str(runtime_dir)
-    discovery = DaemonDiscovery(project_dir)
+    with runtime_dir_env(runtime_dir):
+        discovery = DaemonDiscovery(project_dir)
     lock = discovery.read_lock()
     if lock:
         pid = lock.get("pid")
@@ -262,10 +263,6 @@ def _cleanup_project_dir(
             os.unlink(socket_path)
         except Exception:
             pass
-    if previous_runtime_dir is None:
-        os.environ.pop(runtime_key, None)
-    else:
-        os.environ[runtime_key] = previous_runtime_dir
 
 
 async def _wait_for_registry_entry(
@@ -276,8 +273,8 @@ async def _wait_for_registry_entry(
     """Wait until a registry entry appears for the canonical project root."""
     deadline = asyncio.get_running_loop().time() + timeout
     expected_root = str(project_dir.resolve())
+    registry_dir = _registry_dir(project_dir, runtime_dir)
     while asyncio.get_running_loop().time() < deadline:
-        registry_dir = _registry_dir(runtime_dir)
         if registry_dir.exists():
             for entry_path in registry_dir.glob("*.json"):
                 try:

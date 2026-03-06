@@ -8,6 +8,7 @@ be used when multiple tests run concurrently).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import time
 from pathlib import Path
@@ -16,6 +17,23 @@ import psutil
 
 from chunkhound.daemon import ipc
 from chunkhound.daemon.discovery import DaemonDiscovery
+
+_RUNTIME_DIR_ENV = "CHUNKHOUND_DAEMON_RUNTIME_DIR"
+
+
+@contextlib.contextmanager
+def runtime_dir_env(runtime_dir: Path | None):
+    """Temporarily point daemon runtime metadata at a test runtime dir."""
+    previous_runtime_dir = os.environ.get(_RUNTIME_DIR_ENV)
+    if runtime_dir is not None:
+        os.environ[_RUNTIME_DIR_ENV] = str(runtime_dir)
+    try:
+        yield
+    finally:
+        if previous_runtime_dir is None:
+            os.environ.pop(_RUNTIME_DIR_ENV, None)
+        else:
+            os.environ[_RUNTIME_DIR_ENV] = previous_runtime_dir
 
 
 def is_daemon_running(project_dir: Path) -> bool:
@@ -91,26 +109,11 @@ async def wait_for_daemon_full_cleanup(
     timeout: float = 5.0,
 ) -> bool:
     """Poll until lock, socket, and registry cleanup are all complete."""
-    runtime_key = "CHUNKHOUND_DAEMON_RUNTIME_DIR"
-    previous_runtime_dir = os.environ.get(runtime_key)
-    if runtime_dir is not None:
-        os.environ[runtime_key] = str(runtime_dir)
-
-    try:
+    with runtime_dir_env(runtime_dir):
         discovery = DaemonDiscovery(project_dir)
         lock_path = discovery.get_lock_path()
         socket_path = discovery.get_socket_path()
         registry_entry_path = discovery.get_registry_entry_path()
-    finally:
-        if runtime_dir is None:
-            if previous_runtime_dir is None:
-                os.environ.pop(runtime_key, None)
-            else:
-                os.environ[runtime_key] = previous_runtime_dir
-        elif previous_runtime_dir is None:
-            os.environ.pop(runtime_key, None)
-        else:
-            os.environ[runtime_key] = previous_runtime_dir
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
