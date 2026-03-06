@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import chunkhound.daemon.discovery as discovery_module
 from chunkhound.daemon.discovery import (
     DaemonDiscovery,
     _normalized_project_dir,
@@ -249,3 +250,27 @@ def test_write_json_atomically_survives_same_target_concurrency(tmp_path: Path) 
             if process.is_alive():
                 process.kill()
             process.join(timeout=1.0)
+
+
+def test_write_json_atomically_retries_transient_windows_replace_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Transient Windows replace failures should be retried before surfacing."""
+    target_path = tmp_path / "state.json"
+    original_replace = Path.replace
+    attempts = {"count": 0}
+
+    def flaky_replace(self: Path, target: Path) -> Path:
+        if self.name.startswith(".state.json.") and attempts["count"] == 0:
+            attempts["count"] += 1
+            raise PermissionError("transient windows replace contention")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(discovery_module.sys, "platform", "win32")
+    monkeypatch.setattr(Path, "replace", flaky_replace)
+
+    _write_json_atomically(target_path, {"value": 1})
+
+    assert attempts["count"] == 1
+    assert json.loads(target_path.read_text()) == {"value": 1}

@@ -38,6 +38,8 @@ _SOCKET_DIR = "/tmp"
 # Startup polling interval and timeout
 _STARTUP_POLL_INTERVAL = 0.1
 _STARTUP_TIMEOUT = 30.0
+_WINDOWS_REPLACE_RETRIES = 20
+_WINDOWS_REPLACE_RETRY_DELAY = 0.01
 
 
 def _canonical_project_dir(project_dir: Path) -> Path:
@@ -119,7 +121,14 @@ def _write_json_atomically(
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(data, f)
-        tmp_path.replace(path)
+        for attempt in range(_WINDOWS_REPLACE_RETRIES):
+            try:
+                tmp_path.replace(path)
+                break
+            except PermissionError:
+                if sys.platform != "win32" or attempt >= _WINDOWS_REPLACE_RETRIES - 1:
+                    raise
+                time.sleep(_WINDOWS_REPLACE_RETRY_DELAY)
     except Exception:
         try:
             tmp_path.unlink()
