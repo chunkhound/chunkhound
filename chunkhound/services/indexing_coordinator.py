@@ -1569,7 +1569,7 @@ class IndexingCoordinator(BaseService):
         Returns:
             Dictionary with file, chunk, and embedding counts
         """
-        return self._db.get_stats()
+        return await self._db.get_stats_async()
 
     async def remove_file(self, file_path: str) -> int:
         """Remove a file and all its chunks from the database.

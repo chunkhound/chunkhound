@@ -660,7 +660,7 @@ class RealtimeIndexingService:
         """Remove file from database."""
         try:
             logger.debug(f"Removing file from database: {file_path}")
-            self.services.provider.delete_file_completely(str(file_path))
+            await self.services.provider.delete_file_completely_async(str(file_path))
             self._debug(f"removed file from database: {file_path}")
         except Exception as e:
             logger.error(f"Error removing file {file_path}: {e}")
@@ -694,7 +694,7 @@ class RealtimeIndexingService:
         try:
             # Get all files that were in this directory from database
             # Use the provider's search capability to find files with this path prefix
-            search_results, _ = self.services.provider.search_regex(
+            search_results, _ = await self.services.provider.search_regex_async(
                 pattern=f"^{dir_path}/.*",
                 page_size=1000,  # Large page to get all matches
             )
@@ -704,7 +704,7 @@ class RealtimeIndexingService:
                 file_path = result.get("file_path", result.get("path", ""))
                 if file_path:
                     logger.debug(f"Cleaning up deleted file: {file_path}")
-                    self.services.provider.delete_file_completely(file_path)
+                    await self.services.provider.delete_file_completely_async(file_path)
 
             logger.info(
                 f"Cleaned up {len(search_results)} files from deleted directory: {dir_path}"
