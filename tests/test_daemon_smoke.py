@@ -188,13 +188,13 @@ async def pre_indexed_project_dir(tmp_path: Path) -> AsyncIterator[Path]:
                 proc.terminate()  # SIGTERM on Unix, TerminateProcess on Windows
                 # Wait up to 5 seconds for graceful shutdown (non-blocking)
                 try:
-                    await asyncio.wait_for(asyncio.to_thread(proc.wait), timeout=5.0)
-                except (asyncio.TimeoutError, psutil.TimeoutExpired):
+                    await asyncio.to_thread(proc.wait, timeout=5)
+                except psutil.TimeoutExpired:
                     # Force kill if graceful shutdown fails
                     proc.kill()
                     try:
-                        await asyncio.wait_for(asyncio.to_thread(proc.wait), timeout=2.0)
-                    except (asyncio.TimeoutError, psutil.TimeoutExpired):
+                        await asyncio.to_thread(proc.wait, timeout=2)
+                    except psutil.TimeoutExpired:
                         pass
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
