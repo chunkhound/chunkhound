@@ -39,3 +39,5 @@ All at `/home/johan/workbench/elixir/`:
 ```bash
 uv run chunkhound index --force-reindex /home/johan/workbench/elixir/{repo}
 ```
+
+## Archived — merged into handover 0643
