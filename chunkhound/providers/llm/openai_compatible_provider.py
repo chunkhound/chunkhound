@@ -64,12 +64,14 @@ class OpenAICompatibleProvider(LLMProvider):
         effective_base_url = base_url or self._get_default_base_url()
 
         # Initialize OpenAI-compatible client
-        self._client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=effective_base_url,
-            timeout=timeout,
-            max_retries=max_retries,
-        )
+        client_kwargs: dict[str, Any] = {
+            "api_key": api_key,
+            "timeout": timeout,
+            "max_retries": max_retries,
+        }
+        if effective_base_url:
+            client_kwargs["base_url"] = effective_base_url
+        self._client = AsyncOpenAI(**client_kwargs)
 
         # Usage tracking
         self._requests_made = 0
@@ -77,10 +79,11 @@ class OpenAICompatibleProvider(LLMProvider):
         self._prompt_tokens = 0
         self._completion_tokens = 0
 
-    def _get_default_base_url(self) -> str:
+    def _get_default_base_url(self) -> str | None:
         """Get the default base URL for this provider.
 
         Subclasses must implement this to provide their API endpoint.
+        Returns None to allow AsyncOpenAI to fall back to environment variables.
         """
         raise NotImplementedError("Subclasses must implement _get_default_base_url")
 
@@ -234,7 +237,7 @@ class OpenAICompatibleProvider(LLMProvider):
                 response_format={
                     "type": "json_schema",
                     "json_schema": {
-                        "name": "output",
+                        "name": "structured_response",
                         "strict": True,
                         "schema": json_schema,
                     },

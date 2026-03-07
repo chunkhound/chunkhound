@@ -85,9 +85,12 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
         )
         self._reasoning_effort = reasoning_effort
 
-    def _get_default_base_url(self) -> str:
-        """Get the default OpenAI API base URL."""
-        return "https://api.openai.com/v1"
+    def _get_default_base_url(self) -> str | None:
+        """Get the default OpenAI API base URL.
+
+        Returns None so AsyncOpenAI falls back to OPENAI_BASE_URL env var or its own default.
+        """
+        return None
 
     def _get_provider_name(self) -> str:
         """Get the provider name."""
