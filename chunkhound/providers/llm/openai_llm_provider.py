@@ -16,7 +16,8 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
     - Chat Completions (/v1/chat/completions): Standard models
     - Responses API (/v1/responses): Newer models with agentic capabilities
 
-    Strategy: Prefer Responses API for all compatible models (it's a superset of Chat Completions)
+    Strategy: Prefer Responses API for all compatible models
+    (it's a superset of Chat Completions)
     """
 
     # Models that ONLY support Responses API (from OpenAI spec: ResponsesOnlyModel)
@@ -74,7 +75,8 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
             base_url: Base URL for OpenAI API (optional for custom endpoints)
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts for failed requests
-            reasoning_effort: Reasoning effort for reasoning models (none, minimal, low, medium, high)
+            reasoning_effort: Reasoning effort for reasoning models
+                (none, minimal, low, medium, high)
         """
         super().__init__(
             api_key=api_key,
@@ -88,7 +90,8 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
     def _get_default_base_url(self) -> str | None:
         """Get the default OpenAI API base URL.
 
-        Returns None so AsyncOpenAI falls back to OPENAI_BASE_URL env var or its own default.
+        Returns None so AsyncOpenAI falls back to OPENAI_BASE_URL env var
+        or its own default.
         """
         return None
 
@@ -162,7 +165,8 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
 
             self._requests_made += 1
             if response.usage:
-                # Responses API uses input_tokens/output_tokens instead of prompt_tokens/completion_tokens
+                # Responses API uses input_tokens/output_tokens instead of
+                # prompt_tokens/completion_tokens
                 self._prompt_tokens += response.usage.input_tokens
                 self._completion_tokens += response.usage.output_tokens
                 self._tokens_used += response.usage.total_tokens
@@ -189,8 +193,8 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
             # Validate content is not None or empty
             if content is None:
                 logger.error(
-                    f"OpenAI Responses API returned None content (status={finish_reason}, "
-                    f"tokens={tokens})"
+                    f"OpenAI Responses API returned None content "
+                    f"(status={finish_reason}, tokens={tokens})"
                 )
                 raise RuntimeError(
                     f"LLM returned empty response (status={finish_reason}). "
@@ -199,8 +203,8 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
 
             if not content.strip():
                 logger.warning(
-                    f"OpenAI Responses API returned empty content (status={finish_reason}, "
-                    f"tokens={tokens})"
+                    f"OpenAI Responses API returned empty content "
+                    f"(status={finish_reason}, tokens={tokens})"
                 )
                 raise RuntimeError(
                     f"LLM returned empty response (status={finish_reason}). "
@@ -218,9 +222,11 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
 
                 raise RuntimeError(
                     f"LLM response incomplete - token limit exceeded{usage_info}. "
-                    f"For reasoning models, this indicates the query requires extensive reasoning "
-                    f"that exhausted the output budget. Try breaking your query into smaller, "
-                    f"more focused questions."
+                    "For reasoning models, this indicates the query requires "
+                    "extensive reasoning "
+                    "that exhausted the output budget. Try breaking your query into "
+                    "smaller, "
+                    "more focused questions."
                 )
 
             # Warn on other unexpected status
@@ -342,10 +348,12 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
             # Validate content
             if content is None or not content.strip():
                 logger.error(
-                    f"Responses API structured output returned empty content (status={finish_reason})"
+                    f"Responses API structured output returned empty content "
+                    f"(status={finish_reason})"
                 )
                 raise RuntimeError(
-                    f"LLM structured output returned empty response (status={finish_reason})"
+                    f"LLM structured output returned empty response "
+                    f"(status={finish_reason})"
                 )
 
             # Check for incomplete responses
@@ -357,7 +365,8 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
                         f"output={response.usage.output_tokens:,})"
                     )
                 raise RuntimeError(
-                    f"LLM structured output incomplete - token limit exceeded{usage_info}"
+                    f"LLM structured output incomplete - token limit "
+                    f"exceeded{usage_info}"
                 )
 
             # Parse JSON

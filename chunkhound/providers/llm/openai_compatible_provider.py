@@ -150,8 +150,8 @@ class OpenAICompatibleProvider(LLMProvider):
             # Validate content
             if content is None or not content.strip():
                 logger.error(
-                    f"{self.name} returned empty content (finish_reason={finish_reason}, "
-                    f"tokens={tokens})"
+                    f"{self.name} returned empty content "
+                    f"(finish_reason={finish_reason}, tokens={tokens})"
                 )
                 raise RuntimeError(
                     f"LLM returned empty response (finish_reason={finish_reason}). "
@@ -274,9 +274,11 @@ class OpenAICompatibleProvider(LLMProvider):
                     )
 
                 raise RuntimeError(
-                    f"LLM structured completion truncated - token limit exceeded{usage_info}. "
-                    f"This indicates insufficient max_completion_tokens for the structured output. "
-                    f"Consider increasing the token limit or reducing input context."
+                    f"LLM structured completion truncated - token limit "
+                    f"exceeded{usage_info}. "
+                    "This indicates insufficient max_completion_tokens for the "
+                    "structured output. "
+                    "Consider increasing the token limit or reducing input context."
                 )
 
             # Parse JSON
