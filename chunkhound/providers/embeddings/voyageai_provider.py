@@ -20,12 +20,10 @@ from .shared_utils import (
 )
 
 try:
-    import requests
     import voyageai
 
     VOYAGEAI_AVAILABLE = True
 except ImportError:
-    requests = None  # type: ignore
     voyageai = None  # type: ignore
     VOYAGEAI_AVAILABLE = False
     logger.warning("VoyageAI not available - install with: uv pip install voyageai")
@@ -191,17 +189,9 @@ class VoyageAIEmbeddingProvider:
 
         # Use the system CA bundle when available so that corporate proxy CAs
         # (e.g. Blue Coat / AMAT) are trusted without patching certifi.
-        # The session is stored on self for use in httpx calls (HTTP reranker
-        # path); it is NOT injected into the voyageai SDK globally.
+        # self._ssl_verify is passed directly to httpx.AsyncClient(verify=...).
         _sys_ca = "/etc/ssl/certs/ca-certificates.crt"
         if os.path.exists(_sys_ca) and not os.environ.get("REQUESTS_CA_BUNDLE"):
-            _session = requests.Session()
-            _session.verify = _sys_ca
-            _session.mount(
-                "https://",
-                requests.adapters.HTTPAdapter(max_retries=2),
-            )
-            self._session = _session   # stored for potential future use, not injected globally
             self._ssl_verify: str | bool = _sys_ca
         else:
             self._ssl_verify = os.environ.get("REQUESTS_CA_BUNDLE") or True

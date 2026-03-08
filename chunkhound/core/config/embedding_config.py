@@ -459,7 +459,11 @@ class EmbeddingConfig(BaseSettings):
 
         # Fallback: provider-specific env vars (lower priority than CHUNKHOUND_EMBEDDING__ vars)
         if "api_key" not in config:
-            provider_hint = config.get("provider") or os.getenv("CHUNKHOUND_EMBEDDING__PROVIDER") or os.getenv("CHUNKHOUND_EMBEDDING_PROVIDER")
+            provider_hint = (
+                config.get("provider")
+                or os.getenv("CHUNKHOUND_EMBEDDING__PROVIDER")
+                or os.getenv("CHUNKHOUND_EMBEDDING_PROVIDER")
+            )
             if not provider_hint or provider_hint == "voyageai":
                 if voyage_key := os.getenv("VOYAGE_API_KEY"):
                     config["api_key"] = voyage_key
