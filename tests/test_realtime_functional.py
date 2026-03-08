@@ -7,13 +7,18 @@ Some tests expected to fail initially - helps identify implementation issues.
 import asyncio
 import shutil
 import tempfile
+import time
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
-from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from chunkhound.services.realtime_indexing_service import (
+    RealtimeIndexingService,
+    SimpleEventHandler,
+)
 from tests.utils.windows_compat import should_use_polling, wait_for_indexed
 
 
@@ -35,11 +40,12 @@ class TestRealtimeFunctional:
 
         # Use fake args to prevent find_project_root call that fails in CI
         from types import SimpleNamespace
+
         fake_args = SimpleNamespace(path=temp_dir)
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
-            indexing={"include": ["*.py", "*.js"], "exclude": ["*.log"]}
+            indexing={"include": ["*.py", "*.js"], "exclude": ["*.log"]},
         )
 
         services = create_services(db_path, config)
@@ -47,7 +53,9 @@ class TestRealtimeFunctional:
 
         # Use polling on Windows CI where watchdog's ReadDirectoryChangesW is unreliable
         force_polling = should_use_polling()
-        realtime_service = RealtimeIndexingService(services, config, force_polling=force_polling)
+        realtime_service = RealtimeIndexingService(
+            services, config, force_polling=force_polling
+        )
 
         yield realtime_service, watch_dir, temp_dir, services
 
@@ -75,11 +83,216 @@ class TestRealtimeFunctional:
         # Check basic state
         stats = await service.get_stats()
         assert isinstance(stats, dict), "Stats should be returned"
-        assert 'observer_alive' in stats, "Should report observer status"
-        assert stats['watching_directory'] == str(watch_dir), "Should report watched directory"
+        assert "observer_alive" in stats, "Should report observer status"
+        assert stats["watching_directory"] == str(watch_dir), (
+            "Should report watched directory"
+        )
+        assert "event_queue" in stats, "Should expose event queue health"
+        assert "resync" in stats, "Should expose backend-neutral resync state"
+        assert "monitoring_mode" in stats, "Should expose current monitoring mode"
 
         # Should be able to stop cleanly
         await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_request_resync_is_debounced(self, realtime_setup):
+        """Manual resync requests should coalesce into a single scan callback."""
+        service, watch_dir, _, _ = realtime_setup
+        callback_calls: list[tuple[str, dict[str, object] | None]] = []
+        callback_event = asyncio.Event()
+
+        async def resync_callback(
+            reason: str, details: dict[str, object] | None
+        ) -> None:
+            callback_calls.append((reason, details))
+            callback_event.set()
+
+        service._resync_callback = resync_callback
+        await service.start(watch_dir)
+
+        await service.request_resync("manual_reconcile", {"source": "first"})
+        await service.request_resync("manual_reconcile", {"source": "latest"})
+
+        await asyncio.wait_for(callback_event.wait(), timeout=5.0)
+        await asyncio.sleep(service._RESYNC_DEBOUNCE_SECONDS + 0.1)
+
+        stats = await service.get_health()
+        assert len(callback_calls) == 1, (
+            "Debounced resync should only invoke one callback"
+        )
+        assert callback_calls[0] == ("manual_reconcile", {"source": "latest"})
+        assert stats["resync"]["request_count"] == 2
+        assert stats["resync"]["performed_count"] == 1
+        assert stats["resync"]["needs_resync"] is False
+        assert stats["resync"]["last_reason"] == "manual_reconcile"
+
+        await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_missing_resync_callback_degrades_without_task_leak(
+        self, realtime_setup
+    ):
+        """A missing resync callback should degrade status cleanly."""
+        service, watch_dir, _, _ = realtime_setup
+        loop = asyncio.get_running_loop()
+        loop_errors: list[dict] = []
+        previous_handler = loop.get_exception_handler()
+
+        def exception_handler(_loop, context) -> None:
+            loop_errors.append(context)
+
+        loop.set_exception_handler(exception_handler)
+
+        try:
+            await service.start(watch_dir)
+            await service.request_resync("manual_reconcile")
+            await asyncio.sleep(service._RESYNC_DEBOUNCE_SECONDS + 0.1)
+
+            stats = await service.get_health()
+            assert stats["service_state"] == "degraded"
+            assert stats["last_error"] == "No resync callback configured"
+            assert stats["resync"]["last_error"] == "No resync callback configured"
+            assert stats["resync"]["needs_resync"] is True
+            assert loop_errors == []
+        finally:
+            loop.set_exception_handler(previous_handler)
+            await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_failing_resync_callback_degrades_without_task_leak(
+        self, realtime_setup
+    ):
+        """A failing resync callback should stay contained in service status."""
+        service, watch_dir, _, _ = realtime_setup
+        loop = asyncio.get_running_loop()
+        loop_errors: list[dict] = []
+        previous_handler = loop.get_exception_handler()
+
+        def exception_handler(_loop, context) -> None:
+            loop_errors.append(context)
+
+        async def failing_resync_callback(
+            reason: str, details: dict[str, object] | None
+        ) -> None:
+            assert reason == "manual_reconcile"
+            assert details == {"source": "test"}
+            raise RuntimeError("resync exploded")
+
+        loop.set_exception_handler(exception_handler)
+
+        try:
+            service._resync_callback = failing_resync_callback
+            await service.start(watch_dir)
+            await service.request_resync("manual_reconcile", {"source": "test"})
+            await asyncio.sleep(service._RESYNC_DEBOUNCE_SECONDS + 0.1)
+
+            stats = await service.get_health()
+            assert stats["service_state"] == "degraded"
+            assert stats["last_error"] == "Realtime resync failed: resync exploded"
+            assert stats["resync"]["last_error"] == "resync exploded"
+            assert stats["resync"]["needs_resync"] is True
+            assert loop_errors == []
+        finally:
+            loop.set_exception_handler(previous_handler)
+            await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_watchdog_timeout_fallback_does_not_adopt_late_watchdog(
+        self, realtime_setup, monkeypatch
+    ):
+        """Late watchdog bootstrap results should not overwrite polling fallback."""
+        service, watch_dir, _, _ = realtime_setup
+        late_watchdog_returned = asyncio.Event()
+
+        def late_bootstrap(
+            _watch_path: Path,
+            loop: asyncio.AbstractEventLoop,
+            _abort_event,
+        ) -> tuple[MagicMock, MagicMock]:
+            time.sleep(0.05)
+            loop.call_soon_threadsafe(late_watchdog_returned.set)
+            return MagicMock(), MagicMock()
+
+        monkeypatch.setattr(
+            service, "_WATCHDOG_SETUP_TIMEOUT_SECONDS", 0.01, raising=False
+        )
+        monkeypatch.setattr(
+            service, "_POLLING_STARTUP_SETTLE_SECONDS", 0.01, raising=False
+        )
+        monkeypatch.setattr(service, "_bootstrap_fs_monitor", late_bootstrap)
+
+        await service.start(watch_dir)
+        await asyncio.wait_for(late_watchdog_returned.wait(), timeout=1.0)
+        await asyncio.sleep(0.05)
+
+        stats = await service.get_health()
+        assert stats["monitoring_mode"] == "polling"
+        assert service.observer is None
+        assert service.event_handler is None
+        assert service._polling_task is not None
+
+        await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_full_event_queue_tracks_drop_and_requests_resync(
+        self, realtime_setup
+    ):
+        """Dropped realtime events should be counted and escalated via resync."""
+        service, watch_dir, _, _ = realtime_setup
+        callback_event = asyncio.Event()
+
+        async def resync_callback(
+            reason: str, details: dict[str, object] | None
+        ) -> None:
+            assert reason == "event_queue_overflow"
+            assert details is not None
+            callback_event.set()
+
+        service._resync_callback = resync_callback
+        service.event_queue = asyncio.Queue(maxsize=1)
+        service.event_queue.put_nowait(("created", watch_dir / "already_full.py"))
+
+        handler = SimpleEventHandler(
+            service.event_queue,
+            service.config,
+            asyncio.get_running_loop(),
+            root_path=watch_dir,
+            queue_result_callback=service._handle_queue_result,
+        )
+        handler._queue_event("modified", watch_dir / "overflow.py")
+
+        await asyncio.wait_for(callback_event.wait(), timeout=5.0)
+
+        stats = await service.get_health()
+        assert stats["event_queue"]["dropped"] == 1
+        assert stats["event_queue"]["last_reason"] == "queue_full"
+        assert stats["resync"]["request_count"] == 1
+        assert stats["resync"]["last_reason"] == "event_queue_overflow"
+
+    @pytest.mark.asyncio
+    async def test_polling_monitor_uses_to_thread_snapshot(
+        self, realtime_setup, monkeypatch
+    ):
+        """Polling monitor should offload filesystem snapshots off the event loop."""
+        service, watch_dir, _, _ = realtime_setup
+        to_thread_called = asyncio.Event()
+
+        async def fake_to_thread(func, *args, **kwargs):
+            assert func == service._polling_snapshot
+            assert args == (watch_dir,)
+            assert kwargs == {}
+            to_thread_called.set()
+            return {}, 0, False
+
+        monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+        poll_task = asyncio.create_task(service._polling_monitor(watch_dir))
+
+        try:
+            await asyncio.wait_for(to_thread_called.wait(), timeout=1.0)
+        finally:
+            poll_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await poll_task
 
     @pytest.mark.asyncio
     async def test_filesystem_monitoring_detects_changes(self, realtime_setup):
@@ -119,7 +332,9 @@ class TestRealtimeFunctional:
 
         # Check service is still alive
         stats = await service.get_stats()
-        assert stats.get('observer_alive', False), "Service should still be running after rapid changes"
+        assert stats.get("observer_alive", False), (
+            "Service should still be running after rapid changes"
+        )
 
         # This test mainly checks service doesn't crash under load
         await service.stop()
@@ -133,7 +348,7 @@ class TestRealtimeFunctional:
         # Create a file that might cause processing issues
         bad_file = watch_dir / "bad_file.py"
         # Write binary data to a .py file - might cause parsing errors
-        bad_file.write_bytes(b'\x00\xFF\xFE\xFD')
+        bad_file.write_bytes(b"\x00\xff\xfe\xfd")
 
         await asyncio.sleep(1.0)
 
@@ -145,7 +360,9 @@ class TestRealtimeFunctional:
 
         # Main goal: service should still be alive
         stats = await service.get_stats()
-        assert stats.get('observer_alive', False), "Service should survive processing errors"
+        assert stats.get("observer_alive", False), (
+            "Service should survive processing errors"
+        )
 
         await service.stop()
 
@@ -166,10 +383,10 @@ class TestRealtimeFunctional:
         await asyncio.sleep(1.5)
 
         # Check processing results
-        py_record = services.provider.get_file_by_path(str(py_file))
         bin_record = services.provider.get_file_by_path(str(bin_file))
 
-        # Python file should be considered for processing (might still fail due to other issues)
+        # Python file may still fail for unrelated reasons, but the unsupported
+        # file should definitely be ignored.
         # Binary file should definitely be ignored
         assert bin_record is None, "Unsupported file types should be ignored"
 
@@ -199,7 +416,9 @@ class TestRealtimeFunctional:
         realtime_record = services.provider.get_file_by_path(str(realtime_file))
 
         # At least one should work (helps identify which path is broken)
-        processed_count = sum(1 for record in [initial_record, realtime_record] if record is not None)
+        processed_count = sum(
+            1 for record in [initial_record, realtime_record] if record is not None
+        )
         assert processed_count > 0, "At least one processing path should work"
 
         await service.stop()

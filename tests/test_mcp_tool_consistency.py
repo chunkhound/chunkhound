@@ -16,6 +16,7 @@ def test_tool_registry_populated():
     # Check expected tools are present
     expected_tools = [
         "search",
+        "daemon_status",
         "code_research",
     ]
     for tool_name in expected_tools:
@@ -96,6 +97,18 @@ def test_code_research_schema():
     assert "query" in required, "'query' should be required for code_research"
 
 
+def test_daemon_status_schema():
+    """Verify daemon_status has a zero-arg runtime schema."""
+    tool = TOOL_REGISTRY["daemon_status"]
+
+    assert "status" in tool.description.lower()
+    props = tool.parameters["properties"]
+    required = tool.parameters.get("required", [])
+
+    assert props == {}, "daemon_status should not expose infrastructure arguments"
+    assert required == [], "daemon_status should not require client-supplied args"
+
+
 def test_capability_flags():
     """Verify tools correctly declare capability requirements."""
     # search: no special requirements (validates embedding at runtime)
@@ -103,10 +116,73 @@ def test_capability_flags():
     assert not TOOL_REGISTRY["search"].requires_llm
     assert not TOOL_REGISTRY["search"].requires_reranker
 
+    assert not TOOL_REGISTRY["daemon_status"].requires_embeddings
+    assert not TOOL_REGISTRY["daemon_status"].requires_llm
+    assert not TOOL_REGISTRY["daemon_status"].requires_reranker
+
     # code_research: requires all capabilities
     assert TOOL_REGISTRY["code_research"].requires_embeddings
     assert TOOL_REGISTRY["code_research"].requires_llm
     assert TOOL_REGISTRY["code_research"].requires_reranker
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_returns_scan_progress_snapshot():
+    """Verify daemon_status returns the shared base scan_progress payload."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "realtime": {
+            "service_state": "running",
+            "last_error": None,
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    assert result["status"] == "ready"
+    assert result["query_ready"] is True
+    assert result["scan_progress"]["realtime"]["service_state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_degrades_on_realtime_state():
+    """Verify daemon_status honors degraded realtime state even without scan_error."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "realtime": {
+            "service_state": "degraded",
+            "last_error": None,
+            "resync": {"last_error": None},
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    assert result["status"] == "degraded"
 
 
 def test_stdio_server_uses_registry_descriptions():
@@ -202,6 +278,8 @@ def test_search_enum_restricted_without_embeddings():
     # Find the search tool
     search_tool = next((t for t in tools if t.name == "search"), None)
     assert search_tool is not None, "search tool should be in list"
+    daemon_status_tool = next((t for t in tools if t.name == "daemon_status"), None)
+    assert daemon_status_tool is not None, "daemon_status tool should be in list"
 
     # Verify the type enum is restricted to regex only
     type_schema = search_tool.inputSchema["properties"]["type"]

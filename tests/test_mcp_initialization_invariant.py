@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -85,6 +85,9 @@ class TestNonBlockingInitialization:
                 assert "chunks_created" in progress
                 assert "scan_started_at" in progress
                 assert "scan_completed_at" in progress
+                assert "realtime" in progress
+                assert "event_queue" in progress["realtime"]
+                assert "resync" in progress["realtime"]
 
                 await server.cleanup()
 
@@ -117,3 +120,29 @@ class TestNonBlockingInitialization:
                 assert server._scan_progress["scan_completed_at"] is None
 
                 await server.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_realtime_start_failure_updates_scan_progress(self, tmp_path: Path):
+        """Verify realtime startup task failures are surfaced into realtime status."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+
+        server = ConcreteMCPServer(config=config)
+        server.realtime_indexing = MagicMock()
+        server.realtime_indexing.monitoring_ready = asyncio.Event()
+        server.realtime_indexing._MONITORING_READY_TIMEOUT_SECONDS = 0.01
+        server._run_directory_scan = AsyncMock()  # type: ignore[method-assign]
+
+        async def fail_startup() -> None:
+            raise RuntimeError("startup exploded")
+
+        monitoring_task = asyncio.create_task(fail_startup())
+        await server._coordinated_initial_scan(tmp_path, monitoring_task)
+
+        realtime = server._scan_progress["realtime"]
+        assert realtime["service_state"] == "degraded"
+        assert "Realtime startup failed" in realtime["last_error"]
+        server._run_directory_scan.assert_awaited_once()  # type: ignore[attr-defined]
