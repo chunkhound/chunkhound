@@ -208,6 +208,13 @@ class EmbeddingConfig(BaseSettings):
         # absolute URL; without base_url there is nothing to resolve against.
         if self.rerank_format == "tei" and self.rerank_url is None and self.base_url is not None:
             self.rerank_url = "/rerank"
+        elif (
+            self.rerank_format == "tei"
+            and self.rerank_url is None
+            and self.base_url is None
+            and self.provider != "voyageai"
+        ):
+            raise ValueError(RERANK_BASE_URL_REQUIRED)
         validate_rerank_configuration(
             provider=self.provider,
             rerank_format=self.rerank_format,
