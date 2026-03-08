@@ -689,3 +689,28 @@ class TestFactoryRerankUrlResolution:
         with patch.object(voyageai, "Client", return_value=MagicMock()):
             provider = EmbeddingProviderFactory._create_voyageai_provider(config)
         assert provider._rerank_url is None
+
+    def test_max_concurrent_batches_passed_through(self):
+        config = self._make_dict(max_concurrent_batches=7)
+        with patch.object(voyageai, "Client", return_value=MagicMock()):
+            provider = EmbeddingProviderFactory._create_voyageai_provider(config)
+        assert provider._embed_semaphore._value == 7
+
+
+# ===========================================================================
+# 11. get_model_info reflects supports_reranking()
+# ===========================================================================
+
+
+class TestGetModelInfo:
+    def test_official_api_supports_reranking_true(self, provider_official):
+        info = provider_official.get_model_info()
+        assert info["supports_reranking"] is True
+
+    def test_custom_endpoint_without_rerank_url_is_false(self, provider_custom):
+        info = provider_custom.get_model_info()
+        assert info["supports_reranking"] is False
+
+    def test_custom_endpoint_with_rerank_url_is_true(self, provider_with_rerank_url):
+        info = provider_with_rerank_url.get_model_info()
+        assert info["supports_reranking"] is True

@@ -191,10 +191,8 @@ class VoyageAIEmbeddingProvider:
 
         # Use the system CA bundle when available so that corporate proxy CAs
         # (e.g. Blue Coat / AMAT) are trusted without patching certifi.
-        # Inject a pre-configured requests.Session via voyageai.requestssession —
-        # the SDK's intended injection point (_make_session() in api_requestor.py)
-        # — so that CA configuration is scoped to the session rather than
-        # mutating os.environ process-wide.
+        # The session is stored on self for use in httpx calls (HTTP reranker
+        # path); it is NOT injected into the voyageai SDK globally.
         _sys_ca = "/etc/ssl/certs/ca-certificates.crt"
         if os.path.exists(_sys_ca) and not os.environ.get("REQUESTS_CA_BUNDLE"):
             _session = requests.Session()
@@ -479,7 +477,7 @@ class VoyageAIEmbeddingProvider:
             "rerank_model": self._rerank_model,
             "dimensions": self.dims,
             "max_tokens": self._max_tokens,
-            "supports_reranking": True,
+            "supports_reranking": self.supports_reranking(),
         }
 
     def get_usage_stats(self) -> dict[str, Any]:

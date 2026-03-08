@@ -203,8 +203,10 @@ class EmbeddingConfig(BaseSettings):
     @model_validator(mode="after")
     def validate_rerank_config(self) -> Self:
         """Validate rerank configuration using shared validation logic."""
-        # TEI format implies a relative /rerank endpoint when no explicit URL is given
-        if self.rerank_format == "tei" and self.rerank_url is None:
+        # TEI format implies a relative /rerank endpoint when no explicit URL is given.
+        # Only auto-set when base_url is present so the factory can resolve it to an
+        # absolute URL; without base_url there is nothing to resolve against.
+        if self.rerank_format == "tei" and self.rerank_url is None and self.base_url is not None:
             self.rerank_url = "/rerank"
         validate_rerank_configuration(
             provider=self.provider,
@@ -284,6 +286,8 @@ class EmbeddingConfig(BaseSettings):
         base_config["rerank_format"] = self.rerank_format
         if self.rerank_batch_size is not None:
             base_config["rerank_batch_size"] = self.rerank_batch_size
+        if self.max_concurrent_batches is not None:
+            base_config["max_concurrent_batches"] = self.max_concurrent_batches
 
         return base_config
 
