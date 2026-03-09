@@ -291,3 +291,4 @@ cluster_eval.json
 
 # AI review artifacts
 .gitignored/
+.tldr
