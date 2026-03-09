@@ -257,6 +257,7 @@ def added_during_edit():
         print("✓ File deletion: Deleted file content not found in search")
 
     @pytest.mark.asyncio
+    @pytest.mark.timeout(600)
     async def test_language_coverage_comprehensive(self, qa_setup):
         """QA Items 5-6: Test all supported languages and file types."""
         services, realtime_service, watch_dir, _ = qa_setup
