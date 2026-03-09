@@ -22,6 +22,8 @@ from chunkhound.interfaces.language_parser import LanguageParser
 # Import all language mappings
 from chunkhound.parsers.mappings import (
     BashMapping,
+    CssMapping,
+    HtmlMapping,
     CMapping,
     CppMapping,
     CSharpMapping,
@@ -43,6 +45,7 @@ from chunkhound.parsers.mappings import (
     PDFMapping,
     PHPMapping,
     PythonMapping,
+    ScssMapping,
     RustMapping,
     SqlMapping,
     SvelteMapping,
@@ -205,6 +208,29 @@ if not HCL_AVAILABLE:
 
 # SQL language support - direct import (required dependency in pyproject.toml)
 import tree_sitter_sql as ts_sql
+
+# Web language support - direct imports (required dependencies in pyproject.toml)
+import tree_sitter_html as ts_html
+import tree_sitter_css as ts_css
+
+try:
+    from tree_sitter_language_pack import get_language as _get_language_scss
+
+    _scss_lang = _get_language_scss("scss")
+    if _scss_lang:
+
+        class _ScssLanguageWrapper:
+            def language(self):
+                return _scss_lang
+
+        ts_scss = _ScssLanguageWrapper()  # type: ignore[assignment]
+        SCSS_AVAILABLE = True
+    else:
+        ts_scss = None  # type: ignore[assignment]
+        SCSS_AVAILABLE = False
+except ImportError:
+    ts_scss = None  # type: ignore[assignment]
+    SCSS_AVAILABLE = False
 
 try:
     from tree_sitter_language_pack import get_language
@@ -388,6 +414,11 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.TSX: LanguageConfig(
         ts_typescript, TSXMapping, True, "tsx"
     ),  # TSX uses TS parser with tsx language
+    # Web languages
+    Language.HTML: LanguageConfig(ts_html, HtmlMapping, True, "html"),
+    Language.CSS: LanguageConfig(ts_css, CssMapping, True, "css"),
+    Language.SCSS: LanguageConfig(ts_scss, ScssMapping, SCSS_AVAILABLE, "scss"),
+    Language.JINJA: LanguageConfig(ts_html, HtmlMapping, True, "html"),
     # Non-tree-sitter languages
     Language.TEXT: LanguageConfig(
         None, TextMapping, True, "text"
@@ -485,6 +516,16 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     "GNUmakefile": Language.MAKEFILE,
     ".mk": Language.MAKEFILE,
     ".mak": Language.MAKEFILE,
+    # Web languages
+    ".html": Language.HTML,
+    ".htm": Language.HTML,
+    ".xhtml": Language.HTML,
+    ".jinja": Language.JINJA,
+    ".j2": Language.JINJA,
+    ".njk": Language.JINJA,
+    ".ejs": Language.JINJA,
+    ".css": Language.CSS,
+    ".scss": Language.SCSS,
     # Text files (fallback)
     ".txt": Language.TEXT,
     ".text": Language.TEXT,

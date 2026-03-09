@@ -1,0 +1,136 @@
+/* CSS Comprehensive Test Fixture */
+
+/* Import statements */
+@import "variables.css";
+@import url("https://fonts.googleapis.com/css2?family=Roboto");
+
+/* Root variables (STRUCTURE) */
+:root {
+  --primary-color: #3498db;
+  --secondary-color: #2ecc71;
+  --font-size-base: 16px;
+  --spacing-unit: 8px;
+}
+
+/* Wildcard with variables (STRUCTURE) */
+* {
+  --default-margin: 0;
+  --default-padding: 0;
+}
+
+/* Simple selectors (DEFINITION) */
+body {
+  margin: 0;
+  padding: 0;
+  font-family: 'Roboto', sans-serif;
+  font-size: var(--font-size-base);
+  color: #333;
+}
+
+h1 {
+  font-size: 2em;
+  font-weight: bold;
+  margin-bottom: 1rem;
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 var(--spacing-unit);
+}
+
+#main-header {
+  background-color: var(--primary-color);
+  color: white;
+  padding: 1rem;
+}
+
+/* Complex selectors (DEFINITION) */
+.nav > ul > li > a:hover {
+  color: var(--secondary-color);
+  text-decoration: underline;
+}
+
+input[type="text"],
+input[type="email"],
+textarea {
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 0.5rem;
+}
+
+.card:not(.disabled):hover .card-title {
+  color: var(--primary-color);
+}
+
+/* Media queries (BLOCK) */
+@media (max-width: 768px) {
+  .container {
+    padding: 0 1rem;
+  }
+  .nav {
+    display: none;
+  }
+}
+
+@media (min-width: 1200px) and (max-width: 1600px) {
+  .container {
+    max-width: 1400px;
+  }
+}
+
+@media print {
+  .no-print {
+    display: none;
+  }
+}
+
+/* Keyframes (BLOCK) */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Supports (BLOCK) */
+@supports (display: grid) {
+  .grid-container {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+  }
+}
+
+@supports not (display: flex) {
+  .flex-fallback {
+    display: block;
+  }
+}
+
+/* More selectors */
+.btn {
+  display: inline-block;
+  padding: 0.5rem 1rem;
+  background-color: var(--primary-color);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.btn:hover {
+  background-color: var(--secondary-color);
+}
+
+/* CSS comment at end */
+/* End of comprehensive CSS file */

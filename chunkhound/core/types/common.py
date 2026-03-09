@@ -158,6 +158,12 @@ class Language(Enum):
     DART = "dart"
     LUA = "lua"
 
+    # Web languages
+    HTML = "html"
+    CSS = "css"
+    SCSS = "scss"
+    JINJA = "jinja"  # .jinja, .j2, .njk, .erb, .ejs — parsed with HTML grammar
+
     # Documentation languages
     MARKDOWN = "markdown"
 
@@ -249,6 +255,16 @@ class Language(Enum):
             ".swift": cls.SWIFT,
             ".swiftinterface": cls.SWIFT,
             ".lua": cls.LUA,
+            ".html": cls.HTML,
+            ".htm": cls.HTML,
+            ".css": cls.CSS,
+            ".scss": cls.SCSS,
+            ".sass": cls.SCSS,
+            ".jinja": cls.JINJA,
+            ".j2": cls.JINJA,
+            ".njk": cls.JINJA,
+            ".erb": cls.JINJA,
+            ".ejs": cls.JINJA,
         }
 
         return extension_map.get(extension, cls.UNKNOWN)
