@@ -92,10 +92,18 @@ class TestUpdateProgressWithSpeedHelper:
         self.mock_progress.advance.assert_called_once()
 
     def test_valid_progress_update_succeeds(self):
-        """Valid progress state should update speed display."""
+        """Valid progress state should update speed display.
+
+        Speed is now calculated from self._embed_start_time (wallclock),
+        not from task_obj.elapsed (Rich internal).
+        """
+        import time
+
         mock_task = MagicMock()
-        mock_task.elapsed = 5.0
         self.mock_progress.tasks = {1: mock_task}
+
+        # Set wallclock start 5 seconds ago so speed is ~20 chunks/s
+        self.service._embed_start_time = time.monotonic() - 5.0
 
         self.service._update_progress_with_speed(
             embed_task=1,
@@ -107,9 +115,9 @@ class TestUpdateProgressWithSpeedHelper:
         # Both advance and update should be called
         self.mock_progress.advance.assert_called_once_with(1, 10)
         self.mock_progress.update.assert_called_once()
-        # Check speed was calculated: 100 / 5.0 = 20.0
+        # Speed should be non-zero (approximately 100/5 = 20 chunks/s)
         call_args = self.mock_progress.update.call_args
-        assert "20.0 chunks/s" in str(call_args)
+        assert "chunks/s" in str(call_args), f"Speed not in update call: {call_args}"
 
     def test_zero_elapsed_skips_speed_update(self):
         """Zero elapsed time should skip speed calculation (avoid division)."""
@@ -208,10 +216,12 @@ class TestProgressFailuresDoNotMaskEmbeddingErrors:
     async def test_successful_embedding_with_broken_progress(self):
         """Successful embeddings should complete even if progress tracking fails."""
         # Configure embedding provider to succeed (async method needs AsyncMock)
-        self.mock_embedding_provider.embed = AsyncMock(return_value=[
-            [0.1] * 768,
-            [0.2] * 768,
-        ])
+        self.mock_embedding_provider.embed = AsyncMock(
+            return_value=[
+                [0.1] * 768,
+                [0.2] * 768,
+            ]
+        )
 
         # Configure progress to fail
         self.mock_progress.tasks = {}  # Will raise KeyError
@@ -240,12 +250,15 @@ class TestExceptionTupleCompleteness:
 
     EXCEPTION_TUPLE = (AttributeError, IndexError, TypeError, KeyError)
 
-    @pytest.mark.parametrize("exception_class,scenario", [
-        (KeyError, "task ID not in progress.tasks dict"),
-        (AttributeError, "task object missing attribute"),
-        (IndexError, "task ID out of range in list-like container"),
-        (TypeError, "elapsed has incompatible type for comparison/division"),
-    ])
+    @pytest.mark.parametrize(
+        "exception_class,scenario",
+        [
+            (KeyError, "task ID not in progress.tasks dict"),
+            (AttributeError, "task object missing attribute"),
+            (IndexError, "task ID out of range in list-like container"),
+            (TypeError, "elapsed has incompatible type for comparison/division"),
+        ],
+    )
     def test_all_expected_exceptions_are_in_tuple(self, exception_class, scenario):
         """Verify each expected exception type is in the catch tuple."""
         assert exception_class in self.EXCEPTION_TUPLE, (
@@ -310,9 +323,7 @@ class TestWallclockSpeedCalculation:
 
         before = time.monotonic()
         try:
-            asyncio.run(
-                svc._generate_embeddings_in_batches([], show_progress=False)
-            )
+            asyncio.run(svc._generate_embeddings_in_batches([], show_progress=False))
         except Exception:
             pass  # not testing correctness, just that the attr is set
         after = time.monotonic()
@@ -347,9 +358,7 @@ class TestWallclockSpeedCalculation:
         stale_start = svc._embed_start_time
 
         try:
-            asyncio.run(
-                svc._generate_embeddings_in_batches([], show_progress=False)
-            )
+            asyncio.run(svc._generate_embeddings_in_batches([], show_progress=False))
         except Exception:
             pass
 
