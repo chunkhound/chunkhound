@@ -25,7 +25,7 @@ def is_windows() -> bool:
 
 def normalize_path_for_comparison(path: str | Path) -> str:
     """Normalize path for cross-platform comparison.
-    
+
     On Windows, resolves short path names (8.3 format) to full paths.
     """
     path_obj = Path(path)
@@ -62,7 +62,7 @@ def path_contains(parent: str | Path, child: str | Path) -> bool:
 @contextmanager
 def database_cleanup_context(provider: Any = None) -> Generator[None, None, None]:
     """Context manager for proper database cleanup on Windows.
-    
+
     Args:
         provider: Database provider to cleanup (optional)
     """
@@ -74,16 +74,16 @@ def database_cleanup_context(provider: Any = None) -> Generator[None, None, None
 
 def cleanup_database_resources(provider: Any = None) -> None:
     """Cleanup database resources with Windows-specific handling.
-    
+
     Args:
         provider: Database provider to cleanup (optional)
     """
     try:
         # Close database provider if provided
         if provider is not None:
-            if hasattr(provider, 'close'):
+            if hasattr(provider, "close"):
                 provider.close()
-            elif hasattr(provider, 'disconnect'):
+            elif hasattr(provider, "disconnect"):
                 provider.disconnect()
             # Note: Some tests may use close() instead - prefer that when available
 
@@ -101,7 +101,7 @@ def cleanup_database_resources(provider: Any = None) -> None:
 @contextmanager
 def windows_safe_tempdir() -> Generator[Path, None, None]:
     """Create a temporary directory with Windows-safe cleanup.
-    
+
     Uses database cleanup utilities to ensure proper resource cleanup
     before attempting to delete the directory.
     """
@@ -117,6 +117,7 @@ def windows_safe_tempdir() -> Generator[Path, None, None]:
 
                 # Try to remove the directory
                 import shutil
+
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
                 # On Windows, retry if removal failed
@@ -130,11 +131,11 @@ def windows_safe_tempdir() -> Generator[Path, None, None]:
 
 def wait_for_file_release(file_path: Path, max_attempts: int = 10) -> bool:
     """Wait for a file to be released on Windows.
-    
+
     Args:
         file_path: Path to file to check
         max_attempts: Maximum number of attempts
-        
+
     Returns:
         True if file was released, False if still locked
     """
@@ -187,6 +188,11 @@ def should_use_polling() -> bool:
     return is_windows() and is_ci()
 
 
+def realtime_backend_for_tests() -> str:
+    """Return the explicit realtime backend tests should configure."""
+    return "polling" if should_use_polling() else "watchdog"
+
+
 def get_fs_event_timeout() -> float:
     """Get appropriate timeout for filesystem event detection.
 
@@ -199,10 +205,7 @@ def get_fs_event_timeout() -> float:
 
 
 async def wait_for_indexed(
-    provider,
-    file_path,
-    timeout: float | None = None,
-    poll_interval: float = 0.2
+    provider, file_path, timeout: float | None = None, poll_interval: float = 0.2
 ) -> bool:
     """Wait for file to appear in database index.
 
@@ -236,10 +239,7 @@ async def wait_for_indexed(
 
 
 def wait_for_indexed_sync(
-    provider,
-    file_path,
-    timeout: float | None = None,
-    poll_interval: float = 0.2
+    provider, file_path, timeout: float | None = None, poll_interval: float = 0.2
 ) -> bool:
     """Sync version of wait_for_indexed."""
     if timeout is None:
@@ -258,10 +258,7 @@ def wait_for_indexed_sync(
 
 
 async def wait_for_removed(
-    provider,
-    file_path,
-    timeout: float | None = None,
-    poll_interval: float = 0.2
+    provider, file_path, timeout: float | None = None, poll_interval: float = 0.2
 ) -> bool:
     """Wait for file to be removed from database index.
 
@@ -294,10 +291,7 @@ async def wait_for_removed(
 
 
 async def wait_for_regex_searchable(
-    services,
-    query: str,
-    timeout: float | None = None,
-    poll_interval: float = 0.5
+    services, query: str, timeout: float | None = None, poll_interval: float = 0.5
 ) -> bool:
     """Wait for content to be regex-searchable in the index.
 
@@ -326,13 +320,13 @@ async def wait_for_regex_searchable(
     deadline = time.monotonic() + timeout
 
     while time.monotonic() < deadline:
-        results = await execute_tool("search", services, None, {
-            "type": "regex",
-            "query": query,
-            "page_size": 10,
-            "offset": 0
-        })
-        if len(results.get('results', [])) > 0:
+        results = await execute_tool(
+            "search",
+            services,
+            None,
+            {"type": "regex", "query": query, "page_size": 10, "offset": 0},
+        )
+        if len(results.get("results", [])) > 0:
             return True
         await asyncio.sleep(poll_interval)
 

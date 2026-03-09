@@ -19,7 +19,7 @@ from chunkhound.services.realtime_indexing_service import (
     RealtimeIndexingService,
     SimpleEventHandler,
 )
-from tests.utils.windows_compat import should_use_polling, wait_for_indexed
+from tests.utils.windows_compat import realtime_backend_for_tests, wait_for_indexed
 
 
 class TestRealtimeFunctional:
@@ -45,17 +45,17 @@ class TestRealtimeFunctional:
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
-            indexing={"include": ["*.py", "*.js"], "exclude": ["*.log"]},
+            indexing={
+                "include": ["*.py", "*.js"],
+                "exclude": ["*.log"],
+                "realtime_backend": realtime_backend_for_tests(),
+            },
         )
 
         services = create_services(db_path, config)
         services.provider.connect()
 
-        # Use polling on Windows CI where watchdog's ReadDirectoryChangesW is unreliable
-        force_polling = should_use_polling()
-        realtime_service = RealtimeIndexingService(
-            services, config, force_polling=force_polling
-        )
+        realtime_service = RealtimeIndexingService(services, config)
 
         yield realtime_service, watch_dir, temp_dir, services
 
@@ -89,7 +89,11 @@ class TestRealtimeFunctional:
         )
         assert "event_queue" in stats, "Should expose event queue health"
         assert "resync" in stats, "Should expose backend-neutral resync state"
+        assert "configured_backend" in stats, "Should expose configured backend"
+        assert "effective_backend" in stats, "Should expose effective backend"
         assert "monitoring_mode" in stats, "Should expose current monitoring mode"
+        assert stats["configured_backend"] == realtime_backend_for_tests()
+        assert stats["monitoring_mode"] == stats["effective_backend"]
 
         # Should be able to stop cleanly
         await service.stop()
@@ -127,6 +131,79 @@ class TestRealtimeFunctional:
         assert stats["resync"]["last_reason"] == "manual_reconcile"
 
         await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_explicit_polling_backend_reports_polling_mode(self, realtime_setup):
+        """Explicit polling config should report polling as the active backend."""
+        service, watch_dir, _, _ = realtime_setup
+        service.config.indexing.realtime_backend = "polling"
+
+        await service.start(watch_dir)
+
+        stats = await service.get_health()
+        assert stats["configured_backend"] == "polling"
+        assert stats["effective_backend"] == "polling"
+        assert stats["monitoring_mode"] == "polling"
+        assert stats["last_warning"] is None
+
+        await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_inflight_polling_start(
+        self, realtime_setup, monkeypatch
+    ):
+        """stop() should invalidate an in-flight polling start."""
+        service, watch_dir, _, _ = realtime_setup
+        service.config.indexing.realtime_backend = "polling"
+        startup_blocked = asyncio.Event()
+        release_startup = asyncio.Event()
+
+        async def blocked_start_polling_backend(
+            _watch_path: Path,
+            reason: str,
+            emit_warning: bool = True,
+        ) -> None:
+            assert reason == "Configured realtime backend is polling"
+            assert emit_warning is False
+            startup_blocked.set()
+            await release_startup.wait()
+
+        monkeypatch.setattr(
+            service, "_start_polling_backend", blocked_start_polling_backend
+        )
+
+        start_task = asyncio.create_task(service.start(watch_dir))
+        await asyncio.wait_for(startup_blocked.wait(), timeout=1.0)
+
+        await service.stop()
+        release_startup.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+
+        stats = await service.get_health()
+        assert stats["service_state"] == "stopped"
+        assert stats["monitoring_ready"] is False
+        assert stats["effective_backend"] == "uninitialized"
+        assert service.event_consumer_task is None
+        assert service.process_task is None
+
+    @pytest.mark.asyncio
+    async def test_watchman_placeholder_does_not_claim_effective_backend(
+        self, realtime_setup
+    ):
+        """Watchman placeholder should not claim an active effective backend."""
+        service, watch_dir, _, _ = realtime_setup
+        service.config.indexing.realtime_backend = "watchman"
+
+        with pytest.raises(RuntimeError, match="not implemented"):
+            await service.start(watch_dir)
+
+        stats = await service.get_health()
+        assert stats["configured_backend"] == "watchman"
+        assert stats["effective_backend"] == "uninitialized"
+        assert stats["monitoring_mode"] == "uninitialized"
+        assert stats["service_state"] == "degraded"
 
     @pytest.mark.asyncio
     async def test_missing_resync_callback_degrades_without_task_leak(
@@ -200,9 +277,11 @@ class TestRealtimeFunctional:
     async def test_watchdog_timeout_fallback_does_not_adopt_late_watchdog(
         self, realtime_setup, monkeypatch
     ):
-        """Late watchdog bootstrap results should not overwrite polling fallback."""
+        """Late watchdog bootstrap results should be stopped after polling fallback."""
         service, watch_dir, _, _ = realtime_setup
+        service.config.indexing.realtime_backend = "watchdog"
         late_watchdog_returned = asyncio.Event()
+        late_observer = MagicMock()
 
         def late_bootstrap(
             _watch_path: Path,
@@ -211,7 +290,7 @@ class TestRealtimeFunctional:
         ) -> tuple[MagicMock, MagicMock]:
             time.sleep(0.05)
             loop.call_soon_threadsafe(late_watchdog_returned.set)
-            return MagicMock(), MagicMock()
+            return late_observer, MagicMock()
 
         monkeypatch.setattr(
             service, "_WATCHDOG_SETUP_TIMEOUT_SECONDS", 0.01, raising=False
@@ -227,11 +306,71 @@ class TestRealtimeFunctional:
 
         stats = await service.get_health()
         assert stats["monitoring_mode"] == "polling"
+        assert stats["configured_backend"] == "watchdog"
+        assert stats["effective_backend"] == "polling"
         assert service.observer is None
         assert service.event_handler is None
         assert service._polling_task is not None
+        late_observer.stop.assert_called_once()
+        late_observer.join.assert_called_once_with(timeout=1.0)
 
         await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_swallows_bootstrap_exception_and_finishes_cleanup(
+        self, realtime_setup
+    ):
+        """Bootstrap exceptions during stop should not abort the rest of cleanup."""
+        service, _watch_dir, _, _ = realtime_setup
+        service.config.indexing.realtime_backend = "watchdog"
+        service._monitor_adapter = service._build_monitor_adapter()
+        service._watchdog_setup_task = asyncio.create_task(asyncio.sleep(3600))
+        bootstrap_future: asyncio.Future[tuple[MagicMock, MagicMock] | None] = (
+            asyncio.get_running_loop().create_future()
+        )
+        bootstrap_future.set_exception(RuntimeError("bootstrap exploded during stop"))
+        service._watchdog_bootstrap_future = bootstrap_future
+
+        await service.stop()
+
+        assert service._service_state == "stopped"
+        assert service._watchdog_bootstrap_future is None
+
+    @pytest.mark.asyncio
+    async def test_watchman_backend_raises_until_adapter_is_implemented(self, tmp_path):
+        """Selecting watchman should fail explicitly until later epic steps land."""
+        from types import SimpleNamespace
+
+        fake_args = SimpleNamespace(path=tmp_path)
+        config = Config(
+            args=fake_args,
+            database={
+                "path": str(tmp_path / ".chunkhound" / "test.db"),
+                "provider": "duckdb",
+            },
+            indexing={"realtime_backend": "watchman"},
+        )
+        Path(config.database.path).parent.mkdir(parents=True, exist_ok=True)
+
+        services = create_services(config.database.path, config)
+        services.provider.connect()
+        service = RealtimeIndexingService(services, config)
+
+        watch_dir = tmp_path / "watchman_project"
+        watch_dir.mkdir(parents=True)
+
+        try:
+            with pytest.raises(RuntimeError, match="watchman"):
+                await service.start(watch_dir)
+
+            stats = await service.get_health()
+            assert stats["configured_backend"] == "watchman"
+            assert stats["effective_backend"] == "uninitialized"
+            assert stats["monitoring_mode"] == "uninitialized"
+            assert stats["service_state"] == "degraded"
+        finally:
+            await service.stop()
+            services.provider.disconnect()
 
     @pytest.mark.asyncio
     async def test_full_event_queue_tracks_drop_and_requests_resync(

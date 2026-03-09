@@ -17,7 +17,7 @@ import time
 from collections.abc import Awaitable, Callable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from loguru import logger
 from watchdog.events import FileSystemEventHandler
@@ -234,6 +234,99 @@ class SimpleEventHandler(FileSystemEventHandler):
             pass
 
 
+class RealtimeMonitorAdapter(Protocol):
+    """Backend-specific filesystem monitoring lifecycle."""
+
+    backend_name: str
+
+    async def start(
+        self, watch_path: Path, loop: asyncio.AbstractEventLoop
+    ) -> None: ...
+
+    async def stop(self) -> None: ...
+
+    def get_health(self) -> dict[str, Any]: ...
+
+
+class WatchdogRealtimeAdapter:
+    """Watchdog-backed monitor with polling fallback."""
+
+    backend_name = "watchdog"
+
+    def __init__(self, service: "RealtimeIndexingService") -> None:
+        self._service = service
+
+    async def start(self, watch_path: Path, loop: asyncio.AbstractEventLoop) -> None:
+        self._service._set_effective_backend(self.backend_name)
+        await self._service._setup_watchdog_with_timeout(watch_path, loop)
+
+    async def stop(self) -> None:
+        await self._service._cancel_watchdog_setup_task()
+        await self._service._cancel_watchdog_bootstrap_future()
+        await self._service._stop_observer()
+        await self._service._cancel_polling_task()
+
+    def get_health(self) -> dict[str, Any]:
+        observer_alive = False
+        if self._service.observer and self._service.observer.is_alive():
+            observer_alive = True
+        elif (
+            self._service._using_polling
+            and self._service._polling_task
+            and not self._service._polling_task.done()
+        ):
+            observer_alive = True
+        return {"observer_alive": observer_alive}
+
+
+class PollingRealtimeAdapter:
+    """Explicit polling backend."""
+
+    backend_name = "polling"
+
+    def __init__(self, service: "RealtimeIndexingService") -> None:
+        self._service = service
+
+    async def start(self, watch_path: Path, loop: asyncio.AbstractEventLoop) -> None:
+        del loop
+        await self._service._start_polling_backend(
+            watch_path,
+            reason="Configured realtime backend is polling",
+            emit_warning=False,
+        )
+
+    async def stop(self) -> None:
+        await self._service._cancel_polling_task()
+
+    def get_health(self) -> dict[str, Any]:
+        return {
+            "observer_alive": bool(
+                self._service._polling_task and not self._service._polling_task.done()
+            )
+        }
+
+
+class WatchmanRealtimeAdapter:
+    """Placeholder adapter slot for future Watchman work."""
+
+    backend_name = "watchman"
+
+    def __init__(self, service: "RealtimeIndexingService") -> None:
+        self._service = service
+
+    async def start(self, watch_path: Path, loop: asyncio.AbstractEventLoop) -> None:
+        del watch_path, loop
+        message = "Realtime backend 'watchman' is not implemented on this branch yet"
+        self._service._set_error(message)
+        raise RuntimeError(message)
+
+    async def stop(self) -> None:
+        return None
+
+    def get_health(self) -> dict[str, Any]:
+        return {"observer_alive": False}
+
+
 class RealtimeIndexingService:
     """Simple real-time indexing service with search responsiveness."""
 
@@ -252,7 +345,6 @@ class RealtimeIndexingService:
         services: DatabaseServices,
         config: Config,
         debug_sink: Callable[[str], None] | None = None,
-        force_polling: bool = False,
         status_callback: Callable[[dict[str, Any]], None] | None = None,
         resync_callback: Callable[[str, dict[str, Any] | None], Awaitable[None]]
         | None = None,
@@ -262,10 +354,11 @@ class RealtimeIndexingService:
         # Optional sink that writes to MCPServerBase.debug_log so events land in
         # /tmp/chunkhound_mcp_debug.log when CHUNKHOUND_DEBUG is enabled.
         self._debug_sink = debug_sink
-        # Force polling mode - useful for Windows CI where watchdog is unreliable
-        self._force_polling = force_polling
         self._status_callback = status_callback
         self._resync_callback = resync_callback
+        self._configured_backend = self._resolve_configured_backend()
+        self._effective_backend = "uninitialized"
+        self._monitor_adapter: RealtimeMonitorAdapter | None = None
 
         # Existing asyncio queue for priority processing
         self.file_queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue()
@@ -318,6 +411,8 @@ class RealtimeIndexingService:
         ) = None
         self._watchdog_bootstrap_abort = threading.Event()
         self._resync_dispatch_task: asyncio.Task | None = None
+        self._active_start_task: asyncio.Task | None = None
+        self._start_generation = 0
         self._using_polling = False
         self._service_state = "idle"
         self._last_poll_snapshot_at: str | None = None
@@ -351,9 +446,13 @@ class RealtimeIndexingService:
         return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
     @classmethod
-    def default_health_snapshot(cls) -> dict[str, Any]:
+    def default_health_snapshot(
+        cls, configured_backend: str | None = None
+    ) -> dict[str, Any]:
         """Return the neutral realtime health structure used by MCP status plumbing."""
         return {
+            "configured_backend": configured_backend,
+            "effective_backend": "uninitialized",
             "service_state": "idle",
             "monitoring_mode": "uninitialized",
             "monitoring_ready": False,
@@ -399,6 +498,20 @@ class RealtimeIndexingService:
             },
         }
 
+    @classmethod
+    def health_snapshot_for_config(cls, config: Any | None) -> dict[str, Any]:
+        """Return the neutral realtime health snapshot seeded from config."""
+        configured_backend = None
+        try:
+            backend = getattr(
+                getattr(config, "indexing", None), "realtime_backend", None
+            )
+            if backend in {"watchman", "watchdog", "polling"}:
+                configured_backend = str(backend)
+        except Exception:
+            configured_backend = None
+        return cls.default_health_snapshot(configured_backend=configured_backend)
+
     # Internal helper to forward realtime events into the MCP debug log file
     def _debug(self, message: str) -> None:
         try:
@@ -433,6 +546,29 @@ class RealtimeIndexingService:
             self._service_state = "running"
         self._emit_status_update()
 
+    def _resolve_configured_backend(self) -> str:
+        backend = getattr(self.config.indexing, "realtime_backend", "watchdog")
+        if backend in {"watchman", "watchdog", "polling"}:
+            return str(backend)
+        return "watchdog"
+
+    def _set_effective_backend(self, backend: str) -> None:
+        self._effective_backend = backend
+
+    def _start_still_owned(self, start_generation: int) -> bool:
+        """Return whether a start() invocation still owns service startup state."""
+        return (
+            start_generation == self._start_generation
+            and self._service_state not in {"stopping", "stopped"}
+        )
+
+    def _build_monitor_adapter(self) -> RealtimeMonitorAdapter:
+        if self._configured_backend == "watchman":
+            return WatchmanRealtimeAdapter(self)
+        if self._configured_backend == "polling":
+            return PollingRealtimeAdapter(self)
+        return WatchdogRealtimeAdapter(self)
+
     def _build_health_snapshot(self) -> dict[str, Any]:
         monitoring_active = False
         if self.observer and self.observer.is_alive():
@@ -441,17 +577,23 @@ class RealtimeIndexingService:
             self._using_polling and self._polling_task and not self._polling_task.done()
         ):
             monitoring_active = True
+        adapter_health = (
+            self._monitor_adapter.get_health() if self._monitor_adapter else {}
+        )
+        if "observer_alive" in adapter_health:
+            monitoring_active = bool(adapter_health["observer_alive"])
 
-        if self.watch_path is None:
+        effective_backend = self._effective_backend
+        if self.watch_path is None and effective_backend == "uninitialized":
             monitoring_mode = "uninitialized"
-        elif self._using_polling:
-            monitoring_mode = "polling"
         else:
-            monitoring_mode = "watchdog"
+            monitoring_mode = effective_backend
 
         status = self.default_health_snapshot()
         status.update(
             {
+                "configured_backend": self._configured_backend,
+                "effective_backend": effective_backend,
                 "service_state": self._service_state,
                 "monitoring_mode": monitoring_mode,
                 "monitoring_ready": self.monitoring_ready.is_set(),
@@ -468,6 +610,9 @@ class RealtimeIndexingService:
                 "last_error_at": self._last_error_at,
             }
         )
+        for key, value in adapter_health.items():
+            if key != "observer_alive":
+                status[key] = value
         status["event_queue"].update(
             {
                 "size": self.event_queue.qsize(),
@@ -606,62 +751,16 @@ class RealtimeIndexingService:
         finally:
             self._resync_dispatch_task = None
 
-    async def start(self, watch_path: Path) -> None:
-        """Start real-time indexing service."""
-        # Resolve path to canonical form for Windows 8.3 short name handling
-        # This ensures polling monitor paths stay aligned with the coordinator's
-        # normalized base directory.
-        watch_path = watch_path.resolve()
-
-        logger.debug(f"Starting real-time indexing for {watch_path}")
-        self._debug(f"start watch on {watch_path}")
-        self._service_state = "starting"
-
-        # Store the watch path
-        self.watch_path = watch_path
-        self._emit_status_update()
-
-        # Always start with watchdog but with reasonable timeout
-        # If it takes too long, we'll fall back to polling
-        loop = asyncio.get_event_loop()
-
-        # Start all necessary tasks
-        self.event_consumer_task = asyncio.create_task(self._consume_events())
-        self.process_task = asyncio.create_task(self._process_loop())
-
-        # Setup watchdog with timeout
-        self._watchdog_setup_task = asyncio.create_task(
-            self._setup_watchdog_with_timeout(watch_path, loop)
-        )
-
-        # Wait for monitoring to be confirmed ready
-        monitoring_ok = await self.wait_for_monitoring_ready(
-            timeout=self._MONITORING_READY_TIMEOUT_SECONDS
-        )
-        if monitoring_ok:
-            self._service_state = "running"
-            self._debug("monitoring ready")
-        else:
-            self._service_state = "degraded"
-            self._set_warning("Monitoring did not become ready before startup timeout")
-            self._debug("monitoring timeout; continuing")
-        self._emit_status_update()
-
-    async def stop(self) -> None:
-        """Stop the service gracefully."""
-        logger.debug("Stopping real-time indexing service")
-        self._debug("stopping service")
-        self._service_state = "stopping"
-        self._emit_status_update()
-
-        # Cancel watchdog setup if still running
+    async def _cancel_watchdog_setup_task(self) -> None:
         if self._watchdog_setup_task:
             self._watchdog_setup_task.cancel()
             try:
                 await self._watchdog_setup_task
             except asyncio.CancelledError:
                 pass
+            self._watchdog_setup_task = None
 
+    async def _cancel_watchdog_bootstrap_future(self) -> None:
         self._watchdog_bootstrap_abort.set()
         if (
             self._watchdog_bootstrap_future
@@ -671,11 +770,17 @@ class RealtimeIndexingService:
                 await asyncio.wait_for(self._watchdog_bootstrap_future, timeout=1.0)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
+            except Exception as error:
+                logger.debug(
+                    "Watchdog bootstrap future raised during shutdown: "
+                    f"{type(error).__name__}: {error}"
+                )
+        if self._watchdog_bootstrap_future and self._watchdog_bootstrap_future.done():
+            self._watchdog_bootstrap_future = None
 
-        # Stop filesystem observer
+    async def _stop_observer(self) -> None:
         if self.observer:
             self.observer.stop()
-            # Join with timeout to prevent hanging
             try:
                 loop = asyncio.get_event_loop()
                 await asyncio.wait_for(
@@ -683,6 +788,100 @@ class RealtimeIndexingService:
                 )
             except asyncio.TimeoutError:
                 logger.warning("Observer thread did not exit within timeout")
+            self.observer = None
+            self.event_handler = None
+
+    async def _cancel_polling_task(self) -> None:
+        if self._polling_task:
+            self._polling_task.cancel()
+            try:
+                await self._polling_task
+            except asyncio.CancelledError:
+                pass
+            self._polling_task = None
+        self._using_polling = False
+
+    async def start(self, watch_path: Path) -> None:
+        """Start real-time indexing service."""
+        start_task = asyncio.current_task()
+        self._active_start_task = start_task
+        self._start_generation += 1
+        start_generation = self._start_generation
+
+        # Resolve path to canonical form for Windows 8.3 short name handling
+        # This ensures polling monitor paths stay aligned with the coordinator's
+        # normalized base directory.
+        watch_path = watch_path.resolve()
+
+        try:
+            logger.debug(f"Starting real-time indexing for {watch_path}")
+            self._debug(f"start watch on {watch_path}")
+            self._service_state = "starting"
+            self._configured_backend = self._resolve_configured_backend()
+            self._effective_backend = "uninitialized"
+            self._monitor_adapter = self._build_monitor_adapter()
+            self.monitoring_ready.clear()
+            self._monitoring_ready_at = None
+
+            # Store the watch path
+            self.watch_path = watch_path
+            self._emit_status_update()
+
+            loop = asyncio.get_event_loop()
+
+            if self._configured_backend == "watchman":
+                await self._monitor_adapter.start(watch_path, loop)
+                return
+
+            # Start all necessary tasks
+            self.event_consumer_task = asyncio.create_task(self._consume_events())
+            self.process_task = asyncio.create_task(self._process_loop())
+
+            await self._monitor_adapter.start(watch_path, loop)
+            if not self._start_still_owned(start_generation):
+                return
+
+            # Wait for monitoring to be confirmed ready
+            monitoring_ok = await self.wait_for_monitoring_ready(
+                timeout=self._MONITORING_READY_TIMEOUT_SECONDS
+            )
+            if not self._start_still_owned(start_generation):
+                return
+
+            if monitoring_ok:
+                self._service_state = "running"
+                self._debug("monitoring ready")
+            else:
+                self._service_state = "degraded"
+                self._set_warning(
+                    "Monitoring did not become ready before startup timeout"
+                )
+                self._debug("monitoring timeout; continuing")
+            self._emit_status_update()
+        finally:
+            if self._active_start_task is start_task:
+                self._active_start_task = None
+
+    async def stop(self) -> None:
+        """Stop the service gracefully."""
+        logger.debug("Stopping real-time indexing service")
+        self._debug("stopping service")
+        self._start_generation += 1
+        self._service_state = "stopping"
+        self.monitoring_ready.clear()
+        self._monitoring_ready_at = None
+        self._emit_status_update()
+
+        active_start_task = self._active_start_task
+        if (
+            active_start_task
+            and active_start_task is not asyncio.current_task()
+            and not active_start_task.done()
+        ):
+            active_start_task.cancel()
+
+        if self._monitor_adapter:
+            await self._monitor_adapter.stop()
 
         # Cancel event consumer task
         if self.event_consumer_task:
@@ -691,6 +890,7 @@ class RealtimeIndexingService:
                 await self.event_consumer_task
             except asyncio.CancelledError:
                 pass
+            self.event_consumer_task = None
 
         # Cancel processing task
         if self.process_task:
@@ -699,14 +899,7 @@ class RealtimeIndexingService:
                 await self.process_task
             except asyncio.CancelledError:
                 pass
-
-        # Cancel polling task if running
-        if self._polling_task:
-            self._polling_task.cancel()
-            try:
-                await self._polling_task
-            except asyncio.CancelledError:
-                pass
+            self.process_task = None
 
         if self._resync_dispatch_task:
             self._resync_dispatch_task.cancel()
@@ -726,20 +919,13 @@ class RealtimeIndexingService:
             self._debounce_tasks.clear()
 
         self._service_state = "stopped"
+        self._monitor_adapter = None
         self._emit_status_update()
 
     async def _setup_watchdog_with_timeout(
         self, watch_path: Path, loop: asyncio.AbstractEventLoop
     ) -> None:
         """Setup watchdog with timeout - fall back to polling if it takes too long."""
-        # Skip watchdog entirely if force_polling is enabled (e.g., Windows CI)
-        if self._force_polling:
-            logger.info(f"Polling mode forced for {watch_path}")
-            await self._start_polling_fallback(
-                watch_path, "force_polling enabled; using polling mode"
-            )
-            return
-
         self._watchdog_bootstrap_abort = threading.Event()
         self._watchdog_bootstrap_future = loop.run_in_executor(
             None,
@@ -766,14 +952,16 @@ class RealtimeIndexingService:
             logger.info(
                 f"Watchdog setup timed out for {watch_path} - falling back to polling"
             )
-            await self._start_polling_fallback(
-                watch_path, "Watchdog setup timed out; switched to polling mode"
+            await self._start_polling_backend(
+                watch_path,
+                reason="Watchdog setup timed out; switched to polling mode",
             )
         except Exception as e:
             self._watchdog_bootstrap_abort.set()
             logger.warning(f"Watchdog setup failed: {e} - falling back to polling")
-            await self._start_polling_fallback(
-                watch_path, f"Watchdog setup failed; switched to polling mode: {e}"
+            await self._start_polling_backend(
+                watch_path,
+                reason=f"Watchdog setup failed; switched to polling mode: {e}",
             )
         finally:
             if (
@@ -792,29 +980,43 @@ class RealtimeIndexingService:
             return
 
         try:
-            exc = future.exception()
+            bootstrap_result = future.result()
         except Exception as error:
-            logger.warning(f"Failed to inspect watchdog bootstrap future: {error}")
+            if (
+                not self._watchdog_bootstrap_abort.is_set()
+                and self._service_state not in {"stopping", "stopped"}
+            ):
+                logger.warning(f"Watchdog bootstrap failed: {error}")
+                self._set_error(f"Watchdog bootstrap failed: {error}")
             return
 
-        if (
-            exc
-            and not self._watchdog_bootstrap_abort.is_set()
-            and self._service_state not in {"stopping", "stopped"}
-        ):
-            logger.warning(f"Watchdog bootstrap failed: {exc}")
-            self._set_error(f"Watchdog bootstrap failed: {exc}")
+        if bootstrap_result is None:
+            return
 
-    async def _start_polling_fallback(self, watch_path: Path, reason: str) -> None:
-        """Start polling mode if it is not already active."""
+        observer, _event_handler = bootstrap_result
+        if (
+            self._watchdog_bootstrap_abort.is_set()
+            or self._using_polling
+            or self._service_state in {"stopping", "stopped"}
+        ):
+            self._stop_bootstrap_observer(observer)
+
+    async def _start_polling_backend(
+        self, watch_path: Path, reason: str, emit_warning: bool = True
+    ) -> None:
+        """Start polling mode and optionally record it as a fallback warning."""
         if not self._using_polling or not self._polling_task:
             self._using_polling = True
             self._polling_task = asyncio.create_task(self._polling_monitor(watch_path))
+        self._set_effective_backend("polling")
         await asyncio.sleep(self._POLLING_STARTUP_SETTLE_SECONDS)
         self._monitoring_ready_at = self._utc_now()
         self.monitoring_ready.set()
         self._debug(reason)
-        self._set_warning(reason)
+        if emit_warning:
+            self._set_warning(reason)
+        else:
+            self._emit_status_update()
 
     def _adopt_watchdog_monitor(
         self,
@@ -837,6 +1039,7 @@ class RealtimeIndexingService:
         self.watched_directories.add(str(watch_path))
         logger.debug("Watchdog setup completed successfully (recursive mode)")
         self._debug("watchdog setup complete (recursive)")
+        self._set_effective_backend("watchdog")
         self._monitoring_ready_at = self._utc_now()
         self.monitoring_ready.set()
         self._emit_status_update()

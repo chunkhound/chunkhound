@@ -129,6 +129,7 @@ class TestNonBlockingInitialization:
         config.embedding = None
         config.llm = None
         config.target_dir = tmp_path
+        config.indexing.realtime_backend = "watchdog"
 
         server = ConcreteMCPServer(config=config)
         server.realtime_indexing = MagicMock()
@@ -146,3 +147,27 @@ class TestNonBlockingInitialization:
         assert realtime["service_state"] == "degraded"
         assert "Realtime startup failed" in realtime["last_error"]
         server._run_directory_scan.assert_awaited_once()  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_deferred_start_failure_preserves_configured_backend(
+        self, tmp_path: Path
+    ):
+        """Verify pre-service startup failures keep the configured backend in status."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.realtime_backend = "polling"
+
+        server = ConcreteMCPServer(config=config)
+        server.services = MagicMock()
+        server.services.provider.is_connected = False
+        server.services.provider.connect.side_effect = RuntimeError("connect exploded")
+
+        await server._deferred_connect_and_start(tmp_path)
+
+        realtime = server._scan_progress["realtime"]
+        assert realtime["configured_backend"] == "polling"
+        assert realtime["service_state"] == "degraded"
+        assert "Deferred connect/start failed" in realtime["last_error"]

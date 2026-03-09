@@ -79,7 +79,7 @@ class MCPServerBase(ABC):
             "is_scanning": False,
             "scan_started_at": None,
             "scan_completed_at": None,
-            "realtime": RealtimeIndexingService.default_health_snapshot(),
+            "realtime": RealtimeIndexingService.health_snapshot_for_config(config),
         }
 
         # Set MCP mode to suppress stderr output that interferes with JSON-RPC
@@ -285,7 +285,7 @@ class MCPServerBase(ABC):
         """Persist a startup failure into the shared realtime status snapshot."""
         realtime = copy.deepcopy(
             self._scan_progress.get("realtime")
-            or RealtimeIndexingService.default_health_snapshot()
+            or RealtimeIndexingService.health_snapshot_for_config(self.config)
         )
         realtime["service_state"] = "degraded"
         realtime["last_error"] = message
