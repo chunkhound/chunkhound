@@ -28,20 +28,13 @@ class GrokLLMProvider(OpenAICompatibleProvider):
         """Initialize Grok LLM provider.
 
         Args:
-            api_key: xAI API key. Priority order (explicitly handled here):
-                     1. Passed argument
-                     2. XAI_API_KEY environment variable (primary, recommended)
-                     3. GROK_API_KEY environment variable (fallback)
+            api_key: xAI API key (passed from config)
             model: Model name (default: "grok-4-1-fast-reasoning")
             base_url: Base URL (defaults to https://api.x.ai/v1)
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts
         """
-        # Explicit env-var fallback as requested in review
-        if api_key is None:
-            import os
 
-            api_key = os.getenv("XAI_API_KEY") or os.getenv("GROK_API_KEY")
 
         super().__init__(
             api_key=api_key,
