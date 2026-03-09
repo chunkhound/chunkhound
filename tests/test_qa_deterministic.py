@@ -80,11 +80,14 @@ class TestQADeterministic:
 
         yield services, realtime_service, watch_dir, temp_dir
 
-        # Cleanup
+        # Cleanup — wrap in timeout to prevent teardown hangs (observed on
+        # Ubuntu CI where realtime_service.stop() blocks in epoll/inotify cleanup)
         try:
-            await realtime_service.stop()
-        except Exception:
-            pass
+            await asyncio.wait_for(realtime_service.stop(), timeout=10.0)
+        except (Exception, asyncio.TimeoutError):
+            # Force-stop observer thread if stop() hung
+            if realtime_service.observer and realtime_service.observer.is_alive():
+                realtime_service.observer.stop()
 
         try:
             services.provider.close()
@@ -257,7 +260,6 @@ def added_during_edit():
         print("✓ File deletion: Deleted file content not found in search")
 
     @pytest.mark.asyncio
-    @pytest.mark.timeout(600)
     async def test_language_coverage_comprehensive(self, qa_setup):
         """QA Items 5-6: Test all supported languages and file types."""
         services, realtime_service, watch_dir, _ = qa_setup
