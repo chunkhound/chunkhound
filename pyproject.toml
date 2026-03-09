@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling", "hatch-vcs"]
+requires = ["hatchling", "hatch-vcs", "packaging>=21.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -124,11 +124,26 @@ include = [
     "chunkhound/code_mapper/prompts/*.md",
     "chunkhound/autodoc/prompts/*.txt",
     "chunkhound/autodoc/assets/**/*",
+    "chunkhound/watchman_runtime/**/*",
     "tests/fixtures/yaml/**/*",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["chunkhound"]
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
+[tool.chunkhound.watchman_runtime]
+package = "chunkhound.watchman_runtime"
+requires_platform_wheel = true
+wheel_tag_must_not_be = "any"
+supported_platforms = [
+    "linux-x86_64",
+    "macos-arm64",
+    "macos-x86_64",
+    "windows-x86_64",
+]
 
 [tool.black]
 line-length = 88

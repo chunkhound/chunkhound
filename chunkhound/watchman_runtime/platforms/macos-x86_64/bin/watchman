@@ -1,0 +1,8 @@
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+    printf '%s\n' 'watchman 0.0.0-chunkhound-placeholder'
+    exit 0
+fi
+
+printf '%s\n' 'chunkhound fake watchman runtime: only --version is supported' >&2
+exit 64

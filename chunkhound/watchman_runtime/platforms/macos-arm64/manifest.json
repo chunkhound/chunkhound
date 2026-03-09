@@ -1,0 +1,7 @@
+{
+  "platform": "macos-arm64",
+  "runtime_version": "watchman-placeholder-2026-03",
+  "binary": "bin/watchman",
+  "probe_args": ["--version"],
+  "packaging_decision": "Watchman-carrying wheels must be platform-specific and must not be published as py3-none-any."
+}
