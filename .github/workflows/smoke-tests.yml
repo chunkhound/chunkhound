@@ -32,3 +32,48 @@ jobs:
         
       - name: Run test suite
         run: uv run pytest tests/ -v
+
+  watchman-runtime-validation:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11"]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run Watchman runtime validation tests
+        run: >
+          uv run pytest
+          tests/test_watchman_runtime_resources.py
+          tests/test_verify_watchman_runtime_resources.py
+          -q
+
+      - name: Build wheel artifacts
+        run: uv build --wheel --clear
+
+      - name: Verify Watchman runtime wheel artifacts
+        shell: bash
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [[ ${#wheels[@]} -eq 0 ]]; then
+            echo "No wheel produced in dist/"
+            exit 1
+          fi
+          uv run python scripts/verify_watchman_runtime_resources.py "${wheels[@]}"
