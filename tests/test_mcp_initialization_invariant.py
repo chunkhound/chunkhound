@@ -171,3 +171,22 @@ class TestNonBlockingInitialization:
         assert realtime["configured_backend"] == "polling"
         assert realtime["service_state"] == "degraded"
         assert "Deferred connect/start failed" in realtime["last_error"]
+
+    @pytest.mark.asyncio
+    async def test_watchman_startup_barrier_raises_recorded_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """Watchman daemon startup should fail fast when startup already degraded."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.realtime_backend = "watchman"
+
+        server = ConcreteMCPServer(config=config)
+        server._deferred_start_task = asyncio.create_task(asyncio.sleep(0))
+        server._startup_failure_message = "Watchman sidecar startup failed: boom"
+
+        with pytest.raises(RuntimeError, match="Watchman sidecar startup failed: boom"):
+            await server.await_startup_barrier()

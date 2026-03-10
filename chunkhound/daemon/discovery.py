@@ -17,6 +17,7 @@ import secrets
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,14 @@ _SOCKET_DIR = "/tmp"
 # Startup polling interval and timeout
 _STARTUP_POLL_INTERVAL = 0.1
 _STARTUP_TIMEOUT = 30.0
+
+
+@dataclass(slots=True)
+class DaemonStartupHandle:
+    """Process handle and diagnostics surface for a daemon startup attempt."""
+
+    process: subprocess.Popen[Any]
+    log_path: Path
 
 
 class DaemonDiscovery:
@@ -66,6 +75,20 @@ class DaemonDiscovery:
         """Compatibility alias for get_ipc_address()."""
         return self.get_ipc_address()
 
+    def get_daemon_log_path(self) -> Path:
+        """Return the daemon log path used for startup diagnostics."""
+        return self._project_dir / ".chunkhound" / "daemon.log"
+
+    def _read_json_file(self, path: Path) -> dict[str, Any] | None:
+        try:
+            with open(path) as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+                return None
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
+
     # ------------------------------------------------------------------
     # Lock file I/O
     # ------------------------------------------------------------------
@@ -77,15 +100,11 @@ class DaemonDiscovery:
             Dict with keys ``pid``, ``socket_path``, ``started_at``,
             ``auth_token``, or ``None`` if the file does not exist or is corrupt.
         """
-        lock_path = self.get_lock_path()
-        try:
-            with open(lock_path) as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    return data
-                return None
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return None
+        return self._read_json_file(self.get_lock_path())
+
+    def read_starter_lock(self) -> dict[str, Any] | None:
+        """Read and parse the starter lock file."""
+        return self._read_json_file(self.get_starter_lock_path())
 
     def write_lock(
         self, pid: int, socket_path: str, auth_token: str | None = None
@@ -122,6 +141,35 @@ class DaemonDiscovery:
             self.get_lock_path().unlink()
         except FileNotFoundError:
             pass
+
+    def _tail_daemon_log(
+        self, log_path: Path | None = None, *, max_lines: int = 20
+    ) -> str | None:
+        """Return the recent daemon log tail, if one is available."""
+        path = log_path or self.get_daemon_log_path()
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        if not text:
+            return None
+        return "\n".join(text.splitlines()[-max_lines:])
+
+    def _format_startup_failure(
+        self,
+        *,
+        prefix: str,
+        log_path: Path | None = None,
+        returncode: int | None = None,
+    ) -> str:
+        """Build a fast-fail startup error with optional daemon log context."""
+        message = prefix
+        if returncode is not None:
+            message = f"{message} (exit code {returncode})"
+        log_tail = self._tail_daemon_log(log_path)
+        if log_tail:
+            return f"{message}\nRecent daemon log output:\n{log_tail}"
+        return message
 
     # ------------------------------------------------------------------
     # Starter lock (prevents duplicate-daemon race on concurrent proxy start)
@@ -268,7 +316,7 @@ class DaemonDiscovery:
 
         return forwarded
 
-    def _start_daemon_subprocess(self, args: Any) -> None:
+    def _start_daemon_subprocess(self, args: Any) -> DaemonStartupHandle:
         """Launch the daemon as a detached subprocess.
 
         The new process runs ``chunkhound _daemon`` with the same configuration
@@ -299,10 +347,10 @@ class DaemonDiscovery:
 
         # Route daemon stdout/stderr to a log file so startup failures are
         # diagnosable (especially on Windows where the IPC transport may fail).
-        log_path = self._project_dir / ".chunkhound" / "daemon.log"
+        log_path = self.get_daemon_log_path()
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "w") as log_file:
-            subprocess.Popen(
+            process = subprocess.Popen(
                 cmd,
                 start_new_session=True,
                 stdin=subprocess.DEVNULL,
@@ -311,6 +359,7 @@ class DaemonDiscovery:
                 env=env,
                 cwd=str(self._project_dir),
             )
+        return DaemonStartupHandle(process=process, log_path=log_path)
 
     async def find_or_start_daemon(self, args: Any) -> str:
         """Return the IPC address of the running daemon, starting one if needed.
@@ -347,10 +396,24 @@ class DaemonDiscovery:
                 while time.monotonic() < deadline:
                     if await self._socket_connectable(sp_str):
                         return sp_str
+                    if not pid_alive(pid):
+                        raise RuntimeError(
+                            self._format_startup_failure(
+                                prefix=(
+                                    "ChunkHound daemon exited before it became "
+                                    f"reachable (pid={pid}, address: {sp_str})"
+                                )
+                            )
+                        )
                     await asyncio.sleep(_STARTUP_POLL_INTERVAL)
                 raise RuntimeError(
-                    f"ChunkHound daemon (pid={pid}) did not become reachable "
-                    f"within {_STARTUP_TIMEOUT}s (address: {sp_str})"
+                    self._format_startup_failure(
+                        prefix=(
+                            f"ChunkHound daemon (pid={pid}) did not become "
+                            f"reachable within {_STARTUP_TIMEOUT}s "
+                            f"(address: {sp_str})"
+                        )
+                    )
                 )
             # Stale lock (PID dead) — remove before starting fresh daemon
             self.remove_lock()
@@ -363,8 +426,9 @@ class DaemonDiscovery:
 
         # No live daemon — race to become the sole daemon starter.
         if self._acquire_starter_lock():
+            startup: DaemonStartupHandle
             try:
-                self._start_daemon_subprocess(args)
+                startup = self._start_daemon_subprocess(args)
             finally:
                 # The starter lock is NOT released here; it is held until the polling
                 # loop's finally block below (line ~387) so concurrent proxies don't
@@ -377,6 +441,18 @@ class DaemonDiscovery:
             deadline = time.monotonic() + _STARTUP_TIMEOUT
             try:
                 while time.monotonic() < deadline:
+                    returncode = startup.process.poll()
+                    if returncode is not None:
+                        raise RuntimeError(
+                            self._format_startup_failure(
+                                prefix=(
+                                    "ChunkHound daemon exited before it became "
+                                    "reachable"
+                                ),
+                                log_path=startup.log_path,
+                                returncode=returncode,
+                            )
+                        )
                     lock = self.read_lock()
                     if lock is not None:
                         actual_address = str(lock.get("socket_path", initial_address))
@@ -387,8 +463,13 @@ class DaemonDiscovery:
                 self._release_starter_lock()
 
             raise RuntimeError(
-                f"ChunkHound daemon did not start within {_STARTUP_TIMEOUT}s "
-                f"(address: {initial_address})"
+                self._format_startup_failure(
+                    prefix=(
+                        f"ChunkHound daemon did not start within {_STARTUP_TIMEOUT}s "
+                        f"(address: {initial_address})"
+                    ),
+                    log_path=startup.log_path,
+                )
             )
         else:
             # Another proxy is starting the daemon — poll until it's ready.
@@ -401,9 +482,37 @@ class DaemonDiscovery:
                     if isinstance(pid, int) and pid_alive(pid):
                         if await self._socket_connectable(actual_address):
                             return actual_address
+                starter_lock = self.read_starter_lock()
+                starter_lock_path = self.get_starter_lock_path()
+                if starter_lock is None:
+                    if not starter_lock_path.exists():
+                        raise RuntimeError(
+                            self._format_startup_failure(
+                                prefix=(
+                                    "ChunkHound daemon startup ended before it "
+                                    "became reachable"
+                                )
+                            )
+                        )
+                else:
+                    holder_pid = starter_lock.get("pid")
+                    if isinstance(holder_pid, int) and not pid_alive(holder_pid):
+                        starter_lock_path.unlink(missing_ok=True)
+                        raise RuntimeError(
+                            self._format_startup_failure(
+                                prefix=(
+                                    "ChunkHound daemon startup ended before it "
+                                    "became reachable"
+                                )
+                            )
+                        )
                 await asyncio.sleep(_STARTUP_POLL_INTERVAL)
 
             raise RuntimeError(
-                f"ChunkHound daemon did not become reachable within "
-                f"{_STARTUP_TIMEOUT}s (address: {initial_address})"
+                self._format_startup_failure(
+                    prefix=(
+                        "ChunkHound daemon did not become reachable within "
+                        f"{_STARTUP_TIMEOUT}s (address: {initial_address})"
+                    )
+                )
             )

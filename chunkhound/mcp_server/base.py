@@ -70,6 +70,7 @@ class MCPServerBase(ABC):
         self._scan_task: asyncio.Task | None = None
         self._scan_lock = asyncio.Lock()
         self._scan_target_path: Path | None = None
+        self._startup_failure_message: str | None = None
 
         # Scan progress tracking
         self._scan_complete = False
@@ -118,6 +119,7 @@ class MCPServerBase(ABC):
                 return
 
             self.debug_log("Starting service initialization")
+            self._startup_failure_message = None
 
             # Validate database configuration
             if not self.config.database or not self.config.database.path:
@@ -193,6 +195,27 @@ class MCPServerBase(ABC):
                 self._deferred_connect_and_start(self._scan_target_path)
             )
 
+    def _configured_realtime_backend(self) -> str | None:
+        """Return the configured realtime backend when it is explicitly supported."""
+        try:
+            backend = getattr(
+                getattr(self.config, "indexing", None), "realtime_backend", None
+            )
+        except Exception:
+            return None
+        if backend in {"watchman", "watchdog", "polling"}:
+            return str(backend)
+        return None
+
+    def requires_strict_startup_barrier(self) -> bool:
+        """Return whether daemon startup must block on realtime readiness."""
+        return self._configured_realtime_backend() == "watchman"
+
+    def _set_startup_failure(self, message: str) -> None:
+        """Persist a startup failure for later fail-fast barrier checks."""
+        self._startup_failure_message = message
+        self._record_realtime_failure(message)
+
     async def _deferred_connect_and_start(self, target_path: Path) -> None:
         """Connect DB and start realtime monitoring in background."""
         try:
@@ -223,7 +246,51 @@ class MCPServerBase(ABC):
             )
         except Exception as e:
             self.debug_log(f"Deferred connect/start failed: {e}")
-            self._record_realtime_failure(f"Deferred connect/start failed: {e}")
+            self._set_startup_failure(f"Deferred connect/start failed: {e}")
+
+    async def await_startup_barrier(self) -> None:
+        """Block daemon exposure until strict realtime startup requirements pass."""
+        if not self.requires_strict_startup_barrier():
+            return
+
+        if self._deferred_start_task is None:
+            raise RuntimeError(
+                "Watchman startup barrier requested before deferred startup began"
+            )
+
+        await asyncio.shield(self._deferred_start_task)
+        if self._startup_failure_message is not None:
+            raise RuntimeError(self._startup_failure_message)
+
+        if self._realtime_start_task is None:
+            message = (
+                "Watchman startup barrier requested but realtime startup task "
+                "was never created"
+            )
+            self._set_startup_failure(message)
+            raise RuntimeError(message)
+
+        try:
+            await asyncio.shield(self._realtime_start_task)
+        except asyncio.CancelledError as error:
+            message = "Watchman realtime startup was cancelled before readiness"
+            self._set_startup_failure(message)
+            raise RuntimeError(message) from error
+        except Exception as error:
+            message = self._startup_failure_message or str(error)
+            self._set_startup_failure(message)
+            raise RuntimeError(message) from error
+
+        if self._startup_failure_message is not None:
+            raise RuntimeError(self._startup_failure_message)
+
+        if (
+            self.realtime_indexing is None
+            or not self.realtime_indexing.monitoring_ready.is_set()
+        ):
+            message = "Watchman startup finished without monitoring readiness"
+            self._set_startup_failure(message)
+            raise RuntimeError(message)
 
     async def _coordinated_initial_scan(
         self, target_path: Path, monitoring_task: asyncio.Task
@@ -307,7 +374,7 @@ class MCPServerBase(ABC):
             return
 
         self.debug_log(f"Realtime startup task failed: {exc}")
-        self._record_realtime_failure(f"Realtime startup task failed: {exc}")
+        self._set_startup_failure(f"Realtime startup task failed: {exc}")
 
     async def _request_realtime_resync(
         self, reason: str, details: dict[str, Any] | None = None

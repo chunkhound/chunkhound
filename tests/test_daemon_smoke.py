@@ -18,18 +18,22 @@ import json
 import os
 import shutil
 import sys
+import time
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator
 
 import psutil
 import pytest
 
 from tests.helpers.daemon_test_helpers import (
-    is_daemon_running,
     wait_for_daemon_shutdown,
     wait_for_daemon_start,
 )
-from tests.utils import SubprocessJsonRpcClient, create_subprocess_exec_safe, get_safe_subprocess_env
+from tests.utils import (
+    SubprocessJsonRpcClient,
+    create_subprocess_exec_safe,
+    get_safe_subprocess_env,
+)
 
 
 def _chunkhound_exe() -> str:
@@ -68,7 +72,9 @@ def _make_env(project_dir: Path) -> dict[str, str]:
     return env
 
 
-async def _start_proxy(project_dir: Path) -> tuple[asyncio.subprocess.Process, SubprocessJsonRpcClient]:
+async def _start_proxy(
+    project_dir: Path,
+) -> tuple[asyncio.subprocess.Process, SubprocessJsonRpcClient]:
     """Launch a ``chunkhound mcp`` proxy subprocess and return (proc, client)."""
     env = _make_env(project_dir)
     proc = await create_subprocess_exec_safe(
@@ -84,7 +90,9 @@ async def _start_proxy(project_dir: Path) -> tuple[asyncio.subprocess.Process, S
     return proc, client
 
 
-async def _do_mcp_handshake(client: SubprocessJsonRpcClient, timeout: float = 30.0) -> dict:
+async def _do_mcp_handshake(
+    client: SubprocessJsonRpcClient, timeout: float = 30.0
+) -> dict:
     """Send initialize + initialized notification; return server capabilities."""
     result = await client.send_request("initialize", _MCP_INIT_PARAMS, timeout=timeout)
     await client.send_notification("notifications/initialized", {})
@@ -254,7 +262,8 @@ async def test_daemon_single_client_basic(pre_indexed_project_dir: Path) -> None
         await _teardown_proxy(proc, client)
 
     # After the proxy disconnects, the daemon should shut down
-    # Windows requires significantly more time for cleanup (see test_daemon_lock_file_created comments)
+    # Windows requires significantly more time for cleanup
+    # (see test_daemon_lock_file_created comments)
     stopped = await wait_for_daemon_shutdown(project_dir, timeout=30.0)
     assert stopped, "Daemon did not shut down after last client disconnected"
 
@@ -318,7 +327,8 @@ async def test_daemon_two_clients_concurrent(pre_indexed_project_dir: Path) -> N
         )
 
     # After both clients disconnect, daemon should shut down
-    # Windows requires significantly more time for cleanup (see test_daemon_lock_file_created comments)
+    # Windows requires significantly more time for cleanup
+    # (see test_daemon_lock_file_created comments)
     stopped = await wait_for_daemon_shutdown(project_dir, timeout=30.0)
     assert stopped, "Daemon did not shut down after all clients disconnected"
 
@@ -358,7 +368,9 @@ async def test_daemon_lock_file_created(pre_indexed_project_dir: Path) -> None:
         # Parse and validate lock file contents
         lock_data = json.loads(lock_path.read_text())
         assert "pid" in lock_data, f"Lock file missing 'pid': {lock_data}"
-        assert "socket_path" in lock_data, f"Lock file missing 'socket_path': {lock_data}"
+        assert "socket_path" in lock_data, (
+            f"Lock file missing 'socket_path': {lock_data}"
+        )
         assert "started_at" in lock_data, f"Lock file missing 'started_at': {lock_data}"
 
         pid = lock_data["pid"]
@@ -398,3 +410,50 @@ async def test_daemon_lock_file_created(pre_indexed_project_dir: Path) -> None:
     assert not lock_path.exists(), (
         f"Lock file was not cleaned up after daemon shutdown: {lock_path}"
     )
+
+
+@pytest.mark.asyncio
+async def test_watchman_start_failure_returns_fast_and_skips_lock_publication(
+    pre_indexed_project_dir: Path,
+) -> None:
+    """Watchman startup failures should surface quickly without publishing a lock."""
+    project_dir = pre_indexed_project_dir
+    config_path = project_dir / ".chunkhound.json"
+    config = json.loads(config_path.read_text())
+    config.setdefault("indexing", {})["realtime_backend"] = "watchman"
+    config_path.write_text(json.dumps(config))
+
+    env = _make_env(project_dir)
+    env["CHUNKHOUND_FAKE_WATCHMAN_FAIL_BEFORE_READY"] = "1"
+
+    start_time = time.monotonic()
+    proc = await create_subprocess_exec_safe(
+        _chunkhound_exe(),
+        "mcp",
+        str(project_dir),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+        cwd=str(project_dir),
+    )
+    _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=20.0)
+    elapsed = time.monotonic() - start_time
+
+    assert proc.returncode != 0, "Proxy should fail when watchman startup fails"
+    assert elapsed < 20.0, f"Expected fail-fast startup error, got {elapsed:.2f}s"
+
+    stderr_text = stderr.decode()
+    assert "Watchman sidecar startup failed" in stderr_text
+    assert "Recent daemon log output" in stderr_text
+
+    lock_path = project_dir / ".chunkhound" / "daemon.lock"
+    assert not lock_path.exists(), (
+        "Daemon lock should not be published on watchman failure"
+    )
+    assert not await wait_for_daemon_start(project_dir, timeout=1.0)
+
+    daemon_log_path = project_dir / ".chunkhound" / "daemon.log"
+    assert daemon_log_path.exists()
+    daemon_log_text = daemon_log_path.read_text(encoding="utf-8", errors="replace")
+    assert "Watchman sidecar startup failed" in daemon_log_text
