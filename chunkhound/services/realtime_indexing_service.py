@@ -16,7 +16,7 @@ import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 from loguru import logger
@@ -25,17 +25,83 @@ from watchdog.observers import Observer
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices
+from chunkhound.services.realtime_path_filter import RealtimePathFilter
 from chunkhound.utils.windows_constants import IS_WINDOWS
 from chunkhound.watchman import (
     PrivateWatchmanSidecar,
     WatchmanCliSession,
     WatchmanScopePlan,
+    WatchmanSubscriptionScope,
 )
 
 
 def normalize_file_path(path: Path | str) -> str:
     """Single source of truth for path normalization across ChunkHound."""
     return str(Path(path).resolve())
+
+
+QueueResultCallback = Callable[[str, Path, bool, str | None], None]
+
+
+def _record_realtime_queue_result(
+    queue_result_callback: QueueResultCallback | None,
+    event_type: str,
+    file_path: Path,
+    accepted: bool,
+    reason: str | None,
+) -> None:
+    try:
+        if queue_result_callback:
+            queue_result_callback(event_type, file_path, accepted, reason)
+    except Exception:
+        pass
+
+
+def _enqueue_realtime_event(
+    event_queue: asyncio.Queue[tuple[str, Path]] | None,
+    queue_result_callback: QueueResultCallback | None,
+    event_type: str,
+    file_path: Path,
+) -> None:
+    if event_queue is None:
+        _record_realtime_queue_result(
+            queue_result_callback,
+            event_type,
+            file_path,
+            False,
+            "queue_unavailable",
+        )
+        return
+
+    try:
+        event_queue.put_nowait((event_type, file_path))
+        _record_realtime_queue_result(
+            queue_result_callback,
+            event_type,
+            file_path,
+            True,
+            None,
+        )
+    except asyncio.QueueFull:
+        logger.warning(
+            f"Realtime event queue full; dropped {event_type} for {file_path}"
+        )
+        _record_realtime_queue_result(
+            queue_result_callback,
+            event_type,
+            file_path,
+            False,
+            "queue_full",
+        )
+    except Exception as error:
+        logger.warning(f"Failed to queue {event_type} event for {file_path}: {error}")
+        _record_realtime_queue_result(
+            queue_result_callback,
+            event_type,
+            file_path,
+            False,
+            type(error).__name__,
+        )
 
 
 class SimpleEventHandler(FileSystemEventHandler):
@@ -47,16 +113,12 @@ class SimpleEventHandler(FileSystemEventHandler):
         config: Config | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
         root_path: Path | None = None,
-        queue_result_callback: Callable[[str, Path, bool, str | None], None]
-        | None = None,
+        queue_result_callback: QueueResultCallback | None = None,
     ):
         self.event_queue = event_queue
         self.config = config
         self.loop = loop
         self._queue_result_callback = queue_result_callback
-        self._engine = None
-        self._include_patterns: list[str] | None = None
-        self._pattern_cache: dict[str, Any] = {}
         if root_path is not None:
             self._root = root_path.resolve()
         else:
@@ -66,6 +128,7 @@ class SimpleEventHandler(FileSystemEventHandler):
                 ).resolve()
             except Exception:
                 self._root = Path.cwd().resolve()
+        self._path_filter = RealtimePathFilter(config=config, root_path=self._root)
 
     def on_any_event(self, event: Any) -> None:
         """Handle filesystem events - simple queue operation."""
@@ -107,75 +170,7 @@ class SimpleEventHandler(FileSystemEventHandler):
         This ensures realtime indexing supports all languages without
         requiring manual updates.
         """
-        if not self.config:
-            # Fallback: derive from Language enum (which derives from parser_factory)
-            # Uses lazy import to avoid heavyweight startup cost
-            from chunkhound.core.types.common import Language
-
-            # Check extension-based patterns
-            if file_path.suffix.lower() in Language.get_all_extensions():
-                return True
-
-            # Check filename-based patterns (Makefile, Dockerfile, etc.)
-            if file_path.name.lower() in Language.get_all_filename_patterns():
-                return True
-
-            return False
-
-        # Repo-aware ignore engine (lazy init)
-        try:
-            if self._engine is None:
-                from chunkhound.utils.ignore_engine import (
-                    build_repo_aware_ignore_engine,
-                )
-
-                sources = self.config.indexing.resolve_ignore_sources()
-                cfg_ex = self.config.indexing.get_effective_config_excludes()
-                chf = self.config.indexing.chignore_file
-                overlay = bool(
-                    getattr(self.config.indexing, "workspace_gitignore_nonrepo", False)
-                )
-                self._engine = build_repo_aware_ignore_engine(
-                    self._root,
-                    sources,
-                    chf,
-                    cfg_ex,
-                    workspace_root_only_gitignore=overlay,
-                )
-        except Exception:
-            self._engine = None
-
-        # Exclude via engine
-        try:
-            if self._engine is not None and self._engine.matches(
-                file_path, is_dir=False
-            ):
-                return False
-        except Exception:
-            pass
-
-        # Include via normalized patterns (fallback to Language defaults)
-        try:
-            if self._include_patterns is None:
-                from chunkhound.utils.file_patterns import normalize_include_patterns
-
-                inc = list(self.config.indexing.include)
-                self._include_patterns = normalize_include_patterns(inc)
-
-            from chunkhound.utils.file_patterns import should_include_file
-
-            return should_include_file(
-                file_path, self._root, self._include_patterns, self._pattern_cache
-            )
-        except Exception:
-            # Fallback to Language-based detection if include matching fails
-            from chunkhound.core.types.common import Language
-
-            if file_path.suffix.lower() in Language.get_all_extensions():
-                return True
-            if file_path.name.lower() in Language.get_all_filename_patterns():
-                return True
-            return False
+        return self._path_filter.should_index(file_path)
 
     def _handle_move_event(self, src_path: str, dest_path: str) -> None:
         """Handle atomic file moves (temp -> final file)."""
@@ -204,29 +199,24 @@ class SimpleEventHandler(FileSystemEventHandler):
             self._record_queue_result(event_type, file_path, False, "loop_unavailable")
             return
 
-        def _enqueue() -> None:
-            try:
-                assert self.event_queue is not None
-                self.event_queue.put_nowait((event_type, file_path))
-                self._record_queue_result(event_type, file_path, True, None)
-            except asyncio.QueueFull:
-                logger.warning(
-                    f"Realtime event queue full; dropped {event_type} for {file_path}"
-                )
-                self._record_queue_result(event_type, file_path, False, "queue_full")
-            except Exception as e:
-                logger.warning(
-                    f"Failed to queue {event_type} event for {file_path}: {e}"
-                )
-                self._record_queue_result(
-                    event_type, file_path, False, type(e).__name__
-                )
-
         try:
-            self.loop.call_soon_threadsafe(_enqueue)
-        except Exception as e:
-            logger.warning(f"Failed to queue {event_type} event for {file_path}: {e}")
-            self._record_queue_result(event_type, file_path, False, type(e).__name__)
+            self.loop.call_soon_threadsafe(
+                _enqueue_realtime_event,
+                self.event_queue,
+                self._queue_result_callback,
+                event_type,
+                file_path,
+            )
+        except Exception as error:
+            logger.warning(
+                f"Failed to queue {event_type} event for {file_path}: {error}"
+            )
+            self._record_queue_result(
+                event_type,
+                file_path,
+                False,
+                type(error).__name__,
+            )
 
     def _record_queue_result(
         self, event_type: str, file_path: Path, accepted: bool, reason: str | None
@@ -327,9 +317,10 @@ class WatchmanRealtimeAdapter:
             )
         self._sidecar = PrivateWatchmanSidecar(target_dir, debug_sink=service._debug)
         self._session: WatchmanCliSession | None = None
+        self._path_filter: RealtimePathFilter | None = None
+        self._subscription_consumer_task: asyncio.Task[None] | None = None
 
     async def start(self, watch_path: Path, loop: asyncio.AbstractEventLoop) -> None:
-        del loop
         try:
             metadata = await self._sidecar.start()
         except Exception as error:
@@ -364,6 +355,13 @@ class WatchmanRealtimeAdapter:
 
         self._service.watchman_scope_plan = setup.scope_plan
         self._service.watchman_subscription_queue = self._session.subscription_queue
+        self._path_filter = RealtimePathFilter(
+            config=self._service.config,
+            root_path=setup.scope_plan.primary_scope.requested_path,
+        )
+        self._subscription_consumer_task = loop.create_task(
+            self._consume_subscription_pdus(setup.scope_plan.primary_scope)
+        )
         self._service._set_effective_backend(self.backend_name)
         self._service._monitoring_ready_at = self._service._utc_now()
         self._service.monitoring_ready.set()
@@ -372,10 +370,135 @@ class WatchmanRealtimeAdapter:
     async def stop(self) -> None:
         self._service.watchman_scope_plan = None
         self._service.watchman_subscription_queue = None
+        self._path_filter = None
+        if self._subscription_consumer_task is not None:
+            self._subscription_consumer_task.cancel()
+            try:
+                await self._subscription_consumer_task
+            except asyncio.CancelledError:
+                pass
+            self._subscription_consumer_task = None
         if self._session is not None:
             await self._session.stop()
             self._session = None
         await self._sidecar.stop()
+
+    async def _consume_subscription_pdus(
+        self, scope: WatchmanSubscriptionScope
+    ) -> None:
+        session = self._session
+        if session is None:
+            return
+
+        while True:
+            payload = await session.subscription_queue.get()
+            try:
+                self._translate_subscription_pdu(payload, scope)
+            except Exception as error:
+                message = f"Watchman event translation failed: {error}"
+                logger.warning(message)
+                self._service._set_warning(message)
+            finally:
+                session.subscription_queue.task_done()
+
+    def _translate_subscription_pdu(
+        self, payload: dict[str, object], scope: WatchmanSubscriptionScope
+    ) -> None:
+        files = payload.get("files")
+        if not isinstance(files, list):
+            self._warn_translation_issue(
+                "Watchman subscription PDU did not include a files list"
+            )
+            return
+
+        path_filter = self._path_filter
+        if path_filter is None:
+            self._warn_translation_issue(
+                "Watchman event translation ran without an active path filter"
+            )
+            return
+
+        for entry in files:
+            if not isinstance(entry, dict):
+                self._warn_translation_issue(
+                    "Watchman subscription entry was not an object"
+                )
+                continue
+            translated = self._translate_watchman_file_entry(entry, scope)
+            if translated is None:
+                continue
+            event_type, file_path = translated
+            if not path_filter.should_index(file_path):
+                continue
+            _enqueue_realtime_event(
+                self._service.event_queue,
+                self._service._handle_queue_result,
+                event_type,
+                file_path,
+            )
+
+    def _translate_watchman_file_entry(
+        self,
+        entry: dict[str, object],
+        scope: WatchmanSubscriptionScope,
+    ) -> tuple[str, Path] | None:
+        file_type = entry.get("type")
+        if file_type not in {None, "f"}:
+            self._warn_translation_issue(
+                f"Skipping unexpected Watchman file type {file_type!r}"
+            )
+            return None
+
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            self._warn_translation_issue(
+                "Skipping Watchman subscription entry without a valid name"
+            )
+            return None
+
+        relative_name = PurePosixPath(name.strip().replace("\\", "/"))
+        if (
+            relative_name.is_absolute()
+            or ".." in relative_name.parts
+            or not relative_name.parts
+        ):
+            self._warn_translation_issue(
+                f"Skipping unsafe Watchman subscription path {name!r}"
+            )
+            return None
+
+        relative_root = (
+            PurePosixPath(scope.relative_root) if scope.relative_root else None
+        )
+        mapped_parts = []
+        if relative_root is not None:
+            mapped_parts.extend(relative_root.parts)
+        mapped_parts.extend(relative_name.parts)
+        canonical_path = Path(
+            normalize_file_path(scope.watch_root.joinpath(*mapped_parts))
+        )
+        try:
+            canonical_path.relative_to(scope.requested_path)
+        except ValueError:
+            self._warn_translation_issue(
+                f"Skipping out-of-scope Watchman path {canonical_path}"
+            )
+            return None
+
+        exists = entry.get("exists")
+        is_new = entry.get("new")
+        if exists is False:
+            event_type = "deleted"
+        elif exists is True and is_new is True:
+            event_type = "created"
+        else:
+            event_type = "modified"
+        return event_type, canonical_path
+
+    def _warn_translation_issue(self, message: str) -> None:
+        warning = f"Watchman event translation warning: {message}"
+        logger.warning(warning)
+        self._service._set_warning(warning)
 
     def get_health(self) -> dict[str, Any]:
         health = self._sidecar.get_health()
@@ -442,9 +565,7 @@ class RealtimeIndexingService:
         self._effective_backend = "uninitialized"
         self._monitor_adapter: RealtimeMonitorAdapter | None = None
         self.watchman_scope_plan: WatchmanScopePlan | None = None
-        self.watchman_subscription_queue: asyncio.Queue[dict[str, object]] | None = (
-            None
-        )
+        self.watchman_subscription_queue: asyncio.Queue[dict[str, object]] | None = None
 
         # Existing asyncio queue for priority processing
         self.file_queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue()
