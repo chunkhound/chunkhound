@@ -63,20 +63,18 @@ class ElixirMapping(BaseMapping):
     # --- BaseMapping required methods ---
 
     def get_function_query(self) -> str:
-        return """
+        return f"""
         (call
             target: (identifier) @keyword
-            (#match? @keyword
-                "^(def|defp|defmacro|defmacrop|defguard|defguardp|defdelegate)$"
-            )
+            (#match? @keyword "{_FUNCTION_KEYWORDS}")
         ) @func_def
         """
 
     def get_class_query(self) -> str:
-        return """
+        return f"""
         (call
             target: (identifier) @keyword
-            (#match? @keyword "^(defmodule|defprotocol|defimpl)$")
+            (#match? @keyword "{_MODULE_KEYWORDS}")
         ) @class_def
         """
 
@@ -124,14 +122,14 @@ class ElixirMapping(BaseMapping):
             """
 
         elif concept == UniversalConcept.COMMENT:
-            return """
+            return f"""
             (comment) @definition
 
             (unary_operator
                 operator: "@"
                 operand: (call
                     target: (identifier) @attr_name
-                    (#match? @attr_name "^(doc|moduledoc)$")
+                    (#match? @attr_name "{_DOC_ATTR_KEYWORDS}")
                 )
             ) @definition
             """
