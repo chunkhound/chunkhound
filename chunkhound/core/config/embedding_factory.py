@@ -178,8 +178,13 @@ class EmbeddingProviderFactory:
             if rerank_batch_size is not None:
                 kwargs["rerank_batch_size"] = rerank_batch_size
             # rerank_url: resolve relative paths against base_url, then forward absolute URLs only
-            if rerank_url and base_url and not rerank_url.startswith(("http://", "https://")):
+            if (
+                rerank_url
+                and base_url
+                and not rerank_url.startswith(("http://", "https://"))
+            ):
                 from urllib.parse import urljoin
+
                 rerank_url = urljoin(base_url.rstrip("/") + "/", rerank_url.lstrip("/"))
             if rerank_url and rerank_url.startswith(("http://", "https://")):
                 kwargs["rerank_url"] = rerank_url

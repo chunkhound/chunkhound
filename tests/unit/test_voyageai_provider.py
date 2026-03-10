@@ -81,7 +81,9 @@ class TestIsAvailable:
 
     def test_is_available_keyless_azure_ml(self):
         """Azure ML deployments have no API key but a base_url — must be available."""
-        p = _make_provider(base_url="https://az-endpoint.westus3.inference.ml.azure.com")
+        p = _make_provider(
+            base_url="https://az-endpoint.westus3.inference.ml.azure.com"
+        )
         assert p.is_available() is True
 
     def test_is_available_no_config(self):
@@ -138,7 +140,10 @@ class TestSemaphoreInit:
         assert provider_custom._embed_semaphore._value == 1
 
     def test_official_api_defaults_to_recommended_concurrency(self, provider_official):
-        assert provider_official._embed_semaphore._value == VoyageAIEmbeddingProvider.RECOMMENDED_CONCURRENCY
+        assert (
+            provider_official._embed_semaphore._value
+            == VoyageAIEmbeddingProvider.RECOMMENDED_CONCURRENCY
+        )
 
     def test_explicit_max_concurrent_batches_honoured(self):
         p = _make_provider(api_key="test-key", max_concurrent_batches=5)
@@ -203,7 +208,11 @@ class TestBuildRerankPayload:
     def test_cohere_format_with_model_no_top_k(self):
         p = self._provider("cohere", model="my-reranker")
         payload = p._build_rerank_payload("q", ["d1", "d2"], top_k=None)
-        assert payload == {"query": "q", "documents": ["d1", "d2"], "model": "my-reranker"}
+        assert payload == {
+            "query": "q",
+            "documents": ["d1", "d2"],
+            "model": "my-reranker",
+        }
         assert "top_n" not in payload
 
     def test_cohere_format_with_model_and_top_k(self):
@@ -356,13 +365,17 @@ class TestRerankHttpBatch:
     @pytest.mark.asyncio
     async def test_bare_array_response_normalised(self, provider_with_rerank_url):
         """TEI servers return bare lists; provider must wrap to {"results": [...]}."""
-        mock_client = _mock_http_client([
-            {"index": 1, "score": 0.8},
-            {"index": 0, "score": 0.3},
-        ])
+        mock_client = _mock_http_client(
+            [
+                {"index": 1, "score": 0.8},
+                {"index": 0, "score": 0.3},
+            ]
+        )
 
-        with patch("chunkhound.providers.embeddings.voyageai_provider.httpx.AsyncClient",
-                   return_value=mock_client):
+        with patch(
+            "chunkhound.providers.embeddings.voyageai_provider.httpx.AsyncClient",
+            return_value=mock_client,
+        ):
             results = await provider_with_rerank_url._rerank_http_batch(
                 "query", ["doc0", "doc1"], top_k=None
             )
@@ -375,19 +388,25 @@ class TestRerankHttpBatch:
     async def test_error_key_in_response_raises(self, provider_with_rerank_url):
         mock_client = _mock_http_client({"error": "model not found"})
 
-        with patch("chunkhound.providers.embeddings.voyageai_provider.httpx.AsyncClient",
-                   return_value=mock_client):
+        with patch(
+            "chunkhound.providers.embeddings.voyageai_provider.httpx.AsyncClient",
+            return_value=mock_client,
+        ):
             with pytest.raises(ValueError, match="Rerank service error"):
                 await provider_with_rerank_url._rerank_http_batch(
                     "q", ["doc"], top_k=None
                 )
 
     @pytest.mark.asyncio
-    async def test_authorization_header_sent_when_api_key_set(self, provider_with_rerank_url):
+    async def test_authorization_header_sent_when_api_key_set(
+        self, provider_with_rerank_url
+    ):
         mock_client = _mock_http_client({"results": [{"index": 0, "score": 0.5}]})
 
-        with patch("chunkhound.providers.embeddings.voyageai_provider.httpx.AsyncClient",
-                   return_value=mock_client):
+        with patch(
+            "chunkhound.providers.embeddings.voyageai_provider.httpx.AsyncClient",
+            return_value=mock_client,
+        ):
             await provider_with_rerank_url._rerank_http_batch("q", ["doc"], top_k=None)
 
         _, kwargs = mock_client.post.call_args
@@ -405,8 +424,10 @@ class TestRerankHttpBatch:
 
         mock_client = _mock_http_client({"results": [{"index": 0, "score": 0.5}]})
 
-        with patch("chunkhound.providers.embeddings.voyageai_provider.httpx.AsyncClient",
-                   return_value=mock_client):
+        with patch(
+            "chunkhound.providers.embeddings.voyageai_provider.httpx.AsyncClient",
+            return_value=mock_client,
+        ):
             await p._rerank_http_batch("q", ["doc"], top_k=None)
 
         _, kwargs = mock_client.post.call_args
@@ -447,7 +468,10 @@ class TestRerankViaHttpBatching:
 
         async def fake_batch(query, documents, top_k):
             call_log.append(len(documents))
-            return [RerankResult(index=i, score=0.9 - i * 0.1) for i in range(len(documents))]
+            return [
+                RerankResult(index=i, score=0.9 - i * 0.1)
+                for i in range(len(documents))
+            ]
 
         provider_with_rerank_url._rerank_http_batch = fake_batch
 
@@ -459,17 +483,23 @@ class TestRerankViaHttpBatching:
         assert all_indices == {0, 1, 2, 3}
 
     @pytest.mark.asyncio
-    async def test_multi_batch_top_k_applied_after_merge(self, provider_with_rerank_url):
+    async def test_multi_batch_top_k_applied_after_merge(
+        self, provider_with_rerank_url
+    ):
         from chunkhound.interfaces.embedding_provider import RerankResult
 
         provider_with_rerank_url._rerank_batch_size = 2
 
         async def fake_batch(query, documents, top_k):
-            return [RerankResult(index=i, score=float(i)) for i in range(len(documents))]
+            return [
+                RerankResult(index=i, score=float(i)) for i in range(len(documents))
+            ]
 
         provider_with_rerank_url._rerank_http_batch = fake_batch
 
-        results = await provider_with_rerank_url._rerank_via_http("q", ["d0", "d1", "d2", "d3"], top_k=2)
+        results = await provider_with_rerank_url._rerank_via_http(
+            "q", ["d0", "d1", "d2", "d3"], top_k=2
+        )
         assert len(results) == 2
 
     @pytest.mark.asyncio
@@ -479,11 +509,16 @@ class TestRerankViaHttpBatching:
         provider_with_rerank_url._rerank_batch_size = 2
 
         async def fake_batch(query, documents, top_k):
-            return [RerankResult(index=i, score=float(i) * 0.1) for i in range(len(documents))]
+            return [
+                RerankResult(index=i, score=float(i) * 0.1)
+                for i in range(len(documents))
+            ]
 
         provider_with_rerank_url._rerank_http_batch = fake_batch
 
-        results = await provider_with_rerank_url._rerank_via_http("q", ["d0", "d1", "d2", "d3"], top_k=None)
+        results = await provider_with_rerank_url._rerank_via_http(
+            "q", ["d0", "d1", "d2", "d3"], top_k=None
+        )
         scores = [r.score for r in results]
         assert scores == sorted(scores, reverse=True)
 
@@ -604,10 +639,14 @@ class TestUpstreamTimeoutRetry:
             call_count += 1
             raise RuntimeError("HTTP 408 upstream request timeout")
 
-        with patch("chunkhound.providers.embeddings.voyageai_provider.asyncio.to_thread",
-                   side_effect=fake_to_thread):
-            with patch("chunkhound.providers.embeddings.voyageai_provider.asyncio.sleep",
-                       new_callable=AsyncMock) as mock_sleep:
+        with patch(
+            "chunkhound.providers.embeddings.voyageai_provider.asyncio.to_thread",
+            side_effect=fake_to_thread,
+        ):
+            with patch(
+                "chunkhound.providers.embeddings.voyageai_provider.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep:
                 with pytest.raises(RuntimeError):
                     await p._embed_single_batch_locked(["text"])
 
@@ -625,10 +664,14 @@ class TestUpstreamTimeoutRetry:
             call_count += 1
             raise RuntimeError("Upstream Request Timeout from proxy")
 
-        with patch("chunkhound.providers.embeddings.voyageai_provider.asyncio.to_thread",
-                   side_effect=fake_to_thread):
-            with patch("chunkhound.providers.embeddings.voyageai_provider.asyncio.sleep",
-                       new_callable=AsyncMock):
+        with patch(
+            "chunkhound.providers.embeddings.voyageai_provider.asyncio.to_thread",
+            side_effect=fake_to_thread,
+        ):
+            with patch(
+                "chunkhound.providers.embeddings.voyageai_provider.asyncio.sleep",
+                new_callable=AsyncMock,
+            ):
                 with pytest.raises(RuntimeError):
                     await p._embed_single_batch_locked(["text"])
 
@@ -644,8 +687,10 @@ class TestUpstreamTimeoutRetry:
             call_count += 1
             raise ValueError("bad input")
 
-        with patch("chunkhound.providers.embeddings.voyageai_provider.asyncio.to_thread",
-                   side_effect=fake_to_thread):
+        with patch(
+            "chunkhound.providers.embeddings.voyageai_provider.asyncio.to_thread",
+            side_effect=fake_to_thread,
+        ):
             with pytest.raises(RuntimeError, match="Embedding generation failed"):
                 await p._embed_single_batch_locked(["text"])
 

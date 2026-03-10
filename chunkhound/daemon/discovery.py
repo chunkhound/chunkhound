@@ -186,6 +186,7 @@ class DaemonDiscovery:
         Returns True if the server accepts connections.
         """
         from . import ipc
+
         return await ipc.is_connectable(address)
 
     def is_daemon_alive(self) -> bool:
@@ -281,10 +282,14 @@ class DaemonDiscovery:
         socket_path = self.get_ipc_address()
 
         cmd = [
-            sys.executable, "-m", "chunkhound.api.cli.main",
+            sys.executable,
+            "-m",
+            "chunkhound.api.cli.main",
             "_daemon",
-            "--project-dir", str(self._project_dir),
-            "--socket-path", socket_path,
+            "--project-dir",
+            str(self._project_dir),
+            "--socket-path",
+            socket_path,
         ]
 
         # Forward all config flags by introspecting the daemon parser's own

@@ -211,7 +211,6 @@ class ResearchConfig(BaseSettings):
         description="Minimum cluster size for HDBSCAN clustering",
     )
 
-
     # Phase 3: Synthesis Parameters
     target_tokens: int = Field(
         default=20_000,

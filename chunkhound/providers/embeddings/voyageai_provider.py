@@ -321,13 +321,15 @@ class VoyageAIEmbeddingProvider:
                 error_str = str(e)
 
                 # Network / transient errors that should be retried
-                is_network_error = any([
-                    "APIConnectionError" in error_type,
-                    "ConnectionError" in error_type,
-                    "RemoteDisconnected" in error_type,
-                    "Timeout" in error_type,
-                    "TimeoutError" in error_type,
-                ])
+                is_network_error = any(
+                    [
+                        "APIConnectionError" in error_type,
+                        "ConnectionError" in error_type,
+                        "RemoteDisconnected" in error_type,
+                        "Timeout" in error_type,
+                        "TimeoutError" in error_type,
+                    ]
+                )
 
                 # HTTP 408 (upstream request timeout) from Azure ML / proxies:
                 # treat as transient and retry with a longer initial backoff
@@ -335,10 +337,12 @@ class VoyageAIEmbeddingProvider:
                     "upstream request timeout" in error_str.lower()
                 )
 
-                if (is_network_error or is_upstream_timeout) and attempt < self._retry_attempts - 1:
+                if (
+                    is_network_error or is_upstream_timeout
+                ) and attempt < self._retry_attempts - 1:
                     # Longer backoff for upstream timeouts — endpoint needs time to recover
                     base_delay = 10.0 if is_upstream_timeout else self._retry_delay
-                    delay = base_delay * (2 ** attempt)
+                    delay = base_delay * (2**attempt)
                     logger.warning(
                         f"VoyageAI embedding failed with {error_module}.{error_type} "
                         f"(attempt {attempt + 1}/{self._retry_attempts}): {e}. "
@@ -353,11 +357,15 @@ class VoyageAIEmbeddingProvider:
                             f"VoyageAI embedding failed after {self._retry_attempts} attempts: {e}"
                         )
                     else:
-                        logger.error(f"VoyageAI embedding failed with non-retryable error: {e}")
+                        logger.error(
+                            f"VoyageAI embedding failed with non-retryable error: {e}"
+                        )
                     raise RuntimeError(f"Embedding generation failed: {e}") from e
 
         # Should never reach here, but provide clear error if we do
-        raise RuntimeError(f"Embedding generation failed after {self._retry_attempts} attempts")
+        raise RuntimeError(
+            f"Embedding generation failed after {self._retry_attempts} attempts"
+        )
 
     async def embed_single(self, text: str) -> list[float]:
         """Generate embedding for a single text."""
@@ -419,7 +427,9 @@ class VoyageAIEmbeddingProvider:
 
     def is_available(self) -> bool:
         """Check if the provider is available and properly configured."""
-        return VOYAGEAI_AVAILABLE and (self._api_key is not None or self._base_url is not None)
+        return VOYAGEAI_AVAILABLE and (
+            self._api_key is not None or self._base_url is not None
+        )
 
     async def health_check(self) -> dict[str, Any]:
         """Perform health check and return status information."""
@@ -621,15 +631,17 @@ class VoyageAIEmbeddingProvider:
             except Exception as e:
                 error_type = type(e).__name__
                 error_module = type(e).__module__
-                is_network_error = any([
-                    "APIConnectionError" in error_type,
-                    "ConnectionError" in error_type,
-                    "RemoteDisconnected" in error_type,
-                    "Timeout" in error_type,
-                    "TimeoutError" in error_type,
-                ])
+                is_network_error = any(
+                    [
+                        "APIConnectionError" in error_type,
+                        "ConnectionError" in error_type,
+                        "RemoteDisconnected" in error_type,
+                        "Timeout" in error_type,
+                        "TimeoutError" in error_type,
+                    ]
+                )
                 if is_network_error and attempt < self._retry_attempts - 1:
-                    delay = self._retry_delay * (2 ** attempt)
+                    delay = self._retry_delay * (2**attempt)
                     logger.warning(
                         f"VoyageAI reranking failed with {error_module}.{error_type} "
                         f"(attempt {attempt + 1}/{self._retry_attempts}): {e}. "
@@ -643,7 +655,9 @@ class VoyageAIEmbeddingProvider:
                             f"VoyageAI reranking failed after {self._retry_attempts} attempts: {e}"
                         )
                     else:
-                        logger.error(f"VoyageAI reranking failed with non-retryable error: {e}")
+                        logger.error(
+                            f"VoyageAI reranking failed with non-retryable error: {e}"
+                        )
                     raise RuntimeError(f"Reranking failed: {e}") from e
 
         raise RuntimeError(f"Reranking failed after {self._retry_attempts} attempts")
@@ -687,12 +701,16 @@ class VoyageAIEmbeddingProvider:
             f"(format={self._rerank_format})"
         )
 
-        async with httpx.AsyncClient(timeout=self._timeout, verify=self._ssl_verify) as client:
+        async with httpx.AsyncClient(
+            timeout=self._timeout, verify=self._ssl_verify
+        ) as client:
             headers = {"Content-Type": "application/json"}
             if self._api_key:
                 headers["Authorization"] = f"Bearer {self._api_key}"
 
-            response = await client.post(self._rerank_url, json=payload, headers=headers)
+            response = await client.post(
+                self._rerank_url, json=payload, headers=headers
+            )
             response.raise_for_status()
             data = response.json()
 
@@ -721,13 +739,19 @@ class VoyageAIEmbeddingProvider:
             return payload
         else:  # auto: try Cohere if model provided, else TEI
             if self._rerank_model:
-                payload = {"query": query, "documents": documents, "model": self._rerank_model}
+                payload = {
+                    "query": query,
+                    "documents": documents,
+                    "model": self._rerank_model,
+                }
                 if top_k is not None:
                     payload["top_n"] = top_k
                 return payload
             return {"query": query, "texts": documents}
 
-    def _parse_rerank_response(self, data: dict, num_documents: int) -> list[RerankResult]:
+    def _parse_rerank_response(
+        self, data: dict, num_documents: int
+    ) -> list[RerankResult]:
         """Parse reranker HTTP response (Cohere or TEI format) into RerankResult list."""
         if "results" not in data:
             raise ValueError(
@@ -739,12 +763,18 @@ class VoyageAIEmbeddingProvider:
             # Cohere: {"index": N, "relevance_score": F}
             # TEI:    {"index": N, "score": F}
             idx = item.get("index")
-            score = item.get("relevance_score") if "relevance_score" in item else item.get("score")
+            score = (
+                item.get("relevance_score")
+                if "relevance_score" in item
+                else item.get("score")
+            )
             if idx is None or score is None:
                 logger.warning(f"Skipping malformed rerank result: {item}")
                 continue
             if not (0 <= idx < num_documents):
-                logger.warning(f"Rerank index {idx} out of range ({num_documents} docs), skipping")
+                logger.warning(
+                    f"Rerank index {idx} out of range ({num_documents} docs), skipping"
+                )
                 continue
             results.append(RerankResult(index=idx, score=score))
 
