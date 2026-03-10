@@ -19,6 +19,7 @@ _REQUIRED_WHEEL_PATHS: tuple[str, ...] = (
     "chunkhound/watchman_runtime/platforms/macos-x86_64/bin/watchman",
     "chunkhound/watchman_runtime/platforms/windows-x86_64/manifest.json",
     "chunkhound/watchman_runtime/platforms/windows-x86_64/bin/watchman.cmd",
+    "chunkhound/watchman_runtime/platforms/windows-x86_64/bin/watchman.ps1",
 )
 
 
@@ -45,6 +46,25 @@ def _host_sidecar_command(
         "--logfile",
         str(logfile_path),
         "--no-save-state",
+    ]
+    if os.name == "nt":
+        return ["cmd.exe", "/c", *command]
+    return command
+
+
+def _host_client_command(*, binary_path: Path, socket_path: Path) -> list[str]:
+    command = [
+        str(binary_path),
+        "--sockname",
+        str(socket_path),
+        "--no-spawn",
+        "--no-pretty",
+        "--persistent",
+        "--server-encoding",
+        "json",
+        "--output-encoding",
+        "json",
+        "--json-command",
     ]
     if os.name == "nt":
         return ["cmd.exe", "/c", *command]
@@ -80,6 +100,7 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
         code = "\n".join(
             [
                 "import os",
+                "import json",
                 "import subprocess",
                 "import sys",
                 "import time",
@@ -151,6 +172,66 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                 "assert statefile_path.exists()",
                 "assert logfile_path.exists()",
                 "assert sidecar.poll() is None",
+                "client_command = [",
+                "    str(binary_path),",
+                "    '--sockname',",
+                "    str(socket_path),",
+                "    '--no-spawn',",
+                "    '--no-pretty',",
+                "    '--persistent',",
+                "    '--server-encoding',",
+                "    'json',",
+                "    '--output-encoding',",
+                "    'json',",
+                "    '--json-command',",
+                "]",
+                "if os.name == 'nt':",
+                "    client_command = ['cmd.exe', '/c', *client_command]",
+                (
+                    "client = subprocess.Popen("
+                    "client_command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, "
+                    "stderr=subprocess.PIPE, text=True)"
+                ),
+                "assert client.stdin is not None",
+                "assert client.stdout is not None",
+                (
+                    "client.stdin.write(json.dumps(['version', {'required': "
+                    "['cmd-watch-project', 'relative_root']}]) + '\\n')"
+                ),
+                "client.stdin.flush()",
+                "version_response = json.loads(client.stdout.readline())",
+                (
+                    "assert version_response['capabilities'] == {"
+                    "'cmd-watch-project': True, 'relative_root': True}"
+                ),
+                (
+                    "project_root = Path('project'); "
+                    "project_root.mkdir(exist_ok=True)"
+                ),
+                (
+                    "client.stdin.write(json.dumps(['watch-project', "
+                    "str(project_root.resolve())]) + '\\n')"
+                ),
+                "client.stdin.flush()",
+                "watch_project = json.loads(client.stdout.readline())",
+                "assert watch_project['watch'] == str(project_root.resolve())",
+                (
+                    "client.stdin.write(json.dumps(['subscribe', "
+                    "str(project_root.resolve()), 'chunkhound-live-indexing', "
+                    "{'fields': ['name', 'exists', 'new', 'type']}]) + '\\n')"
+                ),
+                "client.stdin.flush()",
+                "subscribe_response = json.loads(client.stdout.readline())",
+                (
+                    "assert subscribe_response['subscribe'] == "
+                    "'chunkhound-live-indexing'"
+                ),
+                "client.stdin.close()",
+                "try:",
+                "    client.wait(timeout=5.0)",
+                "except subprocess.TimeoutExpired:",
+                "    client.terminate()",
+                "    client.wait(timeout=2.0)",
                 "sidecar.terminate()",
                 "try:",
                 "    sidecar.wait(timeout=5.0)",

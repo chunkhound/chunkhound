@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
 import time
 from pathlib import Path
+from typing import TextIO
 
 import pytest
 
@@ -75,6 +77,25 @@ def _host_sidecar_command(
     return command
 
 
+def _host_client_command(*, binary_path: Path, socket_path: Path) -> list[str]:
+    command = [
+        str(binary_path),
+        "--sockname",
+        str(socket_path),
+        "--no-spawn",
+        "--no-pretty",
+        "--persistent",
+        "--server-encoding",
+        "json",
+        "--output-encoding",
+        "json",
+        "--json-command",
+    ]
+    if os.name == "nt":
+        return ["cmd.exe", "/c", *command]
+    return command
+
+
 def _wait_for_sidecar_files(
     *,
     process: subprocess.Popen,
@@ -102,6 +123,24 @@ def _stop_sidecar_process(process: subprocess.Popen) -> None:
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait(timeout=2.0)
+
+
+def _stop_process(process: subprocess.Popen) -> None:
+    process.terminate()
+    try:
+        process.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=2.0)
+
+
+def _read_json_line(stream: TextIO) -> dict[str, object]:
+    line = stream.readline()
+    if not line:
+        raise AssertionError("expected a JSON response from the fake Watchman client")
+    payload = json.loads(line)
+    assert isinstance(payload, dict)
+    return payload
 
 
 def test_materialize_watchman_binary_writes_executable_for_host(tmp_path: Path) -> None:
@@ -163,6 +202,89 @@ def test_materialized_watchman_binary_supports_private_sidecar_flags(
     finally:
         if process.poll() is None:
             _stop_sidecar_process(process)
+
+
+def test_materialized_watchman_binary_supports_persistent_client_session(
+    tmp_path: Path,
+) -> None:
+    binary_path = materialize_watchman_binary(destination_root=tmp_path)
+    sidecar_root = tmp_path / "sidecar"
+    socket_path = sidecar_root / "sock"
+    statefile_path = sidecar_root / "state"
+    logfile_path = sidecar_root / "watchman.log"
+    project_root = tmp_path / "repo"
+    project_root.mkdir()
+
+    sidecar = subprocess.Popen(
+        _host_sidecar_command(
+            binary_path=binary_path,
+            socket_path=socket_path,
+            statefile_path=statefile_path,
+            logfile_path=logfile_path,
+        ),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    client: subprocess.Popen[str] | None = None
+    try:
+        _wait_for_sidecar_files(
+            process=sidecar,
+            socket_path=socket_path,
+            statefile_path=statefile_path,
+            logfile_path=logfile_path,
+        )
+        client = subprocess.Popen(
+            _host_client_command(binary_path=binary_path, socket_path=socket_path),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert client.stdin is not None
+        assert client.stdout is not None
+
+        client.stdin.write(
+            json.dumps(
+                ["version", {"required": ["cmd-watch-project", "relative_root"]}]
+            )
+            + "\n"
+        )
+        client.stdin.flush()
+        version_response = _read_json_line(client.stdout)
+        assert version_response["capabilities"] == {
+            "cmd-watch-project": True,
+            "relative_root": True,
+        }
+
+        client.stdin.write(json.dumps(["watch-project", str(project_root)]) + "\n")
+        client.stdin.flush()
+        watch_project_response = _read_json_line(client.stdout)
+        assert watch_project_response["watch"] == str(project_root)
+        assert "relative_path" not in watch_project_response
+
+        client.stdin.write(
+            json.dumps(
+                [
+                    "subscribe",
+                    str(project_root),
+                    "chunkhound-live-indexing",
+                    {"fields": ["name", "exists", "new", "type"]},
+                ]
+            )
+            + "\n"
+        )
+        client.stdin.flush()
+        subscribe_response = _read_json_line(client.stdout)
+        assert subscribe_response["subscribe"] == "chunkhound-live-indexing"
+    finally:
+        if client is not None:
+            if client.stdin is not None:
+                client.stdin.close()
+            if client.poll() is None:
+                _stop_process(client)
+        if sidecar.poll() is None:
+            _stop_sidecar_process(sidecar)
 
 
 def test_materialize_watchman_binary_rewrites_corrupt_payload(tmp_path: Path) -> None:

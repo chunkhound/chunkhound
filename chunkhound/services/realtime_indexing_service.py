@@ -26,7 +26,11 @@ from watchdog.observers import Observer
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.utils.windows_constants import IS_WINDOWS
-from chunkhound.watchman import PrivateWatchmanSidecar
+from chunkhound.watchman import (
+    PrivateWatchmanSidecar,
+    WatchmanCliSession,
+    WatchmanScopePlan,
+)
 
 
 def normalize_file_path(path: Path | str) -> str:
@@ -308,9 +312,10 @@ class PollingRealtimeAdapter:
 
 
 class WatchmanRealtimeAdapter:
-    """Private Watchman sidecar lifecycle adapter."""
+    """Private Watchman sidecar and session bridge adapter."""
 
     backend_name = "watchman"
+    _SUBSCRIPTION_NAME = "chunkhound-live-indexing"
 
     def __init__(self, service: "RealtimeIndexingService") -> None:
         self._service = service
@@ -321,27 +326,86 @@ class WatchmanRealtimeAdapter:
                 "to resolve a private runtime root"
             )
         self._sidecar = PrivateWatchmanSidecar(target_dir, debug_sink=service._debug)
+        self._session: WatchmanCliSession | None = None
 
     async def start(self, watch_path: Path, loop: asyncio.AbstractEventLoop) -> None:
-        del watch_path, loop
+        del loop
         try:
-            await self._sidecar.start()
+            metadata = await self._sidecar.start()
         except Exception as error:
             message = f"Watchman sidecar startup failed: {error}"
             self._service._set_error(message)
             raise RuntimeError(message) from error
 
+        self._service.watchman_scope_plan = None
+        self._service.watchman_subscription_queue = None
+
+        try:
+            self._session = WatchmanCliSession(
+                binary_path=Path(metadata.binary_path),
+                socket_path=self._sidecar.paths.socket_path,
+                project_root=self._sidecar.paths.project_root,
+                debug_sink=self._service._debug,
+            )
+            setup = await self._session.start(
+                target_path=watch_path,
+                subscription_name=self._SUBSCRIPTION_NAME,
+            )
+        except Exception as error:
+            if self._session is not None:
+                await self._session.stop()
+                self._session = None
+            await self._sidecar.stop()
+            self._service.watchman_scope_plan = None
+            self._service.watchman_subscription_queue = None
+            message = f"Watchman session startup failed: {error}"
+            self._service._set_error(message)
+            raise RuntimeError(message) from error
+
+        self._service.watchman_scope_plan = setup.scope_plan
+        self._service.watchman_subscription_queue = self._session.subscription_queue
         self._service._set_effective_backend(self.backend_name)
         self._service._monitoring_ready_at = self._service._utc_now()
         self._service.monitoring_ready.set()
         self._service._emit_status_update()
 
     async def stop(self) -> None:
+        self._service.watchman_scope_plan = None
+        self._service.watchman_subscription_queue = None
+        if self._session is not None:
+            await self._session.stop()
+            self._session = None
         await self._sidecar.stop()
 
     def get_health(self) -> dict[str, Any]:
         health = self._sidecar.get_health()
-        health["observer_alive"] = bool(health.get("watchman_alive"))
+        if self._session is not None:
+            health.update(self._session.get_health())
+        else:
+            health.update(
+                {
+                    "watchman_session_alive": False,
+                    "watchman_session_pid": None,
+                    "watchman_session_last_warning": None,
+                    "watchman_session_last_warning_at": None,
+                    "watchman_session_last_error": None,
+                    "watchman_session_last_error_at": None,
+                    "watchman_session_last_response_at": None,
+                    "watchman_subscription_last_received_at": None,
+                    "watchman_session_command_count": 0,
+                    "watchman_subscription_queue_size": 0,
+                    "watchman_subscription_queue_maxsize": 1000,
+                    "watchman_subscription_pdu_count": 0,
+                    "watchman_subscription_pdu_dropped": 0,
+                    "watchman_subscription_name": None,
+                    "watchman_watch_root": None,
+                    "watchman_relative_root": None,
+                    "watchman_session_capabilities": {},
+                }
+            )
+        health["observer_alive"] = bool(health.get("watchman_alive")) and bool(
+            health.get("watchman_session_alive")
+        )
         return health
 
 
@@ -377,6 +441,10 @@ class RealtimeIndexingService:
         self._configured_backend = self._resolve_configured_backend()
         self._effective_backend = "uninitialized"
         self._monitor_adapter: RealtimeMonitorAdapter | None = None
+        self.watchman_scope_plan: WatchmanScopePlan | None = None
+        self.watchman_subscription_queue: asyncio.Queue[dict[str, object]] | None = (
+            None
+        )
 
         # Existing asyncio queue for priority processing
         self.file_queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue()

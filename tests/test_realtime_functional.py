@@ -222,15 +222,57 @@ class TestRealtimeFunctional:
             assert stats["monitoring_ready"] is True
             assert stats["observer_alive"] is True
             assert stats["watchman_pid"] is not None
+            assert stats["watchman_session_alive"] is True
+            assert stats["watchman_subscription_name"] == "chunkhound-live-indexing"
             assert stats["watchman_socket_path"] == str(
                 watch_dir / ".chunkhound" / "watchman" / "sock"
             )
+            assert stats["watchman_watch_root"] == str(watch_dir.resolve())
+            assert stats["watchman_relative_root"] is None
             assert Path(stats["watchman_metadata_path"]).is_file()
+            assert service.watchman_subscription_queue is not None
         finally:
             await service.stop()
             services.provider.disconnect()
 
         assert not (watch_dir / ".chunkhound" / "watchman" / "metadata.json").exists()
+
+    @pytest.mark.asyncio
+    async def test_watchman_backend_requires_session_capabilities(
+        self, tmp_path, monkeypatch
+    ):
+        """Watchman startup should fail when required capabilities are missing."""
+        from types import SimpleNamespace
+
+        watch_dir = tmp_path / "watchman_project"
+        watch_dir.mkdir(parents=True)
+        db_path = watch_dir / ".chunkhound" / "test.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        fake_args = SimpleNamespace(path=watch_dir)
+        config = Config(
+            args=fake_args,
+            database={"path": str(db_path), "provider": "duckdb"},
+            indexing={"realtime_backend": "watchman"},
+        )
+
+        services = create_services(db_path, config)
+        services.provider.connect()
+        service = RealtimeIndexingService(services, config)
+        monkeypatch.setenv(
+            "CHUNKHOUND_FAKE_WATCHMAN_MISSING_CAPABILITY", "relative_root"
+        )
+
+        try:
+            with pytest.raises(RuntimeError, match="relative_root"):
+                await service.start(watch_dir)
+
+            stats = await service.get_health()
+            assert stats["service_state"] == "degraded"
+            assert "relative_root" in (stats["last_error"] or "")
+            assert stats["watchman_session_alive"] is False
+        finally:
+            await service.stop()
+            services.provider.disconnect()
 
     @pytest.mark.asyncio
     async def test_missing_resync_callback_degrades_without_task_leak(

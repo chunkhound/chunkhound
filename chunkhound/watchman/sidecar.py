@@ -15,6 +15,7 @@ from typing import Any
 import psutil
 
 from chunkhound.daemon.process import pid_alive
+from chunkhound.watchman.session import build_watchman_base_command
 from chunkhound.watchman_runtime.loader import (
     PackagedWatchmanRuntime,
     materialize_watchman_binary,
@@ -301,7 +302,7 @@ class PrivateWatchmanSidecar:
         self._validate_socket_path()
 
         command = [
-            str(binary_path),
+            *build_watchman_base_command(binary_path),
             "--foreground",
             "--sockname",
             str(self.paths.socket_path),
