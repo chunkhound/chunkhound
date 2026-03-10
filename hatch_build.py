@@ -1,7 +1,92 @@
 from __future__ import annotations
 
-from hatchling.builders.hooks.plugin.interface import BuildHookInterface
+from pathlib import Path
+from platform import machine as current_machine
+from platform import system as current_system
+
 from packaging import tags
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 build env
+    import tomli as tomllib
+
+try:
+    from hatchling.builders.hooks.plugin.interface import BuildHookInterface
+except ModuleNotFoundError:  # pragma: no cover - local test env without hatchling
+    class BuildHookInterface:
+        pass
+
+
+_PYPROJECT_PATH = Path(__file__).with_name("pyproject.toml")
+_MACHINE_ALIASES = {
+    "amd64": "x86_64",
+    "arm64e": "arm64",
+    "aarch64": "arm64",
+    "x64": "x86_64",
+}
+_SYSTEM_ALIASES = {
+    "darwin": "macos",
+}
+
+
+def _load_supported_watchman_platforms() -> set[str]:
+    with _PYPROJECT_PATH.open("rb") as handle:
+        loaded = tomllib.load(handle)
+
+    supported_platforms = (
+        loaded.get("tool", {})
+        .get("chunkhound", {})
+        .get("watchman_runtime", {})
+        .get("supported_platforms")
+    )
+    if not isinstance(supported_platforms, list) or not supported_platforms:
+        raise RuntimeError(
+            "tool.chunkhound.watchman_runtime.supported_platforms must declare at "
+            "least one supported platform"
+        )
+
+    parsed: set[str] = set()
+    for platform_name in supported_platforms:
+        if not isinstance(platform_name, str) or not platform_name.strip():
+            raise RuntimeError(
+                "tool.chunkhound.watchman_runtime.supported_platforms must contain "
+                "non-empty platform strings"
+            )
+        parsed.add(platform_name.strip())
+    return parsed
+
+
+def _host_watchman_platform(
+    *, system_name: str | None = None, machine_name: str | None = None
+) -> str:
+    normalized_system = (system_name or current_system()).strip().lower()
+    normalized_system = _SYSTEM_ALIASES.get(normalized_system, normalized_system)
+    if normalized_system.startswith("win"):
+        normalized_system = "windows"
+
+    normalized_machine = (machine_name or current_machine()).strip().lower()
+    normalized_machine = _MACHINE_ALIASES.get(normalized_machine, normalized_machine)
+    return f"{normalized_system}-{normalized_machine}"
+
+
+def _require_supported_build_host(
+    supported_platforms: set[str],
+    *,
+    system_name: str | None = None,
+    machine_name: str | None = None,
+) -> str:
+    host_platform = _host_watchman_platform(
+        system_name=system_name,
+        machine_name=machine_name,
+    )
+    if host_platform not in supported_platforms:
+        rendered = ", ".join(sorted(supported_platforms))
+        raise RuntimeError(
+            "No packaged Watchman runtime payload is declared for build host "
+            f"{host_platform}. Supported platforms: {rendered}"
+        )
+    return host_platform
 
 
 def _platform_only_tag() -> str:
@@ -22,5 +107,6 @@ class CustomBuildHook(BuildHookInterface):
 
     def initialize(self, version: str, build_data: dict[str, object]) -> None:
         del version
+        _require_supported_build_host(_load_supported_watchman_platforms())
         build_data["pure_python"] = False
         build_data["tag"] = _platform_only_tag()

@@ -24,10 +24,6 @@ if ! git diff-index --quiet HEAD --; then
     fi
 fi
 
-# Get current version
-CURRENT_VERSION=$(grep 'version = ' pyproject.toml | head -1 | sed 's/.*version = "\([^"]*\)".*/\1/')
-echo "📋 Current version: $CURRENT_VERSION"
-
 # Clean previous builds
 echo "🧹 Cleaning previous builds..."
 rm -rf dist/ build/
@@ -60,6 +56,11 @@ fi
 uv run python scripts/verify_autodoc_wheel_resources.py "${WHEEL_PATHS[@]}"
 echo "✅ AutoDoc wheel resources verified"
 
+# Verify Watchman packaged runtime resources exist in the built wheel(s)
+echo "🔎 Verifying Watchman runtime wheel resources..."
+uv run python scripts/verify_watchman_runtime_resources.py "${WHEEL_PATHS[@]}"
+echo "✅ Watchman runtime wheel resources verified"
+
 # Generate checksums for release artifacts
 echo "🔐 Generating checksums..."
 cd dist/
@@ -75,7 +76,9 @@ ls -la dist/
 echo ""
 echo "🎯 Next steps:"
 echo "1. Test the built distributions locally:"
-echo "   pip install dist/chunkhound-${CURRENT_VERSION}-py3-none-any.whl"
+for wheel_path in "${WHEEL_PATHS[@]}"; do
+    echo "   pip install ${wheel_path}"
+done
 echo "2. Publish to PyPI (requires API token):"
 echo "   uv publish"
 echo "3. Create GitHub release with artifacts from dist/"
