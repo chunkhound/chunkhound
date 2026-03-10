@@ -135,14 +135,16 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
 
             # Determine output path
             if getattr(args, "perf_output", None):
-                output_path = Path(args.perf_output)
+                output_path = args.perf_output
             else:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 output_path = db_path.parent / f"perf_diagnostics_{timestamp}.json"
 
             # Write JSON file
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(json.dumps(diagnostics.to_dict(), indent=2))
+            output_path.write_text(
+                json.dumps(diagnostics.to_dict(), indent=2), encoding="utf-8"
+            )
             formatter.info(f"Performance diagnostics written to: {output_path}")
 
             # Display warnings
@@ -273,7 +275,8 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
                         import json
 
                         local_config_path.write_text(
-                            json.dumps(data, indent=2, sort_keys=False) + "\n"
+                            json.dumps(data, indent=2, sort_keys=False) + "\n",
+                            encoding="utf-8",
                         )
                         formatter.success(
                             f"Added {added} file(s) to indexing.exclude in {local_config_path}"
