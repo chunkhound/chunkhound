@@ -171,7 +171,9 @@ end
         func_chunks = [c for c in chunks if c.chunk_type.value == "function"]
         func_names = [c.symbol for c in func_chunks]
         # Must extract "changeset", not "def" or the full call text
-        assert any(s == "changeset" for s in func_names), f"Expected 'changeset' in {func_names}"
+        assert any(s == "changeset" for s in func_names), (
+            f"Expected 'changeset' in {func_names}"
+        )
 
     def test_parse_type_and_spec(self, parser, tmp_path):
         """Property 4: Attribute Recognition for types/specs."""
@@ -257,7 +259,8 @@ end
         assert "@moduledoc" in all_content or "Module documentation" in all_content
 
     def test_parse_comprehensive_fixture(self, parser):
-        fixture_path = Path(__file__).parent / "fixtures" / "elixir" / "comprehensive.ex"
+        fixture_dir = Path(__file__).parent / "fixtures" / "elixir"
+        fixture_path = fixture_dir / "comprehensive.ex"
         if not fixture_path.exists():
             pytest.skip("Elixir comprehensive fixture not found")
 
