@@ -190,3 +190,38 @@ class TestNonBlockingInitialization:
 
         with pytest.raises(RuntimeError, match="Watchman sidecar startup failed: boom"):
             await server.await_startup_barrier()
+
+    @pytest.mark.asyncio
+    async def test_realtime_resync_uses_no_embedding_scan_and_single_embed_followup(
+        self, tmp_path: Path
+    ) -> None:
+        """Realtime resyncs should rescan without embeddings, then embed once."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.exclude = ["*.lock", "node_modules/**"]
+
+        server = ConcreteMCPServer(config=config)
+        server._scan_target_path = tmp_path
+        server._run_directory_scan = AsyncMock()  # type: ignore[method-assign]
+        server.services = MagicMock()
+        server.services.indexing_coordinator.generate_missing_embeddings = AsyncMock(
+            return_value={"status": "up_to_date", "generated": 0}
+        )
+
+        await server._request_realtime_resync(
+            "realtime_loss_of_sync",
+            {"backend": "watchman", "loss_of_sync_reason": "disconnect"},
+        )
+
+        server._run_directory_scan.assert_awaited_once_with(  # type: ignore[attr-defined]
+            tmp_path,
+            trigger="realtime_resync",
+            reason="realtime_loss_of_sync",
+            no_embeddings=True,
+        )
+        server.services.indexing_coordinator.generate_missing_embeddings.assert_awaited_once_with(
+            exclude_patterns=["*.lock", "node_modules/**"]
+        )

@@ -386,11 +386,32 @@ class MCPServerBase(ABC):
         detail_suffix = f" details={details}" if details else ""
         self.debug_log(f"Realtime resync requested: reason={reason}{detail_suffix}")
         await self._run_directory_scan(
-            self._scan_target_path, trigger="realtime_resync", reason=reason
+            self._scan_target_path,
+            trigger="realtime_resync",
+            reason=reason,
+            no_embeddings=True,
+        )
+        if self.services is None:
+            return
+
+        exclude_patterns = list(getattr(self.config.indexing, "exclude", []) or [])
+        embed_result = await (
+            self.services.indexing_coordinator.generate_missing_embeddings(
+                exclude_patterns=exclude_patterns
+            )
+        )
+        generated = embed_result.get("generated", 0)
+        self.debug_log(
+            "Realtime resync embedding follow-up completed: "
+            f"status={embed_result.get('status')} generated={generated}"
         )
 
     async def _run_directory_scan(
-        self, target_path: Path, trigger: str, reason: str | None = None
+        self,
+        target_path: Path,
+        trigger: str,
+        reason: str | None = None,
+        no_embeddings: bool = False,
     ) -> None:
         """Perform an initial or reconciliation scan without overlapping other scans."""
         async with self._scan_lock:
@@ -427,7 +448,7 @@ class MCPServerBase(ABC):
 
                 # Perform scan with lower priority
                 stats = await indexing_service.process_directory(
-                    target_path, no_embeddings=False
+                    target_path, no_embeddings=no_embeddings
                 )
 
                 # Update final stats

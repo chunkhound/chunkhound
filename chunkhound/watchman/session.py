@@ -76,6 +76,7 @@ class WatchmanCliSession:
         self._subscription_pdu_count = 0
         self._subscription_pdu_dropped = 0
         self._stop_requested = False
+        self._unexpected_exit_future: asyncio.Future[str | None] | None = None
 
     @property
     def scope_plan(self) -> WatchmanScopePlan | None:
@@ -95,6 +96,7 @@ class WatchmanCliSession:
             await self.stop()
 
         self._reset_state()
+        self._unexpected_exit_future = asyncio.get_running_loop().create_future()
         command = [
             *self._build_command_prefix(),
             "--sockname",
@@ -166,6 +168,7 @@ class WatchmanCliSession:
         self._capabilities = {}
         self._clear_subscription_queue()
         self._fail_pending_reply(RuntimeError("Watchman session stopped"))
+        self._resolve_unexpected_exit(None)
 
         process = self._process
         reader_task = self._reader_task
@@ -195,6 +198,12 @@ class WatchmanCliSession:
 
         await self._await_background_task(reader_task)
         await self._await_background_task(stderr_task)
+
+    async def wait_for_unexpected_exit(self) -> str | None:
+        future = self._unexpected_exit_future
+        if future is None:
+            return None
+        return await asyncio.shield(future)
 
     def get_health(self) -> dict[str, Any]:
         process_alive = self._process is not None and self._process.returncode is None
@@ -325,6 +334,7 @@ class WatchmanCliSession:
             message = f"Watchman session exited unexpectedly (rc={returncode})"
             self._record_error(message)
             self._fail_pending_reply(RuntimeError(message))
+            self._resolve_unexpected_exit(message)
 
     async def _stderr_loop(self) -> None:
         process = self._process
@@ -400,6 +410,7 @@ class WatchmanCliSession:
         self._subscription_pdu_count = 0
         self._subscription_pdu_dropped = 0
         self._clear_subscription_queue()
+        self._unexpected_exit_future = None
 
     def _clear_subscription_queue(self) -> None:
         while True:
@@ -424,6 +435,11 @@ class WatchmanCliSession:
         self._last_error = message
         self._last_error_at = _utc_now()
         self._debug(f"error: {message}")
+
+    def _resolve_unexpected_exit(self, message: str | None) -> None:
+        future = self._unexpected_exit_future
+        if future is not None and not future.done():
+            future.set_result(message)
 
     async def _await_background_task(self, task: asyncio.Task[None] | None) -> None:
         if task is None:

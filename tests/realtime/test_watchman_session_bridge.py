@@ -66,6 +66,9 @@ def main(argv: list[str] | None = None) -> int:
     emit_pdu_after_subscribe = (
         os.environ.get("CHUNKHOUND_TEST_WATCHMAN_EMIT_PDU_AFTER_SUBSCRIBE") == "1"
     )
+    exit_after_subscribe = (
+        os.environ.get("CHUNKHOUND_TEST_WATCHMAN_EXIT_AFTER_SUBSCRIBE") == "1"
+    )
     watch_project_logged = False
 
     for raw_line in sys.stdin:
@@ -119,6 +122,8 @@ def main(argv: list[str] | None = None) -> int:
                         ],
                     }
                 )
+            if exit_after_subscribe:
+                return 75
             continue
         emit({"error": f"unsupported command {name}"})
     return 0
@@ -215,5 +220,37 @@ async def test_watchman_cli_session_requires_relative_root_capability(
 
     with pytest.raises(RuntimeError, match="relative_root"):
         await session.start(target_path=target_path)
+
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_watchman_cli_session_reports_unexpected_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script_path = _write_fake_watchman_cli(tmp_path)
+    target_path = tmp_path / "repo"
+    target_path.mkdir()
+    socket_path = tmp_path / "watchman.sock"
+    socket_path.write_text("socket ready\n", encoding="utf-8")
+
+    monkeypatch.setenv("CHUNKHOUND_TEST_WATCHMAN_EXIT_AFTER_SUBSCRIBE", "1")
+
+    session = WatchmanCliSession(
+        binary_path=script_path,
+        socket_path=socket_path,
+        project_root=tmp_path,
+        command_prefix=[sys.executable, str(script_path)],
+    )
+
+    await session.start(target_path=target_path)
+    message = await asyncio.wait_for(session.wait_for_unexpected_exit(), timeout=1.0)
+
+    assert message is not None
+    assert "exited unexpectedly" in message
+    assert session.get_health()["watchman_session_alive"] is False
+    assert "exited unexpectedly" in (
+        session.get_health()["watchman_session_last_error"] or ""
+    )
 
     await session.stop()

@@ -319,8 +319,17 @@ class WatchmanRealtimeAdapter:
         self._session: WatchmanCliSession | None = None
         self._path_filter: RealtimePathFilter | None = None
         self._subscription_consumer_task: asyncio.Task[None] | None = None
+        self._session_monitor_task: asyncio.Task[None] | None = None
+        self._loss_of_sync_count = 0
+        self._fresh_instance_count = 0
+        self._recrawl_count = 0
+        self._disconnect_count = 0
+        self._last_loss_of_sync_reason: str | None = None
+        self._last_loss_of_sync_at: str | None = None
+        self._last_loss_of_sync_details: dict[str, object] | None = None
 
     async def start(self, watch_path: Path, loop: asyncio.AbstractEventLoop) -> None:
+        self._reset_loss_of_sync_state()
         try:
             metadata = await self._sidecar.start()
         except Exception as error:
@@ -362,6 +371,9 @@ class WatchmanRealtimeAdapter:
         self._subscription_consumer_task = loop.create_task(
             self._consume_subscription_pdus(setup.scope_plan.primary_scope)
         )
+        self._session_monitor_task = loop.create_task(
+            self._monitor_unexpected_session_exit()
+        )
         self._service._set_effective_backend(self.backend_name)
         self._service._monitoring_ready_at = self._service._utc_now()
         self._service.monitoring_ready.set()
@@ -371,6 +383,13 @@ class WatchmanRealtimeAdapter:
         self._service.watchman_scope_plan = None
         self._service.watchman_subscription_queue = None
         self._path_filter = None
+        if self._session_monitor_task is not None:
+            self._session_monitor_task.cancel()
+            try:
+                await self._session_monitor_task
+            except asyncio.CancelledError:
+                pass
+            self._session_monitor_task = None
         if self._subscription_consumer_task is not None:
             self._subscription_consumer_task.cancel()
             try:
@@ -393,6 +412,8 @@ class WatchmanRealtimeAdapter:
         while True:
             payload = await session.subscription_queue.get()
             try:
+                if self._handle_loss_of_sync_payload(payload):
+                    continue
                 self._translate_subscription_pdu(payload, scope)
             except Exception as error:
                 message = f"Watchman event translation failed: {error}"
@@ -400,6 +421,33 @@ class WatchmanRealtimeAdapter:
                 self._service._set_warning(message)
             finally:
                 session.subscription_queue.task_done()
+
+    async def _monitor_unexpected_session_exit(self) -> None:
+        session = self._session
+        if session is None:
+            return
+
+        message = await session.wait_for_unexpected_exit()
+        if message is None:
+            return
+
+        if self._subscription_consumer_task is not None:
+            self._subscription_consumer_task.cancel()
+
+        sidecar_health = self._sidecar.get_health()
+        details = {
+            "backend": "watchman",
+            "loss_of_sync_reason": "disconnect",
+            "watchman_session_alive": False,
+            "watchman_alive": bool(sidecar_health.get("watchman_alive")),
+            "watchman_session_error": message,
+        }
+        self._record_loss_of_sync(
+            "disconnect",
+            message=message,
+            details=details,
+            as_error=True,
+        )
 
     def _translate_subscription_pdu(
         self, payload: dict[str, object], scope: WatchmanSubscriptionScope
@@ -500,6 +548,96 @@ class WatchmanRealtimeAdapter:
         logger.warning(warning)
         self._service._set_warning(warning)
 
+    def _reset_loss_of_sync_state(self) -> None:
+        self._loss_of_sync_count = 0
+        self._fresh_instance_count = 0
+        self._recrawl_count = 0
+        self._disconnect_count = 0
+        self._last_loss_of_sync_reason = None
+        self._last_loss_of_sync_at = None
+        self._last_loss_of_sync_details = None
+
+    def _handle_loss_of_sync_payload(self, payload: dict[str, object]) -> bool:
+        reason: str | None = None
+        message: str | None = None
+
+        if (
+            payload.get("is_fresh_instance") is True
+            or payload.get("fresh_instance") is True
+        ):
+            reason = "fresh_instance"
+            message = (
+                "Watchman reported a fresh instance; "
+                "scheduling a reconciliation resync"
+            )
+        else:
+            warning = payload.get("warning")
+            if isinstance(warning, str) and "recrawl" in warning.lower():
+                reason = "recrawl"
+                message = (
+                    "Watchman reported a recrawl warning; "
+                    "scheduling a reconciliation resync"
+                )
+
+        if reason is None:
+            return False
+
+        details: dict[str, object] = {
+            "backend": "watchman",
+            "loss_of_sync_reason": reason,
+            "subscription": str(payload.get("subscription") or self._SUBSCRIPTION_NAME),
+        }
+        clock = payload.get("clock")
+        if isinstance(clock, str) and clock:
+            details["clock"] = clock
+        warning = payload.get("warning")
+        if isinstance(warning, str) and warning:
+            details["warning"] = warning
+
+        self._record_loss_of_sync(reason, message=message, details=details)
+        return True
+
+    def _record_loss_of_sync(
+        self,
+        reason: str,
+        *,
+        message: str | None = None,
+        details: dict[str, object] | None = None,
+        as_error: bool = False,
+    ) -> None:
+        self._loss_of_sync_count += 1
+        if reason == "fresh_instance":
+            self._fresh_instance_count += 1
+        elif reason == "recrawl":
+            self._recrawl_count += 1
+        elif reason == "disconnect":
+            self._disconnect_count += 1
+
+        self._last_loss_of_sync_reason = reason
+        self._last_loss_of_sync_at = self._service._utc_now()
+        self._last_loss_of_sync_details = dict(details) if details else None
+
+        if message:
+            if as_error:
+                self._service._set_error(message)
+            else:
+                self._service._set_warning(message)
+        else:
+            self._service._emit_status_update()
+
+        self._schedule_resync_request(reason, details)
+
+    def _schedule_resync_request(
+        self, reason: str, details: dict[str, object] | None = None
+    ) -> None:
+        async def _dispatch() -> None:
+            try:
+                await self._service.request_resync("realtime_loss_of_sync", details)
+            except Exception as error:
+                self._service._set_error(f"Watchman resync request failed: {error}")
+
+        asyncio.create_task(_dispatch())
+
     def get_health(self) -> dict[str, Any]:
         health = self._sidecar.get_health()
         if self._session is not None:
@@ -526,6 +664,15 @@ class WatchmanRealtimeAdapter:
                     "watchman_session_capabilities": {},
                 }
             )
+        health["watchman_loss_of_sync"] = {
+            "count": self._loss_of_sync_count,
+            "fresh_instance_count": self._fresh_instance_count,
+            "recrawl_count": self._recrawl_count,
+            "disconnect_count": self._disconnect_count,
+            "last_reason": self._last_loss_of_sync_reason,
+            "last_at": self._last_loss_of_sync_at,
+            "last_details": self._last_loss_of_sync_details,
+        }
         health["observer_alive"] = bool(health.get("watchman_alive")) and bool(
             health.get("watchman_session_alive")
         )
