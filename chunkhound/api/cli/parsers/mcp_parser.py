@@ -31,6 +31,13 @@ def add_mcp_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help="Directory path to index (default: current directory)",
     )
 
+    # Daemon mode control
+    mcp_parser.add_argument(
+        "--no-daemon",
+        action="store_true",
+        help="Run MCP server directly without daemon (single client mode)",
+    )
+
     # Add common arguments
     add_common_arguments(mcp_parser)
 

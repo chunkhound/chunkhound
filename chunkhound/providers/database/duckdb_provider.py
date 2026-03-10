@@ -1028,7 +1028,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 conn.execute("ROLLBACK")
                 state["transaction_active"] = False
                 logger.info("Transaction rolled back due to error")
-            except:
+            except Exception:
                 pass
 
             # Attempt to recreate dropped indexes on failure

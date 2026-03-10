@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Global chunk deduplication now applies to all parsers (YAML, Universal) - prevents duplicate chunk IDs that caused indexing failures with repeated config values
 
+### Removed
+- `CHUNKHOUND_EMBEDDING_OPTIMIZATION_BATCH_FREQUENCY` config - optimization now runs once at indexing end
+
 ## [4.1.0b1] - 2025-11-15
 
 ### Added

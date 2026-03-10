@@ -236,9 +236,9 @@ class TestLuaImportResolution:
         import_text = 'require("lib.utils")'
         source_file = tmp_path / "main.lua"
 
-        resolved = mapping.resolve_import_path(import_text, tmp_path, source_file)
-        assert resolved is not None
-        assert resolved == utils_file
+        resolved = mapping.resolve_import_paths(import_text, tmp_path, source_file)
+        assert len(resolved) == 1
+        assert resolved[0] == utils_file
 
     def test_resolve_dofile_path(self, tmp_path):
         """Test resolving dofile statements."""
@@ -252,9 +252,9 @@ class TestLuaImportResolution:
         import_text = 'dofile("config.lua")'
         source_file = tmp_path / "main.lua"
 
-        resolved = mapping.resolve_import_path(import_text, tmp_path, source_file)
-        assert resolved is not None
-        assert resolved == config_file
+        resolved = mapping.resolve_import_paths(import_text, tmp_path, source_file)
+        assert len(resolved) == 1
+        assert resolved[0] == config_file
 
     def test_unresolvable_require(self, tmp_path):
         """Test that unresolvable requires return None."""
@@ -263,5 +263,5 @@ class TestLuaImportResolution:
         import_text = 'require("nonexistent.module")'
         source_file = tmp_path / "main.lua"
 
-        resolved = mapping.resolve_import_path(import_text, tmp_path, source_file)
-        assert resolved is None
+        resolved = mapping.resolve_import_paths(import_text, tmp_path, source_file)
+        assert resolved == []

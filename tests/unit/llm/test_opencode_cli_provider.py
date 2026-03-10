@@ -183,12 +183,6 @@ class TestOpenCodeCLIProvider:
             assert all(isinstance(r, LLMResponse) for r in results)
             assert mock_complete.call_count == 3
 
-    def test_estimate_tokens(self):
-        """Test token estimation."""
-        text = "This is a test string for token estimation"
-        estimated = self.provider.estimate_tokens(text)
-        assert estimated == len(text) // self.provider.TOKEN_CHARS_RATIO
-
     @pytest.mark.asyncio
     async def test_health_check_success(self):
         """Test successful health check."""

@@ -5,7 +5,6 @@ sections (template, script, style) that need to be parsed separately.
 """
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from chunkhound.core.models.chunk import Chunk
 from chunkhound.core.types.common import (
@@ -20,9 +19,6 @@ from chunkhound.parsers.mappings.vue_template import VueTemplateMapping
 from chunkhound.parsers.parser_factory import create_parser_for_language
 from chunkhound.parsers.universal_parser import CASTConfig, UniversalParser
 from chunkhound.parsers.vue_cross_ref import add_cross_references
-
-if TYPE_CHECKING:
-    pass
 
 
 class VueParser:
