@@ -360,7 +360,7 @@ class EmbeddingProviderFactory:
                     # UI-specific metadata for setup wizard
                     "display_name": "VoyageAI",
                     "base_url": None,  # Uses SDK, no direct endpoint
-                    "requires_api_key": True,
+                    "requires_api_key": False,  # Only required for official api.voyageai.com
                     "supports_model_listing": False,
                     "supports_reranking": True,
                     "default_models": [

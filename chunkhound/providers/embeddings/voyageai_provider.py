@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from chunkhound.core.config.voyageai_utils import is_official_voyageai_endpoint
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERANK_MODEL
 from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
@@ -183,9 +184,12 @@ class VoyageAIEmbeddingProvider:
         self._model_config = model_config
         self._rerank_batch_size = rerank_batch_size
 
-        # For custom endpoints without an API key, pass a placeholder to satisfy
-        # the SDK's requirement — the server is expected to ignore the auth header
-        effective_api_key = api_key if api_key else ("no-key" if base_url else None)
+        # For non-official custom endpoints without an API key, pass a placeholder to
+        # satisfy the SDK's requirement — the server ignores the auth header.
+        # Official VoyageAI endpoints require a real key; "no-key" there produces a
+        # cryptic auth error rather than a clear config failure.
+        is_custom = base_url and not is_official_voyageai_endpoint(base_url)
+        effective_api_key = api_key if api_key else ("no-key" if is_custom else None)
 
         # Use the system CA bundle when available so that corporate proxy CAs
         # (e.g. Blue Coat / AMAT) are trusted without patching certifi.

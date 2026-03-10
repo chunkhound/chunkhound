@@ -17,6 +17,7 @@ from typing_extensions import Self
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
 
 from .openai_utils import is_azure_openai_endpoint, is_official_openai_endpoint
+from .voyageai_utils import is_official_voyageai_endpoint
 
 # Error message constants for consistent messaging across config and provider
 RERANK_MODEL_REQUIRED_COHERE = (
@@ -340,10 +341,10 @@ class EmbeddingConfig(BaseSettings):
                 # Custom endpoints don't require API key
                 return True
         else:
-            # For voyageai with a custom endpoint, API key is optional
-            if self.base_url:
-                return True
-            return self.api_key is not None
+            # VoyageAI: only the official endpoint requires an API key
+            if is_official_voyageai_endpoint(self.base_url):
+                return self.api_key is not None
+            return True
 
     def get_missing_config(self) -> list[str]:
         """
@@ -474,11 +475,9 @@ class EmbeddingConfig(BaseSettings):
                 or os.getenv("CHUNKHOUND_EMBEDDING__PROVIDER")
                 or os.getenv("CHUNKHOUND_EMBEDDING_PROVIDER")
             )
-            if not provider_hint or provider_hint == "voyageai":
+            if provider_hint == "voyageai":
                 if voyage_key := os.getenv("VOYAGE_API_KEY"):
                     config["api_key"] = voyage_key
-                    if not provider_hint:
-                        config.setdefault("provider", "voyageai")
 
         # Reranking configuration
         if rerank_model := os.getenv("CHUNKHOUND_EMBEDDING__RERANK_MODEL"):

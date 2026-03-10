@@ -74,10 +74,13 @@ def validate_provider_args(
             )
             return False
     elif provider == "voyageai":
-        if not api_key and not base_url:
+        from chunkhound.core.config.voyageai_utils import is_official_voyageai_endpoint
+
+        if is_official_voyageai_endpoint(base_url) and not api_key:
             logger.error(
-                "VoyageAI API key required. Set CHUNKHOUND_EMBEDDING__API_KEY "
-                "or use --api-key (not required when using a custom --base-url)"
+                "VoyageAI API key required for official VoyageAI endpoints. "
+                "Set CHUNKHOUND_EMBEDDING__API_KEY or use --api-key "
+                "(not required when using a custom --base-url)"
             )
             return False
     else:
