@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -51,6 +52,58 @@ def _host_probe_command(*, binary_path: Path, probe_args: tuple[str, ...]) -> li
     return [str(binary_path), *probe_args]
 
 
+def _host_sidecar_command(
+    *,
+    binary_path: Path,
+    socket_path: Path,
+    statefile_path: Path,
+    logfile_path: Path,
+) -> list[str]:
+    command = [
+        str(binary_path),
+        "--foreground",
+        "--sockname",
+        str(socket_path),
+        "--statefile",
+        str(statefile_path),
+        "--logfile",
+        str(logfile_path),
+        "--no-save-state",
+    ]
+    if os.name == "nt":
+        return ["cmd.exe", "/c", *command]
+    return command
+
+
+def _wait_for_sidecar_files(
+    *,
+    process: subprocess.Popen,
+    socket_path: Path,
+    statefile_path: Path,
+    logfile_path: Path,
+) -> None:
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if socket_path.exists() and statefile_path.exists() and logfile_path.exists():
+            return
+        if process.poll() is not None:
+            raise AssertionError(
+                "materialized Watchman runtime exited before it created sidecar files "
+                f"(rc={process.returncode})"
+            )
+        time.sleep(0.05)
+    raise AssertionError("timed out waiting for packaged Watchman sidecar files")
+
+
+def _stop_sidecar_process(process: subprocess.Popen) -> None:
+    process.terminate()
+    try:
+        process.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=2.0)
+
+
 def test_materialize_watchman_binary_writes_executable_for_host(tmp_path: Path) -> None:
     runtime = resolve_packaged_watchman_runtime()
 
@@ -76,6 +129,40 @@ def test_materialize_watchman_binary_writes_executable_for_host(tmp_path: Path) 
     assert result.returncode == 0
     assert "watchman" in result.stdout.lower()
     assert "placeholder" in result.stdout.lower()
+
+
+def test_materialized_watchman_binary_supports_private_sidecar_flags(
+    tmp_path: Path,
+) -> None:
+    binary_path = materialize_watchman_binary(destination_root=tmp_path)
+    sidecar_root = tmp_path / "sidecar"
+    socket_path = sidecar_root / "sock"
+    statefile_path = sidecar_root / "state"
+    logfile_path = sidecar_root / "watchman.log"
+
+    process = subprocess.Popen(
+        _host_sidecar_command(
+            binary_path=binary_path,
+            socket_path=socket_path,
+            statefile_path=statefile_path,
+            logfile_path=logfile_path,
+        ),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        _wait_for_sidecar_files(
+            process=process,
+            socket_path=socket_path,
+            statefile_path=statefile_path,
+            logfile_path=logfile_path,
+        )
+        assert process.poll() is None
+        assert "fake watchman start" in logfile_path.read_text(encoding="utf-8")
+    finally:
+        if process.poll() is None:
+            _stop_sidecar_process(process)
 
 
 def test_materialize_watchman_binary_rewrites_corrupt_payload(tmp_path: Path) -> None:

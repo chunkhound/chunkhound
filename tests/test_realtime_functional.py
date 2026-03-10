@@ -189,21 +189,48 @@ class TestRealtimeFunctional:
         assert service.process_task is None
 
     @pytest.mark.asyncio
-    async def test_watchman_placeholder_does_not_claim_effective_backend(
-        self, realtime_setup
+    async def test_watchman_backend_starts_private_sidecar_and_reports_health(
+        self, tmp_path
     ):
-        """Watchman placeholder should not claim an active effective backend."""
-        service, watch_dir, _, _ = realtime_setup
-        service.config.indexing.realtime_backend = "watchman"
+        """Watchman backend should own a private sidecar and report it as ready."""
+        from types import SimpleNamespace
 
-        with pytest.raises(RuntimeError, match="not implemented"):
+        watch_dir = tmp_path / "watchman_project"
+        watch_dir.mkdir(parents=True)
+        db_path = watch_dir / ".chunkhound" / "test.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        fake_args = SimpleNamespace(path=watch_dir)
+        config = Config(
+            args=fake_args,
+            database={"path": str(db_path), "provider": "duckdb"},
+            indexing={"realtime_backend": "watchman"},
+        )
+
+        services = create_services(db_path, config)
+        services.provider.connect()
+
+        service = RealtimeIndexingService(services, config)
+
+        try:
             await service.start(watch_dir)
 
-        stats = await service.get_health()
-        assert stats["configured_backend"] == "watchman"
-        assert stats["effective_backend"] == "uninitialized"
-        assert stats["monitoring_mode"] == "uninitialized"
-        assert stats["service_state"] == "degraded"
+            stats = await service.get_health()
+            assert stats["configured_backend"] == "watchman"
+            assert stats["effective_backend"] == "watchman"
+            assert stats["monitoring_mode"] == "watchman"
+            assert stats["service_state"] == "running"
+            assert stats["monitoring_ready"] is True
+            assert stats["observer_alive"] is True
+            assert stats["watchman_pid"] is not None
+            assert stats["watchman_socket_path"] == str(
+                watch_dir / ".chunkhound" / "watchman" / "sock"
+            )
+            assert Path(stats["watchman_metadata_path"]).is_file()
+        finally:
+            await service.stop()
+            services.provider.disconnect()
+
+        assert not (watch_dir / ".chunkhound" / "watchman" / "metadata.json").exists()
 
     @pytest.mark.asyncio
     async def test_missing_resync_callback_degrades_without_task_leak(
@@ -337,15 +364,19 @@ class TestRealtimeFunctional:
         assert service._watchdog_bootstrap_future is None
 
     @pytest.mark.asyncio
-    async def test_watchman_backend_raises_until_adapter_is_implemented(self, tmp_path):
-        """Selecting watchman should fail explicitly until later epic steps land."""
+    async def test_stop_cancels_inflight_watchman_start_and_cleans_sidecar(
+        self, tmp_path, monkeypatch
+    ):
+        """stop() should cancel Watchman startup and leave no owned sidecar state."""
         from types import SimpleNamespace
 
-        fake_args = SimpleNamespace(path=tmp_path)
+        watch_dir = tmp_path / "watchman_project"
+        watch_dir.mkdir(parents=True)
+        fake_args = SimpleNamespace(path=watch_dir)
         config = Config(
             args=fake_args,
             database={
-                "path": str(tmp_path / ".chunkhound" / "test.db"),
+                "path": str(watch_dir / ".chunkhound" / "test.db"),
                 "provider": "duckdb",
             },
             indexing={"realtime_backend": "watchman"},
@@ -354,23 +385,31 @@ class TestRealtimeFunctional:
 
         services = create_services(config.database.path, config)
         services.provider.connect()
+        monkeypatch.setenv("CHUNKHOUND_FAKE_WATCHMAN_START_DELAY_SECONDS", "2")
         service = RealtimeIndexingService(services, config)
 
-        watch_dir = tmp_path / "watchman_project"
-        watch_dir.mkdir(parents=True)
-
         try:
-            with pytest.raises(RuntimeError, match="watchman"):
-                await service.start(watch_dir)
+            start_task = asyncio.create_task(service.start(watch_dir))
+            await asyncio.sleep(0.1)
+
+            await service.stop()
+
+            with pytest.raises(asyncio.CancelledError):
+                await start_task
 
             stats = await service.get_health()
             assert stats["configured_backend"] == "watchman"
             assert stats["effective_backend"] == "uninitialized"
             assert stats["monitoring_mode"] == "uninitialized"
-            assert stats["service_state"] == "degraded"
+            assert stats["service_state"] == "stopped"
+            assert stats["monitoring_ready"] is False
+            assert service.event_consumer_task is None
+            assert service.process_task is None
         finally:
             await service.stop()
             services.provider.disconnect()
+
+        assert not (watch_dir / ".chunkhound" / "watchman" / "metadata.json").exists()
 
     @pytest.mark.asyncio
     async def test_full_event_queue_tracks_drop_and_requests_resync(

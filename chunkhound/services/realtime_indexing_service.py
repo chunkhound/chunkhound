@@ -26,6 +26,7 @@ from watchdog.observers import Observer
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.utils.windows_constants import IS_WINDOWS
+from chunkhound.watchman import PrivateWatchmanSidecar
 
 
 def normalize_file_path(path: Path | str) -> str:
@@ -307,24 +308,41 @@ class PollingRealtimeAdapter:
 
 
 class WatchmanRealtimeAdapter:
-    """Placeholder adapter slot for future Watchman work."""
+    """Private Watchman sidecar lifecycle adapter."""
 
     backend_name = "watchman"
 
     def __init__(self, service: "RealtimeIndexingService") -> None:
         self._service = service
+        target_dir = getattr(service.config, "target_dir", None)
+        if not isinstance(target_dir, Path):
+            raise RuntimeError(
+                "Watchman backend requires config.target_dir "
+                "to resolve a private runtime root"
+            )
+        self._sidecar = PrivateWatchmanSidecar(target_dir, debug_sink=service._debug)
 
     async def start(self, watch_path: Path, loop: asyncio.AbstractEventLoop) -> None:
         del watch_path, loop
-        message = "Realtime backend 'watchman' is not implemented on this branch yet"
-        self._service._set_error(message)
-        raise RuntimeError(message)
+        try:
+            await self._sidecar.start()
+        except Exception as error:
+            message = f"Watchman sidecar startup failed: {error}"
+            self._service._set_error(message)
+            raise RuntimeError(message) from error
+
+        self._service._set_effective_backend(self.backend_name)
+        self._service._monitoring_ready_at = self._service._utc_now()
+        self._service.monitoring_ready.set()
+        self._service._emit_status_update()
 
     async def stop(self) -> None:
-        return None
+        await self._sidecar.stop()
 
     def get_health(self) -> dict[str, Any]:
-        return {"observer_alive": False}
+        health = self._sidecar.get_health()
+        health["observer_alive"] = bool(health.get("watchman_alive"))
+        return health
 
 
 class RealtimeIndexingService:
@@ -801,6 +819,23 @@ class RealtimeIndexingService:
             self._polling_task = None
         self._using_polling = False
 
+    async def _cancel_processing_tasks(self) -> None:
+        if self.event_consumer_task:
+            self.event_consumer_task.cancel()
+            try:
+                await self.event_consumer_task
+            except asyncio.CancelledError:
+                pass
+            self.event_consumer_task = None
+
+        if self.process_task:
+            self.process_task.cancel()
+            try:
+                await self.process_task
+            except asyncio.CancelledError:
+                pass
+            self.process_task = None
+
     async def start(self, watch_path: Path) -> None:
         """Start real-time indexing service."""
         start_task = asyncio.current_task()
@@ -829,10 +864,6 @@ class RealtimeIndexingService:
 
             loop = asyncio.get_event_loop()
 
-            if self._configured_backend == "watchman":
-                await self._monitor_adapter.start(watch_path, loop)
-                return
-
             # Start all necessary tasks
             self.event_consumer_task = asyncio.create_task(self._consume_events())
             self.process_task = asyncio.create_task(self._process_loop())
@@ -858,6 +889,9 @@ class RealtimeIndexingService:
                 )
                 self._debug("monitoring timeout; continuing")
             self._emit_status_update()
+        except Exception:
+            await self._cancel_processing_tasks()
+            raise
         finally:
             if self._active_start_task is start_task:
                 self._active_start_task = None
@@ -883,23 +917,7 @@ class RealtimeIndexingService:
         if self._monitor_adapter:
             await self._monitor_adapter.stop()
 
-        # Cancel event consumer task
-        if self.event_consumer_task:
-            self.event_consumer_task.cancel()
-            try:
-                await self.event_consumer_task
-            except asyncio.CancelledError:
-                pass
-            self.event_consumer_task = None
-
-        # Cancel processing task
-        if self.process_task:
-            self.process_task.cancel()
-            try:
-                await self.process_task
-            except asyncio.CancelledError:
-                pass
-            self.process_task = None
+        await self._cancel_processing_tasks()
 
         if self._resync_dispatch_task:
             self._resync_dispatch_task.cancel()

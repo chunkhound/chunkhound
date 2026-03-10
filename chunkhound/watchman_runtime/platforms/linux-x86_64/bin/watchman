@@ -1,8 +1,59 @@
 #!/bin/sh
 if [ "${1:-}" = "--version" ]; then
-    printf '%s\n' 'watchman 0.0.0-chunkhound-placeholder'
+    printf '%s\n' 'watchman 0.0.0-chunkhound-sidecar-placeholder'
     exit 0
 fi
 
-printf '%s\n' 'chunkhound fake watchman runtime: only --version is supported' >&2
-exit 64
+sockname=""
+statefile=""
+logfile=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --foreground|--no-save-state)
+            shift
+            ;;
+        --sockname)
+            sockname="$2"
+            shift 2
+            ;;
+        --statefile)
+            statefile="$2"
+            shift 2
+            ;;
+        --logfile)
+            logfile="$2"
+            shift 2
+            ;;
+        *)
+            printf '%s\n' "chunkhound fake watchman runtime: unsupported flag $1" >&2
+            exit 64
+            ;;
+    esac
+done
+
+if [ -z "$sockname" ] || [ -z "$statefile" ] || [ -z "$logfile" ]; then
+    printf '%s\n' 'chunkhound fake watchman runtime: missing sidecar path flags' >&2
+    exit 64
+fi
+
+delay_seconds="${CHUNKHOUND_FAKE_WATCHMAN_START_DELAY_SECONDS:-0}"
+if [ "$delay_seconds" != "0" ]; then
+    sleep "$delay_seconds"
+fi
+
+mkdir -p "$(dirname "$logfile")"
+printf '%s\n' 'fake watchman start' >> "$logfile"
+
+if [ "${CHUNKHOUND_FAKE_WATCHMAN_FAIL_BEFORE_READY:-0}" = "1" ]; then
+    exit 70
+fi
+
+mkdir -p "$(dirname "$sockname")" "$(dirname "$statefile")"
+printf '%s\n' 'socket ready' > "$sockname"
+printf '%s\n' 'state ready' > "$statefile"
+
+trap 'exit 0' TERM INT
+while :; do
+    sleep 1
+done

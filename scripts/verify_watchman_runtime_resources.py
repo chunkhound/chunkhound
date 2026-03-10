@@ -28,6 +28,29 @@ def _host_probe_command(*, binary_path: Path, probe_args: tuple[str, ...]) -> li
     return [str(binary_path), *probe_args]
 
 
+def _host_sidecar_command(
+    *,
+    binary_path: Path,
+    socket_path: Path,
+    statefile_path: Path,
+    logfile_path: Path,
+) -> list[str]:
+    command = [
+        str(binary_path),
+        "--foreground",
+        "--sockname",
+        str(socket_path),
+        "--statefile",
+        str(statefile_path),
+        "--logfile",
+        str(logfile_path),
+        "--no-save-state",
+    ]
+    if os.name == "nt":
+        return ["cmd.exe", "/c", *command]
+    return command
+
+
 def _verify_wheel_has_platform_only_tag(wheel_path: Path) -> None:
     if "-py3-none-" not in wheel_path.name or wheel_path.name.endswith("any.whl"):
         raise RuntimeError(
@@ -59,6 +82,7 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                 "import os",
                 "import subprocess",
                 "import sys",
+                "import time",
                 "from pathlib import Path",
                 "",
                 (
@@ -83,11 +107,56 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                 "else:",
                 "    command = [str(binary_path), *runtime.probe_args]",
                 (
-                    "result = subprocess.run(command, check=True, capture_output=True, "
-                    "text=True)"
+                "result = subprocess.run(command, check=True, capture_output=True, "
+                "text=True)"
                 ),
                 "assert 'watchman' in result.stdout.lower()",
                 "assert 'placeholder' in result.stdout.lower()",
+                "sidecar_root = Path('sidecar')",
+                "socket_path = sidecar_root / 'sock'",
+                "statefile_path = sidecar_root / 'state'",
+                "logfile_path = sidecar_root / 'watchman.log'",
+                "sidecar_command = [",
+                "    str(binary_path),",
+                "    '--foreground',",
+                "    '--sockname',",
+                "    str(socket_path),",
+                "    '--statefile',",
+                "    str(statefile_path),",
+                "    '--logfile',",
+                "    str(logfile_path),",
+                "    '--no-save-state',",
+                "]",
+                "if os.name == 'nt':",
+                "    sidecar_command = ['cmd.exe', '/c', *sidecar_command]",
+                (
+                    "sidecar = subprocess.Popen("
+                    "sidecar_command, stdin=subprocess.DEVNULL, "
+                    "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"
+                ),
+                "deadline = time.monotonic() + 5.0",
+                "while time.monotonic() < deadline:",
+                (
+                    "    if socket_path.exists() and statefile_path.exists() "
+                    "and logfile_path.exists():"
+                ),
+                "        break",
+                "    if sidecar.poll() is not None:",
+                (
+                    "        raise AssertionError("
+                    "f'packaged runtime exited early: {sidecar.returncode}')"
+                ),
+                "    time.sleep(0.05)",
+                "assert socket_path.exists()",
+                "assert statefile_path.exists()",
+                "assert logfile_path.exists()",
+                "assert sidecar.poll() is None",
+                "sidecar.terminate()",
+                "try:",
+                "    sidecar.wait(timeout=5.0)",
+                "except subprocess.TimeoutExpired:",
+                "    sidecar.kill()",
+                "    sidecar.wait(timeout=2.0)",
                 "sys.exit(0)",
             ]
         )
