@@ -222,8 +222,11 @@ class TestRealtimeFunctional:
             assert stats["monitoring_ready"] is True
             assert stats["observer_alive"] is True
             assert stats["watchman_pid"] is not None
+            assert stats["watchman_sidecar_state"] == "running"
             assert stats["watchman_session_alive"] is True
+            assert stats["watchman_connection_state"] == "connected"
             assert stats["watchman_subscription_name"] == "chunkhound-live-indexing"
+            assert stats["watchman_subscription_count"] == 1
             assert stats["watchman_socket_path"] == str(
                 watch_dir / ".chunkhound" / "watchman" / "sock"
             )

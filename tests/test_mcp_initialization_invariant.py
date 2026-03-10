@@ -173,6 +173,44 @@ class TestNonBlockingInitialization:
         assert "Deferred connect/start failed" in realtime["last_error"]
 
     @pytest.mark.asyncio
+    async def test_watchman_config_seeds_realtime_status_surface(
+        self, tmp_path: Path
+    ) -> None:
+        """Watchman config should pre-seed daemon status with operator fields."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.realtime_backend = "watchman"
+
+        with patch("chunkhound.mcp_server.base.create_services") as mock_create:
+            mock_services = MagicMock()
+            mock_services.provider.is_connected = False
+            mock_create.return_value = mock_services
+
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+                server = ConcreteMCPServer(config=config)
+                await server.initialize()
+
+                realtime = server._scan_progress["realtime"]
+                assert realtime["configured_backend"] == "watchman"
+                assert realtime["watchman_sidecar_state"] == "uninitialized"
+                assert realtime["watchman_connection_state"] == "uninitialized"
+                assert realtime["watchman_subscription_count"] == 0
+                assert realtime["watchman_loss_of_sync"] == {
+                    "count": 0,
+                    "fresh_instance_count": 0,
+                    "recrawl_count": 0,
+                    "disconnect_count": 0,
+                    "last_reason": None,
+                    "last_at": None,
+                    "last_details": None,
+                }
+
+                await server.cleanup()
+
+    @pytest.mark.asyncio
     async def test_watchman_startup_barrier_raises_recorded_failure(
         self, tmp_path: Path
     ) -> None:

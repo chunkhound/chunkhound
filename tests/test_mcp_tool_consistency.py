@@ -185,6 +185,69 @@ async def test_daemon_status_tool_degrades_on_realtime_state():
     assert result["status"] == "degraded"
 
 
+@pytest.mark.asyncio
+async def test_daemon_status_tool_exposes_watchman_realtime_details():
+    """Verify daemon_status preserves Watchman operator fields in scan_progress."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "realtime": {
+            "configured_backend": "watchman",
+            "effective_backend": "watchman",
+            "monitoring_mode": "watchman",
+            "service_state": "running",
+            "watchman_sidecar_state": "running",
+            "watchman_connection_state": "connected",
+            "watchman_watch_root": "/repo",
+            "watchman_relative_root": "packages/api",
+            "watchman_subscription_count": 1,
+            "last_warning": "watchman recrawl observed",
+            "last_error": None,
+            "watchman_loss_of_sync": {
+                "count": 2,
+                "fresh_instance_count": 1,
+                "recrawl_count": 1,
+                "disconnect_count": 0,
+                "last_reason": "recrawl",
+                "last_at": "2026-03-08T00:00:04Z",
+                "last_details": {"warning": "Recrawled this watch"},
+            },
+            "resync": {
+                "needs_resync": True,
+                "in_progress": False,
+                "last_reason": "realtime_loss_of_sync",
+                "last_error": None,
+            },
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    realtime = result["scan_progress"]["realtime"]
+    assert result["status"] == "ready"
+    assert realtime["configured_backend"] == "watchman"
+    assert realtime["watchman_sidecar_state"] == "running"
+    assert realtime["watchman_connection_state"] == "connected"
+    assert realtime["watchman_subscription_count"] == 1
+    assert realtime["watchman_watch_root"] == "/repo"
+    assert realtime["watchman_relative_root"] == "packages/api"
+    assert realtime["watchman_loss_of_sync"]["fresh_instance_count"] == 1
+    assert realtime["watchman_loss_of_sync"]["recrawl_count"] == 1
+    assert realtime["resync"]["needs_resync"] is True
+    assert realtime["resync"]["last_reason"] == "realtime_loss_of_sync"
+
+
 def test_stdio_server_uses_registry_descriptions():
     """Verify MCP server base imports and uses TOOL_REGISTRY for descriptions.
 

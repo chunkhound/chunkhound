@@ -243,6 +243,56 @@ class RealtimeMonitorAdapter(Protocol):
     def get_health(self) -> dict[str, Any]: ...
 
 
+def _default_watchman_loss_of_sync_snapshot() -> dict[str, Any]:
+    """Return the stable Watchman loss-of-sync status payload."""
+    return {
+        "count": 0,
+        "fresh_instance_count": 0,
+        "recrawl_count": 0,
+        "disconnect_count": 0,
+        "last_reason": None,
+        "last_at": None,
+        "last_details": None,
+    }
+
+
+def _default_watchman_health_snapshot() -> dict[str, Any]:
+    """Return Watchman-specific realtime fields for daemon status surfaces."""
+    return {
+        "watchman_pid": None,
+        "watchman_started_at": None,
+        "watchman_process_start_time_epoch": None,
+        "watchman_runtime_version": None,
+        "watchman_binary_path": None,
+        "watchman_socket_path": None,
+        "watchman_statefile_path": None,
+        "watchman_logfile_path": None,
+        "watchman_metadata_path": None,
+        "watchman_alive": False,
+        "watchman_sidecar_state": "uninitialized",
+        "watchman_connection_state": "uninitialized",
+        "watchman_session_alive": False,
+        "watchman_session_pid": None,
+        "watchman_session_last_warning": None,
+        "watchman_session_last_warning_at": None,
+        "watchman_session_last_error": None,
+        "watchman_session_last_error_at": None,
+        "watchman_session_last_response_at": None,
+        "watchman_subscription_last_received_at": None,
+        "watchman_session_command_count": 0,
+        "watchman_subscription_queue_size": 0,
+        "watchman_subscription_queue_maxsize": 1000,
+        "watchman_subscription_pdu_count": 0,
+        "watchman_subscription_pdu_dropped": 0,
+        "watchman_subscription_name": None,
+        "watchman_subscription_count": 0,
+        "watchman_watch_root": None,
+        "watchman_relative_root": None,
+        "watchman_session_capabilities": {},
+        "watchman_loss_of_sync": _default_watchman_loss_of_sync_snapshot(),
+    }
+
+
 class WatchdogRealtimeAdapter:
     """Watchdog-backed monitor with polling fallback."""
 
@@ -639,31 +689,22 @@ class WatchmanRealtimeAdapter:
         asyncio.create_task(_dispatch())
 
     def get_health(self) -> dict[str, Any]:
-        health = self._sidecar.get_health()
+        health = _default_watchman_health_snapshot()
+        health.update(self._sidecar.get_health())
         if self._session is not None:
             health.update(self._session.get_health())
+        sidecar_alive = bool(health.get("watchman_alive"))
+        session_alive = bool(health.get("watchman_session_alive"))
+        health["watchman_sidecar_state"] = "running" if sidecar_alive else "stopped"
+        if session_alive:
+            health["watchman_connection_state"] = "connected"
+        elif sidecar_alive:
+            health["watchman_connection_state"] = "sidecar_only"
         else:
-            health.update(
-                {
-                    "watchman_session_alive": False,
-                    "watchman_session_pid": None,
-                    "watchman_session_last_warning": None,
-                    "watchman_session_last_warning_at": None,
-                    "watchman_session_last_error": None,
-                    "watchman_session_last_error_at": None,
-                    "watchman_session_last_response_at": None,
-                    "watchman_subscription_last_received_at": None,
-                    "watchman_session_command_count": 0,
-                    "watchman_subscription_queue_size": 0,
-                    "watchman_subscription_queue_maxsize": 1000,
-                    "watchman_subscription_pdu_count": 0,
-                    "watchman_subscription_pdu_dropped": 0,
-                    "watchman_subscription_name": None,
-                    "watchman_watch_root": None,
-                    "watchman_relative_root": None,
-                    "watchman_session_capabilities": {},
-                }
-            )
+            health["watchman_connection_state"] = "disconnected"
+        health["watchman_subscription_count"] = (
+            1 if health.get("watchman_subscription_name") else 0
+        )
         health["watchman_loss_of_sync"] = {
             "count": self._loss_of_sync_count,
             "fresh_instance_count": self._fresh_instance_count,
@@ -673,9 +714,7 @@ class WatchmanRealtimeAdapter:
             "last_at": self._last_loss_of_sync_at,
             "last_details": self._last_loss_of_sync_details,
         }
-        health["observer_alive"] = bool(health.get("watchman_alive")) and bool(
-            health.get("watchman_session_alive")
-        )
+        health["observer_alive"] = sidecar_alive and session_alive
         return health
 
 
@@ -804,7 +843,7 @@ class RealtimeIndexingService:
         cls, configured_backend: str | None = None
     ) -> dict[str, Any]:
         """Return the neutral realtime health structure used by MCP status plumbing."""
-        return {
+        status = {
             "configured_backend": configured_backend,
             "effective_backend": "uninitialized",
             "service_state": "idle",
@@ -851,6 +890,9 @@ class RealtimeIndexingService:
                 "last_snapshot_truncated": False,
             },
         }
+        if configured_backend == "watchman":
+            status.update(_default_watchman_health_snapshot())
+        return status
 
     @classmethod
     def health_snapshot_for_config(cls, config: Any | None) -> dict[str, Any]:
