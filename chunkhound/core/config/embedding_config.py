@@ -63,7 +63,11 @@ def validate_rerank_configuration(
 
     if is_using_reranking:
         # For relative URLs, we need base_url
-        if rerank_url and not rerank_url.startswith(("http://", "https://")) and not base_url:
+        if (
+            rerank_url
+            and not rerank_url.startswith(("http://", "https://"))
+            and not base_url
+        ):
             raise ValueError(RERANK_BASE_URL_REQUIRED)
 
 
@@ -206,7 +210,11 @@ class EmbeddingConfig(BaseSettings):
         # TEI format implies a relative /rerank endpoint when no explicit URL is given.
         # Only auto-set when base_url is present so the factory can resolve it to an
         # absolute URL; without base_url there is nothing to resolve against.
-        if self.rerank_format == "tei" and self.rerank_url is None and self.base_url is not None:
+        if (
+            self.rerank_format == "tei"
+            and self.rerank_url is None
+            and self.base_url is not None
+        ):
             self.rerank_url = "/rerank"
         elif (
             self.rerank_format == "tei"
@@ -361,7 +369,9 @@ class EmbeddingConfig(BaseSettings):
         else:
             # For voyageai with a custom endpoint, API key is optional
             if not self.api_key and not self.base_url:
-                missing.append("api_key (set VOYAGE_API_KEY or CHUNKHOUND_EMBEDDING__API_KEY)")
+                missing.append(
+                    "api_key (set VOYAGE_API_KEY or CHUNKHOUND_EMBEDDING__API_KEY)"
+                )
 
         return missing
 
