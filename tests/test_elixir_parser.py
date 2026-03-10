@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from chunkhound.core.types.common import FileId, Language
+from chunkhound.core.types.common import ChunkType, FileId, Language
 from chunkhound.parsers.mappings.elixir import ElixirMapping
 from chunkhound.parsers.parser_factory import get_parser_factory
 
@@ -225,6 +225,16 @@ end
                          "alias MyApp.Repo", "require Logger"]:
             assert keyword in all_content, f"Expected '{keyword}' in parsed content"
 
+        # Verify import chunks have ChunkType.IMPORT
+        import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
+        assert len(import_chunks) > 0, "Expected at least one IMPORT chunk"
+        import_content = " ".join(c.code for c in import_chunks)
+        for keyword in ["use GenServer", "import Ecto.Changeset",
+                         "alias MyApp.Repo", "require Logger"]:
+            assert keyword in import_content, (
+                f"Expected '{keyword}' in IMPORT chunks, got: {import_content}"
+            )
+
     def test_parse_comments(self, parser, tmp_path):
         code = """
 # A line comment
@@ -276,3 +286,61 @@ end
 
         func_chunks = [c for c in chunks if c.chunk_type.value == "function"]
         assert any("hello" in c.symbol for c in func_chunks)
+
+
+class TestElixirImportResolution:
+    """Tests for Elixir import path resolution including umbrella apps."""
+
+    @pytest.fixture()
+    def mapping(self):
+        return ElixirMapping()
+
+    def test_standard_mix_project(self, mapping, tmp_path):
+        """Resolves imports in standard lib/ layout."""
+        target = tmp_path / "lib" / "my_app" / "repo.ex"
+        target.parent.mkdir(parents=True)
+        target.write_text("defmodule MyApp.Repo do end")
+
+        source = tmp_path / "lib" / "my_app" / "accounts.ex"
+        result = mapping.resolve_import_paths("alias MyApp.Repo", tmp_path, source)
+        assert result == [target]
+
+    def test_umbrella_app_cross_app_resolution(self, mapping, tmp_path):
+        """Resolves imports across sibling umbrella apps."""
+        # Create umbrella structure
+        target = tmp_path / "apps" / "core" / "lib" / "core" / "helper.ex"
+        target.parent.mkdir(parents=True)
+        target.write_text("defmodule Core.Helper do end")
+
+        source_dir = tmp_path / "apps" / "web" / "lib" / "web"
+        source_dir.mkdir(parents=True)
+        source = source_dir / "controller.ex"
+
+        result = mapping.resolve_import_paths("import Core.Helper", tmp_path, source)
+        assert result == [target]
+
+    def test_umbrella_app_same_app_resolution(self, mapping, tmp_path):
+        """Resolves imports within the same umbrella app."""
+        target = tmp_path / "apps" / "web" / "lib" / "web" / "router.ex"
+        target.parent.mkdir(parents=True)
+        target.write_text("defmodule Web.Router do end")
+
+        source = tmp_path / "apps" / "web" / "lib" / "web" / "endpoint.ex"
+        result = mapping.resolve_import_paths("alias Web.Router", tmp_path, source)
+        assert result == [target]
+
+    def test_non_umbrella_source_ignores_apps(self, mapping, tmp_path):
+        """Non-umbrella source files don't probe apps/ directory."""
+        target = tmp_path / "lib" / "my_app" / "repo.ex"
+        target.parent.mkdir(parents=True)
+        target.write_text("defmodule MyApp.Repo do end")
+
+        source = tmp_path / "lib" / "my_app" / "web.ex"
+        result = mapping.resolve_import_paths("alias MyApp.Repo", tmp_path, source)
+        assert result == [target]
+
+    def test_unresolvable_returns_empty(self, mapping, tmp_path):
+        """Returns empty list when import cannot be resolved."""
+        source = tmp_path / "lib" / "my_app.ex"
+        result = mapping.resolve_import_paths("alias NoSuch.Module", tmp_path, source)
+        assert result == []

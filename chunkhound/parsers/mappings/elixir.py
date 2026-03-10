@@ -323,9 +323,27 @@ class ElixirMapping(BaseMapping):
         snake_parts = [self._to_snake_case(p) for p in parts]
         rel_path = "/".join(snake_parts) + ".ex"
 
-        # Try lib/ directory (standard Mix project structure)
-        for prefix in ["lib", ""]:
-            candidate = base_dir / prefix / rel_path if prefix else base_dir / rel_path
+        search_dirs: list[Path] = []
+
+        # Detect umbrella app structure from source_file (apps/*/lib/...)
+        try:
+            rel_source = source_file.relative_to(base_dir)
+            if len(rel_source.parts) >= 2 and rel_source.parts[0] == "apps":
+                apps_dir = base_dir / "apps"
+                if apps_dir.is_dir():
+                    for app_dir in sorted(apps_dir.iterdir()):
+                        lib_dir = app_dir / "lib"
+                        if lib_dir.is_dir():
+                            search_dirs.append(lib_dir)
+        except ValueError:
+            pass
+
+        # Standard Mix search paths (always included as fallback)
+        search_dirs.append(base_dir / "lib")
+        search_dirs.append(base_dir)
+
+        for search_dir in search_dirs:
+            candidate = search_dir / rel_path
             if candidate.exists():
                 return [candidate]
 

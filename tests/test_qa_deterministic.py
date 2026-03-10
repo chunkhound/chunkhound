@@ -80,14 +80,27 @@ class TestQADeterministic:
 
         yield services, realtime_service, watch_dir, temp_dir
 
-        # Cleanup — wrap in timeout to prevent teardown hangs (observed on
-        # Ubuntu CI where realtime_service.stop() blocks in epoll/inotify cleanup)
+        # Cleanup — use asyncio.wait (non-cancelling) instead of wait_for.
+        # wait_for cancels stop() mid-cleanup on timeout, which can leave
+        # async tasks referencing the DB executor in inconsistent state,
+        # causing provider.close() → executor.shutdown(wait=True) to hang.
         try:
-            await asyncio.wait_for(realtime_service.stop(), timeout=10.0)
-        except (Exception, asyncio.TimeoutError):
-            # Force-stop observer thread if stop() hung
-            if realtime_service.observer and realtime_service.observer.is_alive():
-                realtime_service.observer.stop()
+            stop_task = asyncio.create_task(realtime_service.stop())
+            done, _ = await asyncio.wait({stop_task}, timeout=10.0)
+            if not done:
+                # Force-stop observer (likely cause of hang on Ubuntu CI)
+                if realtime_service.observer and realtime_service.observer.is_alive():
+                    realtime_service.observer.stop()
+                # Let stop() finish now that observer is unblocked
+                done, _ = await asyncio.wait({stop_task}, timeout=3.0)
+                if not done:
+                    stop_task.cancel()
+                    try:
+                        await stop_task
+                    except asyncio.CancelledError:
+                        pass
+        except Exception:
+            pass
 
         try:
             services.provider.close()
