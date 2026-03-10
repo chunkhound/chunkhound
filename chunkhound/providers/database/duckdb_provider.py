@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import duckdb
 from loguru import logger
 
 from chunkhound.core.models import Chunk, Embedding, File
@@ -118,14 +119,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         Returns:
             DuckDB connection object
         """
-        # Suppress known SWIG warning from DuckDB Python bindings
-        import warnings
-
-        warnings.filterwarnings(
-            "ignore", message=".*swigvarlink.*", category=DeprecationWarning
-        )
-        import duckdb
-
         # Create a NEW connection for the executor thread
         # This ensures thread safety - only this thread will use this connection
         conn = duckdb.connect(str(self._connection_manager.db_path))
@@ -218,7 +211,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         This ensures all DuckDB operations happen in the same thread.
         """
-        if str(self._connection_manager.db_path) == ":memory:":
+        if self._connection_manager.is_memory_db:
             return
 
         db_path = Path(self._connection_manager.db_path)
@@ -267,7 +260,7 @@ class DuckDBProvider(SerialDatabaseProvider):
     ) -> None:
         """Executor method for disconnect - runs in DB thread."""
         try:
-            if not skip_checkpoint:
+            if not skip_checkpoint and not self._connection_manager.is_memory_db:
                 # Force checkpoint before close to ensure durability
                 conn.execute("CHECKPOINT")
                 if not os.environ.get("CHUNKHOUND_MCP_MODE"):
@@ -378,6 +371,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], force: bool
     ) -> None:
         """Executor method for _maybe_checkpoint - runs in DB thread."""
+        if self._connection_manager.is_memory_db:
+            return
+
         # Defer checkpoint if we're in a transaction
         if state.get("transaction_active", False):
             state["deferred_checkpoint"] = True
@@ -391,10 +387,11 @@ class DuckDBProvider(SerialDatabaseProvider):
         )
         operations_since_checkpoint = state.get("operations_since_checkpoint", 0)
 
-        # Checkpoint if forced, operations threshold reached, or 5 minutes elapsed
+        # Checkpoint if forced, operations threshold reached (default 100), or 5 minutes elapsed
+        threshold = state.get("checkpoint_threshold", 100)
         should_checkpoint = (
             force
-            or operations_since_checkpoint >= 100  # Checkpoint every 100 operations
+            or operations_since_checkpoint >= threshold
             or time_since_checkpoint >= 300  # 5 minutes
         )
 
@@ -1512,10 +1509,6 @@ class DuckDBProvider(SerialDatabaseProvider):
     def delete_chunk(self, chunk_id: int) -> None:
         """Delete a single chunk by ID with proper foreign key handling."""
         self._execute_in_db_thread_sync("delete_chunk", chunk_id)
-
-    def delete_chunks_batch(self, chunk_ids: list[int]) -> None:
-        """Delete multiple chunks by ID efficiently (with embedding cleanup)."""
-        self._execute_in_db_thread_sync("delete_chunks_batch", chunk_ids)
 
     def update_chunk(self, chunk_id: int, **kwargs) -> None:
         """Update chunk record with new values - delegate to chunk repository."""
@@ -2726,41 +2719,36 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     def _executor_begin_transaction(self, conn: Any, state: dict[str, Any]) -> None:
         """Executor method for begin_transaction - runs in DB thread."""
-        # Mark transaction state in executor thread
-        state["transaction_active"] = True
         conn.execute("BEGIN TRANSACTION")
+        state["transaction_active"] = True
 
     def _executor_commit_transaction(
         self, conn: Any, state: dict[str, Any], force_checkpoint: bool
     ) -> None:
         """Executor method for commit_transaction - runs in DB thread."""
+        committed = False
         try:
             conn.execute("COMMIT")
-
-            # Clear transaction state
+            committed = True
+        finally:
             state["transaction_active"] = False
-
-            # Handle checkpoint
-            if force_checkpoint or state.get("deferred_checkpoint", False):
-                try:
-                    conn.execute("CHECKPOINT")
-                    state["operations_since_checkpoint"] = 0
-                    state["last_checkpoint_time"] = time.time()
-                    state["deferred_checkpoint"] = False
-                    if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                        logger.debug("Transaction committed with checkpoint")
-                except Exception as e:
-                    if not os.environ.get("CHUNKHOUND_MCP_MODE"):
-                        logger.warning(f"Post-commit checkpoint failed: {e}")
-        except Exception:
-            # Re-raise to be handled by caller
-            raise
+            deferred = state.get("deferred_checkpoint", False)
+            state["deferred_checkpoint"] = False
+        if committed:
+            self._executor_maybe_checkpoint(
+                conn, state, force=force_checkpoint or deferred
+            )
 
     def _executor_rollback_transaction(self, conn: Any, state: dict[str, Any]) -> None:
         """Executor method for rollback_transaction - runs in DB thread."""
-        conn.execute("ROLLBACK")
-        # Clear transaction state
+        try:
+            conn.execute("ROLLBACK")
+        except duckdb.TransactionException:
+            # No active transaction — defensive rollback in except handlers is safe.
+            logger.warning("Rollback skipped (no active transaction)")
         state["transaction_active"] = False
+        # Rolled-back work is discarded; clear deferred checkpoint to prevent
+        # it from firing on the next unrelated commit.
         state["deferred_checkpoint"] = False
 
     def optimize_tables(self) -> None:
