@@ -216,8 +216,8 @@ def test_makefile_non_rule_oversized_delegates_to_parent() -> None:
         assert metrics.non_whitespace_chars <= splitter.config.max_chunk_size
 
 
-def test_makefile_split_produces_non_overlapping_line_ranges() -> None:
-    """Parts 2+ start at their recipe range, not the original target line."""
+def test_makefile_split_all_parts_start_at_target_line() -> None:
+    """All parts start at original.start_line because each includes the target line."""
     splitter = MakefileChunkSplitter()
     # Target line + 500 recipe lines — well over the 1200 nws char limit
     target = "install: all"
@@ -235,15 +235,12 @@ def test_makefile_split_produces_non_overlapping_line_ranges() -> None:
     result = splitter.validate_and_split(chunk)
 
     assert len(result) > 1
-    assert result[0].start_line == 10  # part 1 owns the target line
-    for part in result[1:]:
-        assert part.start_line > 10  # parts 2+ start past the target
-    # No two parts share a start_line
-    start_lines = [p.start_line for p in result]
-    assert len(start_lines) == len(set(start_lines))
-    # Strict non-overlap: consecutive parts must not overlap
+    # All parts start at original.start_line because content begins with target
+    for part in result:
+        assert part.start_line == 10
+    # end_line grows with each part — later parts cover more recipe lines
     for a, b in zip(result, result[1:]):
-        assert a.end_line < b.start_line
+        assert a.end_line < b.end_line
     # Each recipe line fits within the chunk limit so normal splitting applies —
     # normal splits prepend the target to every part; no emergency split here.
     for part in result:

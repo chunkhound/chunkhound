@@ -137,15 +137,16 @@ class MakefileChunkSplitter(ChunkSplitter):
     ) -> UniversalChunk:
         """Create a split rule chunk with target + recipe subset.
 
-        Each chunk includes the target line for semantic coherence.
-        Part 1 starts at the target line; parts 2+ start at their recipe
-        range to avoid overlapping line spans across split chunks.
+        Each chunk includes the target line for semantic coherence, so all
+        parts share start_line = original.start_line. No two parts have
+        identical content (each contains a distinct recipe subset), so
+        exact-match deduplication preserves all parts correctly.
         """
         content = "\n".join([target] + recipe_lines)
 
-        recipe_start = original.start_line + 1 + recipe_offset
-        start_line = original.start_line if part == 1 else recipe_start
-        end_line = min(original.end_line, recipe_start + len(recipe_lines) - 1)
+        recipe_end = original.start_line + 1 + recipe_offset + len(recipe_lines) - 1
+        start_line = original.start_line
+        end_line = min(original.end_line, recipe_end)
 
         return UniversalChunk(
             concept=original.concept,
