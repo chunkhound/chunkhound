@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,81 @@ _MCP_INIT_PARAMS = {
 }
 _READY_TIMEOUT_SECONDS = 60.0
 _SEARCH_TIMEOUT_SECONDS = 30.0
+
+
+def _terminate_process_tree(pid: int) -> None:
+    try:
+        root = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+
+    try:
+        processes = root.children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        processes = []
+    processes.append(root)
+
+    for process in processes:
+        try:
+            process.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+    _, alive = psutil.wait_procs(processes, timeout=2.0)
+    for process in alive:
+        try:
+            process.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    psutil.wait_procs(alive, timeout=2.0)
+
+
+def _terminate_processes_using_root(root: Path) -> None:
+    root_str = str(root)
+    current_pid = os.getpid()
+    candidates: list[int] = []
+
+    for process in psutil.process_iter(["pid", "cwd", "cmdline"]):
+        pid = process.info.get("pid")
+        if not isinstance(pid, int) or pid == current_pid:
+            continue
+
+        try:
+            cwd = process.info.get("cwd")
+            cmdline = process.info.get("cmdline") or []
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+        if isinstance(cwd, str) and cwd.startswith(root_str):
+            candidates.append(pid)
+            continue
+        if any(isinstance(arg, str) and root_str in arg for arg in cmdline):
+            candidates.append(pid)
+
+    for pid in candidates:
+        _terminate_process_tree(pid)
+
+
+def _remove_tree_with_retries(
+    root: Path, *, attempts: int = 5, base_delay_seconds: float = 0.2
+) -> None:
+    last_error: OSError | None = None
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(root)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            last_error = error
+            if os.name == "nt":
+                _terminate_processes_using_root(root)
+            if attempt == attempts - 1:
+                raise
+            time.sleep(base_delay_seconds * (attempt + 1))
+
+    if last_error is not None:
+        raise last_error
 
 
 class SubprocessJsonRpcClient:
@@ -285,15 +361,7 @@ def _assert_sidecar_uses_installed_runtime(
     if not isinstance(watchman_pid, int) or watchman_pid <= 0:
         raise RuntimeError(f"Invalid Watchman sidecar pid in daemon status: {realtime}")
 
-    process = psutil.Process(watchman_pid)
-    cmdline = process.cmdline()
-    if len(cmdline) < 3:
-        raise RuntimeError(f"Unexpected Watchman sidecar command line: {cmdline}")
-    if cmdline[1:3] != ["-m", "chunkhound.watchman_runtime.bridge"]:
-        raise RuntimeError(
-            "Watchman sidecar did not launch the packaged runtime bridge: "
-            f"{cmdline}"
-        )
+    process = _resolve_bridge_process(watchman_pid)
 
     expected_bin_dir = _python_path(venv_dir).parent
     process_env = process.environ()
@@ -308,6 +376,33 @@ def _assert_sidecar_uses_installed_runtime(
             "Watchman sidecar PATH was not pinned to the installed-wheel "
             f"virtualenv: {process_env.get('PATH')!r}"
         )
+
+
+def _resolve_bridge_process(watchman_pid: int) -> psutil.Process:
+    process = psutil.Process(watchman_pid)
+    cmdline = process.cmdline()
+    if len(cmdline) >= 3 and cmdline[1:3] == [
+        "-m",
+        "chunkhound.watchman_runtime.bridge",
+    ]:
+        return process
+
+    if os.name == "nt" and len(cmdline) >= 3 and cmdline[0].lower().endswith("cmd.exe"):
+        for child in process.children(recursive=True):
+            try:
+                child_cmdline = child.cmdline()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            if len(child_cmdline) >= 3 and child_cmdline[1:3] == [
+                "-m",
+                "chunkhound.watchman_runtime.bridge",
+            ]:
+                return child
+
+    raise RuntimeError(
+        "Watchman sidecar did not launch the packaged runtime bridge: "
+        f"{cmdline}"
+    )
 
 
 def _parse_tool_json(result: dict[str, Any]) -> dict[str, Any]:
@@ -380,10 +475,8 @@ async def _wait_for_search_hit(
 
 
 async def _verify_wheel(wheel_path: Path) -> None:
-    with tempfile.TemporaryDirectory(
-        prefix="chunkhound-watchman-live-wheel-verify-"
-    ) as tmp:
-        root = Path(tmp)
+    root = Path(tempfile.mkdtemp(prefix="chunkhound-watchman-live-wheel-verify-"))
+    try:
         venv_dir = root / "venv"
         project_dir = root / "project"
         project_dir.mkdir(parents=True, exist_ok=True)
@@ -460,6 +553,9 @@ async def _verify_wheel(wheel_path: Path) -> None:
                 )
         if stderr_text.strip():
             print(stderr_text, file=os.sys.stderr)
+    finally:
+        _terminate_processes_using_root(root)
+        _remove_tree_with_retries(root)
 
 
 def main(argv: list[str] | None = None) -> int:
