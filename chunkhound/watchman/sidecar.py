@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -23,13 +25,18 @@ from chunkhound.watchman_runtime.loader import (
 )
 
 
+def _watchman_socket_path_limit_bytes() -> int:
+    return PrivateWatchmanSidecar._UNIX_SOCKET_PATH_MAX_BYTES
+
+
 @dataclass(frozen=True)
 class WatchmanSidecarPaths:
-    """Project-local paths for the private Watchman sidecar."""
+    """ChunkHound-owned paths for the private Watchman sidecar."""
 
     project_root: Path
     root: Path
     runtime_root: Path
+    project_socket_path: Path
     socket_path: Path
     statefile_path: Path
     logfile_path: Path
@@ -39,15 +46,52 @@ class WatchmanSidecarPaths:
     def for_target_dir(cls, target_dir: Path) -> WatchmanSidecarPaths:
         project_root = target_dir.expanduser().resolve()
         root = project_root / ".chunkhound" / "watchman"
+        project_socket_path = root / "sock"
         return cls(
             project_root=project_root,
             root=root,
             runtime_root=root / "runtime",
-            socket_path=root / "sock",
+            project_socket_path=project_socket_path,
+            socket_path=cls._resolve_socket_path(
+                project_root=project_root,
+                project_socket_path=project_socket_path,
+            ),
             statefile_path=root / "state",
             logfile_path=root / "watchman.log",
             metadata_path=root / "metadata.json",
         )
+
+    @property
+    def using_socket_fallback(self) -> bool:
+        return self.socket_path != self.project_socket_path
+
+    def managed_socket_paths(self) -> tuple[Path, ...]:
+        if self.socket_path == self.project_socket_path:
+            return (self.socket_path,)
+        return (self.socket_path, self.project_socket_path)
+
+    @staticmethod
+    def _resolve_socket_path(
+        *, project_root: Path, project_socket_path: Path
+    ) -> Path:
+        if os.name == "nt":
+            return project_socket_path
+
+        limit = _watchman_socket_path_limit_bytes()
+        if len(os.fsencode(str(project_socket_path))) < limit:
+            return project_socket_path
+
+        digest = hashlib.sha256(str(project_root).encode("utf-8")).hexdigest()[:16]
+        fallback_socket_path = (
+            Path(tempfile.gettempdir()) / "chunkhound-watchman" / digest / "sock"
+        )
+        if len(os.fsencode(str(fallback_socket_path))) >= limit:
+            raise RuntimeError(
+                "Watchman private socket path is too long for this platform even "
+                "after deterministic fallback: "
+                f"{fallback_socket_path}"
+            )
+        return fallback_socket_path
 
 
 @dataclass(frozen=True)
@@ -140,7 +184,12 @@ def _terminate_process_tree_sync(pid: int, timeout: float) -> None:
     except psutil.NoSuchProcess:
         return
 
-    processes = root.children(recursive=True)
+    try:
+        processes = root.children(recursive=True)
+    except psutil.NoSuchProcess:
+        return
+    except psutil.AccessDenied:
+        processes = []
     processes.append(root)
 
     for process in processes:
@@ -257,7 +306,7 @@ class PrivateWatchmanSidecar:
             if any(
                 path.exists()
                 for path in (
-                    self.paths.socket_path,
+                    *self.paths.managed_socket_paths(),
                     self.paths.statefile_path,
                     self.paths.logfile_path,
                 )
@@ -300,6 +349,11 @@ class PrivateWatchmanSidecar:
             destination_root=self.paths.runtime_root
         )
         self._validate_socket_path()
+        if self.paths.using_socket_fallback:
+            self._debug(
+                "using deterministic short Watchman socket fallback "
+                f"{self.paths.socket_path} instead of {self.paths.project_socket_path}"
+            )
 
         command = [
             *build_watchman_base_command(binary_path),
@@ -471,8 +525,8 @@ class PrivateWatchmanSidecar:
     def _remove_owned_artifacts(self, *, remove_log: bool) -> None:
         paths = [
             self.paths.metadata_path,
-            self.paths.socket_path,
             self.paths.statefile_path,
+            *self.paths.managed_socket_paths(),
         ]
         if remove_log:
             paths.append(self.paths.logfile_path)

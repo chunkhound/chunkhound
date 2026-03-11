@@ -11,7 +11,11 @@ import psutil
 import pytest
 
 from chunkhound.daemon.process import pid_alive
-from chunkhound.watchman.sidecar import PrivateWatchmanSidecar, WatchmanSidecarMetadata
+from chunkhound.watchman.sidecar import (
+    PrivateWatchmanSidecar,
+    WatchmanSidecarMetadata,
+    WatchmanSidecarPaths,
+)
 from chunkhound.watchman_runtime.loader import materialize_watchman_binary
 
 
@@ -335,16 +339,37 @@ async def test_private_watchman_sidecar_start_failure_leaves_no_metadata(
 @pytest.mark.skipif(
     os.name == "nt", reason="unix socket path validation does not apply on Windows"
 )
-async def test_private_watchman_sidecar_rejects_overlong_socket_path(
+async def test_private_watchman_sidecar_uses_short_socket_fallback_for_overlong_path(
     tmp_path: Path, monkeypatch
 ) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
-    sidecar = PrivateWatchmanSidecar(repo_root)
-    monkeypatch.setattr(sidecar, "_UNIX_SOCKET_PATH_MAX_BYTES", 1, raising=False)
+    project_socket_path = repo_root.resolve() / ".chunkhound" / "watchman" / "sock"
+    monkeypatch.setattr(
+        PrivateWatchmanSidecar,
+        "_UNIX_SOCKET_PATH_MAX_BYTES",
+        len(os.fsencode(str(project_socket_path))),
+        raising=False,
+    )
 
-    with pytest.raises(RuntimeError, match="socket path"):
-        await sidecar.start()
+    expected_socket_path = WatchmanSidecarPaths._resolve_socket_path(
+        project_root=repo_root.resolve(),
+        project_socket_path=project_socket_path,
+    )
+    sidecar = PrivateWatchmanSidecar(repo_root)
+
+    metadata = await sidecar.start()
+
+    assert sidecar.paths.using_socket_fallback is True
+    assert sidecar.paths.project_socket_path == project_socket_path
+    assert sidecar.paths.socket_path == expected_socket_path
+    assert metadata.socket_path == str(expected_socket_path)
+    assert sidecar.paths.metadata_path.exists()
+    assert sidecar.paths.socket_path.exists()
+    assert not sidecar.paths.project_socket_path.exists()
+
+    await sidecar.stop()
 
     assert not sidecar.paths.metadata_path.exists()
     assert not sidecar.paths.socket_path.exists()
+    assert not sidecar.paths.project_socket_path.exists()

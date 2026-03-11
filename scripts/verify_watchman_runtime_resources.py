@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -25,6 +27,26 @@ _REQUIRED_WHEEL_PATHS: tuple[str, ...] = (
 _LIVE_MUTATION_TIMEOUT_ENV = (
     "CHUNKHOUND_WATCHMAN_RUNTIME_VERIFY_LIVE_TIMEOUT_SECONDS"
 )
+
+
+def _remove_tree_with_retries(
+    root: Path, *, attempts: int = 5, base_delay_seconds: float = 0.2
+) -> None:
+    last_error: OSError | None = None
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(root)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            last_error = error
+            if attempt == attempts - 1:
+                raise
+            time.sleep(base_delay_seconds * (attempt + 1))
+
+    if last_error is not None:
+        raise last_error
 
 
 def _host_probe_command(*, binary_path: Path, probe_args: tuple[str, ...]) -> list[str]:
@@ -96,8 +118,8 @@ def _verify_wheel_contents(wheel_path: Path) -> None:
 
 
 def _verify_runtime_reads(*, wheel_path: Path) -> None:
-    with tempfile.TemporaryDirectory(prefix="chunkhound-watchman-wheel-verify-") as tmp:
-        root = Path(tmp)
+    root = Path(tempfile.mkdtemp(prefix="chunkhound-watchman-wheel-verify-"))
+    try:
         with zipfile.ZipFile(wheel_path) as zf:
             zf.extractall(root)
 
@@ -132,11 +154,30 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                 "else:",
                 "    command = [str(binary_path), *runtime.probe_args]",
                 (
-                "result = subprocess.run(command, check=True, capture_output=True, "
-                "text=True)"
+                    "result = subprocess.run(command, check=True, capture_output=True, "
+                    "text=True)"
                 ),
                 "assert 'watchman' in result.stdout.lower()",
                 "assert runtime.runtime_version in result.stdout",
+                "",
+                "def _stop_process(process, *, close_stdin=False):",
+                "    if process is None:",
+                "        return",
+                "    if close_stdin and process.stdin is not None:",
+                "        try:",
+                "            process.stdin.close()",
+                "        except OSError:",
+                "            pass",
+                "    try:",
+                "        process.wait(timeout=5.0)",
+                "    except subprocess.TimeoutExpired:",
+                "        process.terminate()",
+                "        try:",
+                "            process.wait(timeout=2.0)",
+                "        except subprocess.TimeoutExpired:",
+                "            process.kill()",
+                "            process.wait(timeout=2.0)",
+                "",
                 "sidecar_root = Path('sidecar')",
                 "socket_path = sidecar_root / 'sock'",
                 "statefile_path = sidecar_root / 'state'",
@@ -154,156 +195,164 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                 "]",
                 "if os.name == 'nt':",
                 "    sidecar_command = ['cmd.exe', '/c', *sidecar_command]",
+                "sidecar = None",
+                "client = None",
+                "reader_thread = None",
+                "try:",
                 (
-                    "sidecar = subprocess.Popen("
+                    "    sidecar = subprocess.Popen("
                     "sidecar_command, stdin=subprocess.DEVNULL, "
                     "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"
                 ),
-                "deadline = time.monotonic() + 5.0",
-                "while time.monotonic() < deadline:",
+                "    deadline = time.monotonic() + 5.0",
+                "    while time.monotonic() < deadline:",
                 (
-                    "    if socket_path.exists() and statefile_path.exists() "
+                    "        if socket_path.exists() and statefile_path.exists() "
                     "and logfile_path.exists():"
                 ),
-                "        break",
-                "    if sidecar.poll() is not None:",
+                "            break",
+                "        if sidecar.poll() is not None:",
                 (
-                    "        raise AssertionError("
+                    "            raise AssertionError("
                     "f'packaged runtime exited early: {sidecar.returncode}')"
                 ),
-                "    time.sleep(0.05)",
-                "assert socket_path.exists()",
-                "assert statefile_path.exists()",
-                "assert logfile_path.exists()",
-                "assert sidecar.poll() is None",
+                "        time.sleep(0.05)",
+                "    assert socket_path.exists()",
+                "    assert statefile_path.exists()",
+                "    assert logfile_path.exists()",
+                "    assert sidecar.poll() is None",
                 (
-                    "assert 'watchman runtime sidecar start' in "
+                    "    assert 'watchman runtime sidecar start' in "
                     "logfile_path.read_text(encoding='utf-8')"
                 ),
-                "client_command = [",
-                "    str(binary_path),",
-                "    '--sockname',",
-                "    str(socket_path),",
-                "    '--no-spawn',",
-                "    '--no-pretty',",
-                "    '--persistent',",
-                "    '--server-encoding',",
-                "    'json',",
-                "    '--output-encoding',",
-                "    'json',",
-                "    '--json-command',",
-                "]",
-                "if os.name == 'nt':",
-                "    client_command = ['cmd.exe', '/c', *client_command]",
+                "    client_command = [",
+                "        str(binary_path),",
+                "        '--sockname',",
+                "        str(socket_path),",
+                "        '--no-spawn',",
+                "        '--no-pretty',",
+                "        '--persistent',",
+                "        '--server-encoding',",
+                "        'json',",
+                "        '--output-encoding',",
+                "        'json',",
+                "        '--json-command',",
+                "    ]",
+                "    if os.name == 'nt':",
+                "        client_command = ['cmd.exe', '/c', *client_command]",
                 (
-                    "client = subprocess.Popen("
+                    "    client = subprocess.Popen("
                     "client_command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, "
                     "stderr=subprocess.PIPE, text=True)"
                 ),
-                "assert client.stdin is not None",
-                "assert client.stdout is not None",
-                "import queue",
-                "import threading",
-                "responses = queue.Queue()",
-                "EOF = object()",
-                "def _reader():",
-                "    while True:",
-                "        line = client.stdout.readline()",
-                "        if not line:",
-                "            responses.put(EOF)",
-                "            return",
-                "        responses.put(json.loads(line))",
-                "threading.Thread(target=_reader, daemon=True).start()",
+                "    assert client.stdin is not None",
+                "    assert client.stdout is not None",
+                "    import queue",
+                "    import threading",
+                "    responses = queue.Queue()",
+                "    EOF = object()",
+                "    def _reader():",
+                "        while True:",
+                "            line = client.stdout.readline()",
+                "            if not line:",
+                "                responses.put(EOF)",
+                "                return",
+                "            responses.put(json.loads(line))",
+                "    reader_thread = threading.Thread(target=_reader)",
+                "    reader_thread.start()",
                 (
-                    "client.stdin.write(json.dumps(['version', {'required': "
+                    "    client.stdin.write(json.dumps(['version', {'required': "
                     "['cmd-watch-project', 'relative_root']}]) + '\\n')"
                 ),
-                "client.stdin.flush()",
-                "version_response = responses.get(timeout=5.0)",
+                "    client.stdin.flush()",
+                "    version_response = responses.get(timeout=5.0)",
                 (
-                    "assert version_response['capabilities'] == {"
+                    "    assert version_response['capabilities'] == {"
                     "'cmd-watch-project': True, 'relative_root': True}"
                 ),
                 (
-                    "project_root = Path('project'); "
+                    "    project_root = Path('project'); "
                     "project_root.mkdir(exist_ok=True)"
                 ),
                 (
-                    "client.stdin.write(json.dumps(['watch-project', "
+                    "    client.stdin.write(json.dumps(['watch-project', "
                     "str(project_root.resolve())]) + '\\n')"
                 ),
-                "client.stdin.flush()",
-                "watch_project = responses.get(timeout=5.0)",
-                "assert watch_project['watch'] == str(project_root.resolve())",
+                "    client.stdin.flush()",
+                "    watch_project = responses.get(timeout=5.0)",
+                "    assert watch_project['watch'] == str(project_root.resolve())",
                 (
-                    "client.stdin.write(json.dumps(['subscribe', "
+                    "    client.stdin.write(json.dumps(['subscribe', "
                     "str(project_root.resolve()), 'chunkhound-live-indexing', "
                     "{'fields': ['name', 'exists', 'new', 'type']}]) + '\\n')"
                 ),
-                "client.stdin.flush()",
-                "subscribe_response = responses.get(timeout=5.0)",
+                "    client.stdin.flush()",
+                "    subscribe_response = responses.get(timeout=5.0)",
                 (
-                    "assert subscribe_response['subscribe'] == "
+                    "    assert subscribe_response['subscribe'] == "
                     "'chunkhound-live-indexing'"
                 ),
                 (
-                    "live_file = project_root / 'src' / 'installed_runtime_live.py'; "
+                    "    live_file = (project_root / 'src' / "
+                    "'installed_runtime_live.py'); "
                     "live_file.parent.mkdir(parents=True, exist_ok=True)"
                 ),
                 (
-                    "live_file.write_text("
+                    "    live_file.write_text("
                     "'def installed_runtime_live_symbol():\\n    return 1\\n', "
                     "encoding='utf-8')"
                 ),
                 (
-                    "live_timeout = float(os.environ.get("
+                    "    live_timeout = float(os.environ.get("
                     f"'{_LIVE_MUTATION_TIMEOUT_ENV}', '10.0'))"
                 ),
-                "deadline = time.monotonic() + live_timeout",
-                "live_payload = None",
-                "while time.monotonic() < deadline:",
-                "    try:",
-                "        payload = responses.get(timeout=1.0)",
-                "    except queue.Empty:",
-                "        continue",
-                "    if payload is EOF:",
+                "    deadline = time.monotonic() + live_timeout",
+                "    live_payload = None",
+                "    while time.monotonic() < deadline:",
+                "        try:",
+                "            payload = responses.get(timeout=1.0)",
+                "        except queue.Empty:",
+                "            continue",
+                "        if payload is EOF:",
                 (
-                    "        raise AssertionError("
+                    "            raise AssertionError("
                     "'watchman client exited before live mutation delivery'"
                     ")"
                 ),
-                "    if payload.get('subscription') != 'chunkhound-live-indexing':",
-                "        continue",
-                "    files = payload.get('files')",
-                "    if not isinstance(files, list):",
-                "        continue",
-                "    if any(",
-                "        isinstance(item, dict)",
-                "        and item.get('name') == 'src/installed_runtime_live.py'",
-                "        and item.get('exists') is True",
-                "        and item.get('type') == 'f'",
-                "        for item in files",
-                "    ):",
-                "        live_payload = payload",
-                "        break",
-                "if live_payload is None:",
+                "        if payload.get('subscription') != 'chunkhound-live-indexing':",
+                "            continue",
+                "        files = payload.get('files')",
+                "        if not isinstance(files, list):",
+                "            continue",
+                "        if any(",
+                "            isinstance(item, dict)",
+                "            and item.get('name') == 'src/installed_runtime_live.py'",
+                "            and item.get('exists') is True",
+                "            and item.get('type') == 'f'",
+                "            for item in files",
+                "        ):",
+                "            live_payload = payload",
+                "            break",
+                "    if live_payload is None:",
                 (
-                    "    raise AssertionError("
+                    "        raise AssertionError("
                     "'timed out waiting for live subscription payload'"
                     ")"
                 ),
-                "client.stdin.close()",
-                "try:",
-                "    client.wait(timeout=5.0)",
-                "except subprocess.TimeoutExpired:",
-                "    client.terminate()",
-                "    client.wait(timeout=2.0)",
-                "sidecar.terminate()",
-                "try:",
-                "    sidecar.wait(timeout=5.0)",
-                "except subprocess.TimeoutExpired:",
-                "    sidecar.kill()",
-                "    sidecar.wait(timeout=2.0)",
+                "finally:",
+                "    if client is not None:",
+                "        _stop_process(client, close_stdin=True)",
+                "        if reader_thread is not None:",
+                "            reader_thread.join(timeout=5.0)",
+                "            assert not reader_thread.is_alive(), (",
+                "                'watchman client reader thread did not exit'",
+                "            )",
+                "        if client.stdout is not None:",
+                "            client.stdout.close()",
+                "        if client.stderr is not None:",
+                "            client.stderr.close()",
+                "    if sidecar is not None:",
+                "        _stop_process(sidecar)",
                 "sys.exit(0)",
             ]
         )
@@ -326,6 +375,8 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                 f"stdout:\n{result.stdout}\n"
                 f"stderr:\n{result.stderr}\n"
             )
+    finally:
+        _remove_tree_with_retries(root)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -219,3 +220,27 @@ def test_main_rejects_runtime_that_never_emits_live_subscription_payload(
         RuntimeError, match="timed out waiting for live subscription payload"
     ):
         watchman_verifier.main([str(wheel_path)])
+
+
+def test_remove_tree_with_retries_retries_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    locked_root = tmp_path / "locked-root"
+    locked_root.mkdir()
+    (locked_root / "payload.txt").write_text("payload", encoding="utf-8")
+    original_rmtree = shutil.rmtree
+    attempts = {"count": 0}
+
+    def flaky_rmtree(path: Path) -> None:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise PermissionError("simulated Windows handle delay")
+        original_rmtree(path)
+
+    monkeypatch.setattr(watchman_verifier.shutil, "rmtree", flaky_rmtree)
+    monkeypatch.setattr(watchman_verifier.time, "sleep", lambda *_args: None)
+
+    watchman_verifier._remove_tree_with_retries(locked_root, attempts=2)
+
+    assert attempts["count"] == 2
+    assert not locked_root.exists()

@@ -61,6 +61,7 @@ class WatchmanCliSession:
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
+        self._process_wait_task: asyncio.Task[None] | None = None
         self._pending_reply: asyncio.Future[dict[str, object]] | None = None
         self._command_lock = asyncio.Lock()
         self._scope_plan: WatchmanScopePlan | None = None
@@ -121,6 +122,7 @@ class WatchmanCliSession:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        self._process_wait_task = asyncio.create_task(self._wait_for_process_exit())
         self._reader_task = asyncio.create_task(self._reader_loop())
         self._stderr_task = asyncio.create_task(self._stderr_loop())
 
@@ -173,9 +175,11 @@ class WatchmanCliSession:
         process = self._process
         reader_task = self._reader_task
         stderr_task = self._stderr_task
+        process_wait_task = self._process_wait_task
         self._process = None
         self._reader_task = None
         self._stderr_task = None
+        self._process_wait_task = None
 
         if process is not None and process.stdin is not None:
             try:
@@ -196,6 +200,7 @@ class WatchmanCliSession:
                     process.wait(), timeout=self._PROCESS_EXIT_TIMEOUT_SECONDS
                 )
 
+        await self._await_background_task(process_wait_task)
         await self._await_background_task(reader_task)
         await self._await_background_task(stderr_task)
 
@@ -327,14 +332,11 @@ class WatchmanCliSession:
                 self._record_warning(
                     "Received unexpected Watchman response without a pending command"
                 )
-        finally:
-            returncode = await process.wait()
-            if self._stop_requested:
-                return
-            message = f"Watchman session exited unexpectedly (rc={returncode})"
-            self._record_error(message)
-            self._fail_pending_reply(RuntimeError(message))
-            self._resolve_unexpected_exit(message)
+        except asyncio.CancelledError:
+            pass
+        except Exception as error:
+            self._record_error(f"Watchman stdout reader failed: {error}")
+            self._fail_pending_reply(error)
 
     async def _stderr_loop(self) -> None:
         process = self._process
@@ -410,6 +412,7 @@ class WatchmanCliSession:
         self._subscription_pdu_count = 0
         self._subscription_pdu_dropped = 0
         self._clear_subscription_queue()
+        self._process_wait_task = None
         self._unexpected_exit_future = None
 
     def _clear_subscription_queue(self) -> None:
@@ -440,6 +443,24 @@ class WatchmanCliSession:
         future = self._unexpected_exit_future
         if future is not None and not future.done():
             future.set_result(message)
+
+    async def _wait_for_process_exit(self) -> None:
+        process = self._process
+        if process is None:
+            return
+
+        try:
+            returncode = await process.wait()
+        except asyncio.CancelledError:
+            return
+
+        if self._stop_requested:
+            return
+
+        message = f"Watchman session exited unexpectedly (rc={returncode})"
+        self._record_error(message)
+        self._fail_pending_reply(RuntimeError(message))
+        self._resolve_unexpected_exit(message)
 
     async def _await_background_task(self, task: asyncio.Task[None] | None) -> None:
         if task is None:

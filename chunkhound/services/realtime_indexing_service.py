@@ -1158,12 +1158,12 @@ class RealtimeIndexingService:
 
     async def _cancel_watchdog_bootstrap_future(self) -> None:
         self._watchdog_bootstrap_abort.set()
-        if (
-            self._watchdog_bootstrap_future
-            and not self._watchdog_bootstrap_future.done()
-        ):
+        future = self._watchdog_bootstrap_future
+        if future is None:
+            return
+        if not future.done():
             try:
-                await asyncio.wait_for(self._watchdog_bootstrap_future, timeout=1.0)
+                await asyncio.wait_for(future, timeout=1.0)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
             except Exception as error:
@@ -1171,7 +1171,7 @@ class RealtimeIndexingService:
                     "Watchdog bootstrap future raised during shutdown: "
                     f"{type(error).__name__}: {error}"
                 )
-        if self._watchdog_bootstrap_future and self._watchdog_bootstrap_future.done():
+        if self._watchdog_bootstrap_future is future:
             self._watchdog_bootstrap_future = None
 
     async def _stop_observer(self) -> None:
@@ -1505,9 +1505,11 @@ class RealtimeIndexingService:
             "Progressive directory addition skipped (using recursive monitoring)"
         )
 
-    def _polling_snapshot(self, watch_path: Path) -> tuple[dict[Path, int], int, bool]:
+    def _polling_snapshot(
+        self, watch_path: Path
+    ) -> tuple[dict[Path, tuple[int, int]], int, bool]:
         """Collect a filesystem snapshot off the event loop for polling mode."""
-        current_files: dict[Path, int] = {}
+        current_files: dict[Path, tuple[int, int]] = {}
         files_checked = 0
         truncated = False
         simple_handler = SimpleEventHandler(
@@ -1522,11 +1524,14 @@ class RealtimeIndexingService:
                 files_checked += 1
                 if simple_handler._should_index(file_path):
                     try:
-                        current_mtime = file_path.stat().st_mtime_ns
+                        stat_result = file_path.stat()
                     except OSError:
                         continue
 
-                    current_files[file_path] = current_mtime
+                    current_files[file_path] = (
+                        stat_result.st_mtime_ns,
+                        stat_result.st_size,
+                    )
 
                 if files_checked >= 5000:
                     truncated = True
@@ -1554,8 +1559,9 @@ class RealtimeIndexingService:
         """Simple polling monitor for large directories."""
         logger.debug(f"Starting polling monitor for {watch_path}")
         self._debug(f"polling monitor active for {watch_path}")
-        # Track files with their mtime to detect modifications (not just new/deleted)
-        known_files: dict[Path, int] = {}
+        # Track both mtime and size so Windows polling catches overwrites that
+        # fail to advance mtime reliably on CI filesystems.
+        known_files: dict[Path, tuple[int, int]] = {}
 
         # Use a shorter interval during the first few seconds to ensure
         # freshly created files are detected quickly after startup/fallback.
@@ -1575,12 +1581,12 @@ class RealtimeIndexingService:
                         "event-loop starvation"
                     )
 
-                for file_path, current_mtime in current_files.items():
+                for file_path, current_fingerprint in current_files.items():
                     if file_path not in known_files:
                         logger.debug(f"Polling detected new file: {file_path}")
                         self._debug(f"polling detected new file: {file_path}")
                         await self.add_file(file_path, priority="change")
-                    elif known_files[file_path] != current_mtime:
+                    elif known_files[file_path] != current_fingerprint:
                         logger.debug(f"Polling detected modified file: {file_path}")
                         self._debug(f"polling detected modified file: {file_path}")
                         await self.add_file(file_path, priority="change")

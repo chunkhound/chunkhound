@@ -227,9 +227,7 @@ class TestRealtimeFunctional:
             assert stats["watchman_connection_state"] == "connected"
             assert stats["watchman_subscription_name"] == "chunkhound-live-indexing"
             assert stats["watchman_subscription_count"] == 1
-            assert stats["watchman_socket_path"] == str(
-                watch_dir / ".chunkhound" / "watchman" / "sock"
-            )
+            assert Path(stats["watchman_socket_path"]).exists()
             assert stats["watchman_watch_root"] == str(watch_dir.resolve())
             assert stats["watchman_relative_root"] is None
             assert Path(stats["watchman_metadata_path"]).is_file()
@@ -555,6 +553,51 @@ class TestRealtimeFunctional:
             poll_task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await poll_task
+
+    @pytest.mark.asyncio
+    async def test_polling_monitor_detects_size_change_when_mtime_is_constant(
+        self, realtime_setup, monkeypatch
+    ):
+        """Polling mode should treat size changes as modifications."""
+        service, watch_dir, _, _ = realtime_setup
+        target_file = watch_dir / "same_mtime_size_change.py"
+        change_detected = asyncio.Event()
+        add_calls: list[tuple[Path, str]] = []
+        snapshots = iter(
+            [
+                ({target_file: (100, 10)}, 1, False),
+                ({target_file: (100, 30)}, 1, False),
+                ({target_file: (100, 30)}, 1, False),
+            ]
+        )
+
+        async def fake_to_thread(func, *args, **kwargs):
+            assert func == service._polling_snapshot
+            assert args == (watch_dir,)
+            assert kwargs == {}
+            return next(snapshots)
+
+        async def fake_add_file(file_path: Path, priority: str = "change") -> None:
+            add_calls.append((file_path, priority))
+            if len(add_calls) >= 2:
+                change_detected.set()
+
+        monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+        monkeypatch.setattr(service, "add_file", fake_add_file)
+
+        poll_task = asyncio.create_task(service._polling_monitor(watch_dir))
+
+        try:
+            await asyncio.wait_for(change_detected.wait(), timeout=2.5)
+        finally:
+            poll_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await poll_task
+
+        assert add_calls == [
+            (target_file, "change"),
+            (target_file, "change"),
+        ]
 
     @pytest.mark.asyncio
     async def test_filesystem_monitoring_detects_changes(self, realtime_setup):
