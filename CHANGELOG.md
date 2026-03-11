@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Automatic API routing between Chat Completions and Responses API based on model compatibility - supports 30+ models including all GPT-5, GPT-4.1, GPT-4o, and o-series models
 - Reasoning effort control for deep research LLM operations - configurable levels (none, minimal, low, medium, high) via `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT` with per-role overrides for utility and synthesis operations
 - Structured JSON output support for Responses API - maintains schema validation consistency across both Chat Completions and Responses endpoints
+- Watchman live-indexing operator docs covering the private `.chunkhound/watchman/` sidecar, fail-fast startup/no implicit fallback behavior, `daemon_status` health interpretation, and the rollout gate that keeps Watchman opt-in until runtime-validation CI is green
 
 ### Performance
 - LanceDB table creation now detects embedding dimensions upfront from configured embedding provider, eliminating O(n) table recreation penalty during first embedding insertion - significantly improves indexing performance for large codebases (e.g., 16,000+ chunks no longer require full table migration)
