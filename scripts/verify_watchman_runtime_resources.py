@@ -10,6 +10,8 @@ import time
 import zipfile
 from pathlib import Path
 
+import psutil
+
 _REQUIRED_WHEEL_PATHS: tuple[str, ...] = (
     "chunkhound/watchman_runtime/__init__.py",
     "chunkhound/watchman_runtime/bridge.py",
@@ -29,6 +31,59 @@ _LIVE_MUTATION_TIMEOUT_ENV = (
 )
 
 
+def _terminate_process_tree(pid: int) -> None:
+    try:
+        root = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+
+    try:
+        processes = root.children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        processes = []
+    processes.append(root)
+
+    for process in processes:
+        try:
+            process.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+    _, alive = psutil.wait_procs(processes, timeout=2.0)
+    for process in alive:
+        try:
+            process.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    psutil.wait_procs(alive, timeout=2.0)
+
+
+def _terminate_processes_using_root(root: Path) -> None:
+    root_str = str(root)
+    current_pid = os.getpid()
+    candidates: list[int] = []
+
+    for process in psutil.process_iter(["pid", "cwd", "cmdline"]):
+        pid = process.info.get("pid")
+        if not isinstance(pid, int) or pid == current_pid:
+            continue
+
+        try:
+            cwd = process.info.get("cwd")
+            cmdline = process.info.get("cmdline") or []
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+        if isinstance(cwd, str) and cwd.startswith(root_str):
+            candidates.append(pid)
+            continue
+        if any(isinstance(arg, str) and root_str in arg for arg in cmdline):
+            candidates.append(pid)
+
+    for pid in candidates:
+        _terminate_process_tree(pid)
+
+
 def _remove_tree_with_retries(
     root: Path, *, attempts: int = 5, base_delay_seconds: float = 0.2
 ) -> None:
@@ -41,6 +96,8 @@ def _remove_tree_with_retries(
             return
         except OSError as error:
             last_error = error
+            if os.name == "nt":
+                _terminate_processes_using_root(root)
             if attempt == attempts - 1:
                 raise
             time.sleep(base_delay_seconds * (attempt + 1))

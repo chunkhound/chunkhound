@@ -244,3 +244,46 @@ def test_remove_tree_with_retries_retries_permission_error(
 
     assert attempts["count"] == 2
     assert not locked_root.exists()
+
+
+def test_remove_tree_with_retries_terminates_windows_processes_using_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    locked_root = tmp_path / "locked-root"
+    locked_root.mkdir()
+    terminated: list[int] = []
+    original_rmtree = shutil.rmtree
+    attempts = {"count": 0}
+
+    class FakeProcess:
+        def __init__(self, pid: int, cwd: str | None, cmdline: list[str]) -> None:
+            self.info = {"pid": pid, "cwd": cwd, "cmdline": cmdline}
+
+    def flaky_rmtree(path: Path) -> None:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise PermissionError("simulated Windows handle delay")
+        original_rmtree(path)
+
+    monkeypatch.setattr(watchman_verifier.os, "name", "nt", raising=False)
+    monkeypatch.setattr(watchman_verifier.shutil, "rmtree", flaky_rmtree)
+    monkeypatch.setattr(watchman_verifier.time, "sleep", lambda *_args: None)
+    monkeypatch.setattr(
+        watchman_verifier.psutil,
+        "process_iter",
+        lambda *_args, **_kwargs: iter(
+            [
+                FakeProcess(101, str(locked_root), []),
+                FakeProcess(202, None, [str(locked_root / "child.py")]),
+                FakeProcess(303, str(tmp_path / "other"), []),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        watchman_verifier, "_terminate_process_tree", lambda pid: terminated.append(pid)
+    )
+
+    watchman_verifier._remove_tree_with_retries(locked_root, attempts=2)
+
+    assert attempts["count"] == 2
+    assert terminated == [101, 202]
