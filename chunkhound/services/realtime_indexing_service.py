@@ -1646,19 +1646,31 @@ class RealtimeIndexingService:
 
     async def _debounced_add_file(self, file_path: Path, priority: str) -> None:
         """Process file after debounce delay."""
-        await asyncio.sleep(self._debounce_delay)
+        remaining_delay = self._debounce_delay
 
-        file_str = str(file_path)
-        if file_str in self._pending_debounce:
+        while True:
+            await asyncio.sleep(remaining_delay)
+
+            file_str = str(file_path)
+            if file_str not in self._pending_debounce:
+                return
+
             last_update = self._pending_debounce[file_str]
+            remaining_delay = self._debounce_delay - (
+                time.monotonic() - last_update
+            )
 
-            # Check if no recent updates during delay
-            if time.monotonic() - last_update >= self._debounce_delay:
-                del self._pending_debounce[file_str]
-                await self.file_queue.put((priority, file_path))
-                logger.debug(f"Processing debounced file: {file_path}")
-                self._debug(f"processing debounced file: {file_path}")
-                self._emit_status_update()
+            # Windows timer granularity can wake slightly before the debounce
+            # horizon; retry instead of leaving the file stuck in pending state.
+            if remaining_delay > 0:
+                continue
+
+            del self._pending_debounce[file_str]
+            await self.file_queue.put((priority, file_path))
+            logger.debug(f"Processing debounced file: {file_path}")
+            self._debug(f"processing debounced file: {file_path}")
+            self._emit_status_update()
+            return
 
     async def _consume_events(self) -> None:
         """Simple event consumer - pure asyncio queue."""

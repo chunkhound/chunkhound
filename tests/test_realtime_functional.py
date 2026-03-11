@@ -600,6 +600,41 @@ class TestRealtimeFunctional:
         ]
 
     @pytest.mark.asyncio
+    async def test_debounced_add_file_retries_early_timer_wake(
+        self, realtime_setup, monkeypatch
+    ):
+        """Debounce should retry if timer granularity wakes before the target."""
+        service, watch_dir, _, _ = realtime_setup
+        target_file = watch_dir / "early_wake.py"
+        target_file.write_text("def early_wake(): pass")
+        file_key = str(target_file)
+        sleep_calls: list[float] = []
+        monotonic_values = iter([100.49, 100.5001])
+
+        service.pending_files.add(target_file)
+        service._pending_debounce[file_key] = 100.0
+
+        async def fake_sleep(delay: float) -> None:
+            sleep_calls.append(delay)
+
+        def fake_monotonic() -> float:
+            try:
+                return next(monotonic_values)
+            except StopIteration:
+                return 100.5001
+
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(time, "monotonic", fake_monotonic)
+
+        await service._debounced_add_file(target_file, "change")
+
+        assert len(sleep_calls) == 2
+        assert sleep_calls[0] == service._debounce_delay
+        assert sleep_calls[1] == pytest.approx(0.01, abs=1e-6)
+        assert file_key not in service._pending_debounce
+        assert await service.file_queue.get() == ("change", target_file)
+
+    @pytest.mark.asyncio
     async def test_filesystem_monitoring_detects_changes(self, realtime_setup):
         """Test that filesystem changes are detected and processed."""
         service, watch_dir, _, services = realtime_setup
