@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 # Global console for consistent colored output
 _console = Console()
 
+_PERMISSIONS_HINT = "This might be a permissions issue. Try creating the file manually."
+
 
 def console_print(message: str, style: str = None) -> None:
     """Print with colors using Rich console or fallback to plain print."""
@@ -862,7 +864,7 @@ async def _setup_claude_code(target_path: Path, formatter: RichOutputFormatter) 
         return True
     else:
         formatter.error(f"Failed to write configuration to {mcp_path}")
-        print("This might be a permissions issue. Try creating the file manually.")
+        print(_PERMISSIONS_HINT)
         _show_manual_claude_instructions(formatter, mcp_path)
         return False
 
@@ -1031,7 +1033,7 @@ async def _setup_vscode(target_path: Path, formatter: RichOutputFormatter) -> bo
             return True
         else:
             formatter.error(f"Failed to write configuration to {mcp_path}")
-            print("This might be a permissions issue. Try creating the file manually.")
+            print(_PERMISSIONS_HINT)
             _show_manual_vscode_instructions(formatter, mcp_path)
             return False
     else:
@@ -1062,7 +1064,7 @@ async def _setup_vscode(target_path: Path, formatter: RichOutputFormatter) -> bo
                 return True
             else:
                 formatter.error(f"Failed to create {mcp_path}")
-                print("This might be a permissions issue. Try creating the file manually.")
+                print(_PERMISSIONS_HINT)
                 _show_manual_vscode_instructions(formatter, mcp_path)
                 return False
         else:
@@ -1176,7 +1178,7 @@ async def _setup_opencode(target_path: Path, formatter: RichOutputFormatter) -> 
         return True
     else:
         formatter.error(f"Failed to write configuration to {opencode_path}")
-        print("This might be a permissions issue. Try creating the file manually.")
+        print(_PERMISSIONS_HINT)
         _show_manual_opencode_instructions(formatter, opencode_path)
         return False
 
