@@ -6,23 +6,24 @@ flow against a local project checkout.
 
 ## Current rollout posture
 
-- `watchman` is available as an explicit realtime backend.
-- The default backend is still `watchdog`.
-- Do not treat Watchman as the default path until the rollout gate in
-  [Rollout gate](#rollout-gate) is green.
+- `watchman` is the default realtime backend.
+- `watchdog` and `polling` remain available as explicit fallback backends.
+- The rollout gate in [Rollout gate](#rollout-gate) is satisfied on the current
+  branch, so new deployments should treat Watchman as the primary path.
 
-Enable Watchman explicitly with either config or a CLI override:
+Override the default explicitly with either config or a CLI flag when you need
+to force a fallback backend:
 
 ```json
 {
   "indexing": {
-    "realtime_backend": "watchman"
+    "realtime_backend": "watchdog"
   }
 }
 ```
 
 ```bash
-chunkhound mcp . --realtime-backend watchman
+chunkhound mcp . --realtime-backend polling
 ```
 
 ## Tenancy and on-disk layout
@@ -116,7 +117,7 @@ During an incident, confirm that:
 
 ## Rollout gate
 
-Watchman remains opt-in until all of the following are true:
+The default flip to Watchman is gated on all of the following:
 
 1. The `watchman-runtime-validation` job in
    `.github/workflows/smoke-tests.yml` is green on `ubuntu-latest`,
@@ -133,8 +134,10 @@ Watchman remains opt-in until all of the following are true:
    `watchman_loss_of_sync.count` increments and the resync contract surfaces
    through `resync.last_reason == "realtime_loss_of_sync"`.
 
-Until that gate is satisfied:
+Current status:
 
-- keep Watchman behind explicit `realtime_backend=watchman`
-- keep `watchdog` and `polling` as the default/fallback operator choices
-- do not flip the default backend in config, docs, or release messaging
+- The hosted `Tests` workflow run `22959927250` is green on `ubuntu-latest`,
+  `macos-latest`, and `windows-latest`.
+- Watchman is now the default backend in config/runtime defaults.
+- `watchdog` and `polling` remain supported operator fallbacks when Watchman is
+  not desired for a given deployment.

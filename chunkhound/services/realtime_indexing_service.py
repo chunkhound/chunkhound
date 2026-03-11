@@ -943,10 +943,10 @@ class RealtimeIndexingService:
         self._emit_status_update()
 
     def _resolve_configured_backend(self) -> str:
-        backend = getattr(self.config.indexing, "realtime_backend", "watchdog")
+        backend = getattr(self.config.indexing, "realtime_backend", "watchman")
         if backend in {"watchman", "watchdog", "polling"}:
             return str(backend)
-        return "watchdog"
+        return "watchman"
 
     def _set_effective_backend(self, backend: str) -> None:
         self._effective_backend = backend

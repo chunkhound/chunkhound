@@ -17,9 +17,9 @@ def _build_parser(add_subparser) -> argparse.ArgumentParser:
     return parser
 
 
-def test_indexing_config_defaults_to_watchdog():
+def test_indexing_config_defaults_to_watchman():
     config = IndexingConfig()
-    assert config.realtime_backend == "watchdog"
+    assert config.realtime_backend == "watchman"
 
 
 def test_indexing_config_loads_realtime_backend_from_env(monkeypatch):

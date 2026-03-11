@@ -234,7 +234,7 @@ class IndexingConfig(BaseModel):
 
     # Realtime backend controls how filesystem change monitoring is performed.
     realtime_backend: Literal["watchman", "watchdog", "polling"] = Field(
-        default="watchdog",
+        default="watchman",
         description="Realtime backend for filesystem monitoring: watchman|watchdog|polling",
     )
 
