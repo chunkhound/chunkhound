@@ -11,6 +11,7 @@ to ensure consistent initialization while respecting protocol-specific constrain
 """
 
 import asyncio
+import copy
 import os
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -62,6 +63,9 @@ class MCPServerBase(ABC):
         # Initialization state
         self._initialized = False
         self._init_lock = asyncio.Lock()
+
+        # Background tasks
+        self._scan_task: asyncio.Task | None = None
 
         # Scan progress tracking
         self._scan_complete = False
@@ -195,7 +199,7 @@ class MCPServerBase(ABC):
                 self.realtime_indexing.start(target_path)
             )
             # Schedule background scan AFTER monitoring is confirmed ready
-            asyncio.create_task(
+            self._scan_task = asyncio.create_task(
                 self._coordinated_initial_scan(target_path, monitoring_task)
             )
         except Exception as e:
@@ -284,7 +288,16 @@ class MCPServerBase(ABC):
 
         This method is idempotent - safe to call multiple times.
         """
-        # Stop real-time indexing first
+        # Cancel background scan task if still running
+        if self._scan_task is not None and not self._scan_task.done():
+            self.debug_log("Cancelling background scan task")
+            self._scan_task.cancel()
+            try:
+                await self._scan_task
+            except asyncio.CancelledError:
+                pass
+
+        # Stop real-time indexing
         if self.realtime_indexing:
             self.debug_log("Stopping real-time indexing service")
             await self.realtime_indexing.stop()
@@ -331,6 +344,50 @@ class MCPServerBase(ABC):
                 "in .chunkhound.json or set CHUNKHOUND_EMBEDDING__API_KEY environment variable."
             )
         return self.embedding_manager
+
+    def _build_filtered_tool_dicts(self) -> list[dict[str, Any]]:
+        """Build a JSON-serialisable list of available tool schemas.
+
+        Filters tools based on embedding/LLM/reranker availability and
+        dynamically restricts schema enums when capabilities are unavailable.
+
+        Returns:
+            List of dicts with keys ``name``, ``description``, ``inputSchema``.
+        """
+        from .common import has_reranker_support
+        from .tools import TOOL_REGISTRY
+
+        tools = []
+        for tool_name, tool in TOOL_REGISTRY.items():
+            if tool.requires_embeddings and (
+                not self.embedding_manager
+                or not self.embedding_manager.list_providers()
+            ):
+                continue
+            if tool.requires_llm and not self.llm_manager:
+                continue
+            if tool.requires_reranker and not has_reranker_support(
+                self.embedding_manager
+            ):
+                continue
+
+            tool_params = copy.deepcopy(tool.parameters)
+
+            if tool_name == "search" and (
+                not self.embedding_manager
+                or not self.embedding_manager.list_providers()
+            ):
+                if "type" in tool_params.get("properties", {}):
+                    tool_params["properties"]["type"]["enum"] = ["regex"]
+
+            tools.append(
+                {
+                    "name": tool_name,
+                    "description": tool.description,
+                    "inputSchema": tool_params,
+                }
+            )
+        return tools
 
     @abstractmethod
     def _register_tools(self) -> None:

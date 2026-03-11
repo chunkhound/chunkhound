@@ -56,6 +56,7 @@ def create_parser() -> argparse.ArgumentParser:
     # Import parsers dynamically to avoid early loading
     from .parsers import create_main_parser, setup_subparsers
     from .parsers.calibrate_parser import add_calibrate_subparser
+    from .parsers.daemon_parser import add_daemon_subparser
     from .parsers.mcp_parser import add_mcp_subparser
     from .parsers.research_parser import add_research_subparser
     from .parsers.autodoc_parser import add_autodoc_subparser
@@ -75,6 +76,8 @@ def create_parser() -> argparse.ArgumentParser:
     add_map_subparser(subparsers)
     # Diagnose command retired; functionality lives under: index --check-ignores
     add_calibrate_subparser(subparsers)
+    # Internal daemon command (hidden from help)
+    add_daemon_subparser(subparsers)
 
     return parser
 
@@ -97,6 +100,13 @@ async def async_main() -> None:
         getattr(args, "simulate", False) or getattr(args, "check_ignores", False)
     ):
         setattr(args, "no_embeddings", True)
+
+    # For the internal _daemon command, map --project-dir to args.path so that
+    # Config.__init__ resolves the correct project root and config file.
+    if args.command == "_daemon" and hasattr(args, "project_dir"):
+        from pathlib import Path as _Path
+        args.path = _Path(args.project_dir).resolve()
+
     config, validation_errors = create_validated_config(args, args.command)
 
     if validation_errors:
@@ -173,6 +183,11 @@ async def async_main() -> None:
             from .commands.calibrate import calibrate_command
 
             await calibrate_command(args, config)
+        elif args.command == "_daemon":
+            # Internal: run the multi-client daemon process
+            from .commands.daemon import daemon_command
+
+            await daemon_command(args, config)
         # 'diagnose' command retired; use: chunkhound index --check-ignores --vs git
         else:
             logger.error(f"Unknown command: {args.command}")

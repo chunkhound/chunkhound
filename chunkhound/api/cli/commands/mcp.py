@@ -53,10 +53,27 @@ async def mcp_command(args: argparse.Namespace, config) -> None:
     except ImportError:
         pass
 
-    # Use stdio transport (only supported mode)
-    from chunkhound.mcp_server.stdio import main
+    # Daemon mode: route through ClientProxy unless explicitly disabled.
+    # --stdio predates the daemon and implies single-process direct mode for
+    # backwards compatibility.
+    no_daemon = (
+        getattr(args, "no_daemon", False)
+        or getattr(args, "stdio", False)
+        or os.getenv("CHUNKHOUND_DAEMON_MODE", "").lower() == "false"
+    )
 
-    await main(args=args)
+    if no_daemon:
+        # Direct path: run StdioMCPServer in this process (single-client mode)
+        from chunkhound.mcp_server.stdio import main
+
+        await main(args=args)
+    else:
+        # Proxy path: find/start daemon, then bridge stdio ↔ socket
+        from chunkhound.daemon.client_proxy import ClientProxy
+
+        project_dir = Path(getattr(args, "path", ".")).resolve()
+        proxy = ClientProxy(project_dir, args)
+        await proxy.run()
 
 
 def _show_mcp_setup_instructions(

@@ -75,12 +75,12 @@ dependencies = [
     "rich>=13.0.0",
     "readchar>=4.2.1",
     "scikit-learn>=1.3.0",
-    "hdbscan>=0.8.38",
     "numpy>=1.24.0",
     "pathspec>=0.12.1",
     "pygit2>=1.12.0",
     "google-genai>=1.51.0",
     "anthropic>=0.75.0",
+    "msgpack>=1.0",
     "tomli>=2.0.0; python_version < '3.11'",
 ]
 
@@ -176,8 +176,12 @@ addopts = [
 filterwarnings = [
     # Suppress SWIG-related warnings from tree-sitter bindings
     "ignore:builtin type.*has no __module__ attribute:DeprecationWarning",
-    # Suppress asyncio subprocess transport cleanup warnings in tests
+    # Suppress asyncio subprocess/pipe transport cleanup warnings in tests.
+    # On Windows, _ProactorBasePipeTransport raises during GC if pipes are
+    # not explicitly closed before the event loop shuts down.
     "ignore:Exception ignored in.*BaseSubprocessTransport:pytest.PytestUnraisableExceptionWarning",
+    "ignore:Exception ignored in.*ProactorBasePipeTransport:pytest.PytestUnraisableExceptionWarning",
+    "ignore:Exception ignored in.*PipeTransport:pytest.PytestUnraisableExceptionWarning",
     # Allow other warnings to be displayed
 ]
 markers = [

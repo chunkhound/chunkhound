@@ -7,10 +7,9 @@ token-bounded clusters for parallel synthesis operations.
 
 from dataclasses import dataclass
 
-import hdbscan
 import numpy as np
 from loguru import logger
-from sklearn.cluster import KMeans  # type: ignore[import-untyped]
+from sklearn.cluster import HDBSCAN, KMeans  # type: ignore[import-untyped]
 
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 from chunkhound.interfaces.llm_provider import LLMProvider
@@ -226,7 +225,7 @@ class ClusteringService:
             f"Running HDBSCAN with min_cluster_size={effective_min_cluster_size}"
         )
 
-        clusterer = hdbscan.HDBSCAN(
+        clusterer = HDBSCAN(
             min_cluster_size=effective_min_cluster_size,
             min_samples=1,
             metric="euclidean",
@@ -438,7 +437,7 @@ class ClusteringService:
             f"Running HDBSCAN with min_cluster_size={effective_min_cluster_size}"
         )
 
-        clusterer = hdbscan.HDBSCAN(
+        clusterer = HDBSCAN(
             min_cluster_size=effective_min_cluster_size,
             min_samples=1,
             metric="euclidean",
