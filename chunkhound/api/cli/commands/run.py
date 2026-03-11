@@ -81,7 +81,7 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
 
         # Initialize metrics collector if diagnostics enabled
         metrics_collector = None
-        if args.perf_diagnostics:
+        if getattr(args, "perf_diagnostics", False):
             from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector
             metrics_collector = BatchMetricsCollector()
 
@@ -134,8 +134,9 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
             diagnostics = analyzer.analyze(metrics_collector)
 
             # Determine output path
-            if args.perf_output:
-                output_path = args.perf_output
+            perf_output = getattr(args, "perf_output", None)
+            if perf_output:
+                output_path = perf_output
             else:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 output_path = db_path.parent / f"perf_diagnostics_{timestamp}.json"
