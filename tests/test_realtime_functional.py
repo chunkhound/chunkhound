@@ -241,6 +241,45 @@ class TestRealtimeFunctional:
         assert not (watch_dir / ".chunkhound" / "watchman" / "metadata.json").exists()
 
     @pytest.mark.asyncio
+    async def test_watchman_backend_indexes_real_file_mutation(self, tmp_path):
+        """Watchman backend should index a real file mutation without injected PDUs."""
+        from types import SimpleNamespace
+
+        watch_dir = tmp_path / "watchman_project"
+        watch_dir.mkdir(parents=True)
+        db_path = watch_dir / ".chunkhound" / "test.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        fake_args = SimpleNamespace(path=watch_dir)
+        config = Config(
+            args=fake_args,
+            database={"path": str(db_path), "provider": "duckdb"},
+            indexing={"realtime_backend": "watchman"},
+        )
+
+        services = create_services(db_path, config)
+        services.provider.connect()
+        service = RealtimeIndexingService(services, config)
+
+        try:
+            await service.start(watch_dir)
+
+            file_path = watch_dir / "src" / "watchman_live_runtime.py"
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(
+                "def watchman_live_runtime_symbol():\n    return 1\n",
+                encoding="utf-8",
+            )
+
+            assert await wait_for_indexed(services.provider, file_path, timeout=10.0)
+
+            stats = await service.get_health()
+            assert stats["watchman_connection_state"] == "connected"
+            assert stats["watchman_subscription_pdu_count"] >= 1
+        finally:
+            await service.stop()
+            services.provider.disconnect()
+
+    @pytest.mark.asyncio
     async def test_watchman_backend_requires_session_capabilities(
         self, tmp_path, monkeypatch
     ):

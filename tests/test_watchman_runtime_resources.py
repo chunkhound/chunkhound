@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import stat
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import TextIO
@@ -137,10 +139,49 @@ def _stop_process(process: subprocess.Popen) -> None:
 def _read_json_line(stream: TextIO) -> dict[str, object]:
     line = stream.readline()
     if not line:
-        raise AssertionError("expected a JSON response from the fake Watchman client")
+        raise AssertionError("expected a JSON response from the Watchman client")
     payload = json.loads(line)
     assert isinstance(payload, dict)
     return payload
+
+
+class _JsonLineReader:
+    _EOF = object()
+
+    def __init__(self, stream: TextIO) -> None:
+        self._stream = stream
+        self._queue: queue.Queue[object] = queue.Queue()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            line = self._stream.readline()
+            if not line:
+                self._queue.put(self._EOF)
+                return
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError as error:
+                self._queue.put(error)
+                return
+            self._queue.put(payload)
+
+    def read(self, *, timeout: float) -> dict[str, object]:
+        try:
+            payload = self._queue.get(timeout=timeout)
+        except queue.Empty as error:
+            raise AssertionError(
+                "timed out waiting for Watchman JSON output"
+            ) from error
+        if payload is self._EOF:
+            raise AssertionError("Watchman client exited before emitting JSON output")
+        if isinstance(payload, json.JSONDecodeError):
+            raise AssertionError(
+                f"failed to decode Watchman JSON output: {payload}"
+            ) from payload
+        assert isinstance(payload, dict)
+        return payload
 
 
 def test_materialize_watchman_binary_writes_executable_for_host(tmp_path: Path) -> None:
@@ -167,7 +208,7 @@ def test_materialize_watchman_binary_writes_executable_for_host(tmp_path: Path) 
 
     assert result.returncode == 0
     assert "watchman" in result.stdout.lower()
-    assert "placeholder" in result.stdout.lower()
+    assert runtime.runtime_version in result.stdout
 
 
 def test_materialized_watchman_binary_supports_private_sidecar_flags(
@@ -198,7 +239,9 @@ def test_materialized_watchman_binary_supports_private_sidecar_flags(
             logfile_path=logfile_path,
         )
         assert process.poll() is None
-        assert "fake watchman start" in logfile_path.read_text(encoding="utf-8")
+        assert "watchman runtime sidecar start" in logfile_path.read_text(
+            encoding="utf-8"
+        )
     finally:
         if process.poll() is None:
             _stop_sidecar_process(process)
@@ -243,6 +286,7 @@ def test_materialized_watchman_binary_supports_persistent_client_session(
         )
         assert client.stdin is not None
         assert client.stdout is not None
+        reader = _JsonLineReader(client.stdout)
 
         client.stdin.write(
             json.dumps(
@@ -251,7 +295,7 @@ def test_materialized_watchman_binary_supports_persistent_client_session(
             + "\n"
         )
         client.stdin.flush()
-        version_response = _read_json_line(client.stdout)
+        version_response = reader.read(timeout=5.0)
         assert version_response["capabilities"] == {
             "cmd-watch-project": True,
             "relative_root": True,
@@ -259,7 +303,7 @@ def test_materialized_watchman_binary_supports_persistent_client_session(
 
         client.stdin.write(json.dumps(["watch-project", str(project_root)]) + "\n")
         client.stdin.flush()
-        watch_project_response = _read_json_line(client.stdout)
+        watch_project_response = reader.read(timeout=5.0)
         assert watch_project_response["watch"] == str(project_root)
         assert "relative_path" not in watch_project_response
 
@@ -275,8 +319,35 @@ def test_materialized_watchman_binary_supports_persistent_client_session(
             + "\n"
         )
         client.stdin.flush()
-        subscribe_response = _read_json_line(client.stdout)
+        subscribe_response = reader.read(timeout=5.0)
         assert subscribe_response["subscribe"] == "chunkhound-live-indexing"
+
+        live_file = project_root / "src" / "runtime_live.py"
+        live_file.parent.mkdir(parents=True, exist_ok=True)
+        live_file.write_text(
+            "def runtime_live_symbol():\n    return 1\n", encoding="utf-8"
+        )
+
+        deadline = time.monotonic() + 10.0
+        live_payload: dict[str, object] | None = None
+        while time.monotonic() < deadline:
+            payload = reader.read(timeout=1.0)
+            files = payload.get("files")
+            if not isinstance(files, list):
+                continue
+            if payload.get("subscription") != "chunkhound-live-indexing":
+                continue
+            if any(
+                isinstance(item, dict)
+                and item.get("name") == "src/runtime_live.py"
+                and item.get("exists") is True
+                and item.get("type") == "f"
+                for item in files
+            ):
+                live_payload = payload
+                break
+
+        assert live_payload is not None
     finally:
         if client is not None:
             if client.stdin is not None:

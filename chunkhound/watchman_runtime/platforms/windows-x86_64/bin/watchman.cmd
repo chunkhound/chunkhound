@@ -1,4 +1,11 @@
 @echo off
-setlocal EnableExtensions EnableDelayedExpansion
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0watchman.ps1" %*
-exit /b %ERRORLEVEL%
+setlocal ENABLEEXTENSIONS
+where python >NUL 2>&1
+if %ERRORLEVEL% EQU 0 (
+    python -m chunkhound.watchman_runtime.bridge %*
+    set EXITCODE=%ERRORLEVEL%
+    exit /B %EXITCODE%
+)
+py -3 -m chunkhound.watchman_runtime.bridge %*
+set EXITCODE=%ERRORLEVEL%
+exit /B %EXITCODE%

@@ -10,6 +10,7 @@ from pathlib import Path
 
 _REQUIRED_WHEEL_PATHS: tuple[str, ...] = (
     "chunkhound/watchman_runtime/__init__.py",
+    "chunkhound/watchman_runtime/bridge.py",
     "chunkhound/watchman_runtime/README.md",
     "chunkhound/watchman_runtime/platforms/linux-x86_64/manifest.json",
     "chunkhound/watchman_runtime/platforms/linux-x86_64/bin/watchman",
@@ -20,6 +21,9 @@ _REQUIRED_WHEEL_PATHS: tuple[str, ...] = (
     "chunkhound/watchman_runtime/platforms/windows-x86_64/manifest.json",
     "chunkhound/watchman_runtime/platforms/windows-x86_64/bin/watchman.cmd",
     "chunkhound/watchman_runtime/platforms/windows-x86_64/bin/watchman.ps1",
+)
+_LIVE_MUTATION_TIMEOUT_ENV = (
+    "CHUNKHOUND_WATCHMAN_RUNTIME_VERIFY_LIVE_TIMEOUT_SECONDS"
 )
 
 
@@ -132,7 +136,7 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                 "text=True)"
                 ),
                 "assert 'watchman' in result.stdout.lower()",
-                "assert 'placeholder' in result.stdout.lower()",
+                "assert runtime.runtime_version in result.stdout",
                 "sidecar_root = Path('sidecar')",
                 "socket_path = sidecar_root / 'sock'",
                 "statefile_path = sidecar_root / 'state'",
@@ -172,6 +176,10 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                 "assert statefile_path.exists()",
                 "assert logfile_path.exists()",
                 "assert sidecar.poll() is None",
+                (
+                    "assert 'watchman runtime sidecar start' in "
+                    "logfile_path.read_text(encoding='utf-8')"
+                ),
                 "client_command = [",
                 "    str(binary_path),",
                 "    '--sockname',",
@@ -194,12 +202,24 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                 ),
                 "assert client.stdin is not None",
                 "assert client.stdout is not None",
+                "import queue",
+                "import threading",
+                "responses = queue.Queue()",
+                "EOF = object()",
+                "def _reader():",
+                "    while True:",
+                "        line = client.stdout.readline()",
+                "        if not line:",
+                "            responses.put(EOF)",
+                "            return",
+                "        responses.put(json.loads(line))",
+                "threading.Thread(target=_reader, daemon=True).start()",
                 (
                     "client.stdin.write(json.dumps(['version', {'required': "
                     "['cmd-watch-project', 'relative_root']}]) + '\\n')"
                 ),
                 "client.stdin.flush()",
-                "version_response = json.loads(client.stdout.readline())",
+                "version_response = responses.get(timeout=5.0)",
                 (
                     "assert version_response['capabilities'] == {"
                     "'cmd-watch-project': True, 'relative_root': True}"
@@ -213,7 +233,7 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                     "str(project_root.resolve())]) + '\\n')"
                 ),
                 "client.stdin.flush()",
-                "watch_project = json.loads(client.stdout.readline())",
+                "watch_project = responses.get(timeout=5.0)",
                 "assert watch_project['watch'] == str(project_root.resolve())",
                 (
                     "client.stdin.write(json.dumps(['subscribe', "
@@ -221,10 +241,56 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                     "{'fields': ['name', 'exists', 'new', 'type']}]) + '\\n')"
                 ),
                 "client.stdin.flush()",
-                "subscribe_response = json.loads(client.stdout.readline())",
+                "subscribe_response = responses.get(timeout=5.0)",
                 (
                     "assert subscribe_response['subscribe'] == "
                     "'chunkhound-live-indexing'"
+                ),
+                (
+                    "live_file = project_root / 'src' / 'installed_runtime_live.py'; "
+                    "live_file.parent.mkdir(parents=True, exist_ok=True)"
+                ),
+                (
+                    "live_file.write_text("
+                    "'def installed_runtime_live_symbol():\\n    return 1\\n', "
+                    "encoding='utf-8')"
+                ),
+                (
+                    "live_timeout = float(os.environ.get("
+                    f"'{_LIVE_MUTATION_TIMEOUT_ENV}', '10.0'))"
+                ),
+                "deadline = time.monotonic() + live_timeout",
+                "live_payload = None",
+                "while time.monotonic() < deadline:",
+                "    try:",
+                "        payload = responses.get(timeout=1.0)",
+                "    except queue.Empty:",
+                "        continue",
+                "    if payload is EOF:",
+                (
+                    "        raise AssertionError("
+                    "'watchman client exited before live mutation delivery'"
+                    ")"
+                ),
+                "    if payload.get('subscription') != 'chunkhound-live-indexing':",
+                "        continue",
+                "    files = payload.get('files')",
+                "    if not isinstance(files, list):",
+                "        continue",
+                "    if any(",
+                "        isinstance(item, dict)",
+                "        and item.get('name') == 'src/installed_runtime_live.py'",
+                "        and item.get('exists') is True",
+                "        and item.get('type') == 'f'",
+                "        for item in files",
+                "    ):",
+                "        live_payload = payload",
+                "        break",
+                "if live_payload is None:",
+                (
+                    "    raise AssertionError("
+                    "'timed out waiting for live subscription payload'"
+                    ")"
                 ),
                 "client.stdin.close()",
                 "try:",

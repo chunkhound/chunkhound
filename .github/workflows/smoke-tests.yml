@@ -77,3 +77,14 @@ jobs:
             exit 1
           fi
           uv run python scripts/verify_watchman_runtime_resources.py "${wheels[@]}"
+
+      - name: Verify installed-wheel Watchman live mutation e2e
+        shell: bash
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [[ ${#wheels[@]} -eq 0 ]]; then
+            echo "No wheel produced in dist/"
+            exit 1
+          fi
+          uv run python scripts/verify_watchman_live_indexing_e2e.py "${wheels[@]}"
