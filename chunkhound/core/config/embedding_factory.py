@@ -142,9 +142,13 @@ class EmbeddingProviderFactory:
 
         # Extract VoyageAI-specific parameters
         api_key = config.get("api_key")
+        base_url = config.get("base_url")
         model = config.get("model")
         rerank_model = config.get("rerank_model")
         rerank_batch_size = config.get("rerank_batch_size")
+        rerank_url = config.get("rerank_url")
+        rerank_format = config.get("rerank_format", "auto")
+        max_concurrent_batches = config.get("max_concurrent_batches")
 
         # Model should come from config, but handle None case safely
         if not model:
@@ -152,9 +156,9 @@ class EmbeddingProviderFactory:
 
         logger.debug(
             f"Creating VoyageAI provider: model={model}, "
-            f"api_key={'***' if api_key else None}, "
-            f"rerank_model={rerank_model}, "
-            f"rerank_batch_size={rerank_batch_size}"
+            f"base_url={base_url}, api_key={'***' if api_key else None}, "
+            f"rerank_model={rerank_model}, rerank_url={rerank_url}, "
+            f"rerank_format={rerank_format}, rerank_batch_size={rerank_batch_size}"
         )
 
         try:
@@ -167,10 +171,26 @@ class EmbeddingProviderFactory:
                 "timeout": config.get("timeout", 30),
                 "retry_attempts": config.get("max_retries", 3),
             }
+            if base_url is not None:
+                kwargs["base_url"] = base_url
             if rerank_model is not None:
                 kwargs["rerank_model"] = rerank_model
             if rerank_batch_size is not None:
                 kwargs["rerank_batch_size"] = rerank_batch_size
+            # rerank_url: resolve relative paths against base_url, then forward absolute URLs only
+            if (
+                rerank_url
+                and base_url
+                and not rerank_url.startswith(("http://", "https://"))
+            ):
+                from urllib.parse import urljoin
+
+                rerank_url = urljoin(base_url.rstrip("/") + "/", rerank_url.lstrip("/"))
+            if rerank_url and rerank_url.startswith(("http://", "https://")):
+                kwargs["rerank_url"] = rerank_url
+                kwargs["rerank_format"] = rerank_format
+            if max_concurrent_batches is not None:
+                kwargs["max_concurrent_batches"] = max_concurrent_batches
 
             return VoyageAIEmbeddingProvider(**kwargs)
         except Exception as e:
@@ -340,7 +360,7 @@ class EmbeddingProviderFactory:
                     # UI-specific metadata for setup wizard
                     "display_name": "VoyageAI",
                     "base_url": None,  # Uses SDK, no direct endpoint
-                    "requires_api_key": True,
+                    "requires_api_key": False,  # Only required for official api.voyageai.com
                     "supports_model_listing": False,
                     "supports_reranking": True,
                     "default_models": [

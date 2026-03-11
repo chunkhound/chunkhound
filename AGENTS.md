@@ -71,12 +71,6 @@ git push origin vX.Y.Z
 uv publish
 ```
 
-## KNOWN_DEPRECATION_WARNINGS
-**HDBSCAN + scikit-learn**: `force_all_finite` parameter warning
-- Non-breaking, safe to ignore
-- Waiting for upstream HDBSCAN fix
-- Will break in sklearn 1.8 if not fixed upstream
-
 ## PROJECT_MAINTENANCE
 - Smoke tests are mandatory guardrails
 - Run `uv run mypy chunkhound` during reviews to catch Optional/type boundary issues
