@@ -628,8 +628,9 @@ class IndexingCoordinator(BaseService):
                 else:
                     norm.append((item, None))
 
-            # Execute synchronously in-process for the single file
-            results = process_file_batch(norm, config_dict)
+            # Keep the event loop responsive during realtime shutdown by
+            # offloading even single-file parse work off-thread.
+            results = await asyncio.to_thread(process_file_batch, norm, config_dict)
 
             # Stream directly to storage to keep behavior consistent with the
             # parallel path where batches are stored as they complete.

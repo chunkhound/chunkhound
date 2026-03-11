@@ -131,6 +131,7 @@ async def test_private_watchman_sidecar_replaces_stale_dead_metadata(
     dead_process.wait(timeout=5.0)
 
     sidecar.paths.root.mkdir(parents=True, exist_ok=True)
+    sidecar.paths.socket_path.parent.mkdir(parents=True, exist_ok=True)
     sidecar.paths.socket_path.write_text("stale socket\n", encoding="utf-8")
     sidecar.paths.statefile_path.write_text("stale state\n", encoding="utf-8")
     sidecar.paths.logfile_path.write_text("stale log\n", encoding="utf-8")

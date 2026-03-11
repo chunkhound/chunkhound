@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -15,12 +16,15 @@ _REQUIRED_CAPABILITIES: tuple[str, ...] = ("cmd-watch-project", "relative_root")
 _DEFAULT_SUBSCRIPTION_NAME = "chunkhound-live-indexing"
 
 
+def _should_launch_windows_bridge_directly(binary_path: Path) -> bool:
+    return os.name == "nt" and binary_path.suffix.lower() in {".bat", ".cmd"}
+
+
 def build_watchman_base_command(binary_path: Path) -> list[str]:
     """Build the host command prefix for a packaged Watchman executable."""
-    command = [str(binary_path)]
-    if os.name == "nt" and binary_path.suffix.lower() in {".bat", ".cmd"}:
-        return ["cmd.exe", "/c", *command]
-    return command
+    if _should_launch_windows_bridge_directly(binary_path):
+        return [sys.executable, "-m", "chunkhound.watchman_runtime.bridge"]
+    return [str(binary_path)]
 
 
 def _utc_now() -> str:

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from chunkhound.watchman import WatchmanCliSession
+from chunkhound.watchman import session as watchman_session_module
 
 _FAKE_WATCHMAN_CLI = """\
 from __future__ import annotations
@@ -132,6 +133,32 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
 """
+
+
+def test_build_watchman_base_command_uses_direct_python_bridge_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        watchman_session_module,
+        "_should_launch_windows_bridge_directly",
+        lambda _binary_path: True,
+    )
+    monkeypatch.setattr(
+        watchman_session_module.sys,
+        "executable",
+        "C:\\Python311\\python.exe",
+        raising=False,
+    )
+
+    command = watchman_session_module.build_watchman_base_command(
+        Path("C:/tmp/watchman.cmd")
+    )
+
+    assert command == [
+        "C:\\Python311\\python.exe",
+        "-m",
+        "chunkhound.watchman_runtime.bridge",
+    ]
 
 
 def _write_fake_watchman_cli(tmp_path: Path) -> Path:

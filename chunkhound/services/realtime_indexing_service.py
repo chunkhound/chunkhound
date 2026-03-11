@@ -1294,6 +1294,9 @@ class RealtimeIndexingService:
 
         if self._monitor_adapter:
             await self._monitor_adapter.stop()
+        self._watchdog_setup_task = None
+        self._watchdog_bootstrap_future = None
+        self._watchdog_bootstrap_abort = threading.Event()
 
         await self._cancel_processing_tasks()
 
