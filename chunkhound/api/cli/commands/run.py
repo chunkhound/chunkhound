@@ -11,8 +11,6 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.core.config.config import Config
-from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector
-from chunkhound.core.diagnostics.perf_analyzer import PerfAnalyzer
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.registry import configure_registry, create_indexing_coordinator
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
@@ -83,7 +81,8 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
 
         # Initialize metrics collector if diagnostics enabled
         metrics_collector = None
-        if getattr(args, "perf_diagnostics", False):
+        if args.perf_diagnostics:
+            from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector
             metrics_collector = BatchMetricsCollector()
 
         formatter.success(f"Service layer initialized: {args.db}")
@@ -130,11 +129,12 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
 
         # Performance diagnostics analysis
         if metrics_collector and metrics_collector.batches:
+            from chunkhound.core.diagnostics.perf_analyzer import PerfAnalyzer
             analyzer = PerfAnalyzer()
             diagnostics = analyzer.analyze(metrics_collector)
 
             # Determine output path
-            if getattr(args, "perf_output", None):
+            if args.perf_output:
                 output_path = args.perf_output
             else:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
