@@ -610,6 +610,10 @@ class DaemonDiscovery:
     async def find_or_start_daemon(self, args: Any) -> str:
         """Return the IPC address of the running daemon, starting one if needed.
 
+        If a daemon is already starting (lock file with live PID exists but
+        not yet connectable), waits for it rather than starting a second
+        daemon.  This prevents duplicate-daemon races when two proxies start
+        simultaneously.
         Uses an atomic starter lock to prevent two proxies from simultaneously
         spawning duplicate daemons (TOCTOU race).  The proxy that acquires the
         lock is the sole daemon starter; others skip straight to polling.
