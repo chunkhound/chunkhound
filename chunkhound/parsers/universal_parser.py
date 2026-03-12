@@ -209,7 +209,7 @@ class UniversalParser:
         if not content.strip():
             return []
 
-        # Special handling for text files (no tree-sitter parsing)
+        # Special handling for non-tree-sitter parsers (no tree-sitter parsing)
         if self.engine is None:
             # Check if this is PDF content by looking at language mapping
             if (
@@ -229,6 +229,41 @@ class UniversalParser:
                     f"PDF parsing requires parse_pdf_content method, "
                     f"got {type(self.base_mapping)}"
                 )
+
+            # Special handling for Lark-based parsers (e.g., TwinCAT)
+            # These provide extract_universal_chunks() to produce UniversalChunk objects
+            # which then flow through the normal cAST pipeline
+            if hasattr(self.base_mapping, "extract_universal_chunks"):
+                universal_chunks = self.base_mapping.extract_universal_chunks(
+                    content, file_path
+                )
+
+                # Filter out whitespace-only chunks as safety measure
+                filtered_chunks = []
+                for chunk in universal_chunks:
+                    normalized_code = normalize_content(chunk.content)
+                    if normalized_code:
+                        chunk = replace(chunk, content=normalized_code)
+                        filtered_chunks.append(chunk)
+                universal_chunks = filtered_chunks
+
+                # Apply cAST algorithm for optimal chunking
+                # Note: We pass None for ast_tree since Lark parsers don't use tree-sitter
+                optimized_chunks = self._apply_cast_algorithm(
+                    universal_chunks, None, content
+                )
+
+                # Convert to standard Chunk format
+                chunks = self._convert_to_chunks(
+                    optimized_chunks, content, file_path, file_id
+                )
+
+                # Update statistics
+                self._total_files_parsed += 1
+                self._total_chunks_created += len(chunks)
+
+                return chunks
+
             return self._parse_text_content(content, file_path, file_id)
 
         # Parse to AST using TreeSitterEngine
@@ -326,7 +361,10 @@ class UniversalParser:
             )
 
     def _apply_cast_algorithm(
-        self, universal_chunks: list[UniversalChunk], ast_tree: Tree, content: str
+        self,
+        universal_chunks: list[UniversalChunk],
+        ast_tree: Tree | None,
+        content: str,
     ) -> list[UniversalChunk]:
         """Apply cAST (Code AST) algorithm for optimal semantic chunking.
 
@@ -340,7 +378,7 @@ class UniversalParser:
 
         Args:
             universal_chunks: Initial chunks extracted from concepts
-            ast_tree: Full AST tree of the source code
+            ast_tree: Full AST tree of the source code (None for non-tree-sitter parsers)
             content: Original source content
 
         Returns:
@@ -879,6 +917,17 @@ class UniversalParser:
                 return ChunkType.INTERFACE
             elif kind == "trait" or "trait" in node_type:
                 return ChunkType.TRAIT
+            # IEC 61131-3 / TwinCAT PLC types
+            elif kind == "program":
+                return ChunkType.PROGRAM
+            elif kind == "function_block":
+                return ChunkType.FUNCTION_BLOCK
+            elif kind == "action":
+                return ChunkType.ACTION
+            elif kind == "transition":
+                return ChunkType.FUNCTION
+            elif kind in {"sfc_step", "sfc_initial_step"}:
+                return ChunkType.BLOCK
             elif kind == "namespace" or "namespace" in node_type:
                 return ChunkType.NAMESPACE
             elif kind == "property" or "property" in node_type:

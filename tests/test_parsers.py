@@ -45,6 +45,7 @@ LANGUAGE_SAMPLES = {
     Language.LUA: "function hello() print('world') end",
     Language.SQL: "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100));\nCREATE VIEW active_users AS SELECT * FROM users;\nCREATE FUNCTION get_user_count() RETURNS INT BEGIN RETURN 0; END;\nCREATE TRIGGER audit_insert AFTER INSERT ON users FOR EACH ROW BEGIN INSERT INTO audit_log VALUES (NEW.id); END;\nCREATE INDEX idx_users_name ON users (name);",
     Language.ELIXIR: "defmodule Hello do\n  def world, do: :ok\nend",
+    Language.TWINCAT: '<?xml version="1.0" encoding="utf-8"?>\n<TcPlcObject Version="1.1.0.1">\n  <POU Name="PRG_Main" Id="{00000000-0000-0000-0000-000000000000}" SpecialFunc="None">\n    <Declaration><![CDATA[PROGRAM PRG_Main\nVAR\n    x : INT;\nEND_VAR\n]]></Declaration>\n    <Implementation>\n      <ST><![CDATA[x := 1;\n]]></ST>\n    </Implementation>\n  </POU>\n</TcPlcObject>',
 }
 
 

@@ -20,6 +20,7 @@ from chunkhound.database_factory import DatabaseServices
 from chunkhound.services.research.shared.models import (
     ENABLE_SMART_BOUNDARIES,
     EXTRA_CONTEXT_TOKENS,
+    FILE_CONTENT_TOKENS_MAX,
     MAX_BOUNDARY_EXPANSION_LINES,
     TOKEN_BUDGET_PER_FILE,
 )
@@ -93,9 +94,10 @@ class FileReader:
                     logger.warning(f"File not found (expected at {path}): {file_path}")
                     continue
 
-                # Calculate token budget for this file
+                # Calculate token budget for this file (capped to prevent bloat)
                 num_chunks = len(file_chunks)
-                budget = TOKEN_BUDGET_PER_FILE * num_chunks
+                raw_budget = TOKEN_BUDGET_PER_FILE * num_chunks
+                budget = min(raw_budget, FILE_CONTENT_TOKENS_MAX)
 
                 # Read file
                 content = path.read_text(encoding="utf-8", errors="ignore")
@@ -229,7 +231,11 @@ class FileReader:
         chunk_kind = metadata.get("kind") or chunk.get("symbol_type", "")
 
         # If this chunk is marked as a complete function/class/method, use its exact boundaries
-        if chunk_kind in ("function", "method", "class", "interface", "struct", "enum"):
+        if chunk_kind in (
+            "function", "method", "class", "interface", "struct", "enum",
+            # TwinCAT kinds (parser produces complete units)
+            "program", "function_block", "action", "property",
+        ):
             # Chunk is already a complete unit - just add small padding for context
             padding = 3  # A few lines for docstrings/decorators/comments
             start_idx = max(1, start_line - padding)

@@ -660,7 +660,11 @@ class PluggableResearchService:
         chunk_kind = metadata.get("kind") or chunk.get("symbol_type", "")
 
         # If this chunk is marked as a complete function/class/method, use its exact boundaries
-        if chunk_kind in ("function", "method", "class", "interface", "struct", "enum"):
+        if chunk_kind in (
+            "function", "method", "class", "interface", "struct", "enum",
+            # TwinCAT kinds (parser produces complete units)
+            "program", "function_block", "action", "property",
+        ):
             # Chunk is already a complete unit - just add small padding for context
             padding = 3  # A few lines for docstrings/decorators/comments
             start_idx = max(1, start_line - padding)
