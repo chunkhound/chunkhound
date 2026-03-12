@@ -11,13 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
+from tree_sitter import Node as TSNode
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 from .base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
-
-from tree_sitter import Node as TSNode
 
 
 class KotlinMapping(BaseMapping):

@@ -23,7 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Watchman live-indexing operator docs covering the private `.chunkhound/watchman/` sidecar, fail-fast startup/no implicit fallback behavior, `daemon_status` health interpretation, and the rollout/default-switch gate for making Watchman the primary backend
 
 ### Changed
-- Watchman is now the default realtime backend; `watchdog` and `polling` remain explicit fallback backends
+- Watchman is now the default realtime backend only on supported native-runtime
+  platforms; `watchdog` and `polling` remain explicit fallback backends
 
 ### Performance
 - LanceDB table creation now detects embedding dimensions upfront from configured embedding provider, eliminating O(n) table recreation penalty during first embedding insertion - significantly improves indexing performance for large codebases (e.g., 16,000+ chunks no longer require full table migration)

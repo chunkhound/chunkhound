@@ -50,14 +50,10 @@ def render_combined_document(
     lines.append("")
 
     arch_sections = [
-        (poi, result)
-        for poi, result in poi_sections
-        if poi.mode == "architectural"
+        (poi, result) for poi, result in poi_sections if poi.mode == "architectural"
     ]
     ops_sections = [
-        (poi, result)
-        for poi, result in poi_sections
-        if poi.mode == "operational"
+        (poi, result) for poi, result in poi_sections if poi.mode == "operational"
     ]
 
     if arch_sections:

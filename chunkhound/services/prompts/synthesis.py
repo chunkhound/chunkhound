@@ -3,7 +3,6 @@
 Generates comprehensive technical analysis of codebase from BFS exploration results.
 """
 
-
 # Shared citation requirements for all synthesis modes
 CITATION_REQUIREMENTS = (
     """**Citations**: MANDATORY reference numbers for every technical claim, """
