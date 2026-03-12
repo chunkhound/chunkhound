@@ -37,7 +37,10 @@ class FileReader:
         self._db_services = db_services
 
     async def read_files_with_budget(
-        self, chunks: list[dict[str, Any]], llm_manager: Any, max_tokens: int | None = None
+        self,
+        chunks: list[dict[str, Any]],
+        llm_manager: Any,
+        max_tokens: int | None = None,
     ) -> dict[str, str]:
         """Read files containing chunks within optional token budget.
 
@@ -102,7 +105,10 @@ class FileReader:
 
                 if estimated_tokens <= budget:
                     # File fits in budget, check against overall limit (skip if unlimited)
-                    if budget_limit is None or total_tokens + estimated_tokens <= budget_limit:
+                    if (
+                        budget_limit is None
+                        or total_tokens + estimated_tokens <= budget_limit
+                    ):
                         file_contents[file_path] = content
                         total_tokens += estimated_tokens
                     else:
@@ -144,7 +150,10 @@ class FileReader:
                     chunk_tokens = llm.estimate_tokens(combined_chunks)
 
                     # Check against overall token limit (skip if unlimited)
-                    if budget_limit is None or total_tokens + chunk_tokens <= budget_limit:
+                    if (
+                        budget_limit is None
+                        or total_tokens + chunk_tokens <= budget_limit
+                    ):
                         file_contents[file_path] = combined_chunks
                         total_tokens += chunk_tokens
                     else:
@@ -165,7 +174,9 @@ class FileReader:
         # FAIL-FAST: Validate that at least some files were loaded if chunks were provided
         # This prevents silent data loss where searches find chunks but synthesis gets no code
         if chunks and not file_contents:
-            budget_desc = "unlimited" if budget_limit is None else f"{budget_limit:,} tokens"
+            budget_desc = (
+                "unlimited" if budget_limit is None else f"{budget_limit:,} tokens"
+            )
             raise RuntimeError(
                 f"DATA LOSS DETECTED: Found {len(chunks)} chunks across {len(files_to_chunks)} files "
                 f"but failed to read ANY file contents. "

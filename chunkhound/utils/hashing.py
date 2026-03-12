@@ -1,5 +1,6 @@
-import xxhash
 from pathlib import Path
+
+import xxhash
 
 
 def compute_file_hash(path: Path) -> str:
@@ -26,8 +27,8 @@ def compute_file_hash(path: Path) -> str:
     if not path.is_file():
         raise ValueError(f"Path must be a file, not directory: {path}")
     h = xxhash.xxh3_64()
-    with path.open('rb') as f:
+    with path.open("rb") as f:
         # Read in 1MB chunks for efficiency
-        for chunk in iter(lambda: f.read(1024 * 1024), b''):
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()

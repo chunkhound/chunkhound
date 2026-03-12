@@ -18,7 +18,7 @@ import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Iterable
+from typing import Any
 
 from loguru import logger
 

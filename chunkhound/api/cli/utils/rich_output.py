@@ -218,6 +218,7 @@ class RichOutputFormatter:
         """Print a table header - use Rich Table instead."""
         # This is a legacy method - recommend using Rich Table directly
         from rich.table import Table
+
         table = Table(show_header=True)
         for header in headers:
             table.add_column(header)
@@ -321,7 +322,7 @@ class RichOutputFormatter:
 
                 # Truncate value if max_width is specified and exceeded
                 if self.max_width and len(value) > self.max_width:
-                    value = value[:self.max_width - 3] + "..."
+                    value = value[: self.max_width - 3] + "..."
 
                 return Text(value, style=self.style)
 
@@ -357,11 +358,13 @@ class RichOutputFormatter:
         )
         if stats.get("skipped_unchanged", 0) > 0:
             summary_table.add_row(
-                "  └─ Unchanged:", f"[yellow]{stats.get('skipped_unchanged', 0)}[/yellow] files"
+                "  └─ Unchanged:",
+                f"[yellow]{stats.get('skipped_unchanged', 0)}[/yellow] files",
             )
         if stats.get("skipped_filtered", 0) > 0:
             summary_table.add_row(
-                "  └─ Filtered:", f"[yellow]{stats.get('skipped_filtered', 0)}[/yellow] files"
+                "  └─ Filtered:",
+                f"[yellow]{stats.get('skipped_filtered', 0)}[/yellow] files",
             )
         summary_table.add_row(
             "Errors:", f"[red]{stats.get('files_errors', 0)}[/red] files"
@@ -600,6 +603,7 @@ class _NoRichProgressManager:
         class _Shim:
             def __init__(self) -> None:
                 self._next_id = 1
+
                 # Minimal task object mimicking Rich Progress Task attributes
                 class _Task:
                     def __init__(self, total: int | None = None) -> None:

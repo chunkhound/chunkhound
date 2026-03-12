@@ -11,6 +11,7 @@ except ImportError:
     # Fallback for development environments before first build
     try:
         from importlib.metadata import version
+
         __version__ = version("chunkhound")
     except Exception:
         # Final fallback for editable installs without metadata

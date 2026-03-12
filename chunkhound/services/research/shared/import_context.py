@@ -65,9 +65,7 @@ class ImportContextService:
             return self._import_cache[file_path]
 
         # Create parser for this file
-        parser: Any = self._parser_factory.create_parser_for_file(
-            Path(file_path)
-        )
+        parser: Any = self._parser_factory.create_parser_for_file(Path(file_path))
 
         # Check if parser has required attributes (engine, extractor)
         if not hasattr(parser, "engine") or not hasattr(parser, "extractor"):
@@ -93,15 +91,11 @@ class ImportContextService:
 
             # Cache and return
             self._import_cache[file_path] = import_lines
-            logger.debug(
-                f"Extracted {len(import_lines)} imports from {file_path}"
-            )
+            logger.debug(f"Extracted {len(import_lines)} imports from {file_path}")
             return import_lines
 
         except Exception as e:
-            logger.warning(
-                f"Failed to extract imports from {file_path}: {e}"
-            )
+            logger.warning(f"Failed to extract imports from {file_path}: {e}")
             return []
 
     def clear_cache(self) -> None:
