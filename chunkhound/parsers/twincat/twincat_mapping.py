@@ -13,24 +13,15 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.twincat.twincat_parser import TwinCATParser
 from chunkhound.parsers.universal_engine import UniversalChunk
 
-if TYPE_CHECKING:
-    from chunkhound.parsers.twincat.twincat_parser import TwinCATParser
-
-# IEC 61131-3 primitive types to skip
-_PRIMITIVE_TYPES = frozenset({
-    "BOOL", "BYTE", "WORD", "DWORD", "LWORD",
-    "SINT", "USINT", "INT", "UINT", "DINT", "UDINT", "LINT", "ULINT",
-    "REAL", "LREAL", "TIME", "LTIME", "DATE", "LDATE",
-    "TIME_OF_DAY", "TOD", "LTOD", "DATE_AND_TIME", "DT", "LDT",
-    "STRING", "WSTRING",
-    "ANY", "ANY_INT", "ANY_REAL", "ANY_NUM", "ANY_BIT", "ANY_STRING", "ANY_DATE",
-})
+# Import primitive types from parser (single source of truth)
+_PRIMITIVE_TYPES = TwinCATParser.PRIMITIVE_TYPES
 
 # IEC 61131-3 Standard Library function blocks to skip
 _STDLIB_TYPES = frozenset({
@@ -43,16 +34,13 @@ _STDLIB_TYPES = frozenset({
 # File extension for TcPOU files (Function Blocks, Interfaces, Programs, Functions)
 _TWINCAT_EXTENSION = ".TcPOU"
 
-# Lazy import to avoid circular dependency
 _parser: TwinCATParser | None = None
 
 
 def _get_parser() -> TwinCATParser:
-    """Get or create the TwinCATParser instance (lazy loading)."""
+    """Get or create the cached TwinCATParser instance."""
     global _parser
     if _parser is None:
-        from chunkhound.parsers.twincat.twincat_parser import TwinCATParser
-
         _parser = TwinCATParser()
     return _parser
 

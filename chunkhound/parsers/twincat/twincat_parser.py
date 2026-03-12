@@ -1323,12 +1323,14 @@ class TwinCATParser:
     # Import Extraction (Tier 5 - Dependencies)
     # =========================================================================
 
-    # Primitive types to skip when extracting type references
-    _PRIMITIVE_TYPES = frozenset({
+    # IEC 61131-3 primitive types to skip when extracting type references
+    PRIMITIVE_TYPES = frozenset({
         "BOOL", "BYTE", "WORD", "DWORD", "LWORD",
         "SINT", "USINT", "INT", "UINT", "DINT", "UDINT", "LINT", "ULINT",
-        "REAL", "LREAL", "TIME", "DATE", "TIME_OF_DAY", "DATE_AND_TIME",
-        "STRING", "WSTRING", "TOD", "DT",
+        "REAL", "LREAL", "TIME", "LTIME", "DATE", "LDATE",
+        "TIME_OF_DAY", "TOD", "LTOD", "DATE_AND_TIME", "DT", "LDT",
+        "STRING", "WSTRING",
+        "ANY", "ANY_INT", "ANY_REAL", "ANY_NUM", "ANY_BIT", "ANY_STRING", "ANY_DATE",
     })
 
     def extract_import_chunks(
@@ -1664,7 +1666,7 @@ class TwinCATParser:
                     for token in child.children:
                         if isinstance(token, Token) and token.type == "IDENTIFIER":
                             type_name = str(token).upper()
-                            if type_name not in self._PRIMITIVE_TYPES:
+                            if type_name not in self.PRIMITIVE_TYPES:
                                 user_types.append(str(token))
                 elif child.data in ("array_type", "pointer_type", "reference_type"):
                     # Recurse into nested type_spec
