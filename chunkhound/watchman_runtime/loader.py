@@ -5,11 +5,13 @@ import importlib.resources
 import json
 import os
 import stat
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from platform import machine as current_machine
 from platform import system as current_system
+from typing import Literal, cast
 
 _RUNTIME_PACKAGE = "chunkhound.watchman_runtime"
 _DEFAULT_RUNTIME_DIRNAME = "chunkhound-watchman-runtime"
@@ -25,6 +27,10 @@ _SUPPORTED_PLATFORM_ROOTS = {
     ("darwin", "x86_64"): PurePosixPath("platforms/macos-x86_64"),
     ("windows", "x86_64"): PurePosixPath("platforms/windows-x86_64"),
 }
+_PYTHON_BRIDGE_LAUNCH_MODE = "python_bridge"
+_NATIVE_BINARY_LAUNCH_MODE = "native_binary"
+
+WatchmanRuntimeLaunchMode = Literal["python_bridge", "native_binary"]
 
 
 class UnsupportedWatchmanRuntimePlatformError(RuntimeError):
@@ -39,6 +45,7 @@ class PackagedWatchmanRuntime:
     runtime_version: str
     relative_root: PurePosixPath
     relative_binary_path: PurePosixPath
+    launch_mode: WatchmanRuntimeLaunchMode
     probe_args: tuple[str, ...]
     packaging_decision: str
     source_digest: str
@@ -97,9 +104,7 @@ def _require_manifest_string(manifest: dict[str, object], key: str) -> str:
     return value
 
 
-def _require_manifest_args(
-    manifest: dict[str, object], key: str
-) -> tuple[str, ...]:
+def _require_manifest_args(manifest: dict[str, object], key: str) -> tuple[str, ...]:
     value = manifest.get(key)
     if not isinstance(value, list) or not value:
         raise ValueError(f"Manifest field {key!r} must be a non-empty list")
@@ -109,6 +114,34 @@ def _require_manifest_args(
             raise ValueError(f"Manifest field {key!r} must contain strings")
         parsed.append(item)
     return tuple(parsed)
+
+
+def _require_manifest_launch_mode(
+    manifest: dict[str, object], key: str
+) -> WatchmanRuntimeLaunchMode:
+    value = _require_manifest_string(manifest, key)
+    if value not in {
+        _PYTHON_BRIDGE_LAUNCH_MODE,
+        _NATIVE_BINARY_LAUNCH_MODE,
+    }:
+        raise ValueError(
+            "Manifest field "
+            f"{key!r} must be one of {_PYTHON_BRIDGE_LAUNCH_MODE!r} or "
+            f"{_NATIVE_BINARY_LAUNCH_MODE!r}"
+        )
+    return cast(WatchmanRuntimeLaunchMode, value)
+
+
+def build_watchman_runtime_command_prefix(
+    *, runtime: PackagedWatchmanRuntime, binary_path: Path
+) -> list[str]:
+    """Build the ChunkHound-owned command prefix for the resolved runtime."""
+
+    if runtime.launch_mode == _PYTHON_BRIDGE_LAUNCH_MODE:
+        return [sys.executable, "-m", "chunkhound.watchman_runtime.bridge"]
+    if runtime.launch_mode == _NATIVE_BINARY_LAUNCH_MODE:
+        return [str(binary_path)]
+    raise ValueError(f"Unsupported Watchman runtime launch mode: {runtime.launch_mode}")
 
 
 def resolve_packaged_watchman_runtime(
@@ -140,6 +173,7 @@ def resolve_packaged_watchman_runtime(
         runtime_version=_require_manifest_string(manifest, "runtime_version"),
         relative_root=relative_root,
         relative_binary_path=relative_binary_path,
+        launch_mode=_require_manifest_launch_mode(manifest, "launch_mode"),
         probe_args=_require_manifest_args(manifest, "probe_args"),
         packaging_decision=_require_manifest_string(manifest, "packaging_decision"),
         source_digest=hashlib.sha256(payload).hexdigest(),

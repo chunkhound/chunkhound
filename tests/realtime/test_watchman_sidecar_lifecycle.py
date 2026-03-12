@@ -42,6 +42,30 @@ def _host_sidecar_command(
     return command
 
 
+def _prepend_poisoned_python_shims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shims_dir = tmp_path / "poisoned-python"
+    shims_dir.mkdir()
+    if os.name == "nt":
+        for name in ("python.cmd", "python3.cmd"):
+            (shims_dir / name).write_text(
+                "@echo off\r\nexit /b 97\r\n", encoding="utf-8"
+            )
+    else:
+        for name in ("python", "python3"):
+            shim_path = shims_dir / name
+            shim_path.write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
+            shim_path.chmod(0o755)
+    current_path = os.environ.get("PATH", "")
+    monkeypatch.setenv(
+        "PATH",
+        str(shims_dir)
+        if not current_path
+        else f"{shims_dir}{os.pathsep}{current_path}",
+    )
+
+
 def _wait_for_sidecar_files(
     *,
     process: subprocess.Popen,
@@ -91,10 +115,27 @@ async def test_private_watchman_sidecar_start_writes_metadata_and_artifacts(
     health = sidecar.get_health()
     assert health["watchman_pid"] == metadata.pid
     assert (
-        health["watchman_process_start_time_epoch"]
-        == metadata.process_start_time_epoch
+        health["watchman_process_start_time_epoch"] == metadata.process_start_time_epoch
     )
     assert health["watchman_alive"] is True
+
+    await sidecar.stop()
+
+
+@pytest.mark.asyncio
+async def test_private_watchman_sidecar_start_ignores_poisoned_python_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _prepend_poisoned_python_shims(tmp_path, monkeypatch)
+    sidecar = PrivateWatchmanSidecar(repo_root)
+
+    metadata = await sidecar.start()
+
+    assert metadata.pid > 0
+    assert Path(metadata.binary_path).is_file()
+    assert sidecar.paths.socket_path.exists()
 
     await sidecar.stop()
 

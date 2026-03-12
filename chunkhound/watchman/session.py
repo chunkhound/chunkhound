@@ -2,29 +2,29 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..watchman_runtime.loader import (
+    build_watchman_runtime_command_prefix,
+    resolve_packaged_watchman_runtime,
+)
 from .scope import WatchmanScopePlan, build_watchman_scope_plan
 
 _REQUIRED_CAPABILITIES: tuple[str, ...] = ("cmd-watch-project", "relative_root")
 _DEFAULT_SUBSCRIPTION_NAME = "chunkhound-live-indexing"
 
 
-def _should_launch_windows_bridge_directly(binary_path: Path) -> bool:
-    return os.name == "nt" and binary_path.suffix.lower() in {".bat", ".cmd"}
-
-
 def build_watchman_base_command(binary_path: Path) -> list[str]:
     """Build the host command prefix for a packaged Watchman executable."""
-    if _should_launch_windows_bridge_directly(binary_path):
-        return [sys.executable, "-m", "chunkhound.watchman_runtime.bridge"]
-    return [str(binary_path)]
+    runtime = resolve_packaged_watchman_runtime()
+    return build_watchman_runtime_command_prefix(
+        runtime=runtime,
+        binary_path=binary_path,
+    )
 
 
 def _utc_now() -> str:
@@ -139,9 +139,7 @@ class WatchmanCliSession:
                 ["watch-project", str(target_path.resolve())]
             )
             scope_plan = build_watchman_scope_plan(target_path, watch_project_response)
-            resolved_subscription_name = (
-                subscription_name or _DEFAULT_SUBSCRIPTION_NAME
-            )
+            resolved_subscription_name = subscription_name or _DEFAULT_SUBSCRIPTION_NAME
             subscribe_response = await self._send_command(
                 self._build_subscribe_command(
                     scope_plan=scope_plan,
@@ -240,7 +238,11 @@ class WatchmanCliSession:
     def _build_command_prefix(self) -> list[str]:
         if self._command_prefix is not None:
             return list(self._command_prefix)
-        return build_watchman_base_command(self._binary_path)
+        runtime = resolve_packaged_watchman_runtime()
+        return build_watchman_runtime_command_prefix(
+            runtime=runtime,
+            binary_path=self._binary_path,
+        )
 
     def _build_subscribe_command(
         self,

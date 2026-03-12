@@ -7,13 +7,16 @@ import stat
 import subprocess
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
 import pytest
 
+from chunkhound.watchman_runtime import loader as watchman_runtime_loader_module
 from chunkhound.watchman_runtime.loader import (
     UnsupportedWatchmanRuntimePlatformError,
+    build_watchman_runtime_command_prefix,
     materialize_watchman_binary,
     resolve_packaged_watchman_runtime,
 )
@@ -40,9 +43,60 @@ def test_resolve_packaged_watchman_runtime_declared_slots(
 
     assert runtime.platform_tag == platform_tag
     assert runtime.relative_binary_path.as_posix() == binary_path
+    assert runtime.launch_mode == "python_bridge"
     assert runtime.probe_args == ("--version",)
     assert "platform-specific" in runtime.packaging_decision
     assert runtime.source_size > 0
+
+
+@pytest.mark.parametrize(
+    ("system_name", "machine_name", "binary_path"),
+    [
+        ("Linux", "amd64", Path("/tmp/watchman")),
+        ("Windows", "amd64", Path("C:/tmp/watchman.cmd")),
+    ],
+)
+def test_build_watchman_runtime_command_prefix_uses_current_interpreter(
+    system_name: str,
+    machine_name: str,
+    binary_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = resolve_packaged_watchman_runtime(
+        system_name=system_name, machine_name=machine_name
+    )
+    monkeypatch.setattr(
+        watchman_runtime_loader_module.sys,
+        "executable",
+        "/tmp/chunkhound-python",
+        raising=False,
+    )
+
+    command = build_watchman_runtime_command_prefix(
+        runtime=runtime,
+        binary_path=binary_path,
+    )
+
+    assert command == [
+        "/tmp/chunkhound-python",
+        "-m",
+        "chunkhound.watchman_runtime.bridge",
+    ]
+
+
+def test_build_watchman_runtime_command_prefix_uses_binary_for_native_launches() -> (
+    None
+):
+    runtime = resolve_packaged_watchman_runtime()
+    native_runtime = replace(runtime, launch_mode="native_binary")
+    binary_path = Path("/tmp/native-watchman")
+
+    command = build_watchman_runtime_command_prefix(
+        runtime=native_runtime,
+        binary_path=binary_path,
+    )
+
+    assert command == [str(binary_path)]
 
 
 def test_resolve_packaged_watchman_runtime_rejects_unknown_platform() -> None:

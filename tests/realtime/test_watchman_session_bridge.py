@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import stat
 import sys
 import textwrap
@@ -8,8 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from chunkhound.watchman import WatchmanCliSession
-from chunkhound.watchman import session as watchman_session_module
+from chunkhound.watchman import PrivateWatchmanSidecar, WatchmanCliSession
 
 _FAKE_WATCHMAN_CLI = """\
 from __future__ import annotations
@@ -135,30 +135,62 @@ if __name__ == "__main__":
 """
 
 
-def test_build_watchman_base_command_uses_direct_python_bridge_on_windows(
+def _prepend_poisoned_python_shims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shims_dir = tmp_path / "poisoned-python"
+    shims_dir.mkdir()
+    if os.name == "nt":
+        for name in ("python.cmd", "python3.cmd"):
+            (shims_dir / name).write_text(
+                "@echo off\r\nexit /b 97\r\n", encoding="utf-8"
+            )
+    else:
+        for name in ("python", "python3"):
+            shim_path = shims_dir / name
+            shim_path.write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
+            shim_path.chmod(0o755)
+    current_path = os.environ.get("PATH", "")
+    monkeypatch.setenv(
+        "PATH",
+        str(shims_dir)
+        if not current_path
+        else f"{shims_dir}{os.pathsep}{current_path}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_watchman_cli_session_start_ignores_poisoned_python_path(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        watchman_session_module,
-        "_should_launch_windows_bridge_directly",
-        lambda _binary_path: True,
-    )
-    monkeypatch.setattr(
-        watchman_session_module.sys,
-        "executable",
-        "C:\\Python311\\python.exe",
-        raising=False,
-    )
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _prepend_poisoned_python_shims(tmp_path, monkeypatch)
+    sidecar = PrivateWatchmanSidecar(repo_root)
+    session: WatchmanCliSession | None = None
 
-    command = watchman_session_module.build_watchman_base_command(
-        Path("C:/tmp/watchman.cmd")
-    )
+    try:
+        metadata = await sidecar.start()
+        session = WatchmanCliSession(
+            binary_path=Path(metadata.binary_path),
+            socket_path=sidecar.paths.socket_path,
+            project_root=repo_root,
+        )
 
-    assert command == [
-        "C:\\Python311\\python.exe",
-        "-m",
-        "chunkhound.watchman_runtime.bridge",
-    ]
+        setup = await session.start(target_path=repo_root)
+
+        assert setup.capabilities == {
+            "cmd-watch-project": True,
+            "relative_root": True,
+        }
+        assert setup.scope_plan.primary_scope.watch_root == repo_root.resolve()
+        assert setup.scope_plan.primary_scope.relative_root is None
+        assert session.get_health()["watchman_session_alive"] is True
+    finally:
+        if session is not None:
+            await session.stop()
+        await sidecar.stop()
 
 
 def _write_fake_watchman_cli(tmp_path: Path) -> Path:

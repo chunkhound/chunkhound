@@ -17,9 +17,9 @@ from typing import Any
 import psutil
 
 from chunkhound.daemon.process import pid_alive
-from chunkhound.watchman.session import build_watchman_base_command
 from chunkhound.watchman_runtime.loader import (
     PackagedWatchmanRuntime,
+    build_watchman_runtime_command_prefix,
     materialize_watchman_binary,
     resolve_packaged_watchman_runtime,
 )
@@ -71,9 +71,7 @@ class WatchmanSidecarPaths:
         return (self.socket_path, self.project_socket_path)
 
     @staticmethod
-    def _resolve_socket_path(
-        *, project_root: Path, project_socket_path: Path
-    ) -> Path:
+    def _resolve_socket_path(*, project_root: Path, project_socket_path: Path) -> Path:
         if os.name == "nt":
             return project_socket_path
 
@@ -146,9 +144,7 @@ class WatchmanSidecarMetadata:
         }
         for key, value in values.items():
             if not isinstance(value, str) or not value.strip():
-                raise ValueError(
-                    f"metadata field {key!r} must be a non-empty string"
-                )
+                raise ValueError(f"metadata field {key!r} must be a non-empty string")
 
         return cls(
             pid=pid,
@@ -163,9 +159,11 @@ class WatchmanSidecarMetadata:
 
 
 def _iso_from_epoch(epoch_seconds: float) -> str:
-    return datetime.fromtimestamp(epoch_seconds, timezone.utc).replace(
-        microsecond=0
-    ).isoformat()
+    return (
+        datetime.fromtimestamp(epoch_seconds, timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+    )
 
 
 def _terminate_process_tree_sync(pid: int, timeout: float) -> None:
@@ -356,7 +354,10 @@ class PrivateWatchmanSidecar:
             )
 
         command = [
-            *build_watchman_base_command(binary_path),
+            *build_watchman_runtime_command_prefix(
+                runtime=self._runtime,
+                binary_path=binary_path,
+            ),
             "--foreground",
             "--sockname",
             str(self.paths.socket_path),
