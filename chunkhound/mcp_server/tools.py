@@ -375,22 +375,22 @@ DO NOT USE: Multi-file architecture questions (use code_research instead).
 OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}
 COST: Fast, cheap - use liberally."""
 
-CODE_RESEARCH_DESCRIPTION = """Deep analysis for architecture and cross-file code.
+CODE_RESEARCH_DESCRIPTION = """Specialized deep research agent for understanding how code works.
 
-USE FOR:
-- Understanding how systems/features are implemented across files
-- Discovering component relationships and dependencies
-- Getting architectural explanations with code citations
+Answers questions like "how does authentication work?", "explain the payment flow",
+"what happens when a request hits the API?", "how are errors handled across services?"
 
-DO NOT USE:
-- Looking for specific code locations (use search instead)
-- Simple pattern matching (use search with type="regex")
-- You already know where the code is (read files directly)
+CAPABILITIES:
+- Reads and synthesizes code across the entire indexed codebase
+- Traces execution flows, data pipelines, and dependency chains
+- Produces architectural explanations with precise file/line citations
+- Understands the codebase holistically — not just individual files
 
-OUTPUT: Comprehensive markdown with architecture overview, key locations, relationships.
-COST: Expensive (LLM synthesis). 10-60s latency. One call often replaces 5-10 searches.
+OUTPUT: Structured markdown with architecture overview, key code locations, and relationships.
+EFFICIENCY: One call replaces 5-10 sequential searches. Results in 10-60s.
 
-ERROR RECOVERY: If incomplete, try narrower query or use path parameter to scope."""
+BEST FOR: Any question about how code works, why it's structured a certain way,
+or how components connect. Use the path parameter to scope for faster results."""
 
 
 # =============================================================================
@@ -510,10 +510,9 @@ async def deep_research_impl(
         services: Database services bundle
         embedding_manager: Embedding manager instance
         llm_manager: LLM manager instance
-        query: Research query
+        query: Natural language question about the codebase, e.g. "how does auth work?" or "explain the data pipeline"
         progress: Optional Rich Progress instance for terminal UI (None for MCP)
-        path: Optional relative path to limit research scope
-            (e.g., 'tree-sitter-haskell', 'src/')
+        path: Subdirectory to narrow scope for faster results (e.g., 'src/auth/', 'lib/payments')
         config: Application configuration (optional, defaults to environment config)
 
     Returns:
