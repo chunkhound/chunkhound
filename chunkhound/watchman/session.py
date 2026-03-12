@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -9,7 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from ..watchman_runtime.loader import (
+    build_watchman_client_command,
     build_watchman_runtime_command_prefix,
+    build_watchman_runtime_environment,
     resolve_packaged_watchman_runtime,
 )
 from .scope import WatchmanScopePlan, build_watchman_scope_plan
@@ -18,12 +21,24 @@ _REQUIRED_CAPABILITIES: tuple[str, ...] = ("cmd-watch-project", "relative_root")
 _DEFAULT_SUBSCRIPTION_NAME = "chunkhound-live-indexing"
 
 
-def build_watchman_base_command(binary_path: Path) -> list[str]:
-    """Build the host command prefix for a packaged Watchman executable."""
+def build_watchman_base_command(
+    *,
+    binary_path: Path,
+    socket_path: str | Path,
+    statefile_path: Path,
+    logfile_path: Path,
+    pidfile_path: Path,
+) -> list[str]:
+    """Build the client command for a packaged Watchman executable."""
+
     runtime = resolve_packaged_watchman_runtime()
-    return build_watchman_runtime_command_prefix(
+    return build_watchman_client_command(
         runtime=runtime,
         binary_path=binary_path,
+        socket_path=socket_path,
+        statefile_path=statefile_path,
+        logfile_path=logfile_path,
+        pidfile_path=pidfile_path,
     )
 
 
@@ -49,16 +64,24 @@ class WatchmanCliSession:
         self,
         *,
         binary_path: Path,
-        socket_path: Path,
+        socket_path: str | Path,
+        statefile_path: Path,
+        logfile_path: Path,
+        pidfile_path: Path,
         project_root: Path,
         debug_sink: Callable[[str], None] | None = None,
         command_prefix: Sequence[str] | None = None,
+        command_env: dict[str, str] | None = None,
     ) -> None:
         self._binary_path = binary_path
-        self._socket_path = socket_path
+        self._socket_path = str(socket_path)
+        self._statefile_path = statefile_path
+        self._logfile_path = logfile_path
+        self._pidfile_path = pidfile_path
         self._project_root = project_root
         self._debug_sink = debug_sink
         self._command_prefix = tuple(command_prefix) if command_prefix else None
+        self._command_env = dict(command_env) if command_env else None
         self.subscription_queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(
             maxsize=self._SUBSCRIPTION_QUEUE_MAXSIZE
         )
@@ -102,44 +125,35 @@ class WatchmanCliSession:
 
         self._reset_state()
         self._unexpected_exit_future = asyncio.get_running_loop().create_future()
-        command = [
-            *self._build_command_prefix(),
-            "--sockname",
-            str(self._socket_path),
-            "--no-spawn",
-            "--no-pretty",
-            "--persistent",
-            "--server-encoding",
-            "json",
-            "--output-encoding",
-            "json",
-            "--json-command",
-        ]
-        self._debug(
-            "starting Watchman CLI session with "
-            f"binary={self._binary_path} socket={self._socket_path}"
-        )
-        self._process = await asyncio.create_subprocess_exec(
-            *command,
-            cwd=str(self._project_root),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        self._process_wait_task = asyncio.create_task(self._wait_for_process_exit())
-        self._reader_task = asyncio.create_task(self._reader_loop())
-        self._stderr_task = asyncio.create_task(self._stderr_loop())
 
         try:
-            version_response = await self._send_command(
+            version_response = await self._run_one_shot_command(
                 ["version", {"required": list(_REQUIRED_CAPABILITIES)}]
             )
             capabilities = self._require_capabilities(version_response)
-            watch_project_response = await self._send_command(
+            watch_project_response = await self._run_one_shot_command(
                 ["watch-project", str(target_path.resolve())]
             )
             scope_plan = build_watchman_scope_plan(target_path, watch_project_response)
             resolved_subscription_name = subscription_name or _DEFAULT_SUBSCRIPTION_NAME
+
+            command = self._build_command()
+            self._debug(
+                "starting Watchman CLI session with "
+                f"binary={self._binary_path} socket={self._socket_path}"
+            )
+            self._process = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=str(self._project_root),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=self._build_command_env(),
+            )
+            self._process_wait_task = asyncio.create_task(self._wait_for_process_exit())
+            self._reader_task = asyncio.create_task(self._reader_loop())
+            self._stderr_task = asyncio.create_task(self._stderr_loop())
+
             subscribe_response = await self._send_command(
                 self._build_subscribe_command(
                     scope_plan=scope_plan,
@@ -235,11 +249,30 @@ class WatchmanCliSession:
             "watchman_session_capabilities": dict(self._capabilities),
         }
 
-    def _build_command_prefix(self) -> list[str]:
-        if self._command_prefix is not None:
-            return list(self._command_prefix)
+    def _build_command(self, *, persistent: bool = True) -> list[str]:
         runtime = resolve_packaged_watchman_runtime()
-        return build_watchman_runtime_command_prefix(
+        command = build_watchman_client_command(
+            runtime=runtime,
+            binary_path=self._binary_path,
+            socket_path=self._socket_path,
+            statefile_path=self._statefile_path,
+            logfile_path=self._logfile_path,
+            pidfile_path=self._pidfile_path,
+            persistent=persistent,
+        )
+        if self._command_prefix is None:
+            return command
+        default_prefix = build_watchman_runtime_command_prefix(
+            runtime=runtime,
+            binary_path=self._binary_path,
+        )
+        return [*self._command_prefix, *command[len(default_prefix) :]]
+
+    def _build_command_env(self) -> dict[str, str]:
+        if self._command_env is not None:
+            return dict(self._command_env)
+        runtime = resolve_packaged_watchman_runtime()
+        return build_watchman_runtime_environment(
             runtime=runtime,
             binary_path=self._binary_path,
         )
@@ -293,6 +326,77 @@ class WatchmanCliSession:
             raise RuntimeError(error)
 
         return response
+
+    async def _run_one_shot_command(self, command: list[object]) -> dict[str, object]:
+        process = await asyncio.create_subprocess_exec(
+            *self._build_command(persistent=False),
+            cwd=str(self._project_root),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=self._build_command_env(),
+        )
+        try:
+            if (
+                process.stdin is None
+                or process.stdout is None
+                or process.stderr is None
+            ):
+                raise RuntimeError(
+                    "Watchman one-shot client did not expose stdio pipes"
+                )
+
+            process.stdin.write(
+                json.dumps(command, separators=(",", ":")).encode("utf-8") + b"\n"
+            )
+            await process.stdin.drain()
+            process.stdin.close()
+            await process.stdin.wait_closed()
+
+            deadline = asyncio.get_running_loop().time() + self._COMMAND_TIMEOUT_SECONDS
+            while True:
+                timeout = deadline - asyncio.get_running_loop().time()
+                if timeout <= 0:
+                    raise RuntimeError(
+                        f"Timed out waiting for Watchman response to {command[0]!r}"
+                    )
+                raw_line = await asyncio.wait_for(
+                    process.stdout.readline(),
+                    timeout=timeout,
+                )
+                if not raw_line:
+                    stderr_text = (await process.stderr.read()).decode(
+                        "utf-8", errors="replace"
+                    )
+                    raise RuntimeError(
+                        "Watchman one-shot client exited before returning a response "
+                        f"for {command[0]!r}: {stderr_text.strip()}"
+                    )
+                payload = json.loads(raw_line.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    continue
+                if isinstance(payload.get("log"), str):
+                    self._record_warning(f"watchman log: {payload['log']}")
+                    continue
+                error = payload.get("error")
+                if isinstance(error, str) and error:
+                    self._record_error(error)
+                    raise RuntimeError(error)
+                self._last_response_at = _utc_now()
+                self._command_count += 1
+                return payload
+        finally:
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(
+                        process.wait(), timeout=self._PROCESS_EXIT_TIMEOUT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await asyncio.wait_for(
+                        process.wait(), timeout=self._PROCESS_EXIT_TIMEOUT_SECONDS
+                    )
 
     async def _reader_loop(self) -> None:
         process = self._process
@@ -385,6 +489,12 @@ class WatchmanCliSession:
             raise RuntimeError(
                 "Watchman version response did not include a capabilities object"
             )
+        missing_capability = os.environ.get(
+            "CHUNKHOUND_FAKE_WATCHMAN_MISSING_CAPABILITY"
+        )
+        if missing_capability:
+            raw_capabilities = dict(raw_capabilities)
+            raw_capabilities[missing_capability] = False
 
         capabilities: dict[str, bool] = {}
         for capability in _REQUIRED_CAPABILITIES:

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from platform import machine as current_machine
 from platform import system as current_system
 
 from packaging import tags
 
+_REPO_ROOT = Path(__file__).resolve().parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 build env
@@ -28,6 +32,14 @@ _MACHINE_ALIASES = {
 _SYSTEM_ALIASES = {
     "darwin": "macos",
 }
+
+
+def _hydrate_runtime_for_build() -> dict[str, str]:
+    from chunkhound.watchman_runtime.loader import (
+        build_watchman_runtime_force_include_entries,
+    )
+
+    return build_watchman_runtime_force_include_entries()
 
 
 def _load_supported_watchman_platforms() -> set[str]:
@@ -107,6 +119,13 @@ class CustomBuildHook(BuildHookInterface):
 
     def initialize(self, version: str, build_data: dict[str, object]) -> None:
         del version
-        _require_supported_build_host(_load_supported_watchman_platforms())
+        host_platform = _require_supported_build_host(
+            _load_supported_watchman_platforms()
+        )
+        del host_platform
+        force_include = build_data.setdefault("force_include", {})
+        if not isinstance(force_include, dict):
+            raise RuntimeError("hatch build_data.force_include must be a mapping")
+        force_include.update(_hydrate_runtime_for_build())
         build_data["pure_python"] = False
         build_data["tag"] = _platform_only_tag()

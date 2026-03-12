@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling", "hatch-vcs", "packaging>=21.0"]
+requires = ["hatchling", "hatch-vcs", "packaging>=21.0", "zstandard>=0.23.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -81,6 +81,7 @@ dependencies = [
     "google-genai>=1.51.0",
     "anthropic>=0.75.0",
     "msgpack>=1.0",
+    "zstandard>=0.23.0",
     "tomli>=2.0.0; python_version < '3.11'",
 ]
 
@@ -123,7 +124,8 @@ include = [
     "chunkhound/code_mapper/prompts/*.md",
     "chunkhound/autodoc/prompts/*.txt",
     "chunkhound/autodoc/assets/**/*",
-    "chunkhound/watchman_runtime/**/*",
+    "chunkhound/watchman_runtime/README.md",
+    "chunkhound/watchman_runtime/platforms/*/manifest.json",
     "tests/fixtures/yaml/**/*",
 ]
 
@@ -139,8 +141,6 @@ requires_platform_wheel = true
 wheel_tag_must_not_be = "any"
 supported_platforms = [
     "linux-x86_64",
-    "macos-arm64",
-    "macos-x86_64",
     "windows-x86_64",
 ]
 

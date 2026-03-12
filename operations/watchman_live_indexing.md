@@ -6,10 +6,16 @@ flow against a local project checkout.
 
 ## Current rollout posture
 
-- `watchman` is the default realtime backend.
+- `watchman` is the default realtime backend only on hosts that ship a packaged
+  native Watchman runtime. Today that means Linux `x86_64` and Windows
+  `x86_64`.
+- On macOS, ChunkHound defaults to `watchdog` and operators should treat
+  `backend=watchman` as unsupported until a native payload is validated on a
+  macOS host.
 - `watchdog` and `polling` remain available as explicit fallback backends.
-- The rollout gate in [Rollout gate](#rollout-gate) is satisfied on the current
-  branch, so new deployments should treat Watchman as the primary path.
+- The rollout gate in [Rollout gate](#rollout-gate) is satisfied only for the
+  current native Linux and Windows support paths once both hosted validations
+  are green.
 
 Override the default explicitly with either config or a CLI flag when you need
 to force a fallback backend:
@@ -35,7 +41,9 @@ chunkhound mcp . --realtime-backend polling
 Expected private-sidecar artifacts:
 
 - `runtime/`: materialized packaged Watchman binary/runtime payload
-- `sock`: private Watchman socket
+- `sock`: private Watchman Unix socket on Linux; Windows uses a private named
+  pipe endpoint instead of a filesystem socket artifact
+- `pid`: private Watchman pidfile
 - `state`: private Watchman statefile
 - `watchman.log`: Watchman sidecar log
 - `metadata.json`: ChunkHound-owned sidecar metadata
@@ -80,7 +88,9 @@ Fields that are useful during diagnosis:
 - `watchman_watch_root` and `watchman_relative_root`: the resolved
   `watch-project` mapping
 - `watchman_socket_path`, `watchman_statefile_path`, `watchman_logfile_path`,
-  `watchman_metadata_path`: private-sidecar artifact locations
+  `watchman_metadata_path`: private-sidecar locations; on Windows,
+  `watchman_socket_path` reports the named-pipe endpoint string rather than a
+  filesystem socket path
 - `last_warning` and `last_error`: operator-visible runtime warnings/errors
 - `watchman_loss_of_sync`: counters and last observed fresh-instance/recrawl/
   disconnect signal
@@ -117,11 +127,11 @@ During an incident, confirm that:
 
 ## Rollout gate
 
-The default flip to Watchman is gated on all of the following:
+The Linux and Windows native Watchman rollout is gated on all of the following:
 
 1. The `watchman-runtime-validation` job in
-   `.github/workflows/smoke-tests.yml` is green on `ubuntu-latest`,
-   `macos-latest`, and `windows-latest`.
+   `.github/workflows/smoke-tests.yml` is green on `ubuntu-latest` and
+   `windows-latest`.
 2. Built wheel artifacts pass
    `uv run python scripts/verify_watchman_runtime_resources.py <wheel>`.
 3. A Watchman-backed daemon smoke run reaches steady state with
@@ -136,8 +146,9 @@ The default flip to Watchman is gated on all of the following:
 
 Current status:
 
-- The hosted `Tests` workflow run `22959927250` is green on `ubuntu-latest`,
-  `macos-latest`, and `windows-latest`.
-- Watchman is now the default backend in config/runtime defaults.
-- `watchdog` and `polling` remain supported operator fallbacks when Watchman is
-  not desired for a given deployment.
+- Native Watchman rollout is currently scoped to Linux `x86_64` and Windows
+  `x86_64`.
+- On supported Linux and Windows hosts, Watchman remains the default realtime
+  backend.
+- On macOS, `watchdog` is the default and `polling` remains an explicit
+  fallback.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -12,23 +13,44 @@ from pathlib import Path
 
 import psutil
 
-_REQUIRED_WHEEL_PATHS: tuple[str, ...] = (
-    "chunkhound/watchman_runtime/__init__.py",
-    "chunkhound/watchman_runtime/bridge.py",
-    "chunkhound/watchman_runtime/README.md",
-    "chunkhound/watchman_runtime/platforms/linux-x86_64/manifest.json",
-    "chunkhound/watchman_runtime/platforms/linux-x86_64/bin/watchman",
-    "chunkhound/watchman_runtime/platforms/macos-arm64/manifest.json",
-    "chunkhound/watchman_runtime/platforms/macos-arm64/bin/watchman",
-    "chunkhound/watchman_runtime/platforms/macos-x86_64/manifest.json",
-    "chunkhound/watchman_runtime/platforms/macos-x86_64/bin/watchman",
-    "chunkhound/watchman_runtime/platforms/windows-x86_64/manifest.json",
-    "chunkhound/watchman_runtime/platforms/windows-x86_64/bin/watchman.cmd",
-    "chunkhound/watchman_runtime/platforms/windows-x86_64/bin/watchman.ps1",
-)
+import hatch_build
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_WATCHMAN_RUNTIME_ROOT = _REPO_ROOT / "chunkhound" / "watchman_runtime"
 _LIVE_MUTATION_TIMEOUT_ENV = (
     "CHUNKHOUND_WATCHMAN_RUNTIME_VERIFY_LIVE_TIMEOUT_SECONDS"
 )
+
+
+def _required_runtime_platforms() -> tuple[str, ...]:
+    return (hatch_build._host_watchman_platform(),)
+
+
+def _required_wheel_paths() -> tuple[str, ...]:
+    required = [
+        "chunkhound/watchman_runtime/__init__.py",
+        "chunkhound/watchman_runtime/README.md",
+    ]
+    for platform_tag in _required_runtime_platforms():
+        manifest_path = (
+            _WATCHMAN_RUNTIME_ROOT / "platforms" / platform_tag / "manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        required.append(
+            f"chunkhound/watchman_runtime/platforms/{platform_tag}/manifest.json"
+        )
+        binary_rel = manifest["binary"]
+        required.append(
+            f"chunkhound/watchman_runtime/platforms/{platform_tag}/{binary_rel}"
+        )
+        for support_rel in manifest.get("support_files", []):
+            required.append(
+                f"chunkhound/watchman_runtime/platforms/{platform_tag}/{support_rel}"
+            )
+    return tuple(required)
+
+
+_REQUIRED_WHEEL_PATHS: tuple[str, ...] = _required_wheel_paths()
 
 
 def _terminate_process_tree(pid: int) -> None:
@@ -106,54 +128,6 @@ def _remove_tree_with_retries(
         raise last_error
 
 
-def _host_probe_command(*, binary_path: Path, probe_args: tuple[str, ...]) -> list[str]:
-    if os.name == "nt":
-        return ["cmd.exe", "/c", str(binary_path), *probe_args]
-    return [str(binary_path), *probe_args]
-
-
-def _host_sidecar_command(
-    *,
-    binary_path: Path,
-    socket_path: Path,
-    statefile_path: Path,
-    logfile_path: Path,
-) -> list[str]:
-    command = [
-        str(binary_path),
-        "--foreground",
-        "--sockname",
-        str(socket_path),
-        "--statefile",
-        str(statefile_path),
-        "--logfile",
-        str(logfile_path),
-        "--no-save-state",
-    ]
-    if os.name == "nt":
-        return ["cmd.exe", "/c", *command]
-    return command
-
-
-def _host_client_command(*, binary_path: Path, socket_path: Path) -> list[str]:
-    command = [
-        str(binary_path),
-        "--sockname",
-        str(socket_path),
-        "--no-spawn",
-        "--no-pretty",
-        "--persistent",
-        "--server-encoding",
-        "json",
-        "--output-encoding",
-        "json",
-        "--json-command",
-    ]
-    if os.name == "nt":
-        return ["cmd.exe", "/c", *command]
-    return command
-
-
 def _verify_wheel_has_platform_only_tag(wheel_path: Path) -> None:
     if "-py3-none-" not in wheel_path.name or wheel_path.name.endswith("any.whl"):
         raise RuntimeError(
@@ -184,6 +158,7 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
             [
                 "import os",
                 "import json",
+                "import psutil",
                 "import subprocess",
                 "import sys",
                 "import time",
@@ -191,6 +166,11 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                 "",
                 (
                     "from chunkhound.watchman_runtime.loader import "
+                    "build_watchman_client_command, "
+                    "build_watchman_probe_command, "
+                    "build_watchman_runtime_environment, "
+                    "build_watchman_sidecar_command, "
+                    "listener_path_is_filesystem, "
                     "materialize_watchman_binary, "
                     "resolve_packaged_watchman_runtime"
                 ),
@@ -203,19 +183,17 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                 "assert binary_path.is_file()",
                 "if os.name != 'nt':",
                 "    assert os.access(binary_path, os.X_OK)",
-                "if os.name == 'nt':",
                 (
-                    "    command = ['cmd.exe', '/c', str(binary_path), "
-                    "*runtime.probe_args]"
+                    "runtime_env = build_watchman_runtime_environment("
+                    "runtime=runtime, binary_path=binary_path)"
                 ),
-                "else:",
-                "    command = [str(binary_path), *runtime.probe_args]",
                 (
-                    "result = subprocess.run(command, check=True, capture_output=True, "
-                    "text=True)"
+                    "result = subprocess.run("
+                    "build_watchman_probe_command(runtime=runtime, "
+                    "binary_path=binary_path), "
+                    "check=True, capture_output=True, text=True, env=runtime_env)"
                 ),
-                "assert 'watchman' in result.stdout.lower()",
-                "assert runtime.runtime_version in result.stdout",
+                "assert result.stdout.strip() == runtime.runtime_version",
                 "",
                 "def _stop_process(process, *, close_stdin=False):",
                 "    if process is None:",
@@ -235,23 +213,47 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                 "            process.kill()",
                 "            process.wait(timeout=2.0)",
                 "",
-                "sidecar_root = Path('sidecar')",
-                "socket_path = sidecar_root / 'sock'",
+                "def _run_one_shot(command):",
+                "    result = subprocess.run(",
+                "        build_watchman_client_command(",
+                "            runtime=runtime,",
+                "            binary_path=binary_path,",
+                "            socket_path=socket_path,",
+                "            statefile_path=statefile_path,",
+                "            logfile_path=logfile_path,",
+                "            pidfile_path=pidfile_path,",
+                "            persistent=False,",
+                "        ),",
+                "        input=json.dumps(command) + '\\n',",
+                "        capture_output=True,",
+                "        check=False,",
+                "        text=True,",
+                "        env=runtime_env,",
+                "    )",
+                "    assert result.returncode == 0, result.stderr",
+                "    payload = json.loads(result.stdout)",
+                "    assert isinstance(payload, dict)",
+                "    return payload",
+                "",
+                "sidecar_root = Path('sidecar').resolve()",
+                "sidecar_root.mkdir(parents=True, exist_ok=True)",
+                "socket_path = (",
+                "    sidecar_root / 'sock'",
+                "    if listener_path_is_filesystem(runtime)",
+                "    else (",
+                "        rf'\\\\.\\pipe\\chunkhound-watchman-wheel-verify-'",
+                "        + str(os.getpid())",
+                "    )",
+                ")",
+                "pidfile_path = sidecar_root / 'pid'",
                 "statefile_path = sidecar_root / 'state'",
                 "logfile_path = sidecar_root / 'watchman.log'",
-                "sidecar_command = [",
-                "    str(binary_path),",
-                "    '--foreground',",
-                "    '--sockname',",
-                "    str(socket_path),",
-                "    '--statefile',",
-                "    str(statefile_path),",
-                "    '--logfile',",
-                "    str(logfile_path),",
-                "    '--no-save-state',",
-                "]",
-                "if os.name == 'nt':",
-                "    sidecar_command = ['cmd.exe', '/c', *sidecar_command]",
+                (
+                    "sidecar_command = build_watchman_sidecar_command("
+                    "runtime=runtime, binary_path=binary_path, "
+                    "socket_path=socket_path, statefile_path=statefile_path, "
+                    "logfile_path=logfile_path, pidfile_path=pidfile_path)"
+                ),
                 "sidecar = None",
                 "client = None",
                 "reader_thread = None",
@@ -259,48 +261,68 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                 (
                     "    sidecar = subprocess.Popen("
                     "sidecar_command, stdin=subprocess.DEVNULL, "
-                    "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"
+                    "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
+                    "env=runtime_env)"
                 ),
                 "    deadline = time.monotonic() + 5.0",
                 "    while time.monotonic() < deadline:",
+                "        listener_ready = True",
+                "        if listener_path_is_filesystem(runtime):",
+                "            listener_ready = Path(socket_path).exists()",
                 (
-                    "        if socket_path.exists() and statefile_path.exists() "
-                    "and logfile_path.exists():"
+                    "        if (listener_ready and pidfile_path.exists() and "
+                    "logfile_path.exists()):"
                 ),
-                "            break",
+                "            try:",
+                "                _run_one_shot(['version'])",
+                "                break",
+                "            except AssertionError:",
+                "                pass",
                 "        if sidecar.poll() is not None:",
                 (
                     "            raise AssertionError("
                     "f'packaged runtime exited early: {sidecar.returncode}')"
                 ),
                 "        time.sleep(0.05)",
-                "    assert socket_path.exists()",
-                "    assert statefile_path.exists()",
+                "    if listener_path_is_filesystem(runtime):",
+                "        assert Path(socket_path).exists()",
+                "    assert pidfile_path.exists()",
                 "    assert logfile_path.exists()",
                 "    assert sidecar.poll() is None",
+                "    cmdline = psutil.Process(sidecar.pid).cmdline()",
+                "    assert cmdline and cmdline[0] == str(binary_path)",
                 (
-                    "    assert 'watchman runtime sidecar start' in "
-                    "logfile_path.read_text(encoding='utf-8')"
+                    "    assert 'chunkhound.watchman_runtime.bridge' not in "
+                    "' '.join(cmdline)"
                 ),
-                "    client_command = [",
-                "        str(binary_path),",
-                "        '--sockname',",
-                "        str(socket_path),",
-                "        '--no-spawn',",
-                "        '--no-pretty',",
-                "        '--persistent',",
-                "        '--server-encoding',",
-                "        'json',",
-                "        '--output-encoding',",
-                "        'json',",
-                "        '--json-command',",
-                "    ]",
-                "    if os.name == 'nt':",
-                "        client_command = ['cmd.exe', '/c', *client_command]",
+                (
+                    "    version_response = _run_one_shot("
+                    "['version', {'required': ['cmd-watch-project', 'relative_root']}]"
+                    ")"
+                ),
+                "    capabilities = version_response.get('capabilities')",
+                "    assert isinstance(capabilities, dict)",
+                "    assert capabilities.get('cmd-watch-project') is True",
+                "    assert capabilities.get('relative_root') is True",
+                (
+                    "    project_root = Path('project').resolve(); "
+                    "project_root.mkdir(exist_ok=True)"
+                ),
+                (
+                    "    watch_project = _run_one_shot("
+                    "['watch-project', str(project_root.resolve())])"
+                ),
+                "    assert watch_project['watch'] == str(project_root.resolve())",
+                (
+                    "    client_command = build_watchman_client_command("
+                    "runtime=runtime, binary_path=binary_path, "
+                    "socket_path=socket_path, statefile_path=statefile_path, "
+                    "logfile_path=logfile_path, pidfile_path=pidfile_path)"
+                ),
                 (
                     "    client = subprocess.Popen("
                     "client_command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, "
-                    "stderr=subprocess.PIPE, text=True)"
+                    "stderr=subprocess.PIPE, text=True, env=runtime_env)"
                 ),
                 "    assert client.stdin is not None",
                 "    assert client.stdout is not None",
@@ -317,27 +339,6 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                 "            responses.put(json.loads(line))",
                 "    reader_thread = threading.Thread(target=_reader)",
                 "    reader_thread.start()",
-                (
-                    "    client.stdin.write(json.dumps(['version', {'required': "
-                    "['cmd-watch-project', 'relative_root']}]) + '\\n')"
-                ),
-                "    client.stdin.flush()",
-                "    version_response = responses.get(timeout=5.0)",
-                (
-                    "    assert version_response['capabilities'] == {"
-                    "'cmd-watch-project': True, 'relative_root': True}"
-                ),
-                (
-                    "    project_root = Path('project'); "
-                    "project_root.mkdir(exist_ok=True)"
-                ),
-                (
-                    "    client.stdin.write(json.dumps(['watch-project', "
-                    "str(project_root.resolve())]) + '\\n')"
-                ),
-                "    client.stdin.flush()",
-                "    watch_project = responses.get(timeout=5.0)",
-                "    assert watch_project['watch'] == str(project_root.resolve())",
                 (
                     "    client.stdin.write(json.dumps(['subscribe', "
                     "str(project_root.resolve()), 'chunkhound-live-indexing', "

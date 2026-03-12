@@ -11,6 +11,8 @@ import pytest
 
 from chunkhound.watchman import PrivateWatchmanSidecar, WatchmanCliSession
 
+pytestmark = pytest.mark.requires_native_watchman
+
 _FAKE_WATCHMAN_CLI = """\
 from __future__ import annotations
 
@@ -29,6 +31,11 @@ def emit(payload: dict[str, object]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--sockname")
+    parser.add_argument("--unix-listener-path")
+    parser.add_argument("--named-pipe-path")
+    parser.add_argument("--pidfile")
+    parser.add_argument("--statefile")
+    parser.add_argument("--logfile")
     parser.add_argument("--persistent", action="store_true")
     parser.add_argument("--json-command", action="store_true")
     parser.add_argument("--no-spawn", action="store_true")
@@ -42,8 +49,7 @@ def main(argv: list[str] | None = None) -> int:
         return 64
 
     if not (
-        args.sockname
-        and args.persistent
+        (args.sockname or args.unix_listener_path or args.named_pipe_path)
         and args.json_command
         and args.no_spawn
         and args.no_pretty
@@ -53,7 +59,13 @@ def main(argv: list[str] | None = None) -> int:
         print("missing expected persistent client flags", file=sys.stderr)
         return 64
 
-    if not Path(args.sockname).exists():
+    socket_path = args.named_pipe_path or args.unix_listener_path or args.sockname
+    socket_exists = False
+    if socket_path and socket_path.startswith('\\\\\\\\.\\\\pipe\\\\'):
+        socket_exists = True
+    elif socket_path and Path(socket_path).exists():
+        socket_exists = True
+    if not socket_path or not socket_exists:
         print("socket missing", file=sys.stderr)
         return 69
 
@@ -174,7 +186,10 @@ async def test_watchman_cli_session_start_ignores_poisoned_python_path(
         metadata = await sidecar.start()
         session = WatchmanCliSession(
             binary_path=Path(metadata.binary_path),
-            socket_path=sidecar.paths.socket_path,
+            socket_path=sidecar.paths.listener_path,
+            statefile_path=sidecar.paths.statefile_path,
+            logfile_path=sidecar.paths.logfile_path,
+            pidfile_path=sidecar.paths.pidfile_path,
             project_root=repo_root,
         )
 
@@ -210,6 +225,12 @@ async def test_watchman_cli_session_start_sets_scope_and_queues_pdus(
     target_path.mkdir(parents=True)
     socket_path = tmp_path / "watchman.sock"
     socket_path.write_text("socket ready\n", encoding="utf-8")
+    statefile_path = tmp_path / "watchman.state"
+    statefile_path.write_text("state ready\n", encoding="utf-8")
+    logfile_path = tmp_path / "watchman.log"
+    logfile_path.write_text("log ready\n", encoding="utf-8")
+    pidfile_path = tmp_path / "watchman.pid"
+    pidfile_path.write_text("123\n", encoding="utf-8")
 
     monkeypatch.setenv("CHUNKHOUND_TEST_WATCHMAN_WATCH_ROOT", str(watch_root))
     monkeypatch.setenv("CHUNKHOUND_TEST_WATCHMAN_RELATIVE_PATH", "packages/api")
@@ -219,6 +240,9 @@ async def test_watchman_cli_session_start_sets_scope_and_queues_pdus(
     session = WatchmanCliSession(
         binary_path=script_path,
         socket_path=socket_path,
+        statefile_path=statefile_path,
+        logfile_path=logfile_path,
+        pidfile_path=pidfile_path,
         project_root=tmp_path,
         command_prefix=[sys.executable, str(script_path)],
     )
@@ -267,12 +291,21 @@ async def test_watchman_cli_session_requires_relative_root_capability(
     target_path.mkdir()
     socket_path = tmp_path / "watchman.sock"
     socket_path.write_text("socket ready\n", encoding="utf-8")
+    statefile_path = tmp_path / "watchman.state"
+    statefile_path.write_text("state ready\n", encoding="utf-8")
+    logfile_path = tmp_path / "watchman.log"
+    logfile_path.write_text("log ready\n", encoding="utf-8")
+    pidfile_path = tmp_path / "watchman.pid"
+    pidfile_path.write_text("123\n", encoding="utf-8")
 
     monkeypatch.setenv("CHUNKHOUND_TEST_WATCHMAN_MISSING_CAPABILITY", "relative_root")
 
     session = WatchmanCliSession(
         binary_path=script_path,
         socket_path=socket_path,
+        statefile_path=statefile_path,
+        logfile_path=logfile_path,
+        pidfile_path=pidfile_path,
         project_root=tmp_path,
         command_prefix=[sys.executable, str(script_path)],
     )
@@ -292,12 +325,21 @@ async def test_watchman_cli_session_reports_unexpected_exit(
     target_path.mkdir()
     socket_path = tmp_path / "watchman.sock"
     socket_path.write_text("socket ready\n", encoding="utf-8")
+    statefile_path = tmp_path / "watchman.state"
+    statefile_path.write_text("state ready\n", encoding="utf-8")
+    logfile_path = tmp_path / "watchman.log"
+    logfile_path.write_text("log ready\n", encoding="utf-8")
+    pidfile_path = tmp_path / "watchman.pid"
+    pidfile_path.write_text("123\n", encoding="utf-8")
 
     monkeypatch.setenv("CHUNKHOUND_TEST_WATCHMAN_EXIT_AFTER_SUBSCRIBE", "1")
 
     session = WatchmanCliSession(
         binary_path=script_path,
         socket_path=socket_path,
+        statefile_path=statefile_path,
+        logfile_path=logfile_path,
+        pidfile_path=pidfile_path,
         project_root=tmp_path,
         command_prefix=[sys.executable, str(script_path)],
     )

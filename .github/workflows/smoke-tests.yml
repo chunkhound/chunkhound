@@ -36,7 +36,7 @@ jobs:
   watchman-runtime-validation:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
         python: ["3.11"]
       fail-fast: false
     runs-on: ${{ matrix.os }}

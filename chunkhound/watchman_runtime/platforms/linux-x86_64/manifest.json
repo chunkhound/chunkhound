@@ -1,8 +1,52 @@
 {
   "platform": "linux-x86_64",
-  "runtime_version": "watchman-runtime-bridge-2026-03",
+  "runtime_version": "20260301.093127.0",
   "binary": "bin/watchman",
-  "launch_mode": "python_bridge",
+  "support_files": [
+    "lib/libboost_context.so.1.74.0",
+    "lib/libdouble-conversion.so.3",
+    "lib/libgflags.so.2.2",
+    "lib/libsnappy.so.1"
+  ],
+  "launch_mode": "native_binary",
+  "listener_transport": "unix_socket",
   "probe_args": ["--version"],
-  "packaging_decision": "Watchman-carrying wheels must be platform-specific and must not be published as py3-none-any."
+  "path_env": {
+    "LD_LIBRARY_PATH": ["lib"]
+  },
+  "source_url": "https://github.com/facebook/watchman/releases/download/v2026.03.02.00/watchman_ubuntu22.04_v2026.03.02.00.deb",
+  "source_sha256": "64a0af02a55c39156e239a78833839814b1891fe6fc64927b8f85e6fbb63a8de",
+  "source_archive_format": "deb",
+  "source_root_prefix": "usr/local",
+  "support_file_sources": {
+    "lib/libboost_context.so.1.74.0": {
+      "source_url": "https://deb.debian.org/debian/pool/main/b/boost1.74/libboost-context1.74.0_1.74.0+ds1-21_amd64.deb",
+      "source_sha256": "45744bc4599210ac521da1a30cfc15c6d2817bd8311d7759aed9e4f20cd29633",
+      "source_archive_format": "deb",
+      "source_root_prefix": "usr/lib/x86_64-linux-gnu",
+      "source_relative_path": "libboost_context.so.1.74.0"
+    },
+    "lib/libdouble-conversion.so.3": {
+      "source_url": "https://deb.debian.org/debian/pool/main/d/double-conversion/libdouble-conversion3_3.2.1-1_amd64.deb",
+      "source_sha256": "802b880ed900e4a8d54bab77b7551a7f3408b04891c3e5650fdc2368cc1fbc0a",
+      "source_archive_format": "deb",
+      "source_root_prefix": "usr/lib/x86_64-linux-gnu",
+      "source_relative_path": "libdouble-conversion.so.3"
+    },
+    "lib/libgflags.so.2.2": {
+      "source_url": "https://deb.debian.org/debian/pool/main/g/gflags/libgflags2.2_2.2.2-2_amd64.deb",
+      "source_sha256": "288af17a1d3a0955f56c8347ea81bd33534add8b22c5b1b4771d8ac1c85b5ba0",
+      "source_archive_format": "deb",
+      "source_root_prefix": "usr/lib/x86_64-linux-gnu",
+      "source_relative_path": "libgflags.so.2.2"
+    },
+    "lib/libsnappy.so.1": {
+      "source_url": "https://deb.debian.org/debian/pool/main/s/snappy/libsnappy1v5_1.1.9-3_amd64.deb",
+      "source_sha256": "a2ec50d0f92864e7524c96352bc2c62221126ee1ef58f77af7bf369c60b6e98f",
+      "source_archive_format": "deb",
+      "source_root_prefix": "usr/lib/x86_64-linux-gnu",
+      "source_relative_path": "libsnappy.so.1"
+    }
+  },
+  "packaging_decision": "ChunkHound ships native upstream Watchman daemon payloads in platform-specific wheels for Linux x86_64 and Windows x86_64; macOS remains an explicit fallback platform until native payloads are validated on a macOS host."
 }

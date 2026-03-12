@@ -11,6 +11,8 @@ from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 from tests.utils.windows_compat import wait_for_indexed
 
+pytestmark = pytest.mark.requires_native_watchman
+
 
 def _build_watchman_service(target_dir: Path) -> tuple[RealtimeIndexingService, object]:
     db_path = target_dir / ".chunkhound" / "test.db"

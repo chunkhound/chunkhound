@@ -8,8 +8,6 @@ import hatch_build
 def test_load_supported_watchman_platforms_matches_declared_slots() -> None:
     assert hatch_build._load_supported_watchman_platforms() == {
         "linux-x86_64",
-        "macos-arm64",
-        "macos-x86_64",
         "windows-x86_64",
     }
 
@@ -18,8 +16,6 @@ def test_load_supported_watchman_platforms_matches_declared_slots() -> None:
     ("system_name", "machine_name", "expected_platform"),
     [
         ("Linux", "amd64", "linux-x86_64"),
-        ("Darwin", "arm64", "macos-arm64"),
-        ("Darwin", "x86_64", "macos-x86_64"),
         ("Windows", "AMD64", "windows-x86_64"),
     ],
 )
@@ -49,3 +45,23 @@ def test_require_supported_build_host_rejects_unsupported_host() -> None:
             system_name="Linux",
             machine_name="aarch64",
         )
+
+
+def test_custom_build_hook_hydrates_runtime_for_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        hatch_build,
+        "_hydrate_runtime_for_build",
+        lambda: (calls.append("hydrated") or {"src": "dst"}),
+    )
+
+    build_data: dict[str, object] = {}
+    hook = object.__new__(hatch_build.CustomBuildHook)
+    hook.initialize("0.0.0", build_data)
+
+    assert calls == ["hydrated"]
+    assert build_data["force_include"] == {"src": "dst"}
+    assert build_data["pure_python"] is False
+    assert isinstance(build_data["tag"], str)

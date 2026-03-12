@@ -10,6 +10,8 @@ from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 
+pytestmark = pytest.mark.requires_native_watchman
+
 
 def _build_watchman_service(target_dir: Path) -> tuple[RealtimeIndexingService, object]:
     db_path = target_dir / ".chunkhound" / "test.db"
@@ -46,6 +48,7 @@ async def test_watchman_fresh_instance_requests_resync_without_incremental_trans
         await service.start(watch_dir)
         queue = service.watchman_subscription_queue
         assert queue is not None
+        baseline_loss_of_sync = (await service.get_health())["watchman_loss_of_sync"]
 
         queue.put_nowait(
             {
@@ -78,19 +81,27 @@ async def test_watchman_fresh_instance_requests_resync_without_incremental_trans
             )
         ]
         assert stats["event_queue"]["accepted"] == 0
-        assert stats["watchman_loss_of_sync"] == {
-            "count": 1,
-            "fresh_instance_count": 1,
-            "recrawl_count": 0,
-            "disconnect_count": 0,
-            "last_reason": "fresh_instance",
-            "last_at": stats["watchman_loss_of_sync"]["last_at"],
-            "last_details": {
-                "backend": "watchman",
-                "loss_of_sync_reason": "fresh_instance",
-                "subscription": "chunkhound-live-indexing",
-                "clock": "c:0:2",
-            },
+        assert (
+            stats["watchman_loss_of_sync"]["count"]
+            == baseline_loss_of_sync["count"] + 1
+        )
+        assert (
+            stats["watchman_loss_of_sync"]["fresh_instance_count"]
+            == baseline_loss_of_sync["fresh_instance_count"] + 1
+        )
+        assert stats["watchman_loss_of_sync"]["recrawl_count"] == baseline_loss_of_sync[
+            "recrawl_count"
+        ]
+        assert (
+            stats["watchman_loss_of_sync"]["disconnect_count"]
+            == baseline_loss_of_sync["disconnect_count"]
+        )
+        assert stats["watchman_loss_of_sync"]["last_reason"] == "fresh_instance"
+        assert stats["watchman_loss_of_sync"]["last_details"] == {
+            "backend": "watchman",
+            "loss_of_sync_reason": "fresh_instance",
+            "subscription": "chunkhound-live-indexing",
+            "clock": "c:0:2",
         }
         assert stats["watchman_loss_of_sync"]["last_at"] is not None
     finally:
@@ -120,6 +131,7 @@ async def test_watchman_recrawl_warning_requests_resync_without_incremental_tran
         await service.start(watch_dir)
         queue = service.watchman_subscription_queue
         assert queue is not None
+        baseline_loss_of_sync = (await service.get_health())["watchman_loss_of_sync"]
 
         queue.put_nowait(
             {
@@ -153,10 +165,22 @@ async def test_watchman_recrawl_warning_requests_resync_without_incremental_tran
             )
         ]
         assert stats["event_queue"]["accepted"] == 0
-        assert stats["watchman_loss_of_sync"]["count"] == 1
-        assert stats["watchman_loss_of_sync"]["fresh_instance_count"] == 0
-        assert stats["watchman_loss_of_sync"]["recrawl_count"] == 1
-        assert stats["watchman_loss_of_sync"]["disconnect_count"] == 0
+        assert (
+            stats["watchman_loss_of_sync"]["count"]
+            == baseline_loss_of_sync["count"] + 1
+        )
+        assert (
+            stats["watchman_loss_of_sync"]["fresh_instance_count"]
+            == baseline_loss_of_sync["fresh_instance_count"]
+        )
+        assert (
+            stats["watchman_loss_of_sync"]["recrawl_count"]
+            == baseline_loss_of_sync["recrawl_count"] + 1
+        )
+        assert (
+            stats["watchman_loss_of_sync"]["disconnect_count"]
+            == baseline_loss_of_sync["disconnect_count"]
+        )
         assert stats["watchman_loss_of_sync"]["last_reason"] == "recrawl"
         assert stats["watchman_loss_of_sync"]["last_details"] == {
             "backend": "watchman",
@@ -194,6 +218,7 @@ async def test_watchman_unexpected_session_exit_requests_resync(
         session = getattr(adapter, "_session", None)
         process = getattr(session, "_process", None)
         assert process is not None
+        baseline_loss_of_sync = (await service.get_health())["watchman_loss_of_sync"]
 
         process.terminate()
 
@@ -207,8 +232,14 @@ async def test_watchman_unexpected_session_exit_requests_resync(
         assert callback_calls[0][1]["loss_of_sync_reason"] == "disconnect"
         assert callback_calls[0][1]["watchman_session_alive"] is False
         assert stats["watchman_session_alive"] is False
-        assert stats["watchman_loss_of_sync"]["count"] == 1
-        assert stats["watchman_loss_of_sync"]["disconnect_count"] == 1
+        assert (
+            stats["watchman_loss_of_sync"]["count"]
+            == baseline_loss_of_sync["count"] + 1
+        )
+        assert (
+            stats["watchman_loss_of_sync"]["disconnect_count"]
+            == baseline_loss_of_sync["disconnect_count"] + 1
+        )
         assert stats["watchman_loss_of_sync"]["last_reason"] == "disconnect"
         assert stats["service_state"] == "degraded"
     finally:

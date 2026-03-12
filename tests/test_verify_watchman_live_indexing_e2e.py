@@ -37,25 +37,59 @@ def test_mcp_env_prefers_installed_venv_and_clears_repo_python_state(
         assert env["PATH"].split(os.pathsep)[0] != str(Path(sys.prefix) / "bin")
 
 
-def test_resolve_bridge_process_accepts_windows_cmd_wrapper(monkeypatch) -> None:
-    bridge_child = SimpleNamespace(
-        cmdline=lambda: ["python", "-m", "chunkhound.watchman_runtime.bridge"],
+def test_resolve_native_watchman_process_accepts_matching_binary_path(
+    monkeypatch,
+) -> None:
+    process = SimpleNamespace(
+        cmdline=lambda: ["/tmp/runtime/watchman", "--foreground"],
+        environ=lambda: {"PATH": "/tmp/venv/bin:/usr/bin", "VIRTUAL_ENV": "/tmp/venv"},
     )
-    parent = SimpleNamespace(
-        cmdline=lambda: ["cmd.exe", "/c", "watchman.cmd", "--foreground"],
-        children=lambda recursive=True: [bridge_child],
-    )
-
-    monkeypatch.setattr(live_verifier.os, "name", "nt", raising=False)
     monkeypatch.setattr(
         live_verifier.psutil,
         "Process",
-        lambda pid: parent if pid == 123 else None,
+        lambda pid: process if pid == 123 else None,
     )
 
-    resolved = live_verifier._resolve_bridge_process(123)
+    resolved = live_verifier._resolve_native_watchman_process(
+        123,
+        expected_binary_path="/tmp/runtime/watchman",
+    )
 
-    assert resolved is bridge_child
+    assert resolved is process
+
+
+def test_resolve_native_watchman_process_normalizes_path_variants(
+    monkeypatch,
+) -> None:
+    process = SimpleNamespace(
+        cmdline=lambda: [r"C:\Runtime\WATCHMAN.EXE", "--foreground"],
+        environ=lambda: {
+            "PATH": r"C:\venv\Scripts;C:\Windows\System32",
+            "VIRTUAL_ENV": r"C:\venv",
+        },
+    )
+    monkeypatch.setattr(
+        live_verifier.psutil,
+        "Process",
+        lambda pid: process if pid == 456 else None,
+    )
+    monkeypatch.setattr(
+        live_verifier.os.path,
+        "normcase",
+        lambda value: str(value).replace("/", "\\").lower(),
+    )
+    monkeypatch.setattr(
+        live_verifier.os.path,
+        "normpath",
+        lambda value: str(value).replace("/", "\\"),
+    )
+
+    resolved = live_verifier._resolve_native_watchman_process(
+        456,
+        expected_binary_path="C:/Runtime/watchman.exe",
+    )
+
+    assert resolved is process
 
 
 def test_remove_tree_with_retries_terminates_windows_processes_using_root(

@@ -10,6 +10,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from chunkhound.watchman_runtime.loader import default_realtime_backend_for_platform
+
 
 def _get_default_include_patterns() -> list[str]:
     """Get complete default patterns from Language enum.
@@ -234,7 +236,7 @@ class IndexingConfig(BaseModel):
 
     # Realtime backend controls how filesystem change monitoring is performed.
     realtime_backend: Literal["watchman", "watchdog", "polling"] = Field(
-        default="watchman",
+        default_factory=default_realtime_backend_for_platform,
         description="Realtime backend for filesystem monitoring: watchman|watchdog|polling",
     )
 

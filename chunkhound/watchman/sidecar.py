@@ -19,7 +19,10 @@ import psutil
 from chunkhound.daemon.process import pid_alive
 from chunkhound.watchman_runtime.loader import (
     PackagedWatchmanRuntime,
-    build_watchman_runtime_command_prefix,
+    build_watchman_client_command,
+    build_watchman_runtime_environment,
+    build_watchman_sidecar_command,
+    listener_path_is_filesystem,
     materialize_watchman_binary,
     resolve_packaged_watchman_runtime,
 )
@@ -38,6 +41,8 @@ class WatchmanSidecarPaths:
     runtime_root: Path
     project_socket_path: Path
     socket_path: Path
+    listener_path: str
+    pidfile_path: Path
     statefile_path: Path
     logfile_path: Path
     metadata_path: Path
@@ -56,6 +61,11 @@ class WatchmanSidecarPaths:
                 project_root=project_root,
                 project_socket_path=project_socket_path,
             ),
+            listener_path=cls._resolve_listener_path(
+                project_root=project_root,
+                project_socket_path=project_socket_path,
+            ),
+            pidfile_path=root / "pid",
             statefile_path=root / "state",
             logfile_path=root / "watchman.log",
             metadata_path=root / "metadata.json",
@@ -66,9 +76,23 @@ class WatchmanSidecarPaths:
         return self.socket_path != self.project_socket_path
 
     def managed_socket_paths(self) -> tuple[Path, ...]:
+        if os.name == "nt":
+            return ()
         if self.socket_path == self.project_socket_path:
             return (self.socket_path,)
         return (self.socket_path, self.project_socket_path)
+
+    @staticmethod
+    def _resolve_listener_path(*, project_root: Path, project_socket_path: Path) -> str:
+        if os.name != "nt":
+            return str(
+                WatchmanSidecarPaths._resolve_socket_path(
+                    project_root=project_root,
+                    project_socket_path=project_socket_path,
+                )
+            )
+        digest = hashlib.sha256(str(project_root).encode("utf-8")).hexdigest()[:16]
+        return rf"\\.\pipe\chunkhound-watchman-{digest}"
 
     @staticmethod
     def _resolve_socket_path(*, project_root: Path, project_socket_path: Path) -> Path:
@@ -220,7 +244,7 @@ class PrivateWatchmanSidecar:
     _PROCESS_EXIT_TIMEOUT_SECONDS = 5.0
     _READY_POLL_INTERVAL_SECONDS = 0.05
     _PROCESS_START_TIME_EPSILON_SECONDS = 0.1
-    _UNIX_SOCKET_PATH_MAX_BYTES = 104 if sys.platform == "darwin" else 108
+    _UNIX_SOCKET_PATH_MAX_BYTES = 104 if sys.platform == "darwin" else 107
 
     def __init__(
         self, target_dir: Path, debug_sink: Callable[[str], None] | None = None
@@ -231,6 +255,7 @@ class PrivateWatchmanSidecar:
         self._process_start_time_epoch: float | None = None
         self._metadata: WatchmanSidecarMetadata | None = None
         self._runtime: PackagedWatchmanRuntime | None = None
+        self._binary_path: Path | None = None
 
     def _debug(self, message: str) -> None:
         try:
@@ -289,7 +314,7 @@ class PrivateWatchmanSidecar:
             "watchman_process_start_time_epoch": process_start_time_epoch,
             "watchman_runtime_version": runtime_version,
             "watchman_binary_path": binary_path,
-            "watchman_socket_path": str(self.paths.socket_path),
+            "watchman_socket_path": self.paths.listener_path,
             "watchman_statefile_path": str(self.paths.statefile_path),
             "watchman_logfile_path": str(self.paths.logfile_path),
             "watchman_metadata_path": str(self.paths.metadata_path),
@@ -346,31 +371,46 @@ class PrivateWatchmanSidecar:
         binary_path = materialize_watchman_binary(
             destination_root=self.paths.runtime_root
         )
+        self._binary_path = binary_path
         self._validate_socket_path()
+        if listener_path_is_filesystem(self._runtime):
+            self.paths.socket_path.parent.mkdir(parents=True, exist_ok=True)
         if self.paths.using_socket_fallback:
             self._debug(
                 "using deterministic short Watchman socket fallback "
                 f"{self.paths.socket_path} instead of {self.paths.project_socket_path}"
             )
 
+        delay_seconds = float(
+            os.environ.get("CHUNKHOUND_FAKE_WATCHMAN_START_DELAY_SECONDS", "0") or "0"
+        )
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
+        if os.environ.get("CHUNKHOUND_FAKE_WATCHMAN_FAIL_BEFORE_READY") == "1":
+            self.paths.logfile_path.parent.mkdir(parents=True, exist_ok=True)
+            self.paths.logfile_path.touch(exist_ok=True)
+            raise RuntimeError(
+                "Watchman sidecar exited before it became ready (simulated)"
+            )
+
         command = [
-            *build_watchman_runtime_command_prefix(
+            *build_watchman_sidecar_command(
                 runtime=self._runtime,
                 binary_path=binary_path,
+                socket_path=self.paths.listener_path,
+                statefile_path=self.paths.statefile_path,
+                logfile_path=self.paths.logfile_path,
+                pidfile_path=self.paths.pidfile_path,
             ),
-            "--foreground",
-            "--sockname",
-            str(self.paths.socket_path),
-            "--statefile",
-            str(self.paths.statefile_path),
-            "--logfile",
-            str(self.paths.logfile_path),
-            "--no-save-state",
         ]
+        runtime_env = build_watchman_runtime_environment(
+            runtime=self._runtime,
+            binary_path=binary_path,
+        )
 
         self._debug(
             "starting private Watchman sidecar with "
-            f"binary={binary_path} socket={self.paths.socket_path}"
+            f"binary={binary_path} listener={self.paths.listener_path}"
         )
 
         log_handle = self.paths.logfile_path.open("ab")
@@ -381,6 +421,7 @@ class PrivateWatchmanSidecar:
                 stdout=log_handle,
                 stderr=log_handle,
                 cwd=self.paths.project_root,
+                env=runtime_env,
             )
         finally:
             log_handle.close()
@@ -405,7 +446,7 @@ class PrivateWatchmanSidecar:
             started_at=_iso_from_epoch(process_start_time_epoch),
             process_start_time_epoch=process_start_time_epoch,
             runtime_version=self._runtime.runtime_version,
-            socket_path=str(self.paths.socket_path),
+            socket_path=self.paths.listener_path,
             statefile_path=str(self.paths.statefile_path),
             logfile_path=str(self.paths.logfile_path),
             binary_path=str(binary_path),
@@ -438,6 +479,7 @@ class PrivateWatchmanSidecar:
         self._process = None
         self._process_start_time_epoch = None
         self._metadata = None
+        self._binary_path = None
         self._remove_owned_artifacts(remove_log=remove_log)
 
     def _validate_socket_path(self) -> None:
@@ -463,19 +505,70 @@ class PrivateWatchmanSidecar:
                     f"(exit code {returncode})"
                 )
 
+            if self._runtime is None:
+                raise RuntimeError("Watchman runtime metadata was not resolved")
+
+            ready_paths = [self.paths.logfile_path]
+            if self._runtime.launch_mode == "native_binary":
+                ready_paths.append(self.paths.pidfile_path)
+            else:
+                ready_paths.append(self.paths.statefile_path)
+
             if (
-                self.paths.socket_path.exists()
-                and self.paths.statefile_path.exists()
-                and self.paths.logfile_path.exists()
+                all(path.exists() for path in ready_paths)
+                and await asyncio.to_thread(self._probe_ready_sync)
             ):
                 return
 
             if asyncio.get_running_loop().time() >= deadline:
                 raise RuntimeError(
-                    "Watchman sidecar did not create its private socket before timeout"
+                    "Watchman sidecar did not become command-ready before timeout"
                 )
 
             await asyncio.sleep(self._READY_POLL_INTERVAL_SECONDS)
+
+    def _probe_ready_sync(self) -> bool:
+        if self._runtime is None or self._binary_path is None:
+            return False
+        command = build_watchman_client_command(
+            runtime=self._runtime,
+            binary_path=self._binary_path,
+            socket_path=self.paths.listener_path,
+            statefile_path=self.paths.statefile_path,
+            logfile_path=self.paths.logfile_path,
+            pidfile_path=self.paths.pidfile_path,
+            persistent=False,
+        )
+        runtime_env = build_watchman_runtime_environment(
+            runtime=self._runtime,
+            binary_path=self._binary_path,
+        )
+        try:
+            result = subprocess.run(
+                command,
+                input='["version"]\n',
+                capture_output=True,
+                check=False,
+                cwd=self.paths.project_root,
+                env=runtime_env,
+                text=True,
+                timeout=1.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if result.returncode != 0:
+            return False
+
+        for raw_line in result.stdout.splitlines():
+            if not raw_line.strip():
+                continue
+            try:
+                payload = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict) and not isinstance(payload.get("error"), str):
+                return True
+        return False
 
     def _read_process_start_time_epoch(self, pid: int) -> float | None:
         try:
@@ -526,6 +619,7 @@ class PrivateWatchmanSidecar:
     def _remove_owned_artifacts(self, *, remove_log: bool) -> None:
         paths = [
             self.paths.metadata_path,
+            self.paths.pidfile_path,
             self.paths.statefile_path,
             *self.paths.managed_socket_paths(),
         ]

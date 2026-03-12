@@ -361,7 +361,10 @@ def _assert_sidecar_uses_installed_runtime(
     if not isinstance(watchman_pid, int) or watchman_pid <= 0:
         raise RuntimeError(f"Invalid Watchman sidecar pid in daemon status: {realtime}")
 
-    process = _resolve_bridge_process(watchman_pid)
+    process = _resolve_native_watchman_process(
+        watchman_pid,
+        expected_binary_path=realtime.get("watchman_binary_path"),
+    )
 
     expected_bin_dir = _python_path(venv_dir).parent
     process_env = process.environ()
@@ -378,30 +381,30 @@ def _assert_sidecar_uses_installed_runtime(
         )
 
 
-def _resolve_bridge_process(watchman_pid: int) -> psutil.Process:
+def _resolve_native_watchman_process(
+    watchman_pid: int, *, expected_binary_path: object
+) -> psutil.Process:
     process = psutil.Process(watchman_pid)
     cmdline = process.cmdline()
-    if len(cmdline) >= 3 and cmdline[1:3] == [
-        "-m",
-        "chunkhound.watchman_runtime.bridge",
-    ]:
+    if not isinstance(expected_binary_path, str) or not expected_binary_path:
+        raise RuntimeError(
+            "Watchman daemon status did not report a native binary path: "
+            f"{expected_binary_path!r}"
+        )
+    if any(arg == "chunkhound.watchman_runtime.bridge" for arg in cmdline):
+        raise RuntimeError(
+            "Watchman sidecar fell back to the packaged runtime bridge instead of "
+            f"the native daemon: {cmdline}"
+        )
+    normalized_expected = os.path.normcase(os.path.normpath(expected_binary_path))
+    if cmdline and (
+        os.path.normcase(os.path.normpath(cmdline[0])) == normalized_expected
+    ):
         return process
 
-    if os.name == "nt" and len(cmdline) >= 3 and cmdline[0].lower().endswith("cmd.exe"):
-        for child in process.children(recursive=True):
-            try:
-                child_cmdline = child.cmdline()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-            if len(child_cmdline) >= 3 and child_cmdline[1:3] == [
-                "-m",
-                "chunkhound.watchman_runtime.bridge",
-            ]:
-                return child
-
     raise RuntimeError(
-        "Watchman sidecar did not launch the packaged runtime bridge: "
-        f"{cmdline}"
+        "Watchman sidecar did not launch the expected native daemon binary: "
+        f"expected={expected_binary_path!r} actual={cmdline}"
     )
 
 

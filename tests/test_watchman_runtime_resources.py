@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
@@ -8,27 +9,75 @@ import subprocess
 import threading
 import time
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TextIO
 
+import psutil
 import pytest
 
 from chunkhound.watchman_runtime import loader as watchman_runtime_loader_module
 from chunkhound.watchman_runtime.loader import (
     UnsupportedWatchmanRuntimePlatformError,
+    build_watchman_client_command,
+    build_watchman_probe_command,
     build_watchman_runtime_command_prefix,
+    build_watchman_runtime_environment,
+    build_watchman_sidecar_command,
+    listener_path_is_filesystem,
     materialize_watchman_binary,
     resolve_packaged_watchman_runtime,
 )
 
+pytestmark = pytest.mark.requires_native_watchman
+
 
 @pytest.mark.parametrize(
-    ("system_name", "machine_name", "platform_tag", "binary_path"),
+    (
+        "system_name",
+        "machine_name",
+        "platform_tag",
+        "binary_path",
+        "support_paths",
+        "listener_transport",
+        "env_path_entries",
+        "source_archive_count",
+    ),
     [
-        ("Linux", "amd64", "linux-x86_64", "bin/watchman"),
-        ("Darwin", "arm64", "macos-arm64", "bin/watchman"),
-        ("Darwin", "x86_64", "macos-x86_64", "bin/watchman"),
-        ("Windows", "amd64", "windows-x86_64", "bin/watchman.cmd"),
+        (
+            "Linux",
+            "amd64",
+            "linux-x86_64",
+            "bin/watchman",
+            (
+                PurePosixPath("lib/libboost_context.so.1.74.0"),
+                PurePosixPath("lib/libdouble-conversion.so.3"),
+                PurePosixPath("lib/libgflags.so.2.2"),
+                PurePosixPath("lib/libsnappy.so.1"),
+            ),
+            "unix_socket",
+            {"LD_LIBRARY_PATH": (PurePosixPath("lib"),)},
+            5,
+        ),
+        (
+            "Windows",
+            "AMD64",
+            "windows-x86_64",
+            "bin/watchman.exe",
+            (
+                PurePosixPath("bin/eledo-pty-bridge.exe"),
+                PurePosixPath("bin/gflags.dll"),
+                PurePosixPath("bin/glog.dll"),
+                PurePosixPath("bin/libcrypto-3.dll"),
+                PurePosixPath("bin/watchman-diag.exe"),
+                PurePosixPath("bin/watchman-make.exe"),
+                PurePosixPath("bin/watchman-replicate-subscription.exe"),
+                PurePosixPath("bin/watchman-wait.exe"),
+                PurePosixPath("bin/watchmanctl.exe"),
+            ),
+            "named_pipe",
+            {"PATH": (PurePosixPath("bin"),)},
+            1,
+        ),
     ],
 )
 def test_resolve_packaged_watchman_runtime_declared_slots(
@@ -36,6 +85,10 @@ def test_resolve_packaged_watchman_runtime_declared_slots(
     machine_name: str,
     platform_tag: str,
     binary_path: str,
+    support_paths: tuple[PurePosixPath, ...],
+    listener_transport: str,
+    env_path_entries: dict[str, tuple[PurePosixPath, ...]],
+    source_archive_count: int,
 ) -> None:
     runtime = resolve_packaged_watchman_runtime(
         system_name=system_name, machine_name=machine_name
@@ -43,28 +96,21 @@ def test_resolve_packaged_watchman_runtime_declared_slots(
 
     assert runtime.platform_tag == platform_tag
     assert runtime.relative_binary_path.as_posix() == binary_path
-    assert runtime.launch_mode == "python_bridge"
+    assert runtime.relative_support_paths == support_paths
+    assert runtime.launch_mode == "native_binary"
+    assert runtime.listener_transport == listener_transport
     assert runtime.probe_args == ("--version",)
+    assert runtime.env_path_entries == env_path_entries
+    assert len(runtime.source_archives) == source_archive_count
     assert "platform-specific" in runtime.packaging_decision
     assert runtime.source_size > 0
 
 
-@pytest.mark.parametrize(
-    ("system_name", "machine_name", "binary_path"),
-    [
-        ("Linux", "amd64", Path("/tmp/watchman")),
-        ("Windows", "amd64", Path("C:/tmp/watchman.cmd")),
-    ],
-)
-def test_build_watchman_runtime_command_prefix_uses_current_interpreter(
-    system_name: str,
-    machine_name: str,
-    binary_path: Path,
+def test_build_watchman_runtime_command_prefix_uses_current_interpreter_for_bridge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runtime = resolve_packaged_watchman_runtime(
-        system_name=system_name, machine_name=machine_name
-    )
+    runtime = replace(resolve_packaged_watchman_runtime(), launch_mode="python_bridge")
+    binary_path = Path("/tmp/watchman")
     monkeypatch.setattr(
         watchman_runtime_loader_module.sys,
         "executable",
@@ -104,64 +150,25 @@ def test_resolve_packaged_watchman_runtime_rejects_unknown_platform() -> None:
         resolve_packaged_watchman_runtime(system_name="Linux", machine_name="ppc64le")
 
 
-def _host_probe_command(*, binary_path: Path, probe_args: tuple[str, ...]) -> list[str]:
-    if os.name == "nt":
-        return ["cmd.exe", "/c", str(binary_path), *probe_args]
-    return [str(binary_path), *probe_args]
-
-
-def _host_sidecar_command(
-    *,
-    binary_path: Path,
-    socket_path: Path,
-    statefile_path: Path,
-    logfile_path: Path,
-) -> list[str]:
-    command = [
-        str(binary_path),
-        "--foreground",
-        "--sockname",
-        str(socket_path),
-        "--statefile",
-        str(statefile_path),
-        "--logfile",
-        str(logfile_path),
-        "--no-save-state",
-    ]
-    if os.name == "nt":
-        return ["cmd.exe", "/c", *command]
-    return command
-
-
-def _host_client_command(*, binary_path: Path, socket_path: Path) -> list[str]:
-    command = [
-        str(binary_path),
-        "--sockname",
-        str(socket_path),
-        "--no-spawn",
-        "--no-pretty",
-        "--persistent",
-        "--server-encoding",
-        "json",
-        "--output-encoding",
-        "json",
-        "--json-command",
-    ]
-    if os.name == "nt":
-        return ["cmd.exe", "/c", *command]
-    return command
+def _runtime_env(*, binary_path: Path) -> dict[str, str]:
+    runtime = resolve_packaged_watchman_runtime()
+    return build_watchman_runtime_environment(runtime=runtime, binary_path=binary_path)
 
 
 def _wait_for_sidecar_files(
     *,
+    runtime,
     process: subprocess.Popen,
     socket_path: Path,
-    statefile_path: Path,
+    pidfile_path: Path,
     logfile_path: Path,
 ) -> None:
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
-        if socket_path.exists() and statefile_path.exists() and logfile_path.exists():
+        listener_ready = True
+        if listener_path_is_filesystem(runtime):
+            listener_ready = socket_path.exists()
+        if listener_ready and pidfile_path.exists() and logfile_path.exists():
             return
         if process.poll() is not None:
             raise AssertionError(
@@ -197,6 +204,103 @@ def _read_json_line(stream: TextIO) -> dict[str, object]:
     payload = json.loads(line)
     assert isinstance(payload, dict)
     return payload
+
+
+def _run_one_shot_command(
+    *,
+    runtime,
+    binary_path: Path,
+    socket_path: Path,
+    pidfile_path: Path,
+    statefile_path: Path,
+    logfile_path: Path,
+    command: list[object],
+    env: dict[str, str],
+) -> dict[str, object]:
+    result = subprocess.run(
+        build_watchman_client_command(
+            runtime=runtime,
+            binary_path=binary_path,
+            socket_path=socket_path,
+            statefile_path=statefile_path,
+            logfile_path=logfile_path,
+            pidfile_path=pidfile_path,
+            persistent=False,
+        ),
+        input=json.dumps(command) + "\n",
+        capture_output=True,
+        check=False,
+        env=env,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            "watchman one-shot command failed: "
+            f"cmd={command[0]!r} rc={result.returncode} stderr={result.stderr!r}"
+        )
+    payload = json.loads(result.stdout)
+    assert isinstance(payload, dict)
+    return payload
+
+
+def test_build_watchman_command_uses_named_pipe_for_windows_native_runtime() -> None:
+    runtime = resolve_packaged_watchman_runtime(
+        system_name="Windows",
+        machine_name="AMD64",
+    )
+    binary_path = Path(r"C:\runtime\watchman.exe")
+    named_pipe = r"\\.\pipe\chunkhound-watchman-test"
+
+    sidecar_command = build_watchman_sidecar_command(
+        runtime=runtime,
+        binary_path=binary_path,
+        socket_path=named_pipe,
+        statefile_path=Path(r"C:\runtime\watchman.state"),
+        logfile_path=Path(r"C:\runtime\watchman.log"),
+        pidfile_path=Path(r"C:\runtime\watchman.pid"),
+    )
+    client_command = build_watchman_client_command(
+        runtime=runtime,
+        binary_path=binary_path,
+        socket_path=named_pipe,
+        statefile_path=Path(r"C:\runtime\watchman.state"),
+        logfile_path=Path(r"C:\runtime\watchman.log"),
+        pidfile_path=Path(r"C:\runtime\watchman.pid"),
+        persistent=False,
+    )
+
+    assert "--named-pipe-path" in sidecar_command
+    assert "--unix-listener-path" not in sidecar_command
+    assert "--named-pipe-path" in client_command
+    assert "--unix-listener-path" not in client_command
+
+
+def test_materialize_watchman_binary_writes_windows_payload_tree(
+    tmp_path: Path,
+) -> None:
+    runtime = resolve_packaged_watchman_runtime(
+        system_name="Windows",
+        machine_name="AMD64",
+    )
+
+    binary_path = materialize_watchman_binary(
+        destination_root=tmp_path,
+        system_name="Windows",
+        machine_name="AMD64",
+    )
+
+    assert binary_path == (
+        tmp_path
+        / runtime.platform_tag
+        / runtime.runtime_version
+        / Path(*runtime.relative_binary_path.parts)
+    )
+    assert binary_path.is_file()
+    for relative_support_path in runtime.relative_support_paths:
+        support_path = runtime.materialized_root(binary_path) / Path(
+            *relative_support_path.parts
+        )
+        assert support_path.is_file()
 
 
 class _JsonLineReader:
@@ -252,50 +356,63 @@ def test_materialize_watchman_binary_writes_executable_for_host(tmp_path: Path) 
     assert binary_path.is_file()
     if os.name != "nt":
         assert binary_path.stat().st_mode & stat.S_IXUSR
+    for relative_support_path in runtime.relative_support_paths:
+        support_path = runtime.materialized_root(binary_path) / Path(
+            *relative_support_path.parts
+        )
+        assert support_path.is_file()
 
     result = subprocess.run(
-        _host_probe_command(binary_path=binary_path, probe_args=runtime.probe_args),
+        build_watchman_probe_command(runtime=runtime, binary_path=binary_path),
         capture_output=True,
         check=False,
+        env=_runtime_env(binary_path=binary_path),
         text=True,
     )
 
     assert result.returncode == 0
-    assert "watchman" in result.stdout.lower()
-    assert runtime.runtime_version in result.stdout
+    assert result.stdout.strip() == runtime.runtime_version
 
 
 def test_materialized_watchman_binary_supports_private_sidecar_flags(
     tmp_path: Path,
 ) -> None:
+    runtime = resolve_packaged_watchman_runtime()
     binary_path = materialize_watchman_binary(destination_root=tmp_path)
     sidecar_root = tmp_path / "sidecar"
+    sidecar_root.mkdir(parents=True, exist_ok=True)
     socket_path = sidecar_root / "sock"
+    pidfile_path = sidecar_root / "pid"
     statefile_path = sidecar_root / "state"
     logfile_path = sidecar_root / "watchman.log"
 
     process = subprocess.Popen(
-        _host_sidecar_command(
+        build_watchman_sidecar_command(
+            runtime=runtime,
             binary_path=binary_path,
             socket_path=socket_path,
             statefile_path=statefile_path,
             logfile_path=logfile_path,
+            pidfile_path=pidfile_path,
         ),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=_runtime_env(binary_path=binary_path),
     )
     try:
         _wait_for_sidecar_files(
+            runtime=runtime,
             process=process,
             socket_path=socket_path,
-            statefile_path=statefile_path,
+            pidfile_path=pidfile_path,
             logfile_path=logfile_path,
         )
         assert process.poll() is None
-        assert "watchman runtime sidecar start" in logfile_path.read_text(
-            encoding="utf-8"
-        )
+        cmdline = psutil.Process(process.pid).cmdline()
+        assert cmdline
+        assert cmdline[0] == str(binary_path)
+        assert "chunkhound.watchman_runtime.bridge" not in " ".join(cmdline)
     finally:
         if process.poll() is None:
             _stop_sidecar_process(process)
@@ -304,62 +421,88 @@ def test_materialized_watchman_binary_supports_private_sidecar_flags(
 def test_materialized_watchman_binary_supports_persistent_client_session(
     tmp_path: Path,
 ) -> None:
+    runtime = resolve_packaged_watchman_runtime()
     binary_path = materialize_watchman_binary(destination_root=tmp_path)
     sidecar_root = tmp_path / "sidecar"
+    sidecar_root.mkdir(parents=True, exist_ok=True)
     socket_path = sidecar_root / "sock"
+    pidfile_path = sidecar_root / "pid"
     statefile_path = sidecar_root / "state"
     logfile_path = sidecar_root / "watchman.log"
     project_root = tmp_path / "repo"
     project_root.mkdir()
 
     sidecar = subprocess.Popen(
-        _host_sidecar_command(
+        build_watchman_sidecar_command(
+            runtime=runtime,
             binary_path=binary_path,
             socket_path=socket_path,
             statefile_path=statefile_path,
             logfile_path=logfile_path,
+            pidfile_path=pidfile_path,
         ),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=_runtime_env(binary_path=binary_path),
     )
     client: subprocess.Popen[str] | None = None
     try:
         _wait_for_sidecar_files(
+            runtime=runtime,
             process=sidecar,
             socket_path=socket_path,
-            statefile_path=statefile_path,
+            pidfile_path=pidfile_path,
             logfile_path=logfile_path,
         )
+        runtime_env = _runtime_env(binary_path=binary_path)
+
+        version_response = _run_one_shot_command(
+            runtime=runtime,
+            binary_path=binary_path,
+            socket_path=socket_path,
+            pidfile_path=pidfile_path,
+            statefile_path=statefile_path,
+            logfile_path=logfile_path,
+            command=["version", {"required": ["cmd-watch-project", "relative_root"]}],
+            env=runtime_env,
+        )
+        capabilities = version_response.get("capabilities")
+        assert isinstance(capabilities, dict)
+        assert capabilities.get("cmd-watch-project") is True
+        assert capabilities.get("relative_root") is True
+
+        watch_project_response = _run_one_shot_command(
+            runtime=runtime,
+            binary_path=binary_path,
+            socket_path=socket_path,
+            pidfile_path=pidfile_path,
+            statefile_path=statefile_path,
+            logfile_path=logfile_path,
+            command=["watch-project", str(project_root)],
+            env=runtime_env,
+        )
+        assert watch_project_response["watch"] == str(project_root)
+        assert "relative_path" not in watch_project_response
+
         client = subprocess.Popen(
-            _host_client_command(binary_path=binary_path, socket_path=socket_path),
+            build_watchman_client_command(
+                runtime=runtime,
+                binary_path=binary_path,
+                socket_path=socket_path,
+                statefile_path=statefile_path,
+                logfile_path=logfile_path,
+                pidfile_path=pidfile_path,
+            ),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=runtime_env,
             text=True,
         )
         assert client.stdin is not None
         assert client.stdout is not None
         reader = _JsonLineReader(client.stdout)
-
-        client.stdin.write(
-            json.dumps(
-                ["version", {"required": ["cmd-watch-project", "relative_root"]}]
-            )
-            + "\n"
-        )
-        client.stdin.flush()
-        version_response = reader.read(timeout=5.0)
-        assert version_response["capabilities"] == {
-            "cmd-watch-project": True,
-            "relative_root": True,
-        }
-
-        client.stdin.write(json.dumps(["watch-project", str(project_root)]) + "\n")
-        client.stdin.flush()
-        watch_project_response = reader.read(timeout=5.0)
-        assert watch_project_response["watch"] == str(project_root)
-        assert "relative_path" not in watch_project_response
 
         client.stdin.write(
             json.dumps(
@@ -413,10 +556,14 @@ def test_materialized_watchman_binary_supports_persistent_client_session(
 
 
 def test_materialize_watchman_binary_rewrites_corrupt_payload(tmp_path: Path) -> None:
+    runtime = resolve_packaged_watchman_runtime()
     binary_path = materialize_watchman_binary(destination_root=tmp_path)
-    binary_path.write_text("corrupt\n", encoding="utf-8")
+    binary_path.write_bytes(b"corrupt\n")
 
     repaired_path = materialize_watchman_binary(destination_root=tmp_path)
 
     assert repaired_path == binary_path
-    assert "corrupt" not in repaired_path.read_text(encoding="utf-8")
+    assert (
+        hashlib.sha256(repaired_path.read_bytes()).hexdigest()
+        == runtime.source_digest
+    )

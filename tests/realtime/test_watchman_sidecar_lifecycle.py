@@ -16,30 +16,39 @@ from chunkhound.watchman.sidecar import (
     WatchmanSidecarMetadata,
     WatchmanSidecarPaths,
 )
-from chunkhound.watchman_runtime.loader import materialize_watchman_binary
+from chunkhound.watchman_runtime.loader import (
+    build_watchman_runtime_environment,
+    build_watchman_sidecar_command,
+    listener_path_is_filesystem,
+    materialize_watchman_binary,
+    resolve_packaged_watchman_runtime,
+)
+
+pytestmark = pytest.mark.requires_native_watchman
 
 
 def _host_sidecar_command(
     *,
     binary_path: Path,
-    socket_path: Path,
+    socket_path: str | Path,
+    pidfile_path: Path,
     statefile_path: Path,
     logfile_path: Path,
 ) -> list[str]:
-    command = [
-        str(binary_path),
-        "--foreground",
-        "--sockname",
-        str(socket_path),
-        "--statefile",
-        str(statefile_path),
-        "--logfile",
-        str(logfile_path),
-        "--no-save-state",
-    ]
-    if os.name == "nt":
-        return ["cmd.exe", "/c", *command]
-    return command
+    runtime = resolve_packaged_watchman_runtime()
+    return build_watchman_sidecar_command(
+        runtime=runtime,
+        binary_path=binary_path,
+        socket_path=socket_path,
+        statefile_path=statefile_path,
+        logfile_path=logfile_path,
+        pidfile_path=pidfile_path,
+    )
+
+
+def _runtime_env(*, binary_path: Path) -> dict[str, str]:
+    runtime = resolve_packaged_watchman_runtime()
+    return build_watchman_runtime_environment(runtime=runtime, binary_path=binary_path)
 
 
 def _prepend_poisoned_python_shims(
@@ -68,14 +77,18 @@ def _prepend_poisoned_python_shims(
 
 def _wait_for_sidecar_files(
     *,
+    runtime,
     process: subprocess.Popen,
     socket_path: Path,
-    statefile_path: Path,
+    pidfile_path: Path,
     logfile_path: Path,
 ) -> None:
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
-        if socket_path.exists() and statefile_path.exists() and logfile_path.exists():
+        listener_ready = True
+        if listener_path_is_filesystem(runtime):
+            listener_ready = socket_path.exists()
+        if listener_ready and pidfile_path.exists() and logfile_path.exists():
             return
         if process.poll() is not None:
             raise AssertionError(
@@ -102,14 +115,17 @@ async def test_private_watchman_sidecar_start_writes_metadata_and_artifacts(
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     sidecar = PrivateWatchmanSidecar(repo_root)
+    runtime = resolve_packaged_watchman_runtime()
 
     metadata = await sidecar.start()
 
     assert metadata.pid > 0
     assert metadata.process_start_time_epoch is not None
+    assert metadata.socket_path == sidecar.paths.listener_path
     assert sidecar.paths.metadata_path.is_file()
-    assert sidecar.paths.socket_path.exists()
-    assert sidecar.paths.statefile_path.exists()
+    if listener_path_is_filesystem(runtime):
+        assert sidecar.paths.socket_path.exists()
+    assert sidecar.paths.pidfile_path.exists()
     assert sidecar.paths.logfile_path.exists()
 
     health = sidecar.get_health()
@@ -130,12 +146,15 @@ async def test_private_watchman_sidecar_start_ignores_poisoned_python_path(
     repo_root.mkdir()
     _prepend_poisoned_python_shims(tmp_path, monkeypatch)
     sidecar = PrivateWatchmanSidecar(repo_root)
+    runtime = resolve_packaged_watchman_runtime()
 
     metadata = await sidecar.start()
 
     assert metadata.pid > 0
     assert Path(metadata.binary_path).is_file()
-    assert sidecar.paths.socket_path.exists()
+    if listener_path_is_filesystem(runtime):
+        assert sidecar.paths.socket_path.exists()
+    assert sidecar.paths.pidfile_path.exists()
 
     await sidecar.stop()
 
@@ -147,6 +166,7 @@ async def test_private_watchman_sidecar_stop_cleans_state_and_keeps_runtime_cach
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     sidecar = PrivateWatchmanSidecar(repo_root)
+    runtime = resolve_packaged_watchman_runtime()
 
     metadata = await sidecar.start()
     binary_path = Path(metadata.binary_path)
@@ -154,7 +174,9 @@ async def test_private_watchman_sidecar_stop_cleans_state_and_keeps_runtime_cach
     await sidecar.stop()
 
     assert not sidecar.paths.metadata_path.exists()
-    assert not sidecar.paths.socket_path.exists()
+    if listener_path_is_filesystem(runtime):
+        assert not sidecar.paths.socket_path.exists()
+    assert not sidecar.paths.pidfile_path.exists()
     assert not sidecar.paths.statefile_path.exists()
     assert sidecar.paths.logfile_path.exists()
     assert binary_path.is_file()
@@ -172,8 +194,10 @@ async def test_private_watchman_sidecar_replaces_stale_dead_metadata(
     dead_process.wait(timeout=5.0)
 
     sidecar.paths.root.mkdir(parents=True, exist_ok=True)
-    sidecar.paths.socket_path.parent.mkdir(parents=True, exist_ok=True)
-    sidecar.paths.socket_path.write_text("stale socket\n", encoding="utf-8")
+    runtime = resolve_packaged_watchman_runtime()
+    if listener_path_is_filesystem(runtime):
+        sidecar.paths.socket_path.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.paths.socket_path.write_text("stale socket\n", encoding="utf-8")
     sidecar.paths.statefile_path.write_text("stale state\n", encoding="utf-8")
     sidecar.paths.logfile_path.write_text("stale log\n", encoding="utf-8")
     sidecar._write_metadata(
@@ -182,7 +206,7 @@ async def test_private_watchman_sidecar_replaces_stale_dead_metadata(
             started_at="2026-03-10T00:00:00+00:00",
             process_start_time_epoch=1.0,
             runtime_version="stale-runtime",
-            socket_path=str(sidecar.paths.socket_path),
+            socket_path=sidecar.paths.listener_path,
             statefile_path=str(sidecar.paths.statefile_path),
             logfile_path=str(sidecar.paths.logfile_path),
             binary_path="stale-binary",
@@ -211,7 +235,8 @@ async def test_private_watchman_sidecar_replaces_owned_stale_live_process(
     stale_process = subprocess.Popen(
         _host_sidecar_command(
             binary_path=binary_path,
-            socket_path=sidecar.paths.socket_path,
+            socket_path=sidecar.paths.listener_path,
+            pidfile_path=sidecar.paths.pidfile_path,
             statefile_path=sidecar.paths.statefile_path,
             logfile_path=sidecar.paths.logfile_path,
         ),
@@ -219,11 +244,13 @@ async def test_private_watchman_sidecar_replaces_owned_stale_live_process(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         cwd=sidecar.paths.project_root,
+        env=_runtime_env(binary_path=binary_path),
     )
     _wait_for_sidecar_files(
+        runtime=resolve_packaged_watchman_runtime(),
         process=stale_process,
         socket_path=sidecar.paths.socket_path,
-        statefile_path=sidecar.paths.statefile_path,
+        pidfile_path=sidecar.paths.pidfile_path,
         logfile_path=sidecar.paths.logfile_path,
     )
     stale_start_time = psutil.Process(stale_process.pid).create_time()
@@ -232,8 +259,8 @@ async def test_private_watchman_sidecar_replaces_owned_stale_live_process(
             pid=stale_process.pid,
             started_at="2026-03-10T00:00:00+00:00",
             process_start_time_epoch=stale_start_time,
-            runtime_version="watchman-placeholder-2026-03",
-            socket_path=str(sidecar.paths.socket_path),
+            runtime_version=resolve_packaged_watchman_runtime().runtime_version,
+            socket_path=sidecar.paths.listener_path,
             statefile_path=str(sidecar.paths.statefile_path),
             logfile_path=str(sidecar.paths.logfile_path),
             binary_path=str(binary_path),
@@ -263,7 +290,8 @@ async def test_private_watchman_sidecar_refuses_live_process_with_legacy_metadat
     live_process = subprocess.Popen(
         _host_sidecar_command(
             binary_path=binary_path,
-            socket_path=sidecar.paths.socket_path,
+            socket_path=sidecar.paths.listener_path,
+            pidfile_path=sidecar.paths.pidfile_path,
             statefile_path=sidecar.paths.statefile_path,
             logfile_path=sidecar.paths.logfile_path,
         ),
@@ -271,12 +299,14 @@ async def test_private_watchman_sidecar_refuses_live_process_with_legacy_metadat
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         cwd=sidecar.paths.project_root,
+        env=_runtime_env(binary_path=binary_path),
     )
     try:
         _wait_for_sidecar_files(
+            runtime=resolve_packaged_watchman_runtime(),
             process=live_process,
             socket_path=sidecar.paths.socket_path,
-            statefile_path=sidecar.paths.statefile_path,
+            pidfile_path=sidecar.paths.pidfile_path,
             logfile_path=sidecar.paths.logfile_path,
         )
         sidecar.paths.metadata_path.parent.mkdir(parents=True, exist_ok=True)
@@ -285,8 +315,10 @@ async def test_private_watchman_sidecar_refuses_live_process_with_legacy_metadat
                 {
                     "pid": live_process.pid,
                     "started_at": "2026-03-10T00:00:00+00:00",
-                    "runtime_version": "watchman-placeholder-2026-03",
-                    "socket_path": str(sidecar.paths.socket_path),
+                    "runtime_version": (
+                        resolve_packaged_watchman_runtime().runtime_version
+                    ),
+                    "socket_path": sidecar.paths.listener_path,
                     "statefile_path": str(sidecar.paths.statefile_path),
                     "logfile_path": str(sidecar.paths.logfile_path),
                     "binary_path": str(binary_path),
@@ -320,7 +352,8 @@ async def test_private_watchman_sidecar_refuses_shutdown_for_mismatched_live_pro
     live_process = subprocess.Popen(
         _host_sidecar_command(
             binary_path=binary_path,
-            socket_path=sidecar.paths.socket_path,
+            socket_path=sidecar.paths.listener_path,
+            pidfile_path=sidecar.paths.pidfile_path,
             statefile_path=sidecar.paths.statefile_path,
             logfile_path=sidecar.paths.logfile_path,
         ),
@@ -328,12 +361,14 @@ async def test_private_watchman_sidecar_refuses_shutdown_for_mismatched_live_pro
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         cwd=sidecar.paths.project_root,
+        env=_runtime_env(binary_path=binary_path),
     )
     try:
         _wait_for_sidecar_files(
+            runtime=resolve_packaged_watchman_runtime(),
             process=live_process,
             socket_path=sidecar.paths.socket_path,
-            statefile_path=sidecar.paths.statefile_path,
+            pidfile_path=sidecar.paths.pidfile_path,
             logfile_path=sidecar.paths.logfile_path,
         )
         sidecar._write_metadata(
@@ -341,8 +376,8 @@ async def test_private_watchman_sidecar_refuses_shutdown_for_mismatched_live_pro
                 pid=live_process.pid,
                 started_at="2026-03-10T00:00:00+00:00",
                 process_start_time_epoch=1.0,
-                runtime_version="watchman-placeholder-2026-03",
-                socket_path=str(sidecar.paths.socket_path),
+                runtime_version=resolve_packaged_watchman_runtime().runtime_version,
+                socket_path=sidecar.paths.listener_path,
                 statefile_path=str(sidecar.paths.statefile_path),
                 logfile_path=str(sidecar.paths.logfile_path),
                 binary_path=str(binary_path),
@@ -366,13 +401,23 @@ async def test_private_watchman_sidecar_start_failure_leaves_no_metadata(
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     sidecar = PrivateWatchmanSidecar(repo_root)
-    monkeypatch.setenv("CHUNKHOUND_FAKE_WATCHMAN_FAIL_BEFORE_READY", "1")
+    original_builder = build_watchman_sidecar_command
+
+    def broken_builder(**kwargs) -> list[str]:
+        return [*original_builder(**kwargs), "--definitely-invalid-watchman-flag"]
+
+    monkeypatch.setattr(
+        "chunkhound.watchman.sidecar.build_watchman_sidecar_command",
+        broken_builder,
+    )
 
     with pytest.raises(RuntimeError, match="exited before it became ready"):
         await sidecar.start()
 
     assert not sidecar.paths.metadata_path.exists()
-    assert not sidecar.paths.socket_path.exists()
+    if listener_path_is_filesystem(resolve_packaged_watchman_runtime()):
+        assert not sidecar.paths.socket_path.exists()
+    assert not sidecar.paths.pidfile_path.exists()
     assert not sidecar.paths.statefile_path.exists()
     assert sidecar.paths.logfile_path.exists()
 
@@ -408,10 +453,12 @@ async def test_private_watchman_sidecar_uses_short_socket_fallback_for_overlong_
     assert metadata.socket_path == str(expected_socket_path)
     assert sidecar.paths.metadata_path.exists()
     assert sidecar.paths.socket_path.exists()
+    assert sidecar.paths.pidfile_path.exists()
     assert not sidecar.paths.project_socket_path.exists()
 
     await sidecar.stop()
 
     assert not sidecar.paths.metadata_path.exists()
     assert not sidecar.paths.socket_path.exists()
+    assert not sidecar.paths.pidfile_path.exists()
     assert not sidecar.paths.project_socket_path.exists()

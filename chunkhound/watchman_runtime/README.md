@@ -1,10 +1,16 @@
 This package hosts platform-specific Watchman runtime payloads for ChunkHound.
 
-Current payloads are thin platform launchers over a shared Python runtime
-bridge. The bridge preserves the private-sidecar ownership model and the
-persistent JSON client contract (`version`, `watch-project`, `subscribe`), and
-it now emits real filesystem subscription traffic for file mutations on the
-subscribed root instead of only synthetic placeholder PDUs.
+Current native support is intentionally narrow:
+- Linux `x86_64` ships an upstream native Watchman daemon payload plus the
+  shared libraries it needs at runtime.
+- Windows `x86_64` ships an upstream native Watchman daemon payload plus the
+  helper executables and DLLs it needs at runtime.
+- macOS does not currently ship a claimed native Watchman payload in this
+  package and must use explicit fallback realtime backends instead of
+  `backend=watchman`.
+
+The Python bridge remains in this package only as an internal compatibility
+implementation; it does not satisfy the epic's native-daemon closure criteria.
 
 Packaging decision:
 - Wheels that carry this package must be platform-specific.

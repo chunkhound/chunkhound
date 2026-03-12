@@ -8,6 +8,7 @@ from chunkhound.api.cli.parsers.mcp_parser import add_mcp_subparser
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.daemon.discovery import DaemonDiscovery
+from chunkhound.watchman_runtime.loader import default_realtime_backend_for_platform
 
 
 def _build_parser(add_subparser) -> argparse.ArgumentParser:
@@ -17,9 +18,29 @@ def _build_parser(add_subparser) -> argparse.ArgumentParser:
     return parser
 
 
-def test_indexing_config_defaults_to_watchman():
+def test_indexing_config_defaults_to_platform_supported_backend():
     config = IndexingConfig()
-    assert config.realtime_backend == "watchman"
+    assert config.realtime_backend == default_realtime_backend_for_platform()
+
+
+def test_default_realtime_backend_for_supported_windows_host() -> None:
+    assert (
+        default_realtime_backend_for_platform(
+            system_name="Windows",
+            machine_name="AMD64",
+        )
+        == "watchman"
+    )
+
+
+def test_default_realtime_backend_for_unsupported_macos_host() -> None:
+    assert (
+        default_realtime_backend_for_platform(
+            system_name="Darwin",
+            machine_name="x86_64",
+        )
+        == "watchdog"
+    )
 
 
 def test_indexing_config_loads_realtime_backend_from_env(monkeypatch):

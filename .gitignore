@@ -296,3 +296,11 @@ cluster_eval.json
 # AI review artifacts
 .gitignored/
 .tldr
+
+# Generated Watchman runtime payloads are hydrated at build/runtime time.
+chunkhound/watchman_runtime/platforms/linux-x86_64/bin/
+chunkhound/watchman_runtime/platforms/linux-x86_64/lib/
+chunkhound/watchman_runtime/platforms/windows-x86_64/bin/*.dll
+chunkhound/watchman_runtime/platforms/windows-x86_64/bin/*.exe
+chunkhound/watchman_runtime/platforms/linux-x86_64/.chunkhound-hydrated.json
+chunkhound/watchman_runtime/platforms/windows-x86_64/.chunkhound-hydrated.json

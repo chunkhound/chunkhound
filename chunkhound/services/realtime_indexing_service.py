@@ -33,6 +33,7 @@ from chunkhound.watchman import (
     WatchmanScopePlan,
     WatchmanSubscriptionScope,
 )
+from chunkhound.watchman_runtime.loader import default_realtime_backend_for_platform
 
 
 def normalize_file_path(path: Path | str) -> str:
@@ -393,7 +394,10 @@ class WatchmanRealtimeAdapter:
         try:
             self._session = WatchmanCliSession(
                 binary_path=Path(metadata.binary_path),
-                socket_path=self._sidecar.paths.socket_path,
+                socket_path=self._sidecar.paths.listener_path,
+                statefile_path=self._sidecar.paths.statefile_path,
+                logfile_path=self._sidecar.paths.logfile_path,
+                pidfile_path=self._sidecar.paths.pidfile_path,
                 project_root=self._sidecar.paths.project_root,
                 debug_sink=self._service._debug,
             )
@@ -943,10 +947,10 @@ class RealtimeIndexingService:
         self._emit_status_update()
 
     def _resolve_configured_backend(self) -> str:
-        backend = getattr(self.config.indexing, "realtime_backend", "watchman")
+        backend = getattr(self.config.indexing, "realtime_backend", None)
         if backend in {"watchman", "watchdog", "polling"}:
             return str(backend)
-        return "watchman"
+        return default_realtime_backend_for_platform()
 
     def _set_effective_backend(self, backend: str) -> None:
         self._effective_backend = backend

@@ -518,6 +518,7 @@ async def test_daemon_lock_file_created(pre_indexed_project_dir: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_native_watchman
 async def test_watchman_start_failure_returns_fast_and_skips_lock_publication(
     pre_indexed_project_dir: Path,
 ) -> None:

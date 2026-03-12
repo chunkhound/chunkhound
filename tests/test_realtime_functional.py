@@ -19,6 +19,10 @@ from chunkhound.services.realtime_indexing_service import (
     RealtimeIndexingService,
     SimpleEventHandler,
 )
+from chunkhound.watchman_runtime.loader import (
+    listener_path_is_filesystem,
+    resolve_packaged_watchman_runtime,
+)
 from tests.utils.windows_compat import realtime_backend_for_tests, wait_for_indexed
 
 
@@ -189,6 +193,7 @@ class TestRealtimeFunctional:
         assert service.process_task is None
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_native_watchman
     async def test_watchman_backend_starts_private_sidecar_and_reports_health(
         self, tmp_path
     ):
@@ -227,7 +232,8 @@ class TestRealtimeFunctional:
             assert stats["watchman_connection_state"] == "connected"
             assert stats["watchman_subscription_name"] == "chunkhound-live-indexing"
             assert stats["watchman_subscription_count"] == 1
-            assert Path(stats["watchman_socket_path"]).exists()
+            if listener_path_is_filesystem(resolve_packaged_watchman_runtime()):
+                assert Path(stats["watchman_socket_path"]).exists()
             assert stats["watchman_watch_root"] == str(watch_dir.resolve())
             assert stats["watchman_relative_root"] is None
             assert Path(stats["watchman_metadata_path"]).is_file()
@@ -239,6 +245,7 @@ class TestRealtimeFunctional:
         assert not (watch_dir / ".chunkhound" / "watchman" / "metadata.json").exists()
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_native_watchman
     async def test_watchman_backend_indexes_real_file_mutation(self, tmp_path):
         """Watchman backend should index a real file mutation without injected PDUs."""
         from types import SimpleNamespace
@@ -278,6 +285,7 @@ class TestRealtimeFunctional:
             services.provider.disconnect()
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_native_watchman
     async def test_watchman_backend_requires_session_capabilities(
         self, tmp_path, monkeypatch
     ):
@@ -446,6 +454,7 @@ class TestRealtimeFunctional:
         assert service._watchdog_bootstrap_future is None
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_native_watchman
     async def test_stop_cancels_inflight_watchman_start_and_cleans_sidecar(
         self, tmp_path, monkeypatch
     ):
