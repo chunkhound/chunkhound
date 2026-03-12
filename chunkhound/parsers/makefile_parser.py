@@ -1,11 +1,13 @@
 """Specialized parser for Makefiles with size enforcement.
 
 Makefile rules need special handling because:
-1. Each split chunk must contain target line + recipe lines for semantic coherence
+1. Part 1 contains the target + recipe lines; subsequent parts contain recipe lines only
 2. Splitting in the middle of a recipe breaks the target/recipe relationship
 3. Non-rule chunks and within-limit rules delegate to ChunkSplitter's generic path
 
 """
+
+from loguru import logger
 
 from chunkhound.core.utils import estimate_tokens_chunking
 from chunkhound.parsers.chunk_splitter import (
@@ -49,15 +51,13 @@ class MakefileChunkSplitter(ChunkSplitter):
     def _split_makefile_rule(self, chunk: UniversalChunk) -> list[UniversalChunk]:
         """Split Makefile rule preserving target/recipe coherence.
 
-        Each split chunk will contain:
-        - The target line (e.g., "install: all")
-        - A subset of recipe lines that fit within the size limit
+        Part 1 contains the target line + a recipe subset.
+        Parts > 1 contain only recipe lines; the target is stored in
+        metadata["rule_target"] so consumers can reconstruct context.
 
-        This ensures that each chunk is semantically valid - recipe lines
-        always have their associated target.
-
-        Exception: if a single recipe line + target exceeds the size limit,
-        that chunk is emergency-split by characters, losing the target prefix.
+        Exception: if a chunk exceeds the size limit after grouping, it is
+        emergency-split by characters. Part 1 retains the target in both content
+        and metadata["rule_target"]; parts > 1 retain it only in metadata["rule_target"].
         """
         lines = chunk.content.split("\n")
 
@@ -75,7 +75,10 @@ class MakefileChunkSplitter(ChunkSplitter):
         recipe_offset = 0
 
         for recipe_line in recipe_lines:
-            test_content = "\n".join([target_line] + current_group + [recipe_line])
+            if part == 1:
+                test_content = "\n".join([target_line] + current_group + [recipe_line])
+            else:
+                test_content = "\n".join(current_group + [recipe_line])
             test_metrics = ChunkMetrics.from_content(test_content)
             test_tokens = estimate_tokens_chunking(test_content)
 
@@ -135,18 +138,37 @@ class MakefileChunkSplitter(ChunkSplitter):
         part: int,
         recipe_offset: int,
     ) -> UniversalChunk:
-        """Create a split rule chunk with target + recipe subset.
+        """Create a split rule chunk with contiguous line ranges.
 
-        Each chunk includes the target line for semantic coherence, so all
-        parts share start_line = original.start_line. No two parts have
-        identical content (each contains a distinct recipe subset), so
-        exact-match deduplication preserves all parts correctly.
+        Part 1 includes the target line + its recipe subset (contiguous from
+        original.start_line). Parts > 1 contain only their recipe lines with
+        start_line pointing to the first recipe line in the group; the target
+        is stored in metadata["rule_target"] for semantic reference.
         """
-        content = "\n".join([target] + recipe_lines)
+        # +1 skips the single target line to reach the first recipe line
+        recipe_start = original.start_line + 1 + recipe_offset
+        recipe_end = recipe_start + len(recipe_lines) - 1
 
-        recipe_end = original.start_line + 1 + recipe_offset + len(recipe_lines) - 1
-        start_line = original.start_line
-        end_line = min(original.end_line, recipe_end)
+        if part == 1:
+            content = "\n".join([target] + recipe_lines)
+            start_line = original.start_line
+        else:
+            content = "\n".join(recipe_lines)
+            start_line = recipe_start
+
+        # Fires only for malformed input where end_line < start_line + content lines (parser bug)
+        if recipe_end > original.end_line:
+            logger.warning(
+                "recipe_end {} exceeds original.end_line {} for chunk '{}'; clamping",
+                recipe_end,
+                original.end_line,
+                original.name,
+            )
+            recipe_end = original.end_line
+        end_line = recipe_end
+
+        meta = original.metadata.copy()
+        meta["rule_target"] = target
 
         return UniversalChunk(
             concept=original.concept,
@@ -154,7 +176,7 @@ class MakefileChunkSplitter(ChunkSplitter):
             content=content,
             start_line=start_line,
             end_line=end_line,
-            metadata=original.metadata.copy(),
+            metadata=meta,
             language_node_type=original.language_node_type,
         )
 

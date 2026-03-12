@@ -125,11 +125,17 @@ distclean: clean
             lines = code.split("\n")
             has_recipe_lines = any(line.startswith("\t") for line in lines)
             if has_recipe_lines:
-                # Should have a target line (contains ':')
                 has_target = any(
                     ":" in line and not line.strip().startswith("#") for line in lines
                 )
-                assert has_target, f"Recipe without target in chunk: {chunk.symbol}"
+                # rule_target is set on ALL rule parts (including Part 1) so that emergency-split
+                # sub-chunks of Part 1 inherit it via metadata.copy(). is_continuation can therefore
+                # be True for Part 1. The critical case this catches: a continuation part losing
+                # rule_target causes has_target=False AND is_continuation=False → assertion fails.
+                is_continuation = bool((chunk.metadata or {}).get("rule_target"))
+                assert has_target or is_continuation, (
+                    f"Recipe without target in chunk: {chunk.symbol}"
+                )
 
     # VERIFY: Search functionality works
     search = makefile_workflow["search"]
@@ -142,11 +148,6 @@ distclean: clean
     install_results, _ = search.search_regex("mkdir.*DESTDIR")
     assert len(install_results) > 0, "Install commands not searchable"
 
-    print("✅ cAST Algorithm Results:")
-    print(f"   📦 Total chunks: {len(chunks)}")
-    avg = sum(len(c.code) for c in chunks) / len(chunks)
-    print(f"   📏 Avg chunk size: {avg:.0f} chars")
-    print(f"   🔗 Variable chunks: {len(variable_chunks)} (merged efficiently)")
 
 
 async def test_makefile_end_to_end_indexing(makefile_workflow, tmp_path):
@@ -204,9 +205,6 @@ test: $(PROJECT)
 
     # INDEX: Process the file through the full pipeline
     result = await makefile_workflow["coordinator"].process_file(makefile_path)
-
-    # Debug the result
-    print(f"Debug - Result: {result}")
 
     # VERIFY: Indexing succeeded
     assert result["status"] == "success", (
@@ -267,12 +265,6 @@ test: $(PROJECT)
     phony_results, _ = search.search_regex(r"\.PHONY.*clean")
     assert len(phony_results) > 0, "Phony targets not searchable"
 
-    print("✅ Successfully indexed Makefile:")
-    print(f"   📁 File ID: {file_id}")
-    print(f"   📦 Chunks: {len(chunks)}")
-    print(f"   🏷️  Symbols: {len(chunk_symbols)}")
-    print(f"   🔍 Features found: {len(found_features)}")
-    print(f"   📝 Content length: {len(all_content)} chars")
 
 
 async def test_makefile_semantic_boundaries(makefile_workflow, tmp_path):
@@ -321,11 +313,11 @@ async def test_makefile_semantic_boundaries(makefile_workflow, tmp_path):
             assert long_var_name in chunk.code
             assert "very long value" in chunk.code
 
-    # VERIFY: Target and recipe stay together
+    # VERIFY: Part 1 of a split rule (the only chunk containing the target name) has the target line
     target_chunks = [c for c in chunks if "long-target-name" in c.code]
     if target_chunks:
         for chunk in target_chunks:
-            # Should contain target line and at least some recipe
+            # This filter only matches Part 1 chunks; continuation chunks are recipe-only and excluded
             assert ":" in chunk.code  # Target declaration
             assert "\t@echo" in chunk.code or "\t$(CC)" in chunk.code  # Recipe commands
 

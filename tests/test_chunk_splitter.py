@@ -216,8 +216,12 @@ def test_makefile_non_rule_oversized_delegates_to_parent() -> None:
         assert metrics.non_whitespace_chars <= splitter.config.max_chunk_size
 
 
-def test_makefile_split_all_parts_start_at_target_line() -> None:
-    """All parts start at original.start_line because each includes the target line."""
+def test_makefile_split_contiguous_line_ranges() -> None:
+    """Parts have contiguous, non-overlapping line ranges.
+
+    Part 1 starts at original.start_line and includes the target.
+    Parts > 1 start at their first recipe line and store target in metadata.
+    """
     splitter = MakefileChunkSplitter()
     # Target line + 500 recipe lines — well over the 1200 nws char limit
     target = "install: all"
@@ -235,16 +239,18 @@ def test_makefile_split_all_parts_start_at_target_line() -> None:
     result = splitter.validate_and_split(chunk)
 
     assert len(result) > 1
-    # All parts start at original.start_line because content begins with target
-    for part in result:
-        assert part.start_line == 10
-    # end_line grows with each part — later parts cover more recipe lines
+    # Part 1 starts at the target line
+    assert result[0].start_line == 10
+    assert result[0].content.startswith(target)
+    # Parts > 1 start immediately after the previous part ends (contiguous)
     for a, b in zip(result, result[1:]):
-        assert a.end_line < b.end_line
-    # Each recipe line fits within the chunk limit so normal splitting applies —
-    # normal splits prepend the target to every part; no emergency split here.
+        assert b.start_line == a.end_line + 1
+    # All parts carry rule_target in metadata (enables emergency-split propagation)
     for part in result:
-        assert part.content.startswith(target)
+        assert part.metadata.get("rule_target") == target
+    # Parts > 1 have recipe-only content (no target prefix)
+    for part in result[1:]:
+        assert not part.content.startswith(target)
 
 
 def test_makefile_split_target_only_oversized_rule() -> None:
@@ -290,6 +296,88 @@ def test_makefile_split_falls_back_to_emergency_for_huge_recipe_line() -> None:
     for part in result:
         metrics = ChunkMetrics.from_content(part.content)
         assert metrics.non_whitespace_chars <= splitter.config.max_chunk_size
+    # Line ranges within original bounds, monotonically ordered
+    # (emergency split uses proportional estimates — strict contiguity not guaranteed)
+    for part in result:
+        assert part.start_line <= part.end_line
+        assert part.start_line >= chunk.start_line
+        assert part.end_line <= chunk.end_line
+    for a, b in zip(result, result[1:]):
+        assert b.start_line >= a.start_line  # non-decreasing; equal when span < sub-chunks
+
+
+def test_makefile_split_emergency_preserves_rule_target_metadata() -> None:
+    """Emergency-split of a Part > 1 chunk preserves rule_target metadata."""
+    splitter = MakefileChunkSplitter()
+    target = "install: all"
+    # Part 1 fits; Part 2 has a single huge recipe line that triggers emergency split
+    normal_recipes = [f"\tcp file_{i}.txt /dst/" for i in range(10)]
+    huge_recipe = "\tcp " + "x" * 3000
+    content = "\n".join([target] + normal_recipes + [huge_recipe])
+    chunk = _make_chunk(
+        content,
+        name="install",
+        start_line=1,
+        concept=UniversalConcept.DEFINITION,
+        metadata={"kind": "rule"},
+        language_node_type="rule",
+    )
+
+    result = splitter.validate_and_split(chunk)
+
+    # All parts that don't start with the target must carry rule_target in metadata
+    non_first = [p for p in result if not p.content.startswith(target)]
+    assert len(non_first) >= 1, "Expected at least one continuation part"
+    for p in non_first:
+        assert p.metadata.get("rule_target") == target, (
+            f"Continuation chunk missing rule_target: {p.name}"
+        )
+    # Line ranges within original bounds, monotonically ordered
+    # (emergency split uses proportional estimates — strict contiguity not guaranteed)
+    for part in result:
+        assert part.start_line <= part.end_line
+        assert part.start_line >= chunk.start_line
+        assert part.end_line <= chunk.end_line
+    for a, b in zip(result, result[1:]):
+        assert b.start_line >= a.start_line  # non-decreasing; equal when span < sub-chunks
+
+
+def test_makefile_split_emergency_part1_preserves_rule_target() -> None:
+    """Emergency-split of Part 1 (target + oversized recipe) propagates rule_target to all sub-chunks.
+
+    When Part 1 itself exceeds the size limit, _emergency_split is invoked on it.
+    Since rule_target is now set on all parts (including Part 1), _emergency_split
+    copies metadata to every sub-chunk, so no sub-part loses target context.
+    """
+    splitter = MakefileChunkSplitter()
+    target = "install: all"
+    # Single huge recipe line that forces Part 1 into emergency split
+    huge_recipe = "\tcp " + "x" * 3000
+    content = target + "\n" + huge_recipe
+    chunk = _make_chunk(
+        content,
+        name="install",
+        start_line=1,
+        concept=UniversalConcept.DEFINITION,
+        metadata={"kind": "rule"},
+        language_node_type="rule",
+    )
+
+    result = splitter.validate_and_split(chunk)
+
+    assert len(result) > 1
+    for part in result:
+        assert part.metadata.get("rule_target") == target, (
+            f"Chunk '{part.name}' missing rule_target"
+        )
+    # Line ranges within original bounds, monotonically ordered
+    # (emergency split uses proportional estimates — strict contiguity not guaranteed)
+    for part in result:
+        assert part.start_line <= part.end_line
+        assert part.start_line >= chunk.start_line
+        assert part.end_line <= chunk.end_line
+    for a, b in zip(result, result[1:]):
+        assert b.start_line >= a.start_line  # non-decreasing; equal when span < sub-chunks
 
 
 def test_split_by_lines_simple_no_overlap_when_span_narrow() -> None:

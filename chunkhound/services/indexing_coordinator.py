@@ -1648,11 +1648,13 @@ class IndexingCoordinator(BaseService):
                     # Extract constants from metadata if available
                     metadata = chunk.get("metadata") or {}
                     constants = metadata.get("constants")
+                    rule_target = metadata.get("rule_target")
                     text = format_chunk_for_embedding(
                         code=code,
                         file_path=chunk.get("file_path"),
                         language=chunk.get("language"),
                         constants=constants,
+                        rule_target=rule_target,
                     )
                     valid_chunk_data.append((chunk_id, chunk, text))
                 else:
