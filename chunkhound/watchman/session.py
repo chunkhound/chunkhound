@@ -192,33 +192,45 @@ class WatchmanCliSession:
         reader_task = self._reader_task
         stderr_task = self._stderr_task
         process_wait_task = self._process_wait_task
-        self._process = None
-        self._reader_task = None
-        self._stderr_task = None
-        self._process_wait_task = None
+        cleanup_complete = False
 
-        if process is not None and process.stdin is not None:
-            try:
-                process.stdin.close()
-                await process.stdin.wait_closed()
-            except (BrokenPipeError, ConnectionResetError, AttributeError):
-                pass
+        try:
+            if process is not None and process.stdin is not None:
+                try:
+                    process.stdin.close()
+                    await process.stdin.wait_closed()
+                except (BrokenPipeError, ConnectionResetError, AttributeError):
+                    pass
 
-        if process is not None and process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(
-                    process.wait(), timeout=self._PROCESS_EXIT_TIMEOUT_SECONDS
-                )
-            except asyncio.TimeoutError:
-                process.kill()
-                await asyncio.wait_for(
-                    process.wait(), timeout=self._PROCESS_EXIT_TIMEOUT_SECONDS
-                )
+            if process is not None and process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(
+                        process.wait(), timeout=self._PROCESS_EXIT_TIMEOUT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await asyncio.wait_for(
+                        process.wait(), timeout=self._PROCESS_EXIT_TIMEOUT_SECONDS
+                    )
 
-        await self._await_background_task(process_wait_task)
-        await self._await_background_task(reader_task)
-        await self._await_background_task(stderr_task)
+            await self._await_background_task(process_wait_task)
+            await self._await_background_task(reader_task)
+            await self._await_background_task(stderr_task)
+            cleanup_complete = True
+        finally:
+            # If shutdown is cancelled mid-flight, keep the live handles on the
+            # session object so a follow-up stop() call can still terminate the
+            # same process and await the same tasks safely.
+            if cleanup_complete:
+                if self._process is process:
+                    self._process = None
+                if self._reader_task is reader_task:
+                    self._reader_task = None
+                if self._stderr_task is stderr_task:
+                    self._stderr_task = None
+                if self._process_wait_task is process_wait_task:
+                    self._process_wait_task = None
 
     async def wait_for_unexpected_exit(self) -> str | None:
         future = self._unexpected_exit_future

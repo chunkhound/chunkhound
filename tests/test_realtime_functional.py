@@ -26,6 +26,22 @@ from chunkhound.watchman_runtime.loader import (
 from tests.utils.windows_compat import realtime_backend_for_tests, wait_for_indexed
 
 
+async def _wait_for_realtime_condition(
+    service: RealtimeIndexingService,
+    predicate,
+    *,
+    timeout: float = 10.0,
+):
+    async def _poll():
+        while True:
+            stats = await service.get_health()
+            if predicate(stats):
+                return stats
+            await asyncio.sleep(0.05)
+
+    return await asyncio.wait_for(_poll(), timeout=timeout)
+
+
 class TestRealtimeFunctional:
     """Functional tests for real-time indexing - test what really matters."""
 
@@ -280,6 +296,76 @@ class TestRealtimeFunctional:
             stats = await service.get_health()
             assert stats["watchman_connection_state"] == "connected"
             assert stats["watchman_subscription_pdu_count"] >= 1
+        finally:
+            await service.stop()
+            services.provider.disconnect()
+
+    @pytest.mark.asyncio
+    @pytest.mark.requires_native_watchman
+    async def test_watchman_backend_recovers_live_monitoring_after_disconnect(
+        self, tmp_path
+    ):
+        """Watchman reconnect should restore live indexing without daemon restart."""
+        from types import SimpleNamespace
+
+        watch_dir = tmp_path / "watchman_project"
+        watch_dir.mkdir(parents=True)
+        db_path = watch_dir / ".chunkhound" / "test.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        fake_args = SimpleNamespace(path=watch_dir)
+        config = Config(
+            args=fake_args,
+            database={"path": str(db_path), "provider": "duckdb"},
+            indexing={"realtime_backend": "watchman"},
+        )
+
+        services = create_services(db_path, config)
+        services.provider.connect()
+        service = RealtimeIndexingService(services, config)
+        callback_calls: list[tuple[str, dict[str, object] | None]] = []
+        callback_event = asyncio.Event()
+
+        async def resync_callback(
+            reason: str, details: dict[str, object] | None
+        ) -> None:
+            callback_calls.append((reason, details))
+            callback_event.set()
+
+        service._resync_callback = resync_callback
+
+        try:
+            await service.start(watch_dir)
+            adapter = service._monitor_adapter
+            session = getattr(adapter, "_session", None)
+            process = getattr(session, "_process", None)
+            assert process is not None
+
+            process.terminate()
+
+            await asyncio.wait_for(callback_event.wait(), timeout=5.0)
+            restored_stats = await _wait_for_realtime_condition(
+                service,
+                lambda stats: (
+                    stats["watchman_reconnect"]["state"] == "restored"
+                    and stats["watchman_connection_state"] == "connected"
+                ),
+            )
+
+            file_path = watch_dir / "src" / "watchman_recovered_runtime.py"
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(
+                "def watchman_recovered_runtime_symbol():\n    return 2\n",
+                encoding="utf-8",
+            )
+
+            assert await wait_for_indexed(services.provider, file_path, timeout=10.0)
+
+            final_stats = await service.get_health()
+            assert callback_calls
+            assert restored_stats["watchman_reconnect"]["last_result"] == "restored"
+            assert final_stats["watchman_connection_state"] == "connected"
+            assert final_stats["watchman_reconnect"]["state"] == "restored"
+            assert final_stats["watchman_subscription_pdu_count"] >= 1
         finally:
             await service.stop()
             services.provider.disconnect()

@@ -259,6 +259,20 @@ def _default_watchman_loss_of_sync_snapshot() -> dict[str, Any]:
     }
 
 
+def _default_watchman_reconnect_snapshot() -> dict[str, Any]:
+    """Return the stable Watchman reconnect status payload."""
+    return {
+        "state": "idle",
+        "attempt_count": 0,
+        "max_attempts": WatchmanRealtimeAdapter._RECONNECT_MAX_ATTEMPTS,
+        "retry_delay_seconds": WatchmanRealtimeAdapter._RECONNECT_RETRY_DELAY_SECONDS,
+        "last_started_at": None,
+        "last_completed_at": None,
+        "last_error": None,
+        "last_result": None,
+    }
+
+
 def _default_watchman_health_snapshot() -> dict[str, Any]:
     """Return Watchman-specific realtime fields for daemon status surfaces."""
     return {
@@ -293,6 +307,7 @@ def _default_watchman_health_snapshot() -> dict[str, Any]:
         "watchman_relative_root": None,
         "watchman_session_capabilities": {},
         "watchman_loss_of_sync": _default_watchman_loss_of_sync_snapshot(),
+        "watchman_reconnect": _default_watchman_reconnect_snapshot(),
     }
 
 
@@ -359,6 +374,8 @@ class WatchmanRealtimeAdapter:
 
     backend_name = "watchman"
     _SUBSCRIPTION_NAME = "chunkhound-live-indexing"
+    _RECONNECT_MAX_ATTEMPTS = 3
+    _RECONNECT_RETRY_DELAY_SECONDS = 1.0
 
     def __init__(self, service: "RealtimeIndexingService") -> None:
         self._service = service
@@ -373,6 +390,9 @@ class WatchmanRealtimeAdapter:
         self._path_filter: RealtimePathFilter | None = None
         self._subscription_consumer_task: asyncio.Task[None] | None = None
         self._session_monitor_task: asyncio.Task[None] | None = None
+        self._reconnect_task: asyncio.Task[None] | None = None
+        self._watch_path: Path | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._loss_of_sync_count = 0
         self._fresh_instance_count = 0
         self._recrawl_count = 0
@@ -380,83 +400,36 @@ class WatchmanRealtimeAdapter:
         self._last_loss_of_sync_reason: str | None = None
         self._last_loss_of_sync_at: str | None = None
         self._last_loss_of_sync_details: dict[str, object] | None = None
+        self._reconnect_state = "idle"
+        self._reconnect_attempt_count = 0
+        self._last_reconnect_started_at: str | None = None
+        self._last_reconnect_completed_at: str | None = None
+        self._last_reconnect_error: str | None = None
+        self._last_reconnect_result: str | None = None
 
     async def start(self, watch_path: Path, loop: asyncio.AbstractEventLoop) -> None:
+        self._watch_path = watch_path
+        self._loop = loop
         self._reset_loss_of_sync_state()
+        self._reset_reconnect_state()
         try:
-            metadata = await self._sidecar.start()
+            await self._establish_monitoring(watch_path, loop, phase="startup")
         except Exception as error:
-            message = f"Watchman sidecar startup failed: {error}"
+            message = str(error)
             self._service._set_error(message)
             raise RuntimeError(message) from error
-
-        self._service.watchman_scope_plan = None
-        self._service.watchman_subscription_queue = None
-
-        try:
-            self._session = WatchmanCliSession(
-                binary_path=Path(metadata.binary_path),
-                socket_path=self._sidecar.paths.listener_path,
-                statefile_path=self._sidecar.paths.statefile_path,
-                logfile_path=self._sidecar.paths.logfile_path,
-                pidfile_path=self._sidecar.paths.pidfile_path,
-                project_root=self._sidecar.paths.project_root,
-                debug_sink=self._service._debug,
-            )
-            setup = await self._session.start(
-                target_path=watch_path,
-                subscription_name=self._SUBSCRIPTION_NAME,
-            )
-        except Exception as error:
-            if self._session is not None:
-                await self._session.stop()
-                self._session = None
-            await self._sidecar.stop()
-            self._service.watchman_scope_plan = None
-            self._service.watchman_subscription_queue = None
-            message = f"Watchman session startup failed: {error}"
-            self._service._set_error(message)
-            raise RuntimeError(message) from error
-
-        self._service.watchman_scope_plan = setup.scope_plan
-        self._service.watchman_subscription_queue = self._session.subscription_queue
-        self._path_filter = RealtimePathFilter(
-            config=self._service.config,
-            root_path=setup.scope_plan.primary_scope.requested_path,
-        )
-        self._subscription_consumer_task = loop.create_task(
-            self._consume_subscription_pdus(setup.scope_plan.primary_scope)
-        )
-        self._session_monitor_task = loop.create_task(
-            self._monitor_unexpected_session_exit()
-        )
-        self._service._set_effective_backend(self.backend_name)
-        self._service._monitoring_ready_at = self._service._utc_now()
-        self._service.monitoring_ready.set()
-        self._service._emit_status_update()
 
     async def stop(self) -> None:
-        self._service.watchman_scope_plan = None
-        self._service.watchman_subscription_queue = None
-        self._path_filter = None
-        if self._session_monitor_task is not None:
-            self._session_monitor_task.cancel()
+        self._watch_path = None
+        self._loop = None
+        if self._reconnect_task is not None:
+            self._reconnect_task.cancel()
             try:
-                await self._session_monitor_task
+                await self._reconnect_task
             except asyncio.CancelledError:
                 pass
-            self._session_monitor_task = None
-        if self._subscription_consumer_task is not None:
-            self._subscription_consumer_task.cancel()
-            try:
-                await self._subscription_consumer_task
-            except asyncio.CancelledError:
-                pass
-            self._subscription_consumer_task = None
-        if self._session is not None:
-            await self._session.stop()
-            self._session = None
-        await self._sidecar.stop()
+            self._reconnect_task = None
+        await self._clear_monitoring_runtime(stop_sidecar=True)
 
     async def _consume_subscription_pdus(
         self, scope: WatchmanSubscriptionScope
@@ -487,8 +460,14 @@ class WatchmanRealtimeAdapter:
         if message is None:
             return
 
-        if self._subscription_consumer_task is not None:
-            self._subscription_consumer_task.cancel()
+        if self._session_monitor_task is asyncio.current_task():
+            self._session_monitor_task = None
+        await self._cancel_subscription_consumer_task()
+        self._path_filter = None
+        self._service.watchman_scope_plan = None
+        self._service.watchman_subscription_queue = None
+        self._service.monitoring_ready.clear()
+        self._service._monitoring_ready_at = None
 
         sidecar_health = self._sidecar.get_health()
         details = {
@@ -500,10 +479,11 @@ class WatchmanRealtimeAdapter:
         }
         self._record_loss_of_sync(
             "disconnect",
-            message=message,
+            message=f"Watchman session disconnected: {message}",
             details=details,
             as_error=True,
         )
+        self._begin_reconnect_cycle()
 
     def _translate_subscription_pdu(
         self, payload: dict[str, object], scope: WatchmanSubscriptionScope
@@ -613,6 +593,186 @@ class WatchmanRealtimeAdapter:
         self._last_loss_of_sync_at = None
         self._last_loss_of_sync_details = None
 
+    def _reset_reconnect_state(self) -> None:
+        self._reconnect_state = "idle"
+        self._reconnect_attempt_count = 0
+        self._last_reconnect_started_at = None
+        self._last_reconnect_completed_at = None
+        self._last_reconnect_error = None
+        self._last_reconnect_result = None
+
+    async def _cancel_subscription_consumer_task(self) -> None:
+        task = self._subscription_consumer_task
+        if task is None:
+            return
+        self._subscription_consumer_task = None
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _cancel_session_monitor_task(self) -> None:
+        task = self._session_monitor_task
+        if task is None:
+            return
+        if task is asyncio.current_task():
+            self._session_monitor_task = None
+            return
+        self._session_monitor_task = None
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _clear_monitoring_runtime(self, *, stop_sidecar: bool) -> None:
+        self._service.watchman_scope_plan = None
+        self._service.watchman_subscription_queue = None
+        self._path_filter = None
+        self._service.monitoring_ready.clear()
+        self._service._monitoring_ready_at = None
+        await self._cancel_session_monitor_task()
+        await self._cancel_subscription_consumer_task()
+        if self._session is not None:
+            await self._session.stop()
+            self._session = None
+        if stop_sidecar:
+            await self._sidecar.stop()
+        self._service._emit_status_update()
+
+    async def _establish_monitoring(
+        self,
+        watch_path: Path,
+        loop: asyncio.AbstractEventLoop,
+        *,
+        phase: str,
+    ) -> None:
+        try:
+            metadata = await self._sidecar.start()
+        except Exception as error:
+            raise RuntimeError(f"Watchman sidecar {phase} failed: {error}") from error
+
+        self._service.watchman_scope_plan = None
+        self._service.watchman_subscription_queue = None
+
+        session: WatchmanCliSession | None = None
+        try:
+            session = WatchmanCliSession(
+                binary_path=Path(metadata.binary_path),
+                socket_path=self._sidecar.paths.listener_path,
+                statefile_path=self._sidecar.paths.statefile_path,
+                logfile_path=self._sidecar.paths.logfile_path,
+                pidfile_path=self._sidecar.paths.pidfile_path,
+                project_root=self._sidecar.paths.project_root,
+                debug_sink=self._service._debug,
+            )
+            setup = await session.start(
+                target_path=watch_path,
+                subscription_name=self._SUBSCRIPTION_NAME,
+            )
+        except Exception as error:
+            if session is not None:
+                await session.stop()
+            await self._sidecar.stop()
+            self._service.watchman_scope_plan = None
+            self._service.watchman_subscription_queue = None
+            raise RuntimeError(f"Watchman session {phase} failed: {error}") from error
+
+        self._session = session
+        self._service.watchman_scope_plan = setup.scope_plan
+        self._service.watchman_subscription_queue = session.subscription_queue
+        self._path_filter = RealtimePathFilter(
+            config=self._service.config,
+            root_path=setup.scope_plan.primary_scope.requested_path,
+        )
+        self._subscription_consumer_task = loop.create_task(
+            self._consume_subscription_pdus(setup.scope_plan.primary_scope)
+        )
+        self._session_monitor_task = loop.create_task(
+            self._monitor_unexpected_session_exit()
+        )
+        self._service._set_effective_backend(self.backend_name)
+        self._service._monitoring_ready_at = self._service._utc_now()
+        self._service.monitoring_ready.set()
+        self._service._emit_status_update()
+
+    def _begin_reconnect_cycle(self) -> None:
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            return
+        if self._watch_path is None or self._loop is None:
+            return
+        self._reconnect_state = "pending"
+        self._reconnect_attempt_count = 0
+        self._last_reconnect_started_at = None
+        self._last_reconnect_completed_at = None
+        self._last_reconnect_error = None
+        self._last_reconnect_result = None
+        self._service._emit_status_update()
+        self._reconnect_task = asyncio.create_task(self._run_reconnect_loop())
+
+    async def _run_reconnect_loop(self) -> None:
+        watch_path = self._watch_path
+        loop = self._loop
+        if watch_path is None or loop is None:
+            return
+
+        try:
+            for attempt in range(1, self._RECONNECT_MAX_ATTEMPTS + 1):
+                if attempt > 1:
+                    self._reconnect_state = "pending"
+                    self._service._emit_status_update()
+                    await asyncio.sleep(self._RECONNECT_RETRY_DELAY_SECONDS)
+
+                self._reconnect_state = "running"
+                self._reconnect_attempt_count = attempt
+                self._last_reconnect_started_at = self._service._utc_now()
+                self._last_reconnect_error = None
+                self._last_reconnect_result = None
+                self._service._emit_status_update()
+
+                try:
+                    await self._clear_monitoring_runtime(stop_sidecar=False)
+                    await self._establish_monitoring(
+                        watch_path,
+                        loop,
+                        phase="reconnect",
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    self._last_reconnect_error = str(error)
+                    self._last_reconnect_completed_at = self._service._utc_now()
+                    if attempt < self._RECONNECT_MAX_ATTEMPTS:
+                        self._service._set_warning(
+                            "Watchman reconnect attempt "
+                            f"{attempt}/{self._RECONNECT_MAX_ATTEMPTS} failed: "
+                            f"{self._last_reconnect_error}"
+                        )
+                        continue
+                    self._reconnect_state = "failed"
+                    self._last_reconnect_result = "failed"
+                    self._service._set_error(
+                        f"Watchman reconnect failed: {self._last_reconnect_error}"
+                    )
+                    self._service._emit_status_update()
+                    return
+
+                self._reconnect_state = "restored"
+                self._last_reconnect_completed_at = self._service._utc_now()
+                self._last_reconnect_result = "restored"
+                self._service._clear_error_state(
+                    prefixes=(
+                        "Watchman session disconnected:",
+                        "Watchman reconnect failed:",
+                    )
+                )
+                self._service._refresh_runtime_service_state()
+                self._service._emit_status_update()
+                return
+        finally:
+            self._reconnect_task = None
+
     def _handle_loss_of_sync_payload(self, payload: dict[str, object]) -> bool:
         reason: str | None = None
         message: str | None = None
@@ -719,6 +879,16 @@ class WatchmanRealtimeAdapter:
             "last_reason": self._last_loss_of_sync_reason,
             "last_at": self._last_loss_of_sync_at,
             "last_details": self._last_loss_of_sync_details,
+        }
+        health["watchman_reconnect"] = {
+            "state": self._reconnect_state,
+            "attempt_count": self._reconnect_attempt_count,
+            "max_attempts": self._RECONNECT_MAX_ATTEMPTS,
+            "retry_delay_seconds": self._RECONNECT_RETRY_DELAY_SECONDS,
+            "last_started_at": self._last_reconnect_started_at,
+            "last_completed_at": self._last_reconnect_completed_at,
+            "last_error": self._last_reconnect_error,
+            "last_result": self._last_reconnect_result,
         }
         health["observer_alive"] = sidecar_alive and session_alive
         return health
@@ -944,9 +1114,47 @@ class RealtimeIndexingService:
         ):
             self._last_error = None
             self._last_error_at = None
-        if self._service_state not in {"stopping", "stopped"} and not self._last_error:
-            self._service_state = "running"
+        self._refresh_runtime_service_state()
         self._emit_status_update()
+
+    def _clear_error_state(
+        self,
+        *,
+        exact_messages: tuple[str, ...] = (),
+        prefixes: tuple[str, ...] = (),
+    ) -> None:
+        current_error = self._last_error
+        if not current_error:
+            return
+        if current_error in exact_messages or any(
+            current_error.startswith(prefix) for prefix in prefixes
+        ):
+            self._last_error = None
+            self._last_error_at = None
+        self._refresh_runtime_service_state()
+        self._emit_status_update()
+
+    def _refresh_runtime_service_state(self) -> None:
+        if self._service_state in {"starting", "stopping", "stopped"}:
+            return
+        if self._last_error:
+            self._service_state = "degraded"
+            return
+        adapter_health = (
+            self._monitor_adapter.get_health() if self._monitor_adapter else {}
+        )
+        reconnect = adapter_health.get("watchman_reconnect")
+        reconnect_state = None
+        if isinstance(reconnect, dict):
+            reconnect_state = reconnect.get("state")
+        connection_state = adapter_health.get("watchman_connection_state")
+        if self._effective_backend == "watchman" and (
+            reconnect_state in {"pending", "running", "failed"}
+            or connection_state in {"disconnected", "sidecar_only"}
+        ):
+            self._service_state = "degraded"
+            return
+        self._service_state = "running"
 
     def _resolve_configured_backend(self) -> str:
         backend = getattr(self.config.indexing, "realtime_backend", None)

@@ -217,6 +217,16 @@ async def test_daemon_status_tool_exposes_watchman_realtime_details():
                 "last_at": "2026-03-08T00:00:04Z",
                 "last_details": {"warning": "Recrawled this watch"},
             },
+            "watchman_reconnect": {
+                "state": "restored",
+                "attempt_count": 1,
+                "max_attempts": 3,
+                "retry_delay_seconds": 1.0,
+                "last_started_at": "2026-03-08T00:00:03Z",
+                "last_completed_at": "2026-03-08T00:00:04Z",
+                "last_error": None,
+                "last_result": "restored",
+            },
             "resync": {
                 "needs_resync": True,
                 "in_progress": False,
@@ -245,6 +255,8 @@ async def test_daemon_status_tool_exposes_watchman_realtime_details():
     assert realtime["watchman_relative_root"] == "packages/api"
     assert realtime["watchman_loss_of_sync"]["fresh_instance_count"] == 1
     assert realtime["watchman_loss_of_sync"]["recrawl_count"] == 1
+    assert realtime["watchman_reconnect"]["state"] == "restored"
+    assert realtime["watchman_reconnect"]["last_result"] == "restored"
     assert realtime["resync"]["needs_resync"] is True
     assert realtime["resync"]["last_reason"] == "realtime_loss_of_sync"
 
