@@ -188,6 +188,36 @@ def _wait_for_sidecar_files(
     raise AssertionError("timed out waiting for packaged Watchman sidecar files")
 
 
+def _wait_for_named_pipe_ready(
+    *,
+    runtime,
+    binary_path: Path,
+    socket_path: str | Path,
+    pidfile_path: Path,
+    statefile_path: Path,
+    logfile_path: Path,
+    env: dict[str, str],
+    timeout_seconds: float = 15.0,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            _run_one_shot_command(
+                runtime=runtime,
+                binary_path=binary_path,
+                socket_path=socket_path,
+                pidfile_path=pidfile_path,
+                statefile_path=statefile_path,
+                logfile_path=logfile_path,
+                command=["version"],
+                env=env,
+            )
+            return
+        except AssertionError:
+            time.sleep(0.1)
+    raise AssertionError("timed out waiting for packaged Watchman named pipe readiness")
+
+
 def _stop_sidecar_process(process: subprocess.Popen) -> None:
     process.terminate()
     try:
@@ -428,14 +458,13 @@ def test_materialized_watchman_binary_supports_private_sidecar_flags(
             pidfile_path=pidfile_path,
             logfile_path=logfile_path,
         )
-        _run_one_shot_command(
+        _wait_for_named_pipe_ready(
             runtime=runtime,
             binary_path=binary_path,
             socket_path=socket_path,
             pidfile_path=pidfile_path,
             statefile_path=statefile_path,
             logfile_path=logfile_path,
-            command=["version"],
             env=runtime_env,
         )
         assert process.poll() is None
@@ -516,7 +545,7 @@ def test_materialized_watchman_binary_supports_persistent_client_session(
             command=["watch-project", str(project_root)],
             env=runtime_env,
         )
-        assert watch_project_response["watch"] == str(project_root)
+        assert Path(str(watch_project_response["watch"])).resolve() == project_root
         assert "relative_path" not in watch_project_response
 
         client = subprocess.Popen(
