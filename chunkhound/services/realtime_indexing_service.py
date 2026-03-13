@@ -913,7 +913,9 @@ class RealtimeIndexingService:
         config: Config,
         debug_sink: Callable[[str], None] | None = None,
         status_callback: Callable[[dict[str, Any]], None] | None = None,
-        resync_callback: Callable[[str, dict[str, Any] | None], Awaitable[None]]
+        resync_callback: Callable[
+            [str, dict[str, Any] | None], Awaitable[dict[str, Any] | None]
+        ]
         | None = None,
     ):
         self.services = services
@@ -1134,6 +1136,16 @@ class RealtimeIndexingService:
         self._refresh_runtime_service_state()
         self._emit_status_update()
 
+    @staticmethod
+    def _resync_callback_error(result: Any) -> str | None:
+        """Normalize backend-neutral callback error results into service failures."""
+        if not isinstance(result, dict) or result.get("status") != "error":
+            return None
+        error = result.get("error")
+        if isinstance(error, str) and error:
+            return f"Resync callback reported error status: {error}"
+        return "Resync callback reported error status"
+
     def _refresh_runtime_service_state(self) -> None:
         if self._service_state in {"starting", "stopping", "stopped"}:
             return
@@ -1340,7 +1352,10 @@ class RealtimeIndexingService:
                 self._emit_status_update()
 
                 try:
-                    await callback(reason, details)
+                    result = await callback(reason, details)
+                    callback_error = self._resync_callback_error(result)
+                    if callback_error is not None:
+                        raise RuntimeError(callback_error)
                     self._needs_resync = False
                     self._resync_performed_count += 1
                     self._last_resync_completed_at = self._utc_now()

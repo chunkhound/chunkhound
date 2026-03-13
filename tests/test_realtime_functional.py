@@ -477,6 +477,45 @@ class TestRealtimeFunctional:
             await service.stop()
 
     @pytest.mark.asyncio
+    async def test_error_result_resync_callback_stays_degraded(
+        self, realtime_setup
+    ) -> None:
+        """Structured callback error results should preserve stale/degraded state."""
+        service, watch_dir, _, _ = realtime_setup
+
+        async def error_result_resync_callback(
+            reason: str, details: dict[str, object] | None
+        ) -> dict[str, object]:
+            assert reason == "manual_reconcile"
+            assert details == {"source": "test"}
+            return {
+                "status": "error",
+                "error": "embedding follow-up failed",
+                "generated": 0,
+            }
+
+        service._resync_callback = error_result_resync_callback
+        await service.start(watch_dir)
+        await service.request_resync("manual_reconcile", {"source": "test"})
+        await asyncio.sleep(service._RESYNC_DEBOUNCE_SECONDS + 0.1)
+
+        stats = await service.get_health()
+        assert stats["service_state"] == "degraded"
+        assert (
+            stats["last_error"]
+            == "Realtime resync failed: Resync callback reported error status: "
+            "embedding follow-up failed"
+        )
+        assert (
+            stats["resync"]["last_error"]
+            == "Resync callback reported error status: embedding follow-up failed"
+        )
+        assert stats["resync"]["needs_resync"] is True
+        assert stats["resync"]["performed_count"] == 0
+
+        await service.stop()
+
+    @pytest.mark.asyncio
     async def test_watchdog_timeout_fallback_does_not_adopt_late_watchdog(
         self, realtime_setup, monkeypatch
     ):

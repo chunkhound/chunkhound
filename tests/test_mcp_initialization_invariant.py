@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from chunkhound.mcp_server.base import MCPServerBase
+from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 
 
 class ConcreteMCPServer(MCPServerBase):
@@ -286,7 +287,7 @@ class TestNonBlockingInitialization:
             return_value={"status": "up_to_date", "generated": 0}
         )
 
-        await server._request_realtime_resync(
+        result = await server._request_realtime_resync(
             "realtime_loss_of_sync",
             {"backend": "watchman", "loss_of_sync_reason": "disconnect"},
         )
@@ -299,4 +300,56 @@ class TestNonBlockingInitialization:
         )
         server.services.indexing_coordinator.generate_missing_embeddings.assert_awaited_once_with(
             exclude_patterns=["*.lock", "node_modules/**"]
+        )
+        assert result == {"status": "up_to_date", "generated": 0}
+
+    @pytest.mark.asyncio
+    async def test_realtime_resync_embed_error_status_keeps_realtime_degraded(
+        self, tmp_path: Path
+    ) -> None:
+        """Realtime loss-of-sync should stay degraded on embed follow-up error."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.exclude = ["*.lock"]
+
+        server = ConcreteMCPServer(config=config)
+        server._scan_target_path = tmp_path
+        server._run_directory_scan = AsyncMock()  # type: ignore[method-assign]
+        server.services = MagicMock()
+        server.services.indexing_coordinator.generate_missing_embeddings = AsyncMock(
+            return_value={
+                "status": "error",
+                "error": "embedding backend unavailable",
+                "generated": 0,
+            }
+        )
+
+        service = RealtimeIndexingService(
+            server.services,
+            config,
+            status_callback=server._update_realtime_status,
+            resync_callback=server._request_realtime_resync,
+        )
+
+        await service.request_resync(
+            "realtime_loss_of_sync",
+            {"backend": "watchman", "loss_of_sync_reason": "disconnect"},
+        )
+        await asyncio.sleep(service._RESYNC_DEBOUNCE_SECONDS + 0.1)
+
+        realtime = server._scan_progress["realtime"]
+        assert realtime["service_state"] == "degraded"
+        assert realtime["resync"]["needs_resync"] is True
+        assert realtime["resync"]["performed_count"] == 0
+        assert (
+            realtime["resync"]["last_error"]
+            == "Resync callback reported error status: embedding backend unavailable"
+        )
+        assert (
+            realtime["last_error"]
+            == "Realtime resync failed: Resync callback reported error status: "
+            "embedding backend unavailable"
         )

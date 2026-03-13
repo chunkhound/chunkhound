@@ -384,8 +384,8 @@ class MCPServerBase(ABC):
 
     async def _request_realtime_resync(
         self, reason: str, details: dict[str, Any] | None = None
-    ) -> None:
-        """Run a serialized reconciliation scan for backend-neutral resync requests."""
+    ) -> dict[str, Any] | None:
+        """Run a serialized reconciliation scan and return the embed result."""
         if not self._scan_target_path:
             raise RuntimeError("Realtime resync requested before target path resolved")
 
@@ -398,7 +398,7 @@ class MCPServerBase(ABC):
             no_embeddings=True,
         )
         if self.services is None:
-            return
+            return None
 
         exclude_patterns = list(getattr(self.config.indexing, "exclude", []) or [])
         embed_result = await (
@@ -411,6 +411,7 @@ class MCPServerBase(ABC):
             "Realtime resync embedding follow-up completed: "
             f"status={embed_result.get('status')} generated={generated}"
         )
+        return embed_result
 
     async def _run_directory_scan(
         self,
