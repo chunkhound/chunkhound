@@ -12,19 +12,19 @@ Design notes:
 from __future__ import annotations
 
 import os
-import subprocess
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple
 
 from chunkhound.utils.file_patterns import (
-    should_include_file,
     should_exclude_path,
-    normalize_include_patterns,
+    should_include_file,
 )
-from chunkhound.utils.git_safe import run_git, GitCommandError
+from chunkhound.utils.git_safe import GitCommandError, run_git
 
 
-def build_git_pathspecs(rel_prefix: str | None, include_patterns: Sequence[str]) -> list[str]:
+def build_git_pathspecs(
+    rel_prefix: str | None, include_patterns: Sequence[str]
+) -> list[str]:
     """Build a minimal set of Git :(glob) pathspecs from CH include patterns.
 
     We only push down simple, lossless patterns:
@@ -33,7 +33,9 @@ def build_git_pathspecs(rel_prefix: str | None, include_patterns: Sequence[str])
     Complex patterns (character classes, alternations, etc.) are ignored.
     """
     # Import summarizer lazily to avoid cycles
-    from chunkhound.utils.file_patterns import _summarize_include_patterns  # type: ignore
+    from chunkhound.utils.file_patterns import (
+        _summarize_include_patterns,  # type: ignore
+    )
 
     rel = (rel_prefix or "").strip("/")
     exts, names, _complex = _summarize_include_patterns(list(include_patterns))
@@ -59,7 +61,9 @@ def build_git_pathspecs(rel_prefix: str | None, include_patterns: Sequence[str])
     return specs
 
 
-def _run_git_ls_files(repo_root: Path, pathspecs: list[str] | None = None) -> tuple[list[str], int, int]:
+def _run_git_ls_files(
+    repo_root: Path, pathspecs: list[str] | None = None
+) -> tuple[list[str], int, int]:
     """Return repo-relative paths from git ls-files (tracked + untracked non-ignored)."""
     repo_root = repo_root.resolve()
     # Tracked files
@@ -78,7 +82,14 @@ def _run_git_ls_files(repo_root: Path, pathspecs: list[str] | None = None) -> tu
     # Untracked, non-ignored (exclude-standard honors .gitignore + core excludes)
     others = []
     try:
-        args = ["-C", str(repo_root), "ls-files", "--others", "--exclude-standard", "-z"]
+        args = [
+            "-C",
+            str(repo_root),
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ]
         if pathspecs:
             args += ["--", *pathspecs]
         res = run_git(args, cwd=repo_root, timeout_s=None)
@@ -130,7 +141,7 @@ def list_repo_files_via_git(
     if pushdown is None:
         try:
             v = os.environ.get("CHUNKHOUND_INDEXING__GIT_PATHSPEC_PUSHDOWN", "")
-            pushdown = (v.strip() != "0")
+            pushdown = v.strip() != "0"
         except Exception:
             pushdown = True
 
@@ -160,14 +171,18 @@ def list_repo_files_via_git(
                     pathspecs = [rel_prefix]
         except Exception:
             # Fallback to subtree only on any error
-            pathspecs = ([rel_prefix] if rel_prefix else None)
+            pathspecs = [rel_prefix] if rel_prefix else None
     else:
-        pathspecs = ([rel_prefix] if rel_prefix else None)
+        pathspecs = [rel_prefix] if rel_prefix else None
 
-    rel_paths, rows_tracked, rows_others = _run_git_ls_files(repo_root, pathspecs or None)
+    rel_paths, rows_tracked, rows_others = _run_git_ls_files(
+        repo_root, pathspecs or None
+    )
     if rel_prefix:
         rel_prefix_slash = rel_prefix + "/"
-        rel_paths = [p for p in rel_paths if p == rel_prefix or p.startswith(rel_prefix_slash)]
+        rel_paths = [
+            p for p in rel_paths if p == rel_prefix or p.startswith(rel_prefix_slash)
+        ]
 
     # Assume caller provides patterns already normalized where needed
     norm_includes = list(include_patterns)
@@ -188,7 +203,9 @@ def list_repo_files_via_git(
             continue
 
         # Apply ChunkHound config/default excludes on top of Git results
-        if config_excludes and should_exclude_path(abs_path, base_for_filters, list(config_excludes), pcache):
+        if config_excludes and should_exclude_path(
+            abs_path, base_for_filters, list(config_excludes), pcache
+        ):
             continue
 
         # Apply include patterns

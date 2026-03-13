@@ -11,9 +11,9 @@ This module is responsible for:
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from loguru import logger
 
@@ -111,10 +111,7 @@ def _build_language_sample_source(language: Language, token: str) -> str:
         )
 
     if language == Language.YAML:
-        return (
-            "description: QA evaluation settings\n"
-            f"evaluation_marker: {token}\n"
-        )
+        return f"description: QA evaluation settings\nevaluation_marker: {token}\n"
 
     if language == Language.TOML:
         return (
@@ -140,7 +137,7 @@ def _build_language_sample_source(language: Language, token: str) -> str:
         return (
             "# Makefile for QA evaluation\n"
             "all:\n"
-            f"\t@echo \"Running evaluation with marker: {token}\"\n"
+            f'\t@echo "Running evaluation with marker: {token}"\n'
         )
 
     # Shell / scripting
@@ -149,7 +146,7 @@ def _build_language_sample_source(language: Language, token: str) -> str:
             "#!/usr/bin/env bash\n"
             "# Script used in QA evaluation to echo an evaluation marker.\n"
             f"EVAL_MARKER='{token}'\n"
-            "echo \"Evaluation marker: ${EVAL_MARKER}\"\n"
+            'echo "Evaluation marker: ${EVAL_MARKER}"\n'
         )
 
     # Python style
@@ -157,7 +154,7 @@ def _build_language_sample_source(language: Language, token: str) -> str:
         return (
             "def eval_search_language_sample() -> str:\n"
             '    """Return an evaluation marker string used for QA checks."""\n'
-            f"    return \"{token}\"\n"
+            f'    return "{token}"\n'
         )
 
     # Haskell style
@@ -166,7 +163,7 @@ def _build_language_sample_source(language: Language, token: str) -> str:
             "module EvalSearch where\n\n"
             "-- Returns an evaluation marker string used in tests.\n"
             "evaluationMarker :: String\n"
-            f"evaluationMarker = \"{token}\"\n"
+            f'evaluationMarker = "{token}"\n'
         )
 
     # MATLAB style
@@ -211,7 +208,7 @@ def _build_language_sample_source(language: Language, token: str) -> str:
             "// Groovy script used in QA evaluation.\n"
             "// Prints an evaluation marker using println.\n"
             f"def marker = '{token}'\n"
-            "println \"Evaluation marker: ${marker}\"\n"
+            'println "Evaluation marker: ${marker}"\n'
         )
 
     # Kotlin style
@@ -220,8 +217,8 @@ def _build_language_sample_source(language: Language, token: str) -> str:
             "// Kotlin program used in QA evaluation.\n"
             "// Prints an evaluation marker using println.\n"
             "fun main() {\n"
-            f"    val marker = \"{token}\"\n"
-            "    println(\"Evaluation marker: $marker\")\n"
+            f'    val marker = "{token}"\n'
+            '    println("Evaluation marker: $marker")\n'
             "}\n"
         )
 
@@ -257,8 +254,8 @@ def _build_language_sample_source(language: Language, token: str) -> str:
             "public class EvalSearchSample {\n"
             "    // Prints an evaluation marker used in QA runs.\n"
             "    public static void main(String[] args) {\n"
-            f"        String marker = \"{token}\";\n"
-            "        System.out.println(\"Evaluation marker: \" + marker);\n"
+            f'        String marker = "{token}";\n'
+            '        System.out.println("Evaluation marker: " + marker);\n'
             "    }\n"
             "}\n"
         )
@@ -270,8 +267,8 @@ def _build_language_sample_source(language: Language, token: str) -> str:
             "public class EvalSearchSample {\n"
             "    // Prints an evaluation marker used in QA runs.\n"
             "    public static void Main(string[] args) {\n"
-            f"        var marker = \"{token}\";\n"
-            "        Console.WriteLine($\"Evaluation marker: {marker}\");\n"
+            f'        var marker = "{token}";\n'
+            '        Console.WriteLine($"Evaluation marker: {marker}");\n'
             "    }\n"
             "}\n"
         )
@@ -280,11 +277,11 @@ def _build_language_sample_source(language: Language, token: str) -> str:
     if language == Language.GO:
         return (
             "package main\n\n"
-            "import \"fmt\"\n\n"
+            'import "fmt"\n\n'
             "// Prints an evaluation marker used in QA runs.\n"
             "func main() {\n"
-            f"    marker := \"{token}\"\n"
-            "    fmt.Println(\"Evaluation marker:\", marker)\n"
+            f'    marker := "{token}"\n'
+            '    fmt.Println("Evaluation marker:", marker)\n'
             "}\n"
         )
 
@@ -292,8 +289,8 @@ def _build_language_sample_source(language: Language, token: str) -> str:
     if language == Language.RUST:
         return (
             "fn main() {\n"
-            f"    let marker = \"{token}\";\n"
-            "    println!(\"Evaluation marker: {}\", marker);\n"
+            f'    let marker = "{token}";\n'
+            '    println!("Evaluation marker: {}", marker);\n'
             "}\n"
         )
 
@@ -302,8 +299,8 @@ def _build_language_sample_source(language: Language, token: str) -> str:
         return (
             "#include <stdio.h>\n\n"
             "int main(void) {\n"
-            f"    const char *marker = \"{token}\";\n"
-            "    printf(\"Evaluation marker: %s\\n\", marker);\n"
+            f'    const char *marker = "{token}";\n'
+            '    printf("Evaluation marker: %s\\n", marker);\n'
             "    return 0;\n"
             "}\n"
         )
@@ -313,8 +310,8 @@ def _build_language_sample_source(language: Language, token: str) -> str:
         return (
             "#include <iostream>\n\n"
             "int main() {\n"
-            f"    std::string marker = \"{token}\";\n"
-            "    std::cout << \"Evaluation marker: \" << marker << std::endl;\n"
+            f'    std::string marker = "{token}";\n'
+            '    std::cout << "Evaluation marker: " << marker << std::endl;\n'
             "    return 0;\n"
             "}\n"
         )
@@ -322,9 +319,8 @@ def _build_language_sample_source(language: Language, token: str) -> str:
     # Swift style
     if language == Language.SWIFT:
         return (
-            "import Foundation\n\n"
-            "let marker = \"{token}\"\n".format(token=token)
-            + "\nprint(\"Evaluation marker: \\(marker)\")\n"
+            f'import Foundation\n\nlet marker = "{token}"\n'
+            + '\nprint("Evaluation marker: \\(marker)")\n'
         )
 
     # PHP style
@@ -341,8 +337,8 @@ def _build_language_sample_source(language: Language, token: str) -> str:
             "#import <Foundation/Foundation.h>\n\n"
             "int main(int argc, char *argv[]) {\n"
             "    @autoreleasepool {\n"
-            f"        NSString *marker = @\"{token}\";\n"
-            "        NSLog(@\"Evaluation marker: %@\", marker);\n"
+            f'        NSString *marker = @"{token}";\n'
+            '        NSLog(@"Evaluation marker: %@", marker);\n'
             "    }\n"
             "    return 0;\n"
             "}\n"
@@ -366,7 +362,7 @@ def _build_language_syntax_samples(language: Language) -> dict[str, str]:
             "from __future__ import annotations\n"
             "from dataclasses import dataclass\n"
             "from typing import Any, Callable, Generic, Iterable, TypeVar\n\n"
-            "T = TypeVar(\"T\")\n\n"
+            'T = TypeVar("T")\n\n'
             "@dataclass\n"
             "class EvalConfig(Generic[T]):\n"
             "    name: str\n"
@@ -381,11 +377,11 @@ def _build_language_syntax_samples(language: Language) -> dict[str, str]:
             "def pattern_match(value: int) -> str:\n"
             "    match value:\n"
             "        case 0:\n"
-            "            return \"zero\"\n"
+            '            return "zero"\n'
             "        case 1 | 2:\n"
-            "            return \"small\"\n"
+            '            return "small"\n'
             "        case _:\n"
-            "            return \"other\"\n"
+            '            return "other"\n'
         )
 
     if language in {Language.JAVASCRIPT, Language.JSX, Language.TSX}:
@@ -394,12 +390,12 @@ def _build_language_syntax_samples(language: Language) -> dict[str, str]:
             "export class SearchClient {\n"
             "  #endpoint;\n"
             "  constructor(endpoint) {\n"
-            "    this.#endpoint = endpoint ?? \"http://localhost\";\n"
+            '    this.#endpoint = endpoint ?? "http://localhost";\n'
             "  }\n\n"
             "  async search(query, opts = {}) {\n"
             "    const params = { q: query, ...opts };\n"
             "    const url = `${this.#endpoint}/search`;\n"
-            "    const res = await fetch(url, { method: \"POST\", body: JSON.stringify(params) });\n"
+            '    const res = await fetch(url, { method: "POST", body: JSON.stringify(params) });\n'
             "    return res?.ok ? res.json() : [];\n"
             "  }\n"
             "}\n\n"
@@ -462,7 +458,7 @@ def _build_language_syntax_samples(language: Language) -> dict[str, str]:
     if language == Language.GO:
         samples["syntax_showcase.go"] = (
             "package main\n\n"
-            "import \"sort\"\n\n"
+            'import "sort"\n\n'
             "type Pair struct {\n"
             "    Key   string\n"
             "    Value int\n"
@@ -553,17 +549,11 @@ def build_semantic_query(language: Language) -> str:
             "evaluation marker string used for QA checks in the evaluation harness"
         )
     if language == Language.BASH:
-        return (
-            "shell script that echoes an evaluation marker string in a QA run"
-        )
+        return "shell script that echoes an evaluation marker string in a QA run"
     if language == Language.C:
-        return (
-            "C program that uses printf to print an evaluation marker to stdout"
-        )
+        return "C program that uses printf to print an evaluation marker to stdout"
     if language == Language.CPP:
-        return (
-            "C++ program that prints an evaluation marker message to standard output"
-        )
+        return "C++ program that prints an evaluation marker message to standard output"
     if language == Language.JAVA:
         return (
             "Java class with a main method that calls System.out.println to print "
@@ -585,9 +575,7 @@ def build_semantic_query(language: Language) -> str:
             "evaluation marker"
         )
     if language == Language.SWIFT:
-        return (
-            "Swift code that calls print to display an evaluation marker string"
-        )
+        return "Swift code that calls print to display an evaluation marker string"
     if language in {Language.JAVASCRIPT, Language.JSX, Language.TSX}:
         return (
             "JavaScript code that calls console.log to print an evaluation marker "
@@ -603,7 +591,9 @@ def build_semantic_query(language: Language) -> str:
             "Makefile with a default target that prints an evaluation marker when run"
         )
     if language == Language.JSON:
-        return "configuration file defining an evaluation_marker field for automated tests"
+        return (
+            "configuration file defining an evaluation_marker field for automated tests"
+        )
     if language == Language.YAML:
         return "YAML configuration that stores an evaluation marker used in QA"
     if language == Language.TOML:
@@ -611,13 +601,19 @@ def build_semantic_query(language: Language) -> str:
     if language == Language.MARKDOWN:
         return "documentation explaining an evaluation marker used during QA"
     if language == Language.TEXT:
-        return "plain text document that explains the evaluation marker used for testing"
+        return (
+            "plain text document that explains the evaluation marker used for testing"
+        )
     if language == Language.HCL:
-        return "infrastructure configuration resource that includes an evaluation marker"
+        return (
+            "infrastructure configuration resource that includes an evaluation marker"
+        )
     if language == Language.VUE:
         return "single-file component that renders an evaluation marker in the template"
     if language == Language.SVELTE:
-        return "single-file component that displays an evaluation marker in the template"
+        return (
+            "single-file component that displays an evaluation marker in the template"
+        )
     if language == Language.MATLAB:
         return (
             "MATLAB function named eval_search_language_sample that returns an "
@@ -646,9 +642,7 @@ def build_semantic_query(language: Language) -> str:
         return "PDF document that describes the evaluation marker used in QA benchmarks"
 
     # Default for other programming languages (Java, C#, Go, Rust, etc.)
-    return (
-        "small program used in QA evaluation that prints an evaluation marker"
-    )
+    return "small program used in QA evaluation that prints an evaluation marker"
 
 
 def create_corpus(
@@ -711,5 +705,3 @@ def create_corpus(
         )
 
     return language_to_paths, queries
-
-

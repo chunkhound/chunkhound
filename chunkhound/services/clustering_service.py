@@ -186,9 +186,7 @@ class ClusteringService:
             self._llm_provider.estimate_tokens(content) for content in files.values()
         )
 
-        logger.info(
-            f"HDBSCAN clustering {len(files)} files ({total_tokens:,} tokens)"
-        )
+        logger.info(f"HDBSCAN clustering {len(files)} files ({total_tokens:,} tokens)")
 
         # Special case: single file
         if len(files) == 1:
@@ -485,19 +483,15 @@ class ClusteringService:
                 return [file_paths_to_split]
 
             # K-means split into 2 clusters
-            embeddings = np.array(
-                [file_embeddings[fp] for fp in file_paths_to_split]
-            )
+            embeddings = np.array([file_embeddings[fp] for fp in file_paths_to_split])
             kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
             split_labels = kmeans.fit_predict(embeddings)
 
             cluster_0 = [
-                fp for fp, lbl in zip(file_paths_to_split, split_labels)
-                if lbl == 0
+                fp for fp, lbl in zip(file_paths_to_split, split_labels) if lbl == 0
             ]
             cluster_1 = [
-                fp for fp, lbl in zip(file_paths_to_split, split_labels)
-                if lbl == 1
+                fp for fp, lbl in zip(file_paths_to_split, split_labels) if lbl == 1
             ]
 
             # Guard: k-means may return all files in one cluster (identical embeddings)

@@ -122,7 +122,9 @@ REQUIRE_CITATIONS = True  # Validate file:line format
 
 # Map-reduce synthesis constants
 MAX_TOKENS_PER_CLUSTER = 30_000  # Token budget per cluster for parallel synthesis
-CLUSTER_OUTPUT_TOKEN_BUDGET = 15_000  # Fallback/minimum output budget per cluster (elbow detection may override)
+CLUSTER_OUTPUT_TOKEN_BUDGET = (
+    15_000  # Fallback/minimum output budget per cluster (elbow detection may override)
+)
 
 # Fact extraction
 FACT_EXTRACTION_TOKENS = 8_000  # Output budget per cluster
@@ -139,7 +141,9 @@ FACTS_TIER_INDEXED = 100  # 51-100: Compact with file index
 
 # Pre-compiled regex patterns for citation processing
 _CITATION_PATTERN = re.compile(r"\[\d+\]")  # Matches [N] citations
-_CITATION_SEQUENCE_PATTERN = re.compile(r"(?:\[\d+\])+")  # Matches sequences like [1][2][3]
+_CITATION_SEQUENCE_PATTERN = re.compile(
+    r"(?:\[\d+\])+"
+)  # Matches sequences like [1][2][3]
 
 # Smart boundary detection for context-aware file reading
 ENABLE_SMART_BOUNDARIES = True  # Expand to natural code boundaries (functions/classes)

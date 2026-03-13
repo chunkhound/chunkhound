@@ -687,8 +687,8 @@ def _display_detected_configs(
                 table.add_row(f"• {provider_name} configured via environment")
             else:
                 table.add_row(
-                        f"• {provider_name} server detected at "
-                        f"{config.get('base_url', 'unknown')}"
+                    f"• {provider_name} server detected at "
+                    f"{config.get('base_url', 'unknown')}"
                 )
 
     if formatter.console is not None:
@@ -704,8 +704,8 @@ def _display_detected_configs(
                 elif provider == "local":
                     provider_name = config.get("provider_name", "Unknown")
                     print(
-                    f"• {provider_name} server detected at "
-                    f"{config.get('base_url', 'unknown')}"
+                        f"• {provider_name} server detected at "
+                        f"{config.get('base_url', 'unknown')}"
                     )
 
 
@@ -1161,10 +1161,7 @@ async def _setup_opencode(target_path: Path, formatter: RichOutputFormatter) -> 
             return True
 
     # Add ChunkHound server configuration
-    mcp_config["chunkhound"] = {
-        "type": "local",
-        "command": ["chunkhound", "mcp"]
-    }
+    mcp_config["chunkhound"] = {"type": "local", "command": ["chunkhound", "mcp"]}
 
     # Ensure schema is present
     if "$schema" not in config:

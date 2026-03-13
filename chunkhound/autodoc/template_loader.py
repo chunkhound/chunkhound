@@ -35,4 +35,3 @@ def load_bytes(relative_path: str) -> bytes:
         .open("rb") as handle
     ):
         return handle.read()
-

@@ -708,14 +708,21 @@ class JavaMapping(BaseMapping):
 
             # For field_declaration and local_variable_declaration, extract variable name
             def_node = captures.get("definition")
-            if def_node and def_node.type in ["field_declaration", "local_variable_declaration"]:
+            if def_node and def_node.type in [
+                "field_declaration",
+                "local_variable_declaration",
+            ]:
                 declarator = self.find_child_by_type(def_node, "variable_declarator")
                 if declarator:
                     var_name_node = self.find_child_by_type(declarator, "identifier")
                     if var_name_node:
                         return self.get_node_text(var_name_node, source).strip()
                 line = def_node.start_point[0] + 1
-                node_type = "local" if def_node.type == "local_variable_declaration" else "field"
+                node_type = (
+                    "local"
+                    if def_node.type == "local_variable_declaration"
+                    else "field"
+                )
                 return f"{node_type}_line_{line}"
 
             return "unnamed_definition"
@@ -818,8 +825,13 @@ class JavaMapping(BaseMapping):
                     # Other modifiers
                     modifiers = []
                     modifier_keywords = [
-                        "static", "final", "abstract", "synchronized",
-                        "native", "volatile", "transient",
+                        "static",
+                        "final",
+                        "abstract",
+                        "synchronized",
+                        "native",
+                        "volatile",
+                        "transient",
                     ]
                     for mod in modifier_keywords:
                         if mod in modifiers_text:

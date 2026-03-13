@@ -91,9 +91,7 @@ class ImportResolverService:
         parser: Any = self._parser_factory.create_parser_for_file(Path(file_path))
 
         # Check if parser has extractor with mapping
-        if not hasattr(parser, "extractor") or not hasattr(
-            parser.extractor, "mapping"
-        ):
+        if not hasattr(parser, "extractor") or not hasattr(parser.extractor, "mapping"):
             logger.debug(f"Parser lacks mapping for import resolution: {file_path}")
             return []
 

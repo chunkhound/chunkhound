@@ -103,8 +103,11 @@ class StdioMCPServer(MCPServerBase):
                     )
 
                     async def _stub_run_exec(  # type: ignore[override]
-                        self, text, cwd=None,
-                        max_tokens=1024, timeout=None,
+                        self,
+                        text,
+                        cwd=None,
+                        max_tokens=1024,
+                        timeout=None,
                         model=None,
                     ):
                         mark = os.getenv("CH_TEST_CODEX_MARK_FILE")
@@ -133,6 +136,7 @@ class StdioMCPServer(MCPServerBase):
             self.server = None  # type: ignore
         else:
             from mcp.server import Server
+
             self.server: Server = Server("ChunkHound Code Search")
 
         # Event to signal initialization completion
@@ -238,6 +242,7 @@ class StdioMCPServer(MCPServerBase):
                 async with self.server_lifespan():
                     # Run the stdio server
                     import mcp.server.stdio
+
                     async with mcp.server.stdio.stdio_server() as (
                         read_stream,
                         write_stream,
@@ -290,6 +295,7 @@ class StdioMCPServer(MCPServerBase):
             self.debug_log(f"Server error: {e}")
             if self.debug_mode:
                 import traceback
+
                 traceback.print_exc(file=sys.stderr)
 
 
@@ -342,6 +348,7 @@ async def main(args: Any = None) -> None:
         debug_file = os.getenv("CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_mcp_debug.log")
         try:
             import traceback
+
             with open(debug_file, "a") as f:
                 f.write(f"MCP server error: {e}\n")
                 traceback.print_exc(file=f)
