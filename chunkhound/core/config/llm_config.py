@@ -51,6 +51,7 @@ class LLMConfig(BaseSettings):
         "codex-cli",
         "gemini",
         "anthropic",
+        "grok",
         "opencode-cli",
     ] = Field(
         default="openai",
@@ -66,6 +67,7 @@ class LLMConfig(BaseSettings):
             "codex-cli",
             "anthropic",
             "gemini",
+            "grok",
             "opencode-cli",
         ]
         | None
@@ -79,12 +81,18 @@ class LLMConfig(BaseSettings):
             "codex-cli",
             "anthropic",
             "gemini",
+            "grok",
             "opencode-cli",
         ]
         | None
     ) = Field(default=None, description="Override provider for synthesis ops")
 
     # Model Configuration (dual-model architecture)
+    model: str | None = Field(
+        default=None,
+        description="Convenience field to set both utility and synthesis models to the same value",
+    )
+
     utility_model: str = Field(
         default="",  # Will be set by get_default_models() if empty
         description="Model for utility operations (query expansion, follow-ups, classification)",
@@ -95,7 +103,9 @@ class LLMConfig(BaseSettings):
         description="Model for final synthesis (large context analysis)",
     )
 
-    codex_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = Field(
+    codex_reasoning_effort: (
+        Literal["minimal", "low", "medium", "high", "xhigh"] | None
+    ) = Field(
         default=None,
         description="Default Codex CLI reasoning effort (Responses API thinking level)",
     )
@@ -120,6 +130,7 @@ class LLMConfig(BaseSettings):
             "codex-cli",
             "gemini",
             "anthropic",
+            "grok",
             "opencode-cli",
         ]
         | None
@@ -139,13 +150,16 @@ class LLMConfig(BaseSettings):
         ),
     )
 
-    map_hyde_reasoning_effort: Literal[
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-    ] | None = Field(
+    map_hyde_reasoning_effort: (
+        Literal[
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+        ]
+        | None
+    ) = Field(
         default=None,
         description=(
             "Codex/OpenAI reasoning effort override for Code Mapper HyDE planning. "
@@ -161,6 +175,7 @@ class LLMConfig(BaseSettings):
             "codex-cli",
             "gemini",
             "anthropic",
+            "grok",
             "opencode-cli",
         ]
         | None
@@ -180,13 +195,16 @@ class LLMConfig(BaseSettings):
         ),
     )
 
-    autodoc_cleanup_reasoning_effort: Literal[
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-    ] | None = Field(
+    autodoc_cleanup_reasoning_effort: (
+        Literal[
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+        ]
+        | None
+    ) = Field(
         default=None,
         description=(
             "Codex/OpenAI reasoning effort override for AutoDoc LLM cleanup. "
@@ -281,6 +299,15 @@ class LLMConfig(BaseSettings):
             raise ValueError("base_url must start with http:// or https://")
 
         return v
+
+    def model_post_init(self, __context: Any) -> None:
+        """Post-initialization hook to handle model field mapping."""
+        # If model is provided, set both utility_model and synthesis_model
+        if self.model is not None:
+            if not self.utility_model:
+                self.utility_model = self.model
+            if not self.synthesis_model:
+                self.synthesis_model = self.model
 
     @field_validator(
         "codex_reasoning_effort",
@@ -438,6 +465,12 @@ class LLMConfig(BaseSettings):
             # - claude-opus-4-5-20251101: Most capable model with effort control (supports effort parameter)
             # - claude-opus-4-1-20250805: Exceptional model for specialized reasoning (legacy)
             return ("claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929")
+        elif self.provider == "grok":
+            # Grok: Use the same flagship model for both utility and synthesis
+            # Intentional: Grok reasoning models (especially grok-4-1-fast-reasoning)
+            # are extremely strong across both roles — no benefit to splitting them.
+            # grok-4-1-fast-reasoning: Advanced reasoning, structured outputs, tool calling
+            return ("grok-4-1-fast-reasoning", "grok-4-1-fast-reasoning")
         else:
             return ("gpt-5-nano", "gpt-5")
 
@@ -511,6 +544,7 @@ class LLMConfig(BaseSettings):
                 "codex-cli",
                 "anthropic",
                 "gemini",
+                "grok",
                 "opencode-cli",
             ],
             help="Default LLM provider for both roles",
@@ -525,6 +559,7 @@ class LLMConfig(BaseSettings):
                 "codex-cli",
                 "anthropic",
                 "gemini",
+                "grok",
                 "opencode-cli",
             ],
             help="Override LLM provider for utility operations",
@@ -539,6 +574,7 @@ class LLMConfig(BaseSettings):
                 "codex-cli",
                 "anthropic",
                 "gemini",
+                "grok",
                 "opencode-cli",
             ],
             help="Override LLM provider for synthesis operations",
@@ -571,6 +607,7 @@ class LLMConfig(BaseSettings):
                 "codex-cli",
                 "anthropic",
                 "gemini",
+                "grok",
                 "opencode-cli",
             ],
             help="Override provider for Code Mapper HyDE planning (falls back to synthesis)",
@@ -594,6 +631,7 @@ class LLMConfig(BaseSettings):
                 "codex-cli",
                 "anthropic",
                 "gemini",
+                "grok",
                 "opencode-cli",
             ],
             help="Override provider for AutoDoc LLM cleanup (falls back to synthesis)",
@@ -654,9 +692,7 @@ class LLMConfig(BaseSettings):
         if cleanup_effort := os.getenv(
             "CHUNKHOUND_LLM_AUTODOC_CLEANUP_REASONING_EFFORT"
         ):
-            config["autodoc_cleanup_reasoning_effort"] = (
-                cleanup_effort.strip().lower()
-            )
+            config["autodoc_cleanup_reasoning_effort"] = cleanup_effort.strip().lower()
 
         return config
 
@@ -714,7 +750,10 @@ class LLMConfig(BaseSettings):
             and args.llm_autodoc_cleanup_provider
         ):
             overrides["autodoc_cleanup_provider"] = args.llm_autodoc_cleanup_provider
-        if hasattr(args, "llm_autodoc_cleanup_model") and args.llm_autodoc_cleanup_model:
+        if (
+            hasattr(args, "llm_autodoc_cleanup_model")
+            and args.llm_autodoc_cleanup_model
+        ):
             overrides["autodoc_cleanup_model"] = args.llm_autodoc_cleanup_model
         if (
             hasattr(args, "llm_autodoc_cleanup_reasoning_effort")
