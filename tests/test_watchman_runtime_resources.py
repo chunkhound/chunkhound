@@ -163,7 +163,7 @@ def _wait_for_sidecar_files(
     *,
     runtime,
     process: subprocess.Popen,
-    socket_path: Path,
+    socket_path: str | Path,
     pidfile_path: Path,
     logfile_path: Path,
 ) -> None:
@@ -173,7 +173,7 @@ def _wait_for_sidecar_files(
     while time.monotonic() < deadline:
         listener_ready = True
         if listener_path_is_filesystem(runtime):
-            listener_ready = socket_path.exists()
+            listener_ready = Path(socket_path).exists()
         artifacts_ready = True
         if listener_path_is_filesystem(runtime):
             artifacts_ready = pidfile_path.exists() and logfile_path.exists()
@@ -219,7 +219,7 @@ def _run_one_shot_command(
     *,
     runtime,
     binary_path: Path,
-    socket_path: Path,
+    socket_path: str | Path,
     pidfile_path: Path,
     statefile_path: Path,
     logfile_path: Path,
@@ -250,6 +250,12 @@ def _run_one_shot_command(
     payload = json.loads(result.stdout)
     assert isinstance(payload, dict)
     return payload
+
+
+def _runtime_listener_path(*, runtime, sidecar_root: Path, suffix: str) -> str | Path:
+    if listener_path_is_filesystem(runtime):
+        return sidecar_root / suffix
+    return rf"\\.\pipe\chunkhound-watchman-{suffix}-{os.getpid()}"
 
 
 def test_build_watchman_command_uses_named_pipe_for_windows_native_runtime() -> None:
@@ -391,7 +397,11 @@ def test_materialized_watchman_binary_supports_private_sidecar_flags(
     runtime_env = _runtime_env(binary_path=binary_path)
     sidecar_root = tmp_path / "sidecar"
     sidecar_root.mkdir(parents=True, exist_ok=True)
-    socket_path = sidecar_root / "sock"
+    socket_path = _runtime_listener_path(
+        runtime=runtime,
+        sidecar_root=sidecar_root,
+        suffix="flags",
+    )
     pidfile_path = sidecar_root / "pid"
     statefile_path = sidecar_root / "state"
     logfile_path = sidecar_root / "watchman.log"
@@ -445,7 +455,11 @@ def test_materialized_watchman_binary_supports_persistent_client_session(
     binary_path = materialize_watchman_binary(destination_root=tmp_path)
     sidecar_root = tmp_path / "sidecar"
     sidecar_root.mkdir(parents=True, exist_ok=True)
-    socket_path = sidecar_root / "sock"
+    socket_path = _runtime_listener_path(
+        runtime=runtime,
+        sidecar_root=sidecar_root,
+        suffix="session",
+    )
     pidfile_path = sidecar_root / "pid"
     statefile_path = sidecar_root / "state"
     logfile_path = sidecar_root / "watchman.log"
