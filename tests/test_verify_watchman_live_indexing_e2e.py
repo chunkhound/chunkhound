@@ -8,6 +8,23 @@ from types import SimpleNamespace
 from scripts import verify_watchman_live_indexing_e2e as live_verifier
 
 
+def test_prepare_release_runs_watchman_release_verifiers_in_order() -> None:
+    prepare_release = (
+        Path(__file__).resolve().parents[1] / "scripts" / "prepare_release.sh"
+    )
+    script_text = prepare_release.read_text(encoding="utf-8")
+    runtime_call = (
+        'uv run python scripts/verify_watchman_runtime_resources.py "${WHEEL_PATHS[@]}"'
+    )
+    live_call = (
+        'uv run python scripts/verify_watchman_live_indexing_e2e.py "${WHEEL_PATHS[@]}"'
+    )
+
+    assert runtime_call in script_text
+    assert live_call in script_text
+    assert script_text.index(runtime_call) < script_text.index(live_call)
+
+
 def test_mcp_env_prefers_installed_venv_and_clears_repo_python_state(
     monkeypatch,
     tmp_path: Path,

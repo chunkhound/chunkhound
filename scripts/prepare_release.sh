@@ -61,6 +61,11 @@ echo "🔎 Verifying Watchman runtime wheel resources..."
 uv run python scripts/verify_watchman_runtime_resources.py "${WHEEL_PATHS[@]}"
 echo "✅ Watchman runtime wheel resources verified"
 
+# Verify installed wheels satisfy the managed Watchman live-indexing contract
+echo "🔎 Verifying Watchman installed-wheel live indexing..."
+uv run python scripts/verify_watchman_live_indexing_e2e.py "${WHEEL_PATHS[@]}"
+echo "✅ Watchman installed-wheel live indexing verified"
+
 # Generate checksums for release artifacts
 echo "🔐 Generating checksums..."
 cd dist/
