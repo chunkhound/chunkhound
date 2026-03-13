@@ -33,7 +33,9 @@ from chunkhound.watchman import (
     WatchmanScopePlan,
     WatchmanSubscriptionScope,
 )
-from chunkhound.watchman_runtime.loader import default_realtime_backend_for_platform
+from chunkhound.watchman_runtime.loader import (
+    default_realtime_backend_for_current_install,
+)
 
 
 def normalize_file_path(path: Path | str) -> str:
@@ -950,7 +952,7 @@ class RealtimeIndexingService:
         backend = getattr(self.config.indexing, "realtime_backend", None)
         if backend in {"watchman", "watchdog", "polling"}:
             return str(backend)
-        return default_realtime_backend_for_platform()
+        return default_realtime_backend_for_current_install()
 
     def _set_effective_backend(self, backend: str) -> None:
         self._effective_backend = backend

@@ -8,7 +8,11 @@ from chunkhound.api.cli.parsers.mcp_parser import add_mcp_subparser
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.daemon.discovery import DaemonDiscovery
-from chunkhound.watchman_runtime.loader import default_realtime_backend_for_platform
+from chunkhound.watchman_runtime import loader as watchman_runtime_loader
+from chunkhound.watchman_runtime.loader import (
+    default_realtime_backend_for_current_install,
+    default_realtime_backend_for_platform,
+)
 
 
 def _build_parser(add_subparser) -> argparse.ArgumentParser:
@@ -18,9 +22,25 @@ def _build_parser(add_subparser) -> argparse.ArgumentParser:
     return parser
 
 
-def test_indexing_config_defaults_to_platform_supported_backend():
+def test_indexing_config_defaults_to_current_install_backend():
     config = IndexingConfig()
-    assert config.realtime_backend == default_realtime_backend_for_platform()
+    assert config.realtime_backend == default_realtime_backend_for_current_install()
+
+
+def test_default_realtime_backend_for_current_install_uses_watchdog_in_source_tree():
+    assert default_realtime_backend_for_current_install() == "watchdog"
+
+
+def test_default_realtime_backend_for_current_install_uses_watchman_when_payloads_ship(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        watchman_runtime_loader,
+        "is_packaged_watchman_runtime_available",
+        lambda **_: True,
+    )
+
+    assert default_realtime_backend_for_current_install() == "watchman"
 
 
 def test_default_realtime_backend_for_supported_windows_host() -> None:

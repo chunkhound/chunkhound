@@ -655,6 +655,29 @@ def is_packaged_watchman_runtime_supported(
     return platform_key in _SUPPORTED_PLATFORM_ROOTS
 
 
+def is_packaged_watchman_runtime_available(
+    *, system_name: str | None = None, machine_name: str | None = None
+) -> bool:
+    platform_key = _normalize_platform_key(
+        system_name=system_name,
+        machine_name=machine_name,
+    )
+    relative_root = _SUPPORTED_PLATFORM_ROOTS.get(platform_key)
+    if relative_root is None:
+        return False
+
+    manifest = _read_packaged_json(relative_root / "manifest.json")
+    relative_binary_path = _validate_relative_path(
+        _require_manifest_string(manifest, "binary")
+    )
+    relative_support_paths = _require_optional_manifest_paths(manifest, "support_files")
+    return _packaged_payloads_available(
+        relative_root=relative_root,
+        relative_binary_path=relative_binary_path,
+        relative_support_paths=relative_support_paths,
+    )
+
+
 def default_realtime_backend_for_platform(
     *, system_name: str | None = None, machine_name: str | None = None
 ) -> str:
@@ -662,6 +685,12 @@ def default_realtime_backend_for_platform(
         system_name=system_name,
         machine_name=machine_name,
     ):
+        return "watchman"
+    return "watchdog"
+
+
+def default_realtime_backend_for_current_install() -> str:
+    if is_packaged_watchman_runtime_available():
         return "watchman"
     return "watchdog"
 

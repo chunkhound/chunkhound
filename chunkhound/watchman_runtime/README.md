@@ -15,3 +15,9 @@ implementation; it does not satisfy the epic's native-daemon closure criteria.
 Packaging decision:
 - Wheels that carry this package must be platform-specific.
 - Publishing a Watchman-carrying `py3-none-any` wheel is forbidden.
+- Building a Watchman-carrying wheel on any host outside the declared Linux and
+  Windows support matrix must fail instead of silently producing a generic
+  artifact.
+- Source checkouts and editable installs do not ship these native payloads, so
+  they default to fallback realtime backends unless operators explicitly opt
+  into `backend=watchman` and allow runtime hydration from the pinned sources.
