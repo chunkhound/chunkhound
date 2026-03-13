@@ -5,17 +5,17 @@
 # CRITICAL: Must be picklable (top-level function, serializable arguments)
 """
 
-import os
 import multiprocessing
-from multiprocessing.connection import Connection
+import os
 from dataclasses import dataclass
+from multiprocessing.connection import Connection
 from pathlib import Path
+from time import perf_counter
 
 from loguru import logger
 
 from chunkhound.core.detection import detect_language
 from chunkhound.core.types.common import FileId, Language
-from time import perf_counter
 
 
 def _dbg_log(msg: str) -> None:
@@ -64,9 +64,12 @@ def _parse_file_worker(
     try:
         # Local imports to keep worker picklable and light
         from pathlib import Path as _Path
+
+        from chunkhound.core.types.common import (
+            FileId as _FileId,
+        )
         from chunkhound.core.types.common import (
             Language as _Language,
-            FileId as _FileId,
         )
         from chunkhound.parsers.parser_factory import (
             create_parser_for_language as _create,

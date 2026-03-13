@@ -12,8 +12,8 @@ except ImportError:
     TIKTOKEN_AVAILABLE = False
 
 # Token estimation ratios (characters per token)
-EMBEDDING_CHARS_PER_TOKEN = 3      # Embedding APIs (measured ~3.0 for VoyageAI/OpenAI)
-LLM_CHARS_PER_TOKEN = 4            # LLM APIs (conservative estimate)
+EMBEDDING_CHARS_PER_TOKEN = 3  # Embedding APIs (measured ~3.0 for VoyageAI/OpenAI)
+LLM_CHARS_PER_TOKEN = 4  # LLM APIs (conservative estimate)
 # Midpoint of EMBEDDING (3) and LLM (4) ratios — used when the target
 # provider type is unknown.
 DEFAULT_CHARS_PER_TOKEN = 3.5

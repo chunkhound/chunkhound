@@ -35,7 +35,6 @@ class GrokLLMProvider(OpenAICompatibleProvider):
             max_retries: Number of retry attempts
         """
 
-
         super().__init__(
             api_key=api_key,
             model=model,

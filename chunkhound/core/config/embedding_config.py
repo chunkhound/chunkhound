@@ -448,6 +448,7 @@ class EmbeddingConfig(BaseSettings):
         and the legacy single-underscore form (CHUNKHOUND_EMBEDDING_*) for the four
         common fields. The canonical form takes precedence when both are set.
         """
+
         def _first_env(*names: str) -> str | None:
             for name in names:
                 val = os.getenv(name)

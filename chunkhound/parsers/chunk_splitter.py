@@ -368,7 +368,8 @@ class ChunkSplitter:
                     test_metrics = ChunkMetrics.from_content(test_content)
                     if (
                         test_metrics.non_whitespace_chars <= self.config.max_chunk_size
-                        and estimate_tokens_chunking(test_content) <= self.config.safe_token_limit
+                        and estimate_tokens_chunking(test_content)
+                        <= self.config.safe_token_limit
                     ):
                         best_split = pos + 1  # Include the split character
                         break
@@ -379,12 +380,10 @@ class ChunkSplitter:
                 # Shrink if force-split chunk exceeds non-ws limit
                 test = ChunkMetrics.from_content(remaining[:best_split])
                 while (
-                    (
-                        test.non_whitespace_chars > self.config.max_chunk_size
-                        or estimate_tokens_chunking(remaining[:best_split]) > self.config.safe_token_limit
-                    )
-                    and best_split > self.config.min_chunk_size
-                ):
+                    test.non_whitespace_chars > self.config.max_chunk_size
+                    or estimate_tokens_chunking(remaining[:best_split])
+                    > self.config.safe_token_limit
+                ) and best_split > self.config.min_chunk_size:
                     best_split = best_split // 2
                     test = ChunkMetrics.from_content(remaining[:best_split])
                 # Last-resort: chunk may still exceed limits if min_chunk_size reached
