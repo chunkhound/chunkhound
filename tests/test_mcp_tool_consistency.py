@@ -187,7 +187,7 @@ async def test_daemon_status_tool_degrades_on_realtime_state():
 
 @pytest.mark.asyncio
 async def test_daemon_status_tool_exposes_watchman_realtime_details():
-    """Verify daemon_status preserves Watchman operator fields in scan_progress."""
+    """Verify daemon_status exposes stale Watchman state through the summary surface."""
     from chunkhound.mcp_server.tools import execute_tool
 
     scan_progress = {
@@ -235,7 +235,8 @@ async def test_daemon_status_tool_exposes_watchman_realtime_details():
     )
 
     realtime = result["scan_progress"]["realtime"]
-    assert result["status"] == "ready"
+    assert result["status"] == "degraded"
+    assert result["query_ready"] is True
     assert realtime["configured_backend"] == "watchman"
     assert realtime["watchman_sidecar_state"] == "running"
     assert realtime["watchman_connection_state"] == "connected"
