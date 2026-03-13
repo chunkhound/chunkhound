@@ -1045,5 +1045,5 @@ if __name__ == "__main__":
         print("="*60)
 
         # Final assertions for QA requirements
-        assert indexing_time < 10.0, f"File changes should be reflected within 10s, took {indexing_time:.2f}s"
+        assert indexing_time <= 10.0, f"File changes should be reflected within 10s, took {indexing_time:.2f}s"
         assert search_time < 5.0, f"Search should complete within 5s, took {search_time:.3f}s"
