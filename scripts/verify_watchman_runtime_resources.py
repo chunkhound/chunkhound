@@ -235,6 +235,20 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                 "    assert isinstance(payload, dict)",
                 "    return payload",
                 "",
+                "def _wait_for_named_pipe_ready(timeout=15.0):",
+                "    deadline = time.monotonic() + timeout",
+                "    while time.monotonic() < deadline:",
+                "        try:",
+                "            _run_one_shot(['version'])",
+                "            return",
+                "        except AssertionError:",
+                "            time.sleep(0.1)",
+                (
+                    "    raise AssertionError("
+                    "'timed out waiting for named-pipe version readiness'"
+                    ")"
+                ),
+                "",
                 "sidecar_root = Path('sidecar').resolve()",
                 "sidecar_root.mkdir(parents=True, exist_ok=True)",
                 "socket_path = (",
@@ -292,6 +306,8 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                 "        assert Path(socket_path).exists()",
                 "        assert pidfile_path.exists()",
                 "        assert logfile_path.exists()",
+                "    else:",
+                "        _wait_for_named_pipe_ready()",
                 "    assert sidecar.poll() is None",
                 "    cmdline = psutil.Process(sidecar.pid).cmdline()",
                 "    assert cmdline and cmdline[0] == str(binary_path)",
@@ -316,7 +332,10 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                     "    watch_project = _run_one_shot("
                     "['watch-project', str(project_root.resolve())])"
                 ),
-                "    assert watch_project['watch'] == str(project_root.resolve())",
+                (
+                    "    assert Path(str(watch_project['watch'])).resolve() == "
+                    "project_root.resolve()"
+                ),
                 (
                     "    client_command = build_watchman_client_command("
                     "runtime=runtime, binary_path=binary_path, "
