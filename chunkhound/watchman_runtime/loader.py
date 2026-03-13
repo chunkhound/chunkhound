@@ -5,7 +5,6 @@ import importlib.resources
 import io
 import json
 import os
-import shutil
 import stat
 import sys
 import tarfile
@@ -899,23 +898,31 @@ def _read_deb_member_bytes(
             data_member_bytes = reader.read()
 
     with tarfile.open(fileobj=io.BytesIO(data_member_bytes), mode="r:*") as handle:
-        temp_root = Path(tempfile.mkdtemp(prefix="chunkhound-watchman-deb-"))
-        try:
-            handle.extractall(temp_root)
-            extracted_path = temp_root / Path(*expected_path.parts)
-            if not extracted_path.exists():
-                raise RuntimeError(
-                    "Watchman runtime archive is missing required payload "
-                    f"{expected_path.as_posix()} in {archive_path}"
-                )
-            if not extracted_path.is_file():
+        for member in handle.getmembers():
+            member_path = PurePosixPath(member.name)
+            if member_path.is_absolute() or ".." in member_path.parts:
+                continue
+            normalized_member_path = PurePosixPath(
+                *(part for part in member_path.parts if part not in {"", "."})
+            )
+            if normalized_member_path != expected_path:
+                continue
+            if not member.isfile():
                 raise RuntimeError(
                     "Watchman runtime archive member is not a regular file: "
                     f"{expected_path.as_posix()} in {archive_path}"
                 )
-            return extracted_path.read_bytes()
-        finally:
-            shutil.rmtree(temp_root, ignore_errors=True)
+            extracted_file = handle.extractfile(member)
+            if extracted_file is None:
+                raise RuntimeError(
+                    "Watchman runtime archive member could not be read: "
+                    f"{expected_path.as_posix()} in {archive_path}"
+                )
+            return extracted_file.read()
+        raise RuntimeError(
+            "Watchman runtime archive is missing required payload "
+            f"{expected_path.as_posix()} in {archive_path}"
+        )
 
 
 def _read_zip_member_bytes(

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import queue
 import stat
 import subprocess
+import tarfile
 import threading
 import time
 from dataclasses import replace
@@ -29,6 +31,28 @@ from chunkhound.watchman_runtime.loader import (
 )
 
 pytestmark = pytest.mark.requires_native_watchman
+
+
+def _build_ar_member(name: str, payload: bytes) -> bytes:
+    header = (
+        f"{name}/".ljust(16)
+        + f"{0:<12}"
+        + f"{0:<6}"
+        + f"{0:<6}"
+        + f"{100644:<8}"
+        + f"{len(payload):<10}"
+        + "`\n"
+    ).encode("ascii")
+    padding = b"\n" if len(payload) % 2 else b""
+    return header + payload + padding
+
+
+def _build_deb_archive(*, data_member_name: str, tar_payload: bytes) -> bytes:
+    return (
+        b"!<arch>\n"
+        + _build_ar_member("debian-binary", b"2.0\n")
+        + _build_ar_member(data_member_name, tar_payload)
+    )
 
 
 @pytest.mark.parametrize(
@@ -318,6 +342,70 @@ def test_build_watchman_command_uses_named_pipe_for_windows_native_runtime() -> 
     assert "--unix-listener-path" not in sidecar_command
     assert "--named-pipe-path" in client_command
     assert "--unix-listener-path" not in client_command
+
+
+def test_read_deb_member_bytes_reads_expected_member_without_extractall(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tar_payload = io.BytesIO()
+    with tarfile.open(fileobj=tar_payload, mode="w:gz") as handle:
+        escaped_info = tarfile.TarInfo("../escape")
+        escaped_payload = b"nope\n"
+        escaped_info.size = len(escaped_payload)
+        handle.addfile(escaped_info, io.BytesIO(escaped_payload))
+
+        watchman_info = tarfile.TarInfo("./usr/local/bin/watchman")
+        watchman_payload = b"#!/bin/sh\necho native-watchman\n"
+        watchman_info.mode = 0o755
+        watchman_info.size = len(watchman_payload)
+        handle.addfile(watchman_info, io.BytesIO(watchman_payload))
+
+    archive_path = tmp_path / "watchman.deb"
+    archive_path.write_bytes(
+        _build_deb_archive(
+            data_member_name="data.tar.gz",
+            tar_payload=tar_payload.getvalue(),
+        )
+    )
+
+    def _fail_extractall(self, path=".", members=None, *, numeric_owner=False):
+        raise AssertionError("deb hydration should not call tarfile.extractall()")
+
+    monkeypatch.setattr(tarfile.TarFile, "extractall", _fail_extractall)
+
+    payload = watchman_runtime_loader_module._read_deb_member_bytes(
+        archive_path,
+        source_root_prefix=PurePosixPath("usr/local"),
+        source_relative_path=PurePosixPath("bin/watchman"),
+    )
+
+    assert payload == b"#!/bin/sh\necho native-watchman\n"
+
+
+def test_read_deb_member_bytes_rejects_non_regular_target_member(
+    tmp_path: Path,
+) -> None:
+    tar_payload = io.BytesIO()
+    with tarfile.open(fileobj=tar_payload, mode="w:gz") as handle:
+        watchman_link = tarfile.TarInfo("usr/local/bin/watchman")
+        watchman_link.type = tarfile.SYMTYPE
+        watchman_link.linkname = "usr/local/bin/watchman-real"
+        handle.addfile(watchman_link)
+
+    archive_path = tmp_path / "watchman.deb"
+    archive_path.write_bytes(
+        _build_deb_archive(
+            data_member_name="data.tar.gz",
+            tar_payload=tar_payload.getvalue(),
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="not a regular file"):
+        watchman_runtime_loader_module._read_deb_member_bytes(
+            archive_path,
+            source_root_prefix=PurePosixPath("usr/local"),
+            source_relative_path=PurePosixPath("bin/watchman"),
+        )
 
 
 def test_materialize_watchman_binary_writes_windows_payload_tree(
