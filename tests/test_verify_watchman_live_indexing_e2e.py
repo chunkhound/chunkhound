@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
 from scripts import verify_watchman_live_indexing_e2e as live_verifier
@@ -90,6 +90,48 @@ def test_resolve_native_watchman_process_normalizes_path_variants(
     )
 
     assert resolved is process
+
+
+def test_assert_sidecar_uses_installed_runtime_accepts_runtime_bin_then_venv_on_windows(
+    monkeypatch,
+) -> None:
+    process = SimpleNamespace(
+        environ=lambda: {
+            "PATH": (
+                r"C:\runtime\bin;C:\venv\Scripts;C:\Windows\System32"
+            ),
+            "VIRTUAL_ENV": r"C:\venv",
+        }
+    )
+    monkeypatch.setattr(
+        live_verifier,
+        "_resolve_native_watchman_process",
+        lambda pid, expected_binary_path: process,
+    )
+    monkeypatch.setattr(
+        live_verifier,
+        "_python_path",
+        lambda venv_dir: PureWindowsPath(r"C:\venv\Scripts\python.exe"),
+    )
+    monkeypatch.setattr(live_verifier.os, "pathsep", ";", raising=False)
+    monkeypatch.setattr(
+        live_verifier.os.path,
+        "normcase",
+        lambda value: str(value).replace("/", "\\").lower(),
+    )
+    monkeypatch.setattr(
+        live_verifier.os.path,
+        "normpath",
+        lambda value: str(value).replace("/", "\\"),
+    )
+
+    live_verifier._assert_sidecar_uses_installed_runtime(
+        {
+            "watchman_pid": 123,
+            "watchman_binary_path": r"C:\runtime\bin\watchman.exe",
+        },
+        venv_dir=Path(r"C:\venv"),
+    )
 
 
 def test_remove_tree_with_retries_terminates_windows_processes_using_root(

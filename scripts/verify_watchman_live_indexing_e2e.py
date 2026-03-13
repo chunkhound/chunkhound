@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import ntpath
 import os
 import shutil
 import subprocess
@@ -374,7 +375,33 @@ def _assert_sidecar_uses_installed_runtime(
             f"{process_env.get('VIRTUAL_ENV')!r}"
         )
     path_entries = process_env.get("PATH", "").split(os.pathsep)
-    if not path_entries or path_entries[0] != str(expected_bin_dir):
+    normalized_entries = [
+        os.path.normcase(os.path.normpath(entry))
+        for entry in path_entries
+        if entry
+    ]
+    expected_venv_entry = os.path.normcase(os.path.normpath(str(expected_bin_dir)))
+    expected_runtime_dir = realtime.get("watchman_binary_path")
+    runtime_entry: str | None = None
+    if isinstance(expected_runtime_dir, str) and expected_runtime_dir:
+        runtime_entry = os.path.normcase(
+            os.path.normpath(ntpath.dirname(expected_runtime_dir))
+        )
+
+    if not normalized_entries:
+        raise RuntimeError(
+            "Watchman sidecar PATH was not pinned to the installed-wheel "
+            f"virtualenv: {process_env.get('PATH')!r}"
+        )
+    if runtime_entry is not None and normalized_entries[0] == runtime_entry:
+        if len(normalized_entries) < 2 or normalized_entries[1] != expected_venv_entry:
+            raise RuntimeError(
+                "Watchman sidecar PATH did not keep the installed-wheel virtualenv "
+                "immediately after the materialized runtime directory: "
+                f"{process_env.get('PATH')!r}"
+            )
+        return
+    if normalized_entries[0] != expected_venv_entry:
         raise RuntimeError(
             "Watchman sidecar PATH was not pinned to the installed-wheel "
             f"virtualenv: {process_env.get('PATH')!r}"
