@@ -101,6 +101,10 @@ def _require_supported_build_host(
     return host_platform
 
 
+def _should_skip_native_runtime_for_build_version(version: str) -> bool:
+    return version == "editable"
+
+
 def _platform_only_tag() -> str:
     for tag in tags.sys_tags():
         if tag.interpreter == "py3" and tag.abi == "none" and tag.platform != "any":
@@ -118,9 +122,13 @@ class CustomBuildHook(BuildHookInterface):
     PLUGIN_NAME = "custom"
 
     def initialize(self, version: str, build_data: dict[str, object]) -> None:
-        del version
         supported_platforms = _load_supported_watchman_platforms()
-        _require_supported_build_host(supported_platforms)
+        try:
+            _require_supported_build_host(supported_platforms)
+        except RuntimeError:
+            if _should_skip_native_runtime_for_build_version(version):
+                return
+            raise
         force_include = build_data.setdefault("force_include", {})
         if not isinstance(force_include, dict):
             raise RuntimeError("hatch build_data.force_include must be a mapping")

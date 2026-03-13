@@ -64,7 +64,7 @@ def test_custom_build_hook_hydrates_runtime_for_host(
 
     build_data: dict[str, object] = {}
     hook = object.__new__(hatch_build.CustomBuildHook)
-    hook.initialize("0.0.0", build_data)
+    hook.initialize("editable", build_data)
 
     assert calls == ["hydrated"]
     assert build_data["force_include"] == {"src": "dst"}
@@ -72,7 +72,7 @@ def test_custom_build_hook_hydrates_runtime_for_host(
     assert isinstance(build_data["tag"], str)
 
 
-def test_custom_build_hook_rejects_unsupported_host(
+def test_custom_build_hook_skips_native_runtime_for_unsupported_editable_build(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -83,12 +83,35 @@ def test_custom_build_hook_rejects_unsupported_host(
     monkeypatch.setattr(
         hatch_build,
         "_hydrate_runtime_for_build",
-        lambda: pytest.fail("unsupported hosts should fail before runtime hydration"),
+        lambda: pytest.fail(
+            "unsupported editable builds should skip native runtime hydration"
+        ),
+    )
+
+    build_data: dict[str, object] = {"force_include": {"existing": "entry"}}
+    hook = object.__new__(hatch_build.CustomBuildHook)
+    hook.initialize("editable", build_data)
+
+    assert build_data == {"force_include": {"existing": "entry"}}
+
+
+def test_custom_build_hook_rejects_unsupported_wheel_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        hatch_build,
+        "_host_watchman_platform",
+        lambda **_: "macos-arm64",
+    )
+    monkeypatch.setattr(
+        hatch_build,
+        "_hydrate_runtime_for_build",
+        lambda: pytest.fail("unsupported wheel builds should fail before hydration"),
     )
 
     build_data: dict[str, object] = {"force_include": {"existing": "entry"}}
     hook = object.__new__(hatch_build.CustomBuildHook)
     with pytest.raises(RuntimeError, match="macos-arm64"):
-        hook.initialize("0.0.0", build_data)
+        hook.initialize("standard", build_data)
 
     assert build_data == {"force_include": {"existing": "entry"}}
