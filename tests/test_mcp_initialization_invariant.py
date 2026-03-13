@@ -149,6 +149,33 @@ class TestNonBlockingInitialization:
         server._run_directory_scan.assert_awaited_once()  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
+    async def test_watchman_start_failure_skips_initial_scan(self, tmp_path: Path):
+        """Watchman fail-fast startup should not enter the initial scan path."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.realtime_backend = "watchman"
+
+        server = ConcreteMCPServer(config=config)
+        server.realtime_indexing = MagicMock()
+        server.realtime_indexing.monitoring_ready = asyncio.Event()
+        server.realtime_indexing._MONITORING_READY_TIMEOUT_SECONDS = 0.01
+        server._run_directory_scan = AsyncMock()  # type: ignore[method-assign]
+
+        async def fail_startup() -> None:
+            raise RuntimeError("watchman startup exploded")
+
+        monitoring_task = asyncio.create_task(fail_startup())
+        await server._coordinated_initial_scan(tmp_path, monitoring_task)
+
+        realtime = server._scan_progress["realtime"]
+        assert realtime["service_state"] == "degraded"
+        assert "Realtime startup failed" in realtime["last_error"]
+        server._run_directory_scan.assert_not_awaited()  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
     async def test_deferred_start_failure_preserves_configured_backend(
         self, tmp_path: Path
     ):

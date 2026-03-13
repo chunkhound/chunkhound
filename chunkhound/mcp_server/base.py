@@ -322,6 +322,12 @@ class MCPServerBase(ABC):
                         f"Realtime startup failed before monitoring readiness: {e}"
                     )
                     self._record_realtime_failure(f"Realtime startup failed: {e}")
+                    if self.requires_strict_startup_barrier():
+                        self.debug_log(
+                            "Strict realtime startup barrier failed; "
+                            "skipping initial scan"
+                        )
+                        return
                 else:
                     self.debug_log(
                         "Realtime startup completed without monitoring readiness; "
