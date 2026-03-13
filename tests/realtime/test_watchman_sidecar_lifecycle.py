@@ -83,12 +83,17 @@ def _wait_for_sidecar_files(
     pidfile_path: Path,
     logfile_path: Path,
 ) -> None:
-    deadline = time.monotonic() + 5.0
+    deadline = time.monotonic() + (
+        5.0 if listener_path_is_filesystem(runtime) else 15.0
+    )
     while time.monotonic() < deadline:
         listener_ready = True
         if listener_path_is_filesystem(runtime):
             listener_ready = socket_path.exists()
-        if listener_ready and pidfile_path.exists() and logfile_path.exists():
+        artifacts_ready = True
+        if listener_path_is_filesystem(runtime):
+            artifacts_ready = pidfile_path.exists() and logfile_path.exists()
+        if listener_ready and artifacts_ready:
             return
         if process.poll() is not None:
             raise AssertionError(
@@ -125,8 +130,8 @@ async def test_private_watchman_sidecar_start_writes_metadata_and_artifacts(
     assert sidecar.paths.metadata_path.is_file()
     if listener_path_is_filesystem(runtime):
         assert sidecar.paths.socket_path.exists()
-    assert sidecar.paths.pidfile_path.exists()
-    assert sidecar.paths.logfile_path.exists()
+        assert sidecar.paths.pidfile_path.exists()
+        assert sidecar.paths.logfile_path.exists()
 
     health = sidecar.get_health()
     assert health["watchman_pid"] == metadata.pid
@@ -154,7 +159,7 @@ async def test_private_watchman_sidecar_start_ignores_poisoned_python_path(
     assert Path(metadata.binary_path).is_file()
     if listener_path_is_filesystem(runtime):
         assert sidecar.paths.socket_path.exists()
-    assert sidecar.paths.pidfile_path.exists()
+        assert sidecar.paths.pidfile_path.exists()
 
     await sidecar.stop()
 
@@ -176,9 +181,9 @@ async def test_private_watchman_sidecar_stop_cleans_state_and_keeps_runtime_cach
     assert not sidecar.paths.metadata_path.exists()
     if listener_path_is_filesystem(runtime):
         assert not sidecar.paths.socket_path.exists()
-    assert not sidecar.paths.pidfile_path.exists()
+        assert not sidecar.paths.pidfile_path.exists()
+        assert sidecar.paths.logfile_path.exists()
     assert not sidecar.paths.statefile_path.exists()
-    assert sidecar.paths.logfile_path.exists()
     assert binary_path.is_file()
 
 
@@ -417,9 +422,9 @@ async def test_private_watchman_sidecar_start_failure_leaves_no_metadata(
     assert not sidecar.paths.metadata_path.exists()
     if listener_path_is_filesystem(resolve_packaged_watchman_runtime()):
         assert not sidecar.paths.socket_path.exists()
-    assert not sidecar.paths.pidfile_path.exists()
+        assert not sidecar.paths.pidfile_path.exists()
+        assert sidecar.paths.logfile_path.exists()
     assert not sidecar.paths.statefile_path.exists()
-    assert sidecar.paths.logfile_path.exists()
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,6 @@ import json
 import os
 import shutil
 import stat
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -461,7 +460,9 @@ def _manifest_sources_from_source_metadata(
     add_source_file(
         primary_source,
         destination_relative_path=relative_binary_path,
-        source_relative_path=primary_source.source_relative_path or relative_binary_path,
+        source_relative_path=(
+            primary_source.source_relative_path or relative_binary_path
+        ),
     )
     for support_relative_path in relative_support_paths:
         override = support_overrides.get(support_relative_path)
@@ -582,8 +583,6 @@ def build_watchman_client_command(
     if runtime.launch_mode == _NATIVE_BINARY_LAUNCH_MODE:
         command.extend(
             [
-                "--pidfile",
-                str(pidfile_path),
                 "--statefile",
                 str(statefile_path),
                 "--logfile",

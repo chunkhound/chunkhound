@@ -119,10 +119,10 @@ class CustomBuildHook(BuildHookInterface):
 
     def initialize(self, version: str, build_data: dict[str, object]) -> None:
         del version
-        host_platform = _require_supported_build_host(
-            _load_supported_watchman_platforms()
-        )
-        del host_platform
+        supported_platforms = _load_supported_watchman_platforms()
+        host_platform = _host_watchman_platform()
+        if host_platform not in supported_platforms:
+            return
         force_include = build_data.setdefault("force_include", {})
         if not isinstance(force_include, dict):
             raise RuntimeError("hatch build_data.force_include must be a mapping")

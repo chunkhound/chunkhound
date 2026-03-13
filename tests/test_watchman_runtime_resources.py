@@ -51,12 +51,16 @@ pytestmark = pytest.mark.requires_native_watchman
             (
                 PurePosixPath("lib/libboost_context.so.1.74.0"),
                 PurePosixPath("lib/libdouble-conversion.so.3"),
+                PurePosixPath("lib/libevent-2.1.so.7"),
                 PurePosixPath("lib/libgflags.so.2.2"),
+                PurePosixPath("lib/liblz4.so.1"),
                 PurePosixPath("lib/libsnappy.so.1"),
+                PurePosixPath("lib/libxxhash.so.0"),
+                PurePosixPath("lib/libzstd.so.1"),
             ),
             "unix_socket",
             {"LD_LIBRARY_PATH": (PurePosixPath("lib"),)},
-            5,
+            9,
         ),
         (
             "Windows",
@@ -163,12 +167,17 @@ def _wait_for_sidecar_files(
     pidfile_path: Path,
     logfile_path: Path,
 ) -> None:
-    deadline = time.monotonic() + 5.0
+    deadline = time.monotonic() + (
+        5.0 if listener_path_is_filesystem(runtime) else 15.0
+    )
     while time.monotonic() < deadline:
         listener_ready = True
         if listener_path_is_filesystem(runtime):
             listener_ready = socket_path.exists()
-        if listener_ready and pidfile_path.exists() and logfile_path.exists():
+        artifacts_ready = True
+        if listener_path_is_filesystem(runtime):
+            artifacts_ready = pidfile_path.exists() and logfile_path.exists()
+        if listener_ready and artifacts_ready:
             return
         if process.poll() is not None:
             raise AssertionError(
@@ -379,6 +388,7 @@ def test_materialized_watchman_binary_supports_private_sidecar_flags(
 ) -> None:
     runtime = resolve_packaged_watchman_runtime()
     binary_path = materialize_watchman_binary(destination_root=tmp_path)
+    runtime_env = _runtime_env(binary_path=binary_path)
     sidecar_root = tmp_path / "sidecar"
     sidecar_root.mkdir(parents=True, exist_ok=True)
     socket_path = sidecar_root / "sock"
@@ -398,7 +408,7 @@ def test_materialized_watchman_binary_supports_private_sidecar_flags(
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        env=_runtime_env(binary_path=binary_path),
+        env=runtime_env,
     )
     try:
         _wait_for_sidecar_files(
@@ -407,6 +417,16 @@ def test_materialized_watchman_binary_supports_private_sidecar_flags(
             socket_path=socket_path,
             pidfile_path=pidfile_path,
             logfile_path=logfile_path,
+        )
+        _run_one_shot_command(
+            runtime=runtime,
+            binary_path=binary_path,
+            socket_path=socket_path,
+            pidfile_path=pidfile_path,
+            statefile_path=statefile_path,
+            logfile_path=logfile_path,
+            command=["version"],
+            env=runtime_env,
         )
         assert process.poll() is None
         cmdline = psutil.Process(process.pid).cmdline()

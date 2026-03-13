@@ -5,8 +5,12 @@
   "support_files": [
     "lib/libboost_context.so.1.74.0",
     "lib/libdouble-conversion.so.3",
+    "lib/libevent-2.1.so.7",
     "lib/libgflags.so.2.2",
-    "lib/libsnappy.so.1"
+    "lib/liblz4.so.1",
+    "lib/libsnappy.so.1",
+    "lib/libxxhash.so.0",
+    "lib/libzstd.so.1"
   ],
   "launch_mode": "native_binary",
   "listener_transport": "unix_socket",
@@ -33,6 +37,13 @@
       "source_root_prefix": "usr/lib/x86_64-linux-gnu",
       "source_relative_path": "libdouble-conversion.so.3"
     },
+    "lib/libevent-2.1.so.7": {
+      "source_url": "https://deb.debian.org/debian/pool/main/libe/libevent/libevent-2.1-7_2.1.12-stable-8_amd64.deb",
+      "source_sha256": "ca8858a7095ade7776c9f73437812423a45ccd90de2079e8c34830d291df290f",
+      "source_archive_format": "deb",
+      "source_root_prefix": "usr/lib/x86_64-linux-gnu",
+      "source_relative_path": "libevent-2.1.so.7"
+    },
     "lib/libgflags.so.2.2": {
       "source_url": "https://deb.debian.org/debian/pool/main/g/gflags/libgflags2.2_2.2.2-2_amd64.deb",
       "source_sha256": "288af17a1d3a0955f56c8347ea81bd33534add8b22c5b1b4771d8ac1c85b5ba0",
@@ -40,12 +51,33 @@
       "source_root_prefix": "usr/lib/x86_64-linux-gnu",
       "source_relative_path": "libgflags.so.2.2"
     },
+    "lib/liblz4.so.1": {
+      "source_url": "https://deb.debian.org/debian/pool/main/l/lz4/liblz4-1_1.9.4-1_amd64.deb",
+      "source_sha256": "64cde86cef1deaf828bd60297839b59710b5cd8dc50efd4f12643caaee9389d3",
+      "source_archive_format": "deb",
+      "source_root_prefix": "usr/lib/x86_64-linux-gnu",
+      "source_relative_path": "liblz4.so.1"
+    },
     "lib/libsnappy.so.1": {
       "source_url": "https://deb.debian.org/debian/pool/main/s/snappy/libsnappy1v5_1.1.9-3_amd64.deb",
       "source_sha256": "a2ec50d0f92864e7524c96352bc2c62221126ee1ef58f77af7bf369c60b6e98f",
       "source_archive_format": "deb",
       "source_root_prefix": "usr/lib/x86_64-linux-gnu",
       "source_relative_path": "libsnappy.so.1"
+    },
+    "lib/libxxhash.so.0": {
+      "source_url": "https://deb.debian.org/debian/pool/main/x/xxhash/libxxhash0_0.8.1-1_amd64.deb",
+      "source_sha256": "6c19a5d18c8350744581fbd25d5d29e2b7101053e25aafa4e1ffcc2b505b2f1c",
+      "source_archive_format": "deb",
+      "source_root_prefix": "usr/lib/x86_64-linux-gnu",
+      "source_relative_path": "libxxhash.so.0"
+    },
+    "lib/libzstd.so.1": {
+      "source_url": "https://deb.debian.org/debian/pool/main/libz/libzstd/libzstd1_1.5.4+dfsg2-5_amd64.deb",
+      "source_sha256": "6315b5ac38b724a710fb96bf1042019398cb656718b1522279a5185ed39318fa",
+      "source_archive_format": "deb",
+      "source_root_prefix": "usr/lib/x86_64-linux-gnu",
+      "source_relative_path": "libzstd.so.1"
     }
   },
   "packaging_decision": "ChunkHound ships native upstream Watchman daemon payloads in platform-specific wheels for Linux x86_64 and Windows x86_64; macOS remains an explicit fallback platform until native payloads are validated on a macOS host."

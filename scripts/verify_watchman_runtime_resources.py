@@ -264,14 +264,18 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                     "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
                     "env=runtime_env)"
                 ),
-                "    deadline = time.monotonic() + 5.0",
+                (
+                    "    deadline = time.monotonic() + ("
+                    "5.0 if listener_path_is_filesystem(runtime) else 15.0)"
+                ),
                 "    while time.monotonic() < deadline:",
                 "        listener_ready = True",
                 "        if listener_path_is_filesystem(runtime):",
                 "            listener_ready = Path(socket_path).exists()",
                 (
-                    "        if (listener_ready and pidfile_path.exists() and "
-                    "logfile_path.exists()):"
+                    "        if (listener_ready and ("
+                    "not listener_path_is_filesystem(runtime) or "
+                    "(pidfile_path.exists() and logfile_path.exists()))):"
                 ),
                 "            try:",
                 "                _run_one_shot(['version'])",
@@ -286,8 +290,8 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                 "        time.sleep(0.05)",
                 "    if listener_path_is_filesystem(runtime):",
                 "        assert Path(socket_path).exists()",
-                "    assert pidfile_path.exists()",
-                "    assert logfile_path.exists()",
+                "        assert pidfile_path.exists()",
+                "        assert logfile_path.exists()",
                 "    assert sidecar.poll() is None",
                 "    cmdline = psutil.Process(sidecar.pid).cmdline()",
                 "    assert cmdline and cmdline[0] == str(binary_path)",

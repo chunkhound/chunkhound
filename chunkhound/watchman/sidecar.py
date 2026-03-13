@@ -241,8 +241,11 @@ class PrivateWatchmanSidecar:
     """Manage a ChunkHound-owned private Watchman process."""
 
     _READY_TIMEOUT_SECONDS = 5.0
+    _NAMED_PIPE_READY_TIMEOUT_SECONDS = 15.0
     _PROCESS_EXIT_TIMEOUT_SECONDS = 5.0
     _READY_POLL_INTERVAL_SECONDS = 0.05
+    _PROBE_TIMEOUT_SECONDS = 1.0
+    _NAMED_PIPE_PROBE_TIMEOUT_SECONDS = 3.0
     _PROCESS_START_TIME_EPSILON_SECONDS = 0.1
     _UNIX_SOCKET_PATH_MAX_BYTES = 104 if sys.platform == "darwin" else 107
 
@@ -493,7 +496,7 @@ class PrivateWatchmanSidecar:
             )
 
     async def _wait_for_ready(self) -> None:
-        deadline = asyncio.get_running_loop().time() + self._READY_TIMEOUT_SECONDS
+        deadline = asyncio.get_running_loop().time() + self._ready_timeout_seconds()
         while True:
             if self._process is None:
                 raise RuntimeError("Watchman sidecar process was not started")
@@ -508,11 +511,13 @@ class PrivateWatchmanSidecar:
             if self._runtime is None:
                 raise RuntimeError("Watchman runtime metadata was not resolved")
 
-            ready_paths = [self.paths.logfile_path]
-            if self._runtime.launch_mode == "native_binary":
-                ready_paths.append(self.paths.pidfile_path)
-            else:
-                ready_paths.append(self.paths.statefile_path)
+            ready_paths: list[Path] = []
+            if listener_path_is_filesystem(self._runtime):
+                ready_paths.append(self.paths.logfile_path)
+                if self._runtime.launch_mode == "native_binary":
+                    ready_paths.append(self.paths.pidfile_path)
+                else:
+                    ready_paths.append(self.paths.statefile_path)
 
             if (
                 all(path.exists() for path in ready_paths)
@@ -521,8 +526,10 @@ class PrivateWatchmanSidecar:
                 return
 
             if asyncio.get_running_loop().time() >= deadline:
+                detail = self._read_recent_log_detail()
                 raise RuntimeError(
                     "Watchman sidecar did not become command-ready before timeout"
+                    f"{detail}"
                 )
 
             await asyncio.sleep(self._READY_POLL_INTERVAL_SECONDS)
@@ -552,7 +559,7 @@ class PrivateWatchmanSidecar:
                 cwd=self.paths.project_root,
                 env=runtime_env,
                 text=True,
-                timeout=1.0,
+                timeout=self._probe_timeout_seconds(),
             )
         except (OSError, subprocess.SubprocessError):
             return False
@@ -569,6 +576,39 @@ class PrivateWatchmanSidecar:
             if isinstance(payload, dict) and not isinstance(payload.get("error"), str):
                 return True
         return False
+
+    def _ready_timeout_seconds(self) -> float:
+        if (
+            self._runtime is not None
+            and not listener_path_is_filesystem(self._runtime)
+        ):
+            return self._NAMED_PIPE_READY_TIMEOUT_SECONDS
+        return self._READY_TIMEOUT_SECONDS
+
+    def _probe_timeout_seconds(self) -> float:
+        if (
+            self._runtime is not None
+            and not listener_path_is_filesystem(self._runtime)
+        ):
+            return self._NAMED_PIPE_PROBE_TIMEOUT_SECONDS
+        return self._PROBE_TIMEOUT_SECONDS
+
+    def _read_recent_log_detail(self) -> str:
+        try:
+            if not self.paths.logfile_path.exists():
+                return ""
+            lines = self.paths.logfile_path.read_text(
+                encoding="utf-8",
+                errors="replace",
+            ).splitlines()
+        except OSError:
+            return ""
+        if not lines:
+            return ""
+        tail = " | ".join(line.strip() for line in lines[-4:] if line.strip())
+        if not tail:
+            return ""
+        return f"; recent log: {tail}"
 
     def _read_process_start_time_epoch(self, pid: int) -> float | None:
         try:

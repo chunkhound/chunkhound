@@ -53,6 +53,11 @@ def test_custom_build_hook_hydrates_runtime_for_host(
     calls: list[str] = []
     monkeypatch.setattr(
         hatch_build,
+        "_host_watchman_platform",
+        lambda **_: "linux-x86_64",
+    )
+    monkeypatch.setattr(
+        hatch_build,
         "_hydrate_runtime_for_build",
         lambda: (calls.append("hydrated") or {"src": "dst"}),
     )
@@ -65,3 +70,24 @@ def test_custom_build_hook_hydrates_runtime_for_host(
     assert build_data["force_include"] == {"src": "dst"}
     assert build_data["pure_python"] is False
     assert isinstance(build_data["tag"], str)
+
+
+def test_custom_build_hook_skips_native_hydration_on_unsupported_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        hatch_build,
+        "_host_watchman_platform",
+        lambda **_: "macos-arm64",
+    )
+    monkeypatch.setattr(
+        hatch_build,
+        "_hydrate_runtime_for_build",
+        lambda: pytest.fail("unsupported hosts should not hydrate native runtime"),
+    )
+
+    build_data: dict[str, object] = {"force_include": {"existing": "entry"}}
+    hook = object.__new__(hatch_build.CustomBuildHook)
+    hook.initialize("0.0.0", build_data)
+
+    assert build_data == {"force_include": {"existing": "entry"}}
