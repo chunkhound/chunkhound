@@ -18,6 +18,7 @@ from typing_extensions import Self
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
 
 from .openai_utils import is_azure_openai_endpoint, is_official_openai_endpoint
+from .voyageai_utils import is_official_voyageai_endpoint
 
 # Error message constants for consistent messaging across config and provider
 RERANK_MODEL_REQUIRED_COHERE = (
@@ -34,7 +35,7 @@ def validate_rerank_configuration(
     provider: str,
     rerank_format: str,
     rerank_model: str | None,
-    rerank_url: str,
+    rerank_url: str | None,
     base_url: str | None,
 ) -> None:
     """Validate rerank configuration consistency.
@@ -51,8 +52,8 @@ def validate_rerank_configuration(
     Raises:
         ValueError: If configuration is invalid
     """
-    # VoyageAI uses SDK-based reranking, doesn't need URL configuration
-    if provider == "voyageai":
+    # VoyageAI uses SDK-based reranking when no rerank_url provided
+    if provider == "voyageai" and not rerank_url:
         return
 
     # For Cohere format, rerank_model is required
@@ -64,7 +65,11 @@ def validate_rerank_configuration(
 
     if is_using_reranking:
         # For relative URLs, we need base_url
-        if not rerank_url.startswith(("http://", "https://")) and not base_url:
+        if (
+            rerank_url
+            and not rerank_url.startswith(("http://", "https://"))
+            and not base_url
+        ):
             raise ValueError(RERANK_BASE_URL_REQUIRED)
 
 
@@ -130,8 +135,8 @@ class EmbeddingConfig(BaseSettings):
         description="Reranking model name (enables multi-hop search if specified)",
     )
 
-    rerank_url: str = Field(
-        default="/rerank",
+    rerank_url: str | None = Field(
+        default=None,
         description=(
             "Rerank endpoint URL. Absolute URLs (http/https) used "
             "as-is for separate services. Relative paths combined "
@@ -204,6 +209,22 @@ class EmbeddingConfig(BaseSettings):
     @model_validator(mode="after")
     def validate_rerank_config(self) -> Self:
         """Validate rerank configuration using shared validation logic."""
+        # TEI format implies a relative /rerank endpoint when no explicit URL is given.
+        # Only auto-set when base_url is present so the factory can resolve it to an
+        # absolute URL; without base_url there is nothing to resolve against.
+        if (
+            self.rerank_format == "tei"
+            and self.rerank_url is None
+            and self.base_url is not None
+        ):
+            self.rerank_url = "/rerank"
+        elif (
+            self.rerank_format == "tei"
+            and self.rerank_url is None
+            and self.base_url is None
+            and self.provider != "voyageai"
+        ):
+            raise ValueError(RERANK_BASE_URL_REQUIRED)
         validate_rerank_configuration(
             provider=self.provider,
             rerank_format=self.rerank_format,
@@ -292,6 +313,8 @@ class EmbeddingConfig(BaseSettings):
         base_config["rerank_format"] = self.rerank_format
         if self.rerank_batch_size is not None:
             base_config["rerank_batch_size"] = self.rerank_batch_size
+        if self.max_concurrent_batches is not None:
+            base_config["max_concurrent_batches"] = self.max_concurrent_batches
 
         return base_config
 
@@ -329,8 +352,10 @@ class EmbeddingConfig(BaseSettings):
                 # Custom endpoints don't require API key
                 return True
         else:
-            # For other providers (voyageai, etc.), always require API key
-            return self.api_key is not None
+            # VoyageAI: only the official endpoint requires an API key
+            if is_official_voyageai_endpoint(self.base_url):
+                return self.api_key is not None
+            return True
 
     def get_missing_config(self) -> list[str]:
         """
@@ -354,15 +379,24 @@ class EmbeddingConfig(BaseSettings):
             elif is_official_openai_endpoint(self.base_url) and not self.api_key:
                 missing.append("api_key (set CHUNKHOUND_EMBEDDING__API_KEY)")
         else:
-            # For other providers (voyageai, etc.), always require API key
-            if not self.api_key:
-                missing.append("api_key (set CHUNKHOUND_EMBEDDING__API_KEY)")
+            # For voyageai with a custom endpoint, API key is optional
+            if not self.api_key and not self.base_url:
+                missing.append(
+                    "api_key (set VOYAGE_API_KEY or CHUNKHOUND_EMBEDDING__API_KEY)"
+                )
 
         return missing
 
     @classmethod
     def add_cli_arguments(cls, parser: argparse.ArgumentParser) -> None:
         """Add embedding-related CLI arguments."""
+        parser.add_argument(
+            "--provider",
+            "--embedding-provider",
+            choices=["openai", "voyageai"],
+            help="Embedding provider (openai or voyageai)",
+        )
+
         parser.add_argument(
             "--model",
             "--embedding-model",
@@ -448,6 +482,17 @@ class EmbeddingConfig(BaseSettings):
         if azure_deployment := os.getenv("CHUNKHOUND_EMBEDDING__AZURE_DEPLOYMENT"):
             config["azure_deployment"] = azure_deployment
 
+        # Fallback: provider-specific env vars (lower priority than CHUNKHOUND_EMBEDDING__ vars)
+        if "api_key" not in config:
+            provider_hint = (
+                config.get("provider")
+                or os.getenv("CHUNKHOUND_EMBEDDING__PROVIDER")
+                or os.getenv("CHUNKHOUND_EMBEDDING_PROVIDER")
+            )
+            if provider_hint == "voyageai":
+                if voyage_key := os.getenv("VOYAGE_API_KEY"):
+                    config["api_key"] = voyage_key
+
         # Reranking configuration
         if rerank_model := os.getenv("CHUNKHOUND_EMBEDDING__RERANK_MODEL"):
             config["rerank_model"] = rerank_model
@@ -467,6 +512,10 @@ class EmbeddingConfig(BaseSettings):
     def extract_cli_overrides(cls, args: Any) -> dict[str, Any]:
         """Extract embedding config from CLI arguments."""
         overrides = {}
+
+        # Handle provider arguments (both variations)
+        if hasattr(args, "provider") and args.provider:
+            overrides["provider"] = args.provider
 
         # Handle model arguments (both variations)
         if hasattr(args, "model") and args.model:

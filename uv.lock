@@ -378,7 +378,6 @@ dependencies = [
     { name = "anthropic" },
     { name = "duckdb" },
     { name = "google-genai" },
-    { name = "hdbscan" },
     { name = "httpx" },
     { name = "lancedb" },
     { name = "loguru" },
@@ -402,6 +401,8 @@ dependencies = [
     { name = "readchar" },
     { name = "rich" },
     { name = "scikit-learn" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.16.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "tiktoken" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "tree-sitter" },
@@ -467,7 +468,6 @@ requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
     { name = "duckdb", specifier = ">=1.4.0" },
     { name = "google-genai", specifier = ">=1.51.0" },
-    { name = "hdbscan", specifier = ">=0.8.38" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "lancedb", specifier = ">=0.25.3" },
     { name = "loguru", specifier = ">=0.6.0" },
@@ -497,6 +497,7 @@ requires-dist = [
     { name = "rich", specifier = ">=13.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
     { name = "scikit-learn", specifier = ">=1.3.0" },
+    { name = "scipy", specifier = ">=1.7.0" },
     { name = "tiktoken", specifier = ">=0.9.0" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.0" },
     { name = "tree-sitter", specifier = ">=0.25.0" },
@@ -792,31 +793,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/01/ee/02a2c011bdab74c6fb3c75474d40b3052059d95df7e73351460c8588d963/h11-0.16.0.tar.gz", hash = "sha256:4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1", size = 101250, upload-time = "2025-04-24T03:35:25.427Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d33995617b185d14b22401f75ca86f384e87ff1/h11-0.16.0-py3-none-any.whl", hash = "sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86", size = 37515, upload-time = "2025-04-24T03:35:24.344Z" },
-]
-
-[[package]]
-name = "hdbscan"
-version = "0.8.41"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "joblib" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "scikit-learn" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.16.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/0c/22/32a66dd4ce72145ec1b792c794b98897be467bdf18c10aa8b48275530b11/hdbscan-0.8.41.tar.gz", hash = "sha256:e41e823e5bb21ff2173f252d226266b1dda82bdbba5d89106eafb251429dff3d", size = 7091384, upload-time = "2025-12-12T15:48:30.807Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/68/7a/8bc50300f7c1240284b8a69d6c69c59ba37e6349bc9ca097760d3efae077/hdbscan-0.8.41-cp310-cp310-macosx_13_0_x86_64.whl", hash = "sha256:0589ea22e225e4ed6fae8b0a6ac6d18c0aff15165b8ddea7561962e1006b7e63", size = 755274, upload-time = "2025-12-12T15:49:22.72Z" },
-    { url = "https://files.pythonhosted.org/packages/10/d9/cf2dc6c14ff2a85f2f48a5c3e034df3690b655f5dc09e2e7db6bc140e0ce/hdbscan-0.8.41-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:3970e33b7b370cdca5d0fc5d31171c4b5d588590ec6f04b83e08f743099ba950", size = 4162517, upload-time = "2025-12-12T15:48:27.787Z" },
-    { url = "https://files.pythonhosted.org/packages/63/f1/37daced2420b5edaea6fb91875fa4c08e1ef72eaf6f84bc8d4442f45c1dc/hdbscan-0.8.41-cp310-cp310-win_amd64.whl", hash = "sha256:7a689386170d91d1bd9386665b521e4ae66b6a78e0b7e34265ea5b1aa1eb165f", size = 687021, upload-time = "2025-12-12T15:48:57.521Z" },
-    { url = "https://files.pythonhosted.org/packages/70/58/5c1cbfac6dd5fd4310da17b09950c68dba1a7c1bdd267eb31468b140bd3a/hdbscan-0.8.41-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:be948fc76d0035d93d309920f14ab6a0185580a63c5a63b05739f08b45dc6c03", size = 1394443, upload-time = "2025-12-12T15:49:56.098Z" },
-    { url = "https://files.pythonhosted.org/packages/ef/f1/9a17849751488049003a6af08b270eac1e0135d1d29dfd006bcc4edcca00/hdbscan-0.8.41-cp311-cp311-win_amd64.whl", hash = "sha256:0af3e3bab1eb6b07ea497afc4d2db1b58122974fb052bd21f0ea4b42fcf8d535", size = 687100, upload-time = "2025-12-12T15:49:57.879Z" },
-    { url = "https://files.pythonhosted.org/packages/f6/6b/b589c0e903e00108c62f324e99840ab050f1da344fab9cf143ce8ebf1d38/hdbscan-0.8.41-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:07ae4c44098449bd9de12145ad17e92ef699754a43988cbea2dd1a95b89bf142", size = 1393282, upload-time = "2025-12-12T15:52:38.472Z" },
-    { url = "https://files.pythonhosted.org/packages/59/ab/6314e52aee546cc14b74fbb575b8713eeec2255880ec99d6490838306d3a/hdbscan-0.8.41-cp312-cp312-win_amd64.whl", hash = "sha256:dce39272d2d4f1dde50dde9cc428cadb84ed16326de872b01761f7ec4f690419", size = 671752, upload-time = "2025-12-12T15:51:33.213Z" },
-    { url = "https://files.pythonhosted.org/packages/90/51/0befb66e11c5989b7ec419da2bc652023d30113d4bf4df09cf42a42494d8/hdbscan-0.8.41-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:8c2f0111395bd1beba1c095edf6b123ec529c8ebd7f4ccd02aaabd6b016454de", size = 1385747, upload-time = "2025-12-12T15:49:25.195Z" },
-    { url = "https://files.pythonhosted.org/packages/37/a6/e208ef8bb6e9e97e4b274951160a5bb754f20a79d5673563222d79b00461/hdbscan-0.8.41-cp313-cp313-win_amd64.whl", hash = "sha256:e90f6b9e2fcc94f9ac09d537f8b414191d1a837d62a355edd78e12820b63f0e2", size = 671718, upload-time = "2025-12-12T15:51:39.379Z" },
 ]
 
 [[package]]
