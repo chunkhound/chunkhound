@@ -15,6 +15,8 @@ from typing import Any
 
 import psutil
 
+from scripts import watchman_verifier_cleanup
+
 _MCP_INIT_PARAMS = {
     "protocolVersion": "2024-11-05",
     "clientInfo": {"name": "watchman-wheel-e2e", "version": "0.0.1"},
@@ -25,78 +27,30 @@ _SEARCH_TIMEOUT_SECONDS = 30.0
 
 
 def _terminate_process_tree(pid: int) -> None:
-    try:
-        root = psutil.Process(pid)
-    except psutil.NoSuchProcess:
-        return
-
-    try:
-        processes = root.children(recursive=True)
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        processes = []
-    processes.append(root)
-
-    for process in processes:
-        try:
-            process.terminate()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-
-    _, alive = psutil.wait_procs(processes, timeout=2.0)
-    for process in alive:
-        try:
-            process.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-    psutil.wait_procs(alive, timeout=2.0)
+    watchman_verifier_cleanup.terminate_process_tree(pid, psutil_module=psutil)
 
 
 def _terminate_processes_using_root(root: Path) -> None:
-    root_str = str(root)
-    current_pid = os.getpid()
-    candidates: list[int] = []
-
-    for process in psutil.process_iter(["pid", "cwd", "cmdline"]):
-        pid = process.info.get("pid")
-        if not isinstance(pid, int) or pid == current_pid:
-            continue
-
-        try:
-            cwd = process.info.get("cwd")
-            cmdline = process.info.get("cmdline") or []
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-
-        if isinstance(cwd, str) and cwd.startswith(root_str):
-            candidates.append(pid)
-            continue
-        if any(isinstance(arg, str) and root_str in arg for arg in cmdline):
-            candidates.append(pid)
-
-    for pid in candidates:
-        _terminate_process_tree(pid)
+    watchman_verifier_cleanup.terminate_processes_using_root(
+        root,
+        os_module=os,
+        psutil_module=psutil,
+        process_terminator=_terminate_process_tree,
+    )
 
 
 def _remove_tree_with_retries(
     root: Path, *, attempts: int = 5, base_delay_seconds: float = 0.2
 ) -> None:
-    last_error: OSError | None = None
-    for attempt in range(attempts):
-        try:
-            shutil.rmtree(root)
-            return
-        except FileNotFoundError:
-            return
-        except OSError as error:
-            last_error = error
-            if os.name == "nt":
-                _terminate_processes_using_root(root)
-            if attempt == attempts - 1:
-                raise
-            time.sleep(base_delay_seconds * (attempt + 1))
-
-    if last_error is not None:
-        raise last_error
+    watchman_verifier_cleanup.remove_tree_with_retries(
+        root,
+        attempts=attempts,
+        base_delay_seconds=base_delay_seconds,
+        os_module=os,
+        shutil_module=shutil,
+        time_module=time,
+        process_root_terminator=_terminate_processes_using_root,
+    )
 
 
 class SubprocessJsonRpcClient:
