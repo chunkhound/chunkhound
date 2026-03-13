@@ -73,7 +73,9 @@ def _ensure_mp_start_method() -> None:
     if current != desired:
         try:
             multiprocessing.set_start_method(desired, force=True)
-            logger.debug(f"Set multiprocessing start method to '{desired}' (was {current})")
+            logger.debug(
+                f"Set multiprocessing start method to '{desired}' (was {current})"
+            )
         except RuntimeError:
             logger.debug(
                 f"Multiprocessing start method remains '{multiprocessing.get_start_method()}'; desired '{desired}'"
@@ -984,7 +986,9 @@ class IndexingCoordinator(BaseService):
                             if chunk.id is not None
                         ]
                         if chunk_ids_to_delete:
-                            await self._db.delete_chunks_batch_async(chunk_ids_to_delete)
+                            await self._db.delete_chunks_batch_async(
+                                chunk_ids_to_delete
+                            )
 
                     # Store new/modified chunks (pass models directly)
                     chunks_to_store = chunk_diff.added + chunk_diff.modified
@@ -1186,7 +1190,9 @@ class IndexingCoordinator(BaseService):
                         if db_tuple is None:
                             # Fallback for providers without execute_query() (e.g., fake or limited providers)
                             try:
-                                rec = await self._db.get_file_by_path_async(rel, as_model=False)
+                                rec = await self._db.get_file_by_path_async(
+                                    rel, as_model=False
+                                )
                                 if rec:
                                     sz = (
                                         rec.get("size")
@@ -1218,7 +1224,9 @@ class IndexingCoordinator(BaseService):
                                     )
                             except Exception:
                                 logger.debug(
-                                    "change-detection fallback failed for %s", rel, exc_info=True
+                                    "change-detection fallback failed for %s",
+                                    rel,
+                                    exc_info=True,
                                 )
                                 db_tuple = None
                         st = f.stat()
@@ -1351,7 +1359,9 @@ class IndexingCoordinator(BaseService):
                     self.progress.update(parse_task, completed=task.total)
 
             # Optimize tables after parsing/chunking (only if fragmentation warrants it)
-            if agg_total_chunks > 0 and self._db.should_optimize(operation="post-chunking"):
+            if agg_total_chunks > 0 and self._db.should_optimize(
+                operation="post-chunking"
+            ):
                 logger.debug("Optimizing database after chunking phase...")
                 self._db.optimize_tables()
 
@@ -1363,12 +1373,20 @@ class IndexingCoordinator(BaseService):
                             ((_t1 - _t0) if (_t1 and _t0) else 0.0) * 1000.0, 3
                         ),
                         "cleanup_ms": round(
-                            ((_t3 - _t2) if (_t3 is not None and _t2 is not None) else 0.0)
+                            (
+                                (_t3 - _t2)
+                                if (_t3 is not None and _t2 is not None)
+                                else 0.0
+                            )
                             * 1000.0,
                             3,
                         ),
                         "change_scan_ms": round(
-                            ((_t5 - _t4) if (_t5 is not None and _t4 is not None) else 0.0)
+                            (
+                                (_t5 - _t4)
+                                if (_t5 is not None and _t4 is not None)
+                                else 0.0
+                            )
                             * 1000.0,
                             3,
                         ),
@@ -2652,14 +2670,7 @@ class IndexingCoordinator(BaseService):
         except Exception:
             base = str(root)
         try:
-            items = tuple(
-                sorted(
-                    [
-                        str(x)
-                        for x in list(cfg_excludes)
-                    ]
-                )
-            )
+            items = tuple(sorted([str(x) for x in list(cfg_excludes)]))
         except Exception:
             items = tuple()
         return (base, items, 1 if prune_ignored_gitfile_roots else 0)

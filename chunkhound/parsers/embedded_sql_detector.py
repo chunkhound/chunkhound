@@ -35,8 +35,13 @@ class EmbeddedSqlMatch:
 _PRIMARY_KEYWORD_PATTERNS = {
     keyword: re.compile(r"\b" + keyword + r"\b")
     for keyword in [
-        "SELECT", "INSERT", "UPDATE", "DELETE",
-        "CREATE", "ALTER", "DROP",
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "CREATE",
+        "ALTER",
+        "DROP",
     ]
 }
 
@@ -46,13 +51,15 @@ _DDL_KEYWORDS = {"CREATE", "ALTER", "DROP"}
 _SECONDARY_KEYWORD_PATTERNS = {
     keyword: re.compile(r"\b" + keyword + r"\b")
     for keyword in [
-        "HAVING", "LIMIT", "OFFSET",
+        "HAVING",
+        "LIMIT",
+        "OFFSET",
     ]
 }
 
 _SQL_PATTERNS: list[tuple[re.Pattern, int, bool]] = [
-    (re.compile(r"\bFROM\s+\w+"), 25, True),   # weak — matches English prose
-    (re.compile(r"\bWHERE\s+\w+"), 20, True),   # weak — matches English prose
+    (re.compile(r"\bFROM\s+\w+"), 25, True),  # weak — matches English prose
+    (re.compile(r"\bWHERE\s+\w+"), 20, True),  # weak — matches English prose
     (re.compile(r"\bJOIN\s+\w+"), 20, False),
     (re.compile(r"\bSET\s+\w+\s*="), 20, False),
     (re.compile(r"\bORDER\s+BY\b"), 20, False),
@@ -104,7 +111,7 @@ def _select_from_combo_fires(content_upper: str) -> tuple[bool, bool]:
         return False, False
     if m_from.start() <= m_select.end():
         return False, False  # FROM appears before or adjacent to SELECT
-    gap = content_upper[m_select.end():m_from.start()].strip()
+    gap = content_upper[m_select.end() : m_from.start()].strip()
     if not gap:
         return False, False  # adjacent keywords — English phrase pattern
     if _NON_ALPHA_SPACE_RE.search(gap):
@@ -121,8 +128,8 @@ def _select_from_combo_fires(content_upper: str) -> tuple[bool, bool]:
 _STRING_NODE_TYPES = {
     "string",
     "string_literal",
-    "string_fragment",   # defensive: parent `string`/`template_string` matched first;
-    "string_content",    # fires only if a grammar exposes these as top-level nodes
+    "string_fragment",  # defensive: parent `string`/`template_string` matched first;
+    "string_content",  # fires only if a grammar exposes these as top-level nodes
     "template_string",  # JavaScript/TypeScript template strings
     "encapsed_string",  # PHP strings
     "raw_string_literal",
@@ -165,11 +172,7 @@ class EmbeddedSqlDetector:
         self._visit_node(root_node, matches)
         return matches
 
-    def _visit_node(
-        self,
-        node: TSNode,
-        matches: list[EmbeddedSqlMatch]
-    ) -> None:
+    def _visit_node(self, node: TSNode, matches: list[EmbeddedSqlMatch]) -> None:
         """Iteratively visit nodes to find string literals (avoids recursion limit)."""
         stack = [node]
         while stack:
@@ -179,11 +182,7 @@ class EmbeddedSqlDetector:
                 continue  # skip children of string nodes to avoid duplicates
             stack.extend(reversed(current.children))
 
-    def _check_string_node(
-        self,
-        node: TSNode,
-        matches: list[EmbeddedSqlMatch]
-    ) -> None:
+    def _check_string_node(self, node: TSNode, matches: list[EmbeddedSqlMatch]) -> None:
         """Check if a string node contains SQL.
 
         Args:
@@ -191,7 +190,9 @@ class EmbeddedSqlDetector:
             matches: List to append matches to
         """
         # Extract string content
-        string_content = node.text.decode("utf-8", errors="replace") if node.text else ""
+        string_content = (
+            node.text.decode("utf-8", errors="replace") if node.text else ""
+        )
 
         # Remove string delimiters (quotes)
         cleaned_content = self._clean_string_content(string_content)
@@ -215,7 +216,7 @@ class EmbeddedSqlDetector:
             start_line=node.start_point[0] + 1,  # Convert to 1-indexed
             end_line=node.end_point[0] + 1,
             host_context=context,
-            confidence=confidence
+            confidence=confidence,
         )
 
         matches.append(match)
@@ -234,7 +235,7 @@ class EmbeddedSqlDetector:
         stripped = _STRING_PREFIX_RE.sub("", raw_string)
         for quote in ['"""', "'''", '"', "'", "`"]:
             if stripped.startswith(quote) and stripped.endswith(quote):
-                content = stripped[len(quote):-len(quote)]
+                content = stripped[len(quote) : -len(quote)]
                 break
         else:
             content = stripped
@@ -346,19 +347,29 @@ class EmbeddedSqlDetector:
             node_type = current.type
 
             # Check for function-like nodes (exclude call sites)
-            if ("function" in node_type or "method" in node_type) and "call" not in node_type:
+            if (
+                "function" in node_type or "method" in node_type
+            ) and "call" not in node_type:
                 # Tree-sitter places identifier/name children before parameter
                 # lists and bodies across all supported languages.
                 for child in current.children:
                     if "identifier" in child.type or "name" in child.type:
-                        name = child.text.decode("utf-8", errors="replace") if child.text else "unknown"
+                        name = (
+                            child.text.decode("utf-8", errors="replace")
+                            if child.text
+                            else "unknown"
+                        )
                         return f"function:{name}"
 
             # Check for class nodes
             if "class" in node_type:
                 for child in current.children:
                     if "identifier" in child.type or "name" in child.type:
-                        name = child.text.decode("utf-8", errors="replace") if child.text else "unknown"
+                        name = (
+                            child.text.decode("utf-8", errors="replace")
+                            if child.text
+                            else "unknown"
+                        )
                         return f"class:{name}"
 
             current = current.parent

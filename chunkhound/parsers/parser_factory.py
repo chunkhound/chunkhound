@@ -422,9 +422,7 @@ class ParserFactory:
         if language in (Language.TEXT, Language.PDF):
             # Text and PDF mappings don't need tree-sitter engine
             mapping = config.mapping_class()
-            parser = UniversalParser(
-                None, mapping, cast_config, detect_embedded_sql
-            )  # type: ignore[arg-type]
+            parser = UniversalParser(None, mapping, cast_config, detect_embedded_sql)  # type: ignore[arg-type]
             wrapped = self._maybe_wrap_yaml_parser(language, parser, cast_config)
             self._parser_cache[cache_key] = wrapped
             return wrapped

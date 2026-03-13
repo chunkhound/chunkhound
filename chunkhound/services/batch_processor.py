@@ -17,9 +17,11 @@ from chunkhound.core.detection import detect_language
 from chunkhound.core.types.common import FileId, Language
 from time import perf_counter
 
+
 def _dbg_log(msg: str) -> None:
     try:
         import datetime
+
         path = os.getenv("CHUNKHOUND_DEBUG_FILE")
         if not path:
             return
@@ -29,6 +31,8 @@ def _dbg_log(msg: str) -> None:
             f.write(f"[{ts}][PID {pid}] {msg}\n")
     except Exception:
         pass
+
+
 from chunkhound.parsers.parser_factory import create_parser_for_language
 
 
@@ -60,8 +64,13 @@ def _parse_file_worker(
     try:
         # Local imports to keep worker picklable and light
         from pathlib import Path as _Path
-        from chunkhound.core.types.common import Language as _Language, FileId as _FileId
-        from chunkhound.parsers.parser_factory import create_parser_for_language as _create
+        from chunkhound.core.types.common import (
+            Language as _Language,
+            FileId as _FileId,
+        )
+        from chunkhound.parsers.parser_factory import (
+            create_parser_for_language as _create,
+        )
 
         language = _Language.from_string(language_value)
         parser = _create(language, detect_embedded_sql=detect_embedded_sql)
@@ -205,7 +214,7 @@ def process_file_batch(
             # Detect language (content-aware for ambiguous extensions)
             language = detect_language(file_path)
             _dbg_log(
-                f"START file={file_path} size_kb={file_stat.st_size/1024:.1f} lang={language.value} "
+                f"START file={file_path} size_kb={file_stat.st_size / 1024:.1f} lang={language.value} "
                 f"tmo_s={timeout_s} min_kb={timeout_min_kb} threshold_kb={config_dict.get('config_file_size_threshold_kb')}"
             )
             t0 = perf_counter()
@@ -221,7 +230,9 @@ def process_file_batch(
                         error="Unknown file type",
                     )
                 )
-                _dbg_log(f"END   file={file_path} status=skipped reason=unknown_type dur_ms={(perf_counter()-t0)*1000:.1f}")
+                _dbg_log(
+                    f"END   file={file_path} status=skipped reason=unknown_type dur_ms={(perf_counter() - t0) * 1000:.1f}"
+                )
                 logger.debug("Skipping file with unknown type: {}", file_path)
                 continue
 
@@ -244,7 +255,9 @@ def process_file_batch(
                             error="large_config_file",
                         )
                     )
-                    _dbg_log(f"END   file={file_path} status=skipped reason=large_config_file dur_ms={(perf_counter()-t0)*1000:.1f}")
+                    _dbg_log(
+                        f"END   file={file_path} status=skipped reason=large_config_file dur_ms={(perf_counter() - t0) * 1000:.1f}"
+                    )
                     continue
 
             # Parse file and generate chunks (with optional per-file timeout)
@@ -273,7 +286,9 @@ def process_file_batch(
                             error="timeout",
                         )
                     )
-                    _dbg_log(f"END   file={file_path} status=skipped reason=timeout dur_ms={(perf_counter()-t0)*1000:.1f}")
+                    _dbg_log(
+                        f"END   file={file_path} status=skipped reason=timeout dur_ms={(perf_counter() - t0) * 1000:.1f}"
+                    )
                     continue
                 elif status == "error":
                     results.append(
@@ -288,7 +303,9 @@ def process_file_batch(
                             error=str(payload),
                         )
                     )
-                    _dbg_log(f"END   file={file_path} status=error reason={payload} dur_ms={(perf_counter()-t0)*1000:.1f}")
+                    _dbg_log(
+                        f"END   file={file_path} status=error reason={payload} dur_ms={(perf_counter() - t0) * 1000:.1f}"
+                    )
                     continue
                 else:
                     chunks_data = payload if isinstance(payload, list) else []
@@ -296,7 +313,9 @@ def process_file_batch(
                 # No timeout path (original behavior)
                 parser = create_parser_for_language(
                     language,
-                    detect_embedded_sql=bool(config_dict.get("detect_embedded_sql", True)),
+                    detect_embedded_sql=bool(
+                        config_dict.get("detect_embedded_sql", True)
+                    ),
                 )
                 if not parser:
                     results.append(
@@ -327,7 +346,9 @@ def process_file_batch(
                     status="success",
                 )
             )
-            _dbg_log(f"END   file={file_path} status=success dur_ms={(perf_counter()-t0)*1000:.1f} chunks={len(chunks_data)}")
+            _dbg_log(
+                f"END   file={file_path} status=success dur_ms={(perf_counter() - t0) * 1000:.1f} chunks={len(chunks_data)}"
+            )
 
         except Exception as e:
             # Capture errors but continue processing other files in batch
