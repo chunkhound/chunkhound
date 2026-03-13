@@ -876,6 +876,7 @@ class UniversalParser:
                 "block": ChunkType.BLOCK,
                 "comment": ChunkType.COMMENT,
                 "namespace": ChunkType.NAMESPACE,
+                "import": ChunkType.IMPORT,
             }
             if chunk_type_hint in hint_map:
                 return hint_map[chunk_type_hint]
@@ -938,7 +939,7 @@ class UniversalParser:
             return ChunkType.COMMENT
 
         elif concept == UniversalConcept.IMPORT:
-            return ChunkType.UNKNOWN  # No direct mapping for imports
+            return ChunkType.IMPORT
 
         elif concept == UniversalConcept.STRUCTURE:
             return ChunkType.NAMESPACE
