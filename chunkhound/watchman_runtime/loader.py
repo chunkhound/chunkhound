@@ -142,6 +142,27 @@ def _validate_optional_relative_path(relative_path: str) -> PurePosixPath | None
     return _validate_relative_path(relative_path)
 
 
+def _normalize_safe_archive_path(path: PurePosixPath | str) -> PurePosixPath | None:
+    candidate = PurePosixPath(path)
+    if candidate.is_absolute():
+        return None
+
+    normalized_parts: list[str] = []
+    for part in candidate.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not normalized_parts:
+                return None
+            normalized_parts.pop()
+            continue
+        normalized_parts.append(part)
+
+    if not normalized_parts:
+        return None
+    return PurePosixPath(*normalized_parts)
+
+
 def _normalize_platform_key(
     *, system_name: str | None = None, machine_name: str | None = None
 ) -> tuple[str, str]:
@@ -898,31 +919,56 @@ def _read_deb_member_bytes(
             data_member_bytes = reader.read()
 
     with tarfile.open(fileobj=io.BytesIO(data_member_bytes), mode="r:*") as handle:
-        for member in handle.getmembers():
-            member_path = PurePosixPath(member.name)
-            if member_path.is_absolute() or ".." in member_path.parts:
-                continue
-            normalized_member_path = PurePosixPath(
-                *(part for part in member_path.parts if part not in {"", "."})
+        members_by_path = {
+            normalized_path: member
+            for member in handle.getmembers()
+            if (
+                normalized_path := _normalize_safe_archive_path(member.name)
             )
-            if normalized_member_path != expected_path:
+            is not None
+        }
+        current_path = expected_path
+        visited_paths: set[PurePosixPath] = set()
+
+        while True:
+            member = members_by_path.get(current_path)
+            if member is None:
+                raise RuntimeError(
+                    "Watchman runtime archive is missing required payload "
+                    f"{expected_path.as_posix()} in {archive_path}"
+                )
+
+            if member.isfile():
+                extracted_file = handle.extractfile(member)
+                if extracted_file is None:
+                    raise RuntimeError(
+                        "Watchman runtime archive member could not be read: "
+                        f"{expected_path.as_posix()} in {archive_path}"
+                    )
+                return extracted_file.read()
+
+            if member.issym() or member.islnk():
+                if current_path in visited_paths:
+                    raise RuntimeError(
+                        "Watchman runtime archive member link cycle detected: "
+                        f"{expected_path.as_posix()} in {archive_path}"
+                    )
+                visited_paths.add(current_path)
+                link_base = current_path.parent if member.issym() else PurePosixPath()
+                linked_path = _normalize_safe_archive_path(link_base / member.linkname)
+                if linked_path is None:
+                    raise RuntimeError(
+                        "Watchman runtime archive member link target is unsafe: "
+                        f"{expected_path.as_posix()} -> {member.linkname} in "
+                        f"{archive_path}"
+                    )
+                current_path = linked_path
                 continue
-            if not member.isfile():
-                raise RuntimeError(
-                    "Watchman runtime archive member is not a regular file: "
-                    f"{expected_path.as_posix()} in {archive_path}"
-                )
-            extracted_file = handle.extractfile(member)
-            if extracted_file is None:
-                raise RuntimeError(
-                    "Watchman runtime archive member could not be read: "
-                    f"{expected_path.as_posix()} in {archive_path}"
-                )
-            return extracted_file.read()
-        raise RuntimeError(
-            "Watchman runtime archive is missing required payload "
-            f"{expected_path.as_posix()} in {archive_path}"
-        )
+
+            raise RuntimeError(
+                "Watchman runtime archive member is not a regular file: "
+                f"{expected_path.as_posix()} in {archive_path}"
+            )
 
 
 def _read_zip_member_bytes(

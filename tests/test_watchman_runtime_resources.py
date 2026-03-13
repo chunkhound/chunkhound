@@ -382,14 +382,20 @@ def test_read_deb_member_bytes_reads_expected_member_without_extractall(
     assert payload == b"#!/bin/sh\necho native-watchman\n"
 
 
-def test_read_deb_member_bytes_rejects_non_regular_target_member(
-    tmp_path: Path,
+def test_read_deb_member_bytes_reads_symlinked_target_member(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     tar_payload = io.BytesIO()
     with tarfile.open(fileobj=tar_payload, mode="w:gz") as handle:
+        watchman_real = tarfile.TarInfo("usr/local/bin/watchman-real")
+        watchman_payload = b"#!/bin/sh\necho native-watchman\n"
+        watchman_real.mode = 0o755
+        watchman_real.size = len(watchman_payload)
+        handle.addfile(watchman_real, io.BytesIO(watchman_payload))
+
         watchman_link = tarfile.TarInfo("usr/local/bin/watchman")
         watchman_link.type = tarfile.SYMTYPE
-        watchman_link.linkname = "usr/local/bin/watchman-real"
+        watchman_link.linkname = "watchman-real"
         handle.addfile(watchman_link)
 
     archive_path = tmp_path / "watchman.deb"
@@ -400,7 +406,39 @@ def test_read_deb_member_bytes_rejects_non_regular_target_member(
         )
     )
 
-    with pytest.raises(RuntimeError, match="not a regular file"):
+    def _fail_extractall(self, path=".", members=None, *, numeric_owner=False):
+        raise AssertionError("deb hydration should not call tarfile.extractall()")
+
+    monkeypatch.setattr(tarfile.TarFile, "extractall", _fail_extractall)
+
+    payload = watchman_runtime_loader_module._read_deb_member_bytes(
+        archive_path,
+        source_root_prefix=PurePosixPath("usr/local"),
+        source_relative_path=PurePosixPath("bin/watchman"),
+    )
+
+    assert payload == b"#!/bin/sh\necho native-watchman\n"
+
+
+def test_read_deb_member_bytes_rejects_unsafe_link_target(
+    tmp_path: Path,
+) -> None:
+    tar_payload = io.BytesIO()
+    with tarfile.open(fileobj=tar_payload, mode="w:gz") as handle:
+        watchman_link = tarfile.TarInfo("usr/local/bin/watchman")
+        watchman_link.type = tarfile.SYMTYPE
+        watchman_link.linkname = "../../../../escape"
+        handle.addfile(watchman_link)
+
+    archive_path = tmp_path / "watchman.deb"
+    archive_path.write_bytes(
+        _build_deb_archive(
+            data_member_name="data.tar.gz",
+            tar_payload=tar_payload.getvalue(),
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="link target is unsafe"):
         watchman_runtime_loader_module._read_deb_member_bytes(
             archive_path,
             source_root_prefix=PurePosixPath("usr/local"),
