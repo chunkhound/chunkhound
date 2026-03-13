@@ -213,6 +213,10 @@ def _chunkhound_path(venv_dir: Path) -> Path:
     return venv_dir / "bin" / "chunkhound"
 
 
+def _mcp_command_args(project_dir: Path) -> tuple[str, ...]:
+    return ("mcp", "--no-embeddings", str(project_dir))
+
+
 def _utf8_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(base_env or os.environ)
     if os.name == "nt":
@@ -487,8 +491,7 @@ async def _verify_wheel(wheel_path: Path) -> None:
 
         proc = await _create_subprocess_exec_safe(
             str(chunkhound_exe),
-            "mcp",
-            str(project_dir),
+            *_mcp_command_args(project_dir),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

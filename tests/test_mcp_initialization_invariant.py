@@ -275,6 +275,7 @@ class TestNonBlockingInitialization:
         config = MagicMock()
         config.database.path = str(tmp_path / "test.db")
         config.embedding = None
+        config.embeddings_disabled = False
         config.llm = None
         config.target_dir = tmp_path
         config.indexing.exclude = ["*.lock", "node_modules/**"]
@@ -304,6 +305,43 @@ class TestNonBlockingInitialization:
         assert result == {"status": "up_to_date", "generated": 0}
 
     @pytest.mark.asyncio
+    async def test_realtime_resync_skips_embed_followup_when_embeddings_disabled(
+        self, tmp_path: Path
+    ) -> None:
+        """Explicit no-embeddings mode should complete resyncs in regex-only mode."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.embeddings_disabled = True
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.exclude = ["*.lock"]
+
+        server = ConcreteMCPServer(config=config)
+        server._scan_target_path = tmp_path
+        server._run_directory_scan = AsyncMock()  # type: ignore[method-assign]
+        server.services = MagicMock()
+        server.services.indexing_coordinator.generate_missing_embeddings = AsyncMock()
+
+        result = await server._request_realtime_resync(
+            "realtime_loss_of_sync",
+            {"backend": "watchman", "loss_of_sync_reason": "fresh_instance"},
+        )
+
+        server._run_directory_scan.assert_awaited_once_with(  # type: ignore[attr-defined]
+            tmp_path,
+            trigger="realtime_resync",
+            reason="realtime_loss_of_sync",
+            no_embeddings=True,
+        )
+        server.services.indexing_coordinator.generate_missing_embeddings.assert_not_awaited()
+        assert result == {
+            "status": "complete",
+            "generated": 0,
+            "message": "Embeddings explicitly disabled",
+        }
+
+    @pytest.mark.asyncio
     async def test_realtime_resync_embed_error_status_keeps_realtime_degraded(
         self, tmp_path: Path
     ) -> None:
@@ -311,6 +349,7 @@ class TestNonBlockingInitialization:
         config = MagicMock()
         config.database.path = str(tmp_path / "test.db")
         config.embedding = None
+        config.embeddings_disabled = False
         config.llm = None
         config.target_dir = tmp_path
         config.indexing.exclude = ["*.lock"]
@@ -353,3 +392,42 @@ class TestNonBlockingInitialization:
             == "Realtime resync failed: Resync callback reported error status: "
             "embedding backend unavailable"
         )
+
+    @pytest.mark.asyncio
+    async def test_realtime_resync_disabled_embeddings_clear_stale_state(
+        self, tmp_path: Path
+    ) -> None:
+        """Explicit no-embeddings mode should not leave realtime resync latched."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.embeddings_disabled = True
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.exclude = ["*.lock"]
+
+        server = ConcreteMCPServer(config=config)
+        server._scan_target_path = tmp_path
+        server._run_directory_scan = AsyncMock()  # type: ignore[method-assign]
+        server.services = MagicMock()
+        server.services.indexing_coordinator.generate_missing_embeddings = AsyncMock()
+
+        service = RealtimeIndexingService(
+            server.services,
+            config,
+            status_callback=server._update_realtime_status,
+            resync_callback=server._request_realtime_resync,
+        )
+
+        await service.request_resync(
+            "realtime_loss_of_sync",
+            {"backend": "watchman", "loss_of_sync_reason": "fresh_instance"},
+        )
+        await asyncio.sleep(service._RESYNC_DEBOUNCE_SECONDS + 0.1)
+
+        realtime = server._scan_progress["realtime"]
+        assert realtime["resync"]["needs_resync"] is False
+        assert realtime["resync"]["performed_count"] == 1
+        assert realtime["resync"]["last_error"] is None
+        assert realtime["last_error"] is None
+        server.services.indexing_coordinator.generate_missing_embeddings.assert_not_awaited()

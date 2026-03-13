@@ -399,6 +399,19 @@ class MCPServerBase(ABC):
         )
         if self.services is None:
             return None
+        embeddings_disabled = getattr(self.config, "embeddings_disabled", False)
+        if not isinstance(embeddings_disabled, bool):
+            embeddings_disabled = False
+        if embeddings_disabled:
+            self.debug_log(
+                "Realtime resync embedding follow-up skipped: "
+                "embeddings explicitly disabled"
+            )
+            return {
+                "status": "complete",
+                "generated": 0,
+                "message": "Embeddings explicitly disabled",
+            }
 
         exclude_patterns = list(getattr(self.config.indexing, "exclude", []) or [])
         embed_result = await (

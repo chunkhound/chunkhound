@@ -54,6 +54,16 @@ def test_mcp_env_prefers_installed_venv_and_clears_repo_python_state(
         assert env["PATH"].split(os.pathsep)[0] != str(Path(sys.prefix) / "bin")
 
 
+def test_mcp_command_args_disable_embeddings_for_regex_only_validation(
+    tmp_path: Path,
+) -> None:
+    assert live_verifier._mcp_command_args(tmp_path) == (
+        "mcp",
+        "--no-embeddings",
+        str(tmp_path),
+    )
+
+
 def test_resolve_native_watchman_process_accepts_matching_binary_path(
     monkeypatch,
 ) -> None:
