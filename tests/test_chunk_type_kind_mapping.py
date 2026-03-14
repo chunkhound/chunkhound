@@ -71,3 +71,35 @@ def test_embedded_sql_hint_maps_to_embedded_sql_type(universal_parser, kind, con
     )
     assert chunk_type == ChunkType.EMBEDDED_SQL
 
+
+def test_import_concept_maps_to_import_chunk_type(universal_parser):
+    chunk_type = universal_parser._map_concept_to_chunk_type(  # type: ignore[attr-defined]
+        UniversalConcept.IMPORT,
+        {},
+    )
+    assert chunk_type == ChunkType.IMPORT
+
+
+def test_import_hint_overrides_definition_concept(universal_parser):
+    chunk_type = universal_parser._map_concept_to_chunk_type(  # type: ignore[attr-defined]
+        UniversalConcept.DEFINITION,
+        {"chunk_type_hint": "import", "kind": "variable", "node_type": ""},
+    )
+    assert chunk_type == ChunkType.IMPORT
+
+
+def test_comment_concept_maps_to_comment_chunk_type(universal_parser):
+    chunk_type = universal_parser._map_concept_to_chunk_type(  # type: ignore[attr-defined]
+        UniversalConcept.COMMENT,
+        {},
+    )
+    assert chunk_type == ChunkType.COMMENT
+
+
+def test_block_concept_maps_to_block_chunk_type(universal_parser):
+    chunk_type = universal_parser._map_concept_to_chunk_type(  # type: ignore[attr-defined]
+        UniversalConcept.BLOCK,
+        {},
+    )
+    assert chunk_type == ChunkType.BLOCK
+

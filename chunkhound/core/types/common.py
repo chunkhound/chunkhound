@@ -72,6 +72,9 @@ class ChunkType(Enum):
     KEY_VALUE = "key_value"
     ARRAY = "array"
 
+    # Dependency types
+    IMPORT = "import"
+
     # Embedded content types
     EMBEDDED_SQL = "embedded_sql"
 
@@ -115,6 +118,7 @@ class ChunkType(Enum):
             ChunkType.VARIABLE,
             ChunkType.TYPE,
             ChunkType.MACRO,
+            ChunkType.IMPORT,
             ChunkType.EMBEDDED_SQL,
         }
 
@@ -165,6 +169,7 @@ class Language(Enum):
     SQL = "sql"
     SWIFT = "swift"
     DART = "dart"
+    ELIXIR = "elixir"
     LUA = "lua"
 
     # Documentation languages
@@ -273,6 +278,8 @@ class Language(Enum):
             ".sql": cls.SQL,
             ".swift": cls.SWIFT,
             ".swiftinterface": cls.SWIFT,
+            ".ex": cls.ELIXIR,
+            ".exs": cls.ELIXIR,
             ".lua": cls.LUA,
         }
 
@@ -314,6 +321,7 @@ class Language(Enum):
             Language.SVELTE,
             Language.SWIFT,
             Language.DART,
+            Language.ELIXIR,
             Language.LUA,
         }
 

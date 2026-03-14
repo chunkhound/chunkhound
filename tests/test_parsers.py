@@ -44,6 +44,7 @@ LANGUAGE_SAMPLES = {
     Language.DART: "void main() { }",
     Language.LUA: "function hello() print('world') end",
     Language.SQL: "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100));\nCREATE VIEW active_users AS SELECT * FROM users;\nCREATE FUNCTION get_user_count() RETURNS INT BEGIN RETURN 0; END;\nCREATE TRIGGER audit_insert AFTER INSERT ON users FOR EACH ROW BEGIN INSERT INTO audit_log VALUES (NEW.id); END;\nCREATE INDEX idx_users_name ON users (name);",
+    Language.ELIXIR: "defmodule Hello do\n  def world, do: :ok\nend",
 }
 
 
