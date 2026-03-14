@@ -489,6 +489,8 @@ CHUNK_TYPE_TO_CONCEPT: dict[ChunkType, UniversalConcept] = {
     # Documentation -> COMMENT
     ChunkType.COMMENT: UniversalConcept.COMMENT,
     ChunkType.DOCSTRING: UniversalConcept.COMMENT,
+    # Imports -> IMPORT
+    ChunkType.IMPORT: UniversalConcept.IMPORT,
     # Content blocks -> BLOCK (not DEFINITION, as these aren't named reusable units)
     ChunkType.SCRIPT: UniversalConcept.BLOCK,  # File-level scripts
     ChunkType.CODE_BLOCK: UniversalConcept.BLOCK,  # Markdown fenced blocks
