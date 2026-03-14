@@ -171,6 +171,43 @@ def _prepend_poisoned_python_shims(
     )
 
 
+def test_watchman_cli_session_queue_overflow_reports_drop_and_calls_handler(
+    tmp_path: Path,
+) -> None:
+    overflow_calls: list[tuple[dict[str, object], int, int]] = []
+    session = WatchmanCliSession(
+        binary_path=tmp_path / "watchman",
+        socket_path=tmp_path / "watchman.sock",
+        statefile_path=tmp_path / "watchman.state",
+        logfile_path=tmp_path / "watchman.log",
+        pidfile_path=tmp_path / "watchman.pid",
+        project_root=tmp_path,
+        subscription_overflow_handler=lambda payload, dropped, queue_maxsize: (
+            overflow_calls.append((payload, dropped, queue_maxsize))
+        ),
+    )
+
+    for index in range(session.subscription_queue.maxsize):
+        session.subscription_queue.put_nowait({"subscription": f"baseline-{index}"})
+
+    overflow_payload = {
+        "subscription": "chunkhound-live-indexing",
+        "clock": "c:1:1001",
+        "files": [],
+    }
+    session._queue_subscription_pdu(overflow_payload)
+
+    health = session.get_health()
+    assert health["watchman_subscription_pdu_dropped"] == 1
+    assert (
+        health["watchman_session_last_warning"]
+        == "Watchman subscription queue full; dropped a raw subscription PDU"
+    )
+    assert overflow_calls == [
+        (overflow_payload, 1, session.subscription_queue.maxsize)
+    ]
+
+
 @pytest.mark.asyncio
 async def test_watchman_cli_session_start_ignores_poisoned_python_path(
     tmp_path: Path,

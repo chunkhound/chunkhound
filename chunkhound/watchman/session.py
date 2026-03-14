@@ -72,6 +72,9 @@ class WatchmanCliSession:
         debug_sink: Callable[[str], None] | None = None,
         command_prefix: Sequence[str] | None = None,
         command_env: dict[str, str] | None = None,
+        subscription_overflow_handler: (
+            Callable[[dict[str, object], int, int], None] | None
+        ) = None,
     ) -> None:
         self._binary_path = binary_path
         self._socket_path = str(socket_path)
@@ -82,6 +85,7 @@ class WatchmanCliSession:
         self._debug_sink = debug_sink
         self._command_prefix = tuple(command_prefix) if command_prefix else None
         self._command_env = dict(command_env) if command_env else None
+        self._subscription_overflow_handler = subscription_overflow_handler
         self.subscription_queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(
             maxsize=self._SUBSCRIPTION_QUEUE_MAXSIZE
         )
@@ -492,6 +496,17 @@ class WatchmanCliSession:
             self._record_warning(
                 "Watchman subscription queue full; dropped a raw subscription PDU"
             )
+            if self._subscription_overflow_handler is not None:
+                try:
+                    self._subscription_overflow_handler(
+                        payload,
+                        self._subscription_pdu_dropped,
+                        self.subscription_queue.maxsize,
+                    )
+                except Exception as error:
+                    self._record_error(
+                        f"watchman subscription overflow handler failed: {error}"
+                    )
             return
         self._subscription_pdu_count += 1
 

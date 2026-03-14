@@ -10,7 +10,11 @@ import pytest
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
-from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from chunkhound.mcp_server.status import derive_daemon_status
+from chunkhound.services.realtime_indexing_service import (
+    RealtimeIndexingService,
+    WatchmanRealtimeAdapter,
+)
 
 pytestmark = pytest.mark.requires_native_watchman
 
@@ -210,6 +214,104 @@ async def test_watchman_recrawl_warning_requests_resync_without_incremental_tran
         }
     finally:
         await service.stop()
+        services.provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_watchman_subscription_queue_overflow_requests_resync_and_degrades_status(
+    tmp_path: Path,
+) -> None:
+    watch_dir = tmp_path / "watchman_project"
+    watch_dir.mkdir(parents=True)
+    service, services = _build_watchman_service(watch_dir)
+    adapter = WatchmanRealtimeAdapter(service)
+    service._monitor_adapter = adapter
+    callback_calls: list[tuple[str, dict[str, object] | None]] = []
+    callback_event = asyncio.Event()
+
+    async def resync_callback(
+        reason: str, details: dict[str, object] | None
+    ) -> None:
+        callback_calls.append((reason, details))
+        if (
+            isinstance(details, dict)
+            and details.get("loss_of_sync_reason") == "subscription_pdu_dropped"
+        ):
+            callback_event.set()
+
+    try:
+        baseline_loss_of_sync = (await service.get_health())["watchman_loss_of_sync"]
+        service._resync_callback = resync_callback
+
+        adapter._handle_subscription_queue_overflow(
+            {
+                "subscription": "chunkhound-live-indexing",
+                "clock": "c:0:4",
+            },
+            dropped_count=1,
+            queue_maxsize=1000,
+        )
+
+        while not (await service.get_health())["resync"]["needs_resync"]:
+            await asyncio.sleep(0)
+
+        pending_stats = await service.get_health()
+        pending_daemon_status = derive_daemon_status(
+            {
+                "scan_completed_at": "2026-03-14T00:00:00Z",
+                "is_scanning": False,
+                "realtime": pending_stats,
+            }
+        )
+
+        adapter._handle_subscription_queue_overflow(
+            {
+                "subscription": "chunkhound-live-indexing",
+                "clock": "c:0:5",
+            },
+            dropped_count=2,
+            queue_maxsize=1000,
+        )
+
+        await asyncio.wait_for(callback_event.wait(), timeout=5.0)
+        stats = await service.get_health()
+        daemon_status = derive_daemon_status(
+            {
+                "scan_completed_at": "2026-03-14T00:00:00Z",
+                "is_scanning": False,
+                "realtime": stats,
+            }
+        )
+
+        expected_details = {
+            "backend": "watchman",
+            "loss_of_sync_reason": "subscription_pdu_dropped",
+            "subscription": "chunkhound-live-indexing",
+            "clock": "c:0:4",
+            "watchman_subscription_pdu_dropped": 1,
+            "watchman_subscription_queue_maxsize": 1000,
+        }
+        overflow_callbacks = [
+            call
+            for call in callback_calls
+            if isinstance(call[1], dict)
+            and call[1].get("loss_of_sync_reason") == "subscription_pdu_dropped"
+        ]
+        assert overflow_callbacks == [("realtime_loss_of_sync", expected_details)]
+        assert (
+            stats["watchman_loss_of_sync"]["count"]
+            == baseline_loss_of_sync["count"] + 1
+        )
+        assert stats["watchman_loss_of_sync"]["last_reason"] == (
+            "subscription_pdu_dropped"
+        )
+        assert stats["watchman_loss_of_sync"]["last_details"] == expected_details
+        assert pending_stats["resync"]["needs_resync"] is True
+        assert pending_daemon_status["status"] == "degraded"
+        assert stats["resync"]["needs_resync"] is False
+        assert stats["resync"]["last_reason"] == "realtime_loss_of_sync"
+        assert daemon_status["status"] == "ready"
+    finally:
         services.provider.disconnect()
 
 

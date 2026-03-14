@@ -666,6 +666,7 @@ class WatchmanRealtimeAdapter:
                 pidfile_path=self._sidecar.paths.pidfile_path,
                 project_root=self._sidecar.paths.project_root,
                 debug_sink=self._service._debug,
+                subscription_overflow_handler=self._handle_subscription_queue_overflow,
             )
             setup = await session.start(
                 target_path=watch_path,
@@ -812,6 +813,36 @@ class WatchmanRealtimeAdapter:
 
         self._record_loss_of_sync(reason, message=message, details=details)
         return True
+
+    def _handle_subscription_queue_overflow(
+        self,
+        payload: dict[str, object],
+        dropped_count: int,
+        queue_maxsize: int,
+    ) -> None:
+        if self._service._needs_resync:
+            self._service._emit_status_update()
+            return
+
+        details: dict[str, object] = {
+            "backend": "watchman",
+            "loss_of_sync_reason": "subscription_pdu_dropped",
+            "subscription": str(payload.get("subscription") or self._SUBSCRIPTION_NAME),
+            "watchman_subscription_pdu_dropped": dropped_count,
+            "watchman_subscription_queue_maxsize": queue_maxsize,
+        }
+        clock = payload.get("clock")
+        if isinstance(clock, str) and clock:
+            details["clock"] = clock
+
+        self._record_loss_of_sync(
+            "subscription_pdu_dropped",
+            message=(
+                "Watchman subscription queue overflowed; "
+                "scheduling a reconciliation resync"
+            ),
+            details=details,
+        )
 
     def _record_loss_of_sync(
         self,

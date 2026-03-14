@@ -42,6 +42,9 @@ class RealtimePathFilter:
                 sources = self._config.indexing.resolve_ignore_sources()
                 cfg_ex = self._config.indexing.get_effective_config_excludes()
                 chf = self._config.indexing.chignore_file
+                backend = str(
+                    getattr(self._config.indexing, "gitignore_backend", "python")
+                )
                 overlay = bool(
                     getattr(self._config.indexing, "workspace_gitignore_nonrepo", False)
                 )
@@ -50,6 +53,7 @@ class RealtimePathFilter:
                     sources,
                     chf,
                     cfg_ex,
+                    backend=backend,
                     workspace_root_only_gitignore=overlay,
                 )
         except Exception:
