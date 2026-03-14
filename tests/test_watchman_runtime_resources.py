@@ -242,6 +242,37 @@ def _wait_for_named_pipe_ready(
     raise AssertionError("timed out waiting for packaged Watchman named pipe readiness")
 
 
+def _wait_for_sidecar_command_ready(
+    *,
+    runtime,
+    process: subprocess.Popen,
+    binary_path: Path,
+    socket_path: str | Path,
+    pidfile_path: Path,
+    statefile_path: Path,
+    logfile_path: Path,
+    env: dict[str, str],
+) -> None:
+    _wait_for_sidecar_files(
+        runtime=runtime,
+        process=process,
+        socket_path=socket_path,
+        pidfile_path=pidfile_path,
+        logfile_path=logfile_path,
+    )
+    if listener_path_is_filesystem(runtime):
+        return
+    _wait_for_named_pipe_ready(
+        runtime=runtime,
+        binary_path=binary_path,
+        socket_path=socket_path,
+        pidfile_path=pidfile_path,
+        statefile_path=statefile_path,
+        logfile_path=logfile_path,
+        env=env,
+    )
+
+
 def _stop_sidecar_process(process: subprocess.Popen) -> None:
     process.terminate()
     try:
@@ -561,6 +592,7 @@ def test_materialized_watchman_binary_supports_private_sidecar_flags(
     pidfile_path = sidecar_root / "pid"
     statefile_path = sidecar_root / "state"
     logfile_path = sidecar_root / "watchman.log"
+    runtime_env = _runtime_env(binary_path=binary_path)
 
     process = subprocess.Popen(
         build_watchman_sidecar_command(
@@ -577,15 +609,9 @@ def test_materialized_watchman_binary_supports_private_sidecar_flags(
         env=runtime_env,
     )
     try:
-        _wait_for_sidecar_files(
+        _wait_for_sidecar_command_ready(
             runtime=runtime,
             process=process,
-            socket_path=socket_path,
-            pidfile_path=pidfile_path,
-            logfile_path=logfile_path,
-        )
-        _wait_for_named_pipe_ready(
-            runtime=runtime,
             binary_path=binary_path,
             socket_path=socket_path,
             pidfile_path=pidfile_path,
@@ -620,6 +646,7 @@ def test_materialized_watchman_binary_supports_persistent_client_session(
     logfile_path = sidecar_root / "watchman.log"
     project_root = tmp_path / "repo"
     project_root.mkdir()
+    runtime_env = _runtime_env(binary_path=binary_path)
 
     sidecar = subprocess.Popen(
         build_watchman_sidecar_command(
@@ -633,18 +660,20 @@ def test_materialized_watchman_binary_supports_persistent_client_session(
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        env=_runtime_env(binary_path=binary_path),
+        env=runtime_env,
     )
     client: subprocess.Popen[str] | None = None
     try:
-        _wait_for_sidecar_files(
+        _wait_for_sidecar_command_ready(
             runtime=runtime,
             process=sidecar,
+            binary_path=binary_path,
             socket_path=socket_path,
             pidfile_path=pidfile_path,
+            statefile_path=statefile_path,
             logfile_path=logfile_path,
+            env=runtime_env,
         )
-        runtime_env = _runtime_env(binary_path=binary_path)
 
         version_response = _run_one_shot_command(
             runtime=runtime,
