@@ -304,3 +304,6 @@ chunkhound/watchman_runtime/platforms/windows-x86_64/bin/*.dll
 chunkhound/watchman_runtime/platforms/windows-x86_64/bin/*.exe
 chunkhound/watchman_runtime/platforms/linux-x86_64/.chunkhound-hydrated.json
 chunkhound/watchman_runtime/platforms/windows-x86_64/.chunkhound-hydrated.json
+
+# Kiro IDE
+.kiro/

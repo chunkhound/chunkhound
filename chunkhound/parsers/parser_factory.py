@@ -27,6 +27,7 @@ from chunkhound.parsers.mappings import (
     CppMapping,
     CSharpMapping,
     DartMapping,
+    ElixirMapping,
     GoMapping,
     GroovyMapping,
     HaskellMapping,
@@ -87,6 +88,10 @@ import tree_sitter_lua as ts_lua
 import tree_sitter_python as ts_python
 import tree_sitter_rust as ts_rust
 import tree_sitter_typescript as ts_typescript
+import tree_sitter_groovy as ts_groovy
+
+import tree_sitter_elixir as ts_elixir
+import tree_sitter_haskell as ts_haskell
 
 try:
     from tree_sitter_language_pack import get_language
@@ -363,6 +368,7 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.MARKDOWN: LanguageConfig(ts_markdown, MarkdownMapping, True, "markdown"),
     Language.MAKEFILE: LanguageConfig(ts_make, MakefileMapping, True, "makefile"),
     # Haskell (required dependency in pyproject.toml)
+    Language.ELIXIR: LanguageConfig(ts_elixir, ElixirMapping, True, "elixir"),
     Language.HASKELL: LanguageConfig(ts_haskell, HaskellMapping, True, "haskell"),
     Language.HCL: LanguageConfig(ts_hcl, HclMapping, HCL_AVAILABLE, "hcl"),
     # Language pack languages (conditional availability)
@@ -449,6 +455,9 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     # Note: .m is ambiguous, content detection used in File.from_path()
     ".m": Language.MATLAB,
     ".dart": Language.DART,
+    # Elixir
+    ".ex": Language.ELIXIR,
+    ".exs": Language.ELIXIR,
     ".mm": Language.OBJC,
     # PHP
     ".php": Language.PHP,

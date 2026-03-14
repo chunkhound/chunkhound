@@ -86,9 +86,25 @@ class TestQADeterministic:
 
         yield services, realtime_service, watch_dir, temp_dir
 
-        # Cleanup
+        # Cleanup — use asyncio.wait (non-cancelling) instead of wait_for.
+        # wait_for cancels stop() mid-cleanup on timeout, which can leave
+        # async tasks referencing the DB executor in inconsistent state,
+        # causing provider.close() → executor.shutdown(wait=True) to hang.
         try:
-            await realtime_service.stop()
+            stop_task = asyncio.create_task(realtime_service.stop())
+            done, _ = await asyncio.wait({stop_task}, timeout=10.0)
+            if not done:
+                # Force-stop observer (likely cause of hang on Ubuntu CI)
+                if realtime_service.observer and realtime_service.observer.is_alive():
+                    realtime_service.observer.stop()
+                # Let stop() finish now that observer is unblocked
+                done, _ = await asyncio.wait({stop_task}, timeout=3.0)
+                if not done:
+                    stop_task.cancel()
+                    try:
+                        await stop_task
+                    except asyncio.CancelledError:
+                        pass
         except Exception:
             pass
 
