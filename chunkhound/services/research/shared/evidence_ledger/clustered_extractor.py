@@ -112,7 +112,10 @@ async def extract_facts_with_clustering(
         (
             cluster.cluster_id,
             cluster.files_content,
-            max(MIN_FACTS_PER_CLUSTER, int(cluster.total_tokens * FACTS_PER_100K_TOKENS / 100_000)),
+            max(
+                MIN_FACTS_PER_CLUSTER,
+                int(cluster.total_tokens * FACTS_PER_100K_TOKENS / 100_000),
+            ),
         )
         for cluster in cluster_groups
     ]

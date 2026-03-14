@@ -8,9 +8,10 @@ import re
 from pathlib import Path
 from typing import Any
 
+from tree_sitter import Node as TSNode
+
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
-from tree_sitter import Node as TSNode
 
 
 class MatlabMapping(BaseMapping):
@@ -487,7 +488,7 @@ class MatlabMapping(BaseMapping):
             if assignment_name:
                 name = self.get_node_text(assignment_name, source).strip()
                 # Only include UPPER_CASE assignments
-                if re.match(r'^[A-Z][A-Z0-9_]*$', name):
+                if re.match(r"^[A-Z][A-Z0-9_]*$", name):
                     return name
             # If not UPPER_CASE, skip by returning a dummy name
             return f"_skip_assignment_{def_node.start_point[0] + 1}"
@@ -533,7 +534,7 @@ class MatlabMapping(BaseMapping):
             if assignment_name:
                 name = self.get_node_text(assignment_name, source).strip()
                 # Only include UPPER_CASE assignments
-                if not re.match(r'^[A-Z][A-Z0-9_]*$', name):
+                if not re.match(r"^[A-Z][A-Z0-9_]*$", name):
                     return ""  # Empty content will filter out this chunk
 
         return self.get_node_text(def_node, source)
@@ -634,12 +635,14 @@ class MatlabMapping(BaseMapping):
             var_name = self.get_node_text(assignment_name, source).strip()
 
             # Check UPPER_CASE convention
-            if not re.match(r'^[A-Z][A-Z0-9_]*$', var_name):
+            if not re.match(r"^[A-Z][A-Z0-9_]*$", var_name):
                 return None
 
             # Extract value from assignment
             assignment_text = self.get_node_text(def_node, source).strip()
-            value_match = re.search(rf'^{re.escape(var_name)}\s*=\s*(.+)', assignment_text)
+            value_match = re.search(
+                rf"^{re.escape(var_name)}\s*=\s*(.+)", assignment_text
+            )
             if value_match:
                 value = value_match.group(1).strip().rstrip(";")
                 # Truncate long values
@@ -655,7 +658,7 @@ class MatlabMapping(BaseMapping):
             props_text = self.get_node_text(def_node, source).strip()
 
             # Check if it has (Constant) attribute
-            if not re.search(r'properties\s*\([^)]*\bConstant\b', props_text):
+            if not re.search(r"properties\s*\([^)]*\bConstant\b", props_text):
                 return None
 
             # Extract constant properties from this block
@@ -672,7 +675,9 @@ class MatlabMapping(BaseMapping):
 
                 # Extract value if present
                 prop_text = self.get_node_text(property_def, source).strip()
-                value_match = re.search(rf'{re.escape(prop_name)}\s*=\s*(.+?)(?:\s*;|\s*$)', prop_text)
+                value_match = re.search(
+                    rf"{re.escape(prop_name)}\s*=\s*(.+?)(?:\s*;|\s*$)", prop_text
+                )
 
                 if value_match:
                     value = value_match.group(1).strip()
@@ -700,14 +705,16 @@ class MatlabMapping(BaseMapping):
                 var_name = self.get_node_text(identifier_node, source).strip()
 
                 # Check if it matches UPPER_CASE convention
-                if not re.match(r'^[A-Z][A-Z0-9_]*$', var_name):
+                if not re.match(r"^[A-Z][A-Z0-9_]*$", var_name):
                     continue
 
                 # Extract the full assignment text to get the value
                 assignment_text = self.get_node_text(assignment_node, source).strip()
 
                 # Pattern: CONSTANT_NAME = value
-                value_match = re.search(rf'^{re.escape(var_name)}\s*=\s*(.+)', assignment_text)
+                value_match = re.search(
+                    rf"^{re.escape(var_name)}\s*=\s*(.+)", assignment_text
+                )
                 if value_match:
                     value = value_match.group(1).strip().rstrip(";")
                     # Truncate long values

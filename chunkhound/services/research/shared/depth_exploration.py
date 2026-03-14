@@ -24,6 +24,10 @@ from chunkhound.core.config.research_config import ResearchConfig
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
+from chunkhound.services.research.shared.chunk_context_builder import (
+    ChunkContextBuilder,
+    get_chunk_text,
+)
 from chunkhound.services.research.shared.chunk_dedup import (
     deduplicate_chunks,
     merge_chunk_lists,
@@ -31,11 +35,10 @@ from chunkhound.services.research.shared.chunk_dedup import (
 from chunkhound.services.research.shared.elbow_detection import (
     compute_elbow_threshold,
 )
-from chunkhound.services.research.shared.failure_tracker import FailureMetrics
-from chunkhound.services.research.shared.chunk_context_builder import (
-    ChunkContextBuilder,
-    get_chunk_text,
+from chunkhound.services.research.shared.evidence_ledger import (
+    CONSTANTS_INSTRUCTION_SHORT,
 )
+from chunkhound.services.research.shared.failure_tracker import FailureMetrics
 from chunkhound.services.research.shared.import_context import ImportContextService
 from chunkhound.services.research.shared.import_resolution_helper import (
     resolve_and_fetch_imports,
@@ -45,7 +48,6 @@ from chunkhound.services.research.shared.models import (
     ResearchContext,
 )
 from chunkhound.services.research.shared.unified_search import UnifiedSearch
-from chunkhound.services.research.shared.evidence_ledger import CONSTANTS_INSTRUCTION_SHORT
 
 
 class DepthExplorationService:
@@ -123,9 +125,7 @@ class DepthExplorationService:
         top_files = self._select_top_files(
             file_to_chunks, self._config.max_exploration_files
         )
-        logger.info(
-            f"Step 1.5.1: Selected {len(top_files)} top files for exploration"
-        )
+        logger.info(f"Step 1.5.1: Selected {len(top_files)} top files for exploration")
 
         if not top_files:
             logger.info("No files selected for exploration")
@@ -136,7 +136,10 @@ class DepthExplorationService:
             }
 
         # Step 2: Generate exploration queries for each file (parallel)
-        exploration_queries, generation_metrics = await self._generate_all_exploration_queries(
+        (
+            exploration_queries,
+            generation_metrics,
+        ) = await self._generate_all_exploration_queries(
             root_query, top_files, file_to_chunks, constants_context
         )
         total_queries = sum(len(queries) for queries in exploration_queries.values())
@@ -159,9 +162,7 @@ class DepthExplorationService:
             root_query, exploration_queries, phase1_threshold, path_filter
         )
         total_results = sum(len(r) for r in exploration_results)
-        logger.info(
-            f"Step 1.5.3: Exploration searches returned {total_results} chunks"
-        )
+        logger.info(f"Step 1.5.3: Exploration searches returned {total_results} chunks")
 
         # Step 4: Global deduplication (SYNC POINT)
         unified_exploration_chunks = self._global_dedup(exploration_results)
@@ -213,9 +214,7 @@ class DepthExplorationService:
 
         return expanded_chunks, stats
 
-    def _group_chunks_by_file(
-        self, chunks: list[dict]
-    ) -> dict[str, list[dict]]:
+    def _group_chunks_by_file(self, chunks: list[dict]) -> dict[str, list[dict]]:
         """Group chunks by file path.
 
         Args:
@@ -427,9 +426,7 @@ Output JSON with queries array."""
             List of result lists (one per query)
         """
 
-        async def execute_single_query(
-            query: str, source_file: str
-        ) -> list[dict]:
+        async def execute_single_query(query: str, source_file: str) -> list[dict]:
             """Execute a single exploration query."""
             context = ResearchContext(root_query=root_query)
 
@@ -444,8 +441,7 @@ Output JSON with queries array."""
             # Apply window expansion if enabled
             if self._config.window_expansion_enabled:
                 chunks = await self._unified_search.expand_chunk_windows(
-                    chunks,
-                    window_lines=self._config.window_expansion_lines
+                    chunks, window_lines=self._config.window_expansion_lines
                 )
 
             # Compute adaptive threshold

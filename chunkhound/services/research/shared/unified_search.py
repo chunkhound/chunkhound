@@ -156,9 +156,7 @@ class UnifiedSearch:
                 )
                 for expanded_q in expanded_queries
             ]
-            search_results = await asyncio.gather(
-                *search_tasks, return_exceptions=True
-            )
+            search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
 
             # Unify results: deduplicate by chunk_id (same pattern as semantic+regex
             # unification).
@@ -256,9 +254,7 @@ class UnifiedSearch:
                 # Step 4: Select top symbols (deterministic first-seen order from
                 # semantic results).
                 max_symbols = (
-                    self._config.max_symbols
-                    if self._config
-                    else MAX_SYMBOLS_TO_SEARCH
+                    self._config.max_symbols if self._config else MAX_SYMBOLS_TO_SEARCH
                 )
                 logger.debug(
                     f"Step 4: Selecting top {max_symbols} symbols from {len(symbols)} "
@@ -591,9 +587,7 @@ class UnifiedSearch:
                 return []
 
         # Run all symbol searches concurrently
-        results_per_symbol = await asyncio.gather(
-            *[search_symbol(s) for s in symbols]
-        )
+        results_per_symbol = await asyncio.gather(*[search_symbol(s) for s in symbols])
 
         # Flatten results
         all_results = []
@@ -661,9 +655,7 @@ class UnifiedSearch:
 
             # Use the new get_chunks_in_range method
             neighbors = await self._get_chunks_in_range(
-                file_id=file_id,
-                start_line=max(1, min_line),
-                end_line=max_line
+                file_id=file_id, start_line=max(1, min_line), end_line=max_line
             )
 
             # Deduplicate by chunk_id

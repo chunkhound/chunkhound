@@ -10,10 +10,9 @@ ARCHITECTURE: Global state required for stdio communication model
 from __future__ import annotations
 
 import asyncio
-import sys
-import os
-import copy
 import logging
+import os
+import sys
 import warnings
 
 # CRITICAL: Suppress SWIG warnings that break JSON-RPC protocol in CI
@@ -48,8 +47,7 @@ from chunkhound.core.config.config import Config  # noqa: E402
 from chunkhound.version import __version__  # noqa: E402
 
 from .base import MCPServerBase  # noqa: E402
-from .common import handle_tool_call, has_reranker_support  # noqa: E402
-from .tools import TOOL_REGISTRY  # noqa: E402
+from .common import handle_tool_call  # noqa: E402
 
 # CRITICAL: Disable ALL logging to prevent JSON-RPC corruption
 logging.disable(logging.CRITICAL)
@@ -105,8 +103,11 @@ class StdioMCPServer(MCPServerBase):
                     )
 
                     async def _stub_run_exec(  # type: ignore[override]
-                        self, text, cwd=None,
-                        max_tokens=1024, timeout=None,
+                        self,
+                        text,
+                        cwd=None,
+                        max_tokens=1024,
+                        timeout=None,
                         model=None,
                     ):
                         mark = os.getenv("CH_TEST_CODEX_MARK_FILE")
@@ -135,6 +136,7 @@ class StdioMCPServer(MCPServerBase):
             self.server = None  # type: ignore
         else:
             from mcp.server import Server
+
             self.server: Server = Server("ChunkHound Code Search")
 
         # Event to signal initialization completion
@@ -178,7 +180,11 @@ class StdioMCPServer(MCPServerBase):
             List of MCP Tool objects with filtered schemas.
         """
         return [
-            types.Tool(name=d["name"], description=d["description"], inputSchema=d["inputSchema"])
+            types.Tool(
+                name=d["name"],
+                description=d["description"],
+                inputSchema=d["inputSchema"],
+            )
             for d in self._build_filtered_tool_dicts()
         ]
 
@@ -236,6 +242,7 @@ class StdioMCPServer(MCPServerBase):
                 async with self.server_lifespan():
                     # Run the stdio server
                     import mcp.server.stdio
+
                     async with mcp.server.stdio.stdio_server() as (
                         read_stream,
                         write_stream,
@@ -288,6 +295,7 @@ class StdioMCPServer(MCPServerBase):
             self.debug_log(f"Server error: {e}")
             if self.debug_mode:
                 import traceback
+
                 traceback.print_exc(file=sys.stderr)
             _respond_with_startup_error(e, getattr(self, "config", None))
 
@@ -301,9 +309,11 @@ def _respond_with_startup_error(error: Exception, config: Any = None) -> None:
     """
     import json
     import select
+    import traceback as _tb
     from pathlib import Path as _Path
 
     error_msg = str(error)
+    error_traceback = _tb.format_exc()
 
     # Generate a hint for well-known failure modes
     hint = ""
@@ -328,8 +338,10 @@ def _respond_with_startup_error(error: Exception, config: Any = None) -> None:
                 log_path = str(db_dir / "startup_error.log")
             except Exception:
                 pass
-        with open(log_path, "w") as f:
+        with open(log_path, "a") as f:
             f.write(f"ChunkHound MCP startup error: {error_msg}\n")
+            if error_traceback and error_traceback != "NoneType: None\n":
+                f.write(f"Traceback:\n{error_traceback}\n")
             if hint:
                 f.write(f"Hint: {hint}\n")
     except Exception:

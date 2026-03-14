@@ -41,8 +41,13 @@ class EmbeddedSqlMatch:
 _PRIMARY_KEYWORD_PATTERNS = {
     keyword: re.compile(r"\b" + keyword + r"\b")
     for keyword in [
-        "SELECT", "INSERT", "UPDATE", "DELETE",
-        "CREATE", "ALTER", "DROP",
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "CREATE",
+        "ALTER",
+        "DROP",
     ]
 }
 
@@ -52,7 +57,9 @@ _DDL_KEYWORDS = {"CREATE", "ALTER", "DROP"}
 _SECONDARY_KEYWORD_PATTERNS = {
     keyword: re.compile(r"\b" + keyword + r"\b")
     for keyword in [
-        "HAVING", "LIMIT", "OFFSET",
+        "HAVING",
+        "LIMIT",
+        "OFFSET",
     ]
 }
 
@@ -127,10 +134,7 @@ class EmbeddedSqlDetector:
         return matches
 
     def _visit_node(
-        self,
-        node: TSNode,
-        source_bytes: bytes,
-        matches: list[EmbeddedSqlMatch]
+        self, node: TSNode, source_bytes: bytes, matches: list[EmbeddedSqlMatch]
     ) -> None:
         """Recursively visit nodes to find string literals.
 
@@ -151,10 +155,7 @@ class EmbeddedSqlDetector:
             self._visit_node(child, source_bytes, matches)
 
     def _check_string_node(
-        self,
-        node: TSNode,
-        source_bytes: bytes,
-        matches: list[EmbeddedSqlMatch]
+        self, node: TSNode, source_bytes: bytes, matches: list[EmbeddedSqlMatch]
     ) -> None:
         """Check if a string node contains SQL.
 
@@ -189,7 +190,7 @@ class EmbeddedSqlDetector:
             start_line=node.start_point[0] + 1,  # Convert to 1-indexed
             end_line=node.end_point[0] + 1,
             host_context=context,
-            confidence=confidence
+            confidence=confidence,
         )
 
         matches.append(match)
@@ -206,7 +207,7 @@ class EmbeddedSqlDetector:
         # Remove common quote types
         for quote in ['"""', "'''", '"', "'", "`"]:
             if raw_string.startswith(quote) and raw_string.endswith(quote):
-                raw_string = raw_string[len(quote):-len(quote)]
+                raw_string = raw_string[len(quote) : -len(quote)]
                 break
 
         # Handle common escape sequences
@@ -256,9 +257,8 @@ class EmbeddedSqlDetector:
                 score += points
 
         # Bonus: SELECT + FROM combination is very strong indicator
-        if (
-            _SELECT_PATTERN.search(content_upper)
-            and _FROM_PATTERN.search(content_upper)
+        if _SELECT_PATTERN.search(content_upper) and _FROM_PATTERN.search(
+            content_upper
         ):
             score += 10
 

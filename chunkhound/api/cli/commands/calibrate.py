@@ -87,7 +87,7 @@ async def calibrate_command(args: argparse.Namespace, config: Config) -> None:
 
             if args.output_file:
                 output_path = Path(args.output_file)
-                output_path.write_text(json_output)
+                output_path.write_text(json_output, encoding="utf-8")
                 formatter.success(f"Results saved to {output_path}")
             else:
                 # Use formatter for consistent output (no styling for JSON)

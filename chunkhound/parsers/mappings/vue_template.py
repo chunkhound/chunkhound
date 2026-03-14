@@ -22,10 +22,11 @@ logic for mapping Vue template AST nodes to semantic chunks.
 from pathlib import Path
 from typing import Any
 
+from tree_sitter import Node as TSNode
+
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-from tree_sitter import Node as TSNode
 
 
 class VueTemplateMapping(BaseMapping):
@@ -259,21 +260,27 @@ class VueTemplateMapping(BaseMapping):
                 # Handle different directive types
                 if directive in ("v-if", "v-else-if"):
                     if "condition_expr" in captures:
-                        expr_text = self.get_node_text(captures["condition_expr"], source).strip()
+                        expr_text = self.get_node_text(
+                            captures["condition_expr"], source
+                        ).strip()
                         expr = self.get_expression_preview(expr_text, max_length=20)
                     else:
                         expr = "expr"
                     return f"v-if_{expr}"
                 elif directive == "v-for":
                     if "loop_expr" in captures:
-                        expr_text = self.get_node_text(captures["loop_expr"], source).strip()
+                        expr_text = self.get_node_text(
+                            captures["loop_expr"], source
+                        ).strip()
                         expr = self.get_expression_preview(expr_text, max_length=20)
                     else:
                         expr = "expr"
                     return f"v-for_{expr}"
                 elif directive == "v-model":
                     if "model_expr" in captures:
-                        expr_text = self.get_node_text(captures["model_expr"], source).strip()
+                        expr_text = self.get_node_text(
+                            captures["model_expr"], source
+                        ).strip()
                         expr = self.get_expression_preview(expr_text, max_length=20)
                     else:
                         expr = "expr"

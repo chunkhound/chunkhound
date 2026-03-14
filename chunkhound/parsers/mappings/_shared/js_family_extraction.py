@@ -9,10 +9,10 @@ methods, consolidated here to avoid duplication across mappings.
 
 from typing import Any
 
+from tree_sitter import Node as TSNode
+
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH
 from chunkhound.parsers.universal_engine import UniversalConcept
-
-from tree_sitter import Node as TSNode
 
 
 class JSFamilyExtraction:
@@ -192,7 +192,10 @@ class JSFamilyExtraction:
                 value = ""
                 for j in range(child.child_count):
                     value_child = child.child(j)
-                    if value_child and value_child.type not in ("property_identifier", "="):
+                    if value_child and value_child.type not in (
+                        "property_identifier",
+                        "=",
+                    ):
                         value = self.get_node_text(value_child, source).strip()  # type: ignore[attr-defined]
                         break
 

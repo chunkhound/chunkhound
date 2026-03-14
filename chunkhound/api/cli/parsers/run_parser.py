@@ -209,6 +209,22 @@ def add_run_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help="Override discovery backend for this run: auto|python|git|git_only",
     )
 
+    # Performance diagnostics
+    run_parser.add_argument(
+        "--perf-diagnostics",
+        action="store_true",
+        help="Collect and analyze per-batch timing metrics during embedding generation",
+    )
+    run_parser.add_argument(
+        "--perf-output",
+        type=Path,
+        default=None,
+        help=(
+            "Output path for performance diagnostics JSON "
+            "(default: <db_dir>/perf_diagnostics_<timestamp>.json)"
+        ),
+    )
+
     return cast(argparse.ArgumentParser, run_parser)
 
 
