@@ -201,6 +201,15 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         # Normal
         'fun greet(name: String): String {\n    return "Hello, $name"\n}',
     ),
+    Language.ELIXIR: (
+        ".ex",
+        # Large module with many functions - triggers line-based split
+        "defmodule DataProcessor do\n"
+        + _make_large_statements("  def process(x), do: x + 1")
+        + "\nend",
+        # Normal
+        'defmodule Greeter do\n  def hello(name), do: "Hello, #{name}"\nend',
+    ),
     Language.GROOVY: (
         ".groovy",
         # Large function
