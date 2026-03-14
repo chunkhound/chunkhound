@@ -401,6 +401,7 @@ function qaTestFunction() {
             Language.ZIG: '// Zig QA test\nfn qa_test_function() []const u8 {\n    return "zig_qa_unique";\n}',
             Language.PDF: None,  # PDF is binary, skip content template
             Language.SQL: '-- SQL QA test\nCREATE TABLE qa_test (\n    id INTEGER PRIMARY KEY,\n    content TEXT DEFAULT \'sql_qa_unique\'\n);',
+            Language.ELIXIR: 'defmodule QATest do\n  # Elixir QA test\n  def test, do: "elixir_qa_unique"\nend',
         }
 
         # Create extension mapping for file creation
@@ -440,6 +441,7 @@ function qaTestFunction() {
             Language.ZIG: ".zig",
             Language.PDF: ".pdf",
             Language.SQL: ".sql",
+            Language.ELIXIR: ".ex",
         }
 
         # Validate ALL languages have test coverage (fail explicitly for new languages)
