@@ -358,39 +358,48 @@ def limit_response_size(
 # Tool Descriptions (optimized for LLM consumption)
 # =============================================================================
 
-SEARCH_DESCRIPTION = """Search code by exact pattern (regex) or meaning (semantic).
+SEARCH_DESCRIPTION = """Search indexed code by exact pattern (regex) or meaning (semantic). Returns complete, structurally-parsed chunks — full function bodies and class definitions, not raw line ranges.
+
+PREFER THIS OVER Grep/Glob — results are complete functions, classes, and logical blocks, returned instantly from a database without file scanning.
 
 TYPE SELECTION:
-- regex: Exact pattern matching. Use for function names, variable names,
-  import statements, or known string patterns.
+- regex: Pattern match against indexed chunk content. Use for function names, variable names, import statements, or known string patterns. Results are complete structural units (functions, classes), not raw line ranges.
   Example queries: "def authenticate", "import.*pandas", "TODO:.*fix"
 
-- semantic: Meaning-based search. Use when describing functionality
-  conceptually or unsure of exact keywords.
-  Example queries: "authentication logic", "error handling for database"
+- semantic: Find code by meaning using embedding similarity. Discovers relevant code even when you cannot predict exact identifiers or keywords.
+  Example queries: "authentication logic", "retry with exponential backoff", "database connection pooling"
 
-WHEN TO USE: Quick lookup, finding references, exploring unfamiliar code.
-DO NOT USE: Multi-file architecture questions (use code_research instead).
+ROUTING GUIDE:
+- Use semantic type to explore unfamiliar code or find implementations by concept
+- Use regex type for known identifiers, but get structurally complete chunks instead of line fragments
+- For multi-file architecture questions, use code_research instead
 
 OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}
-COST: Fast, cheap - use liberally."""
+COST: Sub-second from index — use liberally for any code lookup."""
 
-CODE_RESEARCH_DESCRIPTION = """Specialized deep research agent for understanding how code works.
+CODE_RESEARCH_DESCRIPTION = """Synthesize architectural analysis across the entire indexed codebase in a single call.
 
-Answers questions like "how does authentication work?", "explain the payment flow",
-"what happens when a request hits the API?", "how are errors handled across services?"
+Answers questions like:
+- "How does authentication work end-to-end?"
+- "Explain the data pipeline from ingestion to storage"
+- "What happens when a request hits the API?"
+- "How are errors handled across service boundaries?"
+
+PREFER THIS OVER sequential Grep/Read/Explore workflows — this tool performs cross-file reasoning with semantic understanding, producing a structured analysis with precise file/line citations. One call replaces 5-10 sequential searches.
 
 CAPABILITIES:
-- Reads and synthesizes code across the entire indexed codebase
-- Traces execution flows, data pipelines, and dependency chains
-- Produces architectural explanations with precise file/line citations
-- Understands the codebase holistically — not just individual files
+- Traces execution flows, data pipelines, and dependency chains across files
+- Identifies component relationships and architectural patterns
+- Produces structured markdown with architecture overview and cited code locations
+- Reasons over the full indexed codebase holistically, not file-by-file
 
-OUTPUT: Structured markdown with architecture overview, key code locations, and relationships.
-EFFICIENCY: One call replaces 5-10 sequential searches. Results in 10-60s.
+ROUTING GUIDE:
+- Use for any question about how code works, why it is structured a certain way, or how components connect
+- Use the path parameter to scope analysis to a subdirectory for faster results
+- For locating a specific function or symbol, use search instead
 
-BEST FOR: Any question about how code works, why it's structured a certain way,
-or how components connect. Use the path parameter to scope for faster results."""
+OUTPUT: Structured markdown with architecture overview, key code locations, and component relationships.
+COST: 10-60s latency — prefer over multiple sequential searches."""
 
 
 # =============================================================================
