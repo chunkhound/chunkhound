@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from chunkhound.mcp_server.base import MCPServerBase
+from chunkhound.mcp_server.status import derive_daemon_status
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 
 
@@ -266,6 +267,53 @@ class TestNonBlockingInitialization:
 
         with pytest.raises(RuntimeError, match="Watchman sidecar startup failed: boom"):
             await server.await_startup_barrier()
+
+    @pytest.mark.asyncio
+    async def test_run_directory_scan_surfaces_reconciliation_cleanup_failures(
+        self, tmp_path: Path
+    ) -> None:
+        """Directory scans should record reconciliation cleanup failures in daemon status."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.include = ["**/*.py"]
+        config.indexing.exclude = []
+        config.indexing.config_file_size_threshold_kb = 20
+
+        server = ConcreteMCPServer(config=config)
+        server.services = MagicMock()
+        server.services.indexing_coordinator.process_directory = AsyncMock(
+            return_value={
+                "status": "error",
+                "error": (
+                    "Storage reconciliation cleanup failed: "
+                    "database invalidated during orphan cleanup"
+                ),
+            }
+        )
+
+        with pytest.raises(RuntimeError, match="Storage reconciliation cleanup failed"):
+            await server._run_directory_scan(
+                tmp_path,
+                trigger="realtime_resync",
+                reason="realtime_loss_of_sync",
+                no_embeddings=True,
+            )
+
+        assert (
+            "Storage reconciliation cleanup failed"
+            in server._scan_progress["scan_error"]
+        )
+
+        daemon_status = derive_daemon_status(server._scan_progress)
+        assert daemon_status["status"] == "degraded"
+        assert daemon_status["query_ready"] is False
+        assert (
+            "Storage reconciliation cleanup failed"
+            in daemon_status["scan_progress"]["scan_error"]
+        )
 
     @pytest.mark.asyncio
     async def test_realtime_resync_uses_no_embedding_scan_and_single_embed_followup(

@@ -6,7 +6,9 @@ and data integrity using real components without mocks.
 
 import pytest
 from pathlib import Path
+from chunkhound.core.models import Chunk, Embedding, File
 from chunkhound.core.types.common import Language, FileId
+from chunkhound.core.types.common import ChunkType, LineNumber
 from chunkhound.parsers.parser_factory import create_parser_for_language
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
@@ -20,6 +22,271 @@ def real_components(tmp_path):
     parser = create_parser_for_language(Language.PYTHON)
     coordinator = IndexingCoordinator(db, tmp_path, None, {Language.PYTHON: parser})
     return {"db": db, "parser": parser, "coordinator": coordinator}
+
+
+def test_process_directory_cleans_orphaned_hnsw_records_without_invalidating_duckdb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import asyncio
+
+    pytest.importorskip("duckdb")
+
+    provider = DuckDBProvider(db_path=tmp_path / "db.duckdb", base_directory=tmp_path)
+    provider.connect()
+
+    current_file = tmp_path / "current.py"
+    current_file.write_text("def current():\n    return 1\n")
+
+    orphan_file_id = provider.insert_file(
+        File(path="orphan.py", mtime=1.0, size_bytes=24, language=Language.PYTHON)
+    )
+    orphan_chunk_id = provider.insert_chunk(
+        Chunk(
+            file_id=FileId(orphan_file_id),
+            symbol="orphan",
+            start_line=LineNumber(1),
+            end_line=LineNumber(2),
+            code="def orphan():\n    return 1\n",
+            chunk_type=ChunkType.FUNCTION,
+            language=Language.PYTHON,
+        )
+    )
+    provider.insert_embedding(
+        Embedding(
+            chunk_id=orphan_chunk_id,
+            provider="test",
+            model="mini",
+            dims=3,
+            vector=[0.1, 0.2, 0.3],
+        )
+    )
+
+    initial_indexes = provider.execute_query(
+        """
+        SELECT index_name
+        FROM duckdb_indexes()
+        WHERE table_name = 'embeddings_3'
+          AND (index_name LIKE 'hnsw_%' OR index_name LIKE 'idx_hnsw_%')
+        ORDER BY index_name
+        """,
+        [],
+    )
+    if not initial_indexes:
+        pytest.skip("DuckDB HNSW indexes are unavailable in this environment")
+
+    coordinator = IndexingCoordinator(provider, tmp_path)
+
+    async def _skip_processing(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(coordinator, "_process_files_in_batches", _skip_processing)
+
+    result = asyncio.run(
+        coordinator.process_directory(
+            tmp_path, patterns=["**/*.py"], exclude_patterns=[]
+        )
+    )
+
+    assert result["status"] == "success"
+    assert provider.get_file_by_path("orphan.py", as_model=False) is None
+    assert provider.get_chunks_by_file_id(orphan_file_id, as_model=False) == []
+    remaining_embeddings = provider.execute_query(
+        "SELECT COUNT(*) AS count FROM embeddings_3 WHERE chunk_id = ?",
+        [orphan_chunk_id],
+    )
+    assert remaining_embeddings[0]["count"] == 0
+
+    remaining_indexes = provider.execute_query(
+        """
+        SELECT index_name
+        FROM duckdb_indexes()
+        WHERE table_name = 'embeddings_3'
+          AND (index_name LIKE 'hnsw_%' OR index_name LIKE 'idx_hnsw_%')
+        ORDER BY index_name
+        """,
+        [],
+    )
+    assert [row["index_name"] for row in remaining_indexes] == [
+        row["index_name"] for row in initial_indexes
+    ]
+
+    followup_file_id = provider.insert_file(
+        File(path="followup.py", mtime=2.0, size_bytes=27, language=Language.PYTHON)
+    )
+    followup_chunk_id = provider.insert_chunk(
+        Chunk(
+            file_id=FileId(followup_file_id),
+            symbol="followup",
+            start_line=LineNumber(1),
+            end_line=LineNumber(2),
+            code="def followup():\n    return 2\n",
+            chunk_type=ChunkType.FUNCTION,
+            language=Language.PYTHON,
+        )
+    )
+    provider.insert_embedding(
+        Embedding(
+            chunk_id=followup_chunk_id,
+            provider="test",
+            model="mini",
+            dims=3,
+            vector=[0.4, 0.5, 0.6],
+        )
+    )
+
+    followup_embeddings = provider.execute_query(
+        "SELECT COUNT(*) AS count FROM embeddings_3 WHERE chunk_id = ?",
+        [followup_chunk_id],
+    )
+    assert followup_embeddings[0]["count"] == 1
+
+
+def test_process_directory_returns_deterministic_error_when_orphan_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import asyncio
+
+    provider = DuckDBProvider(db_path=tmp_path / "db.duckdb", base_directory=tmp_path)
+    provider.connect()
+
+    current_file = tmp_path / "current.py"
+    current_file.write_text("def current():\n    return 1\n")
+    provider.insert_file(
+        File(path="orphan.py", mtime=1.0, size_bytes=24, language=Language.PYTHON)
+    )
+
+    coordinator = IndexingCoordinator(provider, tmp_path)
+
+    async def _skip_processing(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(coordinator, "_process_files_in_batches", _skip_processing)
+
+    def _fail_delete(file_path: str) -> bool:
+        raise RuntimeError("hnsw delete exploded")
+
+    monkeypatch.setattr(provider, "delete_file_completely", _fail_delete)
+
+    result = asyncio.run(
+        coordinator.process_directory(
+            tmp_path, patterns=["**/*.py"], exclude_patterns=[]
+        )
+    )
+
+    assert result == {
+        "status": "error",
+        "error": "Storage reconciliation cleanup failed: hnsw delete exploded",
+    }
+
+
+def test_orphan_cleanup_restores_rows_when_hnsw_index_recreation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import asyncio
+
+    pytest.importorskip("duckdb")
+
+    provider = DuckDBProvider(db_path=tmp_path / "db.duckdb", base_directory=tmp_path)
+    provider.connect()
+
+    current_file = tmp_path / "current.py"
+    current_file.write_text("def current():\n    return 1\n")
+
+    orphan_file_id = provider.insert_file(
+        File(path="orphan.py", mtime=1.0, size_bytes=24, language=Language.PYTHON)
+    )
+    orphan_chunk_id = provider.insert_chunk(
+        Chunk(
+            file_id=FileId(orphan_file_id),
+            symbol="orphan",
+            start_line=LineNumber(1),
+            end_line=LineNumber(2),
+            code="def orphan():\n    return 1\n",
+            chunk_type=ChunkType.FUNCTION,
+            language=Language.PYTHON,
+        )
+    )
+    provider.insert_embedding(
+        Embedding(
+            chunk_id=orphan_chunk_id,
+            provider="test",
+            model="mini",
+            dims=3,
+            vector=[0.1, 0.2, 0.3],
+        )
+    )
+
+    initial_indexes = provider.execute_query(
+        """
+        SELECT index_name
+        FROM duckdb_indexes()
+        WHERE table_name = 'embeddings_3'
+          AND (index_name LIKE 'hnsw_%' OR index_name LIKE 'idx_hnsw_%')
+        ORDER BY index_name
+        """,
+        [],
+    )
+    if not initial_indexes:
+        pytest.skip("DuckDB HNSW indexes are unavailable in this environment")
+
+    recreate_attempts = {"count": 0}
+    original_recreate = provider._executor_recreate_vector_index_from_info
+
+    def _fail_once(conn, state, index_info):
+        recreate_attempts["count"] += 1
+        if recreate_attempts["count"] == 1:
+            raise RuntimeError("forced hnsw recreate failure")
+        return original_recreate(conn, state, index_info)
+
+    monkeypatch.setattr(provider, "_executor_recreate_vector_index_from_info", _fail_once)
+
+    coordinator = IndexingCoordinator(provider, tmp_path)
+
+    async def _skip_processing(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(coordinator, "_process_files_in_batches", _skip_processing)
+
+    failed_result = asyncio.run(
+        coordinator.process_directory(
+            tmp_path, patterns=["**/*.py"], exclude_patterns=[]
+        )
+    )
+
+    assert failed_result == {
+        "status": "error",
+        "error": "Storage reconciliation cleanup failed: forced hnsw recreate failure",
+    }
+    assert recreate_attempts["count"] >= 2
+    assert provider.get_file_by_path("orphan.py", as_model=False) is not None
+    assert provider.get_chunks_by_file_id(orphan_file_id, as_model=False) != []
+    restored_embeddings = provider.execute_query(
+        "SELECT COUNT(*) AS count FROM embeddings_3 WHERE chunk_id = ?",
+        [orphan_chunk_id],
+    )
+    assert restored_embeddings[0]["count"] == 1
+
+    restored_indexes = provider.execute_query(
+        """
+        SELECT index_name
+        FROM duckdb_indexes()
+        WHERE table_name = 'embeddings_3'
+          AND (index_name LIKE 'hnsw_%' OR index_name LIKE 'idx_hnsw_%')
+        ORDER BY index_name
+        """,
+        [],
+    )
+    assert [row["index_name"] for row in restored_indexes] == [
+        row["index_name"] for row in initial_indexes
+    ]
+
+    successful_result = asyncio.run(
+        coordinator.process_directory(
+            tmp_path, patterns=["**/*.py"], exclude_patterns=[]
+        )
+    )
+    assert successful_result["status"] == "success"
+    assert provider.get_file_by_path("orphan.py", as_model=False) is None
 
 
 class TestChunkPreservationLogic:
