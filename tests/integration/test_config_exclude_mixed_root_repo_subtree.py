@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(subprocess.run(["wsich", "git"], stdout=subprocess.DEVNULL).returncode != 0, reason="git required")
+pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
