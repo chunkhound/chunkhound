@@ -16,6 +16,7 @@ from chunkhound.services.realtime_indexing_service import RealtimeIndexingServic
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
     realtime_backend_for_tests,
+    stabilize_polling_monitor,
     wait_for_indexed,
     wait_for_removed,
 )
@@ -113,12 +114,13 @@ class TestRealtimeFailures:
                 skip_embeddings=True,  # This parameter might not exist
             )
             # If we get here, the parameter exists but might not work correctly
-            assert result.get("embeddings_skipped") == True, (
+            assert result.get("embeddings_skipped"), (
                 "skip_embeddings parameter should actually skip embeddings"
             )
         except TypeError as e:
             pytest.fail(
-                f"IndexingCoordinator.process_file doesn't support skip_embeddings: {e}"
+                f"IndexingCoordinator.process_file doesn't support "
+                f"skip_embeddings: {e}"
             )
 
     @pytest.mark.asyncio
@@ -144,7 +146,8 @@ class TestRealtimeFailures:
             active_timers = len(service.event_handler.debouncer.timers)
             # Should only have 1 timer max for the single file, or 0 if cleaned up
             assert active_timers <= 1, (
-                f"Too many active timers ({active_timers}) - should cleanup after execution"
+                f"Too many active timers ({active_timers}) "
+                "- should cleanup after execution"
             )
 
         await service.stop()
@@ -176,7 +179,8 @@ class TestRealtimeFailures:
             unique_contents = set(chunk_contents)
 
             assert len(chunk_contents) == len(unique_contents), (
-                f"Duplicate processing detected: {len(chunk_contents)} chunks, {len(unique_contents)} unique"
+                f"Duplicate processing detected: {len(chunk_contents)} "
+                f"chunks, {len(unique_contents)} unique"
             )
 
         await service.stop()
@@ -186,6 +190,8 @@ class TestRealtimeFailures:
         """Test that filesystem observer doesn't properly watch subdirectories."""
         service, watch_dir, _, services = realtime_setup
         await service.start(watch_dir)
+
+        await stabilize_polling_monitor()
 
         # Create subdirectory and file
         subdir = watch_dir / "subdir"
@@ -254,3 +260,21 @@ class TestRealtimeFailures:
         )
 
         await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_polling_monitor_cleanup_on_cancellation(self, realtime_setup):
+        """Test that polling monitor cleans up resources when cancelled."""
+        service, watch_dir, _, _ = realtime_setup
+
+        service.config.indexing.realtime_backend = "polling"
+        service._configured_backend = "polling"
+        await service.start(watch_dir)
+
+        # Let polling run at least one cycle.
+        await asyncio.sleep(0.5)
+
+        await service.stop()
+
+        assert service._polling_task is None or service._polling_task.done(), (
+            "Polling task should be cleaned up after stop()"
+        )

@@ -14,8 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - FastMCP dependency removed
   - Migration: Use `chunkhound mcp` (stdio) instead. All major MCP clients (Claude Code, Claude Desktop, VS Code) support stdio transport.
   - Rationale: Simplified codebase, reduced dependencies, focused on primary use case (stdio is the standard for MCP)
+- **Unsupported file types no longer indexed as plain text** - Files with unrecognized extensions are now skipped instead of being force-parsed as plain text. Files with known text extensions (.txt, .log, .cfg, .conf, .ini) are unaffected.
 
 ### Added
+- **Embedded SQL detection** - SQL code embedded in string literals is now detected and indexed by default across Python, Java, JavaScript, TypeScript, C#, Go, Rust, and PHP. Disable with `--no-detect-embedded-sql` or `CHUNKHOUND_INDEXING__DETECT_EMBEDDED_SQL=false`.
 - OpenAI Responses API support for reasoning models (gpt-5.1, gpt-5.1-codex, o-series, gpt-5-pro) - enables deep code research with enhanced reasoning capabilities
 - Automatic API routing between Chat Completions and Responses API based on model compatibility - supports 30+ models including all GPT-5, GPT-4.1, GPT-4o, and o-series models
 - Reasoning effort control for deep research LLM operations - configurable levels (none, minimal, low, medium, high) via `CHUNKHOUND_LLM_CODEX_REASONING_EFFORT` with per-role overrides for utility and synthesis operations

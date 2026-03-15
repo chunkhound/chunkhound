@@ -37,9 +37,15 @@ def add_research_subparser(subparsers: Any) -> argparse.ArgumentParser:
         help="Directory path to research (default: current directory)",
     )
 
+    def _nonempty_path(value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise argparse.ArgumentTypeError("path filter must not be empty")
+        return stripped
+
     research_parser.add_argument(
         "--path-filter",
-        type=str,
+        type=_nonempty_path,
         help="Optional path filter (e.g., 'src/', 'tests/')",
     )
 

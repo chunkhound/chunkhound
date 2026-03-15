@@ -210,3 +210,34 @@ class TestFormatChunkForEmbedding:
         assert "C4=4" in result
         assert "+1 more" in result
         assert "C5" not in result
+
+    def test_with_rule_target(self):
+        """Should append rule_target to header for Makefile continuation chunks."""
+        result = format_chunk_for_embedding(
+            code="\tgcc -o main main.c",
+            file_path="Makefile",
+            language="makefile",
+            rule_target="install",
+        )
+        assert result == "# Makefile (makefile) [target: install]\n\tgcc -o main main.c"
+
+    def test_with_rule_target_no_file_or_language(self):
+        """Should create header with only rule_target when no file/language provided."""
+        result = format_chunk_for_embedding(
+            code="\techo done",
+            rule_target="build",
+        )
+        assert result == "# [target: build]\n\techo done"
+
+    def test_with_rule_target_and_constants(self):
+        """Should append both rule_target and constants to header."""
+        result = format_chunk_for_embedding(
+            code="\t$(CC) -o main main.c",
+            file_path="Makefile",
+            language="makefile",
+            constants=[{"name": "CC", "value": "gcc"}],
+            rule_target="build",
+        )
+        assert "target: build" in result
+        assert "[CC=gcc]" in result
+        assert result.startswith("# Makefile (makefile) [target: build] [CC=gcc]")

@@ -12,6 +12,8 @@ from multiprocessing.connection import Connection
 from pathlib import Path
 from time import perf_counter
 
+from loguru import logger
+
 from chunkhound.core.detection import detect_language
 from chunkhound.core.types.common import FileId, Language
 
@@ -19,7 +21,6 @@ from chunkhound.core.types.common import FileId, Language
 def _dbg_log(msg: str) -> None:
     try:
         import datetime
-        import os
 
         path = os.getenv("CHUNKHOUND_DEBUG_FILE")
         if not path:
@@ -50,7 +51,10 @@ class ParsedFileResult:
 
 
 def _parse_file_worker(
-    file_path_str: str, language_value: str, conn: Connection
+    file_path_str: str,
+    language_value: str,
+    conn: Connection,
+    detect_embedded_sql: bool = True,
 ) -> None:
     """Child-process worker to parse a single file and send results via pipe.
 
@@ -72,7 +76,7 @@ def _parse_file_worker(
         )
 
         language = _Language.from_string(language_value)
-        parser = _create(language)
+        parser = _create(language, detect_embedded_sql=detect_embedded_sql)
         if not parser:
             conn.send(("error", f"No parser available for {language}"))
             return
@@ -93,7 +97,10 @@ def _parse_file_worker(
 
 
 def _parse_file_with_timeout(
-    file_path: Path, language: Language, timeout_s: float
+    file_path: Path,
+    language: Language,
+    timeout_s: float,
+    detect_embedded_sql: bool = True,
 ) -> tuple[str, list[dict] | str | None]:
     """Parse a file in a child process with a wall-clock timeout.
 
@@ -108,7 +115,7 @@ def _parse_file_with_timeout(
     parent_conn, child_conn = ctx.Pipe(duplex=False)
     p = ctx.Process(
         target=_parse_file_worker,
-        args=(str(file_path), language.value, child_conn),
+        args=(str(file_path), language.value, child_conn, detect_embedded_sql),
         daemon=True,
     )
     _dbg_log(f"TIMEOUT-SPAWN start: {file_path}")
@@ -229,6 +236,7 @@ def process_file_batch(
                 _dbg_log(
                     f"END   file={file_path} status=skipped reason=unknown_type dur_ms={(perf_counter() - t0) * 1000:.1f}"
                 )
+                logger.debug("Skipping file with unknown type: {}", file_path)
                 continue
 
             # Skip large config/data files (config files are typically < 20KB)
@@ -257,14 +265,15 @@ def process_file_batch(
 
             # Parse file and generate chunks (with optional per-file timeout)
             if timeout_s > 0 and ((file_stat.st_size / 1024) >= timeout_min_kb):
+                detect_sql = bool(config_dict.get("detect_embedded_sql", True))
                 if _timeout_semaphore is not None:
                     with _timeout_semaphore:
                         status, payload = _parse_file_with_timeout(
-                            file_path, language, timeout_s
+                            file_path, language, timeout_s, detect_sql
                         )
                 else:
                     status, payload = _parse_file_with_timeout(
-                        file_path, language, timeout_s
+                        file_path, language, timeout_s, detect_sql
                     )
                 if status == "timeout":
                     # Defer user notification to final summary; avoid live console noise
@@ -305,7 +314,12 @@ def process_file_batch(
                     chunks_data = payload if isinstance(payload, list) else []
             else:
                 # No timeout path (original behavior)
-                parser = create_parser_for_language(language)
+                parser = create_parser_for_language(
+                    language,
+                    detect_embedded_sql=bool(
+                        config_dict.get("detect_embedded_sql", True)
+                    ),
+                )
                 if not parser:
                     results.append(
                         ParsedFileResult(

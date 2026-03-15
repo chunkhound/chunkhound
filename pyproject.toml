@@ -5,8 +5,16 @@ build-backend = "hatchling.build"
 [project]
 name = "chunkhound"
 dynamic = ["version"]
-description = "Local-first semantic code search with vector and regex capabilities for AI assistants via MCP"
+description = "Local-first codebase intelligence for AI assistants via MCP"
 readme = "README.md"
+keywords = [
+    "code search",
+    "semantic search",
+    "MCP",
+    "AI agents",
+    "CAST algorithm",
+    "vector search",
+]
 requires-python = ">=3.10,<3.14"
 authors = [
     {name = "Ofri Wolfus"},

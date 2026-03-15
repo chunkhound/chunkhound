@@ -12,6 +12,7 @@ Architecture:
 """
 
 import asyncio
+import gc
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator
@@ -1437,12 +1438,9 @@ class RealtimeIndexingService:
     async def _stop_observer(self) -> None:
         if self.observer:
             self.observer.stop()
-            try:
-                loop = asyncio.get_event_loop()
-                await asyncio.wait_for(
-                    loop.run_in_executor(None, self.observer.join), timeout=1.0
-                )
-            except asyncio.TimeoutError:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self.observer.join, 1.0)
+            if self.observer.is_alive():
                 logger.warning("Observer thread did not exit within timeout")
             self.observer = None
             self.event_handler = None
@@ -1779,28 +1777,32 @@ class RealtimeIndexingService:
             None, self.config, None, root_path=watch_path
         )
 
-        for file_path in watch_path.rglob("*"):
-            try:
-                if not file_path.is_file():
-                    continue
-
-                files_checked += 1
-                if simple_handler._should_index(file_path):
-                    try:
-                        stat_result = file_path.stat()
-                    except OSError:
+        rglob_gen = watch_path.rglob("*")
+        try:
+            for file_path in rglob_gen:
+                try:
+                    if not file_path.is_file():
                         continue
 
-                    current_files[file_path] = (
-                        stat_result.st_mtime_ns,
-                        stat_result.st_size,
-                    )
+                    files_checked += 1
+                    if simple_handler._should_index(file_path):
+                        try:
+                            stat_result = file_path.stat()
+                        except OSError:
+                            continue
 
-                if files_checked >= 5000:
-                    truncated = True
-                    break
-            except (OSError, PermissionError):
-                continue
+                        current_files[file_path] = (
+                            stat_result.st_mtime_ns,
+                            stat_result.st_size,
+                        )
+
+                    if files_checked >= 5000:
+                        truncated = True
+                        break
+                except (OSError, PermissionError):
+                    continue
+        finally:
+            rglob_gen.close()
 
         return current_files, files_checked, truncated
 
@@ -1830,49 +1832,60 @@ class RealtimeIndexingService:
         # freshly created files are detected quickly after startup/fallback.
         polling_start = time.time()
 
-        while True:
-            try:
-                current_files, files_checked, truncated = await asyncio.to_thread(
-                    self._polling_snapshot, watch_path
-                )
-                self._last_poll_snapshot_at = self._utc_now()
-                self._last_poll_files_checked = files_checked
-                self._last_poll_snapshot_truncated = truncated
-                if truncated:
-                    self._set_warning(
-                        "Polling snapshot truncated after 5000 files to avoid "
-                        "event-loop starvation"
+        try:
+            while True:
+                try:
+                    current_files, files_checked, truncated = await asyncio.to_thread(
+                        self._polling_snapshot, watch_path
                     )
+                    self._last_poll_snapshot_at = self._utc_now()
+                    self._last_poll_files_checked = files_checked
+                    self._last_poll_snapshot_truncated = truncated
+                    if truncated:
+                        self._set_warning(
+                            "Polling snapshot truncated after 5000 files to avoid "
+                            "event-loop starvation"
+                        )
 
-                for file_path, current_fingerprint in current_files.items():
-                    if file_path not in known_files:
-                        logger.debug(f"Polling detected new file: {file_path}")
-                        self._debug(f"polling detected new file: {file_path}")
-                        await self.add_file(file_path, priority="change")
-                    elif known_files[file_path] != current_fingerprint:
-                        logger.debug(f"Polling detected modified file: {file_path}")
-                        self._debug(f"polling detected modified file: {file_path}")
-                        await self.add_file(file_path, priority="change")
+                    for file_path, current_fingerprint in current_files.items():
+                        if file_path not in known_files:
+                            logger.debug(f"Polling detected new file: {file_path}")
+                            self._debug(f"polling detected new file: {file_path}")
+                            await self.add_file(file_path, priority="change")
+                        elif known_files[file_path] != current_fingerprint:
+                            logger.debug(f"Polling detected modified file: {file_path}")
+                            self._debug(f"polling detected modified file: {file_path}")
+                            await self.add_file(file_path, priority="change")
 
-                # Check for deleted files
-                deleted = set(known_files.keys()) - set(current_files.keys())
-                for file_path in deleted:
-                    logger.debug(f"Polling detected deleted file: {file_path}")
-                    await self.remove_file(file_path)
-                    self._debug(f"polling detected deleted file: {file_path}")
+                    # Check for deleted files.
+                    deleted = set(known_files.keys()) - set(current_files.keys())
+                    for file_path in deleted:
+                        logger.debug(f"Polling detected deleted file: {file_path}")
+                        await self.remove_file(file_path)
+                        self._debug(f"polling detected deleted file: {file_path}")
 
-                known_files = current_files
+                    known_files = current_files
 
-                # Adaptive poll interval: 1s for the first 10s, then 5s
-                elapsed = time.time() - polling_start
-                interval = 1.0 if elapsed < 10.0 else 5.0
-                self._emit_status_update()
-                await asyncio.sleep(interval)
+                    # Adaptive poll interval: 0.5s for the first 30s, then 3s
+                    # Extended fast polling window ensures reliable detection during
+                    # multi-file test sequences on Windows CI where setup + indexing
+                    # can consume the initial fast-polling budget
+                    elapsed = time.time() - polling_start
+                    interval = 0.5 if elapsed < 30.0 else 3.0
+                    self._emit_status_update()
+                    await asyncio.sleep(interval)
 
-            except Exception as e:
-                logger.error(f"Polling monitor error: {e}")
-                self._set_error(f"Polling monitor error: {e}")
-                await asyncio.sleep(5)
+                except Exception as e:
+                    logger.error(f"Polling monitor error: {e}")
+                    self._set_error(f"Polling monitor error: {e}")
+                    await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            logger.debug("Polling monitor cancelled")
+            raise
+        finally:
+            # Force cleanup of any lingering file handles on Windows
+            gc.collect()
+            logger.debug("Polling monitor stopped")
 
     async def add_file(self, file_path: Path, priority: str = "change") -> None:
         """Add file to processing queue with deduplication and debouncing."""
@@ -2009,7 +2022,7 @@ class RealtimeIndexingService:
         """Remove file from database."""
         try:
             logger.debug(f"Removing file from database: {file_path}")
-            self.services.provider.delete_file_completely(str(file_path))
+            await self.services.provider.delete_file_completely_async(str(file_path))
             self._debug(f"removed file from database: {file_path}")
             self._emit_status_update()
         except Exception as e:
@@ -2045,7 +2058,7 @@ class RealtimeIndexingService:
         try:
             # Get all files that were in this directory from database
             # Use the provider's search capability to find files with this path prefix
-            search_results, _ = self.services.provider.search_regex(
+            search_results, _ = await self.services.provider.search_regex_async(
                 pattern=f"^{dir_path}/.*",
                 page_size=1000,  # Large page to get all matches
             )
@@ -2055,7 +2068,7 @@ class RealtimeIndexingService:
                 file_path = result.get("file_path", result.get("path", ""))
                 if file_path:
                     logger.debug(f"Cleaning up deleted file: {file_path}")
-                    self.services.provider.delete_file_completely(file_path)
+                    await self.services.provider.delete_file_completely_async(file_path)
 
             logger.info(
                 "Cleaned up "

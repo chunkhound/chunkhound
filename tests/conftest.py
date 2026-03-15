@@ -1,5 +1,8 @@
 import os
 
+from loguru import logger
+
+logger.remove()
 import pytest
 
 from chunkhound.watchman_runtime.loader import is_packaged_watchman_runtime_available

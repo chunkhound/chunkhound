@@ -193,6 +193,9 @@ def realtime_backend_for_tests() -> str:
     return "polling" if should_use_polling() else "watchdog"
 
 
+POLLING_STABILIZATION_DELAY: float = 1.0  # Seconds to wait for first poll iteration
+
+
 def get_fs_event_timeout() -> float:
     """Get appropriate timeout for filesystem event detection.
 
@@ -202,6 +205,17 @@ def get_fs_event_timeout() -> float:
     if is_ci():
         return 30.0 if IS_WINDOWS else 5.0
     return 3.0
+
+
+async def stabilize_polling_monitor() -> None:
+    """Wait for polling monitor to complete first iteration on Windows CI.
+
+    No-op on platforms using native filesystem events.
+    """
+    if should_use_polling():
+        import asyncio
+
+        await asyncio.sleep(POLLING_STABILIZATION_DELAY)
 
 
 async def wait_for_indexed(

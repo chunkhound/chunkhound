@@ -95,8 +95,6 @@ class MCPServerBase(ABC):
             )
             try:
                 with open(debug_file, "a") as f:
-                    from datetime import datetime
-
                     timestamp = datetime.now().isoformat()
                     f.write(f"[{timestamp}] [MCP] {message}\n")
                     f.flush()
