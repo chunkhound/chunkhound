@@ -1,6 +1,7 @@
 """Embedding service for ChunkHound - manages embedding generation and caching."""
 
 import asyncio
+import time
 from typing import Any
 
 from loguru import logger
@@ -111,10 +112,11 @@ class EmbeddingService(BaseService):
             return
         try:
             progress.advance(embed_task, batch_size)
-            # Calculate and display speed
-            task_obj = progress.tasks[embed_task]
-            if task_obj.elapsed and task_obj.elapsed > 0:
-                speed = processed_count / task_obj.elapsed
+            # Calculate speed using wallclock timer — avoids Rich's _Task.elapsed
+            # which is not guaranteed across Rich versions.
+            elapsed = time.monotonic() - self._embed_start_time
+            if elapsed > 0:
+                speed = processed_count / elapsed
                 progress.update(embed_task, speed=f"{speed:.1f} chunks/s")
         except (AttributeError, IndexError, TypeError, KeyError) as e:
             # Progress display is non-critical, but log for debugging
@@ -481,6 +483,8 @@ class EmbeddingService(BaseService):
         Returns:
             Number of embeddings successfully generated
         """
+        self._embed_start_time: float = time.monotonic()  # reset on every call
+
         if not chunk_data:
             return 0
 
