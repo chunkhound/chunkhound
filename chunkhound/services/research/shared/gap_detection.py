@@ -33,7 +33,6 @@ from chunkhound.core.config.research_config import ResearchConfig
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
-from chunkhound.services.research.shared.evidence_ledger import CONSTANTS_INSTRUCTION_SHORT
 from chunkhound.services.research.shared.chunk_context_builder import (
     ChunkContextBuilder,
     get_chunk_text,
@@ -46,7 +45,10 @@ from chunkhound.services.research.shared.elbow_detection import (
     compute_elbow_threshold,
     find_elbow_kneedle,
 )
-from chunkhound.services.research.shared.failure_tracker import FailureMetrics
+from chunkhound.services.research.shared.evidence_ledger import (
+    CONSTANTS_INSTRUCTION_SHORT,
+)
+from chunkhound.services.research.shared.gap_models import GapCandidate, UnifiedGap
 from chunkhound.services.research.shared.import_context import ImportContextService
 from chunkhound.services.research.shared.import_resolution_helper import (
     resolve_and_fetch_imports,
@@ -56,7 +58,6 @@ from chunkhound.services.research.shared.models import (
     ResearchContext,
 )
 from chunkhound.services.research.shared.unified_search import UnifiedSearch
-from chunkhound.services.research.shared.gap_models import GapCandidate, UnifiedGap
 
 # Token budget per gap detection cluster (affects LLM context size)
 GAP_CLUSTER_TOKEN_BUDGET = 50_000
@@ -138,7 +139,9 @@ class GapDetectionService:
         logger.info(f"Step 2.2: Created {len(shards)} shards from clusters")
 
         # Step 2.3: Detect gaps in parallel
-        raw_gaps = await self._detect_gaps_parallel(root_query, shards, constants_context)
+        raw_gaps = await self._detect_gaps_parallel(
+            root_query, shards, constants_context
+        )
         logger.info(f"Step 2.3: Detected {len(raw_gaps)} raw gap candidates")
 
         if not raw_gaps:
@@ -444,7 +447,9 @@ Output JSON with gaps array."""
                         for g in gaps
                     ]
 
-                    logger.debug(f"Shard {shard_idx}: Detected {len(gap_candidates)} gaps")
+                    logger.debug(
+                        f"Shard {shard_idx}: Detected {len(gap_candidates)} gaps"
+                    )
                     return gap_candidates
 
                 except Exception as e:
@@ -833,8 +838,7 @@ Output a single unified query that captures the essential information need."""
         # Apply window expansion if enabled
         if self._config.window_expansion_enabled:
             chunks = await self._unified_search.expand_chunk_windows(
-                chunks,
-                window_lines=self._config.window_expansion_lines
+                chunks, window_lines=self._config.window_expansion_lines
             )
 
         # Compute adaptive threshold for this gap

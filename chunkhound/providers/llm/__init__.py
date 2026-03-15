@@ -5,6 +5,7 @@ from .base_cli_provider import BaseCLIProvider
 from .claude_code_cli_provider import ClaudeCodeCLIProvider
 from .codex_cli_provider import CodexCLIProvider
 from .gemini_llm_provider import GeminiLLMProvider
+from .grok_llm_provider import GrokLLMProvider
 from .openai_llm_provider import OpenAILLMProvider
 from .opencode_cli_provider import OpenCodeCLIProvider
 
@@ -14,6 +15,7 @@ __all__ = [
     "ClaudeCodeCLIProvider",
     "CodexCLIProvider",
     "GeminiLLMProvider",
+    "GrokLLMProvider",
     "OpenAILLMProvider",
     "OpenCodeCLIProvider",
 ]

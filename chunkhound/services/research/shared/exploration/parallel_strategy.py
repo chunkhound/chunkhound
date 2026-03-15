@@ -135,7 +135,9 @@ class ParallelExplorationStrategy:
         if isinstance(bfs_result, BaseException):
             logger.error(f"BFS exploration failed: {bfs_result}")
             bfs_stats = {
-                "error": str(bfs_result), "nodes_explored": 0, "chunks_total": 0
+                "error": str(bfs_result),
+                "nodes_explored": 0,
+                "chunks_total": 0,
             }
         else:
             bfs_chunks = bfs_result[0]
@@ -144,14 +146,18 @@ class ParallelExplorationStrategy:
         if isinstance(wide_result, BaseException):
             logger.error(f"WideCoverage exploration failed: {wide_result}")
             wide_stats = {
-                "error": str(wide_result), "chunks_before": 0, "chunks_after": 0
+                "error": str(wide_result),
+                "chunks_before": 0,
+                "chunks_after": 0,
             }
         else:
             wide_chunks = wide_result[0]
             wide_stats = wide_result[1]
 
         # Fail explicitly if both strategies failed
-        if isinstance(bfs_result, BaseException) and isinstance(wide_result, BaseException):
+        if isinstance(bfs_result, BaseException) and isinstance(
+            wide_result, BaseException
+        ):
             raise RuntimeError(
                 f"Both exploration strategies failed. BFS: {bfs_result}, Wide: {wide_result}"
             )
@@ -209,14 +215,18 @@ class ParallelExplorationStrategy:
         )
 
         if not merged_chunks:
-            return [], {
-                **raw_stats,
-                "elbow_filter": {"method": "passthrough", "reason": "empty_input"},
-                "chunks_before": len(initial_chunks),
-                "chunks_after": 0,
-                "chunks_added": -len(initial_chunks),
-                "files_read": 0,
-            }, {}
+            return (
+                [],
+                {
+                    **raw_stats,
+                    "elbow_filter": {"method": "passthrough", "reason": "empty_input"},
+                    "chunks_before": len(initial_chunks),
+                    "chunks_after": 0,
+                    "chunks_added": -len(initial_chunks),
+                    "files_read": 0,
+                },
+                {},
+            )
 
         # Apply unified elbow detection (score_key=None uses get_unified_score)
         filtered_chunks, elbow_stats = filter_chunks_by_elbow(
@@ -237,9 +247,7 @@ class ParallelExplorationStrategy:
             llm_manager=self._llm_manager,
             max_tokens=None,  # Unlimited - elbow already filtered
         )
-        logger.info(
-            f"ParallelExplorationStrategy: Read {len(file_contents)} files"
-        )
+        logger.info(f"ParallelExplorationStrategy: Read {len(file_contents)} files")
 
         # Aggregate stats
         stats: dict[str, Any] = {

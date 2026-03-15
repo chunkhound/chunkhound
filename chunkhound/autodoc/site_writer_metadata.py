@@ -152,4 +152,3 @@ def _render_index_metadata(index: CodeMapperIndex) -> list[str]:
                 lines.append(f"- Chunks referenced: {detail}")
 
     return lines
-

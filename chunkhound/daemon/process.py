@@ -12,6 +12,7 @@ def pid_alive(pid: int) -> bool:
         return False
     if sys.platform == "win32":
         import psutil
+
         return psutil.pid_exists(pid)
     try:
         os.kill(pid, 0)

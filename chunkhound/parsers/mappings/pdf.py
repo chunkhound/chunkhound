@@ -633,10 +633,7 @@ class PDFMapping(BaseMapping):
         return annotations
 
     def resolve_import_paths(
-        self,
-        import_text: str,
-        base_dir: Path,
-        source_file: Path
+        self, import_text: str, base_dir: Path, source_file: Path
     ) -> list[Path]:
         """Data formats don't have imports."""
         return []

@@ -63,8 +63,7 @@ class ClientProxy:
             stdout_task = asyncio.create_task(self._forward_socket_to_stdout(reader))
 
             done, pending = await asyncio.wait(
-                {stdin_task, stdout_task},
-                return_when=asyncio.FIRST_COMPLETED
+                {stdin_task, stdout_task}, return_when=asyncio.FIRST_COMPLETED
             )
 
             # Retrieve exceptions from completed tasks to prevent

@@ -450,9 +450,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             """)
 
             # Ensure content_hash exists for existing DBs
-            conn.execute(
-                "ALTER TABLE files ADD COLUMN IF NOT EXISTS content_hash TEXT"
-            )
+            conn.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS content_hash TEXT")
 
             # Create sequence for chunks table
             conn.execute("CREATE SEQUENCE IF NOT EXISTS chunks_id_seq")
@@ -607,7 +605,9 @@ class DuckDBProvider(SerialDatabaseProvider):
                     try:
                         conn.execute("ROLLBACK")
                     except Exception as rollback_error:
-                        logger.error(f"ROLLBACK failed during migration: {rollback_error}")
+                        logger.error(
+                            f"ROLLBACK failed during migration: {rollback_error}"
+                        )
                     state["transaction_active"] = False
                     raise
 
@@ -615,9 +615,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 logger.info("Successfully migrated chunks table schema")
 
             # Add metadata column if it doesn't exist (for databases without size/signature migration)
-            conn.execute(
-                "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS metadata TEXT"
-            )
+            conn.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS metadata TEXT")
 
         except Exception as e:
             logger.error(f"Failed to migrate schema: {e}")
@@ -1169,7 +1167,9 @@ class DuckDBProvider(SerialDatabaseProvider):
                 mtime = 0.0
 
             try:
-                size_bytes = int(file_dict["size"]) if file_dict["size"] is not None else 0
+                size_bytes = (
+                    int(file_dict["size"]) if file_dict["size"] is not None else 0
+                )
             except Exception:
                 size_bytes = 0
 
@@ -1201,7 +1201,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         **kwargs,
     ) -> None:
         """Update file record with new values - delegate to file repository."""
-        self._execute_in_db_thread_sync("update_file", file_id, size_bytes, mtime, content_hash)
+        self._execute_in_db_thread_sync(
+            "update_file", file_id, size_bytes, mtime, content_hash
+        )
 
     def _executor_update_file(
         self,
@@ -1330,6 +1332,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         # Create temporary table
         import time as _t
+
         _t0 = _t.perf_counter()
         conn.execute("""
             CREATE TEMPORARY TABLE IF NOT EXISTS temp_chunks (

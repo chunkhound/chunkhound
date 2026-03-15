@@ -291,9 +291,7 @@ class EvidenceLedger:
             if len(link.fact_ids) < 2:
                 continue
 
-            facts_list = [
-                self.facts[fid] for fid in link.fact_ids if fid in self.facts
-            ]
+            facts_list = [self.facts[fid] for fid in link.fact_ids if fid in self.facts]
             if len(facts_list) < 2:
                 continue
 
@@ -428,7 +426,9 @@ class EvidenceLedger:
             return ""
 
         instruction = (
-            CONSTANTS_INSTRUCTION_SHORT if use_short_form else CONSTANTS_INSTRUCTION_FULL
+            CONSTANTS_INSTRUCTION_SHORT
+            if use_short_form
+            else CONSTANTS_INSTRUCTION_FULL
         )
         return f"\n\n{context}\n\n{instruction}"
 

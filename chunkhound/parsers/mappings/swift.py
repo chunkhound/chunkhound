@@ -15,13 +15,12 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
+from tree_sitter import Node as TSNode
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 from .base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
-
-from tree_sitter import Node as TSNode
 
 
 class SwiftMapping(BaseMapping):
@@ -223,9 +222,7 @@ class SwiftMapping(BaseMapping):
 
         return self.get_fallback_name(node, "extension")
 
-    def extract_generic_parameters(
-        self, node: TSNode | None, source: str
-    ) -> list[str]:
+    def extract_generic_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract generic parameter names from a Swift type or function.
 
         Args:
@@ -378,7 +375,13 @@ class SwiftMapping(BaseMapping):
                 modifier_text = self.get_node_text(modifiers_node, source).strip()
 
                 # Check for access modifiers
-                access_modifiers = ["open", "public", "internal", "fileprivate", "private"]
+                access_modifiers = [
+                    "open",
+                    "public",
+                    "internal",
+                    "fileprivate",
+                    "private",
+                ]
                 for modifier in access_modifiers:
                     if modifier in modifier_text:
                         return modifier
@@ -678,7 +681,9 @@ class SwiftMapping(BaseMapping):
                             break
                         elif child.type == "actor":
                             declaration_kind = "actor"
-                            metadata["concurrency"] = True  # Mark as concurrency-related
+                            metadata["concurrency"] = (
+                                True  # Mark as concurrency-related
+                            )
                             break
                         elif child.type == "extension":
                             declaration_kind = "extension"
@@ -793,7 +798,9 @@ class SwiftMapping(BaseMapping):
                 pattern_node = self.find_child_by_type(def_node, "pattern")
                 if pattern_node:
                     # Get the identifier (property name)
-                    identifier = self.find_child_by_type(pattern_node, "simple_identifier")
+                    identifier = self.find_child_by_type(
+                        pattern_node, "simple_identifier"
+                    )
                     if identifier:
                         name = self.get_node_text(identifier, source).strip()
 
@@ -807,7 +814,9 @@ class SwiftMapping(BaseMapping):
                                 "boolean_literal",
                                 "nil",
                             ):
-                                value_text = self.get_node_text(value_child, source).strip()
+                                value_text = self.get_node_text(
+                                    value_child, source
+                                ).strip()
                                 break
 
                         # Truncate to 50 chars if longer
@@ -820,7 +829,9 @@ class SwiftMapping(BaseMapping):
                             def_node, "type_annotation"
                         )
                         if type_annotation:
-                            type_text = self.get_node_text(type_annotation, source).strip()
+                            type_text = self.get_node_text(
+                                type_annotation, source
+                            ).strip()
                             # Remove leading colon
                             if type_text.startswith(":"):
                                 type_text = type_text[1:].strip()

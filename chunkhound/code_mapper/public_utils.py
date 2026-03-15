@@ -104,4 +104,3 @@ def is_empty_research_result(result: dict[str, Any]) -> bool:
         return True
 
     return False
-

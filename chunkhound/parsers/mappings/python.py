@@ -8,10 +8,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+from tree_sitter import Node as TSNode
+
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-from tree_sitter import Node as TSNode
 
 
 class PythonMapping(BaseMapping):
@@ -396,9 +397,7 @@ class PythonMapping(BaseMapping):
         yield_nodes = self.find_nodes_by_type(node, "yield")
         return len(yield_nodes) > 0
 
-    def extract_import_names(
-        self, node: TSNode | None, source: str
-    ) -> dict[str, str]:
+    def extract_import_names(self, node: TSNode | None, source: str) -> dict[str, str]:
         """Extract import information from an import statement.
 
         Args:
@@ -939,9 +938,7 @@ class PythonMapping(BaseMapping):
             List of resolved file paths (empty list if not found/external)
         """
         # Strip inline comments from all lines
-        import_text = "\n".join(
-            line.split("#")[0] for line in import_text.split("\n")
-        )
+        import_text = "\n".join(line.split("#")[0] for line in import_text.split("\n"))
 
         # Handle "from ... import ..."
         from_match = re.match(
@@ -966,7 +963,9 @@ class PythonMapping(BaseMapping):
             paths: list[Path] = []
             for name in imported_names:
                 full_module = f"{module_part}.{name}" if module_part else name
-                if resolved := self._resolve_module_to_path(full_module, effective_base):
+                if resolved := self._resolve_module_to_path(
+                    full_module, effective_base
+                ):
                     paths.append(resolved)
 
             # Fallback: if not all resolved as submodules, try base module
@@ -981,7 +980,8 @@ class PythonMapping(BaseMapping):
         if import_match := re.match(r"import\s+(.+)", import_text):
             modules = self._parse_import_names(import_match.group(1))
             return [
-                resolved for module in modules
+                resolved
+                for module in modules
                 if (resolved := self._resolve_module_to_path(module, base_dir))
             ]
 

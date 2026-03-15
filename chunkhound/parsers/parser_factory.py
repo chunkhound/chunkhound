@@ -18,6 +18,7 @@ from typing import Any
 
 from chunkhound.core.types.common import Language
 from chunkhound.interfaces.language_parser import LanguageParser
+from chunkhound.parsers.concept_extractor import LanguageMapping
 
 # Import all language mappings
 from chunkhound.parsers.mappings import (
@@ -26,6 +27,7 @@ from chunkhound.parsers.mappings import (
     CppMapping,
     CSharpMapping,
     DartMapping,
+    ElixirMapping,
     GoMapping,
     GroovyMapping,
     HaskellMapping,
@@ -55,7 +57,6 @@ from chunkhound.parsers.mappings import (
     YamlMapping,
     ZigMapping,
 )
-from chunkhound.parsers.concept_extractor import LanguageMapping
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import SetupError, TreeSitterEngine
 from chunkhound.parsers.universal_parser import CASTConfig, UniversalParser
@@ -73,20 +74,23 @@ logger = logging.getLogger(__name__)
 #   with try/except, as the language pack's contents may vary across versions
 
 # Core language support - direct imports (required dependencies in pyproject.toml)
-import tree_sitter_python as ts_python
-import tree_sitter_javascript as ts_javascript
-import tree_sitter_typescript as ts_typescript
-import tree_sitter_java as ts_java
-import tree_sitter_c as ts_c
-import tree_sitter_cpp as ts_cpp
-import tree_sitter_c_sharp as ts_csharp
-import tree_sitter_go as ts_go
-import tree_sitter_rust as ts_rust
 import tree_sitter_bash as ts_bash
+import tree_sitter_c as ts_c
+import tree_sitter_c_sharp as ts_csharp
+import tree_sitter_cpp as ts_cpp
+import tree_sitter_go as ts_go
+import tree_sitter_groovy as ts_groovy
+import tree_sitter_haskell as ts_haskell
+import tree_sitter_java as ts_java
+import tree_sitter_javascript as ts_javascript
 import tree_sitter_kotlin as ts_kotlin
 import tree_sitter_lua as ts_lua
+import tree_sitter_python as ts_python
+import tree_sitter_rust as ts_rust
+import tree_sitter_typescript as ts_typescript
 import tree_sitter_groovy as ts_groovy
 
+import tree_sitter_elixir as ts_elixir
 import tree_sitter_haskell as ts_haskell
 
 try:
@@ -151,8 +155,8 @@ except ImportError:
 
 # Markup and config languages - direct imports (required dependencies in pyproject.toml)
 import tree_sitter_json as ts_json
-import tree_sitter_toml as ts_toml
 import tree_sitter_markdown as ts_markdown
+import tree_sitter_toml as ts_toml
 
 # YAML: only available via language pack, not a standalone PyPI package
 try:
@@ -364,6 +368,7 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.MARKDOWN: LanguageConfig(ts_markdown, MarkdownMapping, True, "markdown"),
     Language.MAKEFILE: LanguageConfig(ts_make, MakefileMapping, True, "makefile"),
     # Haskell (required dependency in pyproject.toml)
+    Language.ELIXIR: LanguageConfig(ts_elixir, ElixirMapping, True, "elixir"),
     Language.HASKELL: LanguageConfig(ts_haskell, HaskellMapping, True, "haskell"),
     Language.HCL: LanguageConfig(ts_hcl, HclMapping, HCL_AVAILABLE, "hcl"),
     # Language pack languages (conditional availability)
@@ -450,6 +455,9 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     # Note: .m is ambiguous, content detection used in File.from_path()
     ".m": Language.MATLAB,
     ".dart": Language.DART,
+    # Elixir
+    ".ex": Language.ELIXIR,
+    ".exs": Language.ELIXIR,
     ".mm": Language.OBJC,
     # PHP
     ".php": Language.PHP,
@@ -580,9 +588,7 @@ class ParserFactory:
         if language in (Language.TEXT, Language.PDF):
             # Text and PDF mappings don't need tree-sitter engine
             mapping = config.mapping_class()
-            parser = UniversalParser(
-                None, mapping, cast_config, detect_embedded_sql
-            )  # type: ignore[arg-type]
+            parser = UniversalParser(None, mapping, cast_config, detect_embedded_sql)  # type: ignore[arg-type]
             wrapped = self._maybe_wrap_yaml_parser(language, parser)
             self._parser_cache[cache_key] = wrapped
             return wrapped
