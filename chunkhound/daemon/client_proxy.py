@@ -147,7 +147,11 @@ class ClientProxy:
         while True:
             try:
                 msg = await ipc.read_frame(reader)
-            except (asyncio.IncompleteReadError, Exception):
+            except asyncio.IncompleteReadError:
+                break
+            except Exception as e:
+                sys.stderr.write(f"[chunkhound] IPC read error: {e!r}\n")
+                sys.stderr.flush()
                 break
             line = json.dumps(msg) + "\n"
             sys.stdout.buffer.write(line.encode())

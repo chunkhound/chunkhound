@@ -12,8 +12,10 @@ except ImportError:
     TIKTOKEN_AVAILABLE = False
 
 # Token estimation ratios (characters per token)
-EMBEDDING_CHARS_PER_TOKEN = 3
-LLM_CHARS_PER_TOKEN = 4
+EMBEDDING_CHARS_PER_TOKEN = 3  # Embedding APIs (measured ~3.0 for VoyageAI/OpenAI)
+LLM_CHARS_PER_TOKEN = 4  # LLM APIs (conservative estimate)
+# Midpoint of EMBEDDING (3) and LLM (4) ratios — used when the target
+# provider type is unknown.
 DEFAULT_CHARS_PER_TOKEN = 3.5
 
 
@@ -28,11 +30,11 @@ def estimate_tokens_llm(text: str) -> int:
     return max(1, len(text) // LLM_CHARS_PER_TOKEN)
 
 
-def estimate_tokens_embedding(text: str) -> int:
-    """Token estimation for embedding providers (3 chars/token).
+def estimate_tokens_chunking(text: str) -> int:
+    """Token estimation for chunking decisions (3 chars/token).
 
-    Central implementation for chunking - used by parsers to estimate
-    chunk sizes for embedding APIs.
+    Used by parsers and splitters to enforce chunk size limits before indexing.
+    Ratio is calibrated against embedding model token windows (3 chars/token).
     """
     if not text:
         return 0
@@ -88,8 +90,10 @@ def estimate_tokens(
 def _estimate_tokens_openai(text: str, model: str) -> int:
     """Use tiktoken for exact OpenAI token counting."""
     if not TIKTOKEN_AVAILABLE:
-        # Fallback to conservative estimation
-        return max(1, int(len(text) / EMBEDDING_CHARS_PER_TOKEN))
+        # Fallback: EMBEDDING_CHARS_PER_TOKEN is correct here because this function
+        # is only called from estimate_tokens() for embedding providers. LLM callers
+        # use estimate_tokens_llm() which uses LLM_CHARS_PER_TOKEN directly.
+        return max(1, len(text) // EMBEDDING_CHARS_PER_TOKEN)
 
     try:
         encoding = tiktoken.encoding_for_model(model)
@@ -106,7 +110,7 @@ def _estimate_tokens_voyageai(text: str) -> int:
     Based on actual measurements:
     - 325,138 tokens for 975,414 chars = 3.0 chars/token
     """
-    return max(1, int(len(text) / EMBEDDING_CHARS_PER_TOKEN))
+    return max(1, len(text) // EMBEDDING_CHARS_PER_TOKEN)
 
 
 def _estimate_tokens_default(text: str) -> int:

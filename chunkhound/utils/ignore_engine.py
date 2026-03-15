@@ -192,18 +192,6 @@ def _detect_repo_roots(
     roots: list[Path] = []
     root = root.resolve()
     ignored_cache: dict[tuple[str, str], bool] = {}
-    prune_debug_logged = False
-
-    def _log_prune_debug(msg: str, *args: object) -> None:
-        nonlocal prune_debug_logged
-        if prune_debug_logged:
-            return
-        prune_debug_logged = True
-        try:
-            logger.debug(msg, *args)
-        except Exception:
-            # Avoid raising during best-effort logging
-            pass
 
     git_available = False
     git_check_ignored_fn = None
@@ -212,7 +200,7 @@ def _detect_repo_roots(
             git_available = shutil.which("git") is not None
         except Exception as e:
             git_available = False
-            _log_prune_debug(
+            logger.debug(
                 "Worktree ignore pruning: failed to check git availability: {}",
                 e,
             )
@@ -225,7 +213,7 @@ def _detect_repo_roots(
                 git_check_ignored_fn = _git_check_ignored
             except Exception as e:
                 git_check_ignored_fn = None
-                _log_prune_debug(
+                logger.debug(
                     "Worktree ignore pruning: failed to import git_check_ignored: {}",
                     e,
                 )
@@ -269,24 +257,24 @@ def _detect_repo_roots(
             # This avoids surprising discovery behavior when a parent repo ignores
             # a subtree (e.g. `.gitignored/`) that contains linked worktrees.
             parent: Path | None = None
-            for rr in reversed(roots):
+            for rr in sorted(roots, key=lambda p: len(p.as_posix()), reverse=True):
                 try:
                     dpath.resolve().relative_to(rr.resolve())
                     parent = rr
                     break
-                except Exception:
+                except (ValueError, OSError):
                     continue
 
             if parent is not None:
                 try:
                     try:
                         rel = dpath.resolve().relative_to(parent.resolve()).as_posix()
-                    except Exception:
+                    except (ValueError, OSError):
                         rel = ""
                     if rel:
                         try:
                             parent_key = str(parent.resolve())
-                        except Exception:
+                        except OSError:
                             parent_key = str(parent)
                         key = (parent_key, rel)
                         ign = ignored_cache.get(key)
@@ -297,7 +285,7 @@ def _detect_repo_roots(
                                 timeout_s=5.0,
                                 on_error=lambda e,
                                 _dpath=dpath,
-                                _parent=parent: _log_prune_debug(
+                                _parent=parent: logger.debug(
                                     "Worktree ignore pruning: git check failed for {} (parent={}): {}",
                                     _dpath,
                                     _parent,
@@ -310,7 +298,7 @@ def _detect_repo_roots(
                             dirnames[:] = []
                             continue
                 except Exception as e:
-                    _log_prune_debug(
+                    logger.debug(
                         "Worktree ignore pruning: unexpected failure for {} (parent={}): {}",
                         dpath,
                         parent,

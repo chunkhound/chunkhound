@@ -129,7 +129,7 @@ class TestServerStartup:
             "run",
             "chunkhound",
             "mcp",
-            "--stdio",
+            "--no-daemon",
             "--help",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
