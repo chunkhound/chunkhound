@@ -210,15 +210,3 @@ def create_embedding_manager_for_tests(config_dict: dict | None) -> EmbeddingMan
     except (ImportError, ValueError):
         # Dependencies not installed or config invalid - return None so tests skip
         return None
-
-
-def should_run_live_api_tests(expected_provider: str | None = None) -> bool:
-    """Check if live API tests should run for the specified provider."""
-    api_key, provider = get_api_key_for_tests()
-    if not api_key:
-        return False
-
-    if expected_provider and provider != expected_provider:
-        return False
-
-    return True

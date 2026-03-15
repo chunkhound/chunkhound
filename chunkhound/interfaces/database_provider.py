@@ -105,6 +105,24 @@ class DatabaseProvider(Protocol):
         """Delete a file and all its chunks/embeddings completely."""
         ...
 
+    async def delete_file_completely_async(self, file_path: str) -> bool:
+        """Delete a file and all its chunks/embeddings completely (asynchronous)."""
+        ...
+
+    async def insert_file_async(self, file: File) -> int:
+        """Insert file record and return file ID (asynchronous)."""
+        ...
+
+    async def get_file_by_path_async(
+        self, path: str, as_model: bool = False
+    ) -> dict[str, Any] | File | None:
+        """Get file record by path (asynchronous)."""
+        ...
+
+    async def update_file_async(self, file_id: int, **kwargs: Any) -> None:
+        """Update file record with new values (asynchronous)."""
+        ...
+
     # Chunk Operations
     def insert_chunk(self, chunk: Chunk) -> int:
         """Insert chunk record and return chunk ID."""
@@ -126,8 +144,26 @@ class DatabaseProvider(Protocol):
         """Get all chunks for a specific file."""
         ...
 
+    async def get_chunks_by_file_id_async(
+        self, file_id: int, as_model: bool = False
+    ) -> list[dict[str, Any] | Chunk]:
+        """Get all chunks for a specific file (asynchronous)."""
+        ...
+
+    async def insert_chunks_batch_async(self, chunks: list[Chunk]) -> list[int]:
+        """Insert multiple chunks in batch and return chunk IDs (asynchronous)."""
+        ...
+
+    async def delete_chunks_batch_async(self, chunk_ids: list[int]) -> None:
+        """Delete chunks by IDs (asynchronous)."""
+        ...
+
     def delete_file_chunks(self, file_id: int) -> None:
         """Delete all chunks for a file."""
+        ...
+
+    def delete_chunks_batch(self, chunk_ids: list[int]) -> None:
+        """Delete multiple chunks by IDs."""
         ...
 
     def delete_chunk(self, chunk_id: int) -> None:
@@ -273,6 +309,16 @@ class DatabaseProvider(Protocol):
         """
         ...
 
+    async def search_regex_async(
+        self,
+        pattern: str,
+        page_size: int = 10,
+        offset: int = 0,
+        path_filter: str | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Perform regex search on code content (asynchronous)."""
+        ...
+
     def search_text(
         self, query: str, page_size: int = 10, offset: int = 0
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -305,6 +351,10 @@ class DatabaseProvider(Protocol):
         """Get database statistics (file count, chunk count, etc.)."""
         ...
 
+    async def get_stats_async(self) -> dict[str, int]:
+        """Get database statistics (asynchronous)."""
+        ...
+
     def get_file_stats(self, file_id: int) -> dict[str, Any]:
         """Get statistics for a specific file."""
         ...
@@ -324,12 +374,24 @@ class DatabaseProvider(Protocol):
         """Begin a database transaction."""
         ...
 
-    def commit_transaction(self) -> None:
+    def commit_transaction(self, force_checkpoint: bool = False) -> None:
         """Commit the current transaction."""
         ...
 
     def rollback_transaction(self) -> None:
         """Rollback the current transaction."""
+        ...
+
+    async def begin_transaction_async(self) -> None:
+        """Begin a database transaction (asynchronous)."""
+        ...
+
+    async def commit_transaction_async(self, force_checkpoint: bool = False) -> None:
+        """Commit the current transaction (asynchronous)."""
+        ...
+
+    async def rollback_transaction_async(self) -> None:
+        """Rollback the current transaction (asynchronous)."""
         ...
 
     # File Processing Integration

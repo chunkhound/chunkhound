@@ -217,7 +217,10 @@ class ChunkHoundDaemon(MCPServerBase):
             while True:
                 try:
                     msg = await ipc.read_frame(reader)
-                except (asyncio.IncompleteReadError, Exception):
+                except asyncio.IncompleteReadError:
+                    break
+                except Exception as e:
+                    self.debug_log(f"IPC read error: {e!r}")
                     break
 
                 if not isinstance(msg, dict):

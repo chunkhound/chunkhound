@@ -12,6 +12,7 @@ Architecture:
 """
 
 import asyncio
+import gc
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -297,17 +298,15 @@ class RealtimeIndexingService:
         # Store the watch path
         self.watch_path = watch_path
 
-        # Always start with watchdog but with reasonable timeout
-        # If it takes too long, we'll fall back to polling
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         # Start all necessary tasks
         self.event_consumer_task = asyncio.create_task(self._consume_events())
         self.process_task = asyncio.create_task(self._process_loop())
 
-        # Setup watchdog with timeout
+        # Setup watchdog, falling back to polling on failure
         self._watchdog_setup_task = asyncio.create_task(
-            self._setup_watchdog_with_timeout(watch_path, loop)
+            self._setup_watchdog(watch_path, loop)
         )
 
         # Wait for monitoring to be confirmed ready
@@ -333,13 +332,9 @@ class RealtimeIndexingService:
         # Stop filesystem observer
         if self.observer:
             self.observer.stop()
-            # Join with timeout to prevent hanging
-            try:
-                loop = asyncio.get_event_loop()
-                await asyncio.wait_for(
-                    loop.run_in_executor(None, self.observer.join), timeout=1.0
-                )
-            except asyncio.TimeoutError:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self.observer.join, 1.0)
+            if self.observer.is_alive():
                 logger.warning("Observer thread did not exit within timeout")
 
         # Cancel event consumer task
@@ -375,21 +370,10 @@ class RealtimeIndexingService:
             await asyncio.gather(*self._debounce_tasks, return_exceptions=True)
             self._debounce_tasks.clear()
 
-    async def _setup_watchdog_async(
+    async def _setup_watchdog(
         self, watch_path: Path, loop: asyncio.AbstractEventLoop
     ) -> None:
-        """Setup watchdog in background thread without blocking initialization."""
-        try:
-            await loop.run_in_executor(None, self._start_fs_monitor, watch_path, loop)
-            logger.debug("Watchdog setup completed successfully")
-        except Exception as e:
-            logger.error(f"Failed to setup watchdog monitoring: {e}")
-            # Server continues to work even if watchdog setup fails
-
-    async def _setup_watchdog_with_timeout(
-        self, watch_path: Path, loop: asyncio.AbstractEventLoop
-    ) -> None:
-        """Setup watchdog with timeout - fall back to polling if it takes too long."""
+        """Setup watchdog, falling back to polling on failure."""
         # Skip watchdog entirely if force_polling is enabled (e.g., Windows CI)
         if self._force_polling:
             logger.info(f"Polling mode forced for {watch_path}")
@@ -401,59 +385,31 @@ class RealtimeIndexingService:
             self._debug("force_polling enabled; using polling mode")
             return
 
-        # run_in_executor returns an awaitable Future - no create_task needed
-        watchdog_task = loop.run_in_executor(
-            None, self._start_fs_monitor, watch_path, loop
-        )
-
         try:
-            # Try recursive setup with reasonable timeout for large directories
-            await asyncio.wait_for(watchdog_task, timeout=5.0)
+            # No asyncio-level timeout: _start_fs_monitor has its own deadline,
+            # and asyncio.wait_for cannot interrupt running executor threads.
+            await loop.run_in_executor(None, self._start_fs_monitor, watch_path, loop)
             logger.debug("Watchdog setup completed successfully (recursive mode)")
             self._debug("watchdog setup complete (recursive)")
             self._monitoring_ready_time = time.time()
-            self.monitoring_ready.set()  # Signal monitoring is ready
-
-        except asyncio.TimeoutError:
-            # Cancel the watchdog task before falling back to polling
-            watchdog_task.cancel()
-            try:
-                await watchdog_task
-            except asyncio.CancelledError:
-                pass
-
-            logger.info(
-                f"Watchdog setup timed out for {watch_path} - falling back to polling"
-            )
-            self._using_polling = True
-            self._polling_task = asyncio.create_task(self._polling_monitor(watch_path))
-            # Wait a moment for polling to start
-            await asyncio.sleep(0.5)
-            self._monitoring_ready_time = time.time()
-            self.monitoring_ready.set()  # Signal monitoring is ready (polling mode)
-            self._debug("watchdog timed out; switched to polling")
+            self.monitoring_ready.set()
         except Exception as e:
-            # Cancel watchdog task on other errors too
-            if not watchdog_task.done():
-                watchdog_task.cancel()
-                try:
-                    await watchdog_task
-                except asyncio.CancelledError:
-                    pass
-
             logger.warning(f"Watchdog setup failed: {e} - falling back to polling")
             self._using_polling = True
             self._polling_task = asyncio.create_task(self._polling_monitor(watch_path))
-            # Wait a moment for polling to start
             await asyncio.sleep(0.5)
             self._monitoring_ready_time = time.time()
-            self.monitoring_ready.set()  # Signal monitoring is ready (polling mode)
+            self.monitoring_ready.set()
             self._debug("watchdog failed; switched to polling")
 
     def _start_fs_monitor(
         self, watch_path: Path, loop: asyncio.AbstractEventLoop
     ) -> None:
         """Start filesystem monitoring with recursive watching for complete coverage."""
+        # Deadline covers the entire setup (schedule + start + thread alive check).
+        # On Windows, observer thread startup can be noticeably slower.
+        deadline = time.time() + (5.0 if IS_WINDOWS else 1.0)
+
         self.event_handler = SimpleEventHandler(
             self.event_queue, self.config, loop, root_path=watch_path
         )
@@ -469,12 +425,7 @@ class RealtimeIndexingService:
         self.watched_directories.add(str(watch_path))
         self.observer.start()
 
-        # Wait for observer thread to be fully running
-        # On Windows, observer thread startup can be noticeably slower.
-        # Give it more time to become alive to avoid falling back to polling unnecessarily.
-        max_wait = 5.0 if IS_WINDOWS else 1.0
-        start = time.time()
-        while not self.observer.is_alive() and (time.time() - start) < max_wait:
+        while not self.observer.is_alive() and time.time() < deadline:
             time.sleep(0.01)
 
         if self.observer.is_alive():
@@ -504,72 +455,92 @@ class RealtimeIndexingService:
         # freshly created files are detected quickly after startup/fallback.
         polling_start = time.time()
 
-        while True:
-            try:
-                current_files: dict[Path, int] = {}
-                files_checked = 0
+        try:
+            while True:
+                try:
+                    current_files: dict[Path, int] = {}
+                    files_checked = 0
 
-                # Walk directory tree but with limits to avoid hanging
-                for file_path in watch_path.rglob("*"):
+                    # Walk directory tree but with limits to avoid hanging
+                    # Store generator to ensure cleanup on cancellation
+                    rglob_gen = watch_path.rglob("*")
                     try:
-                        if file_path.is_file():
-                            files_checked += 1
-                            if simple_handler._should_index(file_path):
-                                try:
-                                    current_mtime = file_path.stat().st_mtime_ns
-                                except OSError:
-                                    continue
-
-                                current_files[file_path] = current_mtime
-
-                                if file_path not in known_files:
-                                    # New file detected
-                                    logger.debug(
-                                        f"Polling detected new file: {file_path}"
+                        for file_path in rglob_gen:
+                            try:
+                                if file_path.is_file():
+                                    files_checked += 1
+                                    await self._process_polled_file(
+                                        file_path,
+                                        simple_handler,
+                                        known_files,
+                                        current_files,
                                     )
-                                    self._debug(
-                                        f"polling detected new file: {file_path}"
-                                    )
-                                    await self.add_file(file_path, priority="change")
-                                elif known_files[file_path] != current_mtime:
-                                    # Modified file detected
-                                    logger.debug(
-                                        f"Polling detected modified file: {file_path}"
-                                    )
-                                    self._debug(
-                                        f"polling detected modified file: {file_path}"
-                                    )
-                                    await self.add_file(file_path, priority="change")
+                                if files_checked % 100 == 0:
+                                    await asyncio.sleep(0)
+                                    if files_checked > 5000:
+                                        logger.warning(
+                                            f"Polling checked {files_checked} files,"
+                                            " skipping rest",
+                                        )
+                                        break
+                            except (OSError, PermissionError):
+                                continue
+                    finally:
+                        rglob_gen.close()
 
-                        # Yield control periodically and limit total files checked
-                        if files_checked % 100 == 0:
-                            await asyncio.sleep(0)  # Yield control
-                            if files_checked > 5000:  # Limit to prevent hanging
-                                logger.warning(
-                                    f"Polling checked {files_checked} files, skipping rest to avoid blocking"
-                                )
-                                break
-                    except (OSError, PermissionError):
-                        # Skip files we can't access
-                        continue
+                    # Check for deleted files
+                    deleted = set(known_files.keys()) - set(current_files.keys())
+                    for file_path in deleted:
+                        logger.debug(f"Polling detected deleted file: {file_path}")
+                        await self.remove_file(file_path)
+                        self._debug(f"polling detected deleted file: {file_path}")
 
-                # Check for deleted files
-                deleted = set(known_files.keys()) - set(current_files.keys())
-                for file_path in deleted:
-                    logger.debug(f"Polling detected deleted file: {file_path}")
-                    await self.remove_file(file_path)
-                    self._debug(f"polling detected deleted file: {file_path}")
+                    known_files = current_files
 
-                known_files = current_files
+                    # Adaptive poll interval: 0.5s for the first 30s, then 3s
+                    # Extended fast polling window ensures reliable detection during
+                    # multi-file test sequences on Windows CI where setup + indexing
+                    # can consume the initial fast-polling budget
+                    elapsed = time.time() - polling_start
+                    interval = 0.5 if elapsed < 30.0 else 3.0
+                    await asyncio.sleep(interval)
 
-                # Adaptive poll interval: 1s for the first 10s, then 5s
-                elapsed = time.time() - polling_start
-                interval = 1.0 if elapsed < 10.0 else 5.0
-                await asyncio.sleep(interval)
+                except Exception as e:
+                    logger.error(f"Polling monitor error: {e}")
+                    await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            logger.debug("Polling monitor cancelled")
+            raise
+        finally:
+            # Force cleanup of any lingering file handles on Windows
+            gc.collect()
+            logger.debug("Polling monitor stopped")
 
-            except Exception as e:
-                logger.error(f"Polling monitor error: {e}")
-                await asyncio.sleep(5)
+    async def _process_polled_file(
+        self,
+        file_path: Path,
+        handler: SimpleEventHandler,
+        known_files: dict[Path, int],
+        current_files: dict[Path, int],
+    ) -> None:
+        """Check a single file for changes during polling."""
+        if not handler._should_index(file_path):  # noqa: SLF001
+            return
+        try:
+            current_mtime = file_path.stat().st_mtime_ns
+        except OSError:
+            return
+
+        current_files[file_path] = current_mtime
+
+        if file_path not in known_files:
+            logger.debug(f"Polling detected new file: {file_path}")
+            self._debug(f"polling detected new file: {file_path}")
+            await self.add_file(file_path, priority="change")
+        elif known_files[file_path] != current_mtime:
+            logger.debug(f"Polling detected modified file: {file_path}")
+            self._debug(f"polling detected modified file: {file_path}")
+            await self.add_file(file_path, priority="change")
 
     async def add_file(self, file_path: Path, priority: str = "change") -> None:
         """Add file to processing queue with deduplication and debouncing."""
@@ -689,7 +660,7 @@ class RealtimeIndexingService:
         """Remove file from database."""
         try:
             logger.debug(f"Removing file from database: {file_path}")
-            self.services.provider.delete_file_completely(str(file_path))
+            await self.services.provider.delete_file_completely_async(str(file_path))
             self._debug(f"removed file from database: {file_path}")
         except Exception as e:
             logger.error(f"Error removing file {file_path}: {e}")
@@ -723,7 +694,7 @@ class RealtimeIndexingService:
         try:
             # Get all files that were in this directory from database
             # Use the provider's search capability to find files with this path prefix
-            search_results, _ = self.services.provider.search_regex(
+            search_results, _ = await self.services.provider.search_regex_async(
                 pattern=f"^{dir_path}/.*",
                 page_size=1000,  # Large page to get all matches
             )
@@ -733,7 +704,7 @@ class RealtimeIndexingService:
                 file_path = result.get("file_path", result.get("path", ""))
                 if file_path:
                     logger.debug(f"Cleaning up deleted file: {file_path}")
-                    self.services.provider.delete_file_completely(file_path)
+                    await self.services.provider.delete_file_completely_async(file_path)
 
             logger.info(
                 f"Cleaned up {len(search_results)} files from deleted directory: {dir_path}"

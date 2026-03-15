@@ -21,9 +21,7 @@ class RegressionResult:
     @property
     def degradation_detected(self) -> bool:
         """Detect performance degradation via significant positive trend."""
-        return bool(
-            self.slope > 0.05 and self.r_squared > 0.80 and self.p_value < 0.05
-        )
+        return bool(self.slope > 0.05 and self.r_squared > 0.80 and self.p_value < 0.05)
 
 
 @dataclass
@@ -200,9 +198,7 @@ class PerfAnalyzer:
 
         return warnings
 
-    def _build_summary_only(
-        self, batches: list[BatchTiming]
-    ) -> PerformanceDiagnostics:
+    def _build_summary_only(self, batches: list[BatchTiming]) -> PerformanceDiagnostics:
         """Build diagnostics when insufficient batches for regression."""
         if not batches:
             msg = (
@@ -256,9 +252,7 @@ class PerfAnalyzer:
         end = max((b.end_time for b in batches if b.end_time is not None), default=None)
         return end - start if end is not None else 0.0
 
-    def _build_batch_metrics(
-        self, batches: list[BatchTiming]
-    ) -> list[dict[str, Any]]:
+    def _build_batch_metrics(self, batches: list[BatchTiming]) -> list[dict[str, Any]]:
         """Build list of per-batch metrics dictionaries."""
         return [
             {
