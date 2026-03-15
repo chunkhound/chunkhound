@@ -57,7 +57,8 @@ class MakefileChunkSplitter(ChunkSplitter):
 
         Exception: if a chunk exceeds the size limit after grouping, it is
         emergency-split by characters. Part 1 retains the target in both content
-        and metadata["rule_target"]; parts > 1 retain it only in metadata["rule_target"].
+        and metadata["rule_target"]; parts > 1 retain it only in
+        metadata["rule_target"].
         """
         lines = chunk.content.split("\n")
 
@@ -156,7 +157,8 @@ class MakefileChunkSplitter(ChunkSplitter):
             content = "\n".join(recipe_lines)
             start_line = recipe_start
 
-        # Fires only for malformed input where end_line < start_line + content lines (parser bug)
+        # Fires only for malformed input where end_line < start_line + content lines
+        # (parser bug)
         if recipe_end > original.end_line:
             logger.warning(
                 "recipe_end {} exceeds original.end_line {} for chunk '{}'; clamping",

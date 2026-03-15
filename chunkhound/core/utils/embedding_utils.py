@@ -24,7 +24,8 @@ def format_chunk_for_embedding(
         file_path: Relative file path (e.g., "src/auth/handler.py").
         language: Programming language (e.g., "python").
         constants: List of constant dicts with "name" and "value" keys.
-        rule_target: Makefile rule target name; set on all rule parts (including Part 1).
+        rule_target: Makefile rule target name; set on all rule parts
+            (including Part 1).
 
     Returns:
         Formatted text with metadata header prepended.

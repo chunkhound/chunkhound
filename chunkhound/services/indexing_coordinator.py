@@ -78,9 +78,14 @@ def _ensure_mp_start_method() -> None:
             )
         except RuntimeError:
             logger.debug(
-                f"Multiprocessing start method remains '{multiprocessing.get_start_method()}'; desired '{desired}'"
+                f"Multiprocessing start method remains"
+                f" '{multiprocessing.get_start_method()}'; desired '{desired}'"
             )
     _mp_configured = True
+
+
+def _progress_info(stored: int, skipped: int, errs: int, chunks: int) -> str:
+    return f"stored {stored} | skipped {skipped} | err {errs} | {chunks} chunks"
 
 
 class _StatResult:
@@ -916,7 +921,7 @@ class IndexingCoordinator(BaseService):
                         chunks_so_far = cumulative_counters.get("chunks", 0)
                         self.progress.update(
                             file_task,
-                            info=f"stored {stored} | skipped {skipped} | err {errs} | {chunks_so_far} chunks",
+                            info=_progress_info(stored, skipped, errs, chunks_so_far),
                         )
                 continue
 
@@ -937,7 +942,7 @@ class IndexingCoordinator(BaseService):
                         chunks_so_far = cumulative_counters.get("chunks", 0)
                         self.progress.update(
                             file_task,
-                            info=f"stored {stored} | skipped {skipped} | err {errs} | {chunks_so_far} chunks",
+                            info=_progress_info(stored, skipped, errs, chunks_so_far),
                         )
                 continue
 
@@ -1025,7 +1030,7 @@ class IndexingCoordinator(BaseService):
                         errs = cumulative_counters.get("errors", 0)
                         self.progress.update(
                             file_task,
-                            info=f"stored {stored} | skipped {skipped} | err {errs} | {display_chunks} chunks",
+                            info=_progress_info(stored, skipped, errs, display_chunks),
                         )
 
             except Exception as e:
@@ -1043,7 +1048,7 @@ class IndexingCoordinator(BaseService):
                         chunks_so_far = cumulative_counters.get("chunks", 0)
                         self.progress.update(
                             file_task,
-                            info=f"stored {stored} | skipped {skipped} | err {errs} | {chunks_so_far} chunks",
+                            info=_progress_info(stored, skipped, errs, chunks_so_far),
                         )
                 continue
 
