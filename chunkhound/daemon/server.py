@@ -97,6 +97,7 @@ class ChunkHoundDaemon(MCPServerBase):
 
             # Initialise services (DB, embeddings, realtime indexing)
             await self.initialize()
+            await self.await_startup_barrier()
             self._initialization_complete.set()
             self.debug_log("Daemon initialised")
 
@@ -156,6 +157,7 @@ class ChunkHoundDaemon(MCPServerBase):
             import traceback
 
             traceback.print_exc(file=sys.stderr)
+            raise
         finally:
             await self._graceful_shutdown()
 

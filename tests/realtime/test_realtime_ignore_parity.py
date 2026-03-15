@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 
@@ -8,22 +7,40 @@ import pytest
 
 from chunkhound.core.config.config import Config
 from chunkhound.services.realtime_indexing_service import SimpleEventHandler
+from chunkhound.services.realtime_path_filter import RealtimePathFilter
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(repo), *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _git_ignored(repo: Path, rel_path: str) -> bool:
+    result = _git(repo, "check-ignore", "-q", "--no-index", rel_path)
+    return result.returncode == 0
 
 
 def _git_init_and_commit(repo: Path) -> None:
     repo.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init"], cwd=str(repo), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(
+        ["git", "init"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
     _git(repo, "config", "user.email", "ci@example.com")
     _git(repo, "config", "user.name", "CI")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-m", "init")
 
 
-@pytest.mark.skipif(subprocess.run(["which","git"], stdout=subprocess.DEVNULL).returncode != 0, reason="git required")
+@pytest.mark.skipif(
+    subprocess.run(["which", "git"], stdout=subprocess.DEVNULL).returncode != 0,
+    reason="git required",
+)
 def test_realtime_nested_subrepo_boundary_respected(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     sub = root / "subrepo"
@@ -38,20 +55,31 @@ def test_realtime_nested_subrepo_boundary_respected(tmp_path: Path) -> None:
     (sub / "pkg" / "mod.py").write_text("print('ok')\n", encoding="utf-8")
     _git_init_and_commit(sub)
 
-    cfg = Config(**{
-        "database": {"provider": "duckdb", "path": str(tmp_path / "db.duckdb")},
-        "indexing": {"include": ["**/*.py"], "exclude": [], "exclude_sentinel": ".gitignore"},
-        "target_dir": root,
-    })
+    cfg = Config(
+        **{
+            "database": {"provider": "duckdb", "path": str(tmp_path / "db.duckdb")},
+            "indexing": {
+                "include": ["**/*.py"],
+                "exclude": [],
+                "exclude_sentinel": ".gitignore",
+            },
+            "target_dir": root,
+        }
+    )
 
     handler = SimpleEventHandler(event_queue=None, config=cfg, loop=None)
+    path_filter = RealtimePathFilter(config=cfg, root_path=root)
 
     # Path inside nested repo should be included despite parent ignore of folder name
     p = sub / "pkg" / "mod.py"
     assert handler._should_index(p) is True
+    assert path_filter.should_index(p) is True
 
 
-@pytest.mark.skipif(subprocess.run(["which","git"], stdout=subprocess.DEVNULL).returncode != 0, reason="git required")
+@pytest.mark.skipif(
+    subprocess.run(["which", "git"], stdout=subprocess.DEVNULL).returncode != 0,
+    reason="git required",
+)
 def test_realtime_nonrepo_workspace_gitignore_overlay(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
     # Workspace-level .gitignore (not a repo) excludes datasets/
@@ -71,14 +99,71 @@ def test_realtime_nonrepo_workspace_gitignore_overlay(tmp_path: Path) -> None:
     _git_init_and_commit(repo)
 
     # Build config with overlay flag on; engine currently reads env for this behavior
-    cfg = Config(**{
-        "database": {"provider": "duckdb", "path": str(tmp_path / "db.duckdb")},
-        "indexing": {"include": ["**/*.py", "**/*.json"], "exclude": [], "exclude_sentinel": ".gitignore", "workspace_gitignore_nonrepo": True},
-        "target_dir": ws,
-    })
+    cfg = Config(
+        **{
+            "database": {"provider": "duckdb", "path": str(tmp_path / "db.duckdb")},
+            "indexing": {
+                "include": ["**/*.py", "**/*.json"],
+                "exclude": [],
+                "exclude_sentinel": ".gitignore",
+                "workspace_gitignore_nonrepo": True,
+            },
+            "target_dir": ws,
+        }
+    )
 
     handler = SimpleEventHandler(event_queue=None, config=cfg, loop=None)
+    path_filter = RealtimePathFilter(config=cfg, root_path=ws)
 
     # Non-repo datasets file should be excluded; repo file should be included
     assert handler._should_index(nonrepo_file) is False
     assert handler._should_index(tracked) is True
+    assert path_filter.should_index(nonrepo_file) is False
+    assert path_filter.should_index(tracked) is True
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "git"], stdout=subprocess.DEVNULL).returncode != 0,
+    reason="git required",
+)
+def test_realtime_path_filter_honors_libgit2_backend(tmp_path: Path) -> None:
+    pytest.importorskip("pygit2")
+
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "init"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    (repo / ".gitignore").write_text("foo/\n", encoding="utf-8")
+    (repo / "foo").mkdir(parents=True, exist_ok=True)
+    ignored_file = repo / "foo" / "x.py"
+    ignored_file.write_text("print('ignored')\n", encoding="utf-8")
+    (repo / "bar").mkdir(parents=True, exist_ok=True)
+    included_file = repo / "bar" / "y.py"
+    included_file.write_text("print('included')\n", encoding="utf-8")
+
+    cfg = Config(
+        **{
+            "database": {"provider": "duckdb", "path": str(tmp_path / "db.duckdb")},
+            "indexing": {
+                "include": ["**/*.py"],
+                "exclude": [],
+                "exclude_sentinel": ".gitignore",
+                "gitignore_backend": "libgit2",
+            },
+            "target_dir": repo,
+        }
+    )
+
+    handler = SimpleEventHandler(event_queue=None, config=cfg, loop=None)
+    path_filter = RealtimePathFilter(config=cfg, root_path=repo)
+
+    assert _git_ignored(repo, "foo/x.py") is True
+    assert _git_ignored(repo, "bar/y.py") is False
+    assert handler._should_index(ignored_file) is False
+    assert path_filter.should_index(ignored_file) is False
+    assert handler._should_index(included_file) is True
+    assert path_filter.should_index(included_file) is True

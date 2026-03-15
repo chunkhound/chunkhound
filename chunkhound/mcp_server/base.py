@@ -65,7 +65,12 @@ class MCPServerBase(ABC):
         self._init_lock = asyncio.Lock()
 
         # Background tasks
+        self._deferred_start_task: asyncio.Task | None = None
+        self._realtime_start_task: asyncio.Task | None = None
         self._scan_task: asyncio.Task | None = None
+        self._scan_lock = asyncio.Lock()
+        self._scan_target_path: Path | None = None
+        self._startup_failure_message: str | None = None
 
         # Scan progress tracking
         self._scan_complete = False
@@ -75,6 +80,7 @@ class MCPServerBase(ABC):
             "is_scanning": False,
             "scan_started_at": None,
             "scan_completed_at": None,
+            "realtime": RealtimeIndexingService.health_snapshot_for_config(config),
         }
 
         # Set MCP mode to suppress stderr output that interferes with JSON-RPC
@@ -113,6 +119,7 @@ class MCPServerBase(ABC):
                 return
 
             self.debug_log("Starting service initialization")
+            self._startup_failure_message = None
 
             # Validate database configuration
             if not self.config.database or not self.config.database.path:
@@ -132,7 +139,8 @@ class MCPServerBase(ABC):
                     )
                     self.embedding_manager.register_provider(provider, set_default=True)
                     self.debug_log(
-                        f"Embedding provider registered: {self.config.embedding.provider}"
+                        "Embedding provider registered: "
+                        f"{self.config.embedding.provider}"
                     )
             except ValueError as e:
                 # API key or configuration issue - expected for search-only usage
@@ -141,7 +149,8 @@ class MCPServerBase(ABC):
                 # Unexpected error - log but continue
                 self.debug_log(f"Unexpected error setting up embedding provider: {e}")
 
-            # Initialize LLM manager with dual providers (optional - continue if it fails)
+            # Initialize LLM manager with dual providers
+            # (optional - continue if it fails)
             try:
                 if self.config.llm:
                     utility_config, synthesis_config = (
@@ -150,7 +159,8 @@ class MCPServerBase(ABC):
                     self.llm_manager = LLMManager(utility_config, synthesis_config)
                     self.debug_log(
                         f"LLM providers registered: {self.config.llm.provider} "
-                        f"(utility: {utility_config['model']}, synthesis: {synthesis_config['model']})"
+                        f"(utility: {utility_config['model']}, "
+                        f"synthesis: {synthesis_config['model']})"
                     )
             except ValueError as e:
                 # API key or configuration issue - expected if LLM not needed
@@ -174,13 +184,37 @@ class MCPServerBase(ABC):
                 # Fallback to config resolution (shouldn't happen in normal usage)
                 target_path = self.config.target_dir or db_path.parent.parent
                 self.debug_log(f"Using fallback path resolution: {target_path}")
+            self._scan_target_path = target_path.resolve()
 
             # Mark as initialized immediately (tools available)
             self._initialized = True
             self.debug_log("Service initialization complete")
 
             # Defer DB connect + realtime start to background so initialize is fast
-            asyncio.create_task(self._deferred_connect_and_start(target_path))
+            self._deferred_start_task = asyncio.create_task(
+                self._deferred_connect_and_start(self._scan_target_path)
+            )
+
+    def _configured_realtime_backend(self) -> str | None:
+        """Return the configured realtime backend when it is explicitly supported."""
+        try:
+            backend = getattr(
+                getattr(self.config, "indexing", None), "realtime_backend", None
+            )
+        except Exception:
+            return None
+        if backend in {"watchman", "watchdog", "polling"}:
+            return str(backend)
+        return None
+
+    def requires_strict_startup_barrier(self) -> bool:
+        """Return whether daemon startup must block on realtime readiness."""
+        return self._configured_realtime_backend() == "watchman"
+
+    def _set_startup_failure(self, message: str) -> None:
+        """Persist a startup failure for later fail-fast barrier checks."""
+        self._startup_failure_message = message
+        self._record_realtime_failure(message)
 
     async def _deferred_connect_and_start(self, target_path: Path) -> None:
         """Connect DB and start realtime monitoring in background."""
@@ -195,101 +229,297 @@ class MCPServerBase(ABC):
             # Start real-time indexing service
             self.debug_log("Starting real-time indexing service (deferred)")
             self.realtime_indexing = RealtimeIndexingService(
-                self.services, self.config, debug_sink=self.debug_log
+                self.services,
+                self.config,
+                debug_sink=self.debug_log,
+                status_callback=self._update_realtime_status,
+                resync_callback=self._request_realtime_resync,
             )
             monitoring_task = asyncio.create_task(
                 self.realtime_indexing.start(target_path)
             )
+            self._realtime_start_task = monitoring_task
+            monitoring_task.add_done_callback(self._handle_realtime_start_task_done)
             # Schedule background scan AFTER monitoring is confirmed ready
             self._scan_task = asyncio.create_task(
                 self._coordinated_initial_scan(target_path, monitoring_task)
             )
         except Exception as e:
             self.debug_log(f"Deferred connect/start failed: {e}")
+            self._set_startup_failure(f"Deferred connect/start failed: {e}")
+
+    async def await_startup_barrier(self) -> None:
+        """Block daemon exposure until strict realtime startup requirements pass."""
+        if not self.requires_strict_startup_barrier():
+            return
+
+        if self._deferred_start_task is None:
+            raise RuntimeError(
+                "Watchman startup barrier requested before deferred startup began"
+            )
+
+        await asyncio.shield(self._deferred_start_task)
+        if self._startup_failure_message is not None:
+            raise RuntimeError(self._startup_failure_message)
+
+        if self._realtime_start_task is None:
+            message = (
+                "Watchman startup barrier requested but realtime startup task "
+                "was never created"
+            )
+            self._set_startup_failure(message)
+            raise RuntimeError(message)
+
+        try:
+            await asyncio.shield(self._realtime_start_task)
+        except asyncio.CancelledError as error:
+            message = "Watchman realtime startup was cancelled before readiness"
+            self._set_startup_failure(message)
+            raise RuntimeError(message) from error
+        except Exception as error:
+            message = self._startup_failure_message or str(error)
+            self._set_startup_failure(message)
+            raise RuntimeError(message) from error
+
+        if self._startup_failure_message is not None:
+            raise RuntimeError(self._startup_failure_message)
+
+        if (
+            self.realtime_indexing is None
+            or not self.realtime_indexing.monitoring_ready.is_set()
+        ):
+            message = "Watchman startup finished without monitoring readiness"
+            self._set_startup_failure(message)
+            raise RuntimeError(message)
 
     async def _coordinated_initial_scan(
         self, target_path: Path, monitoring_task: asyncio.Task
     ) -> None:
         """Perform initial scan after monitoring is confirmed ready."""
+        ready_task = asyncio.create_task(self.realtime_indexing.monitoring_ready.wait())
         try:
-            # Wait for monitoring to be ready (with timeout)
-            await asyncio.wait_for(
-                self.realtime_indexing.monitoring_ready.wait(), timeout=10.0
+            timeout = (
+                self.realtime_indexing._MONITORING_READY_TIMEOUT_SECONDS
+                if self.realtime_indexing
+                else 10.0
             )
-            self.debug_log("Monitoring confirmed ready, starting initial scan")
-
-            # Add small delay to ensure any startup files are captured by monitoring
-            await asyncio.sleep(1.0)
-
-            # Now perform the initial scan
-            self._scan_progress["is_scanning"] = True
-            self._scan_progress["scan_started_at"] = datetime.now().isoformat()
-            await self._background_initial_scan(target_path)
-
-        except asyncio.TimeoutError:
-            self.debug_log(
-                "Monitoring setup timeout - proceeding with initial scan anyway"
+            done, pending = await asyncio.wait(
+                {ready_task, monitoring_task},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
             )
-            # Still do the scan even if monitoring isn't ready
-            self._scan_progress["is_scanning"] = True
-            self._scan_progress["scan_started_at"] = datetime.now().isoformat()
-            await self._background_initial_scan(target_path)
 
-    async def _background_initial_scan(self, target_path: Path) -> None:
-        """Perform initial directory scan in background without blocking startup."""
+            if ready_task in done:
+                self.debug_log("Monitoring confirmed ready, starting initial scan")
+                # Add small delay to ensure any startup files are captured
+                # by monitoring.
+                await asyncio.sleep(1.0)
+            elif monitoring_task in done:
+                try:
+                    monitoring_task.result()
+                except Exception as e:
+                    self.debug_log(
+                        f"Realtime startup failed before monitoring readiness: {e}"
+                    )
+                    self._record_realtime_failure(f"Realtime startup failed: {e}")
+                    if self.requires_strict_startup_barrier():
+                        self.debug_log(
+                            "Strict realtime startup barrier failed; "
+                            "skipping initial scan"
+                        )
+                        return
+                else:
+                    self.debug_log(
+                        "Realtime startup completed without monitoring readiness; "
+                        "proceeding with initial scan"
+                    )
+            else:
+                self.debug_log(
+                    "Monitoring setup timeout - proceeding with initial scan anyway"
+                )
+                for task in pending:
+                    if task is not monitoring_task:
+                        task.cancel()
+
+            await self._run_directory_scan(target_path, trigger="initial")
+        finally:
+            if not ready_task.done():
+                ready_task.cancel()
+                try:
+                    await ready_task
+                except asyncio.CancelledError:
+                    pass
+
+    def _update_realtime_status(self, status: dict[str, Any]) -> None:
+        """Persist the latest realtime snapshot for daemon status surfaces."""
+        self._scan_progress["realtime"] = copy.deepcopy(status)
+
+    def _record_realtime_failure(self, message: str) -> None:
+        """Persist a startup failure into the shared realtime status snapshot."""
+        realtime = copy.deepcopy(
+            self._scan_progress.get("realtime")
+            or RealtimeIndexingService.health_snapshot_for_config(self.config)
+        )
+        realtime["service_state"] = "degraded"
+        realtime["last_error"] = message
+        realtime["last_error_at"] = datetime.now().isoformat()
+        self._scan_progress["realtime"] = realtime
+
+    def _handle_realtime_start_task_done(self, task: asyncio.Task) -> None:
+        """Capture realtime startup task failures so they are never silent."""
+        if task.cancelled():
+            return
+
         try:
-            self.debug_log("Starting background initial directory scan")
+            exc = task.exception()
+        except Exception as error:
+            self.debug_log(f"Failed to inspect realtime startup task: {error}")
+            return
 
-            # Progress callback to update scan state
-            def progress_callback(message: str):
-                # Parse progress messages to update counters
-                if "files processed" in message:
-                    # Extract numbers from progress messages
-                    import re
+        if exc is None:
+            return
 
-                    match = re.search(r"(\d+) files processed.*?(\d+) chunks", message)
-                    if match:
-                        self._scan_progress["files_processed"] = int(match.group(1))
-                        self._scan_progress["chunks_created"] = int(match.group(2))
-                self.debug_log(message)
+        self.debug_log(f"Realtime startup task failed: {exc}")
+        self._set_startup_failure(f"Realtime startup task failed: {exc}")
 
-            # Create indexing service for background scan
-            indexing_service = DirectoryIndexingService(
-                indexing_coordinator=self.services.indexing_coordinator,
-                config=self.config,
-                progress_callback=progress_callback,
-            )
+    async def _request_realtime_resync(
+        self, reason: str, details: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        """Run a serialized reconciliation scan and return the embed result."""
+        if not self._scan_target_path:
+            raise RuntimeError("Realtime resync requested before target path resolved")
 
-            # Perform scan with lower priority
-            stats = await indexing_service.process_directory(
-                target_path, no_embeddings=False
-            )
-
-            # Update final stats
-            self._scan_progress.update(
-                {
-                    "files_processed": stats.files_processed,
-                    "chunks_created": stats.chunks_created,
-                    "is_scanning": False,
-                    "scan_completed_at": datetime.now().isoformat(),
-                }
-            )
-            self._scan_complete = True
-
+        detail_suffix = f" details={details}" if details else ""
+        self.debug_log(f"Realtime resync requested: reason={reason}{detail_suffix}")
+        await self._run_directory_scan(
+            self._scan_target_path,
+            trigger="realtime_resync",
+            reason=reason,
+            no_embeddings=True,
+        )
+        if self.services is None:
+            return None
+        embeddings_disabled = getattr(self.config, "embeddings_disabled", False)
+        if not isinstance(embeddings_disabled, bool):
+            embeddings_disabled = False
+        if embeddings_disabled:
             self.debug_log(
-                f"Background scan completed: {stats.files_processed} files, {stats.chunks_created} chunks"
+                "Realtime resync embedding follow-up skipped: "
+                "embeddings explicitly disabled"
             )
+            return {
+                "status": "complete",
+                "generated": 0,
+                "message": "Embeddings explicitly disabled",
+            }
 
-        except Exception as e:
-            self.debug_log(f"Background initial scan failed: {e}")
-            self._scan_progress["is_scanning"] = False
-            self._scan_progress["scan_error"] = str(e)
+        exclude_patterns = list(getattr(self.config.indexing, "exclude", []) or [])
+        embed_result = await (
+            self.services.indexing_coordinator.generate_missing_embeddings(
+                exclude_patterns=exclude_patterns
+            )
+        )
+        generated = embed_result.get("generated", 0)
+        self.debug_log(
+            "Realtime resync embedding follow-up completed: "
+            f"status={embed_result.get('status')} generated={generated}"
+        )
+        return embed_result
+
+    async def _run_directory_scan(
+        self,
+        target_path: Path,
+        trigger: str,
+        reason: str | None = None,
+        no_embeddings: bool = False,
+    ) -> None:
+        """Perform an initial or reconciliation scan without overlapping other scans."""
+        async with self._scan_lock:
+            try:
+                self._scan_progress["is_scanning"] = True
+                self._scan_progress["scan_started_at"] = datetime.now().isoformat()
+                self._scan_progress["scan_error"] = None
+                self.debug_log(
+                    f"Starting {trigger} directory scan"
+                    + (f" ({reason})" if reason else "")
+                )
+
+                # Progress callback to update scan state
+                def progress_callback(message: str):
+                    # Parse progress messages to update counters
+                    if "files processed" in message:
+                        # Extract numbers from progress messages
+                        import re
+
+                        match = re.search(
+                            r"(\d+) files processed.*?(\d+) chunks", message
+                        )
+                        if match:
+                            self._scan_progress["files_processed"] = int(match.group(1))
+                            self._scan_progress["chunks_created"] = int(match.group(2))
+                    self.debug_log(message)
+
+                # Create indexing service for background scan
+                indexing_service = DirectoryIndexingService(
+                    indexing_coordinator=self.services.indexing_coordinator,
+                    config=self.config,
+                    progress_callback=progress_callback,
+                )
+
+                # Perform scan with lower priority
+                stats = await indexing_service.process_directory(
+                    target_path, no_embeddings=no_embeddings
+                )
+
+                # Update final stats
+                self._scan_progress.update(
+                    {
+                        "files_processed": stats.files_processed,
+                        "chunks_created": stats.chunks_created,
+                        "is_scanning": False,
+                        "scan_completed_at": datetime.now().isoformat(),
+                    }
+                )
+                self._scan_complete = True
+
+                self.debug_log(
+                    f"{trigger} scan completed: "
+                    f"{stats.files_processed} files, {stats.chunks_created} chunks"
+                )
+
+            except Exception as e:
+                self.debug_log(f"{trigger} scan failed: {e}")
+                self._scan_progress["is_scanning"] = False
+                self._scan_progress["scan_error"] = str(e)
+                raise
 
     async def cleanup(self) -> None:
         """Clean up resources and close database connection.
 
         This method is idempotent - safe to call multiple times.
         """
+        if (
+            self._deferred_start_task is not None
+            and not self._deferred_start_task.done()
+        ):
+            self.debug_log("Cancelling deferred realtime startup task")
+            self._deferred_start_task.cancel()
+            try:
+                await self._deferred_start_task
+            except asyncio.CancelledError:
+                pass
+
+        if (
+            self._realtime_start_task is not None
+            and not self._realtime_start_task.done()
+        ):
+            self.debug_log("Cancelling realtime start task")
+            self._realtime_start_task.cancel()
+            try:
+                await self._realtime_start_task
+            except asyncio.CancelledError:
+                pass
+
         # Cancel background scan task if still running
         if self._scan_task is not None and not self._scan_task.done():
             self.debug_log("Cancelling background scan task")
@@ -343,7 +573,8 @@ class MCPServerBase(ABC):
         if not self.embedding_manager or not self.embedding_manager.list_providers():
             raise RuntimeError(
                 "No embedding providers available. Configure an embedding provider "
-                "in .chunkhound.json or set CHUNKHOUND_EMBEDDING__API_KEY environment variable."
+                "in .chunkhound.json or set "
+                "CHUNKHOUND_EMBEDDING__API_KEY environment variable."
             )
         return self.embedding_manager
 

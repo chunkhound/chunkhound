@@ -18,11 +18,16 @@ from chunkhound.mcp_server.tools import execute_tool
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
-    should_use_polling,
+    realtime_backend_for_tests,
     wait_for_regex_searchable,
 )
 
-from .test_utils import get_api_key_for_tests, get_embedding_config_for_tests, build_embedding_config_from_dict, create_embedding_manager_for_tests
+from .test_utils import (
+    get_api_key_for_tests,
+    get_embedding_config_for_tests,
+    build_embedding_config_from_dict,
+    create_embedding_manager_for_tests,
+)
 
 
 class TestMCPIntegration:
@@ -45,12 +50,17 @@ class TestMCPIntegration:
 
         # Use fake args to prevent find_project_root call that fails in CI
         from types import SimpleNamespace
+
         fake_args = SimpleNamespace(path=temp_dir)
         config = Config(
             args=fake_args,
             database={"path": str(db_path), "provider": "duckdb"},
             embedding=embedding_config,
-            indexing={"include": ["*.py", "*.js"], "exclude": ["*.log"]}
+            indexing={
+                "include": ["*.py", "*.js"],
+                "exclude": ["*.log"],
+                "realtime_backend": realtime_backend_for_tests(),
+            },
         )
 
         # Create embedding manager if API key is available
@@ -60,12 +70,8 @@ class TestMCPIntegration:
         # Create services - this is what MCP server uses
         services = create_services(db_path, config, embedding_manager)
         services.provider.connect()
-
-
         # Initialize realtime indexing service (what MCP server should do)
-        # Use polling mode on Windows CI where watchdog is unreliable
-        force_polling = should_use_polling()
-        realtime_service = RealtimeIndexingService(services, config, force_polling=force_polling)
+        realtime_service = RealtimeIndexingService(services, config)
         await realtime_service.start(watch_dir)
 
         yield services, realtime_service, watch_dir, temp_dir, embedding_manager
@@ -83,7 +89,9 @@ class TestMCPIntegration:
 
         shutil.rmtree(temp_dir, ignore_errors=True)
 
-    @pytest.mark.skipif(get_api_key_for_tests()[0] is None, reason="No API key available")
+    @pytest.mark.skipif(
+        get_api_key_for_tests()[0] is None, reason="No API key available"
+    )
     @pytest.mark.asyncio
     async def test_mcp_semantic_search_finds_new_files(self, mcp_setup):
         """Test that MCP semantic search finds newly created files."""
@@ -101,10 +109,10 @@ class TestMCPIntegration:
                 "type": "semantic",
                 "query": "unique_mcp_test_function",
                 "page_size": 10,
-                "offset": 0
-            }
+                "offset": 0,
+            },
         )
-        initial_count = len(initial_results.get('results', []))
+        initial_count = len(initial_results.get("results", []))
 
         # Create new file with unique content
         new_file = watch_dir / "mcp_test.py"
@@ -126,13 +134,14 @@ def unique_mcp_test_function():
                 "type": "semantic",
                 "query": "unique_mcp_test_function",
                 "page_size": 10,
-                "offset": 0
-            }
+                "offset": 0,
+            },
         )
-        new_count = len(new_results.get('results', []))
+        new_count = len(new_results.get("results", []))
 
-        assert new_count > initial_count, \
+        assert new_count > initial_count, (
             f"MCP semantic search should find new file (was {initial_count}, now {new_count})"
+        )
 
     @pytest.mark.asyncio
     async def test_mcp_regex_search_finds_modified_files(self, mcp_setup):
@@ -144,7 +153,9 @@ def unique_mcp_test_function():
         test_file.write_text("def initial_function(): pass")
 
         # Wait for initial content to be searchable (handles Windows CI polling delay)
-        found = await wait_for_regex_searchable(services, "initial_function", timeout=get_fs_event_timeout())
+        found = await wait_for_regex_searchable(
+            services, "initial_function", timeout=get_fs_event_timeout()
+        )
         assert found, "Initial content should be found"
 
         # Modify file with new unique content
@@ -157,7 +168,9 @@ def modified_unique_regex_pattern():
 """)
 
         # Wait for modified content to be searchable (handles Windows CI polling delay)
-        found = await wait_for_regex_searchable(services, "modified_unique_regex_pattern", timeout=get_fs_event_timeout())
+        found = await wait_for_regex_searchable(
+            services, "modified_unique_regex_pattern", timeout=get_fs_event_timeout()
+        )
 
         assert found, "MCP regex search should find modified content"
 
@@ -171,8 +184,8 @@ def modified_unique_regex_pattern():
 
         # Get initial stats directly from database provider
         initial_stats = services.provider.get_stats()
-        initial_files = initial_stats.get('files', 0)
-        initial_chunks = initial_stats.get('chunks', 0)
+        initial_files = initial_stats.get("files", 0)
+        initial_chunks = initial_stats.get("chunks", 0)
 
         # Create multiple new files
         for i in range(3):
@@ -194,17 +207,19 @@ class StatsTestClass_{i}:
 
         while time.monotonic() < deadline:
             updated_stats = services.provider.get_stats()
-            if updated_stats.get('files', 0) > initial_files:
+            if updated_stats.get("files", 0) > initial_files:
                 break
             await asyncio.sleep(0.3)
 
-        updated_files = updated_stats.get('files', 0) if updated_stats else 0
-        updated_chunks = updated_stats.get('chunks', 0) if updated_stats else 0
+        updated_files = updated_stats.get("files", 0) if updated_stats else 0
+        updated_chunks = updated_stats.get("chunks", 0) if updated_stats else 0
 
-        assert updated_files > initial_files, \
+        assert updated_files > initial_files, (
             f"File count should increase (was {initial_files}, now {updated_files})"
-        assert updated_chunks > initial_chunks, \
+        )
+        assert updated_chunks > initial_chunks, (
             f"Chunk count should increase (was {initial_chunks}, now {updated_chunks})"
+        )
 
     @pytest.mark.asyncio
     async def test_mcp_search_after_file_deletion(self, mcp_setup):
@@ -231,10 +246,12 @@ def delete_test_unique_function():
                 "type": "regex",
                 "query": "delete_test_unique_function",
                 "page_size": 10,
-                "offset": 0
-            }
+                "offset": 0,
+            },
         )
-        assert len(before_delete.get('results', [])) > 0, "Content should be found before deletion"
+        assert len(before_delete.get("results", [])) > 0, (
+            "Content should be found before deletion"
+        )
 
         # Delete the file
         delete_file.unlink()
@@ -251,10 +268,12 @@ def delete_test_unique_function():
                 "type": "regex",
                 "query": "delete_test_unique_function",
                 "page_size": 10,
-                "offset": 0
-            }
+                "offset": 0,
+            },
         )
-        assert len(after_delete.get('results', [])) == 0, "Content should not be found after deletion"
+        assert len(after_delete.get("results", [])) == 0, (
+            "Content should not be found after deletion"
+        )
 
     @pytest.mark.asyncio
     async def test_file_modification_detection_comprehensive(self, mcp_setup):
@@ -269,7 +288,9 @@ def delete_test_unique_function():
         test_file.write_text(initial_content)
 
         # Wait for initial content to be searchable (handles Windows CI polling delay)
-        found = await wait_for_regex_searchable(services, "original_function", timeout=get_fs_event_timeout())
+        found = await wait_for_regex_searchable(
+            services, "original_function", timeout=get_fs_event_timeout()
+        )
         assert found, "Initial content should be indexed"
 
         # Verify initial content is indexed (use multiline-compatible regex)
@@ -280,7 +301,9 @@ def delete_test_unique_function():
         initial_record = services.provider.get_file_by_path(str(test_file.resolve()))
         assert initial_record is not None, "Initial file should exist"
         # Get chunk count for initial state
-        initial_chunks = services.provider.search_chunks_regex(".*", file_path=str(test_file.resolve()))
+        initial_chunks = services.provider.search_chunks_regex(
+            ".*", file_path=str(test_file.resolve())
+        )
         initial_chunk_count = len(initial_chunks)
 
         print(f"Initial state: chunks={initial_chunk_count}")
@@ -302,39 +325,51 @@ class NewlyAddedClass:
 
         # Touch file to ensure modification time changes
         import time
+
         time.sleep(0.1)
         test_file.touch()
 
         # Wait for new content to be searchable (handles Windows CI polling delay)
-        found = await wait_for_regex_searchable(services, "newly_added_function", timeout=get_fs_event_timeout())
+        found = await wait_for_regex_searchable(
+            services, "newly_added_function", timeout=get_fs_event_timeout()
+        )
         assert found, "Modified content should be searchable"
 
         # Check if modification was detected
         modified_record = services.provider.get_file_by_path(str(test_file.resolve()))
         assert modified_record is not None, "Modified file should still exist"
         # Get chunk count for modified state
-        modified_chunks = services.provider.search_chunks_regex(".*", file_path=str(test_file.resolve()))
+        modified_chunks = services.provider.search_chunks_regex(
+            ".*", file_path=str(test_file.resolve())
+        )
         modified_chunk_count = len(modified_chunks)
 
         print(f"Modified state: chunks={modified_chunk_count}")
 
         # Key assertions for content-based change detection
 
-        assert modified_chunk_count >= initial_chunk_count, \
+        assert modified_chunk_count >= initial_chunk_count, (
             f"Chunk count should not decrease (was {initial_chunk_count}, now {modified_chunk_count})"
+        )
 
         # Check if new content is searchable
         new_func_results = services.provider.search_chunks_regex("newly_added_function")
-        assert len(new_func_results) > 0, "New function should be searchable after modification"
+        assert len(new_func_results) > 0, (
+            "New function should be searchable after modification"
+        )
 
         new_class_results = services.provider.search_chunks_regex("NewlyAddedClass")
-        assert len(new_class_results) > 0, "New class should be indexed after modification"
+        assert len(new_class_results) > 0, (
+            "New class should be indexed after modification"
+        )
 
         # Check that content-based deduplication works - old version replaced by new
         v1_results = services.provider.search_chunks_regex("version_1")
         v2_results = services.provider.search_chunks_regex("version_2")
 
-        assert len(v1_results) == 0, "Old version_1 should be replaced via content-based chunk deduplication"
+        assert len(v1_results) == 0, (
+            "Old version_1 should be replaced via content-based chunk deduplication"
+        )
         assert len(v2_results) > 0, "New version_2 should be indexed"
 
     @pytest.mark.asyncio
@@ -346,28 +381,33 @@ class NewlyAddedClass:
         test_file = watch_dir / "fs_ops_test.py"
 
         # Create with explicit file operations
-        with open(test_file, 'w') as f:
+        with open(test_file, "w") as f:
             f.write("def func(): return 'initial'")
             f.flush()
             os.fsync(f.fileno())
 
         # Wait for initial content to be searchable (handles Windows CI polling delay)
-        found = await wait_for_regex_searchable(services, "func.*initial", timeout=get_fs_event_timeout())
+        found = await wait_for_regex_searchable(
+            services, "func.*initial", timeout=get_fs_event_timeout()
+        )
         assert found, "Initial content should be indexed"
 
         # Modify with explicit operations and different content
-        with open(test_file, 'w') as f:
+        with open(test_file, "w") as f:
             f.write("def func(): return 'modified'\ndef new_func(): return 'added'")
             f.flush()
             os.fsync(f.fileno())
 
         # Also change mtime explicitly
         import time
+
         current_time = time.time()
         os.utime(test_file, (current_time, current_time))
 
         # Wait for modified content to be searchable (handles Windows CI polling delay)
-        found = await wait_for_regex_searchable(services, "new_func.*added", timeout=get_fs_event_timeout())
+        found = await wait_for_regex_searchable(
+            services, "new_func.*added", timeout=get_fs_event_timeout()
+        )
         assert found, "Added content should be indexed"
 
         # Verify modification was detected

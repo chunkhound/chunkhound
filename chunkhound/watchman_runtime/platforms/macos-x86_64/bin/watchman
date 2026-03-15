@@ -1,0 +1,5 @@
+#!/bin/sh
+if command -v python3 >/dev/null 2>&1; then
+    exec python3 -m chunkhound.watchman_runtime.bridge "$@"
+fi
+exec python -m chunkhound.watchman_runtime.bridge "$@"

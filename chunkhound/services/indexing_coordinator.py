@@ -630,8 +630,9 @@ class IndexingCoordinator(BaseService):
                 else:
                     norm.append((item, None))
 
-            # Execute synchronously in-process for the single file
-            results = process_file_batch(norm, config_dict)
+            # Keep the event loop responsive during realtime shutdown by
+            # offloading even single-file parse work off-thread.
+            results = await asyncio.to_thread(process_file_batch, norm, config_dict)
 
             # Stream directly to storage to keep behavior consistent with the
             # parallel path where batches are stored as they complete.
@@ -1056,20 +1057,17 @@ class IndexingCoordinator(BaseService):
 
             # Phase 2: Reconciliation - Ensure database consistency by removing orphaned files
             cleaned_files = 0
-            try:
-                do_cleanup = True
-                if self.config and getattr(self.config, "indexing", None) is not None:
-                    do_cleanup = bool(getattr(self.config.indexing, "cleanup", True))
-                if do_cleanup:
-                    _t2 = _t.perf_counter() if _t0 is not None else None
-                    cleaned_files = self._cleanup_orphaned_files(
-                        directory, files, exclude_patterns
-                    )
-                    _t3 = _t.perf_counter() if _t0 is not None else None
-                else:
-                    logger.debug("Skipping orphaned file cleanup (cleanup disabled)")
-            except Exception as e:
-                logger.warning(f"Cleanup phase skipped due to error: {e}")
+            do_cleanup = True
+            if self.config and getattr(self.config, "indexing", None) is not None:
+                do_cleanup = bool(getattr(self.config.indexing, "cleanup", True))
+            if do_cleanup:
+                _t2 = _t.perf_counter() if _t0 is not None else None
+                cleaned_files = self._cleanup_orphaned_files(
+                    directory, files, exclude_patterns
+                )
+                _t3 = _t.perf_counter() if _t0 is not None else None
+            else:
+                logger.debug("Skipping orphaned file cleanup (cleanup disabled)")
 
             logger.debug(
                 f"Directory consistency: {len(files)} files discovered, {cleaned_files} orphaned files cleaned"
@@ -2875,5 +2873,6 @@ class IndexingCoordinator(BaseService):
             return orphaned_count
 
         except Exception as e:
-            logger.warning(f"Failed to cleanup orphaned files: {e}")
-            return 0
+            message = f"Storage reconciliation cleanup failed: {e}"
+            logger.error(message)
+            raise RuntimeError(message) from e

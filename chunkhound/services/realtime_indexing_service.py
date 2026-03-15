@@ -12,10 +12,12 @@ Architecture:
 """
 
 import asyncio
+import threading
 import time
-from collections.abc import Callable, Iterator
-from pathlib import Path
-from typing import Any
+from collections.abc import Awaitable, Callable, Iterator
+from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
+from typing import Any, Protocol
 
 from loguru import logger
 from watchdog.events import FileSystemEventHandler
@@ -23,12 +25,86 @@ from watchdog.observers import Observer
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices
+from chunkhound.services.realtime_path_filter import RealtimePathFilter
 from chunkhound.utils.windows_constants import IS_WINDOWS
+from chunkhound.watchman import (
+    PrivateWatchmanSidecar,
+    WatchmanCliSession,
+    WatchmanScopePlan,
+    WatchmanSubscriptionScope,
+)
+from chunkhound.watchman_runtime.loader import (
+    default_realtime_backend_for_current_install,
+)
 
 
 def normalize_file_path(path: Path | str) -> str:
     """Single source of truth for path normalization across ChunkHound."""
     return str(Path(path).resolve())
+
+
+QueueResultCallback = Callable[[str, Path, bool, str | None], None]
+
+
+def _record_realtime_queue_result(
+    queue_result_callback: QueueResultCallback | None,
+    event_type: str,
+    file_path: Path,
+    accepted: bool,
+    reason: str | None,
+) -> None:
+    try:
+        if queue_result_callback:
+            queue_result_callback(event_type, file_path, accepted, reason)
+    except Exception:
+        pass
+
+
+def _enqueue_realtime_event(
+    event_queue: asyncio.Queue[tuple[str, Path]] | None,
+    queue_result_callback: QueueResultCallback | None,
+    event_type: str,
+    file_path: Path,
+) -> None:
+    if event_queue is None:
+        _record_realtime_queue_result(
+            queue_result_callback,
+            event_type,
+            file_path,
+            False,
+            "queue_unavailable",
+        )
+        return
+
+    try:
+        event_queue.put_nowait((event_type, file_path))
+        _record_realtime_queue_result(
+            queue_result_callback,
+            event_type,
+            file_path,
+            True,
+            None,
+        )
+    except asyncio.QueueFull:
+        logger.warning(
+            f"Realtime event queue full; dropped {event_type} for {file_path}"
+        )
+        _record_realtime_queue_result(
+            queue_result_callback,
+            event_type,
+            file_path,
+            False,
+            "queue_full",
+        )
+    except Exception as error:
+        logger.warning(f"Failed to queue {event_type} event for {file_path}: {error}")
+        _record_realtime_queue_result(
+            queue_result_callback,
+            event_type,
+            file_path,
+            False,
+            type(error).__name__,
+        )
 
 
 class SimpleEventHandler(FileSystemEventHandler):
@@ -40,13 +116,12 @@ class SimpleEventHandler(FileSystemEventHandler):
         config: Config | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
         root_path: Path | None = None,
+        queue_result_callback: QueueResultCallback | None = None,
     ):
         self.event_queue = event_queue
         self.config = config
         self.loop = loop
-        self._engine = None
-        self._include_patterns: list[str] | None = None
-        self._pattern_cache: dict[str, Any] = {}
+        self._queue_result_callback = queue_result_callback
         if root_path is not None:
             self._root = root_path.resolve()
         else:
@@ -56,6 +131,7 @@ class SimpleEventHandler(FileSystemEventHandler):
                 ).resolve()
             except Exception:
                 self._root = Path.cwd().resolve()
+        self._path_filter = RealtimePathFilter(config=config, root_path=self._root)
 
     def on_any_event(self, event: Any) -> None:
         """Handle filesystem events - simple queue operation."""
@@ -87,15 +163,7 @@ class SimpleEventHandler(FileSystemEventHandler):
         if not self._should_index(file_path):
             return
 
-        # Put event in async queue from watchdog thread
-        try:
-            if self.loop and not self.loop.is_closed() and self.event_queue is not None:
-                future = asyncio.run_coroutine_threadsafe(
-                    self.event_queue.put((event.event_type, file_path)), self.loop
-                )
-                future.result(timeout=5.0)  # More tolerance for queue operations
-        except Exception as e:
-            logger.warning(f"Failed to queue event for {file_path}: {e}")
+        self._queue_event(event.event_type, file_path)
 
     def _should_index(self, file_path: Path) -> bool:
         """Check if file should be indexed based on config patterns.
@@ -105,75 +173,7 @@ class SimpleEventHandler(FileSystemEventHandler):
         This ensures realtime indexing supports all languages without
         requiring manual updates.
         """
-        if not self.config:
-            # Fallback: derive from Language enum (which derives from parser_factory)
-            # Uses lazy import to avoid heavyweight startup cost
-            from chunkhound.core.types.common import Language
-
-            # Check extension-based patterns
-            if file_path.suffix.lower() in Language.get_all_extensions():
-                return True
-
-            # Check filename-based patterns (Makefile, Dockerfile, etc.)
-            if file_path.name.lower() in Language.get_all_filename_patterns():
-                return True
-
-            return False
-
-        # Repo-aware ignore engine (lazy init)
-        try:
-            if self._engine is None:
-                from chunkhound.utils.ignore_engine import (
-                    build_repo_aware_ignore_engine,
-                )
-
-                sources = self.config.indexing.resolve_ignore_sources()
-                cfg_ex = self.config.indexing.get_effective_config_excludes()
-                chf = self.config.indexing.chignore_file
-                overlay = bool(
-                    getattr(self.config.indexing, "workspace_gitignore_nonrepo", False)
-                )
-                self._engine = build_repo_aware_ignore_engine(
-                    self._root,
-                    sources,
-                    chf,
-                    cfg_ex,
-                    workspace_root_only_gitignore=overlay,
-                )
-        except Exception:
-            self._engine = None
-
-        # Exclude via engine
-        try:
-            if self._engine is not None and self._engine.matches(
-                file_path, is_dir=False
-            ):
-                return False
-        except Exception:
-            pass
-
-        # Include via normalized patterns (fallback to Language defaults)
-        try:
-            if self._include_patterns is None:
-                from chunkhound.utils.file_patterns import normalize_include_patterns
-
-                inc = list(self.config.indexing.include)
-                self._include_patterns = normalize_include_patterns(inc)
-
-            from chunkhound.utils.file_patterns import should_include_file
-
-            return should_include_file(
-                file_path, self._root, self._include_patterns, self._pattern_cache
-            )
-        except Exception:
-            # Fallback to Language-based detection if include matching fails
-            from chunkhound.core.types.common import Language
-
-            if file_path.suffix.lower() in Language.get_all_extensions():
-                return True
-            if file_path.name.lower() in Language.get_all_filename_patterns():
-                return True
-            return False
+        return self._path_filter.should_index(file_path)
 
     def _handle_move_event(self, src_path: str, dest_path: str) -> None:
         """Handle atomic file moves (temp -> final file)."""
@@ -198,14 +198,731 @@ class SimpleEventHandler(FileSystemEventHandler):
 
     def _queue_event(self, event_type: str, file_path: Path) -> None:
         """Queue an event for async processing."""
+        if not self.loop or self.loop.is_closed() or self.event_queue is None:
+            self._record_queue_result(event_type, file_path, False, "loop_unavailable")
+            return
+
         try:
-            if self.loop and not self.loop.is_closed() and self.event_queue is not None:
-                future = asyncio.run_coroutine_threadsafe(
-                    self.event_queue.put((event_type, file_path)), self.loop
+            self.loop.call_soon_threadsafe(
+                _enqueue_realtime_event,
+                self.event_queue,
+                self._queue_result_callback,
+                event_type,
+                file_path,
+            )
+        except Exception as error:
+            logger.warning(
+                f"Failed to queue {event_type} event for {file_path}: {error}"
+            )
+            self._record_queue_result(
+                event_type,
+                file_path,
+                False,
+                type(error).__name__,
+            )
+
+    def _record_queue_result(
+        self, event_type: str, file_path: Path, accepted: bool, reason: str | None
+    ) -> None:
+        try:
+            if self._queue_result_callback:
+                self._queue_result_callback(event_type, file_path, accepted, reason)
+        except Exception:
+            # Never let bookkeeping interfere with monitoring.
+            pass
+
+
+class RealtimeMonitorAdapter(Protocol):
+    """Backend-specific filesystem monitoring lifecycle."""
+
+    backend_name: str
+
+    async def start(
+        self, watch_path: Path, loop: asyncio.AbstractEventLoop
+    ) -> None: ...
+
+    async def stop(self) -> None: ...
+
+    def get_health(self) -> dict[str, Any]: ...
+
+
+def _default_watchman_loss_of_sync_snapshot() -> dict[str, Any]:
+    """Return the stable Watchman loss-of-sync status payload."""
+    return {
+        "count": 0,
+        "fresh_instance_count": 0,
+        "recrawl_count": 0,
+        "disconnect_count": 0,
+        "last_reason": None,
+        "last_at": None,
+        "last_details": None,
+    }
+
+
+def _default_watchman_reconnect_snapshot() -> dict[str, Any]:
+    """Return the stable Watchman reconnect status payload."""
+    return {
+        "state": "idle",
+        "attempt_count": 0,
+        "max_attempts": WatchmanRealtimeAdapter._RECONNECT_MAX_ATTEMPTS,
+        "retry_delay_seconds": WatchmanRealtimeAdapter._RECONNECT_RETRY_DELAY_SECONDS,
+        "last_started_at": None,
+        "last_completed_at": None,
+        "last_error": None,
+        "last_result": None,
+    }
+
+
+def _default_watchman_health_snapshot() -> dict[str, Any]:
+    """Return Watchman-specific realtime fields for daemon status surfaces."""
+    return {
+        "watchman_pid": None,
+        "watchman_started_at": None,
+        "watchman_process_start_time_epoch": None,
+        "watchman_runtime_version": None,
+        "watchman_binary_path": None,
+        "watchman_socket_path": None,
+        "watchman_statefile_path": None,
+        "watchman_logfile_path": None,
+        "watchman_metadata_path": None,
+        "watchman_alive": False,
+        "watchman_sidecar_state": "uninitialized",
+        "watchman_connection_state": "uninitialized",
+        "watchman_session_alive": False,
+        "watchman_session_pid": None,
+        "watchman_session_last_warning": None,
+        "watchman_session_last_warning_at": None,
+        "watchman_session_last_error": None,
+        "watchman_session_last_error_at": None,
+        "watchman_session_last_response_at": None,
+        "watchman_subscription_last_received_at": None,
+        "watchman_session_command_count": 0,
+        "watchman_subscription_queue_size": 0,
+        "watchman_subscription_queue_maxsize": 1000,
+        "watchman_subscription_pdu_count": 0,
+        "watchman_subscription_pdu_dropped": 0,
+        "watchman_subscription_name": None,
+        "watchman_subscription_count": 0,
+        "watchman_watch_root": None,
+        "watchman_relative_root": None,
+        "watchman_session_capabilities": {},
+        "watchman_loss_of_sync": _default_watchman_loss_of_sync_snapshot(),
+        "watchman_reconnect": _default_watchman_reconnect_snapshot(),
+    }
+
+
+class WatchdogRealtimeAdapter:
+    """Watchdog-backed monitor with polling fallback."""
+
+    backend_name = "watchdog"
+
+    def __init__(self, service: "RealtimeIndexingService") -> None:
+        self._service = service
+
+    async def start(self, watch_path: Path, loop: asyncio.AbstractEventLoop) -> None:
+        self._service._set_effective_backend(self.backend_name)
+        await self._service._setup_watchdog_with_timeout(watch_path, loop)
+
+    async def stop(self) -> None:
+        await self._service._cancel_watchdog_setup_task()
+        await self._service._cancel_watchdog_bootstrap_future()
+        await self._service._stop_observer()
+        await self._service._cancel_polling_task()
+
+    def get_health(self) -> dict[str, Any]:
+        observer_alive = False
+        if self._service.observer and self._service.observer.is_alive():
+            observer_alive = True
+        elif (
+            self._service._using_polling
+            and self._service._polling_task
+            and not self._service._polling_task.done()
+        ):
+            observer_alive = True
+        return {"observer_alive": observer_alive}
+
+
+class PollingRealtimeAdapter:
+    """Explicit polling backend."""
+
+    backend_name = "polling"
+
+    def __init__(self, service: "RealtimeIndexingService") -> None:
+        self._service = service
+
+    async def start(self, watch_path: Path, loop: asyncio.AbstractEventLoop) -> None:
+        del loop
+        await self._service._start_polling_backend(
+            watch_path,
+            reason="Configured realtime backend is polling",
+            emit_warning=False,
+        )
+
+    async def stop(self) -> None:
+        await self._service._cancel_polling_task()
+
+    def get_health(self) -> dict[str, Any]:
+        return {
+            "observer_alive": bool(
+                self._service._polling_task and not self._service._polling_task.done()
+            )
+        }
+
+
+class WatchmanRealtimeAdapter:
+    """Private Watchman sidecar and session bridge adapter."""
+
+    backend_name = "watchman"
+    _SUBSCRIPTION_NAME = "chunkhound-live-indexing"
+    _RECONNECT_MAX_ATTEMPTS = 3
+    _RECONNECT_RETRY_DELAY_SECONDS = 1.0
+
+    def __init__(self, service: "RealtimeIndexingService") -> None:
+        self._service = service
+        target_dir = getattr(service.config, "target_dir", None)
+        if not isinstance(target_dir, Path):
+            raise RuntimeError(
+                "Watchman backend requires config.target_dir "
+                "to resolve a private runtime root"
+            )
+        self._sidecar = PrivateWatchmanSidecar(target_dir, debug_sink=service._debug)
+        self._session: WatchmanCliSession | None = None
+        self._path_filter: RealtimePathFilter | None = None
+        self._subscription_consumer_task: asyncio.Task[None] | None = None
+        self._session_monitor_task: asyncio.Task[None] | None = None
+        self._reconnect_task: asyncio.Task[None] | None = None
+        self._watch_path: Path | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loss_of_sync_count = 0
+        self._fresh_instance_count = 0
+        self._recrawl_count = 0
+        self._disconnect_count = 0
+        self._last_loss_of_sync_reason: str | None = None
+        self._last_loss_of_sync_at: str | None = None
+        self._last_loss_of_sync_details: dict[str, object] | None = None
+        self._reconnect_state = "idle"
+        self._reconnect_attempt_count = 0
+        self._last_reconnect_started_at: str | None = None
+        self._last_reconnect_completed_at: str | None = None
+        self._last_reconnect_error: str | None = None
+        self._last_reconnect_result: str | None = None
+
+    async def start(self, watch_path: Path, loop: asyncio.AbstractEventLoop) -> None:
+        self._watch_path = watch_path
+        self._loop = loop
+        self._reset_loss_of_sync_state()
+        self._reset_reconnect_state()
+        try:
+            await self._establish_monitoring(watch_path, loop, phase="startup")
+        except Exception as error:
+            message = str(error)
+            self._service._set_error(message)
+            raise RuntimeError(message) from error
+
+    async def stop(self) -> None:
+        self._watch_path = None
+        self._loop = None
+        if self._reconnect_task is not None:
+            self._reconnect_task.cancel()
+            try:
+                await self._reconnect_task
+            except asyncio.CancelledError:
+                pass
+            self._reconnect_task = None
+        await self._clear_monitoring_runtime(stop_sidecar=True)
+
+    async def _consume_subscription_pdus(
+        self, scope: WatchmanSubscriptionScope
+    ) -> None:
+        session = self._session
+        if session is None:
+            return
+
+        while True:
+            payload = await session.subscription_queue.get()
+            try:
+                if self._handle_loss_of_sync_payload(payload):
+                    continue
+                self._translate_subscription_pdu(payload, scope)
+            except Exception as error:
+                message = f"Watchman event translation failed: {error}"
+                logger.warning(message)
+                self._service._set_warning(message)
+            finally:
+                session.subscription_queue.task_done()
+
+    async def _monitor_unexpected_session_exit(self) -> None:
+        session = self._session
+        if session is None:
+            return
+
+        message = await session.wait_for_unexpected_exit()
+        if message is None:
+            return
+
+        if self._session_monitor_task is asyncio.current_task():
+            self._session_monitor_task = None
+        await self._cancel_subscription_consumer_task()
+        self._path_filter = None
+        self._service.watchman_scope_plan = None
+        self._service.watchman_subscription_queue = None
+        self._service.monitoring_ready.clear()
+        self._service._monitoring_ready_at = None
+
+        sidecar_health = self._sidecar.get_health()
+        details = {
+            "backend": "watchman",
+            "loss_of_sync_reason": "disconnect",
+            "watchman_session_alive": False,
+            "watchman_alive": bool(sidecar_health.get("watchman_alive")),
+            "watchman_session_error": message,
+        }
+        self._record_loss_of_sync(
+            "disconnect",
+            message=f"Watchman session disconnected: {message}",
+            details=details,
+            as_error=True,
+        )
+        self._begin_reconnect_cycle()
+
+    def _translate_subscription_pdu(
+        self, payload: dict[str, object], scope: WatchmanSubscriptionScope
+    ) -> None:
+        files = payload.get("files")
+        if not isinstance(files, list):
+            self._warn_translation_issue(
+                "Watchman subscription PDU did not include a files list"
+            )
+            return
+
+        path_filter = self._path_filter
+        if path_filter is None:
+            self._warn_translation_issue(
+                "Watchman event translation ran without an active path filter"
+            )
+            return
+
+        for entry in files:
+            if not isinstance(entry, dict):
+                self._warn_translation_issue(
+                    "Watchman subscription entry was not an object"
                 )
-                future.result(timeout=5.0)  # More tolerance for queue operations
-        except Exception as e:
-            logger.warning(f"Failed to queue {event_type} event for {file_path}: {e}")
+                continue
+            translated = self._translate_watchman_file_entry(entry, scope)
+            if translated is None:
+                continue
+            event_type, file_path = translated
+            if not path_filter.should_index(file_path):
+                continue
+            _enqueue_realtime_event(
+                self._service.event_queue,
+                self._service._handle_queue_result,
+                event_type,
+                file_path,
+            )
+
+    def _translate_watchman_file_entry(
+        self,
+        entry: dict[str, object],
+        scope: WatchmanSubscriptionScope,
+    ) -> tuple[str, Path] | None:
+        file_type = entry.get("type")
+        if file_type not in {None, "f"}:
+            self._warn_translation_issue(
+                f"Skipping unexpected Watchman file type {file_type!r}"
+            )
+            return None
+
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            self._warn_translation_issue(
+                "Skipping Watchman subscription entry without a valid name"
+            )
+            return None
+
+        relative_name = PurePosixPath(name.strip().replace("\\", "/"))
+        if (
+            relative_name.is_absolute()
+            or ".." in relative_name.parts
+            or not relative_name.parts
+        ):
+            self._warn_translation_issue(
+                f"Skipping unsafe Watchman subscription path {name!r}"
+            )
+            return None
+
+        relative_root = (
+            PurePosixPath(scope.relative_root) if scope.relative_root else None
+        )
+        mapped_parts = []
+        if relative_root is not None:
+            mapped_parts.extend(relative_root.parts)
+        mapped_parts.extend(relative_name.parts)
+        canonical_path = Path(
+            normalize_file_path(scope.watch_root.joinpath(*mapped_parts))
+        )
+        try:
+            canonical_path.relative_to(scope.requested_path)
+        except ValueError:
+            self._warn_translation_issue(
+                f"Skipping out-of-scope Watchman path {canonical_path}"
+            )
+            return None
+
+        exists = entry.get("exists")
+        is_new = entry.get("new")
+        if exists is False:
+            event_type = "deleted"
+        elif exists is True and is_new is True:
+            event_type = "created"
+        else:
+            event_type = "modified"
+        return event_type, canonical_path
+
+    def _warn_translation_issue(self, message: str) -> None:
+        warning = f"Watchman event translation warning: {message}"
+        logger.warning(warning)
+        self._service._set_warning(warning)
+
+    def _reset_loss_of_sync_state(self) -> None:
+        self._loss_of_sync_count = 0
+        self._fresh_instance_count = 0
+        self._recrawl_count = 0
+        self._disconnect_count = 0
+        self._last_loss_of_sync_reason = None
+        self._last_loss_of_sync_at = None
+        self._last_loss_of_sync_details = None
+
+    def _reset_reconnect_state(self) -> None:
+        self._reconnect_state = "idle"
+        self._reconnect_attempt_count = 0
+        self._last_reconnect_started_at = None
+        self._last_reconnect_completed_at = None
+        self._last_reconnect_error = None
+        self._last_reconnect_result = None
+
+    async def _cancel_subscription_consumer_task(self) -> None:
+        task = self._subscription_consumer_task
+        if task is None:
+            return
+        self._subscription_consumer_task = None
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _cancel_session_monitor_task(self) -> None:
+        task = self._session_monitor_task
+        if task is None:
+            return
+        if task is asyncio.current_task():
+            self._session_monitor_task = None
+            return
+        self._session_monitor_task = None
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _clear_monitoring_runtime(self, *, stop_sidecar: bool) -> None:
+        self._service.watchman_scope_plan = None
+        self._service.watchman_subscription_queue = None
+        self._path_filter = None
+        self._service.monitoring_ready.clear()
+        self._service._monitoring_ready_at = None
+        await self._cancel_session_monitor_task()
+        await self._cancel_subscription_consumer_task()
+        if self._session is not None:
+            await self._session.stop()
+            self._session = None
+        if stop_sidecar:
+            await self._sidecar.stop()
+        self._service._emit_status_update()
+
+    async def _establish_monitoring(
+        self,
+        watch_path: Path,
+        loop: asyncio.AbstractEventLoop,
+        *,
+        phase: str,
+    ) -> None:
+        try:
+            metadata = await self._sidecar.start()
+        except Exception as error:
+            raise RuntimeError(f"Watchman sidecar {phase} failed: {error}") from error
+
+        self._service.watchman_scope_plan = None
+        self._service.watchman_subscription_queue = None
+
+        session: WatchmanCliSession | None = None
+        try:
+            session = WatchmanCliSession(
+                binary_path=Path(metadata.binary_path),
+                socket_path=self._sidecar.paths.listener_path,
+                statefile_path=self._sidecar.paths.statefile_path,
+                logfile_path=self._sidecar.paths.logfile_path,
+                pidfile_path=self._sidecar.paths.pidfile_path,
+                project_root=self._sidecar.paths.project_root,
+                debug_sink=self._service._debug,
+                subscription_overflow_handler=self._handle_subscription_queue_overflow,
+            )
+            setup = await session.start(
+                target_path=watch_path,
+                subscription_name=self._SUBSCRIPTION_NAME,
+            )
+        except Exception as error:
+            if session is not None:
+                await session.stop()
+            await self._sidecar.stop()
+            self._service.watchman_scope_plan = None
+            self._service.watchman_subscription_queue = None
+            raise RuntimeError(f"Watchman session {phase} failed: {error}") from error
+
+        self._session = session
+        self._service.watchman_scope_plan = setup.scope_plan
+        self._service.watchman_subscription_queue = session.subscription_queue
+        self._path_filter = RealtimePathFilter(
+            config=self._service.config,
+            root_path=setup.scope_plan.primary_scope.requested_path,
+        )
+        self._subscription_consumer_task = loop.create_task(
+            self._consume_subscription_pdus(setup.scope_plan.primary_scope)
+        )
+        self._session_monitor_task = loop.create_task(
+            self._monitor_unexpected_session_exit()
+        )
+        self._service._set_effective_backend(self.backend_name)
+        self._service._monitoring_ready_at = self._service._utc_now()
+        self._service.monitoring_ready.set()
+        self._service._emit_status_update()
+
+    def _begin_reconnect_cycle(self) -> None:
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            return
+        if self._watch_path is None or self._loop is None:
+            return
+        self._reconnect_state = "pending"
+        self._reconnect_attempt_count = 0
+        self._last_reconnect_started_at = None
+        self._last_reconnect_completed_at = None
+        self._last_reconnect_error = None
+        self._last_reconnect_result = None
+        self._service._emit_status_update()
+        self._reconnect_task = asyncio.create_task(self._run_reconnect_loop())
+
+    async def _run_reconnect_loop(self) -> None:
+        watch_path = self._watch_path
+        loop = self._loop
+        if watch_path is None or loop is None:
+            return
+
+        try:
+            for attempt in range(1, self._RECONNECT_MAX_ATTEMPTS + 1):
+                if attempt > 1:
+                    self._reconnect_state = "pending"
+                    self._service._emit_status_update()
+                    await asyncio.sleep(self._RECONNECT_RETRY_DELAY_SECONDS)
+
+                self._reconnect_state = "running"
+                self._reconnect_attempt_count = attempt
+                self._last_reconnect_started_at = self._service._utc_now()
+                self._last_reconnect_error = None
+                self._last_reconnect_result = None
+                self._service._emit_status_update()
+
+                try:
+                    await self._clear_monitoring_runtime(stop_sidecar=False)
+                    await self._establish_monitoring(
+                        watch_path,
+                        loop,
+                        phase="reconnect",
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    self._last_reconnect_error = str(error)
+                    self._last_reconnect_completed_at = self._service._utc_now()
+                    if attempt < self._RECONNECT_MAX_ATTEMPTS:
+                        self._service._set_warning(
+                            "Watchman reconnect attempt "
+                            f"{attempt}/{self._RECONNECT_MAX_ATTEMPTS} failed: "
+                            f"{self._last_reconnect_error}"
+                        )
+                        continue
+                    self._reconnect_state = "failed"
+                    self._last_reconnect_result = "failed"
+                    self._service._set_error(
+                        f"Watchman reconnect failed: {self._last_reconnect_error}"
+                    )
+                    self._service._emit_status_update()
+                    return
+
+                self._reconnect_state = "restored"
+                self._last_reconnect_completed_at = self._service._utc_now()
+                self._last_reconnect_result = "restored"
+                self._service._clear_error_state(
+                    prefixes=(
+                        "Watchman session disconnected:",
+                        "Watchman reconnect failed:",
+                    )
+                )
+                self._service._refresh_runtime_service_state()
+                self._service._emit_status_update()
+                return
+        finally:
+            self._reconnect_task = None
+
+    def _handle_loss_of_sync_payload(self, payload: dict[str, object]) -> bool:
+        reason: str | None = None
+        message: str | None = None
+
+        if (
+            payload.get("is_fresh_instance") is True
+            or payload.get("fresh_instance") is True
+        ):
+            reason = "fresh_instance"
+            message = (
+                "Watchman reported a fresh instance; "
+                "scheduling a reconciliation resync"
+            )
+        else:
+            warning = payload.get("warning")
+            if isinstance(warning, str) and "recrawl" in warning.lower():
+                reason = "recrawl"
+                message = (
+                    "Watchman reported a recrawl warning; "
+                    "scheduling a reconciliation resync"
+                )
+
+        if reason is None:
+            return False
+
+        details: dict[str, object] = {
+            "backend": "watchman",
+            "loss_of_sync_reason": reason,
+            "subscription": str(payload.get("subscription") or self._SUBSCRIPTION_NAME),
+        }
+        clock = payload.get("clock")
+        if isinstance(clock, str) and clock:
+            details["clock"] = clock
+        warning = payload.get("warning")
+        if isinstance(warning, str) and warning:
+            details["warning"] = warning
+
+        self._record_loss_of_sync(reason, message=message, details=details)
+        return True
+
+    def _handle_subscription_queue_overflow(
+        self,
+        payload: dict[str, object],
+        dropped_count: int,
+        queue_maxsize: int,
+    ) -> None:
+        if self._service._needs_resync:
+            self._service._emit_status_update()
+            return
+
+        details: dict[str, object] = {
+            "backend": "watchman",
+            "loss_of_sync_reason": "subscription_pdu_dropped",
+            "subscription": str(payload.get("subscription") or self._SUBSCRIPTION_NAME),
+            "watchman_subscription_pdu_dropped": dropped_count,
+            "watchman_subscription_queue_maxsize": queue_maxsize,
+        }
+        clock = payload.get("clock")
+        if isinstance(clock, str) and clock:
+            details["clock"] = clock
+
+        self._record_loss_of_sync(
+            "subscription_pdu_dropped",
+            message=(
+                "Watchman subscription queue overflowed; "
+                "scheduling a reconciliation resync"
+            ),
+            details=details,
+        )
+
+    def _record_loss_of_sync(
+        self,
+        reason: str,
+        *,
+        message: str | None = None,
+        details: dict[str, object] | None = None,
+        as_error: bool = False,
+    ) -> None:
+        self._loss_of_sync_count += 1
+        if reason == "fresh_instance":
+            self._fresh_instance_count += 1
+        elif reason == "recrawl":
+            self._recrawl_count += 1
+        elif reason == "disconnect":
+            self._disconnect_count += 1
+
+        self._last_loss_of_sync_reason = reason
+        self._last_loss_of_sync_at = self._service._utc_now()
+        self._last_loss_of_sync_details = dict(details) if details else None
+
+        if message:
+            if as_error:
+                self._service._set_error(message)
+            else:
+                self._service._set_warning(message)
+        else:
+            self._service._emit_status_update()
+
+        self._schedule_resync_request(reason, details)
+
+    def _schedule_resync_request(
+        self, reason: str, details: dict[str, object] | None = None
+    ) -> None:
+        async def _dispatch() -> None:
+            try:
+                await self._service.request_resync("realtime_loss_of_sync", details)
+            except Exception as error:
+                self._service._set_error(f"Watchman resync request failed: {error}")
+
+        asyncio.create_task(_dispatch())
+
+    def get_health(self) -> dict[str, Any]:
+        health = _default_watchman_health_snapshot()
+        health.update(self._sidecar.get_health())
+        if self._session is not None:
+            health.update(self._session.get_health())
+        sidecar_alive = bool(health.get("watchman_alive"))
+        session_alive = bool(health.get("watchman_session_alive"))
+        health["watchman_sidecar_state"] = "running" if sidecar_alive else "stopped"
+        if session_alive:
+            health["watchman_connection_state"] = "connected"
+        elif sidecar_alive:
+            health["watchman_connection_state"] = "sidecar_only"
+        else:
+            health["watchman_connection_state"] = "disconnected"
+        health["watchman_subscription_count"] = (
+            1 if health.get("watchman_subscription_name") else 0
+        )
+        health["watchman_loss_of_sync"] = {
+            "count": self._loss_of_sync_count,
+            "fresh_instance_count": self._fresh_instance_count,
+            "recrawl_count": self._recrawl_count,
+            "disconnect_count": self._disconnect_count,
+            "last_reason": self._last_loss_of_sync_reason,
+            "last_at": self._last_loss_of_sync_at,
+            "last_details": self._last_loss_of_sync_details,
+        }
+        health["watchman_reconnect"] = {
+            "state": self._reconnect_state,
+            "attempt_count": self._reconnect_attempt_count,
+            "max_attempts": self._RECONNECT_MAX_ATTEMPTS,
+            "retry_delay_seconds": self._RECONNECT_RETRY_DELAY_SECONDS,
+            "last_started_at": self._last_reconnect_started_at,
+            "last_completed_at": self._last_reconnect_completed_at,
+            "last_error": self._last_reconnect_error,
+            "last_result": self._last_reconnect_result,
+        }
+        health["observer_alive"] = sidecar_alive and session_alive
+        return health
 
 
 class RealtimeIndexingService:
@@ -215,31 +932,51 @@ class RealtimeIndexingService:
     _EVENT_DEDUP_WINDOW_SECONDS = 2.0
     # Retention period for event history - entries older than this are cleaned up
     _EVENT_HISTORY_RETENTION_SECONDS = 10.0
+    _EVENT_QUEUE_MAXSIZE = 1000
+    _RESYNC_DEBOUNCE_SECONDS = 1.0
+    _WATCHDOG_SETUP_TIMEOUT_SECONDS = 5.0
+    _MONITORING_READY_TIMEOUT_SECONDS = 10.0
+    _POLLING_STARTUP_SETTLE_SECONDS = 0.5
 
     def __init__(
         self,
         services: DatabaseServices,
         config: Config,
         debug_sink: Callable[[str], None] | None = None,
-        force_polling: bool = False,
+        status_callback: Callable[[dict[str, Any]], None] | None = None,
+        resync_callback: Callable[
+            [str, dict[str, Any] | None], Awaitable[dict[str, Any] | None]
+        ]
+        | None = None,
     ):
         self.services = services
         self.config = config
         # Optional sink that writes to MCPServerBase.debug_log so events land in
         # /tmp/chunkhound_mcp_debug.log when CHUNKHOUND_DEBUG is enabled.
         self._debug_sink = debug_sink
-        # Force polling mode - useful for Windows CI where watchdog is unreliable
-        self._force_polling = force_polling
+        self._status_callback = status_callback
+        self._resync_callback = resync_callback
+        self._configured_backend = self._resolve_configured_backend()
+        self._effective_backend = "uninitialized"
+        self._monitor_adapter: RealtimeMonitorAdapter | None = None
+        self.watchman_scope_plan: WatchmanScopePlan | None = None
+        self.watchman_subscription_queue: asyncio.Queue[dict[str, object]] | None = None
 
         # Existing asyncio queue for priority processing
         self.file_queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue()
 
         # NEW: Async queue for events from watchdog (thread-safe via asyncio)
-        self.event_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        self.event_queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue(
+            maxsize=self._EVENT_QUEUE_MAXSIZE
+        )
 
         # Deduplication and error tracking
         self.pending_files: set[Path] = set()
         self.failed_files: set[str] = set()
+        self._last_warning: str | None = None
+        self._last_warning_at: str | None = None
+        self._last_error: str | None = None
+        self._last_error_at: str | None = None
 
         # Simple debouncing for rapid file changes
         self._pending_debounce: dict[str, float] = {}  # file_path -> timestamp
@@ -249,6 +986,13 @@ class RealtimeIndexingService:
         self._recent_file_events: dict[
             str, tuple[str, float]
         ] = {}  # Layer 3: event dedup
+        self._event_queue_accepted = 0
+        self._event_queue_dropped = 0
+        self._event_queue_last_reason: str | None = None
+        self._event_queue_last_event_type: str | None = None
+        self._event_queue_last_file_path: str | None = None
+        self._event_queue_last_enqueued_at: str | None = None
+        self._event_queue_last_dropped_at: str | None = None
 
         # Background scan state
         self.scan_iterator: Iterator | None = None
@@ -263,6 +1007,19 @@ class RealtimeIndexingService:
         self.process_task: asyncio.Task | None = None
         self.event_consumer_task: asyncio.Task | None = None
         self._polling_task: asyncio.Task | None = None
+        self._watchdog_setup_task: asyncio.Task | None = None
+        self._watchdog_bootstrap_future: (
+            asyncio.Future[tuple[Observer, SimpleEventHandler] | None] | None
+        ) = None
+        self._watchdog_bootstrap_abort = threading.Event()
+        self._resync_dispatch_task: asyncio.Task | None = None
+        self._active_start_task: asyncio.Task | None = None
+        self._start_generation = 0
+        self._using_polling = False
+        self._service_state = "idle"
+        self._last_poll_snapshot_at: str | None = None
+        self._last_poll_files_checked = 0
+        self._last_poll_snapshot_truncated = False
 
         # Directory watch management for progressive monitoring
         self.watched_directories: set[str] = set()  # Track watched dirs
@@ -270,9 +1027,95 @@ class RealtimeIndexingService:
 
         # Monitoring readiness coordination
         self.monitoring_ready = asyncio.Event()  # Signals when monitoring is ready
-        self._monitoring_ready_time: float | None = (
-            None  # Track when monitoring became ready
-        )
+        self._monitoring_ready_at: str | None = None
+
+        # Backend-neutral resync substrate
+        self._needs_resync = False
+        self._resync_in_progress = False
+        self._resync_request_count = 0
+        self._resync_performed_count = 0
+        self._last_resync_reason: str | None = None
+        self._last_resync_details: dict[str, Any] | None = None
+        self._last_resync_requested_at: str | None = None
+        self._last_resync_started_at: str | None = None
+        self._last_resync_completed_at: str | None = None
+        self._last_resync_error: str | None = None
+        self._last_resync_request_monotonic: float | None = None
+
+    @staticmethod
+    def _utc_now() -> str:
+        """Return an ISO8601 UTC timestamp."""
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    @classmethod
+    def default_health_snapshot(
+        cls, configured_backend: str | None = None
+    ) -> dict[str, Any]:
+        """Return the neutral realtime health structure used by MCP status plumbing."""
+        status = {
+            "configured_backend": configured_backend,
+            "effective_backend": "uninitialized",
+            "service_state": "idle",
+            "monitoring_mode": "uninitialized",
+            "monitoring_ready": False,
+            "monitoring_ready_at": None,
+            "observer_alive": False,
+            "watching_directory": None,
+            "watched_directories_count": 0,
+            "queue_size": 0,
+            "pending_files": 0,
+            "failed_files": 0,
+            "last_warning": None,
+            "last_warning_at": None,
+            "last_error": None,
+            "last_error_at": None,
+            "event_queue": {
+                "size": 0,
+                "maxsize": cls._EVENT_QUEUE_MAXSIZE,
+                "accepted": 0,
+                "dropped": 0,
+                "last_reason": None,
+                "last_event_type": None,
+                "last_file_path": None,
+                "last_enqueued_at": None,
+                "last_dropped_at": None,
+            },
+            "resync": {
+                "needs_resync": False,
+                "in_progress": False,
+                "debounce_seconds": cls._RESYNC_DEBOUNCE_SECONDS,
+                "request_count": 0,
+                "performed_count": 0,
+                "last_reason": None,
+                "last_details": None,
+                "last_requested_at": None,
+                "last_started_at": None,
+                "last_completed_at": None,
+                "last_error": None,
+            },
+            "polling": {
+                "last_snapshot_at": None,
+                "last_files_checked": 0,
+                "last_snapshot_truncated": False,
+            },
+        }
+        if configured_backend == "watchman":
+            status.update(_default_watchman_health_snapshot())
+        return status
+
+    @classmethod
+    def health_snapshot_for_config(cls, config: Any | None) -> dict[str, Any]:
+        """Return the neutral realtime health snapshot seeded from config."""
+        configured_backend = None
+        try:
+            backend = getattr(
+                getattr(config, "indexing", None), "realtime_backend", None
+            )
+            if backend in {"watchman", "watchdog", "polling"}:
+                configured_backend = str(backend)
+        except Exception:
+            configured_backend = None
+        return cls.default_health_snapshot(configured_backend=configured_backend)
 
     # Internal helper to forward realtime events into the MCP debug log file
     def _debug(self, message: str) -> None:
@@ -284,56 +1127,316 @@ class RealtimeIndexingService:
             # Never let debug plumbing affect runtime
             pass
 
-    async def start(self, watch_path: Path) -> None:
-        """Start real-time indexing service."""
-        # Resolve path to canonical form for Windows 8.3 short name handling
-        # This ensures polling monitor's rglob() returns paths with resolved prefixes,
-        # matching how Config.target_dir is resolved for IndexingCoordinator._base_directory
-        watch_path = watch_path.resolve()
+    def _set_warning(self, message: str) -> None:
+        self._last_warning = message
+        self._last_warning_at = self._utc_now()
+        self._emit_status_update()
 
-        logger.debug(f"Starting real-time indexing for {watch_path}")
-        self._debug(f"start watch on {watch_path}")
+    def _set_error(self, message: str) -> None:
+        self._last_error = message
+        self._last_error_at = self._utc_now()
+        if self._service_state not in {"stopping", "stopped"}:
+            self._service_state = "degraded"
+        self._emit_status_update()
 
-        # Store the watch path
-        self.watch_path = watch_path
+    def _clear_resync_error_state(self) -> None:
+        """Clear degraded state only when it originated from resync plumbing."""
+        self._last_resync_error = None
+        if self._last_error == "No resync callback configured" or (
+            self._last_error and self._last_error.startswith("Realtime resync failed:")
+        ):
+            self._last_error = None
+            self._last_error_at = None
+        self._refresh_runtime_service_state()
+        self._emit_status_update()
 
-        # Always start with watchdog but with reasonable timeout
-        # If it takes too long, we'll fall back to polling
-        loop = asyncio.get_event_loop()
+    def _clear_error_state(
+        self,
+        *,
+        exact_messages: tuple[str, ...] = (),
+        prefixes: tuple[str, ...] = (),
+    ) -> None:
+        current_error = self._last_error
+        if not current_error:
+            return
+        if current_error in exact_messages or any(
+            current_error.startswith(prefix) for prefix in prefixes
+        ):
+            self._last_error = None
+            self._last_error_at = None
+        self._refresh_runtime_service_state()
+        self._emit_status_update()
 
-        # Start all necessary tasks
-        self.event_consumer_task = asyncio.create_task(self._consume_events())
-        self.process_task = asyncio.create_task(self._process_loop())
+    @staticmethod
+    def _resync_callback_error(result: Any) -> str | None:
+        """Normalize backend-neutral callback error results into service failures."""
+        if not isinstance(result, dict) or result.get("status") != "error":
+            return None
+        error = result.get("error")
+        if isinstance(error, str) and error:
+            return f"Resync callback reported error status: {error}"
+        return "Resync callback reported error status"
 
-        # Setup watchdog with timeout
-        self._watchdog_setup_task = asyncio.create_task(
-            self._setup_watchdog_with_timeout(watch_path, loop)
+    def _refresh_runtime_service_state(self) -> None:
+        if self._service_state in {"starting", "stopping", "stopped"}:
+            return
+        if self._last_error:
+            self._service_state = "degraded"
+            return
+        adapter_health = (
+            self._monitor_adapter.get_health() if self._monitor_adapter else {}
+        )
+        reconnect = adapter_health.get("watchman_reconnect")
+        reconnect_state = None
+        if isinstance(reconnect, dict):
+            reconnect_state = reconnect.get("state")
+        connection_state = adapter_health.get("watchman_connection_state")
+        if self._effective_backend == "watchman" and (
+            reconnect_state in {"pending", "running", "failed"}
+            or connection_state in {"disconnected", "sidecar_only"}
+        ):
+            self._service_state = "degraded"
+            return
+        self._service_state = "running"
+
+    def _resolve_configured_backend(self) -> str:
+        backend = getattr(self.config.indexing, "realtime_backend", None)
+        if backend in {"watchman", "watchdog", "polling"}:
+            return str(backend)
+        return default_realtime_backend_for_current_install()
+
+    def _set_effective_backend(self, backend: str) -> None:
+        self._effective_backend = backend
+
+    def _start_still_owned(self, start_generation: int) -> bool:
+        """Return whether a start() invocation still owns service startup state."""
+        return (
+            start_generation == self._start_generation
+            and self._service_state not in {"stopping", "stopped"}
         )
 
-        # Wait for monitoring to be confirmed ready
-        monitoring_ok = await self.wait_for_monitoring_ready(timeout=10.0)
-        if monitoring_ok:
-            self._debug("monitoring ready")
+    def _build_monitor_adapter(self) -> RealtimeMonitorAdapter:
+        if self._configured_backend == "watchman":
+            return WatchmanRealtimeAdapter(self)
+        if self._configured_backend == "polling":
+            return PollingRealtimeAdapter(self)
+        return WatchdogRealtimeAdapter(self)
+
+    def _build_health_snapshot(self) -> dict[str, Any]:
+        monitoring_active = False
+        if self.observer and self.observer.is_alive():
+            monitoring_active = True
+        elif (
+            self._using_polling and self._polling_task and not self._polling_task.done()
+        ):
+            monitoring_active = True
+        adapter_health = (
+            self._monitor_adapter.get_health() if self._monitor_adapter else {}
+        )
+        if "observer_alive" in adapter_health:
+            monitoring_active = bool(adapter_health["observer_alive"])
+
+        effective_backend = self._effective_backend
+        if self.watch_path is None and effective_backend == "uninitialized":
+            monitoring_mode = "uninitialized"
         else:
-            self._debug("monitoring timeout; continuing")
+            monitoring_mode = effective_backend
 
-    async def stop(self) -> None:
-        """Stop the service gracefully."""
-        logger.debug("Stopping real-time indexing service")
-        self._debug("stopping service")
+        status = self.default_health_snapshot()
+        status.update(
+            {
+                "configured_backend": self._configured_backend,
+                "effective_backend": effective_backend,
+                "service_state": self._service_state,
+                "monitoring_mode": monitoring_mode,
+                "monitoring_ready": self.monitoring_ready.is_set(),
+                "monitoring_ready_at": self._monitoring_ready_at,
+                "observer_alive": monitoring_active,
+                "watching_directory": str(self.watch_path) if self.watch_path else None,
+                "watched_directories_count": len(self.watched_directories),
+                "queue_size": self.file_queue.qsize(),
+                "pending_files": len(self.pending_files),
+                "failed_files": len(self.failed_files),
+                "last_warning": self._last_warning,
+                "last_warning_at": self._last_warning_at,
+                "last_error": self._last_error,
+                "last_error_at": self._last_error_at,
+            }
+        )
+        for key, value in adapter_health.items():
+            if key != "observer_alive":
+                status[key] = value
+        status["event_queue"].update(
+            {
+                "size": self.event_queue.qsize(),
+                "maxsize": self.event_queue.maxsize,
+                "accepted": self._event_queue_accepted,
+                "dropped": self._event_queue_dropped,
+                "last_reason": self._event_queue_last_reason,
+                "last_event_type": self._event_queue_last_event_type,
+                "last_file_path": self._event_queue_last_file_path,
+                "last_enqueued_at": self._event_queue_last_enqueued_at,
+                "last_dropped_at": self._event_queue_last_dropped_at,
+            }
+        )
+        status["resync"].update(
+            {
+                "needs_resync": self._needs_resync,
+                "in_progress": self._resync_in_progress,
+                "debounce_seconds": self._RESYNC_DEBOUNCE_SECONDS,
+                "request_count": self._resync_request_count,
+                "performed_count": self._resync_performed_count,
+                "last_reason": self._last_resync_reason,
+                "last_details": self._last_resync_details,
+                "last_requested_at": self._last_resync_requested_at,
+                "last_started_at": self._last_resync_started_at,
+                "last_completed_at": self._last_resync_completed_at,
+                "last_error": self._last_resync_error,
+            }
+        )
+        status["polling"].update(
+            {
+                "last_snapshot_at": self._last_poll_snapshot_at,
+                "last_files_checked": self._last_poll_files_checked,
+                "last_snapshot_truncated": self._last_poll_snapshot_truncated,
+            }
+        )
+        return status
 
-        # Cancel watchdog setup if still running
-        if hasattr(self, "_watchdog_setup_task") and self._watchdog_setup_task:
+    def _emit_status_update(self) -> None:
+        try:
+            if self._status_callback:
+                self._status_callback(self._build_health_snapshot())
+        except Exception:
+            # Status plumbing must never affect runtime behavior.
+            pass
+
+    def _handle_queue_result(
+        self, event_type: str, file_path: Path, accepted: bool, reason: str | None
+    ) -> None:
+        timestamp = self._utc_now()
+        self._event_queue_last_event_type = event_type
+        self._event_queue_last_file_path = str(file_path)
+
+        if accepted:
+            self._event_queue_accepted += 1
+            self._event_queue_last_enqueued_at = timestamp
+        else:
+            self._event_queue_dropped += 1
+            self._event_queue_last_reason = reason
+            self._event_queue_last_dropped_at = timestamp
+            self._set_warning(f"realtime event dropped ({reason or 'unknown_reason'})")
+            if reason == "queue_full":
+                asyncio.create_task(
+                    self.request_resync(
+                        "event_queue_overflow",
+                        {
+                            "event_type": event_type,
+                            "file_path": str(file_path),
+                            "drop_reason": reason,
+                        },
+                    )
+                )
+
+        self._emit_status_update()
+
+    async def request_resync(
+        self, reason: str, details: dict[str, Any] | None = None
+    ) -> bool:
+        """Request a debounced backend-neutral reconciliation scan."""
+        self._needs_resync = True
+        self._resync_request_count += 1
+        self._last_resync_reason = reason
+        self._last_resync_details = details
+        self._last_resync_requested_at = self._utc_now()
+        self._last_resync_request_monotonic = time.monotonic()
+        self._emit_status_update()
+
+        if self._resync_dispatch_task and not self._resync_dispatch_task.done():
+            return False
+
+        self._resync_dispatch_task = asyncio.create_task(self._dispatch_resync())
+        return True
+
+    async def _dispatch_resync(self) -> None:
+        """Coalesce resync requests and run the callback on the trailing edge."""
+        try:
+            while True:
+                requested_at = self._last_resync_request_monotonic
+                await asyncio.sleep(self._RESYNC_DEBOUNCE_SECONDS)
+                if requested_at == self._last_resync_request_monotonic:
+                    break
+
+            reason = self._last_resync_reason or "unspecified"
+            details = self._last_resync_details
+            callback = self._resync_callback
+            if callback is None:
+                self._last_resync_error = "No resync callback configured"
+                self._set_error(self._last_resync_error)
+                return
+
+            while True:
+                started_request_at = self._last_resync_request_monotonic
+                self._resync_in_progress = True
+                self._last_resync_started_at = self._utc_now()
+                self._last_resync_error = None
+                self._emit_status_update()
+
+                try:
+                    result = await callback(reason, details)
+                    callback_error = self._resync_callback_error(result)
+                    if callback_error is not None:
+                        raise RuntimeError(callback_error)
+                    self._needs_resync = False
+                    self._resync_performed_count += 1
+                    self._last_resync_completed_at = self._utc_now()
+                    if self._service_state not in {"stopping", "stopped"}:
+                        self._clear_resync_error_state()
+                except Exception as e:
+                    self._last_resync_error = str(e)
+                    self._set_error(f"Realtime resync failed: {e}")
+                    break
+                finally:
+                    self._resync_in_progress = False
+                    self._emit_status_update()
+
+                if started_request_at == self._last_resync_request_monotonic:
+                    break
+                reason = self._last_resync_reason or reason
+                details = self._last_resync_details
+        finally:
+            self._resync_dispatch_task = None
+
+    async def _cancel_watchdog_setup_task(self) -> None:
+        if self._watchdog_setup_task:
             self._watchdog_setup_task.cancel()
             try:
                 await self._watchdog_setup_task
             except asyncio.CancelledError:
                 pass
+            self._watchdog_setup_task = None
 
-        # Stop filesystem observer
+    async def _cancel_watchdog_bootstrap_future(self) -> None:
+        self._watchdog_bootstrap_abort.set()
+        future = self._watchdog_bootstrap_future
+        if future is None:
+            return
+        if not future.done():
+            try:
+                await asyncio.wait_for(future, timeout=1.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+            except Exception as error:
+                logger.debug(
+                    "Watchdog bootstrap future raised during shutdown: "
+                    f"{type(error).__name__}: {error}"
+                )
+        if self._watchdog_bootstrap_future is future:
+            self._watchdog_bootstrap_future = None
+
+    async def _stop_observer(self) -> None:
         if self.observer:
             self.observer.stop()
-            # Join with timeout to prevent hanging
             try:
                 loop = asyncio.get_event_loop()
                 await asyncio.wait_for(
@@ -341,30 +1444,129 @@ class RealtimeIndexingService:
                 )
             except asyncio.TimeoutError:
                 logger.warning("Observer thread did not exit within timeout")
+            self.observer = None
+            self.event_handler = None
 
-        # Cancel event consumer task
-        if self.event_consumer_task:
-            self.event_consumer_task.cancel()
-            try:
-                await self.event_consumer_task
-            except asyncio.CancelledError:
-                pass
-
-        # Cancel processing task
-        if self.process_task:
-            self.process_task.cancel()
-            try:
-                await self.process_task
-            except asyncio.CancelledError:
-                pass
-
-        # Cancel polling task if running
+    async def _cancel_polling_task(self) -> None:
         if self._polling_task:
             self._polling_task.cancel()
             try:
                 await self._polling_task
             except asyncio.CancelledError:
                 pass
+            self._polling_task = None
+        self._using_polling = False
+
+    async def _cancel_processing_tasks(self) -> None:
+        if self.event_consumer_task:
+            self.event_consumer_task.cancel()
+            try:
+                await self.event_consumer_task
+            except asyncio.CancelledError:
+                pass
+            self.event_consumer_task = None
+
+        if self.process_task:
+            self.process_task.cancel()
+            try:
+                await self.process_task
+            except asyncio.CancelledError:
+                pass
+            self.process_task = None
+
+    async def start(self, watch_path: Path) -> None:
+        """Start real-time indexing service."""
+        start_task = asyncio.current_task()
+        self._active_start_task = start_task
+        self._start_generation += 1
+        start_generation = self._start_generation
+
+        # Resolve path to canonical form for Windows 8.3 short name handling
+        # This ensures polling monitor paths stay aligned with the coordinator's
+        # normalized base directory.
+        watch_path = watch_path.resolve()
+
+        try:
+            logger.debug(f"Starting real-time indexing for {watch_path}")
+            self._debug(f"start watch on {watch_path}")
+            self._service_state = "starting"
+            self._configured_backend = self._resolve_configured_backend()
+            self._effective_backend = "uninitialized"
+            self._monitor_adapter = self._build_monitor_adapter()
+            self.monitoring_ready.clear()
+            self._monitoring_ready_at = None
+
+            # Store the watch path
+            self.watch_path = watch_path
+            self._emit_status_update()
+
+            loop = asyncio.get_event_loop()
+
+            # Start all necessary tasks
+            self.event_consumer_task = asyncio.create_task(self._consume_events())
+            self.process_task = asyncio.create_task(self._process_loop())
+
+            await self._monitor_adapter.start(watch_path, loop)
+            if not self._start_still_owned(start_generation):
+                return
+
+            # Wait for monitoring to be confirmed ready
+            monitoring_ok = await self.wait_for_monitoring_ready(
+                timeout=self._MONITORING_READY_TIMEOUT_SECONDS
+            )
+            if not self._start_still_owned(start_generation):
+                return
+
+            if monitoring_ok:
+                self._service_state = "running"
+                self._debug("monitoring ready")
+            else:
+                self._service_state = "degraded"
+                self._set_warning(
+                    "Monitoring did not become ready before startup timeout"
+                )
+                self._debug("monitoring timeout; continuing")
+            self._emit_status_update()
+        except Exception:
+            await self._cancel_processing_tasks()
+            raise
+        finally:
+            if self._active_start_task is start_task:
+                self._active_start_task = None
+
+    async def stop(self) -> None:
+        """Stop the service gracefully."""
+        logger.debug("Stopping real-time indexing service")
+        self._debug("stopping service")
+        self._start_generation += 1
+        self._service_state = "stopping"
+        self.monitoring_ready.clear()
+        self._monitoring_ready_at = None
+        self._emit_status_update()
+
+        active_start_task = self._active_start_task
+        if (
+            active_start_task
+            and active_start_task is not asyncio.current_task()
+            and not active_start_task.done()
+        ):
+            active_start_task.cancel()
+
+        if self._monitor_adapter:
+            await self._monitor_adapter.stop()
+        self._watchdog_setup_task = None
+        self._watchdog_bootstrap_future = None
+        self._watchdog_bootstrap_abort = threading.Event()
+
+        await self._cancel_processing_tasks()
+
+        if self._resync_dispatch_task:
+            self._resync_dispatch_task.cancel()
+            try:
+                await self._resync_dispatch_task
+            except asyncio.CancelledError:
+                pass
+            self._resync_dispatch_task = None
 
         # Cancel all active debounce tasks
         for task in self._debounce_tasks.copy():
@@ -375,112 +1577,190 @@ class RealtimeIndexingService:
             await asyncio.gather(*self._debounce_tasks, return_exceptions=True)
             self._debounce_tasks.clear()
 
-    async def _setup_watchdog_async(
-        self, watch_path: Path, loop: asyncio.AbstractEventLoop
-    ) -> None:
-        """Setup watchdog in background thread without blocking initialization."""
-        try:
-            await loop.run_in_executor(None, self._start_fs_monitor, watch_path, loop)
-            logger.debug("Watchdog setup completed successfully")
-        except Exception as e:
-            logger.error(f"Failed to setup watchdog monitoring: {e}")
-            # Server continues to work even if watchdog setup fails
+        self._service_state = "stopped"
+        self._monitor_adapter = None
+        self._emit_status_update()
 
     async def _setup_watchdog_with_timeout(
         self, watch_path: Path, loop: asyncio.AbstractEventLoop
     ) -> None:
         """Setup watchdog with timeout - fall back to polling if it takes too long."""
-        # Skip watchdog entirely if force_polling is enabled (e.g., Windows CI)
-        if self._force_polling:
-            logger.info(f"Polling mode forced for {watch_path}")
-            self._using_polling = True
-            self._polling_task = asyncio.create_task(self._polling_monitor(watch_path))
-            await asyncio.sleep(0.5)
-            self._monitoring_ready_time = time.time()
-            self.monitoring_ready.set()
-            self._debug("force_polling enabled; using polling mode")
-            return
-
-        # run_in_executor returns an awaitable Future - no create_task needed
-        watchdog_task = loop.run_in_executor(
-            None, self._start_fs_monitor, watch_path, loop
+        self._watchdog_bootstrap_abort = threading.Event()
+        self._watchdog_bootstrap_future = loop.run_in_executor(
+            None,
+            self._bootstrap_fs_monitor,
+            watch_path,
+            loop,
+            self._watchdog_bootstrap_abort,
+        )
+        self._watchdog_bootstrap_future.add_done_callback(
+            self._handle_watchdog_bootstrap_done
         )
 
         try:
-            # Try recursive setup with reasonable timeout for large directories
-            await asyncio.wait_for(watchdog_task, timeout=5.0)
-            logger.debug("Watchdog setup completed successfully (recursive mode)")
-            self._debug("watchdog setup complete (recursive)")
-            self._monitoring_ready_time = time.time()
-            self.monitoring_ready.set()  # Signal monitoring is ready
-
+            bootstrap_result = await asyncio.wait_for(
+                asyncio.shield(self._watchdog_bootstrap_future),
+                timeout=self._WATCHDOG_SETUP_TIMEOUT_SECONDS,
+            )
+            if bootstrap_result is None:
+                return
+            observer, event_handler = bootstrap_result
+            self._adopt_watchdog_monitor(observer, event_handler, watch_path)
         except asyncio.TimeoutError:
-            # Cancel the watchdog task before falling back to polling
-            watchdog_task.cancel()
-            try:
-                await watchdog_task
-            except asyncio.CancelledError:
-                pass
-
+            self._watchdog_bootstrap_abort.set()
             logger.info(
                 f"Watchdog setup timed out for {watch_path} - falling back to polling"
             )
-            self._using_polling = True
-            self._polling_task = asyncio.create_task(self._polling_monitor(watch_path))
-            # Wait a moment for polling to start
-            await asyncio.sleep(0.5)
-            self._monitoring_ready_time = time.time()
-            self.monitoring_ready.set()  # Signal monitoring is ready (polling mode)
-            self._debug("watchdog timed out; switched to polling")
+            await self._start_polling_backend(
+                watch_path,
+                reason="Watchdog setup timed out; switched to polling mode",
+            )
         except Exception as e:
-            # Cancel watchdog task on other errors too
-            if not watchdog_task.done():
-                watchdog_task.cancel()
-                try:
-                    await watchdog_task
-                except asyncio.CancelledError:
-                    pass
-
+            self._watchdog_bootstrap_abort.set()
             logger.warning(f"Watchdog setup failed: {e} - falling back to polling")
+            await self._start_polling_backend(
+                watch_path,
+                reason=f"Watchdog setup failed; switched to polling mode: {e}",
+            )
+        finally:
+            if (
+                self._watchdog_bootstrap_future
+                and self._watchdog_bootstrap_future.done()
+            ):
+                self._watchdog_bootstrap_future = None
+
+    def _handle_watchdog_bootstrap_done(
+        self, future: asyncio.Future[tuple[Observer, SimpleEventHandler] | None]
+    ) -> None:
+        """Drain watchdog bootstrap exceptions and reflect unexpected failures."""
+        if self._watchdog_bootstrap_future is future:
+            self._watchdog_bootstrap_future = None
+        if future.cancelled():
+            return
+
+        try:
+            bootstrap_result = future.result()
+        except Exception as error:
+            if (
+                not self._watchdog_bootstrap_abort.is_set()
+                and self._service_state not in {"stopping", "stopped"}
+            ):
+                logger.warning(f"Watchdog bootstrap failed: {error}")
+                self._set_error(f"Watchdog bootstrap failed: {error}")
+            return
+
+        if bootstrap_result is None:
+            return
+
+        observer, _event_handler = bootstrap_result
+        if (
+            self._watchdog_bootstrap_abort.is_set()
+            or self._using_polling
+            or self._service_state in {"stopping", "stopped"}
+        ):
+            self._stop_bootstrap_observer(observer)
+
+    async def _start_polling_backend(
+        self, watch_path: Path, reason: str, emit_warning: bool = True
+    ) -> None:
+        """Start polling mode and optionally record it as a fallback warning."""
+        if not self._using_polling or not self._polling_task:
             self._using_polling = True
             self._polling_task = asyncio.create_task(self._polling_monitor(watch_path))
-            # Wait a moment for polling to start
-            await asyncio.sleep(0.5)
-            self._monitoring_ready_time = time.time()
-            self.monitoring_ready.set()  # Signal monitoring is ready (polling mode)
-            self._debug("watchdog failed; switched to polling")
+        self._set_effective_backend("polling")
+        await asyncio.sleep(self._POLLING_STARTUP_SETTLE_SECONDS)
+        self._monitoring_ready_at = self._utc_now()
+        self.monitoring_ready.set()
+        self._debug(reason)
+        if emit_warning:
+            self._set_warning(reason)
+        else:
+            self._emit_status_update()
 
-    def _start_fs_monitor(
-        self, watch_path: Path, loop: asyncio.AbstractEventLoop
+    def _adopt_watchdog_monitor(
+        self,
+        observer: Observer,
+        event_handler: SimpleEventHandler,
+        watch_path: Path,
     ) -> None:
-        """Start filesystem monitoring with recursive watching for complete coverage."""
-        self.event_handler = SimpleEventHandler(
-            self.event_queue, self.config, loop, root_path=watch_path
+        """Adopt a successfully bootstrapped watchdog observer into service state."""
+        if (
+            self._watchdog_bootstrap_abort.is_set()
+            or self._using_polling
+            or self._service_state in {"stopping", "stopped"}
+        ):
+            self._stop_bootstrap_observer(observer)
+            return
+
+        self.event_handler = event_handler
+        self.observer = observer
+        self._using_polling = False
+        self.watched_directories.add(str(watch_path))
+        logger.debug("Watchdog setup completed successfully (recursive mode)")
+        self._debug("watchdog setup complete (recursive)")
+        self._set_effective_backend("watchdog")
+        self._monitoring_ready_at = self._utc_now()
+        self.monitoring_ready.set()
+        self._emit_status_update()
+
+    @staticmethod
+    def _stop_bootstrap_observer(observer: Observer) -> None:
+        """Stop a watchdog observer created during a bootstrap race."""
+        try:
+            observer.stop()
+        except Exception:
+            pass
+        try:
+            observer.join(timeout=1.0)
+        except Exception:
+            pass
+
+    def _bootstrap_fs_monitor(
+        self,
+        watch_path: Path,
+        loop: asyncio.AbstractEventLoop,
+        abort_event: threading.Event,
+    ) -> tuple[Observer, SimpleEventHandler] | None:
+        """Create and start a watchdog observer without mutating shared state."""
+        event_handler = SimpleEventHandler(
+            self.event_queue,
+            self.config,
+            loop,
+            root_path=watch_path,
+            queue_result_callback=self._handle_queue_result,
         )
-        self.observer = Observer()
+        observer = Observer()
 
         # Use recursive=True to ensure all directory events are captured
         # This is necessary for proper real-time monitoring of new directories
-        self.observer.schedule(
-            self.event_handler,
+        observer.schedule(
+            event_handler,
             str(watch_path),
             recursive=True,  # Use recursive for complete event coverage
         )
-        self.watched_directories.add(str(watch_path))
-        self.observer.start()
+        observer.start()
 
         # Wait for observer thread to be fully running
         # On Windows, observer thread startup can be noticeably slower.
-        # Give it more time to become alive to avoid falling back to polling unnecessarily.
+        # Give it more time to become alive to avoid unnecessary polling fallback.
         max_wait = 5.0 if IS_WINDOWS else 1.0
         start = time.time()
-        while not self.observer.is_alive() and (time.time() - start) < max_wait:
+        while not observer.is_alive() and (time.time() - start) < max_wait:
+            if abort_event.is_set():
+                self._stop_bootstrap_observer(observer)
+                return None
             time.sleep(0.01)
 
-        if self.observer.is_alive():
+        if abort_event.is_set():
+            self._stop_bootstrap_observer(observer)
+            return None
+
+        if observer.is_alive():
             logger.debug(f"Started recursive filesystem monitoring for {watch_path}")
-        else:
-            raise RuntimeError("Observer failed to start within timeout")
+            return observer, event_handler
+
+        self._stop_bootstrap_observer(observer)
+        raise RuntimeError("Observer failed to start within timeout")
 
     async def _add_subdirectories_progressively(self, root_path: Path) -> None:
         """No longer needed - using recursive monitoring."""
@@ -488,17 +1768,63 @@ class RealtimeIndexingService:
             "Progressive directory addition skipped (using recursive monitoring)"
         )
 
+    def _polling_snapshot(
+        self, watch_path: Path
+    ) -> tuple[dict[Path, tuple[int, int]], int, bool]:
+        """Collect a filesystem snapshot off the event loop for polling mode."""
+        current_files: dict[Path, tuple[int, int]] = {}
+        files_checked = 0
+        truncated = False
+        simple_handler = SimpleEventHandler(
+            None, self.config, None, root_path=watch_path
+        )
+
+        for file_path in watch_path.rglob("*"):
+            try:
+                if not file_path.is_file():
+                    continue
+
+                files_checked += 1
+                if simple_handler._should_index(file_path):
+                    try:
+                        stat_result = file_path.stat()
+                    except OSError:
+                        continue
+
+                    current_files[file_path] = (
+                        stat_result.st_mtime_ns,
+                        stat_result.st_size,
+                    )
+
+                if files_checked >= 5000:
+                    truncated = True
+                    break
+            except (OSError, PermissionError):
+                continue
+
+        return current_files, files_checked, truncated
+
+    def _collect_supported_files(self, dir_path: Path) -> list[Path]:
+        """Collect supported files in a directory off the event loop."""
+        simple_handler = SimpleEventHandler(None, self.config, None, root_path=dir_path)
+        supported_files: list[Path] = []
+
+        for file_path in dir_path.rglob("*"):
+            try:
+                if file_path.is_file() and simple_handler._should_index(file_path):
+                    supported_files.append(file_path)
+            except (OSError, PermissionError):
+                continue
+
+        return supported_files
+
     async def _polling_monitor(self, watch_path: Path) -> None:
         """Simple polling monitor for large directories."""
         logger.debug(f"Starting polling monitor for {watch_path}")
         self._debug(f"polling monitor active for {watch_path}")
-        # Track files with their mtime to detect modifications (not just new/deleted)
-        known_files: dict[Path, int] = {}
-
-        # Create a simple event handler for shouldIndex check once
-        simple_handler = SimpleEventHandler(
-            None, self.config, None, root_path=watch_path
-        )
+        # Track both mtime and size so Windows polling catches overwrites that
+        # fail to advance mtime reliably on CI filesystems.
+        known_files: dict[Path, tuple[int, int]] = {}
 
         # Use a shorter interval during the first few seconds to ensure
         # freshly created files are detected quickly after startup/fallback.
@@ -506,52 +1832,27 @@ class RealtimeIndexingService:
 
         while True:
             try:
-                current_files: dict[Path, int] = {}
-                files_checked = 0
+                current_files, files_checked, truncated = await asyncio.to_thread(
+                    self._polling_snapshot, watch_path
+                )
+                self._last_poll_snapshot_at = self._utc_now()
+                self._last_poll_files_checked = files_checked
+                self._last_poll_snapshot_truncated = truncated
+                if truncated:
+                    self._set_warning(
+                        "Polling snapshot truncated after 5000 files to avoid "
+                        "event-loop starvation"
+                    )
 
-                # Walk directory tree but with limits to avoid hanging
-                for file_path in watch_path.rglob("*"):
-                    try:
-                        if file_path.is_file():
-                            files_checked += 1
-                            if simple_handler._should_index(file_path):
-                                try:
-                                    current_mtime = file_path.stat().st_mtime_ns
-                                except OSError:
-                                    continue
-
-                                current_files[file_path] = current_mtime
-
-                                if file_path not in known_files:
-                                    # New file detected
-                                    logger.debug(
-                                        f"Polling detected new file: {file_path}"
-                                    )
-                                    self._debug(
-                                        f"polling detected new file: {file_path}"
-                                    )
-                                    await self.add_file(file_path, priority="change")
-                                elif known_files[file_path] != current_mtime:
-                                    # Modified file detected
-                                    logger.debug(
-                                        f"Polling detected modified file: {file_path}"
-                                    )
-                                    self._debug(
-                                        f"polling detected modified file: {file_path}"
-                                    )
-                                    await self.add_file(file_path, priority="change")
-
-                        # Yield control periodically and limit total files checked
-                        if files_checked % 100 == 0:
-                            await asyncio.sleep(0)  # Yield control
-                            if files_checked > 5000:  # Limit to prevent hanging
-                                logger.warning(
-                                    f"Polling checked {files_checked} files, skipping rest to avoid blocking"
-                                )
-                                break
-                    except (OSError, PermissionError):
-                        # Skip files we can't access
-                        continue
+                for file_path, current_fingerprint in current_files.items():
+                    if file_path not in known_files:
+                        logger.debug(f"Polling detected new file: {file_path}")
+                        self._debug(f"polling detected new file: {file_path}")
+                        await self.add_file(file_path, priority="change")
+                    elif known_files[file_path] != current_fingerprint:
+                        logger.debug(f"Polling detected modified file: {file_path}")
+                        self._debug(f"polling detected modified file: {file_path}")
+                        await self.add_file(file_path, priority="change")
 
                 # Check for deleted files
                 deleted = set(known_files.keys()) - set(current_files.keys())
@@ -565,10 +1866,12 @@ class RealtimeIndexingService:
                 # Adaptive poll interval: 1s for the first 10s, then 5s
                 elapsed = time.time() - polling_start
                 interval = 1.0 if elapsed < 10.0 else 5.0
+                self._emit_status_update()
                 await asyncio.sleep(interval)
 
             except Exception as e:
                 logger.error(f"Polling monitor error: {e}")
+                self._set_error(f"Polling monitor error: {e}")
                 await asyncio.sleep(5)
 
     async def add_file(self, file_path: Path, priority: str = "change") -> None:
@@ -594,25 +1897,40 @@ class RealtimeIndexingService:
                     self._debounce_tasks.add(task)
                     task.add_done_callback(self._debounce_tasks.discard)
                     self._debug(f"queued (debounced) {file_path} priority={priority}")
+                    self._emit_status_update()
             else:
                 # Priority scan events bypass debouncing
                 await self.file_queue.put((priority, file_path))
                 self._debug(f"queued {file_path} priority={priority}")
+                self._emit_status_update()
 
     async def _debounced_add_file(self, file_path: Path, priority: str) -> None:
         """Process file after debounce delay."""
-        await asyncio.sleep(self._debounce_delay)
+        remaining_delay = self._debounce_delay
 
-        file_str = str(file_path)
-        if file_str in self._pending_debounce:
+        while True:
+            await asyncio.sleep(remaining_delay)
+
+            file_str = str(file_path)
+            if file_str not in self._pending_debounce:
+                return
+
             last_update = self._pending_debounce[file_str]
+            remaining_delay = self._debounce_delay - (
+                time.monotonic() - last_update
+            )
 
-            # Check if no recent updates during delay
-            if time.monotonic() - last_update >= self._debounce_delay:
-                del self._pending_debounce[file_str]
-                await self.file_queue.put((priority, file_path))
-                logger.debug(f"Processing debounced file: {file_path}")
-                self._debug(f"processing debounced file: {file_path}")
+            # Windows timer granularity can wake slightly before the debounce
+            # horizon; retry instead of leaving the file stuck in pending state.
+            if remaining_delay > 0:
+                continue
+
+            del self._pending_debounce[file_str]
+            await self.file_queue.put((priority, file_path))
+            logger.debug(f"Processing debounced file: {file_path}")
+            self._debug(f"processing debounced file: {file_path}")
+            self._emit_status_update()
+            return
 
     async def _consume_events(self) -> None:
         """Simple event consumer - pure asyncio queue."""
@@ -627,8 +1945,7 @@ class RealtimeIndexingService:
                     # Normal timeout, continue to check if task should stop
                     continue
 
-                # Layer 3: Event deduplication to prevent redundant processing
-                # Suppress duplicate events within 2-second window (e.g., created + modified from same editor save)
+                # Layer 3: Event deduplication to prevent redundant processing.
                 file_key = str(file_path)
                 current_time = time.time()
 
@@ -642,7 +1959,9 @@ class RealtimeIndexingService:
                         < self._EVENT_DEDUP_WINDOW_SECONDS
                     ):
                         logger.debug(
-                            f"Suppressing duplicate {event_type} event for {file_path} (within {self._EVENT_DEDUP_WINDOW_SECONDS}s window)"
+                            "Suppressing duplicate "
+                            f"{event_type} event for {file_path} "
+                            f"(within {self._EVENT_DEDUP_WINDOW_SECONDS}s window)"
                         )
                         self._debug(f"suppressed duplicate {event_type}: {file_path}")
                         self.event_queue.task_done()
@@ -683,6 +2002,7 @@ class RealtimeIndexingService:
 
             except Exception as e:
                 logger.error(f"Error consuming event: {e}")
+                self._set_error(f"Error consuming realtime event: {e}")
                 await asyncio.sleep(0.1)  # Brief pause on error
 
     async def remove_file(self, file_path: Path) -> None:
@@ -691,18 +2011,20 @@ class RealtimeIndexingService:
             logger.debug(f"Removing file from database: {file_path}")
             self.services.provider.delete_file_completely(str(file_path))
             self._debug(f"removed file from database: {file_path}")
+            self._emit_status_update()
         except Exception as e:
             logger.error(f"Error removing file {file_path}: {e}")
+            self._set_error(f"Error removing file {file_path}: {e}")
 
     async def _add_directory_watch(self, dir_path: str) -> None:
-        """Add a new directory to monitoring with recursive watching for real-time events."""
+        """Add a new directory to monitoring with recursive watching."""
         async with self.watch_lock:
             if dir_path not in self.watched_directories:
                 if self.observer and self.event_handler:
                     self.observer.schedule(
                         self.event_handler,
                         dir_path,
-                        recursive=True,  # Use recursive for dynamically created directories
+                        recursive=True,  # Keep new directories recursively covered.
                     )
                     self.watched_directories.add(dir_path)
                     logger.debug(f"Added recursive watch for new directory: {dir_path}")
@@ -736,24 +2058,20 @@ class RealtimeIndexingService:
                     self.services.provider.delete_file_completely(file_path)
 
             logger.info(
-                f"Cleaned up {len(search_results)} files from deleted directory: {dir_path}"
+                "Cleaned up "
+                f"{len(search_results)} files from deleted directory: {dir_path}"
             )
 
         except Exception as e:
             logger.error(f"Error cleaning up deleted directory {dir_path}: {e}")
+            self._set_error(f"Error cleaning up deleted directory {dir_path}: {e}")
 
     async def _index_directory(self, dir_path: Path) -> None:
         """Index files in a newly created directory."""
         try:
-            # Get all supported files in the new directory
-            supported_files = []
-            for file_path in dir_path.rglob("*"):
-                if (
-                    file_path.is_file()
-                    and self.event_handler
-                    and self.event_handler._should_index(file_path)
-                ):
-                    supported_files.append(file_path)
+            supported_files = await asyncio.to_thread(
+                self._collect_supported_files, dir_path
+            )
 
             # Add files to processing queue
             for file_path in supported_files:
@@ -768,6 +2086,7 @@ class RealtimeIndexingService:
 
         except Exception as e:
             logger.error(f"Error indexing new directory {dir_path}: {e}")
+            self._set_error(f"Error indexing new directory {dir_path}: {e}")
 
     async def _process_loop(self) -> None:
         """Main processing loop - simple and robust."""
@@ -789,14 +2108,17 @@ class RealtimeIndexingService:
                 # Process the file
                 logger.debug(f"Processing {file_path} (priority: {priority})")
 
-                # Fast path for embedding pass: generate missing embeddings for all chunks
-                # without re-parsing the file. Keeps the loop snappy and avoids diffing.
+                # Fast path for embedding generation without re-parsing the file.
                 if priority == "embed":
                     try:
-                        await self.services.indexing_coordinator.generate_missing_embeddings()
+                        indexing_coordinator = self.services.indexing_coordinator
+                        await indexing_coordinator.generate_missing_embeddings()
                     except Exception as e:
                         logger.warning(
                             f"Embedding generation failed in realtime (embed pass): {e}"
+                        )
+                        self._set_warning(
+                            f"Embedding generation failed in realtime embed pass: {e}"
                         )
                     continue
 
@@ -832,10 +2154,12 @@ class RealtimeIndexingService:
                     )
                     self._debug(
                         f"processed {file_path} priority={priority} "
-                        f"skip_embeddings={skip_embeddings} chunks={chunks} embeddings={embeds}"
+                        f"skip_embeddings={skip_embeddings} "
+                        f"chunks={chunks} embeddings={embeds}"
                     )
                 except Exception:
                     pass
+                self._emit_status_update()
 
             except asyncio.CancelledError:
                 logger.debug("Processing loop cancelled")
@@ -844,27 +2168,18 @@ class RealtimeIndexingService:
                 logger.error(f"Error processing {file_path}: {e}")
                 # Track failed files for debugging and monitoring
                 self.failed_files.add(str(file_path))
+                self._set_error(f"Error processing {file_path}: {e}")
                 # Continue processing other files
 
-    async def get_stats(self) -> dict:
-        """Get current service statistics."""
-        # Check if observer is running OR we're using polling mode
-        monitoring_active = False
-        if self.observer and self.observer.is_alive():
-            monitoring_active = True
-        elif hasattr(self, "_using_polling"):
-            # If we're using polling mode, consider it "alive"
-            monitoring_active = True
+    async def get_health(self) -> dict[str, Any]:
+        """Return the richer backend-neutral realtime health snapshot."""
+        status = self._build_health_snapshot()
+        status["scan_complete"] = self.scan_complete
+        return status
 
-        return {
-            "queue_size": self.file_queue.qsize(),
-            "pending_files": len(self.pending_files),
-            "failed_files": len(self.failed_files),
-            "scan_complete": self.scan_complete,
-            "observer_alive": monitoring_active,
-            "watching_directory": str(self.watch_path) if self.watch_path else None,
-            "watched_directories_count": len(self.watched_directories),  # Added
-        }
+    async def get_stats(self) -> dict[str, Any]:
+        """Get current service statistics."""
+        return await self.get_health()
 
     async def wait_for_monitoring_ready(self, timeout: float = 10.0) -> bool:
         """Wait for filesystem monitoring to be ready."""
@@ -874,4 +2189,5 @@ class RealtimeIndexingService:
             return True
         except asyncio.TimeoutError:
             logger.warning(f"Monitoring not ready after {timeout}s")
+            self._set_warning(f"Monitoring not ready after {timeout}s")
             return False

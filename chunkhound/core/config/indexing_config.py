@@ -6,9 +6,13 @@ batch processing, and pattern matching.
 
 import argparse
 import os
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from chunkhound.watchman_runtime.loader import (
+    default_realtime_backend_for_current_install,
+)
 
 
 def _get_default_include_patterns() -> list[str]:
@@ -232,6 +236,12 @@ class IndexingConfig(BaseModel):
         description="Discovery backend for file enumeration: auto|python|git|git_only",
     )
 
+    # Realtime backend controls how filesystem change monitoring is performed.
+    realtime_backend: Literal["watchman", "watchdog", "polling"] = Field(
+        default_factory=default_realtime_backend_for_current_install,
+        description="Realtime backend for filesystem monitoring: watchman|watchdog|polling",
+    )
+
     # When true, also load the CH root's .gitignore as a global overlay in addition
     # to per-repo .gitignore files. This does not affect Git itself; it is a CH-only
     # convenience to apply workspace-wide rules across external repos.
@@ -358,6 +368,15 @@ class IndexingConfig(BaseModel):
                 "continue to follow their native Git rules"
             ),
         )
+        parser.add_argument(
+            "--realtime-backend",
+            choices=["watchman", "watchdog", "polling"],
+            default=None,
+            help=(
+                "Override realtime filesystem monitoring backend for this run: "
+                "watchman|watchdog|polling"
+            ),
+        )
 
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
@@ -419,6 +438,12 @@ class IndexingConfig(BaseModel):
         # Discovery backend selection
         if dback := os.getenv("CHUNKHOUND_INDEXING__DISCOVERY_BACKEND"):
             config["discovery_backend"] = dback
+
+        # Realtime backend selection
+        if rback := os.getenv("CHUNKHOUND_INDEXING__REALTIME_BACKEND"):
+            val = rback.strip().lower()
+            if val in ("watchman", "watchdog", "polling"):
+                config["realtime_backend"] = val
 
         # Exclude mode (combined | config_only | gitignore_only)
         if em := os.getenv("CHUNKHOUND_INDEXING__EXCLUDE_MODE"):
@@ -574,6 +599,10 @@ class IndexingConfig(BaseModel):
         # Discovery backend override via CLI (if present)
         if hasattr(args, "discovery_backend") and args.discovery_backend is not None:
             overrides["discovery_backend"] = str(args.discovery_backend)
+
+        # Realtime backend override via CLI (if present)
+        if hasattr(args, "realtime_backend") and args.realtime_backend is not None:
+            overrides["realtime_backend"] = str(args.realtime_backend)
 
         return overrides
 

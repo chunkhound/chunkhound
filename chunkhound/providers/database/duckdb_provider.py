@@ -897,6 +897,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                             indexes.append(
                                 {
                                     "index_name": index_name,
+                                    "table_name": table_name,
                                     "provider": provider,
                                     "model": model,
                                     "dims": dims,
@@ -917,6 +918,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                             indexes.append(
                                 {
                                     "index_name": index_name,
+                                    "table_name": table_name,
                                     "provider": "generic",  # Standard index doesn't specify provider
                                     "model": "generic",  # Standard index doesn't specify model
                                     "dims": dims,
@@ -933,6 +935,237 @@ class DuckDBProvider(SerialDatabaseProvider):
         except Exception as e:
             logger.error(f"Failed to get existing vector indexes: {e}")
             return []
+
+    def _executor_drop_vector_index_by_name(self, conn: Any, index_name: str) -> None:
+        """Drop a specific HNSW index by its current name."""
+        conn.execute(f"DROP INDEX IF EXISTS {index_name}")
+
+    def _executor_recreate_vector_index_from_info(
+        self, conn: Any, state: dict[str, Any], index_info: dict[str, Any]
+    ) -> None:
+        """Recreate one previously discovered HNSW index with its original name."""
+        table_name = index_info["table_name"]
+        index_name = index_info["index_name"]
+        metric = index_info.get("metric", "cosine")
+        dims = int(index_info["dims"])
+        self._executor_ensure_embedding_table_exists(conn, state, dims)
+        conn.execute(f"""
+            CREATE INDEX {index_name} ON {table_name}
+            USING HNSW (embedding)
+            WITH (metric = '{metric}')
+        """)
+
+    def _executor_fetch_rows_as_dicts(
+        self, conn: Any, query: str, params: list[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Execute a query in the DB thread and return row dictionaries."""
+        cursor = conn.execute(query, params or [])
+        rows = cursor.fetchall()
+        if not rows:
+            return []
+
+        column_names = [desc[0] for desc in cursor.description]
+        return [dict(zip(column_names, row)) for row in rows]
+
+    def _executor_insert_row_dict(
+        self, conn: Any, table_name: str, row: dict[str, Any]
+    ) -> None:
+        """Insert one previously snapshotted row back into a table."""
+        columns = list(row.keys())
+        placeholders = ", ".join(["?"] * len(columns))
+        conn.execute(
+            f"""
+            INSERT INTO {table_name} ({", ".join(columns)})
+            VALUES ({placeholders})
+            """,
+            [row[column] for column in columns],
+        )
+
+    def _executor_delete_embeddings_for_chunk_ids(
+        self, conn: Any, state: dict[str, Any], chunk_ids: list[int]
+    ) -> None:
+        """Delete embeddings for specific chunks across all embedding tables."""
+        if not chunk_ids:
+            return
+
+        placeholders = ", ".join(["?"] * len(chunk_ids))
+        for table_name in self._executor_get_all_embedding_tables(conn, state):
+            conn.execute(
+                f"DELETE FROM {table_name} WHERE chunk_id IN ({placeholders})",
+                chunk_ids,
+            )
+
+    def _executor_snapshot_file_delete_target(
+        self, conn: Any, state: dict[str, Any], file_id: int
+    ) -> dict[str, Any]:
+        """Capture the rows needed to restore a file delete if mutation fails."""
+        file_rows = self._executor_fetch_rows_as_dicts(
+            conn, "SELECT * FROM files WHERE id = ?", [file_id]
+        )
+        chunk_rows = self._executor_fetch_rows_as_dicts(
+            conn,
+            """
+            SELECT *
+            FROM chunks
+            WHERE file_id = ?
+            ORDER BY id
+            """,
+            [file_id],
+        )
+        chunk_ids = [int(row["id"]) for row in chunk_rows]
+
+        embedding_rows_by_table: dict[str, list[dict[str, Any]]] = {}
+        if chunk_ids:
+            placeholders = ", ".join(["?"] * len(chunk_ids))
+            for table_name in self._executor_get_all_embedding_tables(conn, state):
+                rows = self._executor_fetch_rows_as_dicts(
+                    conn,
+                    f"""
+                    SELECT *
+                    FROM {table_name}
+                    WHERE chunk_id IN ({placeholders})
+                    ORDER BY id
+                    """,
+                    chunk_ids,
+                )
+                if rows:
+                    embedding_rows_by_table[table_name] = rows
+
+        return {
+            "file_row": file_rows[0] if file_rows else None,
+            "chunk_rows": chunk_rows,
+            "chunk_ids": chunk_ids,
+            "embedding_rows_by_table": embedding_rows_by_table,
+        }
+
+    def _executor_restore_file_delete_snapshot(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        snapshot: dict[str, Any],
+        original_indexes: list[dict[str, Any]],
+    ) -> None:
+        """Restore a file delete target and its HNSW indexes after a failed mutation."""
+        current_indexes = self._executor_get_existing_vector_indexes(conn, state)
+        for index_info in current_indexes:
+            self._executor_drop_vector_index_by_name(conn, index_info["index_name"])
+
+        chunk_ids = snapshot["chunk_ids"]
+        self._executor_delete_embeddings_for_chunk_ids(conn, state, chunk_ids)
+        if chunk_ids:
+            placeholders = ", ".join(["?"] * len(chunk_ids))
+            conn.execute(f"DELETE FROM chunks WHERE id IN ({placeholders})", chunk_ids)
+
+        file_row = snapshot["file_row"]
+        if file_row is not None:
+            conn.execute("DELETE FROM files WHERE id = ?", [file_row["id"]])
+            self._executor_insert_row_dict(conn, "files", file_row)
+
+        for chunk_row in snapshot["chunk_rows"]:
+            self._executor_insert_row_dict(conn, "chunks", chunk_row)
+
+        for table_name, rows in snapshot["embedding_rows_by_table"].items():
+            for row in rows:
+                self._executor_insert_row_dict(conn, table_name, row)
+
+        for index_info in original_indexes:
+            self._executor_recreate_vector_index_from_info(conn, state, index_info)
+
+        self._executor_maybe_checkpoint(conn, state, True)
+
+    def _executor_run_hnsw_guarded_mutation(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        mutation_label: str,
+        mutation_func,
+        *,
+        optimize_for_bulk: bool = False,
+        transactional: bool = True,
+        rollback_func=None,
+    ):
+        """Run a mutation behind one transactional HNSW drop/recreate guard."""
+        if state.get("transaction_active", False):
+            raise RuntimeError(
+                f"{mutation_label} cannot run while another DuckDB transaction is active"
+            )
+
+        track_operation(state)
+        existing_indexes = self._executor_get_existing_vector_indexes(conn, state)
+        indexes_recreated = False
+
+        try:
+            if transactional:
+                self._executor_begin_transaction(conn, state)
+            if optimize_for_bulk:
+                conn.execute("SET preserve_insertion_order = false")
+
+            if existing_indexes:
+                logger.info(
+                    f"Dropping {len(existing_indexes)} HNSW indexes for {mutation_label}"
+                )
+                for index_info in existing_indexes:
+                    self._executor_drop_vector_index_by_name(
+                        conn, index_info["index_name"]
+                    )
+
+            result = mutation_func()
+
+            if existing_indexes:
+                logger.info(
+                    f"Recreating {len(existing_indexes)} HNSW indexes after {mutation_label}"
+                )
+                for index_info in existing_indexes:
+                    self._executor_recreate_vector_index_from_info(
+                        conn, state, index_info
+                    )
+                indexes_recreated = True
+
+            if transactional:
+                self._executor_commit_transaction(conn, state, True)
+            else:
+                self._executor_maybe_checkpoint(conn, state, True)
+            logger.info(f"{mutation_label} completed successfully with HNSW safety")
+            return result
+        except Exception as e:
+            if transactional and state.get("transaction_active", False):
+                try:
+                    self._executor_rollback_transaction(conn, state)
+                except Exception as rollback_error:
+                    logger.error(
+                        f"Failed to roll back {mutation_label}: {rollback_error}"
+                    )
+                    raise RuntimeError(
+                        f"{mutation_label} failed: {e}; rollback failed: {rollback_error}"
+                    ) from rollback_error
+            elif rollback_func is not None:
+                try:
+                    rollback_func(existing_indexes)
+                except Exception as rollback_error:
+                    logger.error(
+                        f"Failed to restore {mutation_label}: {rollback_error}"
+                    )
+                    raise RuntimeError(
+                        f"{mutation_label} failed: {e}; rollback failed: {rollback_error}"
+                    ) from rollback_error
+            elif existing_indexes and not indexes_recreated:
+                logger.info(
+                    f"Attempting best-effort HNSW index restore after {mutation_label} failure"
+                )
+                for index_info in existing_indexes:
+                    try:
+                        self._executor_recreate_vector_index_from_info(
+                            conn, state, index_info
+                        )
+                    except Exception as recreate_error:
+                        logger.error(
+                            "Failed to restore HNSW index "
+                            f"{index_info['index_name']} after {mutation_label}: "
+                            f"{recreate_error}"
+                        )
+
+            logger.error(f"{mutation_label} failed: {e}")
+            raise
 
     def bulk_operation_with_index_management(self, operation_func, *args, **kwargs):
         """Execute bulk operation with automatic HNSW index management and transaction safety.
@@ -953,102 +1186,13 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], operation_func, args, kwargs
     ):
         """Executor method for bulk operations with index management - runs in DB thread."""
-        # Get existing indexes before starting
-        existing_indexes = self._executor_get_existing_vector_indexes(conn, state)
-        dropped_indexes = []
-
-        try:
-            # Start transaction for atomic operation
-            conn.execute("BEGIN TRANSACTION")
-            state["transaction_active"] = True
-
-            # Optimize settings for bulk loading
-            conn.execute("SET preserve_insertion_order = false")
-
-            # Drop existing HNSW vector indexes to improve bulk performance
-            if existing_indexes:
-                logger.info(
-                    f"Dropping {len(existing_indexes)} HNSW indexes for bulk operation"
-                )
-                for index_info in existing_indexes:
-                    try:
-                        self._executor_drop_vector_index(
-                            conn,
-                            state,
-                            index_info["provider"],
-                            index_info["model"],
-                            index_info["dims"],
-                            index_info["metric"],
-                        )
-                        dropped_indexes.append(index_info)
-                    except Exception as e:
-                        logger.warning(
-                            f"Could not drop index {index_info['index_name']}: {e}"
-                        )
-
-            # Execute the bulk operation
-            result = operation_func(*args, **kwargs)
-
-            # Recreate dropped indexes
-            if dropped_indexes:
-                logger.info(
-                    f"Recreating {len(dropped_indexes)} HNSW indexes after bulk operation"
-                )
-                for index_info in dropped_indexes:
-                    try:
-                        self._executor_create_vector_index(
-                            conn,
-                            state,
-                            index_info["provider"],
-                            index_info["model"],
-                            index_info["dims"],
-                            index_info["metric"],
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to recreate index {index_info['index_name']}: {e}"
-                        )
-                        # Continue with other indexes
-
-            # Commit transaction
-            conn.execute("COMMIT")
-            state["transaction_active"] = False
-
-            # Force checkpoint after bulk operations to ensure durability
-            self._executor_maybe_checkpoint(conn, state, True)
-
-            logger.info("Bulk operation completed successfully with index management")
-            return result
-
-        except Exception as e:
-            # Rollback transaction on any error
-            try:
-                conn.execute("ROLLBACK")
-                state["transaction_active"] = False
-                logger.info("Transaction rolled back due to error")
-            except Exception:
-                pass
-
-            # Attempt to recreate dropped indexes on failure
-            if dropped_indexes:
-                logger.info("Attempting to recreate dropped indexes after failure")
-                for index_info in dropped_indexes:
-                    try:
-                        self._executor_create_vector_index(
-                            conn,
-                            state,
-                            index_info["provider"],
-                            index_info["model"],
-                            index_info["dims"],
-                            index_info["metric"],
-                        )
-                    except Exception as recreate_error:
-                        logger.error(
-                            f"Failed to recreate index {index_info['index_name']}: {recreate_error}"
-                        )
-
-            logger.error(f"Bulk operation failed: {e}")
-            raise
+        return self._executor_run_hnsw_guarded_mutation(
+            conn,
+            state,
+            "bulk operation",
+            lambda: operation_func(*args, **kwargs),
+            optimize_for_bulk=True,
+        )
 
     def insert_file(self, file: File) -> int:
         """Insert file record and return file ID - delegate to file repository."""
@@ -1252,9 +1396,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], file_path: str
     ) -> bool:
         """Executor method for delete_file_completely - runs in DB thread."""
-        # Track operation for checkpoint management
-        track_operation(state)
-
         # Get file ID first
         # Normalize path to handle both absolute and relative paths
         base_dir = state.get("base_directory")
@@ -1267,24 +1408,31 @@ class DuckDBProvider(SerialDatabaseProvider):
             return False
 
         file_id = result[0]
+        snapshot = self._executor_snapshot_file_delete_target(conn, state, file_id)
+        chunk_ids = snapshot["chunk_ids"]
 
-        # Delete in correct order due to foreign key constraints
-        # 1. Delete embeddings first from all embedding tables
-        embedding_tables = self._executor_get_all_embedding_tables(conn, state)
-        for table_name in embedding_tables:
-            conn.execute(
-                f"""
-                DELETE FROM {table_name}
-                WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id = ?)
-                """,
-                [file_id],
+        def delete_records() -> bool:
+            # Delete in correct order due to foreign key constraints.
+            self._executor_delete_embeddings_for_chunk_ids(conn, state, chunk_ids)
+            conn.execute("DELETE FROM chunks WHERE file_id = ?", [file_id])
+            conn.execute("DELETE FROM files WHERE id = ?", [file_id])
+            return True
+
+        def rollback_delete(original_indexes: list[dict[str, Any]]) -> None:
+            self._executor_restore_file_delete_snapshot(
+                conn, state, snapshot, original_indexes
             )
 
-        # 2. Delete chunks
-        conn.execute("DELETE FROM chunks WHERE file_id = ?", [file_id])
-
-        # 3. Delete file
-        conn.execute("DELETE FROM files WHERE id = ?", [file_id])
+        self._executor_run_hnsw_guarded_mutation(
+            conn,
+            state,
+            f"delete_file_completely({normalized_path})",
+            delete_records,
+            # DuckDB currently rejects parent-row deletes inside the same explicit
+            # transaction after child-row deletes on FK-linked tables.
+            transactional=False,
+            rollback_func=rollback_delete,
+        )
 
         logger.debug(f"File {file_path} and all associated data deleted")
         return True

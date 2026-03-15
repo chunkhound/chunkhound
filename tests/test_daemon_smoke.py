@@ -18,6 +18,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -75,6 +76,7 @@ def _make_env(
     project_dir: Path,
     *,
     runtime_dir: Path | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Return a clean subprocess environment pointing to project_dir."""
     env = get_safe_subprocess_env(os.environ.copy())
@@ -86,6 +88,8 @@ def _make_env(
     if runtime_dir is not None:
         runtime_dir.mkdir(parents=True, exist_ok=True)
         env["CHUNKHOUND_DAEMON_RUNTIME_DIR"] = str(runtime_dir)
+    if extra_env is not None:
+        env.update(extra_env)
     return env
 
 
@@ -95,9 +99,10 @@ async def _start_proxy_process(
     runtime_dir: Path | None = None,
     stdin: int | None = asyncio.subprocess.PIPE,
     capture_stderr: bool = False,
+    extra_env: dict[str, str] | None = None,
 ) -> asyncio.subprocess.Process:
     """Launch a ``chunkhound mcp`` proxy subprocess and return the process."""
-    env = _make_env(project_dir, runtime_dir=runtime_dir)
+    env = _make_env(project_dir, runtime_dir=runtime_dir, extra_env=extra_env)
     stderr = asyncio.subprocess.PIPE if capture_stderr else asyncio.subprocess.DEVNULL
     return await create_subprocess_exec_safe(
         _chunkhound_exe(),
@@ -116,12 +121,14 @@ async def _start_proxy(
     *,
     runtime_dir: Path | None = None,
     capture_stderr: bool = False,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[asyncio.subprocess.Process, SubprocessJsonRpcClient]:
     """Launch a ``chunkhound mcp`` proxy subprocess and return (proc, client)."""
     proc = await _start_proxy_process(
         project_dir,
         runtime_dir=runtime_dir,
         capture_stderr=capture_stderr,
+        extra_env=extra_env,
     )
     client = SubprocessJsonRpcClient(proc)
     await client.start()
@@ -132,6 +139,7 @@ async def _run_proxy_to_failure(
     project_dir: Path,
     *,
     runtime_dir: Path | None = None,
+    extra_env: dict[str, str] | None = None,
     timeout: float = 30.0,
 ) -> tuple[int, str, str]:
     """Run ``chunkhound mcp`` until it exits and capture stdio."""
@@ -140,6 +148,7 @@ async def _run_proxy_to_failure(
         runtime_dir=runtime_dir,
         stdin=asyncio.subprocess.DEVNULL,
         capture_stderr=True,
+        extra_env=extra_env,
     )
     stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     return proc.returncode or 0, stdout.decode(), stderr.decode()
@@ -506,6 +515,43 @@ async def test_daemon_lock_file_created(pre_indexed_project_dir: Path) -> None:
     assert not lock_path.exists(), (
         f"Lock file was not cleaned up after daemon shutdown: {lock_path}"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.requires_native_watchman
+async def test_watchman_start_failure_returns_fast_and_skips_lock_publication(
+    pre_indexed_project_dir: Path,
+) -> None:
+    """Watchman startup failures should surface quickly without publishing a lock."""
+    project_dir = pre_indexed_project_dir
+    config_path = project_dir / ".chunkhound.json"
+    config = json.loads(config_path.read_text())
+    config.setdefault("indexing", {})["realtime_backend"] = "watchman"
+    config_path.write_text(json.dumps(config))
+
+    start_time = time.monotonic()
+    returncode, _stdout, stderr_text = await _run_proxy_to_failure(
+        project_dir,
+        extra_env={"CHUNKHOUND_FAKE_WATCHMAN_FAIL_BEFORE_READY": "1"},
+        timeout=20.0,
+    )
+    elapsed = time.monotonic() - start_time
+
+    assert returncode != 0, "Proxy should fail when watchman startup fails"
+    assert elapsed < 20.0, f"Expected fail-fast startup error, got {elapsed:.2f}s"
+    assert "Watchman sidecar startup failed" in stderr_text
+    assert "Recent daemon log output" in stderr_text
+
+    lock_path = project_dir / ".chunkhound" / "daemon.lock"
+    assert not lock_path.exists(), (
+        "Daemon lock should not be published on watchman failure"
+    )
+    assert not await wait_for_daemon_start(project_dir, timeout=1.0)
+
+    daemon_log_path = project_dir / ".chunkhound" / "daemon.log"
+    assert daemon_log_path.exists()
+    daemon_log_text = daemon_log_path.read_text(encoding="utf-8", errors="replace")
+    assert "Watchman sidecar startup failed" in daemon_log_text
 
 
 @pytest.mark.asyncio

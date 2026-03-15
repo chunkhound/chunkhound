@@ -1,0 +1,27 @@
+{
+  "platform": "windows-x86_64",
+  "runtime_version": "20250223.093309.0",
+  "binary": "bin/watchman.exe",
+  "support_files": [
+    "bin/eledo-pty-bridge.exe",
+    "bin/gflags.dll",
+    "bin/glog.dll",
+    "bin/libcrypto-3.dll",
+    "bin/watchman-diag.exe",
+    "bin/watchman-make.exe",
+    "bin/watchman-replicate-subscription.exe",
+    "bin/watchman-wait.exe",
+    "bin/watchmanctl.exe"
+  ],
+  "launch_mode": "native_binary",
+  "listener_transport": "named_pipe",
+  "probe_args": ["--version"],
+  "path_env": {
+    "PATH": ["bin"]
+  },
+  "source_url": "https://github.com/facebook/watchman/releases/download/v2025.02.24.00/watchman-v2025.02.24.00-windows.zip",
+  "source_sha256": "8550b79b3620f6eabc81544ab767cc94883750efbb3a4127423f52fc420bfbed",
+  "source_archive_format": "zip",
+  "source_root_prefix": "watchman-v2025.02.24.00-windows",
+  "packaging_decision": "ChunkHound ships the native upstream Windows Watchman daemon payload in platform-specific wheels; macOS remains an explicit fallback platform until native payloads are validated on a macOS host."
+}

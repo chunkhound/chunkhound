@@ -32,7 +32,7 @@ Your AI assistant searches code but doesn't understand it. ChunkHound researches
   - **Configuration**: JSON, YAML, TOML, HCL, Markdown
   - **Text-based** (custom parsers): Text files, PDF
 - **[MCP integration](https://spec.modelcontextprotocol.io/)** - Works with Claude, VS Code, Cursor, Windsurf, Zed, etc
-- **Real-time indexing** - Automatic file watching, smart diffs, seamless branch switching
+- **Real-time indexing** - Automatic file watching, smart diffs, seamless branch switching, and explicit backend selection (`watchdog`, `watchman`, `polling`)
 
 ## Documentation
 
@@ -40,6 +40,7 @@ Your AI assistant searches code but doesn't understand it. ChunkHound researches
 - [Quickstart](https://chunkhound.github.io/quickstart/)
 - [Configuration Guide](https://chunkhound.github.io/configuration/)
 - [Architecture Deep Dive](https://chunkhound.github.io/under-the-hood/)
+- [Watchman live-indexing ops note](operations/watchman_live_indexing.md) for the private-sidecar model, `daemon_status` interpretation, and default-backend posture
 
 ## Requirements
 
