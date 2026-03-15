@@ -21,21 +21,33 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _wheel_name_for_runtime_platform(platform_tag: str) -> str:
+    wheel_platform_tag = watchman_verifier._manifest_wheel_platform_tags(
+        platform_tag
+    )[0]
+    return f"chunkhound-0.0.0-py3-none-{wheel_platform_tag}.whl"
+
+
 def _host_runtime_wheel_name() -> str:
     host_platform = hatch_build._host_watchman_platform()
-    if host_platform == "linux-x86_64":
-        return "chunkhound-0.0.0-py3-none-manylinux_2_36_x86_64.whl"
-    if host_platform == "windows-x86_64":
-        return "chunkhound-0.0.0-py3-none-win_amd64.whl"
-    raise AssertionError(f"Unsupported native Watchman test host: {host_platform}")
+    return _wheel_name_for_runtime_platform(host_platform)
 
 
 def _other_supported_wheel_name() -> str:
     host_platform = hatch_build._host_watchman_platform()
     if host_platform == "linux-x86_64":
-        return "chunkhound-0.0.0-py3-none-win_amd64.whl"
+        return _wheel_name_for_runtime_platform("windows-x86_64")
     if host_platform == "windows-x86_64":
-        return "chunkhound-0.0.0-py3-none-manylinux_2_36_x86_64.whl"
+        return _wheel_name_for_runtime_platform("linux-x86_64")
+    raise AssertionError(f"Unsupported native Watchman test host: {host_platform}")
+
+
+def _unsupported_host_runtime_wheel_name() -> str:
+    host_platform = hatch_build._host_watchman_platform()
+    if host_platform == "linux-x86_64":
+        return "chunkhound-0.0.0-py3-none-linux_x86_64.whl"
+    if host_platform == "windows-x86_64":
+        return "chunkhound-0.0.0-py3-none-win32.whl"
     raise AssertionError(f"Unsupported native Watchman test host: {host_platform}")
 
 
@@ -183,6 +195,16 @@ def test_main_rejects_runtime_slot_that_mismatches_wheel_tag(tmp_path: Path) -> 
     wheel_path = _build_synthetic_watchman_wheel(
         tmp_path,
         wheel_name=_other_supported_wheel_name(),
+    )
+
+    with pytest.raises(RuntimeError, match="does not match wheel tag"):
+        watchman_verifier.main([str(wheel_path)])
+
+
+def test_main_rejects_wheel_tag_outside_manifest_contract(tmp_path: Path) -> None:
+    wheel_path = _build_synthetic_watchman_wheel(
+        tmp_path,
+        wheel_name=_unsupported_host_runtime_wheel_name(),
     )
 
     with pytest.raises(RuntimeError, match="does not match wheel tag"):

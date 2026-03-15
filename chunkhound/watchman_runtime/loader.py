@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import importlib.resources
 import io
 import json
 import os
+import socket
 import stat
 import sys
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -23,7 +27,13 @@ _RUNTIME_PACKAGE = "chunkhound.watchman_runtime"
 _PACKAGE_ROOT = Path(__file__).resolve().parent
 _DEFAULT_RUNTIME_DIRNAME = "chunkhound-watchman-runtime"
 _RUNTIME_CACHE_DIR_ENV = "CHUNKHOUND_WATCHMAN_RUNTIME_CACHE_DIR"
+_RUNTIME_DOWNLOAD_TIMEOUT_SECONDS_ENV = (
+    "CHUNKHOUND_WATCHMAN_RUNTIME_DOWNLOAD_TIMEOUT_SECONDS"
+)
+_RUNTIME_DOWNLOAD_RETRIES_ENV = "CHUNKHOUND_WATCHMAN_RUNTIME_DOWNLOAD_RETRIES"
 _HYDRATION_MARKER_NAME = ".chunkhound-hydrated.json"
+_DEFAULT_RUNTIME_DOWNLOAD_TIMEOUT_SECONDS = 30.0
+_DEFAULT_RUNTIME_DOWNLOAD_RETRIES = 2
 _MACHINE_ALIASES = {
     "amd64": "x86_64",
     "arm64e": "arm64",
@@ -102,6 +112,7 @@ class PackagedWatchmanRuntime:
     launch_mode: WatchmanRuntimeLaunchMode
     listener_transport: WatchmanRuntimeListenerTransport
     probe_args: tuple[str, ...]
+    wheel_platform_tags: tuple[str, ...]
     env_path_entries: dict[str, tuple[PurePosixPath, ...]]
     packaging_decision: str
     source_archives: tuple[WatchmanRuntimeSource, ...]
@@ -228,6 +239,21 @@ def _require_manifest_args(manifest: dict[str, object], key: str) -> tuple[str, 
         if not isinstance(item, str) or not item:
             raise ValueError(f"Manifest field {key!r} must contain strings")
         parsed.append(item)
+    return tuple(parsed)
+
+
+def _require_manifest_wheel_platform_tags(
+    manifest: dict[str, object], key: str
+) -> tuple[str, ...]:
+    value = manifest.get(key)
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"Manifest field {key!r} must be a non-empty list")
+
+    parsed: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"Manifest field {key!r} must contain strings")
+        parsed.append(item.strip())
     return tuple(parsed)
 
 
@@ -804,6 +830,72 @@ def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
     os.replace(temp_path, path)
 
 
+def _runtime_download_timeout_seconds() -> float:
+    raw = os.environ.get(_RUNTIME_DOWNLOAD_TIMEOUT_SECONDS_ENV)
+    if raw is None:
+        return _DEFAULT_RUNTIME_DOWNLOAD_TIMEOUT_SECONDS
+    try:
+        timeout = float(raw)
+    except ValueError:
+        return _DEFAULT_RUNTIME_DOWNLOAD_TIMEOUT_SECONDS
+    if timeout <= 0:
+        return _DEFAULT_RUNTIME_DOWNLOAD_TIMEOUT_SECONDS
+    return timeout
+
+
+def _runtime_download_retries() -> int:
+    raw = os.environ.get(_RUNTIME_DOWNLOAD_RETRIES_ENV)
+    if raw is None:
+        return _DEFAULT_RUNTIME_DOWNLOAD_RETRIES
+    try:
+        retries = int(raw)
+    except ValueError:
+        return _DEFAULT_RUNTIME_DOWNLOAD_RETRIES
+    if retries < 1:
+        return _DEFAULT_RUNTIME_DOWNLOAD_RETRIES
+    return retries
+
+
+def _cleanup_partial_download(temp_path: Path) -> None:
+    try:
+        temp_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _should_retry_source_download(error: Exception) -> bool:
+    if isinstance(error, urllib.error.HTTPError):
+        return False
+    if isinstance(
+        error,
+        (
+            TimeoutError,
+            socket.timeout,
+            http.client.IncompleteRead,
+            urllib.error.URLError,
+        ),
+    ):
+        return True
+    return False
+
+
+def _download_source_archive_once(
+    *,
+    source: WatchmanRuntimeSource,
+    temp_path: Path,
+    timeout_seconds: float,
+) -> None:
+    with urllib.request.urlopen(
+        source.source_url,
+        timeout=timeout_seconds,
+    ) as response, temp_path.open("wb") as handle:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            handle.write(chunk)
+
+
 def _ensure_downloaded_source_archive(source: WatchmanRuntimeSource) -> Path:
     archive_path = _download_cache_path(source)
     archive_path.parent.mkdir(parents=True, exist_ok=True)
@@ -811,28 +903,32 @@ def _ensure_downloaded_source_archive(source: WatchmanRuntimeSource) -> Path:
         return archive_path
 
     temp_path = archive_path.with_name(f"{archive_path.name}.tmp")
-    try:
-        with urllib.request.urlopen(source.source_url) as response, temp_path.open(
-            "wb"
-        ) as handle:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                handle.write(chunk)
-    except Exception:
+    timeout_seconds = _runtime_download_timeout_seconds()
+    max_attempts = _runtime_download_retries()
+    for attempt in range(1, max_attempts + 1):
         try:
-            temp_path.unlink()
-        except FileNotFoundError:
-            pass
-        raise
+            _cleanup_partial_download(temp_path)
+            _download_source_archive_once(
+                source=source,
+                temp_path=temp_path,
+                timeout_seconds=timeout_seconds,
+            )
+            break
+        except Exception as error:
+            _cleanup_partial_download(temp_path)
+            if attempt >= max_attempts or not _should_retry_source_download(error):
+                if _should_retry_source_download(error):
+                    raise RuntimeError(
+                        "Watchman runtime archive download failed after "
+                        f"{attempt} attempt(s) with timeout "
+                        f"{timeout_seconds}s: {source.source_url}"
+                    ) from error
+                raise
+            time.sleep(float(attempt))
 
     actual_sha256 = _file_sha256(temp_path)
     if actual_sha256 != source.source_sha256:
-        try:
-            temp_path.unlink()
-        except FileNotFoundError:
-            pass
+        _cleanup_partial_download(temp_path)
         raise RuntimeError(
             "Watchman runtime archive checksum mismatch for "
             f"{source.source_url}: expected {source.source_sha256}, got {actual_sha256}"
@@ -1263,6 +1359,9 @@ def resolve_packaged_watchman_runtime(
             manifest, "listener_transport"
         ),
         probe_args=_require_manifest_args(manifest, "probe_args"),
+        wheel_platform_tags=_require_manifest_wheel_platform_tags(
+            manifest, "wheel_platform_tags"
+        ),
         env_path_entries=_require_manifest_env_path_entries(manifest, "path_env"),
         packaging_decision=_require_manifest_string(manifest, "packaging_decision"),
         source_archives=source_archives,

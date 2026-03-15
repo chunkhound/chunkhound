@@ -22,3 +22,5 @@ Packaging decision:
 - Source checkouts and editable installs do not ship these native payloads, so
   they default to fallback realtime backends unless operators explicitly opt
   into `backend=watchman` and allow runtime hydration from the pinned sources.
+- Source-hydration downloads use bounded timeout/retry settings and fail fast
+  on repeated network stalls instead of hanging indefinitely.

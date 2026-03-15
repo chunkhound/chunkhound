@@ -10,6 +10,7 @@ import subprocess
 import tarfile
 import threading
 import time
+import urllib.error
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import TextIO
@@ -63,6 +64,7 @@ def _build_deb_archive(*, data_member_name: str, tar_payload: bytes) -> bytes:
         "binary_path",
         "support_paths",
         "listener_transport",
+        "wheel_platform_tags",
         "env_path_entries",
         "source_archive_count",
     ),
@@ -83,6 +85,7 @@ def _build_deb_archive(*, data_member_name: str, tar_payload: bytes) -> bytes:
                 PurePosixPath("lib/libzstd.so.1"),
             ),
             "unix_socket",
+            ("manylinux_2_34_x86_64",),
             {"LD_LIBRARY_PATH": (PurePosixPath("lib"),)},
             9,
         ),
@@ -103,6 +106,7 @@ def _build_deb_archive(*, data_member_name: str, tar_payload: bytes) -> bytes:
                 PurePosixPath("bin/watchmanctl.exe"),
             ),
             "named_pipe",
+            ("win_amd64",),
             {"PATH": (PurePosixPath("bin"),)},
             1,
         ),
@@ -115,6 +119,7 @@ def test_resolve_packaged_watchman_runtime_declared_slots(
     binary_path: str,
     support_paths: tuple[PurePosixPath, ...],
     listener_transport: str,
+    wheel_platform_tags: tuple[str, ...],
     env_path_entries: dict[str, tuple[PurePosixPath, ...]],
     source_archive_count: int,
 ) -> None:
@@ -128,6 +133,7 @@ def test_resolve_packaged_watchman_runtime_declared_slots(
     assert runtime.launch_mode == "native_binary"
     assert runtime.listener_transport == listener_transport
     assert runtime.probe_args == ("--version",)
+    assert runtime.wheel_platform_tags == wheel_platform_tags
     assert runtime.env_path_entries == env_path_entries
     assert len(runtime.source_archives) == source_archive_count
     assert "platform-specific" in runtime.packaging_decision
@@ -475,6 +481,117 @@ def test_read_deb_member_bytes_rejects_unsafe_link_target(
             source_root_prefix=PurePosixPath("usr/local"),
             source_relative_path=PurePosixPath("bin/watchman"),
         )
+
+
+def test_ensure_downloaded_source_archive_retries_timeout_and_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    payload = b"native-watchman"
+    source = watchman_runtime_loader_module.WatchmanRuntimeSource(
+        source_url="https://example.test/watchman.tar.gz",
+        source_sha256=hashlib.sha256(payload).hexdigest(),
+        source_archive_format="zip",
+        source_root_prefix=None,
+        source_files=(),
+    )
+    attempts = {"count": 0}
+
+    class _Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+            self.close()
+
+    def _fake_urlopen(url: str, *, timeout: float):
+        attempts["count"] += 1
+        assert url == source.source_url
+        assert timeout == 3.0
+        if attempts["count"] == 1:
+            raise urllib.error.URLError(TimeoutError("timed out"))
+        return _Response(payload)
+
+    monkeypatch.setattr(
+        watchman_runtime_loader_module,
+        "_download_cache_path",
+        lambda _source: tmp_path / "watchman.tar.gz",
+    )
+    monkeypatch.setattr(
+        watchman_runtime_loader_module.urllib.request,
+        "urlopen",
+        _fake_urlopen,
+    )
+    monkeypatch.setattr(
+        watchman_runtime_loader_module.time,
+        "sleep",
+        lambda *_args: None,
+    )
+    monkeypatch.setenv(
+        "CHUNKHOUND_WATCHMAN_RUNTIME_DOWNLOAD_TIMEOUT_SECONDS",
+        "3",
+    )
+    monkeypatch.setenv(
+        "CHUNKHOUND_WATCHMAN_RUNTIME_DOWNLOAD_RETRIES",
+        "2",
+    )
+
+    archive_path = watchman_runtime_loader_module._ensure_downloaded_source_archive(
+        source
+    )
+
+    assert archive_path == tmp_path / "watchman.tar.gz"
+    assert archive_path.read_bytes() == payload
+    assert attempts["count"] == 2
+
+
+def test_ensure_downloaded_source_archive_raises_after_retry_exhaustion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = watchman_runtime_loader_module.WatchmanRuntimeSource(
+        source_url="https://example.test/watchman.tar.gz",
+        source_sha256=hashlib.sha256(b"payload").hexdigest(),
+        source_archive_format="zip",
+        source_root_prefix=None,
+        source_files=(),
+    )
+    attempts = {"count": 0}
+
+    def _fake_urlopen(url: str, *, timeout: float):
+        attempts["count"] += 1
+        assert url == source.source_url
+        assert timeout == 3.0
+        raise urllib.error.URLError(TimeoutError("timed out"))
+
+    monkeypatch.setattr(
+        watchman_runtime_loader_module,
+        "_download_cache_path",
+        lambda _source: tmp_path / "watchman.tar.gz",
+    )
+    monkeypatch.setattr(
+        watchman_runtime_loader_module.urllib.request,
+        "urlopen",
+        _fake_urlopen,
+    )
+    monkeypatch.setattr(
+        watchman_runtime_loader_module.time,
+        "sleep",
+        lambda *_args: None,
+    )
+    monkeypatch.setenv(
+        "CHUNKHOUND_WATCHMAN_RUNTIME_DOWNLOAD_TIMEOUT_SECONDS",
+        "3",
+    )
+    monkeypatch.setenv(
+        "CHUNKHOUND_WATCHMAN_RUNTIME_DOWNLOAD_RETRIES",
+        "2",
+    )
+
+    with pytest.raises(RuntimeError, match="download failed after 2 attempt"):
+        watchman_runtime_loader_module._ensure_downloaded_source_archive(source)
+
+    assert attempts["count"] == 2
 
 
 def test_materialize_watchman_binary_writes_windows_payload_tree(

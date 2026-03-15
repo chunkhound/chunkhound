@@ -41,6 +41,8 @@ jobs:
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      CHUNKHOUND_RUN_WATCHMAN_RUNTIME_VALIDATION: "1"
 
     steps:
       - name: Checkout code
@@ -60,8 +62,8 @@ jobs:
       - name: Run Watchman runtime validation tests
         run: >
           uv run pytest
-          tests/test_watchman_runtime_resources.py
-          tests/test_verify_watchman_runtime_resources.py
+          tests/
+          -m requires_native_watchman
           -q
 
       - name: Build wheel artifacts

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from packaging.tags import Tag
 
 import hatch_build
 
@@ -61,6 +62,16 @@ def test_custom_build_hook_hydrates_runtime_for_host(
         "_hydrate_runtime_for_build",
         lambda: (calls.append("hydrated") or {"src": "dst"}),
     )
+    monkeypatch.setattr(
+        hatch_build,
+        "_allowed_wheel_platform_tags_for_build_host",
+        lambda **_: {"manylinux_2_34_x86_64"},
+    )
+    monkeypatch.setattr(
+        hatch_build,
+        "_platform_only_tag",
+        lambda allowed_platform_tags=None: "py3-none-manylinux_2_34_x86_64",
+    )
 
     build_data: dict[str, object] = {}
     hook = object.__new__(hatch_build.CustomBuildHook)
@@ -93,6 +104,39 @@ def test_custom_build_hook_skips_native_runtime_for_unsupported_editable_build(
     hook.initialize("editable", build_data)
 
     assert build_data == {"force_include": {"existing": "entry"}}
+
+
+def test_platform_only_tag_prefers_declared_runtime_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        hatch_build.tags,
+        "sys_tags",
+        lambda: iter(
+            [
+                Tag("py3", "none", "manylinux_2_39_x86_64"),
+                Tag("py3", "none", "manylinux_2_34_x86_64"),
+            ]
+        ),
+    )
+
+    assert (
+        hatch_build._platform_only_tag({"manylinux_2_34_x86_64"})
+        == "py3-none-manylinux_2_34_x86_64"
+    )
+
+
+def test_platform_only_tag_rejects_when_declared_runtime_tag_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        hatch_build.tags,
+        "sys_tags",
+        lambda: iter([Tag("py3", "none", "manylinux_2_39_x86_64")]),
+    )
+
+    with pytest.raises(RuntimeError, match="manylinux_2_34_x86_64"):
+        hatch_build._platform_only_tag({"manylinux_2_34_x86_64"})
 
 
 def test_custom_build_hook_rejects_unsupported_wheel_host(

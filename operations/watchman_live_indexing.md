@@ -16,6 +16,8 @@ flow against a local project checkout.
 - Source checkouts and editable installs do not embed the native payloads, so
   they default to `watchdog` unless operators explicitly set
   `realtime_backend=watchman` and accept the pinned-source hydration path.
+- That source-hydration path is network-bounded and fails fast on repeated
+  download timeout/connection errors instead of waiting indefinitely.
 - `watchdog` and `polling` remain available as explicit fallback backends.
 - The rollout gate in [Rollout gate](#rollout-gate) is satisfied only for the
   current native Linux and Windows support paths once both hosted validations

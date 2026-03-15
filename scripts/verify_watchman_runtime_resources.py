@@ -33,6 +33,26 @@ def _runtime_manifest_path(platform_tag: str) -> Path:
     return _WATCHMAN_RUNTIME_ROOT / "platforms" / platform_tag / "manifest.json"
 
 
+def _manifest_wheel_platform_tags(platform_tag: str) -> tuple[str, ...]:
+    manifest_path = _runtime_manifest_path(platform_tag)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    wheel_platform_tags = manifest.get("wheel_platform_tags")
+    if not isinstance(wheel_platform_tags, list) or not wheel_platform_tags:
+        raise RuntimeError(
+            "Watchman runtime manifest must declare non-empty wheel_platform_tags: "
+            f"{manifest_path}"
+        )
+    parsed: list[str] = []
+    for item in wheel_platform_tags:
+        if not isinstance(item, str) or not item.strip():
+            raise RuntimeError(
+                "Watchman runtime manifest wheel_platform_tags must contain "
+                f"non-empty strings: {manifest_path}"
+            )
+        parsed.append(item.strip())
+    return tuple(parsed)
+
+
 def _required_wheel_paths_for_platforms(
     platform_tags: tuple[str, ...],
 ) -> tuple[str, ...]:
@@ -56,19 +76,10 @@ def _required_wheel_paths_for_platforms(
             )
     return tuple(required)
 
-def _runtime_platform_from_wheel_filename(wheel_path: Path) -> str:
-    platform_fragment = wheel_path.name[: -len(".whl")].rsplit("-py3-none-", 1)[-1]
-    for tag in platform_fragment.split("."):
-        if tag == "win_amd64":
-            return "windows-x86_64"
-        if tag.endswith("x86_64") and "linux" in tag:
-            return "linux-x86_64"
 
-    rendered = ", ".join(_supported_runtime_platforms())
-    raise RuntimeError(
-        "Wheel tag does not map to a supported Watchman runtime platform: "
-        f"{wheel_path} ({platform_fragment!r}; supported runtime platforms: {rendered})"
-    )
+def _wheel_platform_tags_from_filename(wheel_path: Path) -> tuple[str, ...]:
+    platform_fragment = wheel_path.name[: -len(".whl")].rsplit("-py3-none-", 1)[-1]
+    return tuple(tag for tag in platform_fragment.split(".") if tag)
 
 
 def _runtime_platforms_in_wheel(
@@ -106,11 +117,14 @@ def _runtime_platforms_in_wheel(
             f"platform slot: {wheel_path} ({rendered})"
         )
 
-    expected_platform = _runtime_platform_from_wheel_filename(wheel_path)
-    if discovered[0] != expected_platform:
+    allowed_wheel_tags = set(_manifest_wheel_platform_tags(discovered[0]))
+    wheel_platform_tags = set(_wheel_platform_tags_from_filename(wheel_path))
+    if not wheel_platform_tags <= allowed_wheel_tags:
         raise RuntimeError(
             "Wheel runtime slot does not match wheel tag: "
-            f"{wheel_path} (slot={discovered[0]!r}, expected={expected_platform!r})"
+            f"{wheel_path} (slot={discovered[0]!r}, "
+            f"actual={sorted(wheel_platform_tags)!r}, "
+            f"allowed={sorted(allowed_wheel_tags)!r})"
         )
     return discovered
 

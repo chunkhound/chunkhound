@@ -16,6 +16,7 @@
   "launch_mode": "native_binary",
   "listener_transport": "named_pipe",
   "probe_args": ["--version"],
+  "wheel_platform_tags": ["win_amd64"],
   "path_env": {
     "PATH": ["bin"]
   },

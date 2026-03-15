@@ -42,6 +42,19 @@ def _hydrate_runtime_for_build() -> dict[str, str]:
     return build_watchman_runtime_force_include_entries()
 
 
+def _allowed_wheel_platform_tags_for_build_host(
+    *, system_name: str | None = None, machine_name: str | None = None
+) -> set[str]:
+    from chunkhound.watchman_runtime.loader import resolve_packaged_watchman_runtime
+
+    runtime = resolve_packaged_watchman_runtime(
+        system_name=system_name,
+        machine_name=machine_name,
+        _hydrate_if_missing=False,
+    )
+    return set(runtime.wheel_platform_tags)
+
+
 def _load_supported_watchman_platforms() -> set[str]:
     with _PYPROJECT_PATH.open("rb") as handle:
         loaded = tomllib.load(handle)
@@ -105,11 +118,23 @@ def _should_skip_native_runtime_for_build_version(version: str) -> bool:
     return version == "editable"
 
 
-def _platform_only_tag() -> str:
+def _platform_only_tag(allowed_platform_tags: set[str] | None = None) -> str:
     for tag in tags.sys_tags():
-        if tag.interpreter == "py3" and tag.abi == "none" and tag.platform != "any":
-            return str(tag)
+        if tag.interpreter != "py3" or tag.abi != "none" or tag.platform == "any":
+            continue
+        if (
+            allowed_platform_tags is not None
+            and tag.platform not in allowed_platform_tags
+        ):
+            continue
+        return str(tag)
 
+    if allowed_platform_tags:
+        rendered = ", ".join(sorted(allowed_platform_tags))
+        raise RuntimeError(
+            "Unable to determine a host-native py3-none-platform wheel tag matching "
+            f"the declared Watchman runtime contract. Allowed tags: {rendered}"
+        )
     raise RuntimeError(
         "Unable to determine a host-native py3-none-platform wheel tag for the "
         "packaged Watchman runtime."
@@ -129,9 +154,10 @@ class CustomBuildHook(BuildHookInterface):
             if _should_skip_native_runtime_for_build_version(version):
                 return
             raise
+        allowed_platform_tags = _allowed_wheel_platform_tags_for_build_host()
         force_include = build_data.setdefault("force_include", {})
         if not isinstance(force_include, dict):
             raise RuntimeError("hatch build_data.force_include must be a mapping")
         force_include.update(_hydrate_runtime_for_build())
         build_data["pure_python"] = False
-        build_data["tag"] = _platform_only_tag()
+        build_data["tag"] = _platform_only_tag(allowed_platform_tags)
