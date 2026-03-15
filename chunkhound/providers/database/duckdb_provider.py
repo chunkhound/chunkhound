@@ -477,38 +477,8 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Create sequence for embeddings table
             conn.execute("CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq")
 
-            # Embeddings table (1536 dimensions as default)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS embeddings_1536 (
-                    id INTEGER PRIMARY KEY DEFAULT nextval('embeddings_id_seq'),
-                    chunk_id INTEGER NOT NULL,
-                    provider TEXT NOT NULL,
-                    model TEXT NOT NULL,
-                    embedding FLOAT[1536],
-                    dims INTEGER NOT NULL DEFAULT 1536,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-
-            # Create indexes for 1536-dimensional embeddings
-            try:
-                conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_hnsw_1536 ON embeddings_1536
-                    USING HNSW (embedding)
-                    WITH (metric = 'cosine')
-                """)
-                logger.info(
-                    "HNSW index for 1536-dimensional embeddings created successfully"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to create HNSW index for 1536-dimensional embeddings: {e}"
-                )
-
-            # Create index on chunk_id for efficient deletions
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_embeddings_1536_chunk_id ON embeddings_1536(chunk_id)
-            """)
+            # Embedding tables are created dynamically on first use via
+            # _executor_ensure_embedding_table_exists for the configured dimension.
 
             # Handle schema migrations for existing databases
             self._executor_migrate_schema(conn, state)

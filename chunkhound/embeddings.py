@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from loguru import logger
 
+from chunkhound.core.constants import OPENAI_DEFAULT_MODEL
 from chunkhound.interfaces.embedding_provider import (
     EmbeddingProvider as InterfaceEmbeddingProvider,
 )
@@ -31,7 +32,7 @@ class EmbeddingProvider(Protocol):
 
     @property
     def model(self) -> str:
-        """Model name (e.g., 'text-embedding-3-small')."""
+        """Model name (e.g., 'text-embedding-3-large')."""
         ...
 
     @property
@@ -183,14 +184,20 @@ class EmbeddingManager:
 def create_openai_provider(
     api_key: str | None = None,
     base_url: str | None = None,
-    model: str = "text-embedding-3-small",
+    model: str = OPENAI_DEFAULT_MODEL,
     rerank_model: str | None = None,
     rerank_url: str = "/rerank",
     rerank_format: str = "auto",
     rerank_batch_size: int | None = None,
+    output_dims: int | None = None,
+    client_side_truncation: bool = False,
     api_version: str | None = None,
     azure_endpoint: str | None = None,
     azure_deployment: str | None = None,
+    batch_size: int = 100,
+    timeout: int = 30,
+    retry_attempts: int = 3,
+    verify_ssl: bool = True,
 ) -> "OpenAIEmbeddingProvider":
     """Create an OpenAI embedding provider with default settings.
 
@@ -207,9 +214,16 @@ def create_openai_provider(
             'cohere', 'tei', or 'auto' (default: 'auto')
         rerank_batch_size: Max documents per rerank batch
             (overrides model defaults, bounded by model caps)
+        output_dims: Output embedding dimension (for matryoshka models)
+        client_side_truncation: Truncate embeddings client-side
+            instead of using API dimensions parameter
         api_version: Azure OpenAI API version (e.g., '2024-02-01')
         azure_endpoint: Azure OpenAI endpoint URL (e.g., 'https://myresource.openai.azure.com')
         azure_deployment: Azure OpenAI deployment name
+        batch_size: Maximum batch size for API requests
+        timeout: Request timeout in seconds
+        retry_attempts: Number of retry attempts for failed requests
+        verify_ssl: Verify SSL certificates (False only for self-signed certs)
 
     Returns:
         Configured OpenAI embedding provider
@@ -225,7 +239,13 @@ def create_openai_provider(
         rerank_url=rerank_url,
         rerank_format=rerank_format,
         rerank_batch_size=rerank_batch_size,
+        output_dims=output_dims,
+        client_side_truncation=client_side_truncation,
         api_version=api_version,
         azure_endpoint=azure_endpoint,
         azure_deployment=azure_deployment,
+        batch_size=batch_size,
+        timeout=timeout,
+        retry_attempts=retry_attempts,
+        verify_ssl=verify_ssl,
     )

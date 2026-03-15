@@ -13,6 +13,8 @@ class _DummyEmbeddingProvider:
     name = "dummy"
     model = "dummy"
     dims = 1
+    output_dims = None
+    client_side_truncation = False
     distance = "cosine"
     batch_size = 8
 

@@ -6,7 +6,7 @@ the complete code research pipeline in CI/CD without external dependencies.
 
 import asyncio
 import math
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import xxhash
@@ -187,17 +187,20 @@ class FakeEmbeddingProvider:
         self,
         model: str = "fake-embeddings",
         dims: int = 1536,
+        output_dims: int | None = None,
         batch_size: int = 100,
     ):
         """Initialize fake embedding provider.
 
         Args:
             model: Model name for identification
-            dims: Embedding dimensions
+            dims: Embedding dimensions (native/full dimension)
+            output_dims: Output dimension override for matryoshka testing
             batch_size: Maximum batch size
         """
         self._model = model
         self._dims = dims
+        self._output_dims = output_dims
         self._batch_size = batch_size
         self._distance = "cosine"
         self._max_tokens = 8192
@@ -219,8 +222,35 @@ class FakeEmbeddingProvider:
 
     @property
     def dims(self) -> int:
-        """Embedding dimensions."""
+        """Current embedding output dimension."""
+        if self._output_dims is not None:
+            return self._output_dims
         return self._dims
+
+    @property
+    def native_dims(self) -> int:
+        """Model's full/native embedding dimension."""
+        return self._dims
+
+    @property
+    def supported_dimensions(self) -> Sequence[int]:
+        """List of valid output dimensions for this model."""
+        # Fake provider only supports its configured native dimension
+        return [self._dims]
+
+    def supports_matryoshka(self) -> bool:
+        """True if model supports variable output dimensions."""
+        return False  # Fake provider doesn't have real matryoshka
+
+    @property
+    def output_dims(self) -> int | None:
+        """Configured output dimension override, or None for native."""
+        return self._output_dims
+
+    @property
+    def client_side_truncation(self) -> bool:
+        """Whether client-side truncation is enabled."""
+        return False  # Fake provider doesn't need client-side truncation
 
     @property
     def distance(self) -> str:
@@ -257,7 +287,7 @@ class FakeEmbeddingProvider:
         and L2-normalizes. Produces vectors where texts sharing substrings
         (identifiers, keywords) have high cosine similarity.
         """
-        dims = self._dims
+        dims = self.dims
         vector = [0.0] * dims
 
         words = text.lower().split()

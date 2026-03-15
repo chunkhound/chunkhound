@@ -121,6 +121,87 @@ class TestQwenModelDetection:
         assert max_batch == 128
 
 
+class TestQwenPrefixedModelNames:
+    """Test handling of provider-prefixed Qwen model names (e.g., fireworks/qwen3-embedding-4b)."""
+
+    def test_prefixed_qwen_model_config_lookup_dims(self):
+        """Test that prefixed model names correctly resolve dims."""
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            model="fireworks/qwen3-embedding-4b",
+        )
+        assert provider.dims == 2560
+        assert provider.native_dims == 2560
+
+    def test_prefixed_qwen_model_config_lookup_batch_size(self):
+        """Test that prefixed model names correctly configure batch sizes."""
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            model="fireworks/qwen3-embedding-4b",
+            batch_size=512,
+        )
+        # Should be limited to model max (256 for 4B)
+        assert provider._batch_size == 256
+        assert provider._qwen_model_config is not None
+
+    def test_prefixed_ollama_qwen_model(self):
+        """Test Ollama-prefixed model names."""
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            model="ollama/qwen3-embedding-8b",
+            batch_size=512,
+        )
+        assert provider.dims == 4096
+        assert provider._batch_size == 128
+
+    def test_prefixed_together_qwen_model(self):
+        """Test Together-prefixed model names."""
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            model="together/qwen3-embedding-0.6b",
+            batch_size=1000,
+        )
+        assert provider.dims == 1024
+        assert provider._batch_size == 512
+
+    def test_prefixed_qwen_matryoshka_support(self):
+        """Test that matryoshka support is detected for prefixed models."""
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            model="fireworks/qwen3-embedding-4b",
+        )
+        assert provider.supports_matryoshka() is True
+
+    def test_prefixed_qwen_output_dims_validation(self):
+        """Test that output_dims validation works with prefixed models."""
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            model="fireworks/qwen3-embedding-4b",
+            output_dims=512,  # Valid for matryoshka model
+        )
+        assert provider.dims == 512
+        assert provider.native_dims == 2560
+
+    def test_prefixed_qwen_reranker(self):
+        """Test prefixed Qwen reranker model detection."""
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            base_url="http://localhost:8080/v1",
+            model="text-embedding-3-small",
+            rerank_model="fireworks/qwen3-reranker-4b",
+        )
+        assert provider._qwen_rerank_config is not None
+        assert provider.get_max_rerank_batch_size() == 96
+
+    def test_case_insensitive_prefixed_model(self):
+        """Test case-insensitive matching for prefixed models."""
+        provider = OpenAIEmbeddingProvider(
+            api_key="test-key",
+            model="Fireworks/Qwen3-Embedding-4B",
+        )
+        assert provider.dims == 2560
+
+
 class TestQwenModelConfig:
     """Test the QWEN_MODEL_CONFIG dictionary structure."""
 
@@ -162,7 +243,7 @@ class TestQwenModelConfig:
         for model in embedding_models:
             assert (
                 model in QWEN_MODEL_CONFIG
-                or f"dengcao/Qwen3-Embedding-{model.split('-')[-1].upper()}:Q5_K_M"
+                or f"dengcao/{model}:q5_k_m"
                 in QWEN_MODEL_CONFIG
             ), f"Embedding model {model} not found in config"
 
