@@ -12,11 +12,6 @@ from scripts import verify_watchman_runtime_resources as watchman_verifier
 
 pytestmark = pytest.mark.requires_native_watchman
 
-_SYNTHETIC_WHEEL_FILES: tuple[str, ...] = (
-    "chunkhound/watchman_runtime/loader.py",
-    "chunkhound/watchman_runtime/bridge.py",
-    *watchman_verifier._REQUIRED_WHEEL_PATHS,
-)
 _SYNTHETIC_TEXT_FILES: dict[str, str] = {
     "chunkhound/__init__.py": '"""Synthetic ChunkHound test package."""\n',
 }
@@ -24,6 +19,34 @@ _SYNTHETIC_TEXT_FILES: dict[str, str] = {
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def _host_runtime_wheel_name() -> str:
+    host_platform = hatch_build._host_watchman_platform()
+    if host_platform == "linux-x86_64":
+        return "chunkhound-0.0.0-py3-none-manylinux_2_36_x86_64.whl"
+    if host_platform == "windows-x86_64":
+        return "chunkhound-0.0.0-py3-none-win_amd64.whl"
+    raise AssertionError(f"Unsupported native Watchman test host: {host_platform}")
+
+
+def _other_supported_wheel_name() -> str:
+    host_platform = hatch_build._host_watchman_platform()
+    if host_platform == "linux-x86_64":
+        return "chunkhound-0.0.0-py3-none-win_amd64.whl"
+    if host_platform == "windows-x86_64":
+        return "chunkhound-0.0.0-py3-none-manylinux_2_36_x86_64.whl"
+    raise AssertionError(f"Unsupported native Watchman test host: {host_platform}")
+
+
+def _synthetic_wheel_files() -> tuple[str, ...]:
+    return (
+        "chunkhound/watchman_runtime/loader.py",
+        "chunkhound/watchman_runtime/bridge.py",
+        *watchman_verifier._required_wheel_paths_for_platforms(
+            (hatch_build._host_watchman_platform(),)
+        ),
+    )
 
 
 def _host_runtime_binary_path() -> str:
@@ -80,7 +103,7 @@ def _build_synthetic_watchman_wheel(
             info.external_attr = 0o644 << 16
             zf.writestr(info, content, compress_type=zipfile.ZIP_DEFLATED)
 
-        for relative_path in _SYNTHETIC_WHEEL_FILES:
+        for relative_path in _synthetic_wheel_files():
             if relative_path in excluded:
                 continue
             overridden_text = overrides.get(relative_path)
@@ -122,13 +145,13 @@ def test_main_accepts_synthetic_platform_wheel(
 ) -> None:
     wheel_path = _build_synthetic_watchman_wheel(
         tmp_path,
-        wheel_name="chunkhound-0.0.0-py3-none-manylinux_2_36_x86_64.whl",
+        wheel_name=_host_runtime_wheel_name(),
     )
     calls: list[Path] = []
     monkeypatch.setattr(
         watchman_verifier,
         "_verify_runtime_reads",
-        lambda *, wheel_path: calls.append(wheel_path),
+        lambda *, wheel_path, runtime_platform: calls.append(wheel_path),
     )
 
     assert watchman_verifier.main([str(wheel_path)]) == 0
@@ -148,7 +171,7 @@ def test_main_rejects_universal_wheel_tag(tmp_path: Path) -> None:
 def test_main_rejects_missing_required_runtime_resource(tmp_path: Path) -> None:
     wheel_path = _build_synthetic_watchman_wheel(
         tmp_path,
-        wheel_name="chunkhound-0.0.0-py3-none-manylinux_2_36_x86_64.whl",
+        wheel_name=_host_runtime_wheel_name(),
         excluded_paths={_host_runtime_binary_path()},
     )
 
@@ -156,10 +179,20 @@ def test_main_rejects_missing_required_runtime_resource(tmp_path: Path) -> None:
         watchman_verifier.main([str(wheel_path)])
 
 
+def test_main_rejects_runtime_slot_that_mismatches_wheel_tag(tmp_path: Path) -> None:
+    wheel_path = _build_synthetic_watchman_wheel(
+        tmp_path,
+        wheel_name=_other_supported_wheel_name(),
+    )
+
+    with pytest.raises(RuntimeError, match="does not match wheel tag"):
+        watchman_verifier.main([str(wheel_path)])
+
+
 def test_main_rejects_unexpected_non_host_runtime_resource(tmp_path: Path) -> None:
     wheel_path = _build_synthetic_watchman_wheel(
         tmp_path,
-        wheel_name="chunkhound-0.0.0-py3-none-manylinux_2_36_x86_64.whl",
+        wheel_name=_host_runtime_wheel_name(),
         extra_text_files={
             "chunkhound/watchman_runtime/platforms/macos-arm64/bin/watchman": (
                 "#!/bin/sh\nexit 0\n"
@@ -176,16 +209,41 @@ def test_main_surfaces_runtime_verification_failures(
 ) -> None:
     wheel_path = _build_synthetic_watchman_wheel(
         tmp_path,
-        wheel_name="chunkhound-0.0.0-py3-none-manylinux_2_36_x86_64.whl",
+        wheel_name=_host_runtime_wheel_name(),
     )
     monkeypatch.setattr(
         watchman_verifier,
         "_verify_runtime_reads",
-        lambda *, wheel_path: (_ for _ in ()).throw(RuntimeError("native daemon")),
+        lambda *, wheel_path, runtime_platform: (_ for _ in ()).throw(
+            RuntimeError("native daemon")
+        ),
     )
 
     with pytest.raises(RuntimeError, match="native daemon"):
         watchman_verifier.main([str(wheel_path)])
+
+
+def test_main_skips_runtime_probe_for_supported_wheel_on_unsupported_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel_path = _build_synthetic_watchman_wheel(
+        tmp_path,
+        wheel_name=_host_runtime_wheel_name(),
+    )
+    monkeypatch.setattr(
+        watchman_verifier.hatch_build,
+        "_host_watchman_platform",
+        lambda **_: "macos-arm64",
+    )
+    monkeypatch.setattr(
+        watchman_verifier,
+        "_verify_runtime_reads",
+        lambda **_kwargs: pytest.fail(
+            "runtime execution should be skipped on unsupported hosts"
+        ),
+    )
+
+    assert watchman_verifier.main([str(wheel_path)]) == 0
 
 
 def test_remove_tree_with_retries_retries_permission_error(

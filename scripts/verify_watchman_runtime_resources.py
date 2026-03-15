@@ -22,21 +22,26 @@ _LIVE_MUTATION_TIMEOUT_ENV = (
     "CHUNKHOUND_WATCHMAN_RUNTIME_VERIFY_LIVE_TIMEOUT_SECONDS"
 )
 _RUNTIME_SLOT_PREFIX = "chunkhound/watchman_runtime/platforms/"
+_RUNTIME_MANIFEST_SUFFIX = "/manifest.json"
 
 
-def _required_runtime_platforms() -> tuple[str, ...]:
-    return (hatch_build._host_watchman_platform(),)
+def _supported_runtime_platforms() -> tuple[str, ...]:
+    return tuple(sorted(hatch_build._load_supported_watchman_platforms()))
 
 
-def _required_wheel_paths() -> tuple[str, ...]:
+def _runtime_manifest_path(platform_tag: str) -> Path:
+    return _WATCHMAN_RUNTIME_ROOT / "platforms" / platform_tag / "manifest.json"
+
+
+def _required_wheel_paths_for_platforms(
+    platform_tags: tuple[str, ...],
+) -> tuple[str, ...]:
     required = [
         "chunkhound/watchman_runtime/__init__.py",
         "chunkhound/watchman_runtime/README.md",
     ]
-    for platform_tag in _required_runtime_platforms():
-        manifest_path = (
-            _WATCHMAN_RUNTIME_ROOT / "platforms" / platform_tag / "manifest.json"
-        )
+    for platform_tag in platform_tags:
+        manifest_path = _runtime_manifest_path(platform_tag)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         required.append(
             f"chunkhound/watchman_runtime/platforms/{platform_tag}/manifest.json"
@@ -51,8 +56,63 @@ def _required_wheel_paths() -> tuple[str, ...]:
             )
     return tuple(required)
 
+def _runtime_platform_from_wheel_filename(wheel_path: Path) -> str:
+    platform_fragment = wheel_path.name[: -len(".whl")].rsplit("-py3-none-", 1)[-1]
+    for tag in platform_fragment.split("."):
+        if tag == "win_amd64":
+            return "windows-x86_64"
+        if tag.endswith("x86_64") and "linux" in tag:
+            return "linux-x86_64"
 
-_REQUIRED_WHEEL_PATHS: tuple[str, ...] = _required_wheel_paths()
+    rendered = ", ".join(_supported_runtime_platforms())
+    raise RuntimeError(
+        "Wheel tag does not map to a supported Watchman runtime platform: "
+        f"{wheel_path} ({platform_fragment!r}; supported runtime platforms: {rendered})"
+    )
+
+
+def _runtime_platforms_in_wheel(
+    *, wheel_path: Path, names: set[str]
+) -> tuple[str, ...]:
+    discovered = tuple(
+        sorted(
+            path[len(_RUNTIME_SLOT_PREFIX) : -len(_RUNTIME_MANIFEST_SUFFIX)]
+            for path in names
+            if path.startswith(_RUNTIME_SLOT_PREFIX)
+            and path.endswith(_RUNTIME_MANIFEST_SUFFIX)
+        )
+    )
+    if not discovered:
+        raise RuntimeError(
+            "Wheel is missing a required Watchman runtime manifest: "
+            f"{wheel_path}"
+        )
+
+    supported = set(_supported_runtime_platforms())
+    unexpected = sorted(
+        platform for platform in discovered if platform not in supported
+    )
+    if unexpected:
+        unexpected_rendered = ", ".join(unexpected)
+        raise RuntimeError(
+            "Wheel contains unsupported Watchman runtime platform manifests: "
+            f"{wheel_path} ({unexpected_rendered})"
+        )
+
+    if len(discovered) != 1:
+        rendered = ", ".join(discovered)
+        raise RuntimeError(
+            "Watchman runtime wheels must contain exactly one packaged runtime "
+            f"platform slot: {wheel_path} ({rendered})"
+        )
+
+    expected_platform = _runtime_platform_from_wheel_filename(wheel_path)
+    if discovered[0] != expected_platform:
+        raise RuntimeError(
+            "Wheel runtime slot does not match wheel tag: "
+            f"{wheel_path} (slot={discovered[0]!r}, expected={expected_platform!r})"
+        )
+    return discovered
 
 
 def _terminate_process_tree(pid: int) -> None:
@@ -90,10 +150,12 @@ def _verify_wheel_has_platform_only_tag(wheel_path: Path) -> None:
         )
 
 
-def _verify_wheel_contents(wheel_path: Path) -> None:
+def _verify_wheel_contents(wheel_path: Path) -> str:
     with zipfile.ZipFile(wheel_path) as zf:
         names = set(zf.namelist())
-    missing = [path for path in _REQUIRED_WHEEL_PATHS if path not in names]
+    runtime_platforms = _runtime_platforms_in_wheel(wheel_path=wheel_path, names=names)
+    required_wheel_paths = _required_wheel_paths_for_platforms(runtime_platforms)
+    missing = [path for path in required_wheel_paths if path not in names]
     if missing:
         missing_rendered = "\n".join(f"- {item}" for item in missing)
         raise RuntimeError(
@@ -105,7 +167,7 @@ def _verify_wheel_contents(wheel_path: Path) -> None:
         for path in names
         if path.startswith(_RUNTIME_SLOT_PREFIX)
         and not path.endswith("/")
-        and path not in _REQUIRED_WHEEL_PATHS
+        and path not in required_wheel_paths
     )
     if unexpected:
         unexpected_rendered = "\n".join(f"- {item}" for item in unexpected)
@@ -113,9 +175,15 @@ def _verify_wheel_contents(wheel_path: Path) -> None:
             "Wheel contains unexpected Watchman runtime resources: "
             f"{wheel_path}\n{unexpected_rendered}"
         )
+    return runtime_platforms[0]
 
 
-def _verify_runtime_reads(*, wheel_path: Path) -> None:
+def _should_verify_runtime_reads(runtime_platform: str) -> bool:
+    return runtime_platform == hatch_build._host_watchman_platform()
+
+
+def _verify_runtime_reads(*, wheel_path: Path, runtime_platform: str) -> None:
+    system_name, machine_name = runtime_platform.split("-", maxsplit=1)
     root = Path(tempfile.mkdtemp(prefix="chunkhound-watchman-wheel-verify-"))
     try:
         with zipfile.ZipFile(wheel_path) as zf:
@@ -131,6 +199,9 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                 "import time",
                 "from pathlib import Path",
                 "",
+                f"SYSTEM_NAME = {system_name!r}",
+                f"MACHINE_NAME = {machine_name!r}",
+                "",
                 (
                     "from chunkhound.watchman_runtime.loader import "
                     "build_watchman_client_command, "
@@ -142,10 +213,14 @@ def _verify_runtime_reads(*, wheel_path: Path) -> None:
                     "resolve_packaged_watchman_runtime"
                 ),
                 "",
-                "runtime = resolve_packaged_watchman_runtime()",
+                (
+                    "runtime = resolve_packaged_watchman_runtime("
+                    "system_name=SYSTEM_NAME, machine_name=MACHINE_NAME)"
+                ),
                 (
                     "binary_path = materialize_watchman_binary("
-                    "destination_root=Path('materialized'))"
+                    "destination_root=Path('materialized'), "
+                    "system_name=SYSTEM_NAME, machine_name=MACHINE_NAME)"
                 ),
                 "assert binary_path.is_file()",
                 "if os.name != 'nt':",
@@ -451,8 +526,12 @@ def main(argv: list[str] | None = None) -> int:
 
     for wheel_path in wheel_paths:
         _verify_wheel_has_platform_only_tag(wheel_path)
-        _verify_wheel_contents(wheel_path)
-        _verify_runtime_reads(wheel_path=wheel_path)
+        runtime_platform = _verify_wheel_contents(wheel_path)
+        if _should_verify_runtime_reads(runtime_platform):
+            _verify_runtime_reads(
+                wheel_path=wheel_path,
+                runtime_platform=runtime_platform,
+            )
 
     return 0
 

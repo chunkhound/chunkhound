@@ -1,8 +1,0 @@
-{
-  "platform": "macos-x86_64",
-  "runtime_version": "watchman-runtime-bridge-2026-03",
-  "binary": "bin/watchman",
-  "launch_mode": "python_bridge",
-  "probe_args": ["--version"],
-  "packaging_decision": "Watchman-carrying wheels must be platform-specific and must not be published as py3-none-any."
-}

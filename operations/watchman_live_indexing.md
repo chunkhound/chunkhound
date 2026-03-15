@@ -9,9 +9,10 @@ flow against a local project checkout.
 - `watchman` is the default realtime backend only in installs that already ship
   a packaged native Watchman runtime. Today that means the platform-specific
   Linux `x86_64` and Windows `x86_64` wheels.
-- On macOS, ChunkHound defaults to `watchdog` and operators should treat
-  `backend=watchman` as unsupported until a native payload is validated on a
-  macOS host.
+- On macOS, ChunkHound stays fallback-only in this rollout: `watchdog` is the
+  default, `polling` remains an explicit fallback, and `backend=watchman`
+  should be treated as unsupported because no packaged Watchman runtime slot is
+  shipped for macOS.
 - Source checkouts and editable installs do not embed the native payloads, so
   they default to `watchdog` unless operators explicitly set
   `realtime_backend=watchman` and accept the pinned-source hydration path.
@@ -155,5 +156,5 @@ Current status:
   realtime backend.
 - In source checkouts and editable installs, `watchdog` remains the default
   unless operators explicitly opt into `watchman`.
-- On macOS, `watchdog` is the default and `polling` remains an explicit
-  fallback.
+- On macOS, no Watchman runtime slot is staged in this rollout; `watchdog` is
+  the default and `polling` remains an explicit fallback.

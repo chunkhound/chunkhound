@@ -30,6 +30,9 @@ _MACHINE_ALIASES = {
     "aarch64": "arm64",
     "x64": "x86_64",
 }
+# macOS intentionally ships no packaged Watchman runtime slot in this rollout.
+# Keep macOS on the fallback backends until a separate macOS-native follow-up
+# exists.
 _SUPPORTED_PLATFORM_ROOTS = {
     ("linux", "x86_64"): PurePosixPath("platforms/linux-x86_64"),
     ("windows", "x86_64"): PurePosixPath("platforms/windows-x86_64"),
