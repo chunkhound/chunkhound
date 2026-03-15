@@ -21,6 +21,7 @@ _WATCHMAN_RUNTIME_ROOT = _REPO_ROOT / "chunkhound" / "watchman_runtime"
 _LIVE_MUTATION_TIMEOUT_ENV = (
     "CHUNKHOUND_WATCHMAN_RUNTIME_VERIFY_LIVE_TIMEOUT_SECONDS"
 )
+_RUNTIME_SLOT_PREFIX = "chunkhound/watchman_runtime/platforms/"
 
 
 def _required_runtime_platforms() -> tuple[str, ...]:
@@ -98,6 +99,19 @@ def _verify_wheel_contents(wheel_path: Path) -> None:
         raise RuntimeError(
             "Wheel is missing required Watchman runtime resources: "
             f"{wheel_path}\n{missing_rendered}"
+        )
+    unexpected = sorted(
+        path
+        for path in names
+        if path.startswith(_RUNTIME_SLOT_PREFIX)
+        and not path.endswith("/")
+        and path not in _REQUIRED_WHEEL_PATHS
+    )
+    if unexpected:
+        unexpected_rendered = "\n".join(f"- {item}" for item in unexpected)
+        raise RuntimeError(
+            "Wheel contains unexpected Watchman runtime resources: "
+            f"{wheel_path}\n{unexpected_rendered}"
         )
 
 

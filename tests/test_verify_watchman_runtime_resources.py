@@ -46,7 +46,9 @@ def _host_runtime_binary_path() -> str:
 def _hydrated_runtime_sources() -> dict[str, Path]:
     return {
         destination_path: Path(source_path)
-        for source_path, destination_path in hatch_build._hydrate_runtime_for_build().items()
+        for source_path, destination_path in (
+            hatch_build._hydrate_runtime_for_build().items()
+        )
     }
 
 
@@ -56,15 +58,23 @@ def _build_synthetic_watchman_wheel(
     wheel_name: str,
     excluded_paths: set[str] | None = None,
     overridden_text_files: dict[str, str] | None = None,
+    extra_text_files: dict[str, str] | None = None,
 ) -> Path:
     repo_root = _repo_root()
     wheel_path = tmp_path / wheel_name
     excluded = excluded_paths or set()
     overrides = overridden_text_files or {}
+    extras = extra_text_files or {}
     hydrated_runtime_sources = _hydrated_runtime_sources()
 
     with zipfile.ZipFile(wheel_path, "w") as zf:
         for relative_path, content in _SYNTHETIC_TEXT_FILES.items():
+            info = zipfile.ZipInfo(relative_path)
+            info.create_system = 3
+            info.external_attr = 0o644 << 16
+            zf.writestr(info, content, compress_type=zipfile.ZIP_DEFLATED)
+
+        for relative_path, content in extras.items():
             info = zipfile.ZipInfo(relative_path)
             info.create_system = 3
             info.external_attr = 0o644 << 16
@@ -90,7 +100,9 @@ def _build_synthetic_watchman_wheel(
             hydrated_source_path = hydrated_runtime_sources.get(relative_path)
             if hydrated_source_path is not None:
                 payload = hydrated_source_path.read_bytes()
-                info.external_attr = (hydrated_source_path.stat().st_mode & 0xFFFF) << 16
+                info.external_attr = (
+                    hydrated_source_path.stat().st_mode & 0xFFFF
+                ) << 16
             elif source_path.exists():
                 payload = source_path.read_bytes()
                 info.external_attr = (source_path.stat().st_mode & 0xFFFF) << 16
@@ -141,6 +153,21 @@ def test_main_rejects_missing_required_runtime_resource(tmp_path: Path) -> None:
     )
 
     with pytest.raises(RuntimeError, match="missing required Watchman runtime"):
+        watchman_verifier.main([str(wheel_path)])
+
+
+def test_main_rejects_unexpected_non_host_runtime_resource(tmp_path: Path) -> None:
+    wheel_path = _build_synthetic_watchman_wheel(
+        tmp_path,
+        wheel_name="chunkhound-0.0.0-py3-none-manylinux_2_36_x86_64.whl",
+        extra_text_files={
+            "chunkhound/watchman_runtime/platforms/macos-arm64/bin/watchman": (
+                "#!/bin/sh\nexit 0\n"
+            )
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected Watchman runtime"):
         watchman_verifier.main([str(wheel_path)])
 
 

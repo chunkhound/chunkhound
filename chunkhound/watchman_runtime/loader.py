@@ -1307,9 +1307,14 @@ def build_watchman_runtime_force_include_entries(
     package_root = (
         PurePosixPath("chunkhound")
         / "watchman_runtime"
-        / runtime.relative_root
     )
-    entries: dict[str, str] = {}
+    manifest_relative_path = runtime.relative_root / "manifest.json"
+    entries: dict[str, str] = {
+        str(_PACKAGE_ROOT / Path(*manifest_relative_path.parts)): (
+            package_root / manifest_relative_path
+        ).as_posix()
+    }
+    package_root = package_root / runtime.relative_root
     for relative_path in (
         runtime.relative_binary_path,
         *runtime.relative_support_paths,
