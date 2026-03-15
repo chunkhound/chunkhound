@@ -297,6 +297,81 @@ class StdioMCPServer(MCPServerBase):
                 import traceback
 
                 traceback.print_exc(file=sys.stderr)
+            _respond_with_startup_error(e, getattr(self, "config", None))
+
+
+def _respond_with_startup_error(error: Exception, config: Any = None) -> None:
+    """Write startup error to a log file and send a JSON-RPC error response.
+
+    Called when the server crashes before the MCP stdio loop starts, so the
+    MCP client (e.g. Claude Code) receives a readable error instead of a
+    silent process exit.
+    """
+    import json
+    import select
+    import traceback as _tb
+    from pathlib import Path as _Path
+
+    error_msg = str(error)
+    error_traceback = _tb.format_exc()
+
+    # Generate a hint for well-known failure modes
+    hint = ""
+    if "Could not set lock" in error_msg or "Conflicting lock" in error_msg:
+        hint = (
+            "Another chunkhound process is holding a lock on the database. "
+            "Run: kill $(pgrep -f 'chunkhound mcp') to stop stale processes, "
+            "then reconnect."
+        )
+
+    # Always write to an error log (regardless of --debug flag)
+    try:
+        log_path = "/tmp/chunkhound_mcp_error.log"
+        if (
+            config is not None
+            and getattr(config, "database", None) is not None
+            and getattr(config.database, "path", None) is not None
+        ):
+            db_dir = _Path(config.database.path).parent
+            try:
+                db_dir.mkdir(parents=True, exist_ok=True)
+                log_path = str(db_dir / "startup_error.log")
+            except Exception:
+                pass
+        with open(log_path, "a") as f:
+            f.write(f"ChunkHound MCP startup error: {error_msg}\n")
+            if error_traceback and error_traceback != "NoneType: None\n":
+                f.write(f"Traceback:\n{error_traceback}\n")
+            if hint:
+                f.write(f"Hint: {hint}\n")
+    except Exception:
+        pass
+
+    # Attempt to respond to the pending initialize request so the MCP client
+    # can surface a human-readable error message.
+    try:
+        # Use select with a short timeout so we don't block if stdin is empty
+        ready, _, _ = select.select([sys.stdin], [], [], 2.0)
+        if ready:
+            line = sys.stdin.readline()
+            if line.strip():
+                req = json.loads(line)
+                if req.get("method") == "initialize":
+                    full_msg = f"ChunkHound startup failed: {error_msg}"
+                    if hint:
+                        full_msg += f"  |  {hint}"
+                    error_resp = {
+                        "jsonrpc": "2.0",
+                        "id": req.get("id"),
+                        "error": {
+                            "code": -32000,
+                            "message": full_msg,
+                        },
+                    }
+                    sys.stdout.write(json.dumps(error_resp) + "\n")
+                    sys.stdout.flush()
+    except Exception:
+        pass
 
 
 async def main(args: Any = None) -> None:
@@ -328,14 +403,10 @@ async def main(args: Any = None) -> None:
     config, validation_errors = create_validated_config(args, "mcp")
 
     if validation_errors:
-        # CRITICAL: Cannot print to stderr in MCP mode - breaks JSON-RPC protocol
-        # Log to debug file if available, then exit
-        debug_file = os.getenv("CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_mcp_debug.log")
-        try:
-            with open(debug_file, "a") as f:
-                f.write(f"MCP validation errors: {validation_errors}\n")
-        except Exception:
-            pass
+        msg = "; ".join(str(e) for e in validation_errors)
+        _respond_with_startup_error(
+            Exception(f"Configuration errors: {msg}")
+        )
         sys.exit(1)
 
     # Create and run the stdio server
@@ -343,17 +414,7 @@ async def main(args: Any = None) -> None:
         server = StdioMCPServer(config, args=args)
         await server.run()
     except Exception as e:
-        # CRITICAL: Cannot print to stderr in MCP mode - breaks JSON-RPC protocol
-        # Log to debug file if available, then exit
-        debug_file = os.getenv("CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_mcp_debug.log")
-        try:
-            import traceback
-
-            with open(debug_file, "a") as f:
-                f.write(f"MCP server error: {e}\n")
-                traceback.print_exc(file=f)
-        except Exception:
-            pass
+        _respond_with_startup_error(e, config)
         sys.exit(1)
 
 
