@@ -65,4 +65,6 @@ def extract_at_rule_name(node: Node, content: bytes) -> str:
                 name = node_text(child, content).strip()
                 return f"@keyframes {name}"
         return f"@keyframes_line{node.start_point[0] + 1}"
-    return f"rule_line{node.start_point[0] + 1}"
+    # Fallback for unexpected at-rule types; use @ prefix for naming consistency.
+    at_name = node.type.replace("_statement", "")
+    return f"@{at_name}_line{node.start_point[0] + 1}"

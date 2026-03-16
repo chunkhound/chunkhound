@@ -70,7 +70,8 @@ class ScssMapping(BaseMapping):
         # Use preprocessed content so byte offsets from the AST (built on the
         # preprocessed source) stay aligned with the bytes we slice into.
         preprocessed = self.preprocess_for_ast(source)
-        return self._identifier_name(node, preprocessed.encode("utf-8", errors="replace"))
+        preprocessed_bytes = preprocessed.encode("utf-8", errors="replace")
+        return self._identifier_name(node, preprocessed_bytes)
 
     def extract_class_name(self, node: Node | None, source: str) -> str:
         """SCSS has no class definitions; always returns empty string."""
@@ -140,6 +141,7 @@ class ScssMapping(BaseMapping):
                 return f"@function {self._identifier_name(node, content)}"
             elif node.type == "rule_set":
                 return selector_text(node, content)
+            # Unexpected node type — fall through to final return "unnamed".
 
         elif concept == UniversalConcept.BLOCK:
             if node.type == "include_statement":

@@ -14,6 +14,7 @@ recursive approach to create chunks that:
 - Ensure plug-and-play compatibility with existing systems
 """
 
+import logging
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -241,8 +242,7 @@ class UniversalParser:
         content_bytes = content.encode("utf-8")
         ast_bytes_len = len(ast_source.encode("utf-8"))
         if ast_bytes_len != len(content_bytes):
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
+            logging.getLogger(__name__).warning(
                 "preprocess_for_ast changed byte length (%d → %d) for %s; "
                 "chunk text may be misaligned",
                 len(content_bytes),

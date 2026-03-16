@@ -12,9 +12,9 @@ from typing import Any
 from tree_sitter import Node
 
 from chunkhound.core.types.common import Language
-# node_text lives in css_family_helpers because it is a generic tree-sitter
-# byte-slice utility shared by the CSS family; it has no CSS semantics.
 from chunkhound.parsers.mappings._shared.css_family_helpers import (
+    # node_text lives in css_family_helpers because it is a generic tree-sitter
+    # byte-slice utility shared by the web-language family (CSS, SCSS, HTML).
     node_text,
     resolve_capture,
 )
@@ -168,7 +168,7 @@ class HtmlMapping(BaseMapping):
     def get_query_for_concept(self, concept: UniversalConcept) -> str | None:
         """Get tree-sitter query for a universal concept in HTML."""
         if concept == UniversalConcept.BLOCK:
-            # Capture all elements; filtering to semantic/custom happens in extract_content
+            # All elements captured; semantic/custom filtering in extract_content.
             return """
                 (element) @definition
                 (script_element) @definition
@@ -224,6 +224,8 @@ class HtmlMapping(BaseMapping):
                     src = self._get_attribute(start_tag, "src", content)
                     if src:
                         return src
+                # Unrecognised import tag (no start_tag, or not link/script) —
+                # fall through to "unnamed".
 
         return "unnamed"
 
