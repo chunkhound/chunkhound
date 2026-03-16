@@ -92,18 +92,10 @@ class TestUpdateProgressWithSpeedHelper:
         self.mock_progress.advance.assert_called_once()
 
     def test_valid_progress_update_succeeds(self):
-        """Valid progress state should update speed display.
-
-        Speed is now calculated from self._embed_start_time (wallclock),
-        not from task_obj.elapsed (Rich internal).
-        """
-        import time
-
+        """Valid progress state should update speed display."""
         mock_task = MagicMock()
+        mock_task.elapsed = 5.0
         self.mock_progress.tasks = {1: mock_task}
-
-        # Set wallclock start 5 seconds ago so speed is ~20 chunks/s
-        self.service._embed_start_time = time.monotonic() - 5.0
 
         self.service._update_progress_with_speed(
             embed_task=1,
@@ -115,9 +107,9 @@ class TestUpdateProgressWithSpeedHelper:
         # Both advance and update should be called
         self.mock_progress.advance.assert_called_once_with(1, 10)
         self.mock_progress.update.assert_called_once()
-        # Speed should be non-zero (approximately 100/5 = 20 chunks/s)
+        # Check speed was calculated: 100 / 5.0 = 20.0
         call_args = self.mock_progress.update.call_args
-        assert "chunks/s" in str(call_args), f"Speed not in update call: {call_args}"
+        assert "20.0 chunks/s" in str(call_args)
 
     def test_zero_elapsed_skips_speed_update(self):
         """Zero elapsed time should skip speed calculation (avoid division)."""
@@ -216,12 +208,10 @@ class TestProgressFailuresDoNotMaskEmbeddingErrors:
     async def test_successful_embedding_with_broken_progress(self):
         """Successful embeddings should complete even if progress tracking fails."""
         # Configure embedding provider to succeed (async method needs AsyncMock)
-        self.mock_embedding_provider.embed = AsyncMock(
-            return_value=[
-                [0.1] * 768,
-                [0.2] * 768,
-            ]
-        )
+        self.mock_embedding_provider.embed = AsyncMock(return_value=[
+            [0.1] * 768,
+            [0.2] * 768,
+        ])
 
         # Configure progress to fail
         self.mock_progress.tasks = {}  # Will raise KeyError
@@ -250,119 +240,14 @@ class TestExceptionTupleCompleteness:
 
     EXCEPTION_TUPLE = (AttributeError, IndexError, TypeError, KeyError)
 
-    @pytest.mark.parametrize(
-        "exception_class,scenario",
-        [
-            (KeyError, "task ID not in progress.tasks dict"),
-            (AttributeError, "task object missing attribute"),
-            (IndexError, "task ID out of range in list-like container"),
-            (TypeError, "elapsed has incompatible type for comparison/division"),
-        ],
-    )
+    @pytest.mark.parametrize("exception_class,scenario", [
+        (KeyError, "task ID not in progress.tasks dict"),
+        (AttributeError, "task object missing attribute"),
+        (IndexError, "task ID out of range in list-like container"),
+        (TypeError, "elapsed has incompatible type for comparison/division"),
+    ])
     def test_all_expected_exceptions_are_in_tuple(self, exception_class, scenario):
         """Verify each expected exception type is in the catch tuple."""
         assert exception_class in self.EXCEPTION_TUPLE, (
             f"Missing {exception_class} for: {scenario}"
-        )
-
-
-class TestWallclockSpeedCalculation:
-    """Speed must use wallclock time, not Rich's _Task.elapsed.
-
-    Rich's _Task object does not guarantee an `elapsed` attribute across
-    all versions. A wallclock timer owned by the service is always safe.
-    """
-
-    def test_speed_calculated_even_when_task_elapsed_raises(self):
-        """Even if task.elapsed raises AttributeError, speed must still appear.
-
-        The service must use self._embed_start_time (wallclock), not
-        task_obj.elapsed (Rich internal), for speed calculation.
-        """
-        import time
-        from unittest.mock import PropertyMock
-
-        from rich.progress import Progress
-
-        svc = EmbeddingService.__new__(EmbeddingService)
-
-        # Mock progress where task.elapsed always raises AttributeError
-        mock_task = MagicMock()
-        type(mock_task).elapsed = PropertyMock(
-            side_effect=AttributeError("_Task has no attribute 'elapsed'")
-        )
-        mock_progress = MagicMock(spec=Progress)
-        mock_progress.tasks = {0: mock_task}
-        svc.progress = mock_progress
-
-        # Set wallclock timer 2 seconds in the past — 10 chunks processed
-        svc._embed_start_time = time.monotonic() - 2.0
-
-        svc._update_progress_with_speed(
-            embed_task=0, batch_size=10, processed_count=10, batch_num=1
-        )
-
-        update_calls = mock_progress.update.call_args_list
-        assert update_calls, "progress.update was never called — speed not displayed"
-        speed_str = update_calls[-1].kwargs.get("speed", "")
-        assert speed_str and speed_str != "0.0 chunks/s", (
-            f"Expected non-zero speed (should be ~5.0 chunks/s), got: {speed_str!r}"
-        )
-
-    def test_embed_start_time_is_float_after_method_entry(self):
-        """_embed_start_time must be set as a float on every call entry.
-
-        Runtime behavioral test: call _generate_embeddings_in_batches with
-        empty input and assert the attribute is a float in wallclock range.
-        """
-        import asyncio
-        import time
-
-        svc = EmbeddingService.__new__(EmbeddingService)
-        svc.progress = None
-
-        before = time.monotonic()
-        try:
-            asyncio.run(svc._generate_embeddings_in_batches([], show_progress=False))
-        except Exception:
-            pass  # not testing correctness, just that the attr is set
-        after = time.monotonic()
-
-        assert hasattr(svc, "_embed_start_time"), (
-            "_embed_start_time not set — add "
-            "self._embed_start_time = time.monotonic() as first line of "
-            "_generate_embeddings_in_batches"
-        )
-        assert isinstance(svc._embed_start_time, float), (
-            f"_embed_start_time should be float, got: {type(svc._embed_start_time)}"
-        )
-        assert before <= svc._embed_start_time <= after + 1.0, (
-            "_embed_start_time is outside expected wallclock range"
-        )
-
-    def test_embed_start_time_resets_on_second_call(self):
-        """_embed_start_time must reset on every call, not just the first.
-
-        If the same EmbeddingService processes a second batch (incremental
-        re-index), elapsed time must reflect the current run only — not
-        include idle time from a prior run.
-        """
-        import asyncio
-        import time
-
-        svc = EmbeddingService.__new__(EmbeddingService)
-        svc.progress = None
-
-        # Simulate a stale start time from a previous run (1 hour ago)
-        svc._embed_start_time = time.monotonic() - 3600.0
-        stale_start = svc._embed_start_time
-
-        try:
-            asyncio.run(svc._generate_embeddings_in_batches([], show_progress=False))
-        except Exception:
-            pass
-
-        assert svc._embed_start_time > stale_start + 3500, (
-            "_embed_start_time was not reset — second run will report stale speed. "
-            f"old={stale_start:.1f}, current={svc._embed_start_time:.1f}"
         )
