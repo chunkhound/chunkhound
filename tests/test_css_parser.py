@@ -210,5 +210,47 @@ def test_comprehensive_file(css_parser, comprehensive_css):
     assert len(import_chunks) >= 1, f"Expected at least 1 import, got {len(import_chunks)}"
 
 
+def test_parses_star_variables_chunk_type(css_parser):
+    """* rule with custom properties produces a BLOCK chunk with is_root_vars=True."""
+    code = """* {
+  --margin: 0;
+  --padding: 0;
+}"""
+    chunks = css_parser.parse_content(code, "test.css", file_id=1)
+    block_chunks = [c for c in chunks if c.chunk_type == ChunkType.BLOCK]
+    assert len(block_chunks) > 0, "No BLOCK chunk for * with custom properties"
+    assert any(
+        c.metadata and c.metadata.get("is_root_vars") is True for c in block_chunks
+    ), "is_root_vars not True for * with --vars"
+
+
+def test_comment_query_is_valid():
+    """CssMapping.get_comment_query returns a non-empty CSS comment query."""
+    from chunkhound.parsers.mappings.css import CssMapping
+    css = CssMapping()
+    query = css.get_comment_query()
+    assert query, "get_comment_query returned empty string"
+    assert "comment" in query
+
+
+def test_resolve_import_paths_url(tmp_path):
+    """resolve_import_paths strips url(...) wrapper and resolves the path."""
+    from chunkhound.parsers.mappings.css import CssMapping
+    css = CssMapping()
+    # Create a real file for the resolver to find
+    (tmp_path / "reset.css").write_text("*{margin:0}")
+    resolved = css.resolve_import_paths('url("reset.css")', tmp_path, tmp_path / "style.css")
+    assert len(resolved) == 1
+    assert resolved[0] == tmp_path / "reset.css"
+
+
+def test_resolve_import_paths_not_found(tmp_path):
+    """resolve_import_paths returns empty list when the file does not exist."""
+    from chunkhound.parsers.mappings.css import CssMapping
+    css = CssMapping()
+    resolved = css.resolve_import_paths('"nonexistent.css"', tmp_path, tmp_path / "style.css")
+    assert resolved == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

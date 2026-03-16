@@ -12,7 +12,12 @@ from typing import Any
 from tree_sitter import Node
 
 from chunkhound.core.types.common import Language
-from chunkhound.parsers.mappings._shared.css_family_helpers import node_text
+# node_text lives in css_family_helpers because it is a generic tree-sitter
+# byte-slice utility shared by the CSS family; it has no CSS semantics.
+from chunkhound.parsers.mappings._shared.css_family_helpers import (
+    node_text,
+    resolve_capture,
+)
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
@@ -43,14 +48,23 @@ class HtmlMapping(BaseMapping):
         super().__init__(Language.HTML)
 
     def get_function_query(self) -> str:
-        """HTML has no function definitions to extract."""
+        """Get tree-sitter query for function definitions.
+
+        Returns:
+            Empty string — HTML has no function definitions.
+        """
         return ""
 
     def get_class_query(self) -> str:
-        """HTML has no class definitions to extract."""
+        """Get tree-sitter query for class definitions.
+
+        Returns:
+            Empty string — HTML has no class definitions.
+        """
         return ""
 
     def get_comment_query(self) -> str:
+        """Get tree-sitter query for HTML comments."""
         return "(comment) @definition"
 
     def extract_function_name(self, node: Node | None, source: str) -> str:
@@ -120,15 +134,17 @@ class HtmlMapping(BaseMapping):
                 return node_text(value_node, content).strip("\"'")
         return ""
 
+    def _get_start_tag(self, node: Node) -> Node | None:
+        """Return the start_tag child of an element node, or None."""
+        for child in node.children:
+            if child.type == "start_tag":
+                return child
+        return None
+
     def _extract_element_name(self, node: Node, content: bytes) -> str:
         """Derive a human-readable name for an HTML element."""
         tag = self._get_tag_name(node, content)
-        # Find start_tag to query attributes
-        start_tag = None
-        for child in node.children:
-            if child.type == "start_tag":
-                start_tag = child
-                break
+        start_tag = self._get_start_tag(node)
         if start_tag is not None:
             # Prefer id > class > aria-label
             id_val = self._get_attribute(start_tag, "id", content)
@@ -150,8 +166,9 @@ class HtmlMapping(BaseMapping):
     # --- universal concept interface ---
 
     def get_query_for_concept(self, concept: UniversalConcept) -> str | None:
+        """Get tree-sitter query for a universal concept in HTML."""
         if concept == UniversalConcept.BLOCK:
-            # Capture all elements; filtering to semantic/custom happens in extract_name
+            # Capture all elements; filtering to semantic/custom happens in extract_content
             return """
                 (element) @definition
                 (script_element) @definition
@@ -162,9 +179,7 @@ class HtmlMapping(BaseMapping):
         elif concept == UniversalConcept.STRUCTURE:
             return "(doctype) @definition"
         elif concept == UniversalConcept.IMPORT:
-            return """
-                (element) @definition
-            """
+            return "(element) @definition"
         elif concept == UniversalConcept.DEFINITION:
             return ""
         return None
@@ -172,20 +187,14 @@ class HtmlMapping(BaseMapping):
     def extract_name(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
     ) -> str:
-        node = captures.get("definition") or (
-            next(iter(captures.values()), None) if captures else None
-        )
+        """Extract a human-readable name for a captured HTML node."""
+        node = resolve_capture(captures)
         if node is None:
             return "unnamed"
 
         if concept == UniversalConcept.BLOCK:
             if node.type == "script_element":
-                # Try to get src attribute
-                start_tag = None
-                for child in node.children:
-                    if child.type == "start_tag":
-                        start_tag = child
-                        break
+                start_tag = self._get_start_tag(node)
                 if start_tag is not None:
                     src = self._get_attribute(start_tag, "src", content)
                     if src:
@@ -205,11 +214,7 @@ class HtmlMapping(BaseMapping):
         elif concept == UniversalConcept.IMPORT:
             if node.type == "element":
                 tag = self._get_tag_name(node, content)
-                start_tag = None
-                for child in node.children:
-                    if child.type == "start_tag":
-                        start_tag = child
-                        break
+                start_tag = self._get_start_tag(node)
                 if tag == "link" and start_tag is not None:
                     rel = self._get_attribute(start_tag, "rel", content)
                     if rel == "stylesheet":
@@ -225,9 +230,8 @@ class HtmlMapping(BaseMapping):
     def extract_content(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
     ) -> str:
-        node = captures.get("definition") or (
-            next(iter(captures.values()), None) if captures else None
-        )
+        """Extract raw source text for a captured HTML node, or '' to skip it."""
+        node = resolve_capture(captures)
         if node is None:
             return ""
 
@@ -242,11 +246,7 @@ class HtmlMapping(BaseMapping):
             if node.type != "element":
                 return ""
             tag = self._get_tag_name(node, content)
-            start_tag = None
-            for child in node.children:
-                if child.type == "start_tag":
-                    start_tag = child
-                    break
+            start_tag = self._get_start_tag(node)
             if tag == "link" and start_tag is not None:
                 rel = self._get_attribute(start_tag, "rel", content)
                 if rel != "stylesheet":
@@ -263,9 +263,8 @@ class HtmlMapping(BaseMapping):
     def extract_metadata(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
     ) -> dict[str, Any]:
-        node = captures.get("definition") or (
-            next(iter(captures.values()), None) if captures else None
-        )
+        """Build metadata dict for a captured HTML node."""
+        node = resolve_capture(captures)
         metadata: dict[str, Any] = {}
         if node is not None:
             metadata["node_type"] = node.type
@@ -279,6 +278,16 @@ class HtmlMapping(BaseMapping):
     def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
     ) -> list[Path]:
+        """Resolve a relative href or src to an absolute filesystem path.
+
+        Args:
+            import_text: The href/src value extracted from the link/script element.
+            base_dir: Directory of the importing file.
+            source_file: Path of the importing file (unused, for API compat).
+
+        Returns:
+            List with a single resolved Path if it exists, otherwise empty list.
+        """
         # Resolve relative hrefs/srcs to actual paths
         candidate = base_dir / import_text
         if candidate.exists():
@@ -291,4 +300,5 @@ class HtmlMapping(BaseMapping):
         captures: dict[str, Any],
         content: bytes,
     ) -> list[dict[str, str]] | None:
+        """HTML does not define constants via this interface; always returns None."""
         return None

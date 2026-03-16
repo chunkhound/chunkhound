@@ -18,12 +18,15 @@ from tree_sitter import Node
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings._shared.css_family_helpers import (
+    extract_at_rule_name,
     node_text,
+    resolve_capture,
     selector_text,
 )
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
+# Matches SCSS #{...} interpolations for preprocessing.
 _INTERP_RE = re.compile(r"#\{[^}]*\}")
 
 
@@ -42,22 +45,32 @@ class ScssMapping(BaseMapping):
         grammar-valid token, so AST positions remain aligned with the original
         source for text extraction.
         """
-        return _INTERP_RE.sub(lambda m: "x" * len(m.group()), content)
+        return _INTERP_RE.sub(lambda m: "x" * len(m.group().encode("utf-8")), content)
 
     def get_function_query(self) -> str:
+        """Get tree-sitter query for SCSS mixin and function definitions."""
         return "(mixin_statement) @definition (function_statement) @definition"
 
     def get_class_query(self) -> str:
-        """SCSS has no class definitions to extract."""
+        """Get tree-sitter query for class definitions.
+
+        Returns:
+            Empty string — SCSS has no class definitions.
+        """
         return ""
 
     def get_comment_query(self) -> str:
+        """Get tree-sitter query for SCSS comments."""
         return "(comment) @definition"
 
     def extract_function_name(self, node: Node | None, source: str) -> str:
+        """Extract mixin/function name from a mixin or function statement node."""
         if node is None:
             return ""
-        return self._identifier_name(node, source.encode("utf-8", errors="replace"))
+        # Use preprocessed content so byte offsets from the AST (built on the
+        # preprocessed source) stay aligned with the bytes we slice into.
+        preprocessed = self.preprocess_for_ast(source)
+        return self._identifier_name(node, preprocessed.encode("utf-8", errors="replace"))
 
     def extract_class_name(self, node: Node | None, source: str) -> str:
         """SCSS has no class definitions; always returns empty string."""
@@ -82,6 +95,7 @@ class ScssMapping(BaseMapping):
     # --- universal concept interface ---
 
     def get_query_for_concept(self, concept: UniversalConcept) -> str | None:
+        """Get tree-sitter query for a universal concept in SCSS."""
         if concept == UniversalConcept.DEFINITION:
             return """
                 (mixin_statement) @definition
@@ -114,9 +128,8 @@ class ScssMapping(BaseMapping):
     def extract_name(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
     ) -> str:
-        node = captures.get("definition") or (
-            next(iter(captures.values()), None) if captures else None
-        )
+        """Extract a human-readable name for a captured SCSS node."""
+        node = resolve_capture(captures)
         if node is None:
             return "unnamed"
 
@@ -129,20 +142,13 @@ class ScssMapping(BaseMapping):
                 return selector_text(node, content)
 
         elif concept == UniversalConcept.BLOCK:
-            if node.type == "media_statement":
-                for child in node.children:
-                    if child.type not in ("@media", "block"):
-                        cond = node_text(child, content).strip()
-                        return f"@media {cond[:40]}"
-                return f"@media_line{node.start_point[0] + 1}"
-            elif node.type == "keyframes_statement":
-                for child in node.children:
-                    if child.type == "keyframes_name":
-                        name = node_text(child, content).strip()
-                        return f"@keyframes {name}"
-                return f"@keyframes_line{node.start_point[0] + 1}"
-            elif node.type == "include_statement":
+            if node.type == "include_statement":
                 return f"@include_line{node.start_point[0] + 1}"
+            elif node.type in (
+                "media_statement",
+                "keyframes_statement",
+            ):
+                return extract_at_rule_name(node, content)
             else:
                 type_name = node.type.replace("_statement", "")
                 return f"@{type_name}_line{node.start_point[0] + 1}"
@@ -167,9 +173,8 @@ class ScssMapping(BaseMapping):
     def extract_content(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
     ) -> str:
-        node = captures.get("definition") or (
-            next(iter(captures.values()), None) if captures else None
-        )
+        """Extract raw source text for a captured SCSS node, or '' to skip it."""
+        node = resolve_capture(captures)
         if node is None:
             return ""
         # STRUCTURE: only $variable declarations
@@ -183,9 +188,8 @@ class ScssMapping(BaseMapping):
     def extract_metadata(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
     ) -> dict[str, Any]:
-        node = captures.get("definition") or (
-            next(iter(captures.values()), None) if captures else None
-        )
+        """Build metadata dict for a captured SCSS node."""
+        node = resolve_capture(captures)
         metadata: dict[str, Any] = {}
         if node is not None:
             metadata["node_type"] = node.type
@@ -205,6 +209,19 @@ class ScssMapping(BaseMapping):
     def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
     ) -> list[Path]:
+        """Resolve an SCSS @import/@use/@forward path to an absolute path.
+
+        Handles SCSS partial conventions: ``@import 'colors'`` also tries
+        ``_colors.scss`` (underscore-prefixed partials).
+
+        Args:
+            import_text: The import value extracted from the statement.
+            base_dir: Directory of the importing file.
+            source_file: Path of the importing file (unused, for API compat).
+
+        Returns:
+            List with a single resolved Path if it exists, otherwise empty list.
+        """
         path = import_text.strip("\"'")
         # Try with and without leading underscore (SCSS partials)
         candidates = [base_dir / path]
@@ -223,4 +240,5 @@ class ScssMapping(BaseMapping):
         captures: dict[str, Any],
         content: bytes,
     ) -> list[dict[str, str]] | None:
+        """SCSS does not define constants via this interface; always returns None."""
         return None

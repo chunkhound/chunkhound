@@ -15,7 +15,9 @@ from tree_sitter import Node
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings._shared.css_family_helpers import (
+    extract_at_rule_name,
     node_text,
+    resolve_capture,
     selector_text,
 )
 from chunkhound.parsers.mappings.base import BaseMapping
@@ -29,14 +31,23 @@ class CssMapping(BaseMapping):
         super().__init__(Language.CSS)
 
     def get_function_query(self) -> str:
-        """CSS has no function definitions to extract."""
+        """Get tree-sitter query for function definitions.
+
+        Returns:
+            Empty string — CSS has no function definitions.
+        """
         return ""
 
     def get_class_query(self) -> str:
-        """CSS has no class definitions to extract."""
+        """Get tree-sitter query for class definitions.
+
+        Returns:
+            Empty string — CSS has no class definitions.
+        """
         return ""
 
     def get_comment_query(self) -> str:
+        """Get tree-sitter query for CSS comments."""
         return "(comment) @definition"
 
     def extract_function_name(self, node: Node | None, source: str) -> str:
@@ -54,16 +65,25 @@ class CssMapping(BaseMapping):
         sel = selector_text(node, content)
         if sel not in (":root", "*"):
             return False
-        # Check if block contains any --var declarations
+        # Walk direct block children looking for a declaration whose property
+        # name starts with '--'.  This is more precise than a substring match
+        # on the whole block text (avoids false positives from comments like
+        # /* -- separator */ or calc values).
         for child in node.children:
             if child.type == "block":
-                if "--" in node_text(child, content):
-                    return True
+                for block_child in child.children:
+                    if block_child.type == "declaration":
+                        for prop_child in block_child.children:
+                            if prop_child.type == "property_name":
+                                prop = node_text(prop_child, content).strip()
+                                if prop.startswith("--"):
+                                    return True
         return False
 
     # --- universal concept interface ---
 
     def get_query_for_concept(self, concept: UniversalConcept) -> str | None:
+        """Get tree-sitter query for a universal concept in CSS."""
         if concept == UniversalConcept.DEFINITION:
             return "(rule_set) @definition"
         elif concept == UniversalConcept.BLOCK:
@@ -87,9 +107,8 @@ class CssMapping(BaseMapping):
     def extract_name(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
     ) -> str:
-        node = captures.get("definition") or (
-            next(iter(captures.values()), None) if captures else None
-        )
+        """Extract a human-readable name for a captured CSS node."""
+        node = resolve_capture(captures)
         if node is None:
             return "unnamed"
 
@@ -97,20 +116,9 @@ class CssMapping(BaseMapping):
             return selector_text(node, content)
 
         elif concept == UniversalConcept.BLOCK:
-            if node.type == "media_statement":
-                for child in node.children:
-                    if child.type not in ("@media", "block"):
-                        cond = node_text(child, content).strip()
-                        return f"@media {cond[:40]}"
-                return f"@media_line{node.start_point[0] + 1}"
-            elif node.type == "keyframes_statement":
-                for child in node.children:
-                    if child.type == "keyframes_name":
-                        name = node_text(child, content).strip()
-                        return f"@keyframes {name}"
-                return f"@keyframes_line{node.start_point[0] + 1}"
-            elif node.type == "supports_statement":
+            if node.type == "supports_statement":
                 return f"@supports_line{node.start_point[0] + 1}"
+            return extract_at_rule_name(node, content)
 
         elif concept == UniversalConcept.STRUCTURE:
             return ":root_vars"
@@ -129,9 +137,8 @@ class CssMapping(BaseMapping):
     def extract_content(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
     ) -> str:
-        node = captures.get("definition") or (
-            next(iter(captures.values()), None) if captures else None
-        )
+        """Extract raw source text for a captured CSS node, or '' to skip it."""
+        node = resolve_capture(captures)
         if node is None:
             return ""
         # STRUCTURE: only :root/:* blocks with --variables
@@ -147,9 +154,8 @@ class CssMapping(BaseMapping):
     def extract_metadata(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
     ) -> dict[str, Any]:
-        node = captures.get("definition") or (
-            next(iter(captures.values()), None) if captures else None
-        )
+        """Build metadata dict for a captured CSS node."""
+        node = resolve_capture(captures)
         metadata: dict[str, Any] = {}
         if node is not None:
             metadata["node_type"] = node.type
@@ -162,6 +168,18 @@ class CssMapping(BaseMapping):
     def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
     ) -> list[Path]:
+        """Resolve a CSS @import path to an absolute filesystem path.
+
+        Strips surrounding quotes and ``url(...)`` wrappers before resolving.
+
+        Args:
+            import_text: The import value extracted from the @import statement.
+            base_dir: Directory of the importing file.
+            source_file: Path of the importing file (unused, for API compat).
+
+        Returns:
+            List with a single resolved Path if it exists, otherwise empty list.
+        """
         # Strip quotes and url()
         path = import_text.strip("\"'")
         if path.startswith("url("):
@@ -177,4 +195,5 @@ class CssMapping(BaseMapping):
         captures: dict[str, Any],
         content: bytes,
     ) -> list[dict[str, str]] | None:
+        """CSS does not define constants; always returns None."""
         return None

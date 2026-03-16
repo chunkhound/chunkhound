@@ -238,5 +238,53 @@ def test_comprehensive_file(html_parser, comprehensive_html):
     assert len(comment_chunks) >= 3, f"Expected at least 3 comment chunks, got {len(comment_chunks)}"
 
 
+def test_unquoted_attribute_value():
+    """_get_attribute handles unquoted attribute values."""
+    from chunkhound.parsers.parser_factory import ParserFactory
+    from chunkhound.core.types.common import Language
+    factory = ParserFactory()
+    parser = factory.create_parser(Language.HTML)
+    # Unquoted id attribute
+    code = '<section id=intro><h1>Hello</h1></section>'
+    chunks = parser.parse_content(code, "test.html", file_id=1)
+    block_chunks = [c for c in chunks if c.chunk_type == ChunkType.BLOCK]
+    assert len(block_chunks) > 0, "No BLOCK chunk for section with unquoted id"
+    assert any("intro" in c.symbol for c in block_chunks), (
+        f"section#intro not found in {[c.symbol for c in block_chunks]}"
+    )
+
+
+def test_jinja_language_produces_chunks():
+    """Language.JINJA (HTML grammar) parses templates and produces BLOCK chunks."""
+    from chunkhound.parsers.parser_factory import ParserFactory
+    from chunkhound.core.types.common import Language
+    factory = ParserFactory()
+    parser = factory.create_parser(Language.JINJA)
+    # Jinja {{ }} expressions are treated as plain text by the HTML grammar
+    code = """<!DOCTYPE html>
+<html>
+  <body>
+    <section id="main">
+      <h1>{{ title }}</h1>
+      {% for item in items %}<p>{{ item }}</p>{% endfor %}
+    </section>
+  </body>
+</html>"""
+    chunks = parser.parse_content(code, "template.html", file_id=1)
+    assert len(chunks) > 0, "Language.JINJA parser returned no chunks"
+    block_chunks = [c for c in chunks if c.chunk_type == ChunkType.BLOCK]
+    assert len(block_chunks) > 0, "No BLOCK chunks for Jinja template"
+
+
+def test_resolve_import_paths_html(tmp_path):
+    """resolve_import_paths resolves a relative href to an absolute path."""
+    from chunkhound.parsers.mappings.html import HtmlMapping
+    html = HtmlMapping()
+    (tmp_path / "style.css").write_text("body{}")
+    resolved = html.resolve_import_paths("style.css", tmp_path, tmp_path / "index.html")
+    assert len(resolved) == 1
+    assert resolved[0] == tmp_path / "style.css"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

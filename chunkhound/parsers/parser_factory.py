@@ -247,6 +247,9 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.HTML: LanguageConfig(ts_html, HtmlMapping, True, "html"),
     Language.CSS: LanguageConfig(ts_css, CssMapping, True, "css"),
     Language.SCSS: LanguageConfig(ts_scss, ScssMapping, SCSS_AVAILABLE, "scss"),
+    # JINJA uses the HTML grammar as a best-effort approximation.
+    # Jinja {{ }}/{% %}/{# #} tokens are treated as plain text by the HTML
+    # grammar.  A dedicated tree-sitter-jinja grammar could be added later.
     Language.JINJA: LanguageConfig(ts_html, HtmlMapping, True, "html"),
     # Non-tree-sitter languages
     Language.TEXT: LanguageConfig(

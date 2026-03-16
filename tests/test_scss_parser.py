@@ -285,5 +285,42 @@ def test_interpolated_custom_props_not_empty(scss_parser):
     assert "xxxxxxxx" not in all_code, "placeholder leaked into stored chunk code"
 
 
+def test_parses_while_as_block(scss_parser):
+    """@while loops are extracted as BLOCK chunks."""
+    code = """$i: 1;
+@while $i <= 3 {
+  .item-#{$i} { width: 10px * $i; }
+  $i: $i + 1;
+}"""
+    chunks = scss_parser.parse_content(code, "test.scss", file_id=1)
+    block_chunks = [c for c in chunks if c.chunk_type == ChunkType.BLOCK]
+    assert len(block_chunks) > 0, "No BLOCK chunk for @while"
+    assert any("while" in c.symbol for c in block_chunks), (
+        f"@while not found in {[c.symbol for c in block_chunks]}"
+    )
+
+
+def test_resolve_import_paths_partial(tmp_path):
+    """resolve_import_paths resolves SCSS underscore-prefixed partials."""
+    from chunkhound.parsers.mappings.scss import ScssMapping
+    scss = ScssMapping()
+    # Create the partial file (underscore prefix convention)
+    (tmp_path / "_colors.scss").write_text("$primary: red;")
+    # Import without the underscore or extension
+    resolved = scss.resolve_import_paths("colors", tmp_path, tmp_path / "main.scss")
+    assert len(resolved) == 1
+    assert resolved[0] == tmp_path / "_colors.scss"
+
+
+def test_resolve_import_paths_direct(tmp_path):
+    """resolve_import_paths resolves a direct SCSS path first."""
+    from chunkhound.parsers.mappings.scss import ScssMapping
+    scss = ScssMapping()
+    (tmp_path / "variables.scss").write_text("$size: 16px;")
+    resolved = scss.resolve_import_paths("variables.scss", tmp_path, tmp_path / "main.scss")
+    assert len(resolved) == 1
+    assert resolved[0] == tmp_path / "variables.scss"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

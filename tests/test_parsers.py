@@ -47,7 +47,7 @@ LANGUAGE_SAMPLES = {
     Language.HTML: "<section><h1>Hello</h1></section>",
     Language.CSS: "body { color: red; }",
     Language.SCSS: "$color: red; .btn { color: $color; }",
-    Language.JINJA: "<html><body>{{ name }}</body></html>",
+    Language.JINJA: "<section id='main'>{{ title }}</section>",
     Language.ELIXIR: "defmodule Hello do\n  def world, do: :ok\nend",
 }
 
@@ -201,7 +201,13 @@ class TestParserValidation:
         try:
             chunks = parser.parse_content(sample_code, "test_file", FileId(1))
             assert isinstance(chunks, list), f"Parser for {language.value} didn't return a list"
-            # Don't require chunks - some parsers might return empty for minimal code
+            # Web-language parsers must produce at least one chunk for their sample inputs
+            _must_have_chunks = {Language.HTML, Language.CSS, Language.SCSS, Language.JINJA}
+            if language in _must_have_chunks:
+                assert len(chunks) > 0, (
+                    f"Parser for {language.value} returned 0 chunks for minimal sample"
+                )
+            # Other parsers may legitimately return empty for minimal code
         except SetupError as e:
             # SetupError indicates critical parser initialization failure (e.g., version incompatibility)
             # This should cause immediate test failure

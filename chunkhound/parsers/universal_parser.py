@@ -239,6 +239,16 @@ class UniversalParser:
         ast_source = self.base_mapping.preprocess_for_ast(content)
         ast_tree = self.engine.parse_to_ast(ast_source)
         content_bytes = content.encode("utf-8")
+        ast_bytes_len = len(ast_source.encode("utf-8"))
+        if ast_bytes_len != len(content_bytes):
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "preprocess_for_ast changed byte length (%d → %d) for %s; "
+                "chunk text may be misaligned",
+                len(content_bytes),
+                ast_bytes_len,
+                file_path,
+            )
 
         # Extract universal concepts using ConceptExtractor
         if self.extractor is None:
