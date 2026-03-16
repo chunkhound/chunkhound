@@ -205,7 +205,17 @@ async def test_daemon_status_tool_exposes_watchman_realtime_details():
             "watchman_connection_state": "connected",
             "watchman_watch_root": "/repo",
             "watchman_relative_root": "packages/api",
+            "watchman_subscription_names": ["chunkhound-live-indexing"],
             "watchman_subscription_count": 1,
+            "watchman_scopes": [
+                {
+                    "subscription_name": "chunkhound-live-indexing",
+                    "scope_kind": "primary",
+                    "requested_path": "/repo/packages/api",
+                    "watch_root": "/repo",
+                    "relative_root": "packages/api",
+                }
+            ],
             "last_warning": "watchman recrawl observed",
             "last_error": None,
             "watchman_loss_of_sync": {
@@ -251,8 +261,18 @@ async def test_daemon_status_tool_exposes_watchman_realtime_details():
     assert realtime["watchman_sidecar_state"] == "running"
     assert realtime["watchman_connection_state"] == "connected"
     assert realtime["watchman_subscription_count"] == 1
+    assert realtime["watchman_subscription_names"] == ["chunkhound-live-indexing"]
     assert realtime["watchman_watch_root"] == "/repo"
     assert realtime["watchman_relative_root"] == "packages/api"
+    assert realtime["watchman_scopes"] == [
+        {
+            "subscription_name": "chunkhound-live-indexing",
+            "scope_kind": "primary",
+            "requested_path": "/repo/packages/api",
+            "watch_root": "/repo",
+            "relative_root": "packages/api",
+        }
+    ]
     assert realtime["watchman_loss_of_sync"]["fresh_instance_count"] == 1
     assert realtime["watchman_loss_of_sync"]["recrawl_count"] == 1
     assert realtime["watchman_reconnect"]["state"] == "restored"

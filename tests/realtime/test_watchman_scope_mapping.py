@@ -4,10 +4,12 @@ from pathlib import Path
 
 import pytest
 
+import chunkhound.watchman.scope as watchman_scope_module
 from chunkhound.watchman import (
     WatchmanScopePlan,
     WatchmanSubscriptionScope,
     build_watchman_scope_plan,
+    discover_nested_linux_mount_roots,
 )
 
 
@@ -113,3 +115,54 @@ def test_build_watchman_scope_plan_normalizes_dot_relative_root(tmp_path: Path) 
     )
 
     assert plan.primary_scope.relative_root is None
+
+
+def test_discover_nested_linux_mount_roots_reads_mountinfo_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target_dir = (tmp_path / "workspace_root").resolve()
+    nested_mount = (target_dir / "chunkhound_workspace").resolve()
+    unrelated_mount = (tmp_path / "elsewhere").resolve()
+    target_dir.mkdir(parents=True)
+    nested_mount.mkdir(parents=True)
+    unrelated_mount.mkdir(parents=True)
+    mountinfo_path = tmp_path / "mountinfo"
+    mountinfo_path.write_text(
+        "\n".join(
+            (
+                f"24 23 0:45 / {target_dir} rw,relatime - overlay overlay rw",
+                f"25 24 0:46 / {nested_mount} rw,relatime - ext4 /dev/sdb rw",
+                f"26 24 0:47 / {unrelated_mount} rw,relatime - ext4 /dev/sdc rw",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(watchman_scope_module.sys, "platform", "linux")
+
+    assert discover_nested_linux_mount_roots(
+        target_dir,
+        mountinfo_path=mountinfo_path,
+    ) == (nested_mount,)
+
+
+def test_build_watchman_scope_plan_adds_nested_mount_scopes(tmp_path: Path) -> None:
+    target_dir = (tmp_path / "workspace_root").resolve()
+    nested_mount = (target_dir / "chunkhound_workspace").resolve()
+    target_dir.mkdir(parents=True)
+    nested_mount.mkdir(parents=True)
+
+    plan = build_watchman_scope_plan(
+        target_dir,
+        {"watch": str(target_dir)},
+        nested_mount_roots=(nested_mount,),
+    )
+
+    assert plan.primary_scope.requested_path == target_dir
+    assert len(plan.scopes) == 2
+    assert plan.scopes[1] == WatchmanSubscriptionScope(
+        requested_path=nested_mount,
+        watch_root=nested_mount,
+        relative_root=None,
+        scope_kind="nested_mount",
+    )

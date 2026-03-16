@@ -1,17 +1,18 @@
-"""Watchman scope planning for v1 live-indexing integration.
+"""Watchman scope planning for live-indexing integration.
 
-The v1 contract deliberately keeps the handled logical scope equal to
-`config.target_dir` and returns a single-item plan so later steps can grow into
-multi-scope subscriptions without redesigning the interface.
+The primary logical scope remains exactly `config.target_dir`, but Linux nested
+mount roots may require their own explicit Watchman subscriptions so live file
+events keep flowing across mount boundaries.
 
-Future coarse optimizations live outside this step:
+Future coarse optimizations still live outside this step:
 - repo roots from `detect_repo_roots()`
 - anchored include prefixes from `_extract_include_prefixes()`
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -23,6 +24,7 @@ class WatchmanSubscriptionScope:
     requested_path: Path
     watch_root: Path
     relative_root: str | None
+    scope_kind: str = "primary"
 
 
 @dataclass(frozen=True)
@@ -39,11 +41,60 @@ class WatchmanScopePlan:
 
 
 def build_watchman_scope_plan(
-    target_dir: Path, watch_project_result: Mapping[str, object]
+    target_dir: Path,
+    watch_project_result: Mapping[str, object],
+    *,
+    nested_mount_roots: Sequence[Path] | None = None,
 ) -> WatchmanScopePlan:
-    """Build the v1 Watchman scope plan for a logical live-indexing target."""
+    """Build the Watchman scope plan for a logical live-indexing target."""
 
     requested_path = target_dir.expanduser().resolve()
+    primary_scope = _build_scope_from_watch_project(
+        requested_path, watch_project_result
+    )
+    mount_roots = (
+        discover_nested_linux_mount_roots(requested_path)
+        if nested_mount_roots is None
+        else _normalize_nested_mount_roots(requested_path, nested_mount_roots)
+    )
+
+    scopes = [primary_scope]
+    for mount_root in mount_roots:
+        scopes.append(
+            WatchmanSubscriptionScope(
+                requested_path=mount_root,
+                watch_root=mount_root,
+                relative_root=None,
+                scope_kind="nested_mount",
+            )
+        )
+    return WatchmanScopePlan(scopes=tuple(scopes))
+
+
+def discover_nested_linux_mount_roots(
+    target_dir: Path,
+    *,
+    mountinfo_path: Path | None = None,
+) -> tuple[Path, ...]:
+    """Return nested Linux mount roots contained under the logical target."""
+
+    if not sys.platform.startswith("linux"):
+        return ()
+
+    requested_path = target_dir.expanduser().resolve()
+    resolved_mountinfo_path = mountinfo_path or Path("/proc/self/mountinfo")
+    try:
+        mountinfo_text = resolved_mountinfo_path.read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return ()
+    return _mount_roots_from_mountinfo(requested_path, mountinfo_text)
+
+
+def _build_scope_from_watch_project(
+    requested_path: Path, watch_project_result: Mapping[str, object]
+) -> WatchmanSubscriptionScope:
     watch_root = _require_watch_root(watch_project_result)
     relative_root = _normalize_relative_root(watch_project_result.get("relative_path"))
     mapped_path = _resolve_mapped_path(watch_root, relative_root)
@@ -54,14 +105,67 @@ def build_watchman_scope_plan(
             f"target_dir={requested_path} mapped_path={mapped_path}"
         )
 
-    return WatchmanScopePlan(
-        scopes=(
-            WatchmanSubscriptionScope(
-                requested_path=requested_path,
-                watch_root=watch_root,
-                relative_root=relative_root,
-            ),
-        )
+    return WatchmanSubscriptionScope(
+        requested_path=requested_path,
+        watch_root=watch_root,
+        relative_root=relative_root,
+        scope_kind="primary",
+    )
+
+
+def _normalize_nested_mount_roots(
+    requested_path: Path, nested_mount_roots: Sequence[Path]
+) -> tuple[Path, ...]:
+    normalized_mount_roots: set[Path] = set()
+    for candidate in nested_mount_roots:
+        mount_root = Path(candidate).expanduser().resolve()
+        if mount_root == requested_path:
+            continue
+        try:
+            mount_root.relative_to(requested_path)
+        except ValueError:
+            continue
+        normalized_mount_roots.add(mount_root)
+    return tuple(
+        sorted(normalized_mount_roots, key=lambda path: (len(path.parts), str(path)))
+    )
+
+
+def _mount_roots_from_mountinfo(
+    requested_path: Path, mountinfo_text: str
+) -> tuple[Path, ...]:
+    discovered_mount_roots: set[Path] = set()
+    for line in mountinfo_text.splitlines():
+        mount_root = _parse_mountinfo_mount_root(line)
+        if mount_root is None or mount_root == requested_path:
+            continue
+        try:
+            mount_root.relative_to(requested_path)
+        except ValueError:
+            continue
+        discovered_mount_roots.add(mount_root)
+    return tuple(
+        sorted(discovered_mount_roots, key=lambda path: (len(path.parts), str(path)))
+    )
+
+
+def _parse_mountinfo_mount_root(line: str) -> Path | None:
+    head, separator, _tail = line.partition(" - ")
+    if not separator:
+        return None
+    fields = head.split()
+    if len(fields) < 5:
+        return None
+    mount_point = _unescape_mountinfo_field(fields[4])
+    return Path(mount_point).expanduser().resolve()
+
+
+def _unescape_mountinfo_field(value: str) -> str:
+    return (
+        value.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
     )
 
 

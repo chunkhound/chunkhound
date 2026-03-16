@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import chunkhound.services.realtime_indexing_service as realtime_service_module
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
@@ -153,6 +154,103 @@ async def test_watchman_relative_root_mapping_and_filtering(
 
         assert await wait_for_indexed(services.provider, included)
         assert services.provider.get_file_by_path(str(excluded)) is None
+    finally:
+        await service.stop()
+        services.provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_watchman_multi_scope_translation_deduplicates_across_subscriptions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target_dir = tmp_path / "workspace_root"
+    nested_mount = target_dir / "chunkhound_workspace"
+    target_dir.mkdir(parents=True)
+    nested_mount.mkdir(parents=True)
+    monkeypatch.setattr(
+        realtime_service_module,
+        "discover_nested_linux_mount_roots",
+        lambda target_path: (nested_mount.resolve(),),
+    )
+
+    service, services = _build_watchman_service(target_dir)
+    add_file_calls: list[tuple[Path, str]] = []
+
+    original_add_file = service.add_file
+
+    async def counting_add_file(file_path: Path, priority: str = "change") -> None:
+        add_file_calls.append((file_path, priority))
+        await original_add_file(file_path, priority)
+
+    monkeypatch.setattr(service, "add_file", counting_add_file)
+
+    try:
+        await service.start(target_dir)
+        queue = service.watchman_subscription_queue
+        assert queue is not None
+
+        file_path = nested_mount / "src" / "mounted.py"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text("def mounted():\n    return 1\n", encoding="utf-8")
+
+        queue.put_nowait(
+            {
+                "subscription": "chunkhound-live-indexing",
+                "clock": "c:0:3",
+                "files": [
+                    {
+                        "name": "chunkhound_workspace/src/mounted.py",
+                        "exists": True,
+                        "new": True,
+                        "type": "f",
+                    }
+                ],
+            }
+        )
+        queue.put_nowait(
+            {
+                "subscription": "chunkhound-live-indexing--chunkhound-workspace",
+                "clock": "c:0:4",
+                "files": [
+                    {
+                        "name": "src/mounted.py",
+                        "exists": True,
+                        "new": True,
+                        "type": "f",
+                    }
+                ],
+            }
+        )
+
+        assert await wait_for_indexed(services.provider, file_path)
+
+        stats = await service.get_health()
+        assert stats["watchman_subscription_count"] == 2
+        assert stats["watchman_subscription_names"] == [
+            "chunkhound-live-indexing",
+            "chunkhound-live-indexing--chunkhound-workspace",
+        ]
+        assert stats["watchman_scopes"] == [
+            {
+                "subscription_name": "chunkhound-live-indexing",
+                "scope_kind": "primary",
+                "requested_path": str(target_dir.resolve()),
+                "watch_root": str(target_dir.resolve()),
+                "relative_root": None,
+            },
+            {
+                "subscription_name": "chunkhound-live-indexing--chunkhound-workspace",
+                "scope_kind": "nested_mount",
+                "requested_path": str(nested_mount.resolve()),
+                "watch_root": str(nested_mount.resolve()),
+                "relative_root": None,
+            },
+        ]
+        assert [
+            (queued_path, priority)
+            for queued_path, priority in add_file_calls
+            if priority == "change"
+        ] == [(file_path.resolve(), "change")]
     finally:
         await service.stop()
         services.provider.disconnect()

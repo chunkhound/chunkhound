@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import chunkhound.watchman.session as watchman_session_module
 from chunkhound.watchman import PrivateWatchmanSidecar, WatchmanCliSession
 
 pytestmark = pytest.mark.requires_native_watchman
@@ -116,6 +117,9 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                 }
             )
+            continue
+        if name == "watch":
+            emit({"version": "0.0.0-test", "watch": command[1]})
             continue
         if name == "subscribe":
             emit({"version": "0.0.0-test", "subscribe": command[2]})
@@ -317,6 +321,87 @@ async def test_watchman_cli_session_start_sets_scope_and_queues_pdus(
     await session.stop()
 
     assert session.get_health()["watchman_session_alive"] is False
+
+
+@pytest.mark.asyncio
+async def test_watchman_cli_session_start_adds_nested_mount_subscription(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script_path = _write_fake_watchman_cli(tmp_path)
+    watch_root = tmp_path / "workspace_root"
+    nested_mount = watch_root / "chunkhound_workspace"
+    watch_root.mkdir(parents=True)
+    nested_mount.mkdir(parents=True)
+    socket_path = tmp_path / "watchman.sock"
+    socket_path.write_text("socket ready\n", encoding="utf-8")
+    statefile_path = tmp_path / "watchman.state"
+    statefile_path.write_text("state ready\n", encoding="utf-8")
+    logfile_path = tmp_path / "watchman.log"
+    logfile_path.write_text("log ready\n", encoding="utf-8")
+    pidfile_path = tmp_path / "watchman.pid"
+    pidfile_path.write_text("123\n", encoding="utf-8")
+
+    monkeypatch.setenv("CHUNKHOUND_TEST_WATCHMAN_WATCH_ROOT", str(watch_root))
+    monkeypatch.setenv("CHUNKHOUND_TEST_WATCHMAN_EMIT_PDU_AFTER_SUBSCRIBE", "1")
+    monkeypatch.setattr(
+        watchman_session_module,
+        "discover_nested_linux_mount_roots",
+        lambda target_path: (nested_mount.resolve(),),
+    )
+
+    session = WatchmanCliSession(
+        binary_path=script_path,
+        socket_path=socket_path,
+        statefile_path=statefile_path,
+        logfile_path=logfile_path,
+        pidfile_path=pidfile_path,
+        project_root=tmp_path,
+        command_prefix=[sys.executable, str(script_path)],
+    )
+
+    setup = await session.start(target_path=watch_root)
+
+    assert len(setup.scope_plan.scopes) == 2
+    assert setup.subscription_names == (
+        "chunkhound-live-indexing",
+        "chunkhound-live-indexing--chunkhound-workspace",
+    )
+
+    first_pdu = await asyncio.wait_for(session.subscription_queue.get(), timeout=1.0)
+    second_pdu = await asyncio.wait_for(session.subscription_queue.get(), timeout=1.0)
+
+    assert {first_pdu["subscription"], second_pdu["subscription"]} == {
+        "chunkhound-live-indexing",
+        "chunkhound-live-indexing--chunkhound-workspace",
+    }
+    assert {first_pdu["root"], second_pdu["root"]} == {
+        str(watch_root),
+        str(nested_mount),
+    }
+
+    health = session.get_health()
+    assert health["watchman_subscription_names"] == [
+        "chunkhound-live-indexing",
+        "chunkhound-live-indexing--chunkhound-workspace",
+    ]
+    assert health["watchman_scopes"] == [
+        {
+            "subscription_name": "chunkhound-live-indexing",
+            "scope_kind": "primary",
+            "requested_path": str(watch_root.resolve()),
+            "watch_root": str(watch_root.resolve()),
+            "relative_root": None,
+        },
+        {
+            "subscription_name": "chunkhound-live-indexing--chunkhound-workspace",
+            "scope_kind": "nested_mount",
+            "requested_path": str(nested_mount.resolve()),
+            "watch_root": str(nested_mount.resolve()),
+            "relative_root": None,
+        },
+    ]
+
+    await session.stop()
 
 
 @pytest.mark.asyncio

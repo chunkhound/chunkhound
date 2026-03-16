@@ -227,6 +227,8 @@ class TestNonBlockingInitialization:
                 assert realtime["watchman_sidecar_state"] == "uninitialized"
                 assert realtime["watchman_connection_state"] == "uninitialized"
                 assert realtime["watchman_subscription_count"] == 0
+                assert realtime["watchman_subscription_names"] == []
+                assert realtime["watchman_scopes"] == []
                 assert realtime["watchman_loss_of_sync"] == {
                     "count": 0,
                     "fresh_instance_count": 0,
@@ -272,7 +274,7 @@ class TestNonBlockingInitialization:
     async def test_run_directory_scan_surfaces_reconciliation_cleanup_failures(
         self, tmp_path: Path
     ) -> None:
-        """Directory scans should record reconciliation cleanup failures in daemon status."""
+        """Directory scans should record cleanup failures in daemon status."""
         config = MagicMock()
         config.database.path = str(tmp_path / "test.db")
         config.embedding = None

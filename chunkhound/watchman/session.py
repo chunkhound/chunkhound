@@ -6,7 +6,7 @@ import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..watchman_runtime.loader import (
@@ -15,7 +15,12 @@ from ..watchman_runtime.loader import (
     build_watchman_runtime_environment,
     resolve_packaged_watchman_runtime,
 )
-from .scope import WatchmanScopePlan, build_watchman_scope_plan
+from .scope import (
+    WatchmanScopePlan,
+    WatchmanSubscriptionScope,
+    build_watchman_scope_plan,
+    discover_nested_linux_mount_roots,
+)
 
 _REQUIRED_CAPABILITIES: tuple[str, ...] = ("cmd-watch-project", "relative_root")
 _DEFAULT_SUBSCRIPTION_NAME = "chunkhound-live-indexing"
@@ -50,6 +55,7 @@ def _utc_now() -> str:
 class WatchmanSessionSetup:
     scope_plan: WatchmanScopePlan
     subscription_name: str
+    subscription_names: tuple[str, ...]
     capabilities: dict[str, bool]
 
 
@@ -97,6 +103,8 @@ class WatchmanCliSession:
         self._command_lock = asyncio.Lock()
         self._scope_plan: WatchmanScopePlan | None = None
         self._subscription_name: str | None = None
+        self._subscription_names: tuple[str, ...] = ()
+        self._subscription_scopes: dict[str, WatchmanSubscriptionScope] = {}
         self._capabilities: dict[str, bool] = {}
         self._last_warning: str | None = None
         self._last_warning_at: str | None = None
@@ -118,11 +126,24 @@ class WatchmanCliSession:
     def subscription_name(self) -> str | None:
         return self._subscription_name
 
+    @property
+    def subscription_names(self) -> tuple[str, ...]:
+        return self._subscription_names
+
+    def scope_for_subscription(
+        self, subscription_name: str | None
+    ) -> WatchmanSubscriptionScope | None:
+        if not isinstance(subscription_name, str) or not subscription_name:
+            return None
+        return self._subscription_scopes.get(subscription_name)
+
     async def start(
         self,
         *,
         target_path: Path,
         subscription_name: str | None = None,
+        scope_plan: WatchmanScopePlan | None = None,
+        nested_mount_roots: Sequence[Path] | None = None,
     ) -> WatchmanSessionSetup:
         if self._process is not None and self._process.returncode is None:
             await self.stop()
@@ -135,10 +156,23 @@ class WatchmanCliSession:
                 ["version", {"required": list(_REQUIRED_CAPABILITIES)}]
             )
             capabilities = self._require_capabilities(version_response)
-            watch_project_response = await self._run_one_shot_command(
-                ["watch-project", str(target_path.resolve())]
-            )
-            scope_plan = build_watchman_scope_plan(target_path, watch_project_response)
+            resolved_scope_plan = scope_plan
+            if resolved_scope_plan is None:
+                resolved_nested_mount_roots = (
+                    discover_nested_linux_mount_roots(target_path)
+                    if nested_mount_roots is None
+                    else tuple(nested_mount_roots)
+                )
+                watch_project_response = await self._run_one_shot_command(
+                    ["watch-project", str(target_path.resolve())]
+                )
+                for mount_root in resolved_nested_mount_roots:
+                    await self._run_one_shot_command(["watch", str(mount_root)])
+                resolved_scope_plan = build_watchman_scope_plan(
+                    target_path,
+                    watch_project_response,
+                    nested_mount_roots=resolved_nested_mount_roots,
+                )
             resolved_subscription_name = subscription_name or _DEFAULT_SUBSCRIPTION_NAME
 
             command = self._build_command()
@@ -158,28 +192,42 @@ class WatchmanCliSession:
             self._reader_task = asyncio.create_task(self._reader_loop())
             self._stderr_task = asyncio.create_task(self._stderr_loop())
 
-            subscribe_response = await self._send_command(
-                self._build_subscribe_command(
-                    scope_plan=scope_plan,
-                    subscription_name=resolved_subscription_name,
+            resolved_subscription_names: list[str] = []
+            resolved_subscription_scopes: dict[str, WatchmanSubscriptionScope] = {}
+            for scope_index, scope in enumerate(resolved_scope_plan.scopes):
+                scoped_subscription_name = self._subscription_name_for_scope(
+                    base_name=resolved_subscription_name,
+                    target_path=resolved_scope_plan.primary_scope.requested_path,
+                    scope=scope,
+                    scope_index=scope_index,
                 )
-            )
-            subscribed_name = subscribe_response.get("subscribe")
-            if subscribed_name != resolved_subscription_name:
-                raise RuntimeError(
-                    "Watchman subscribe response did not confirm the expected "
-                    f"subscription name: {subscribed_name!r}"
+                subscribe_response = await self._send_command(
+                    self._build_subscribe_command(
+                        scope=scope,
+                        subscription_name=scoped_subscription_name,
+                    )
                 )
+                subscribed_name = subscribe_response.get("subscribe")
+                if subscribed_name != scoped_subscription_name:
+                    raise RuntimeError(
+                        "Watchman subscribe response did not confirm the expected "
+                        f"subscription name: {subscribed_name!r}"
+                    )
+                resolved_subscription_names.append(scoped_subscription_name)
+                resolved_subscription_scopes[scoped_subscription_name] = scope
         except Exception:
             await self.stop()
             raise
 
-        self._scope_plan = scope_plan
+        self._scope_plan = resolved_scope_plan
         self._subscription_name = resolved_subscription_name
+        self._subscription_names = tuple(resolved_subscription_names)
+        self._subscription_scopes = dict(resolved_subscription_scopes)
         self._capabilities = capabilities
         return WatchmanSessionSetup(
-            scope_plan=scope_plan,
+            scope_plan=resolved_scope_plan,
             subscription_name=resolved_subscription_name,
+            subscription_names=tuple(resolved_subscription_names),
             capabilities=dict(capabilities),
         )
 
@@ -187,6 +235,8 @@ class WatchmanCliSession:
         self._stop_requested = True
         self._scope_plan = None
         self._subscription_name = None
+        self._subscription_names = ()
+        self._subscription_scopes = {}
         self._capabilities = {}
         self._clear_subscription_queue()
         self._fail_pending_reply(RuntimeError("Watchman session stopped"))
@@ -244,7 +294,21 @@ class WatchmanCliSession:
 
     def get_health(self) -> dict[str, Any]:
         process_alive = self._process is not None and self._process.returncode is None
-        scope = self._scope_plan.primary_scope if self._scope_plan else None
+        primary_scope = self._scope_plan.primary_scope if self._scope_plan else None
+        watchman_scopes: list[dict[str, object]] = []
+        for subscription_name in self._subscription_names:
+            scope = self._subscription_scopes.get(subscription_name)
+            if scope is None:
+                continue
+            watchman_scopes.append(
+                {
+                    "subscription_name": subscription_name,
+                    "scope_kind": scope.scope_kind,
+                    "requested_path": str(scope.requested_path),
+                    "watch_root": str(scope.watch_root),
+                    "relative_root": scope.relative_root,
+                }
+            )
         return {
             "watchman_session_alive": process_alive,
             "watchman_session_pid": self._process.pid if self._process else None,
@@ -260,8 +324,14 @@ class WatchmanCliSession:
             "watchman_subscription_pdu_count": self._subscription_pdu_count,
             "watchman_subscription_pdu_dropped": self._subscription_pdu_dropped,
             "watchman_subscription_name": self._subscription_name,
-            "watchman_watch_root": str(scope.watch_root) if scope else None,
-            "watchman_relative_root": scope.relative_root if scope else None,
+            "watchman_subscription_names": list(self._subscription_names),
+            "watchman_watch_root": (
+                str(primary_scope.watch_root) if primary_scope else None
+            ),
+            "watchman_relative_root": (
+                primary_scope.relative_root if primary_scope else None
+            ),
+            "watchman_scopes": watchman_scopes,
             "watchman_session_capabilities": dict(self._capabilities),
         }
 
@@ -296,10 +366,9 @@ class WatchmanCliSession:
     def _build_subscribe_command(
         self,
         *,
-        scope_plan: WatchmanScopePlan,
+        scope: WatchmanSubscriptionScope,
         subscription_name: str,
     ) -> list[object]:
-        scope = scope_plan.primary_scope
         payload: dict[str, object] = {
             "expression": ["allof", ["type", "f"]],
             "fields": ["name", "exists", "new", "type"],
@@ -544,6 +613,8 @@ class WatchmanCliSession:
         self._stop_requested = False
         self._scope_plan = None
         self._subscription_name = None
+        self._subscription_names = ()
+        self._subscription_scopes = {}
         self._capabilities = {}
         self._last_warning = None
         self._last_warning_at = None
@@ -619,3 +690,37 @@ class WatchmanCliSession:
             await task
         except asyncio.CancelledError:
             pass
+
+    def _subscription_name_for_scope(
+        self,
+        *,
+        base_name: str,
+        target_path: Path,
+        scope: WatchmanSubscriptionScope,
+        scope_index: int,
+    ) -> str:
+        if scope.scope_kind == "primary" or scope_index == 0:
+            return base_name
+        try:
+            suffix_source = scope.requested_path.relative_to(target_path).as_posix()
+        except ValueError:
+            suffix_source = scope.requested_path.as_posix()
+        suffix = self._sanitize_subscription_suffix(suffix_source)
+        if not suffix:
+            suffix = f"scope-{scope_index}"
+        return f"{base_name}--{suffix}"
+
+    @staticmethod
+    def _sanitize_subscription_suffix(value: str) -> str:
+        candidate = value.replace("\\", "/").strip("/")
+        if not candidate:
+            return ""
+        parts: list[str] = []
+        for chunk in PurePosixPath(candidate).parts:
+            normalized_chunk = "".join(
+                character.lower() if character.isalnum() else "-"
+                for character in chunk
+            ).strip("-")
+            if normalized_chunk:
+                parts.append(normalized_chunk)
+        return "-".join(parts)

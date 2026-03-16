@@ -59,6 +59,24 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
+      - name: Prepare Linux mount-aware Watchman fixture
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          sudo mkdir -p /workspaces
+          if ! mountpoint -q /workspaces; then
+            sudo mount -t tmpfs -o size=256m tmpfs /workspaces
+          fi
+          sudo mkdir -p /workspaces/chunkhound_workspace
+          if ! mountpoint -q /workspaces/chunkhound_workspace; then
+            sudo mount -t tmpfs -o size=256m tmpfs /workspaces/chunkhound_workspace
+          fi
+          sudo chown -R "$(id -u):$(id -g)" /workspaces
+          {
+            echo "CHUNKHOUND_TEST_WATCHMAN_MOUNT_PARENT=/workspaces"
+            echo "CHUNKHOUND_TEST_WATCHMAN_MOUNT_CHILD=/workspaces/chunkhound_workspace"
+          } >> "$GITHUB_ENV"
+
       - name: Run Watchman runtime validation tests
         run: >
           uv run pytest

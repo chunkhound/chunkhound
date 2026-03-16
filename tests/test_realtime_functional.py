@@ -5,6 +5,7 @@ Some tests expected to fail initially - helps identify implementation issues.
 """
 
 import asyncio
+import os
 import shutil
 import tempfile
 import time
@@ -19,6 +20,7 @@ from chunkhound.services.realtime_indexing_service import (
     RealtimeIndexingService,
     SimpleEventHandler,
 )
+from chunkhound.watchman import discover_nested_linux_mount_roots
 from chunkhound.watchman_runtime.loader import (
     listener_path_is_filesystem,
     resolve_packaged_watchman_runtime,
@@ -40,6 +42,14 @@ async def _wait_for_realtime_condition(
             await asyncio.sleep(0.05)
 
     return await asyncio.wait_for(_poll(), timeout=timeout)
+
+
+def _configured_mount_regression_paths() -> tuple[Path, Path] | None:
+    mount_parent = os.environ.get("CHUNKHOUND_TEST_WATCHMAN_MOUNT_PARENT")
+    nested_mount = os.environ.get("CHUNKHOUND_TEST_WATCHMAN_MOUNT_CHILD")
+    if not mount_parent or not nested_mount:
+        return None
+    return Path(mount_parent).resolve(), Path(nested_mount).resolve()
 
 
 class TestRealtimeFunctional:
@@ -299,6 +309,71 @@ class TestRealtimeFunctional:
         finally:
             await service.stop()
             services.provider.disconnect()
+
+    @pytest.mark.asyncio
+    @pytest.mark.requires_native_watchman
+    @pytest.mark.skipif(os.name == "nt", reason="Linux mount topology only")
+    async def test_watchman_backend_indexes_real_file_mutation_under_nested_mount(
+        self,
+    ):
+        """Watchman backend should observe live mutations inside a nested mount."""
+        from types import SimpleNamespace
+
+        configured_paths = _configured_mount_regression_paths()
+        if configured_paths is None:
+            pytest.skip("Linux mount-aware Watchman fixture paths are not configured")
+
+        watch_dir, nested_mount = configured_paths
+        if not watch_dir.is_dir() or not nested_mount.is_dir():
+            pytest.skip("Linux mount-aware Watchman fixture paths do not exist")
+
+        if nested_mount not in discover_nested_linux_mount_roots(watch_dir):
+            pytest.skip("Configured fixture does not expose a nested mount boundary")
+
+        run_suffix = str(time.time_ns())
+        db_root = watch_dir / ".chunkhound" / f"mount-aware-{run_suffix}"
+        db_path = db_root / "test.db"
+        db_root.mkdir(parents=True, exist_ok=True)
+        project_dir = nested_mount / f"watchman_mount_project_{run_suffix}"
+        project_dir.mkdir(parents=True, exist_ok=True)
+
+        fake_args = SimpleNamespace(path=watch_dir)
+        config = Config(
+            args=fake_args,
+            database={"path": str(db_path), "provider": "duckdb"},
+            indexing={"realtime_backend": "watchman"},
+        )
+
+        services = create_services(db_path, config)
+        services.provider.connect()
+        service = RealtimeIndexingService(services, config)
+
+        try:
+            await service.start(watch_dir)
+
+            file_path = project_dir / "src" / "watchman_mount_runtime.py"
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(
+                "def watchman_mount_runtime_symbol():\n    return 3\n",
+                encoding="utf-8",
+            )
+
+            assert await wait_for_indexed(services.provider, file_path, timeout=15.0)
+
+            stats = await service.get_health()
+            assert stats["watchman_connection_state"] == "connected"
+            assert stats["watchman_subscription_count"] >= 2
+            assert len(stats["watchman_scopes"]) >= 2
+            assert any(
+                scope["requested_path"] == str(nested_mount.resolve())
+                and scope["scope_kind"] == "nested_mount"
+                for scope in stats["watchman_scopes"]
+            )
+        finally:
+            await service.stop()
+            services.provider.disconnect()
+            shutil.rmtree(project_dir, ignore_errors=True)
+            shutil.rmtree(db_root, ignore_errors=True)
 
     @pytest.mark.asyncio
     @pytest.mark.requires_native_watchman

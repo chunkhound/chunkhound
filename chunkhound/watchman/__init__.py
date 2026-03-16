@@ -2,6 +2,7 @@ from .scope import (
     WatchmanScopePlan,
     WatchmanSubscriptionScope,
     build_watchman_scope_plan,
+    discover_nested_linux_mount_roots,
 )
 from .session import (
     WatchmanCliSession,
@@ -24,4 +25,5 @@ __all__ = [
     "WatchmanSubscriptionScope",
     "build_watchman_base_command",
     "build_watchman_scope_plan",
+    "discover_nested_linux_mount_roots",
 ]

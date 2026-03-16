@@ -33,6 +33,8 @@ from chunkhound.watchman import (
     WatchmanCliSession,
     WatchmanScopePlan,
     WatchmanSubscriptionScope,
+    build_watchman_scope_plan,
+    discover_nested_linux_mount_roots,
 )
 from chunkhound.watchman_runtime.loader import (
     default_realtime_backend_for_current_install,
@@ -303,9 +305,11 @@ def _default_watchman_health_snapshot() -> dict[str, Any]:
         "watchman_subscription_pdu_count": 0,
         "watchman_subscription_pdu_dropped": 0,
         "watchman_subscription_name": None,
+        "watchman_subscription_names": [],
         "watchman_subscription_count": 0,
         "watchman_watch_root": None,
         "watchman_relative_root": None,
+        "watchman_scopes": [],
         "watchman_session_capabilities": {},
         "watchman_loss_of_sync": _default_watchman_loss_of_sync_snapshot(),
         "watchman_reconnect": _default_watchman_reconnect_snapshot(),
@@ -388,9 +392,13 @@ class WatchmanRealtimeAdapter:
             )
         self._sidecar = PrivateWatchmanSidecar(target_dir, debug_sink=service._debug)
         self._session: WatchmanCliSession | None = None
+        self._sessions: list[WatchmanCliSession] = []
         self._path_filter: RealtimePathFilter | None = None
+        self._shared_subscription_queue: asyncio.Queue[dict[str, object]] | None = None
         self._subscription_consumer_task: asyncio.Task[None] | None = None
+        self._subscription_bridge_tasks: list[asyncio.Task[None]] = []
         self._session_monitor_task: asyncio.Task[None] | None = None
+        self._subscription_scope_map: dict[str, WatchmanSubscriptionScope] = {}
         self._reconnect_task: asyncio.Task[None] | None = None
         self._watch_path: Path | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -432,17 +440,21 @@ class WatchmanRealtimeAdapter:
             self._reconnect_task = None
         await self._clear_monitoring_runtime(stop_sidecar=True)
 
-    async def _consume_subscription_pdus(
-        self, scope: WatchmanSubscriptionScope
-    ) -> None:
-        session = self._session
-        if session is None:
+    async def _consume_subscription_pdus(self) -> None:
+        subscription_queue = self._shared_subscription_queue
+        if subscription_queue is None:
             return
 
         while True:
-            payload = await session.subscription_queue.get()
+            payload = await subscription_queue.get()
             try:
                 if self._handle_loss_of_sync_payload(payload):
+                    continue
+                scope = self._scope_for_payload(payload)
+                if scope is None:
+                    self._warn_translation_issue(
+                        "Watchman subscription PDU did not map to a known scope"
+                    )
                     continue
                 self._translate_subscription_pdu(payload, scope)
             except Exception as error:
@@ -450,20 +462,78 @@ class WatchmanRealtimeAdapter:
                 logger.warning(message)
                 self._service._set_warning(message)
             finally:
-                session.subscription_queue.task_done()
+                subscription_queue.task_done()
 
-    async def _monitor_unexpected_session_exit(self) -> None:
-        session = self._session
-        if session is None:
+    def _scope_for_payload(
+        self, payload: dict[str, object]
+    ) -> WatchmanSubscriptionScope | None:
+        subscription_name = payload.get("subscription")
+        scope = self._subscription_scope_map.get(
+            subscription_name if isinstance(subscription_name, str) else ""
+        )
+        if scope is not None:
+            return scope
+        if self._service.watchman_scope_plan is None:
+            return None
+        if len(self._service.watchman_scope_plan.scopes) == 1:
+            return self._service.watchman_scope_plan.primary_scope
+        return None
+
+    async def _bridge_session_subscription_pdus(
+        self, session: WatchmanCliSession
+    ) -> None:
+        shared_queue = self._shared_subscription_queue
+        if shared_queue is None:
             return
 
-        message = await session.wait_for_unexpected_exit()
+        while True:
+            payload = await session.subscription_queue.get()
+            try:
+                shared_queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                self._handle_subscription_queue_overflow(
+                    payload,
+                    shared_queue.qsize() + 1,
+                    shared_queue.maxsize,
+                )
+            finally:
+                session.subscription_queue.task_done()
+
+    async def _monitor_unexpected_session_exits(self) -> None:
+        sessions = tuple(self._sessions)
+        if not sessions:
+            return
+
+        wait_tasks = {
+            asyncio.create_task(session.wait_for_unexpected_exit()): session
+            for session in sessions
+        }
+        message: str | None = None
+        try:
+            done, pending = await asyncio.wait(
+                wait_tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                message = task.result()
+                if message is not None:
+                    break
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            wait_tasks.clear()
+
         if message is None:
             return
 
         if self._session_monitor_task is asyncio.current_task():
             self._session_monitor_task = None
         await self._cancel_subscription_consumer_task()
+        await self._cancel_subscription_bridge_tasks()
         self._path_filter = None
         self._service.watchman_scope_plan = None
         self._service.watchman_subscription_queue = None
@@ -613,6 +683,17 @@ class WatchmanRealtimeAdapter:
         except asyncio.CancelledError:
             pass
 
+    async def _cancel_subscription_bridge_tasks(self) -> None:
+        tasks = list(self._subscription_bridge_tasks)
+        self._subscription_bridge_tasks = []
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
     async def _cancel_session_monitor_task(self) -> None:
         task = self._session_monitor_task
         if task is None:
@@ -631,13 +712,18 @@ class WatchmanRealtimeAdapter:
         self._service.watchman_scope_plan = None
         self._service.watchman_subscription_queue = None
         self._path_filter = None
+        self._shared_subscription_queue = None
+        self._subscription_scope_map = {}
         self._service.monitoring_ready.clear()
         self._service._monitoring_ready_at = None
         await self._cancel_session_monitor_task()
         await self._cancel_subscription_consumer_task()
-        if self._session is not None:
-            await self._session.stop()
-            self._session = None
+        await self._cancel_subscription_bridge_tasks()
+        sessions = list(self._sessions)
+        self._sessions = []
+        self._session = None
+        for session in sessions:
+            await session.stop()
         if stop_sidecar:
             await self._sidecar.stop()
         self._service._emit_status_update()
@@ -657,42 +743,90 @@ class WatchmanRealtimeAdapter:
         self._service.watchman_scope_plan = None
         self._service.watchman_subscription_queue = None
 
-        session: WatchmanCliSession | None = None
+        planning_session = WatchmanCliSession(
+            binary_path=Path(metadata.binary_path),
+            socket_path=self._sidecar.paths.listener_path,
+            statefile_path=self._sidecar.paths.statefile_path,
+            logfile_path=self._sidecar.paths.logfile_path,
+            pidfile_path=self._sidecar.paths.pidfile_path,
+            project_root=self._sidecar.paths.project_root,
+            debug_sink=self._service._debug,
+            subscription_overflow_handler=self._handle_subscription_queue_overflow,
+        )
+        sessions: list[WatchmanCliSession] = []
+        subscription_scope_map: dict[str, WatchmanSubscriptionScope] = {}
         try:
-            session = WatchmanCliSession(
-                binary_path=Path(metadata.binary_path),
-                socket_path=self._sidecar.paths.listener_path,
-                statefile_path=self._sidecar.paths.statefile_path,
-                logfile_path=self._sidecar.paths.logfile_path,
-                pidfile_path=self._sidecar.paths.pidfile_path,
-                project_root=self._sidecar.paths.project_root,
-                debug_sink=self._service._debug,
-                subscription_overflow_handler=self._handle_subscription_queue_overflow,
+            watch_project_response = await planning_session._run_one_shot_command(
+                ["watch-project", str(watch_path.resolve())]
             )
-            setup = await session.start(
-                target_path=watch_path,
-                subscription_name=self._SUBSCRIPTION_NAME,
+            nested_mount_roots = discover_nested_linux_mount_roots(watch_path)
+            for mount_root in nested_mount_roots:
+                await planning_session._run_one_shot_command(["watch", str(mount_root)])
+            scope_plan = build_watchman_scope_plan(
+                watch_path,
+                watch_project_response,
+                nested_mount_roots=nested_mount_roots,
             )
+
+            self._shared_subscription_queue = asyncio.Queue(
+                maxsize=WatchmanCliSession._SUBSCRIPTION_QUEUE_MAXSIZE
+            )
+            self._subscription_scope_map = {}
+
+            for scope_index, scope in enumerate(scope_plan.scopes):
+                session = WatchmanCliSession(
+                    binary_path=Path(metadata.binary_path),
+                    socket_path=self._sidecar.paths.listener_path,
+                    statefile_path=self._sidecar.paths.statefile_path,
+                    logfile_path=self._sidecar.paths.logfile_path,
+                    pidfile_path=self._sidecar.paths.pidfile_path,
+                    project_root=self._sidecar.paths.project_root,
+                    debug_sink=self._service._debug,
+                    subscription_overflow_handler=self._handle_subscription_queue_overflow,
+                )
+                scoped_subscription_name = self._subscription_name_for_scope(
+                    base_name=self._SUBSCRIPTION_NAME,
+                    target_path=watch_path,
+                    scope=scope,
+                    scope_index=scope_index,
+                )
+                single_scope_plan = WatchmanScopePlan(scopes=(scope,))
+                await session.start(
+                    target_path=scope.requested_path,
+                    subscription_name=scoped_subscription_name,
+                    scope_plan=single_scope_plan,
+                    nested_mount_roots=(),
+                )
+                sessions.append(session)
+                subscription_scope_map[scoped_subscription_name] = scope
         except Exception as error:
-            if session is not None:
+            for session in sessions:
                 await session.stop()
             await self._sidecar.stop()
             self._service.watchman_scope_plan = None
             self._service.watchman_subscription_queue = None
+            self._shared_subscription_queue = None
+            self._subscription_scope_map = {}
             raise RuntimeError(f"Watchman session {phase} failed: {error}") from error
 
-        self._session = session
-        self._service.watchman_scope_plan = setup.scope_plan
-        self._service.watchman_subscription_queue = session.subscription_queue
+        self._sessions = sessions
+        self._session = sessions[0] if sessions else None
+        self._subscription_scope_map = dict(subscription_scope_map)
+        self._service.watchman_scope_plan = scope_plan
+        self._service.watchman_subscription_queue = self._shared_subscription_queue
         self._path_filter = RealtimePathFilter(
             config=self._service.config,
-            root_path=setup.scope_plan.primary_scope.requested_path,
+            root_path=watch_path,
         )
+        self._subscription_bridge_tasks = [
+            loop.create_task(self._bridge_session_subscription_pdus(session))
+            for session in sessions
+        ]
         self._subscription_consumer_task = loop.create_task(
-            self._consume_subscription_pdus(setup.scope_plan.primary_scope)
+            self._consume_subscription_pdus()
         )
         self._session_monitor_task = loop.create_task(
-            self._monitor_unexpected_session_exit()
+            self._monitor_unexpected_session_exits()
         )
         self._service._set_effective_backend(self.backend_name)
         self._service._monitoring_ready_at = self._service._utc_now()
@@ -886,11 +1020,124 @@ class WatchmanRealtimeAdapter:
 
         asyncio.create_task(_dispatch())
 
+    @staticmethod
+    def _latest_session_value(
+        session_healths: list[dict[str, Any]],
+        value_key: str,
+        timestamp_key: str,
+    ) -> tuple[Any, str | None]:
+        latest_value: Any = None
+        latest_timestamp: str | None = None
+        for health in session_healths:
+            timestamp = health.get(timestamp_key)
+            value = health.get(value_key)
+            if not isinstance(timestamp, str) or not timestamp:
+                continue
+            if latest_timestamp is None or timestamp > latest_timestamp:
+                latest_timestamp = timestamp
+                latest_value = value
+        return latest_value, latest_timestamp
+
     def get_health(self) -> dict[str, Any]:
         health = _default_watchman_health_snapshot()
         health.update(self._sidecar.get_health())
-        if self._session is not None:
-            health.update(self._session.get_health())
+        session_healths = [session.get_health() for session in self._sessions]
+        if not session_healths and self._session is not None:
+            session_healths = [self._session.get_health()]
+        if session_healths:
+            primary_session_health = session_healths[0]
+            warning, warning_at = self._latest_session_value(
+                session_healths,
+                "watchman_session_last_warning",
+                "watchman_session_last_warning_at",
+            )
+            error, error_at = self._latest_session_value(
+                session_healths,
+                "watchman_session_last_error",
+                "watchman_session_last_error_at",
+            )
+            last_response_at, _ = self._latest_session_value(
+                session_healths,
+                "watchman_session_last_response_at",
+                "watchman_session_last_response_at",
+            )
+            last_subscription_at, _ = self._latest_session_value(
+                session_healths,
+                "watchman_subscription_last_received_at",
+                "watchman_subscription_last_received_at",
+            )
+            health.update(
+                {
+                    "watchman_session_alive": all(
+                        bool(item.get("watchman_session_alive"))
+                        for item in session_healths
+                    ),
+                    "watchman_session_pid": primary_session_health.get(
+                        "watchman_session_pid"
+                    ),
+                    "watchman_session_last_warning": warning,
+                    "watchman_session_last_warning_at": warning_at,
+                    "watchman_session_last_error": error,
+                    "watchman_session_last_error_at": error_at,
+                    "watchman_session_last_response_at": last_response_at,
+                    "watchman_subscription_last_received_at": last_subscription_at,
+                    "watchman_session_command_count": sum(
+                        int(item.get("watchman_session_command_count") or 0)
+                        for item in session_healths
+                    ),
+                    "watchman_subscription_queue_size": (
+                        self._shared_subscription_queue.qsize()
+                        if self._shared_subscription_queue is not None
+                        else sum(
+                            int(item.get("watchman_subscription_queue_size") or 0)
+                            for item in session_healths
+                        )
+                    ),
+                    "watchman_subscription_queue_maxsize": (
+                        self._shared_subscription_queue.maxsize
+                        if self._shared_subscription_queue is not None
+                        else int(
+                            primary_session_health.get(
+                                "watchman_subscription_queue_maxsize"
+                            )
+                            or 0
+                        )
+                    ),
+                    "watchman_subscription_pdu_count": sum(
+                        int(item.get("watchman_subscription_pdu_count") or 0)
+                        for item in session_healths
+                    ),
+                    "watchman_subscription_pdu_dropped": sum(
+                        int(item.get("watchman_subscription_pdu_dropped") or 0)
+                        for item in session_healths
+                    ),
+                    "watchman_subscription_name": primary_session_health.get(
+                        "watchman_subscription_name"
+                    ),
+                    "watchman_subscription_names": [
+                        str(name)
+                        for item in session_healths
+                        for name in item.get("watchman_subscription_names", [])
+                        if isinstance(name, str)
+                    ],
+                    "watchman_watch_root": primary_session_health.get(
+                        "watchman_watch_root"
+                    ),
+                    "watchman_relative_root": primary_session_health.get(
+                        "watchman_relative_root"
+                    ),
+                    "watchman_scopes": [
+                        scope
+                        for item in session_healths
+                        for scope in item.get("watchman_scopes", [])
+                        if isinstance(scope, dict)
+                    ],
+                    "watchman_session_capabilities": dict(
+                        primary_session_health.get("watchman_session_capabilities")
+                        or {}
+                    ),
+                }
+            )
         sidecar_alive = bool(health.get("watchman_alive"))
         session_alive = bool(health.get("watchman_session_alive"))
         health["watchman_sidecar_state"] = "running" if sidecar_alive else "stopped"
@@ -900,9 +1147,15 @@ class WatchmanRealtimeAdapter:
             health["watchman_connection_state"] = "sidecar_only"
         else:
             health["watchman_connection_state"] = "disconnected"
-        health["watchman_subscription_count"] = (
-            1 if health.get("watchman_subscription_name") else 0
-        )
+        subscription_names = health.get("watchman_subscription_names")
+        if isinstance(subscription_names, list):
+            health["watchman_subscription_count"] = len(subscription_names)
+        elif isinstance(health.get("watchman_scopes"), list):
+            health["watchman_subscription_count"] = len(health["watchman_scopes"])
+        elif health.get("watchman_subscription_name"):
+            health["watchman_subscription_count"] = 1
+        else:
+            health["watchman_subscription_count"] = 0
         health["watchman_loss_of_sync"] = {
             "count": self._loss_of_sync_count,
             "fresh_instance_count": self._fresh_instance_count,
@@ -924,6 +1177,25 @@ class WatchmanRealtimeAdapter:
         }
         health["observer_alive"] = sidecar_alive and session_alive
         return health
+
+    def _subscription_name_for_scope(
+        self,
+        *,
+        base_name: str,
+        target_path: Path,
+        scope: WatchmanSubscriptionScope,
+        scope_index: int,
+    ) -> str:
+        if scope.scope_kind == "primary" or scope_index == 0:
+            return base_name
+        try:
+            suffix_source = scope.requested_path.relative_to(target_path).as_posix()
+        except ValueError:
+            suffix_source = scope.requested_path.as_posix()
+        suffix = WatchmanCliSession._sanitize_subscription_suffix(suffix_source)
+        if not suffix:
+            suffix = f"scope-{scope_index}"
+        return f"{base_name}--{suffix}"
 
 
 class RealtimeIndexingService:
