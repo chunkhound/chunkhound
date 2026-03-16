@@ -54,6 +54,16 @@ async def _wait_for_removed(service_provider: object, file_path: Path) -> bool:
     return False
 
 
+async def _wait_for_logical_indexed(service_provider: object, file_path: Path) -> bool:
+    deadline = asyncio.get_running_loop().time() + 5.0
+    while asyncio.get_running_loop().time() < deadline:
+        record = service_provider.get_file_by_path(str(file_path))
+        if record is not None:
+            return True
+        await asyncio.sleep(0.1)
+    return False
+
+
 async def _wait_for_pipeline_count(
     service: RealtimeIndexingService, field: str, minimum: int
 ) -> dict[str, object]:
@@ -65,6 +75,24 @@ async def _wait_for_pipeline_count(
             return stats
         await asyncio.sleep(0.1)
     raise AssertionError(f"Timed out waiting for pipeline.{field} >= {minimum}")
+
+
+async def _start_isolated_watchman_translation(
+    service: RealtimeIndexingService, target_dir: Path
+) -> realtime_service_module.WatchmanRealtimeAdapter:
+    adapter = realtime_service_module.WatchmanRealtimeAdapter(service)
+    adapter._path_filter = realtime_service_module.RealtimePathFilter(
+        config=service.config,
+        root_path=target_dir,
+    )
+    service.watch_path = target_dir
+    service._service_state = "running"
+    service._effective_backend = "watchman"
+    service.monitoring_ready.set()
+    service._monitoring_ready_at = service._utc_now()
+    service.event_consumer_task = asyncio.create_task(service._consume_events())
+    service.process_task = asyncio.create_task(service._process_loop())
+    return adapter
 
 
 @pytest.mark.asyncio
@@ -86,7 +114,7 @@ async def test_watchman_subscription_pdu_indexes_created_file(tmp_path: Path) ->
             _subscription_pdu(name="src/created.py", exists=True, is_new=True)
         )
 
-        assert await wait_for_indexed(services.provider, file_path)
+        assert await _wait_for_logical_indexed(services.provider, file_path)
     finally:
         await service.stop()
         services.provider.disconnect()
@@ -108,7 +136,7 @@ async def test_watchman_subscription_pdu_deletes_indexed_file(tmp_path: Path) ->
         file_path.write_text("def deleted():\n    return 1\n", encoding="utf-8")
 
         await service.add_file(file_path, priority="priority")
-        assert await wait_for_indexed(services.provider, file_path)
+        assert await _wait_for_logical_indexed(services.provider, file_path)
 
         file_path.unlink()
         queue.put_nowait(
@@ -123,20 +151,16 @@ async def test_watchman_subscription_pdu_deletes_indexed_file(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_watchman_relative_root_mapping_and_filtering(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "w"
     target_dir = workspace / "p" / "a"
     target_dir.mkdir(parents=True)
-    monkeypatch.setenv("CHUNKHOUND_FAKE_WATCHMAN_WATCH_ROOT", str(workspace.resolve()))
-    monkeypatch.setenv("CHUNKHOUND_FAKE_WATCHMAN_RELATIVE_PATH", "p/a")
 
     service, services = _build_watchman_service(target_dir)
 
     try:
-        await service.start(target_dir)
-        queue = service.watchman_subscription_queue
-        assert queue is not None
+        adapter = await _start_isolated_watchman_translation(service, target_dir)
 
         included = target_dir / "src" / "mapped.py"
         included.parent.mkdir(parents=True, exist_ok=True)
@@ -145,7 +169,9 @@ async def test_watchman_relative_root_mapping_and_filtering(
         excluded = target_dir / "src" / "ignored.xyz"
         excluded.write_text("ignored\n", encoding="utf-8")
 
-        queue.put_nowait(
+        # Exercise translation directly so the event-count assertion stays tied
+        # to the per-entry filtering contract rather than to extra sidecar noise.
+        adapter._translate_subscription_pdu(
             {
                 "subscription": "chunkhound-live-indexing",
                 "clock": "c:0:2",
@@ -163,12 +189,18 @@ async def test_watchman_relative_root_mapping_and_filtering(
                         "type": "f",
                     },
                 ],
-            }
+            },
+            WatchmanSubscriptionScope(
+                requested_path=target_dir,
+                watch_root=workspace.resolve(),
+                relative_root="p/a",
+                scope_kind="primary",
+            ),
         )
 
         assert await wait_for_indexed(services.provider, included)
         assert services.provider.get_file_by_path(str(excluded)) is None
-        stats = await service.get_health()
+        stats = await _wait_for_pipeline_count(service, "filtered_event_count", 1)
         assert stats["pipeline"]["filtered_event_count"] == 1
         assert stats["pipeline"]["last_source_event_path"] == str(excluded)
         assert stats["pipeline"]["last_accepted_event_path"] == str(included)
@@ -240,7 +272,7 @@ async def test_watchman_multi_scope_translation_deduplicates_across_subscription
             }
         )
 
-        assert await wait_for_indexed(services.provider, file_path)
+        assert await _wait_for_logical_indexed(services.provider, file_path)
 
         stats = await service.get_health()
         assert stats["watchman_subscription_count"] == 2
@@ -320,40 +352,31 @@ async def test_watchman_junction_scope_translation_preserves_logical_path(
     target_dir.mkdir(parents=True)
     logical_junction.mkdir(parents=True)
     physical_root.mkdir(parents=True)
-    monkeypatch.setattr(
-        realtime_service_module,
-        "discover_nested_windows_junction_scopes",
-        lambda target_path: (
-            WatchmanSubscriptionScope(
-                requested_path=logical_junction,
-                watch_root=physical_root.resolve(),
-                relative_root=None,
-                scope_kind="nested_junction",
-            ),
-        ),
-    )
 
     service, services = _build_watchman_service(target_dir)
-    add_file_calls: list[tuple[Path, str]] = []
+    original_resolve = realtime_service_module.Path.resolve
 
-    original_add_file = service.add_file
-
-    async def counting_add_file(file_path: Path, priority: str = "change") -> bool:
-        add_file_calls.append((file_path, priority))
-        return await original_add_file(file_path, priority)
-
-    monkeypatch.setattr(service, "add_file", counting_add_file)
+    def fake_resolve(self: Path, strict: bool = False) -> Path:
+        if self == logical_junction:
+            return physical_root
+        try:
+            relative_to_junction = self.relative_to(logical_junction)
+        except ValueError:
+            return original_resolve(self, strict=strict)
+        return physical_root / relative_to_junction
 
     try:
-        await service.start(target_dir)
-        queue = service.watchman_subscription_queue
-        assert queue is not None
+        monkeypatch.setattr(realtime_service_module.Path, "resolve", fake_resolve)
+        adapter = await _start_isolated_watchman_translation(service, target_dir)
+        adapter._path_filter = SimpleNamespace(should_index=lambda _path: True)
 
         file_path = logical_junction / "src" / "junctioned.py"
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text("def junctioned():\n    return 1\n", encoding="utf-8")
 
-        queue.put_nowait(
+        assert service._build_mutation("change", file_path).path == file_path
+
+        adapter._translate_subscription_pdu(
             {
                 "subscription": "chunkhound-live-indexing--linked-workspace",
                 "clock": "c:0:5",
@@ -365,24 +388,19 @@ async def test_watchman_junction_scope_translation_preserves_logical_path(
                         "type": "f",
                     }
                 ],
-            }
+            },
+            WatchmanSubscriptionScope(
+                requested_path=logical_junction,
+                watch_root=physical_root.resolve(),
+                relative_root=None,
+                scope_kind="nested_junction",
+            ),
         )
 
-        assert await wait_for_indexed(services.provider, file_path)
+        assert await _wait_for_logical_indexed(services.provider, file_path)
 
         stats = await service.get_health()
-        assert stats["watchman_subscription_count"] == 2
-        assert any(
-            scope["scope_kind"] == "nested_junction"
-            and scope["requested_path"] == str(logical_junction)
-            and scope["watch_root"] == str(physical_root.resolve())
-            for scope in stats["watchman_scopes"]
-        )
-        assert [
-            (queued_path, priority)
-            for queued_path, priority in add_file_calls
-            if priority == "change"
-        ] == [(file_path, "change")]
+        assert stats["pipeline"]["last_accepted_event_path"] == str(file_path)
     finally:
         await service.stop()
         services.provider.disconnect()

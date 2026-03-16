@@ -26,6 +26,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from chunkhound.core.config.config import Config
+from chunkhound.core.utils.path_utils import normalize_realtime_path
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.providers.database.duckdb_provider import (
     DuckDBTransactionConflictError,
@@ -1873,11 +1874,10 @@ class RealtimeIndexingService:
 
     def _normalize_mutation_path(self, file_path: Path | str) -> Path:
         path_obj = Path(file_path)
-        if not path_obj.is_absolute():
-            base_dir = self.watch_path or getattr(self.config, "target_dir", None)
-            if isinstance(base_dir, Path):
-                path_obj = base_dir / path_obj
-        return Path(normalize_file_path(path_obj))
+        base_dir = self.watch_path or getattr(self.config, "target_dir", None)
+        return normalize_realtime_path(
+            path_obj, base_dir if isinstance(base_dir, Path) else None
+        )
 
     @classmethod
     def _mutation_priority(cls, operation: str) -> int:
