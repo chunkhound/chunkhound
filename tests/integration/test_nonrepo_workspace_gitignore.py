@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -21,7 +22,7 @@ def _simulate(dir_path: Path, env: dict[str, str]) -> list[str]:
     return [ln.strip() for ln in p.stdout.splitlines() if ln.strip()]
 
 
-@pytest.mark.skipif(subprocess.run(["which","git"], stdout=subprocess.DEVNULL).returncode != 0, reason="git required")
+@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 def test_nonrepo_root_gitignore_affects_only_nonrepo(tmp_path: Path):
     ws = tmp_path / "ws"
     # CH root .gitignore excludes datasets/

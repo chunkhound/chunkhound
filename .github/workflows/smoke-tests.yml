@@ -29,9 +29,16 @@ jobs:
         
       - name: Install dependencies
         run: uv sync --locked
-        
-      - name: Run test suite
-        run: uv run pytest tests/ -v
+
+      - name: Run tests
+        run: |
+          echo "::group::Test collection check"
+          uv run pytest tests/ --collectonly -q --tb=no
+          echo "::endgroup::"
+
+          echo "::group::Full test suite"
+          uv run pytest tests/ -v
+          echo "::endgroup::"
 
   watchman-runtime-validation:
     strategy:
