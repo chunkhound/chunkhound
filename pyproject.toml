@@ -92,6 +92,8 @@ dependencies = [
     "anthropic>=0.75.0",
     "msgpack>=1.0",
     "tomli>=2.0.0; python_version < '3.11'",
+    "tree-sitter-html>=0.23.2",
+    "tree-sitter-css>=0.25.0",
 ]
 
 [project.optional-dependencies]

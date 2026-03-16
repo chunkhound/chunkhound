@@ -43,7 +43,11 @@ LANGUAGE_SAMPLES = {
     Language.SWIFT: "class MyClass {\n    func hello() -> String {\n        return \"world\"\n    }\n}",
     Language.DART: "void main() { }",
     Language.LUA: "function hello() print('world') end",
-    Language.SQL: "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100));\nCREATE VIEW active_users AS SELECT * FROM users;\nCREATE FUNCTION get_user_count() RETURNS INT BEGIN RETURN 0; END;\nCREATE TRIGGER audit_insert AFTER INSERT ON users FOR EACH ROW BEGIN INSERT INTO audit_log VALUES (NEW.id); END;\nCREATE INDEX idx_users_name ON users (name);",
+    Language.SQL: "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100));\nCREATE VIEW active_users AS SELECT * FROM users;\nCREATE FUNCTION get_user_count() RETURNS INT BEGIN RETURN 0; END;\nCREATE TRIGGER audit_insert AFTER INSERT ON users FOR EACH ROW BEGIN INSERT INTO audit_log VALUES (NEW.id); END;",
+    Language.HTML: "<section><h1>Hello</h1></section>",
+    Language.CSS: "body { color: red; }",
+    Language.SCSS: "$color: red; .btn { color: $color; }",
+    Language.JINJA: "<html><body>{{ name }}</body></html>",
     Language.ELIXIR: "defmodule Hello do\n  def world, do: :ok\nend",
 }
 

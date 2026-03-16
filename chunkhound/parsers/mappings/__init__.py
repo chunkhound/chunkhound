@@ -6,6 +6,8 @@ for mapping tree-sitter AST nodes to semantic chunks.
 
 from .base import BaseMapping
 from .bash import BashMapping
+from .css import CssMapping
+from .html import HtmlMapping
 from .c import CMapping
 from .cpp import CppMapping
 from .csharp import CSharpMapping
@@ -28,6 +30,7 @@ from .objc import ObjCMapping
 from .pdf import PDFMapping
 from .php import PHPMapping
 from .python import PythonMapping
+from .scss import ScssMapping
 from .rust import RustMapping
 from .sql import SqlMapping
 from .svelte import SvelteMapping
@@ -44,6 +47,8 @@ from .zig import ZigMapping
 __all__ = [
     "BaseMapping",
     "BashMapping",
+    "CssMapping",
+    "HtmlMapping",
     "CMapping",
     "CppMapping",
     "CSharpMapping",
@@ -66,6 +71,7 @@ __all__ = [
     "PDFMapping",
     "PHPMapping",
     "PythonMapping",
+    "ScssMapping",
     "RustMapping",
     "SqlMapping",
     "SvelteMapping",
