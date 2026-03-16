@@ -89,13 +89,17 @@ class MultiHopStrategy:
 
         # Apply defaults - consult config if available
         effective_time_limit = (
-            time_limit if time_limit is not None
-            else self._config.get_effective_time_limit() if self._config
+            time_limit
+            if time_limit is not None
+            else self._config.get_effective_time_limit()
+            if self._config
             else 5.0
         )
         effective_result_limit = (
-            result_limit if result_limit is not None
-            else self._config.get_effective_result_limit() if self._config
+            result_limit
+            if result_limit is not None
+            else self._config.get_effective_result_limit()
+            if self._config
             else 500
         )
 
@@ -171,8 +175,13 @@ class MultiHopStrategy:
                     f"Dynamic expansion terminated: {effective_time_limit:.1f} second time limit reached"
                 )
                 break
-            if effective_result_limit is not None and len(all_results) >= effective_result_limit:
-                logger.debug(f"Dynamic expansion terminated: {effective_result_limit} result limit reached")
+            if (
+                effective_result_limit is not None
+                and len(all_results) >= effective_result_limit
+            ):
+                logger.debug(
+                    f"Dynamic expansion terminated: {effective_result_limit} result limit reached"
+                )
                 break
 
             # Get top 5 candidates for expansion

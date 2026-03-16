@@ -168,8 +168,7 @@ async def _maybe_synthesize_global_ia(
     except Exception as exc:  # noqa: BLE001
         if log_warning:
             log_warning(
-                "Global IA synthesis provider unavailable; skipping. "
-                f"Error: {exc}"
+                f"Global IA synthesis provider unavailable; skipping. Error: {exc}"
             )
         return None, None, None
 
@@ -201,8 +200,7 @@ async def _maybe_synthesize_global_ia(
     except Exception as exc:  # noqa: BLE001
         if log_warning:
             log_warning(
-                "Global navigation/glossary synthesis failed; skipping. "
-                f"Error: {exc}"
+                f"Global navigation/glossary synthesis failed; skipping. Error: {exc}"
             )
 
     return nav_groups, glossary_terms, homepage_overview

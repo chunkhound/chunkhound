@@ -639,7 +639,7 @@ class ObjCMapping(BaseMapping):
         if def_node.type == "preproc_def":
             # Extract #define NAME VALUE
             node_text = self.get_node_text(def_node, source).strip()
-            match = re.match(r'#define\s+([A-Za-z_][A-Za-z0-9_]*)\s+(.+)', node_text)
+            match = re.match(r"#define\s+([A-Za-z_][A-Za-z0-9_]*)\s+(.+)", node_text)
             if not match:
                 return None
 

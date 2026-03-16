@@ -44,7 +44,9 @@ class DatabaseServices(NamedTuple):
     embedding_service: "EmbeddingService"
 
 
-def _db_root_path_for_config(db_path: Path | str, *, provider: str | None) -> Path | str:
+def _db_root_path_for_config(
+    db_path: Path | str, *, provider: str | None
+) -> Path | str:
     """Return the directory-style database path expected by DatabaseConfig.
 
     `DatabaseConfig.get_db_path()` derives provider-specific locations from the

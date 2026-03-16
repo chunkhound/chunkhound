@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
+from tree_sitter import Node as TSNode
 
 from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.parsers.mappings._shared.js_family_extraction import (
@@ -22,7 +23,6 @@ from chunkhound.parsers.mappings._shared.js_query_patterns import (
 )
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-from tree_sitter import Node as TSNode
 
 
 class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
@@ -116,8 +116,9 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
           modules that export object literals are chunked.
         """
         if concept == UniversalConcept.DEFINITION:
-            return ("\n".join([
-                """
+            return "\n".join(
+                [
+                    """
                 ; Standard definitions
                 (function_declaration
                     name: (identifier) @name
@@ -134,9 +135,9 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
                 ; Top-level export (default or named)
                 (export_statement) @definition
                 """,
-                LEXICAL_DECLARATION_CONFIG,
-                # Top-level function/arrow declarators
-                """
+                    LEXICAL_DECLARATION_CONFIG,
+                    # Top-level function/arrow declarators
+                    """
                 (program
                     (lexical_declaration
                         (variable_declarator
@@ -154,10 +155,11 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
                     )
                 )
                 """,
-                COMMONJS_MODULE_EXPORTS,
-                COMMONJS_NESTED_EXPORTS,
-                COMMONJS_EXPORTS_SHORTHAND,
-            ]))
+                    COMMONJS_MODULE_EXPORTS,
+                    COMMONJS_NESTED_EXPORTS,
+                    COMMONJS_EXPORTS_SHORTHAND,
+                ]
+            )
         elif concept == UniversalConcept.COMMENT:
             return """
             (comment) @definition
@@ -742,10 +744,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         return chunk
 
     def resolve_import_paths(
-        self,
-        import_text: str,
-        base_dir: Path,
-        source_file: Path
+        self, import_text: str, base_dir: Path, source_file: Path
     ) -> list[Path]:
         """Resolve TypeScript import to file path.
 
@@ -760,7 +759,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
         import re
 
         # Extract import path
-        match = re.search(r'''from\s+['"](.+?)['"]''', import_text)
+        match = re.search(r"""from\s+['"](.+?)['"]""", import_text)
         if not match:
             return []
 
@@ -769,7 +768,7 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             return []
 
         # Skip non-relative imports
-        if not import_path.startswith('.'):
+        if not import_path.startswith("."):
             return []
 
         source_dir = self._resolve_source_dir(source_file, base_dir)
@@ -780,13 +779,13 @@ class TypeScriptMapping(BaseMapping, JSFamilyExtraction):
             return [resolved]
 
         # Try with TypeScript extensions first, then JS
-        for ext in ['.ts', '.tsx', '.d.ts', '.js', '.jsx']:
+        for ext in [".ts", ".tsx", ".d.ts", ".js", ".jsx"]:
             with_ext = resolved.with_suffix(ext)
             if with_ext.exists():
                 return [with_ext]
 
         # Try index file
-        for index in ['index.ts', 'index.tsx', 'index.js']:
+        for index in ["index.ts", "index.tsx", "index.js"]:
             index_path = resolved / index
             if index_path.exists():
                 return [index_path]

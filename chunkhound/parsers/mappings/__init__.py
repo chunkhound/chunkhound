@@ -12,6 +12,7 @@ from .c import CMapping
 from .cpp import CppMapping
 from .csharp import CSharpMapping
 from .dart import DartMapping
+from .elixir import ElixirMapping
 from .go import GoMapping
 from .groovy import GroovyMapping
 from .haskell import HaskellMapping
@@ -52,6 +53,7 @@ __all__ = [
     "CppMapping",
     "CSharpMapping",
     "DartMapping",
+    "ElixirMapping",
     "GoMapping",
     "GroovyMapping",
     "HaskellMapping",

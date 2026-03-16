@@ -48,6 +48,7 @@ LANGUAGE_SAMPLES = {
     Language.CSS: "body { color: red; }",
     Language.SCSS: "$color: red; .btn { color: $color; }",
     Language.JINJA: "<html><body>{{ name }}</body></html>",
+    Language.ELIXIR: "defmodule Hello do\n  def world, do: :ok\nend",
 }
 
 
@@ -307,3 +308,23 @@ class TestParserValidation:
 
         except Exception as e:
             pytest.fail(f"Parser for {language.value} failed to parse large array content: {e}")
+
+
+class TestSqlMetadata:
+    """Test SQL parser metadata extraction for specific constructs."""
+
+    def test_sql_create_index_metadata(self):
+        """CREATE INDEX produces kind='index' and correct target_table."""
+        factory = get_parser_factory()
+        parser = factory.create_parser(Language.SQL)
+        assert parser is not None
+
+        sql = "CREATE INDEX idx_users_name ON users (name);"
+        chunks = parser.parse_content(sql, "test.sql", FileId(1))
+
+        index_chunks = [c for c in chunks if "idx_users_name" in (c.symbol or "")]
+        assert index_chunks, "No chunk found with index name idx_users_name"
+
+        chunk = index_chunks[0]
+        assert chunk.metadata.get("kind") == "index"
+        assert chunk.metadata.get("target_table") == "users"

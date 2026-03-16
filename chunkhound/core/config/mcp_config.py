@@ -5,7 +5,6 @@ including transport settings and server behavior.
 """
 
 import argparse
-import os
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field

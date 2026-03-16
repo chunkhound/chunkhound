@@ -9,18 +9,23 @@ def format_chunk_for_embedding(
     file_path: str | None = None,
     language: str | None = None,
     constants: list[dict[str, str]] | None = None,
+    rule_target: str | None = None,
 ) -> str:
     """Prepend path, language, and constants metadata to chunk content for embedding.
 
     This improves semantic search recall by ~35% (Anthropic Contextual Retrieval)
     by allowing path-related queries to match chunks from relevant directories.
     Constants in the header enable searching for specific constant values.
+    rule_target embeds the Makefile rule target name into the header for all rule parts,
+    enabling target-aware search across continuation chunks.
 
     Args:
         code: The chunk code content.
         file_path: Relative file path (e.g., "src/auth/handler.py").
         language: Programming language (e.g., "python").
         constants: List of constant dicts with "name" and "value" keys.
+        rule_target: Makefile rule target name; set on all rule parts
+            (including Part 1).
 
     Returns:
         Formatted text with metadata header prepended.
@@ -36,7 +41,7 @@ def format_chunk_for_embedding(
         >>> format_chunk_for_embedding("def foo(): pass")
         'def foo(): pass'
     """
-    if not file_path and not language and not constants:
+    if not file_path and not language and not constants and not rule_target:
         return code
 
     if file_path and language:
@@ -47,6 +52,10 @@ def format_chunk_for_embedding(
         header = f"# ({language})"
     else:
         header = "#"
+
+    # Append rule_target context (set on all Makefile rule parts for consistent search)
+    if rule_target:
+        header += f" [target: {rule_target}]"
 
     # Append constants summary to header (limited to avoid bloat)
     if constants:

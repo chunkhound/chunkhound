@@ -44,7 +44,7 @@ class _FakeDB:
     def begin_transaction(self):
         return None
 
-    def commit_transaction(self):
+    def commit_transaction(self, force_checkpoint: bool = False):
         return None
 
     def rollback_transaction(self):
@@ -56,8 +56,38 @@ class _FakeDB:
     def insert_chunks_batch(self, chunks):
         return []
 
+    def delete_chunks_batch(self, chunk_ids):
+        return None
+
     def should_optimize(self, operation: str = "") -> bool:
         return False
+
+    async def begin_transaction_async(self):
+        return self.begin_transaction()
+
+    async def commit_transaction_async(self, force_checkpoint: bool = False):
+        return self.commit_transaction(force_checkpoint=force_checkpoint)
+
+    async def rollback_transaction_async(self):
+        return self.rollback_transaction()
+
+    async def get_file_by_path_async(self, path: str, as_model: bool = False):
+        return self.get_file_by_path(path, as_model)
+
+    async def update_file_async(self, file_id: int, **kwargs):
+        return self.update_file(file_id, **kwargs)
+
+    async def insert_file_async(self, file_model):
+        return self.insert_file(file_model)
+
+    async def get_chunks_by_file_id_async(self, file_id: int, as_model: bool = False):
+        return self.get_chunks_by_file_id(file_id, as_model)
+
+    async def insert_chunks_batch_async(self, chunks):
+        return self.insert_chunks_batch(chunks)
+
+    async def delete_chunks_batch_async(self, chunk_ids):
+        return self.delete_chunks_batch(chunk_ids)
 
 
 class _Cfg:

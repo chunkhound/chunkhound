@@ -6,12 +6,13 @@ and GitHub Flavored Markdown extensions.
 """
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
+
+from tree_sitter import Node as TSNode
 
 from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-from tree_sitter import Node as TSNode
 
 
 class MarkdownMapping(BaseMapping):
@@ -710,9 +711,7 @@ class MarkdownMapping(BaseMapping):
 
         return metadata
 
-    def _find_definition_node(
-        self, captures: dict[str, TSNode]
-    ) -> Optional[TSNode]:
+    def _find_definition_node(self, captures: dict[str, TSNode]) -> TSNode | None:
         """Find the main definition node from captures.
 
         Args:
@@ -744,10 +743,7 @@ class MarkdownMapping(BaseMapping):
         return None
 
     def resolve_import_paths(
-        self,
-        import_text: str,
-        base_dir: Path,
-        source_file: Path
+        self, import_text: str, base_dir: Path, source_file: Path
     ) -> list[Path]:
         """Data formats don't have imports."""
         return []
