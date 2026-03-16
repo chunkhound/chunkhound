@@ -25,7 +25,12 @@ from chunkhound.watchman_runtime.loader import (
     listener_path_is_filesystem,
     resolve_packaged_watchman_runtime,
 )
-from tests.utils.windows_compat import realtime_backend_for_tests, wait_for_indexed
+from tests.utils.windows_compat import (
+    create_windows_directory_junction,
+    realtime_backend_for_tests,
+    remove_windows_directory_junction,
+    wait_for_indexed,
+)
 
 
 async def _wait_for_realtime_condition(
@@ -42,6 +47,23 @@ async def _wait_for_realtime_condition(
             await asyncio.sleep(0.05)
 
     return await asyncio.wait_for(_poll(), timeout=timeout)
+
+
+async def _wait_for_logical_indexed(
+    provider,
+    file_path: Path,
+    *,
+    timeout: float = 10.0,
+    poll_interval: float = 0.2,
+) -> bool:
+    deadline = time.monotonic() + timeout
+    lookup_path = str(file_path)
+    while time.monotonic() < deadline:
+        record = provider.get_file_by_path(lookup_path)
+        if record is not None:
+            return True
+        await asyncio.sleep(poll_interval)
+    return False
 
 
 def _configured_mount_regression_paths() -> tuple[Path, Path] | None:
@@ -374,6 +396,63 @@ class TestRealtimeFunctional:
             services.provider.disconnect()
             shutil.rmtree(project_dir, ignore_errors=True)
             shutil.rmtree(db_root, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.requires_native_watchman
+    @pytest.mark.skipif(os.name != "nt", reason="Windows topology only")
+    async def test_watchman_backend_indexes_real_file_mutation_under_windows_junction(
+        self, tmp_path
+    ):
+        """Watchman backend should observe live mutations through a Windows junction."""
+        from types import SimpleNamespace
+
+        watch_dir = tmp_path / "watchman_project"
+        watch_dir.mkdir(parents=True)
+        physical_workspace = tmp_path / "junction_target"
+        physical_workspace.mkdir(parents=True)
+        junction_dir = watch_dir / "linked_workspace"
+        try:
+            create_windows_directory_junction(junction_dir, physical_workspace)
+        except RuntimeError as error:
+            pytest.skip(str(error))
+
+        db_path = watch_dir / ".chunkhound" / "test.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        fake_args = SimpleNamespace(path=watch_dir)
+        config = Config(
+            args=fake_args,
+            database={"path": str(db_path), "provider": "duckdb"},
+            indexing={"realtime_backend": "watchman"},
+        )
+
+        services = create_services(db_path, config)
+        services.provider.connect()
+        service = RealtimeIndexingService(services, config)
+
+        try:
+            await service.start(watch_dir)
+
+            file_path = junction_dir / "src" / "watchman_junction_runtime.py"
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(
+                "def watchman_junction_runtime_symbol():\n    return 7\n",
+                encoding="utf-8",
+            )
+
+            assert await _wait_for_logical_indexed(
+                services.provider, file_path, timeout=30.0
+            )
+
+            stats = await service.get_health()
+            assert stats["watchman_connection_state"] == "connected"
+            assert stats["watchman_subscription_count"] >= 1
+            assert isinstance(stats["watchman_scopes"], list)
+            assert stats["watchman_scopes"]
+        finally:
+            await service.stop()
+            services.provider.disconnect()
+            remove_windows_directory_junction(junction_dir)
+            shutil.rmtree(physical_workspace, ignore_errors=True)
 
     @pytest.mark.asyncio
     @pytest.mark.requires_native_watchman

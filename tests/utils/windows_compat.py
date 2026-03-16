@@ -2,6 +2,7 @@
 
 import gc
 import os
+import subprocess
 import tempfile
 import time
 from collections.abc import Generator
@@ -186,6 +187,58 @@ def should_use_polling() -> bool:
     drop filesystem events, causing tests to hang or fail.
     """
     return is_windows() and is_ci()
+
+
+def create_windows_directory_junction(link_path: Path, target_path: Path) -> None:
+    """Create a Windows directory junction without requiring admin privileges."""
+    if not is_windows():
+        raise RuntimeError("Windows directory junctions are only supported on Windows")
+
+    resolved_target = target_path.resolve()
+    if not resolved_target.is_dir():
+        raise RuntimeError(
+            f"Windows directory junction target must exist: {resolved_target}"
+        )
+    if link_path.exists() or link_path.is_symlink():
+        raise RuntimeError(
+            f"Windows directory junction path already exists: {link_path}"
+        )
+
+    completed = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link_path), str(resolved_target)],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
+        raise RuntimeError(
+            "Failed to create Windows directory junction "
+            f"{link_path} -> {resolved_target}: {detail}"
+        )
+    if not link_path.exists():
+        raise RuntimeError(f"Windows directory junction was not created: {link_path}")
+
+
+def remove_windows_directory_junction(link_path: Path) -> None:
+    """Remove a Windows directory junction without touching its target tree."""
+    if not link_path.exists():
+        return
+    if not is_windows():
+        link_path.rmdir()
+        return
+
+    completed = subprocess.run(
+        ["cmd", "/c", "rmdir", str(link_path)],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if completed.returncode != 0 and link_path.exists():
+        detail = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
+        raise RuntimeError(
+            f"Failed to remove Windows directory junction {link_path}: {detail}"
+        )
 
 
 def realtime_backend_for_tests() -> str:
