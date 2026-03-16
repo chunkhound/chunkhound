@@ -121,11 +121,15 @@ class SimpleEventHandler(FileSystemEventHandler):
         loop: asyncio.AbstractEventLoop | None = None,
         root_path: Path | None = None,
         queue_result_callback: QueueResultCallback | None = None,
+        source_event_callback: Callable[[str, Path], None] | None = None,
+        filtered_event_callback: Callable[[str, Path], None] | None = None,
     ):
         self.event_queue = event_queue
         self.config = config
         self.loop = loop
         self._queue_result_callback = queue_result_callback
+        self._source_event_callback = source_event_callback
+        self._filtered_event_callback = filtered_event_callback
         if root_path is not None:
             self._root = root_path.resolve()
         else:
@@ -142,13 +146,17 @@ class SimpleEventHandler(FileSystemEventHandler):
         # Handle directory creation
         if event.event_type == "created" and event.is_directory:
             # Queue directory creation for processing
-            self._queue_event("dir_created", Path(normalize_file_path(event.src_path)))
+            file_path = Path(normalize_file_path(event.src_path))
+            self._record_source_event("dir_created", file_path)
+            self._queue_event("dir_created", file_path)
             return
 
         # Handle directory deletion
         if event.event_type == "deleted" and event.is_directory:
             # Queue directory deletion for cleanup
-            self._queue_event("dir_deleted", Path(normalize_file_path(event.src_path)))
+            file_path = Path(normalize_file_path(event.src_path))
+            self._record_source_event("dir_deleted", file_path)
+            self._queue_event("dir_deleted", file_path)
             return
 
         # Skip other directory events (modified, moved)
@@ -162,9 +170,11 @@ class SimpleEventHandler(FileSystemEventHandler):
 
         # Resolve path to canonical form to avoid /var vs /private/var issues
         file_path = Path(normalize_file_path(event.src_path))
+        self._record_source_event(event.event_type, file_path)
 
         # Simple filtering for supported file types
         if not self._should_index(file_path):
+            self._record_filtered_event(event.event_type, file_path)
             return
 
         self._queue_event(event.event_type, file_path)
@@ -187,17 +197,21 @@ class SimpleEventHandler(FileSystemEventHandler):
         # If moving FROM temp file TO supported file -> index destination
         if not self._should_index(src_file) and self._should_index(dest_file):
             logger.debug(f"Atomic write detected: {src_path} -> {dest_path}")
+            self._record_source_event("created", dest_file)
             self._queue_event("created", dest_file)
 
         # If moving FROM supported file -> handle as deletion + creation
         elif self._should_index(src_file) and self._should_index(dest_file):
             logger.debug(f"File rename: {src_path} -> {dest_path}")
+            self._record_source_event("deleted", src_file)
             self._queue_event("deleted", src_file)
+            self._record_source_event("created", dest_file)
             self._queue_event("created", dest_file)
 
         # If moving FROM supported file TO temp/unsupported -> deletion
         elif self._should_index(src_file) and not self._should_index(dest_file):
             logger.debug(f"File moved to temp/unsupported: {src_path}")
+            self._record_source_event("deleted", src_file)
             self._queue_event("deleted", src_file)
 
     def _queue_event(self, event_type: str, file_path: Path) -> None:
@@ -233,6 +247,20 @@ class SimpleEventHandler(FileSystemEventHandler):
                 self._queue_result_callback(event_type, file_path, accepted, reason)
         except Exception:
             # Never let bookkeeping interfere with monitoring.
+            pass
+
+    def _record_source_event(self, event_type: str, file_path: Path) -> None:
+        try:
+            if self._source_event_callback:
+                self._source_event_callback(event_type, file_path)
+        except Exception:
+            pass
+
+    def _record_filtered_event(self, event_type: str, file_path: Path) -> None:
+        try:
+            if self._filtered_event_callback:
+                self._filtered_event_callback(event_type, file_path)
+        except Exception:
             pass
 
 
@@ -461,6 +489,7 @@ class WatchmanRealtimeAdapter:
             except Exception as error:
                 message = f"Watchman event translation failed: {error}"
                 logger.warning(message)
+                self._service._record_translation_error()
                 self._service._set_warning(message)
             finally:
                 subscription_queue.task_done()
@@ -584,7 +613,9 @@ class WatchmanRealtimeAdapter:
             if translated is None:
                 continue
             event_type, file_path = translated
+            self._service._record_source_event(event_type, file_path)
             if not path_filter.should_index(file_path):
+                self._service._record_filtered_event(event_type, file_path)
                 continue
             _enqueue_realtime_event(
                 self._service.event_queue,
@@ -647,6 +678,7 @@ class WatchmanRealtimeAdapter:
     def _warn_translation_issue(self, message: str) -> None:
         warning = f"Watchman event translation warning: {message}"
         logger.warning(warning)
+        self._service._record_translation_error()
         self._service._set_warning(warning)
 
     def _reset_loss_of_sync_state(self) -> None:
@@ -937,8 +969,7 @@ class WatchmanRealtimeAdapter:
         ):
             reason = "fresh_instance"
             message = (
-                "Watchman reported a fresh instance; "
-                "scheduling a reconciliation resync"
+                "Watchman reported a fresh instance; scheduling a reconciliation resync"
             )
         else:
             warning = payload.get("warning")
@@ -1225,6 +1256,7 @@ class RealtimeIndexingService:
     _EVENT_HISTORY_RETENTION_SECONDS = 10.0
     _EVENT_QUEUE_MAXSIZE = 1000
     _RESYNC_DEBOUNCE_SECONDS = 1.0
+    _STALL_THRESHOLD_SECONDS = 30.0
     _WATCHDOG_SETUP_TIMEOUT_SECONDS = 5.0
     _MONITORING_READY_TIMEOUT_SECONDS = 10.0
     _POLLING_STARTUP_SETTLE_SECONDS = 0.5
@@ -1284,6 +1316,21 @@ class RealtimeIndexingService:
         self._event_queue_last_file_path: str | None = None
         self._event_queue_last_enqueued_at: str | None = None
         self._event_queue_last_dropped_at: str | None = None
+        self._last_source_event_at: str | None = None
+        self._last_source_event_type: str | None = None
+        self._last_source_event_path: str | None = None
+        self._last_accepted_event_at: str | None = None
+        self._last_accepted_event_type: str | None = None
+        self._last_accepted_event_path: str | None = None
+        self._last_processing_started_at: str | None = None
+        self._last_processing_started_path: str | None = None
+        self._last_processing_completed_at: str | None = None
+        self._last_processing_completed_path: str | None = None
+        self._filtered_event_count = 0
+        self._suppressed_duplicate_count = 0
+        self._translation_error_count = 0
+        self._processing_error_count = 0
+        self._active_processing_count = 0
 
         # Background scan state
         self.scan_iterator: Iterator | None = None
@@ -1339,6 +1386,50 @@ class RealtimeIndexingService:
         return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
     @classmethod
+    def _default_pipeline_snapshot(cls) -> dict[str, Any]:
+        return {
+            "last_source_event_at": None,
+            "last_source_event_type": None,
+            "last_source_event_path": None,
+            "last_accepted_event_at": None,
+            "last_accepted_event_type": None,
+            "last_accepted_event_path": None,
+            "last_processing_started_at": None,
+            "last_processing_started_path": None,
+            "last_processing_completed_at": None,
+            "last_processing_completed_path": None,
+            "filtered_event_count": 0,
+            "suppressed_duplicate_count": 0,
+            "translation_error_count": 0,
+            "processing_error_count": 0,
+            "stall_threshold_seconds": cls._STALL_THRESHOLD_SECONDS,
+        }
+
+    @staticmethod
+    def _parse_status_timestamp(value: Any) -> datetime | None:
+        if not isinstance(value, str) or not value:
+            return None
+        normalized = value.replace("Z", "+00:00") if value.endswith("Z") else value
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @classmethod
+    def _latest_timestamp(cls, *values: Any) -> datetime | None:
+        latest: datetime | None = None
+        for value in values:
+            parsed = cls._parse_status_timestamp(value)
+            if parsed is None:
+                continue
+            if latest is None or parsed > latest:
+                latest = parsed
+        return latest
+
+    @classmethod
     def default_health_snapshot(
         cls, configured_backend: str | None = None
     ) -> dict[str, Any]:
@@ -1348,6 +1439,8 @@ class RealtimeIndexingService:
             "effective_backend": "uninitialized",
             "service_state": "idle",
             "monitoring_mode": "uninitialized",
+            "live_indexing_state": "uninitialized",
+            "live_indexing_hint": "Live indexing monitoring is not ready yet.",
             "monitoring_ready": False,
             "monitoring_ready_at": None,
             "observer_alive": False,
@@ -1389,6 +1482,7 @@ class RealtimeIndexingService:
                 "last_files_checked": 0,
                 "last_snapshot_truncated": False,
             },
+            "pipeline": cls._default_pipeline_snapshot(),
         }
         if configured_backend == "watchman":
             status.update(_default_watchman_health_snapshot())
@@ -1592,7 +1686,101 @@ class RealtimeIndexingService:
                 "last_snapshot_truncated": self._last_poll_snapshot_truncated,
             }
         )
+        pipeline = self._build_pipeline_snapshot()
+        status["pipeline"].update(pipeline)
+        live_indexing_state = self._derive_live_indexing_state(pipeline)
+        status["live_indexing_state"] = live_indexing_state
+        status["live_indexing_hint"] = self._derive_live_indexing_hint(
+            live_indexing_state
+        )
         return status
+
+    def _build_pipeline_snapshot(self) -> dict[str, Any]:
+        pipeline = self._default_pipeline_snapshot()
+        pipeline.update(
+            {
+                "last_source_event_at": self._last_source_event_at,
+                "last_source_event_type": self._last_source_event_type,
+                "last_source_event_path": self._last_source_event_path,
+                "last_accepted_event_at": self._last_accepted_event_at,
+                "last_accepted_event_type": self._last_accepted_event_type,
+                "last_accepted_event_path": self._last_accepted_event_path,
+                "last_processing_started_at": self._last_processing_started_at,
+                "last_processing_started_path": self._last_processing_started_path,
+                "last_processing_completed_at": self._last_processing_completed_at,
+                "last_processing_completed_path": self._last_processing_completed_path,
+                "filtered_event_count": self._filtered_event_count,
+                "suppressed_duplicate_count": self._suppressed_duplicate_count,
+                "translation_error_count": self._translation_error_count,
+                "processing_error_count": self._processing_error_count,
+            }
+        )
+        return pipeline
+
+    def _derive_live_indexing_state(self, pipeline: dict[str, Any]) -> str:
+        if (
+            self._service_state == "degraded"
+            or self._last_error is not None
+            or self._last_resync_error is not None
+            or self._needs_resync
+        ):
+            return "degraded"
+        if (
+            self._effective_backend == "uninitialized"
+            or not self.monitoring_ready.is_set()
+        ):
+            return "uninitialized"
+
+        if self._active_processing_count > 0:
+            return "busy"
+
+        backlog_size = (
+            self.event_queue.qsize() + self.file_queue.qsize() + len(self.pending_files)
+        )
+        if backlog_size <= 0:
+            return "idle"
+
+        accepted_at = self._parse_status_timestamp(pipeline["last_accepted_event_at"])
+        latest_progress_at = self._latest_timestamp(
+            pipeline["last_processing_started_at"],
+            pipeline["last_processing_completed_at"],
+        )
+        if accepted_at is not None:
+            now = datetime.now(timezone.utc)
+            accepted_age_seconds = (now - accepted_at).total_seconds()
+            progress_is_stale = (
+                latest_progress_at is None
+                or latest_progress_at < accepted_at
+                or (now - latest_progress_at).total_seconds()
+                > self._STALL_THRESHOLD_SECONDS
+            )
+            if (
+                accepted_age_seconds > self._STALL_THRESHOLD_SECONDS
+                and progress_is_stale
+            ):
+                return "stalled"
+        return "busy"
+
+    def _derive_live_indexing_hint(self, live_indexing_state: str) -> str:
+        if live_indexing_state == "degraded":
+            if self._needs_resync:
+                return (
+                    "Live indexing needs reconciliation; inspect resync.last_reason "
+                    "and last_error."
+                )
+            return (
+                "Live indexing is degraded; inspect last_error and resync.last_error."
+            )
+        if live_indexing_state == "stalled":
+            return (
+                "Accepted events are queued but processing has not advanced in "
+                "30s; inspect pipeline timestamps and processing_error_count."
+            )
+        if live_indexing_state == "busy":
+            return "Live indexing is actively processing changes."
+        if live_indexing_state == "idle":
+            return "Live indexing is connected and idle."
+        return "Live indexing monitoring is not ready yet."
 
     def _emit_status_update(self) -> None:
         try:
@@ -1601,6 +1789,48 @@ class RealtimeIndexingService:
         except Exception:
             # Status plumbing must never affect runtime behavior.
             pass
+
+    def _record_source_event(self, event_type: str, file_path: Path | str) -> None:
+        self._last_source_event_at = self._utc_now()
+        self._last_source_event_type = event_type
+        self._last_source_event_path = str(file_path)
+
+    def _record_accepted_event(self, event_type: str, file_path: Path | str) -> None:
+        self._last_accepted_event_at = self._utc_now()
+        self._last_accepted_event_type = event_type
+        self._last_accepted_event_path = str(file_path)
+        self._emit_status_update()
+
+    def _record_filtered_event(self, event_type: str, file_path: Path | str) -> None:
+        del event_type, file_path
+        self._filtered_event_count += 1
+        self._emit_status_update()
+
+    def _record_translation_error(self) -> None:
+        self._translation_error_count += 1
+
+    def _record_duplicate_suppression(self) -> None:
+        self._suppressed_duplicate_count += 1
+        self._emit_status_update()
+
+    def _record_processing_started(self, file_path: Path | str) -> None:
+        self._active_processing_count += 1
+        self._last_processing_started_at = self._utc_now()
+        self._last_processing_started_path = str(file_path)
+        self._emit_status_update()
+
+    def _record_processing_finished(
+        self, file_path: Path | str, *, completed: bool
+    ) -> None:
+        if completed:
+            self._last_processing_completed_at = self._utc_now()
+            self._last_processing_completed_path = str(file_path)
+        if self._active_processing_count > 0:
+            self._active_processing_count -= 1
+        self._emit_status_update()
+
+    def _record_processing_error(self) -> None:
+        self._processing_error_count += 1
 
     def _handle_queue_result(
         self, event_type: str, file_path: Path, accepted: bool, reason: str | None
@@ -1612,6 +1842,7 @@ class RealtimeIndexingService:
         if accepted:
             self._event_queue_accepted += 1
             self._event_queue_last_enqueued_at = timestamp
+            self._record_accepted_event(event_type, file_path)
         else:
             self._event_queue_dropped += 1
             self._event_queue_last_reason = reason
@@ -2016,6 +2247,8 @@ class RealtimeIndexingService:
             loop,
             root_path=watch_path,
             queue_result_callback=self._handle_queue_result,
+            source_event_callback=self._record_source_event,
+            filtered_event_callback=self._record_filtered_event,
         )
         observer = Observer()
 
@@ -2141,16 +2374,24 @@ class RealtimeIndexingService:
                         if file_path not in known_files:
                             logger.debug(f"Polling detected new file: {file_path}")
                             self._debug(f"polling detected new file: {file_path}")
-                            await self.add_file(file_path, priority="change")
+                            self._record_source_event("created", file_path)
+                            accepted = await self.add_file(file_path, priority="change")
+                            if accepted:
+                                self._record_accepted_event("created", file_path)
                         elif known_files[file_path] != current_fingerprint:
                             logger.debug(f"Polling detected modified file: {file_path}")
                             self._debug(f"polling detected modified file: {file_path}")
-                            await self.add_file(file_path, priority="change")
+                            self._record_source_event("modified", file_path)
+                            accepted = await self.add_file(file_path, priority="change")
+                            if accepted:
+                                self._record_accepted_event("modified", file_path)
 
                     # Check for deleted files.
                     deleted = set(known_files.keys()) - set(current_files.keys())
                     for file_path in deleted:
                         logger.debug(f"Polling detected deleted file: {file_path}")
+                        self._record_source_event("deleted", file_path)
+                        self._record_accepted_event("deleted", file_path)
                         await self.remove_file(file_path)
                         self._debug(f"polling detected deleted file: {file_path}")
 
@@ -2177,35 +2418,35 @@ class RealtimeIndexingService:
             gc.collect()
             logger.debug("Polling monitor stopped")
 
-    async def add_file(self, file_path: Path, priority: str = "change") -> None:
-        """Add file to processing queue with deduplication and debouncing."""
-        if file_path not in self.pending_files:
-            self.pending_files.add(file_path)
-
-            # Simple debouncing for change events
+    async def add_file(self, file_path: Path, priority: str = "change") -> bool:
+        """Add file to the realtime pipeline and report whether work was admitted."""
+        if file_path in self.pending_files:
             if priority == "change":
                 file_str = str(file_path)
                 current_time = time.monotonic()
-
                 if file_str in self._pending_debounce:
-                    # Update timestamp for existing pending file
+                    # Keep the already-pending debounce horizon fresh.
                     self._pending_debounce[file_str] = current_time
-                    return
-                else:
-                    # Schedule debounced processing
-                    self._pending_debounce[file_str] = current_time
-                    task = asyncio.create_task(
-                        self._debounced_add_file(file_path, priority)
-                    )
-                    self._debounce_tasks.add(task)
-                    task.add_done_callback(self._debounce_tasks.discard)
-                    self._debug(f"queued (debounced) {file_path} priority={priority}")
-                    self._emit_status_update()
-            else:
-                # Priority scan events bypass debouncing
-                await self.file_queue.put((priority, file_path))
-                self._debug(f"queued {file_path} priority={priority}")
-                self._emit_status_update()
+            return False
+
+        self.pending_files.add(file_path)
+
+        # Simple debouncing for change events
+        if priority == "change":
+            file_str = str(file_path)
+            self._pending_debounce[file_str] = time.monotonic()
+            task = asyncio.create_task(self._debounced_add_file(file_path, priority))
+            self._debounce_tasks.add(task)
+            task.add_done_callback(self._debounce_tasks.discard)
+            self._debug(f"queued (debounced) {file_path} priority={priority}")
+            self._emit_status_update()
+            return True
+
+        # Priority scan events bypass debouncing
+        await self.file_queue.put((priority, file_path))
+        self._debug(f"queued {file_path} priority={priority}")
+        self._emit_status_update()
+        return True
 
     async def _debounced_add_file(self, file_path: Path, priority: str) -> None:
         """Process file after debounce delay."""
@@ -2219,9 +2460,7 @@ class RealtimeIndexingService:
                 return
 
             last_update = self._pending_debounce[file_str]
-            remaining_delay = self._debounce_delay - (
-                time.monotonic() - last_update
-            )
+            remaining_delay = self._debounce_delay - (time.monotonic() - last_update)
 
             # Windows timer granularity can wake slightly before the debounce
             # horizon; retry instead of leaving the file stuck in pending state.
@@ -2267,6 +2506,7 @@ class RealtimeIndexingService:
                             f"(within {self._EVENT_DEDUP_WINDOW_SECONDS}s window)"
                         )
                         self._debug(f"suppressed duplicate {event_type}: {file_path}")
+                        self._record_duplicate_suppression()
                         self.event_queue.task_done()
                         continue
 
@@ -2310,14 +2550,19 @@ class RealtimeIndexingService:
 
     async def remove_file(self, file_path: Path) -> None:
         """Remove file from database."""
+        self._record_processing_started(file_path)
+        completed = False
         try:
             logger.debug(f"Removing file from database: {file_path}")
             await self.services.provider.delete_file_completely_async(str(file_path))
             self._debug(f"removed file from database: {file_path}")
-            self._emit_status_update()
+            completed = True
         except Exception as e:
             logger.error(f"Error removing file {file_path}: {e}")
+            self._record_processing_error()
             self._set_error(f"Error removing file {file_path}: {e}")
+        finally:
+            self._record_processing_finished(file_path, completed=completed)
 
     async def _add_directory_watch(self, dir_path: str) -> None:
         """Add a new directory to monitoring with recursive watching."""
@@ -2345,6 +2590,8 @@ class RealtimeIndexingService:
 
     async def _cleanup_deleted_directory(self, dir_path: str) -> None:
         """Clean up database entries for files in a deleted directory."""
+        self._record_processing_started(dir_path)
+        completed = False
         try:
             # Get all files that were in this directory from database
             # Use the provider's search capability to find files with this path prefix
@@ -2364,13 +2611,19 @@ class RealtimeIndexingService:
                 "Cleaned up "
                 f"{len(search_results)} files from deleted directory: {dir_path}"
             )
+            completed = True
 
         except Exception as e:
             logger.error(f"Error cleaning up deleted directory {dir_path}: {e}")
+            self._record_processing_error()
             self._set_error(f"Error cleaning up deleted directory {dir_path}: {e}")
+        finally:
+            self._record_processing_finished(dir_path, completed=completed)
 
     async def _index_directory(self, dir_path: Path) -> None:
         """Index files in a newly created directory."""
+        self._record_processing_started(dir_path)
+        completed = False
         try:
             supported_files = await asyncio.to_thread(
                 self._collect_supported_files, dir_path
@@ -2386,10 +2639,14 @@ class RealtimeIndexingService:
             self._debug(
                 f"queued {len(supported_files)} files from new directory: {dir_path}"
             )
+            completed = True
 
         except Exception as e:
             logger.error(f"Error indexing new directory {dir_path}: {e}")
+            self._record_processing_error()
             self._set_error(f"Error indexing new directory {dir_path}: {e}")
+        finally:
+            self._record_processing_finished(dir_path, completed=completed)
 
     async def _process_loop(self) -> None:
         """Main processing loop - simple and robust."""
@@ -2413,16 +2670,22 @@ class RealtimeIndexingService:
 
                 # Fast path for embedding generation without re-parsing the file.
                 if priority == "embed":
+                    completed = False
                     try:
+                        self._record_processing_started(file_path)
                         indexing_coordinator = self.services.indexing_coordinator
                         await indexing_coordinator.generate_missing_embeddings()
+                        completed = True
                     except Exception as e:
                         logger.warning(
                             f"Embedding generation failed in realtime (embed pass): {e}"
                         )
+                        self._record_processing_error()
                         self._set_warning(
                             f"Embedding generation failed in realtime embed pass: {e}"
                         )
+                    finally:
+                        self._record_processing_finished(file_path, completed=completed)
                     continue
 
                 # Skip embeddings for initial and change events to keep loop responsive.
@@ -2430,39 +2693,46 @@ class RealtimeIndexingService:
                 skip_embeddings = True
 
                 # Use existing indexing coordinator
-                result = await self.services.indexing_coordinator.process_file(
-                    file_path, skip_embeddings=skip_embeddings
-                )
-
-                # Ensure database transaction is flushed for immediate visibility
-                if hasattr(self.services.provider, "flush"):
-                    await self.services.provider.flush()
-
-                # Clear event dedup entry so future modifications aren't suppressed
-                self._recent_file_events.pop(str(file_path), None)
-
-                # If we skipped embeddings, queue for embedding generation
-                if skip_embeddings:
-                    await self.add_file(file_path, priority="embed")
-
-                # Record processing summary into MCP debug log
+                self._record_processing_started(file_path)
+                completed = False
                 try:
-                    chunks = (
-                        result.get("chunks", None) if isinstance(result, dict) else None
+                    result = await self.services.indexing_coordinator.process_file(
+                        file_path, skip_embeddings=skip_embeddings
                     )
-                    embeds = (
-                        result.get("embeddings", None)
-                        if isinstance(result, dict)
-                        else None
-                    )
-                    self._debug(
-                        f"processed {file_path} priority={priority} "
-                        f"skip_embeddings={skip_embeddings} "
-                        f"chunks={chunks} embeddings={embeds}"
-                    )
-                except Exception:
-                    pass
-                self._emit_status_update()
+
+                    # Ensure database transaction is flushed for immediate visibility
+                    if hasattr(self.services.provider, "flush"):
+                        await self.services.provider.flush()
+
+                    # Clear event dedup entry so future modifications aren't suppressed
+                    self._recent_file_events.pop(str(file_path), None)
+
+                    # If we skipped embeddings, queue for embedding generation
+                    if skip_embeddings:
+                        await self.add_file(file_path, priority="embed")
+
+                    # Record processing summary into MCP debug log
+                    try:
+                        chunks = (
+                            result.get("chunks", None)
+                            if isinstance(result, dict)
+                            else None
+                        )
+                        embeds = (
+                            result.get("embeddings", None)
+                            if isinstance(result, dict)
+                            else None
+                        )
+                        self._debug(
+                            f"processed {file_path} priority={priority} "
+                            f"skip_embeddings={skip_embeddings} "
+                            f"chunks={chunks} embeddings={embeds}"
+                        )
+                    except Exception:
+                        pass
+                    completed = True
+                finally:
+                    self._record_processing_finished(file_path, completed=completed)
 
             except asyncio.CancelledError:
                 logger.debug("Processing loop cancelled")
@@ -2471,6 +2741,7 @@ class RealtimeIndexingService:
                 logger.error(f"Error processing {file_path}: {e}")
                 # Track failed files for debugging and monitoring
                 self.failed_files.add(str(file_path))
+                self._record_processing_error()
                 self._set_error(f"Error processing {file_path}: {e}")
                 # Continue processing other files
 

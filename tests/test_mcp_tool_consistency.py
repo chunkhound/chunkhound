@@ -203,6 +203,8 @@ async def test_daemon_status_tool_exposes_watchman_realtime_details():
             "service_state": "running",
             "watchman_sidecar_state": "running",
             "watchman_connection_state": "connected",
+            "live_indexing_state": "idle",
+            "live_indexing_hint": "Live indexing is connected and idle.",
             "watchman_watch_root": "/repo",
             "watchman_relative_root": "packages/api",
             "watchman_subscription_names": ["chunkhound-live-indexing"],
@@ -243,6 +245,23 @@ async def test_daemon_status_tool_exposes_watchman_realtime_details():
                 "last_reason": "realtime_loss_of_sync",
                 "last_error": None,
             },
+            "pipeline": {
+                "last_source_event_at": "2026-03-08T00:00:02Z",
+                "last_source_event_type": "modified",
+                "last_source_event_path": "/repo/packages/api/app.py",
+                "last_accepted_event_at": "2026-03-08T00:00:02Z",
+                "last_accepted_event_type": "modified",
+                "last_accepted_event_path": "/repo/packages/api/app.py",
+                "last_processing_started_at": "2026-03-08T00:00:03Z",
+                "last_processing_started_path": "/repo/packages/api/app.py",
+                "last_processing_completed_at": "2026-03-08T00:00:04Z",
+                "last_processing_completed_path": "/repo/packages/api/app.py",
+                "filtered_event_count": 1,
+                "suppressed_duplicate_count": 2,
+                "translation_error_count": 0,
+                "processing_error_count": 0,
+                "stall_threshold_seconds": 30.0,
+            },
         },
     }
 
@@ -262,6 +281,8 @@ async def test_daemon_status_tool_exposes_watchman_realtime_details():
     assert realtime["watchman_connection_state"] == "connected"
     assert realtime["watchman_subscription_count"] == 1
     assert realtime["watchman_subscription_names"] == ["chunkhound-live-indexing"]
+    assert realtime["live_indexing_state"] == "idle"
+    assert realtime["live_indexing_hint"] == "Live indexing is connected and idle."
     assert realtime["watchman_watch_root"] == "/repo"
     assert realtime["watchman_relative_root"] == "packages/api"
     assert realtime["watchman_scopes"] == [
@@ -279,6 +300,69 @@ async def test_daemon_status_tool_exposes_watchman_realtime_details():
     assert realtime["watchman_reconnect"]["last_result"] == "restored"
     assert realtime["resync"]["needs_resync"] is True
     assert realtime["resync"]["last_reason"] == "realtime_loss_of_sync"
+    assert realtime["pipeline"]["filtered_event_count"] == 1
+    assert realtime["pipeline"]["suppressed_duplicate_count"] == 2
+    assert realtime["pipeline"]["last_processing_completed_path"] == (
+        "/repo/packages/api/app.py"
+    )
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_keeps_stalled_pipeline_summary_ready():
+    """A stalled pipeline should not change the top-level daemon summary."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "realtime": {
+            "service_state": "running",
+            "last_error": None,
+            "resync": {
+                "needs_resync": False,
+                "in_progress": False,
+                "last_reason": None,
+                "last_error": None,
+            },
+            "live_indexing_state": "stalled",
+            "live_indexing_hint": (
+                "Accepted events are queued but processing has not advanced in "
+                "30s; inspect pipeline timestamps and processing_error_count."
+            ),
+            "pipeline": {
+                "last_source_event_at": "2026-03-08T00:00:01Z",
+                "last_source_event_type": "modified",
+                "last_source_event_path": "/repo/app.py",
+                "last_accepted_event_at": "2026-03-08T00:00:01Z",
+                "last_accepted_event_type": "modified",
+                "last_accepted_event_path": "/repo/app.py",
+                "last_processing_started_at": None,
+                "last_processing_started_path": None,
+                "last_processing_completed_at": None,
+                "last_processing_completed_path": None,
+                "filtered_event_count": 0,
+                "suppressed_duplicate_count": 0,
+                "translation_error_count": 0,
+                "processing_error_count": 0,
+                "stall_threshold_seconds": 30.0,
+            },
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    assert result["status"] == "ready"
+    assert result["query_ready"] is True
+    assert result["scan_progress"]["realtime"]["live_indexing_state"] == "stalled"
 
 
 def test_stdio_server_uses_registry_descriptions():

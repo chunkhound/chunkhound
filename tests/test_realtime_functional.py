@@ -9,6 +9,7 @@ import os
 import shutil
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -141,6 +142,7 @@ class TestRealtimeFunctional:
         )
         assert "event_queue" in stats, "Should expose event queue health"
         assert "resync" in stats, "Should expose backend-neutral resync state"
+        assert "pipeline" in stats, "Should expose pipeline progress state"
         assert "configured_backend" in stats, "Should expose configured backend"
         assert "effective_backend" in stats, "Should expose effective backend"
         assert "monitoring_mode" in stats, "Should expose current monitoring mode"
@@ -149,6 +151,101 @@ class TestRealtimeFunctional:
 
         # Should be able to stop cleanly
         await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_live_indexing_state_distinguishes_busy_from_stalled(
+        self, realtime_setup
+    ):
+        """Pipeline backlog should surface as busy first, then stalled."""
+        service, watch_dir, _, _ = realtime_setup
+        target_file = watch_dir / "stalled.py"
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+        service.pending_files.add(target_file)
+        service._last_accepted_event_at = (
+            (
+                datetime.now(timezone.utc)
+                - timedelta(seconds=service._STALL_THRESHOLD_SECONDS + 1)
+            )
+            .replace(microsecond=0)
+            .isoformat()
+        )
+        service._last_accepted_event_type = "modified"
+        service._last_accepted_event_path = str(target_file)
+
+        stalled_stats = await service.get_health()
+        assert stalled_stats["live_indexing_state"] == "stalled"
+        assert stalled_stats["live_indexing_hint"] == (
+            "Accepted events are queued but processing has not advanced in "
+            "30s; inspect pipeline timestamps and processing_error_count."
+        )
+
+        service.pending_files.clear()
+        service._active_processing_count = 1
+        service._last_processing_started_at = service._utc_now()
+        service._last_processing_started_path = str(target_file)
+
+        busy_stats = await service.get_health()
+        assert busy_stats["live_indexing_state"] == "busy"
+        assert busy_stats["live_indexing_hint"] == (
+            "Live indexing is actively processing changes."
+        )
+
+    @pytest.mark.asyncio
+    async def test_live_indexing_state_stays_busy_while_processing_is_inflight(
+        self, realtime_setup, monkeypatch
+    ):
+        """In-flight work should remain busy after pending_files is cleared."""
+        service, watch_dir, _, _ = realtime_setup
+        target_file = watch_dir / "inflight_busy.py"
+        target_file.write_text("def inflight_busy(): pass")
+        process_started = asyncio.Event()
+        release_processing = asyncio.Event()
+        original_process_file = service.services.indexing_coordinator.process_file
+
+        async def blocked_process_file(
+            file_path: Path, skip_embeddings: bool = False
+        ) -> dict[str, object]:
+            assert file_path == target_file
+            assert skip_embeddings is True
+            process_started.set()
+            await release_processing.wait()
+            return await original_process_file(
+                file_path, skip_embeddings=skip_embeddings
+            )
+
+        monkeypatch.setattr(
+            service.services.indexing_coordinator,
+            "process_file",
+            blocked_process_file,
+        )
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+        service.pending_files.add(target_file)
+        await service.file_queue.put(("change", target_file))
+
+        process_task = asyncio.create_task(service._process_loop())
+
+        try:
+            await asyncio.wait_for(process_started.wait(), timeout=1.0)
+            assert target_file not in service.pending_files
+
+            stats = await service.get_health()
+            assert stats["live_indexing_state"] == "busy"
+            assert stats["live_indexing_hint"] == (
+                "Live indexing is actively processing changes."
+            )
+        finally:
+            release_processing.set()
+            process_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await process_task
 
     @pytest.mark.asyncio
     async def test_request_resync_is_debounced(self, realtime_setup):
@@ -870,10 +967,11 @@ class TestRealtimeFunctional:
             assert kwargs == {}
             return next(snapshots)
 
-        async def fake_add_file(file_path: Path, priority: str = "change") -> None:
+        async def fake_add_file(file_path: Path, priority: str = "change") -> bool:
             add_calls.append((file_path, priority))
             if len(add_calls) >= 2:
                 change_detected.set()
+            return True
 
         monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
         monkeypatch.setattr(service, "add_file", fake_add_file)
@@ -891,6 +989,47 @@ class TestRealtimeFunctional:
             (target_file, "change"),
             (target_file, "change"),
         ]
+        stats = await service.get_health()
+        assert stats["pipeline"]["last_accepted_event_path"] == str(target_file)
+
+    @pytest.mark.asyncio
+    async def test_polling_monitor_coalesced_change_does_not_advance_accepted_event(
+        self, realtime_setup, monkeypatch
+    ):
+        """Polling should not advance accepted timestamps for already-pending work."""
+        service, watch_dir, _, _ = realtime_setup
+        target_file = watch_dir / "already_pending.py"
+        target_file.write_text("def already_pending(): pass")
+        baseline_accepted_at = "2026-03-16T12:00:00+00:00"
+        baseline_accepted_type = "modified"
+        baseline_accepted_path = str(watch_dir / "baseline.py")
+        service.pending_files.add(target_file)
+        service._pending_debounce[str(target_file)] = time.monotonic()
+        service._last_accepted_event_at = baseline_accepted_at
+        service._last_accepted_event_type = baseline_accepted_type
+        service._last_accepted_event_path = baseline_accepted_path
+
+        async def fake_to_thread(func, *args, **kwargs):
+            assert func == service._polling_snapshot
+            assert args == (watch_dir,)
+            assert kwargs == {}
+            return {target_file: (100, 10)}, 1, False
+
+        async def stop_after_first_iteration(_delay: float) -> None:
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+        monkeypatch.setattr(asyncio, "sleep", stop_after_first_iteration)
+
+        with pytest.raises(asyncio.CancelledError):
+            await service._polling_monitor(watch_dir)
+
+        stats = await service.get_health()
+        pipeline = stats["pipeline"]
+        assert pipeline["last_source_event_path"] == str(target_file)
+        assert pipeline["last_accepted_event_at"] == baseline_accepted_at
+        assert pipeline["last_accepted_event_type"] == baseline_accepted_type
+        assert pipeline["last_accepted_event_path"] == baseline_accepted_path
 
     @pytest.mark.asyncio
     async def test_debounced_add_file_retries_early_timer_wake(
@@ -942,6 +1081,14 @@ class TestRealtimeFunctional:
 
         # This tests the full pipeline: detection -> processing -> storage
         assert found, "File should be detected and processed by filesystem monitoring"
+        stats = await service.get_health()
+        pipeline = stats["pipeline"]
+        assert pipeline["last_source_event_at"] is not None
+        assert pipeline["last_accepted_event_at"] is not None
+        assert pipeline["last_processing_started_at"] is not None
+        assert pipeline["last_processing_completed_at"] is not None
+        assert pipeline["last_processing_completed_path"] == str(test_file)
+        assert stats["live_indexing_state"] in {"idle", "busy"}
 
         await service.stop()
 
@@ -973,17 +1120,37 @@ class TestRealtimeFunctional:
         await service.stop()
 
     @pytest.mark.asyncio
-    async def test_service_survives_processing_errors(self, realtime_setup):
+    async def test_service_survives_processing_errors(
+        self, realtime_setup, monkeypatch
+    ):
         """Test service continues working after processing errors."""
         service, watch_dir, _, _ = realtime_setup
+        original_process_file = service.services.indexing_coordinator.process_file
+        bad_file = watch_dir / "bad_file.py"
+
+        async def flaky_process_file(
+            file_path: Path, skip_embeddings: bool = False
+        ) -> dict[str, object]:
+            if file_path == bad_file:
+                raise RuntimeError("synthetic realtime processing failure")
+            return await original_process_file(
+                file_path, skip_embeddings=skip_embeddings
+            )
+
+        monkeypatch.setattr(
+            service.services.indexing_coordinator,
+            "process_file",
+            flaky_process_file,
+        )
         await service.start(watch_dir)
 
-        # Create a file that might cause processing issues
-        bad_file = watch_dir / "bad_file.py"
-        # Write binary data to a .py file - might cause parsing errors
-        bad_file.write_bytes(b"\x00\xff\xfe\xfd")
+        # Create a file that reliably forces a processing failure.
+        bad_file.write_text("def broken(): pass")
 
-        await asyncio.sleep(1.0)
+        await _wait_for_realtime_condition(
+            service,
+            lambda stats: stats["pipeline"]["processing_error_count"] >= 1,
+        )
 
         # Create a normal file after the bad one
         good_file = watch_dir / "good_file.py"
@@ -996,6 +1163,7 @@ class TestRealtimeFunctional:
         assert stats.get("observer_alive", False), (
             "Service should survive processing errors"
         )
+        assert stats["pipeline"]["processing_error_count"] >= 1
 
         await service.stop()
 

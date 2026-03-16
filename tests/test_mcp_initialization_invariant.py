@@ -224,11 +224,33 @@ class TestNonBlockingInitialization:
 
                 realtime = server._scan_progress["realtime"]
                 assert realtime["configured_backend"] == "watchman"
+                assert realtime["live_indexing_state"] == "uninitialized"
+                assert (
+                    realtime["live_indexing_hint"]
+                    == "Live indexing monitoring is not ready yet."
+                )
                 assert realtime["watchman_sidecar_state"] == "uninitialized"
                 assert realtime["watchman_connection_state"] == "uninitialized"
                 assert realtime["watchman_subscription_count"] == 0
                 assert realtime["watchman_subscription_names"] == []
                 assert realtime["watchman_scopes"] == []
+                assert realtime["pipeline"] == {
+                    "last_source_event_at": None,
+                    "last_source_event_type": None,
+                    "last_source_event_path": None,
+                    "last_accepted_event_at": None,
+                    "last_accepted_event_type": None,
+                    "last_accepted_event_path": None,
+                    "last_processing_started_at": None,
+                    "last_processing_started_path": None,
+                    "last_processing_completed_at": None,
+                    "last_processing_completed_path": None,
+                    "filtered_event_count": 0,
+                    "suppressed_duplicate_count": 0,
+                    "translation_error_count": 0,
+                    "processing_error_count": 0,
+                    "stall_threshold_seconds": 30.0,
+                }
                 assert realtime["watchman_loss_of_sync"] == {
                     "count": 0,
                     "fresh_instance_count": 0,

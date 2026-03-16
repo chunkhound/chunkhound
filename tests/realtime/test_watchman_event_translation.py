@@ -54,6 +54,19 @@ async def _wait_for_removed(service_provider: object, file_path: Path) -> bool:
     return False
 
 
+async def _wait_for_pipeline_count(
+    service: RealtimeIndexingService, field: str, minimum: int
+) -> dict[str, object]:
+    deadline = asyncio.get_running_loop().time() + 5.0
+    while asyncio.get_running_loop().time() < deadline:
+        stats = await service.get_health()
+        pipeline = stats.get("pipeline", {})
+        if isinstance(pipeline, dict) and int(pipeline.get(field, 0)) >= minimum:
+            return stats
+        await asyncio.sleep(0.1)
+    raise AssertionError(f"Timed out waiting for pipeline.{field} >= {minimum}")
+
+
 @pytest.mark.asyncio
 async def test_watchman_subscription_pdu_indexes_created_file(tmp_path: Path) -> None:
     watch_dir = tmp_path / "watchman_project"
@@ -155,6 +168,10 @@ async def test_watchman_relative_root_mapping_and_filtering(
 
         assert await wait_for_indexed(services.provider, included)
         assert services.provider.get_file_by_path(str(excluded)) is None
+        stats = await service.get_health()
+        assert stats["pipeline"]["filtered_event_count"] == 1
+        assert stats["pipeline"]["last_source_event_path"] == str(excluded)
+        assert stats["pipeline"]["last_accepted_event_path"] == str(included)
     finally:
         await service.stop()
         services.provider.disconnect()
@@ -179,9 +196,9 @@ async def test_watchman_multi_scope_translation_deduplicates_across_subscription
 
     original_add_file = service.add_file
 
-    async def counting_add_file(file_path: Path, priority: str = "change") -> None:
+    async def counting_add_file(file_path: Path, priority: str = "change") -> bool:
         add_file_calls.append((file_path, priority))
-        await original_add_file(file_path, priority)
+        return await original_add_file(file_path, priority)
 
     monkeypatch.setattr(service, "add_file", counting_add_file)
 
@@ -252,6 +269,42 @@ async def test_watchman_multi_scope_translation_deduplicates_across_subscription
             for queued_path, priority in add_file_calls
             if priority == "change"
         ] == [(file_path.resolve(), "change")]
+        assert stats["pipeline"]["suppressed_duplicate_count"] >= 1
+    finally:
+        await service.stop()
+        services.provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_watchman_translation_errors_increment_pipeline_counter(
+    tmp_path: Path,
+) -> None:
+    watch_dir = tmp_path / "watchman_project"
+    watch_dir.mkdir(parents=True)
+    service, services = _build_watchman_service(watch_dir)
+
+    try:
+        await service.start(watch_dir)
+        queue = service.watchman_subscription_queue
+        assert queue is not None
+
+        queue.put_nowait(
+            {
+                "subscription": "chunkhound-live-indexing",
+                "clock": "c:0:6",
+                "files": [
+                    {
+                        "exists": True,
+                        "new": True,
+                        "type": "f",
+                    }
+                ],
+            }
+        )
+
+        stats = await _wait_for_pipeline_count(service, "translation_error_count", 1)
+        assert stats["pipeline"]["translation_error_count"] == 1
+        assert "translation warning" in (stats["last_warning"] or "")
     finally:
         await service.stop()
         services.provider.disconnect()
@@ -285,9 +338,9 @@ async def test_watchman_junction_scope_translation_preserves_logical_path(
 
     original_add_file = service.add_file
 
-    async def counting_add_file(file_path: Path, priority: str = "change") -> None:
+    async def counting_add_file(file_path: Path, priority: str = "change") -> bool:
         add_file_calls.append((file_path, priority))
-        await original_add_file(file_path, priority)
+        return await original_add_file(file_path, priority)
 
     monkeypatch.setattr(service, "add_file", counting_add_file)
 

@@ -91,6 +91,20 @@ Healthy Watchman-backed live indexing should normally show:
 
 Fields that are useful during diagnosis:
 
+- `live_indexing_state` and `live_indexing_hint`: backend-neutral summary of
+  whether live indexing is `uninitialized`, `idle`, `busy`, `stalled`, or
+  `degraded`
+- `pipeline.last_source_event_*`: the most recent source mutation observed
+  before filtering/queueing
+- `pipeline.last_accepted_event_*`: the most recent mutation accepted into the
+  live-indexing pipeline by a real admission, not a coalesced refresh of
+  already-pending work
+- `pipeline.last_processing_started_*` and
+  `pipeline.last_processing_completed_*`: the latest downstream processing
+  progress point
+- `pipeline.filtered_event_count`, `pipeline.suppressed_duplicate_count`,
+  `pipeline.translation_error_count`, `pipeline.processing_error_count`: counts
+  for common “connected but not converging” failure modes
 - `watchman_watch_root` and `watchman_relative_root`: the resolved
   `watch-project` mapping
 - `watchman_socket_path`, `watchman_statefile_path`, `watchman_logfile_path`,
@@ -102,14 +116,26 @@ Fields that are useful during diagnosis:
   disconnect signal
 - `resync.needs_resync`, `resync.in_progress`, `resync.last_reason`,
   `resync.last_error`: ChunkHound-side reconciliation state
+- These fields summarize observed mutations and pipeline progress only.
+  If no filesystem mutations have been observed yet, they do not actively prove
+  end-to-end live-indexing health.
 
 Quick interpretation guide:
 
 - `watchman_connection_state == "connected"`: sidecar and session are both up.
 - `watchman_connection_state == "sidecar_only"`: sidecar is alive, but the MCP
   session bridge is not healthy.
+- `live_indexing_state == "idle"`: monitoring is ready and no backlog is
+  pending.
+- `live_indexing_state == "busy"`: ChunkHound is actively processing changes or
+  advancing accepted backlog work.
+- `live_indexing_state == "stalled"`: accepted events exist, but downstream
+  processing has not advanced for at least 30 seconds.
 - `status == "degraded"` or `service_state == "degraded"`: inspect
   `last_error`, `watchman_loss_of_sync`, and the daemon/Watchman log files.
+- Top-level `daemon_status.status` remains the coarse readiness summary.
+  Stall diagnosis lives under `scan_progress.realtime.live_indexing_state`
+  rather than automatically degrading the daemon summary.
 
 ## Loss of sync and resync
 
