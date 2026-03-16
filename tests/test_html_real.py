@@ -41,9 +41,9 @@ def test_python_docs_has_nav_block(python_docs_chunks):
 
 
 def test_python_docs_has_stylesheet_imports(python_docs_chunks):
-    unknown_chunks = [c for c in python_docs_chunks if c.chunk_type == ChunkType.UNKNOWN]
-    assert len(unknown_chunks) > 0, (
-        "Expected <link rel='stylesheet'> as UNKNOWN/import chunks"
+    import_chunks = [c for c in python_docs_chunks if c.chunk_type == ChunkType.IMPORT]
+    assert len(import_chunks) > 0, (
+        "Expected <link rel='stylesheet'> as IMPORT chunks"
     )
 
 

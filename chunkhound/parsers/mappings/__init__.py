@@ -6,17 +6,17 @@ for mapping tree-sitter AST nodes to semantic chunks.
 
 from .base import BaseMapping
 from .bash import BashMapping
-from .css import CssMapping
-from .html import HtmlMapping
 from .c import CMapping
 from .cpp import CppMapping
 from .csharp import CSharpMapping
+from .css import CssMapping
 from .dart import DartMapping
 from .elixir import ElixirMapping
 from .go import GoMapping
 from .groovy import GroovyMapping
 from .haskell import HaskellMapping
 from .hcl import HclMapping
+from .html import HtmlMapping
 from .java import JavaMapping
 from .javascript import JavaScriptMapping
 from .json import JsonMapping
@@ -30,8 +30,8 @@ from .objc import ObjCMapping
 from .pdf import PDFMapping
 from .php import PHPMapping
 from .python import PythonMapping
-from .scss import ScssMapping
 from .rust import RustMapping
+from .scss import ScssMapping
 from .sql import SqlMapping
 from .svelte import SvelteMapping
 from .swift import SwiftMapping
@@ -47,23 +47,23 @@ from .zig import ZigMapping
 __all__ = [
     "BaseMapping",
     "BashMapping",
-    "CssMapping",
-    "HtmlMapping",
     "CMapping",
     "CppMapping",
     "CSharpMapping",
+    "CssMapping",
     "DartMapping",
     "ElixirMapping",
     "GoMapping",
     "GroovyMapping",
     "HaskellMapping",
+    "HclMapping",
+    "HtmlMapping",
     "JavaMapping",
     "JavaScriptMapping",
     "JsonMapping",
     "JSXMapping",
     "KotlinMapping",
     "LuaMapping",
-    "HclMapping",
     "MakefileMapping",
     "MarkdownMapping",
     "MatlabMapping",
@@ -71,8 +71,8 @@ __all__ = [
     "PDFMapping",
     "PHPMapping",
     "PythonMapping",
-    "ScssMapping",
     "RustMapping",
+    "ScssMapping",
     "SqlMapping",
     "SvelteMapping",
     "SwiftMapping",

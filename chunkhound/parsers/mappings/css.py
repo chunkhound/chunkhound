@@ -73,7 +73,10 @@ class CssMapping(BaseMapping):
                 (supports_statement) @definition
             """
         elif concept == UniversalConcept.STRUCTURE:
-            # :root rules with CSS custom properties
+            # Intentionally the same query as DEFINITION — both scan rule_set nodes.
+            # extract_content filters them to non-overlapping sets:
+            #   DEFINITION → rule sets that are NOT :root/:* var blocks
+            #   STRUCTURE  → rule sets that ARE :root/:* var blocks
             return "(rule_set) @definition"
         elif concept == UniversalConcept.IMPORT:
             return "(import_statement) @definition"
