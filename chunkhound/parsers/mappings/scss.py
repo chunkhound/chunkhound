@@ -185,7 +185,9 @@ class ScssMapping(BaseMapping):
             prop = _property_name(node, content)
             if not prop.startswith("$"):
                 return ""
-        return content[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
+        return content[node.start_byte : node.end_byte].decode(
+            "utf-8", errors="replace"
+        )
 
     def extract_metadata(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes

@@ -157,7 +157,9 @@ class CssMapping(BaseMapping):
         if concept == UniversalConcept.DEFINITION:
             if _is_root_vars(node, content):
                 return ""
-        return content[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
+        return content[node.start_byte : node.end_byte].decode(
+            "utf-8", errors="replace"
+        )
 
     def extract_metadata(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes

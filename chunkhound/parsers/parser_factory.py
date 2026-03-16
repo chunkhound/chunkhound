@@ -21,10 +21,12 @@ import tree_sitter_bash as ts_bash
 import tree_sitter_c as ts_c
 import tree_sitter_c_sharp as ts_csharp
 import tree_sitter_cpp as ts_cpp
+import tree_sitter_css as ts_css
 import tree_sitter_elixir as ts_elixir
 import tree_sitter_go as ts_go
 import tree_sitter_groovy as ts_groovy
 import tree_sitter_haskell as ts_haskell
+import tree_sitter_html as ts_html
 import tree_sitter_java as ts_java
 import tree_sitter_javascript as ts_javascript
 import tree_sitter_json as ts_json
@@ -46,17 +48,17 @@ from chunkhound.interfaces.language_parser import LanguageParser
 from chunkhound.parsers.concept_extractor import LanguageMapping
 from chunkhound.parsers.mappings import (
     BashMapping,
-    CssMapping,
-    HtmlMapping,
     CMapping,
     CppMapping,
     CSharpMapping,
+    CssMapping,
     DartMapping,
     ElixirMapping,
     GoMapping,
     GroovyMapping,
     HaskellMapping,
     HclMapping,
+    HtmlMapping,
     JavaMapping,
     JavaScriptMapping,
     JsonMapping,
@@ -70,8 +72,8 @@ from chunkhound.parsers.mappings import (
     PDFMapping,
     PHPMapping,
     PythonMapping,
-    ScssMapping,
     RustMapping,
+    ScssMapping,
     SqlMapping,
     SvelteMapping,
     SwiftMapping,
@@ -112,12 +114,10 @@ ts_yaml = _LanguagePackWrapper(_yaml_lang)
 ts_hcl = _LanguagePackWrapper(_hcl_lang)
 ts_dart = _LanguagePackWrapper(_dart_lang)
 
-# Web language support - direct imports (required dependencies in pyproject.toml)
-import tree_sitter_html as ts_html
-import tree_sitter_css as ts_css
-
 _scss_lang = _get_lang("scss")
-ts_scss: _LanguagePackWrapper | None = _LanguagePackWrapper(_scss_lang) if _scss_lang else None
+ts_scss: _LanguagePackWrapper | None = (
+    _LanguagePackWrapper(_scss_lang) if _scss_lang else None
+)
 SCSS_AVAILABLE: bool = ts_scss is not None
 
 logger = logging.getLogger(__name__)
