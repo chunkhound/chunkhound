@@ -719,14 +719,25 @@ class WatchmanRealtimeAdapter:
         await self._cancel_session_monitor_task()
         await self._cancel_subscription_consumer_task()
         await self._cancel_subscription_bridge_tasks()
-        sessions = list(self._sessions)
-        self._sessions = []
-        self._session = None
-        for session in sessions:
-            await session.stop()
-        if stop_sidecar:
-            await self._sidecar.stop()
-        self._service._emit_status_update()
+        sessions = self._sessions
+        primary_session = self._session
+        cleanup_complete = False
+        try:
+            for session in list(sessions):
+                await session.stop()
+            if stop_sidecar:
+                await self._sidecar.stop()
+            cleanup_complete = True
+        finally:
+            # If teardown is cancelled mid-flight, keep the live adapter-owned
+            # session handles attached so a follow-up stop() call can still
+            # terminate the same CLI processes safely.
+            if cleanup_complete:
+                if self._sessions is sessions:
+                    self._sessions = []
+                if self._session is primary_session:
+                    self._session = None
+            self._service._emit_status_update()
 
     async def _establish_monitoring(
         self,
