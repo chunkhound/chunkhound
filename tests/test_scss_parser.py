@@ -252,5 +252,38 @@ def test_comprehensive_file(scss_parser, comprehensive_scss):
     )
 
 
+def test_interpolated_custom_props_not_empty(scss_parser):
+    """Bootstrap-style --#{$prefix}name custom props don't produce zero chunks.
+
+    The tree-sitter SCSS grammar cannot parse ``--#{$var}name`` natively.
+    ScssMapping.preprocess_for_ast() replaces #{...} with same-length
+    placeholders so the grammar sees a valid token and extracts rule sets.
+    The stored chunk code must still contain the original #{$prefix} syntax.
+    """
+    code = """.btn {
+  --#{$prefix}btn-color: #{$btn-color};
+  --#{$prefix}btn-bg: transparent;
+  display: inline-block;
+  padding: var(--#{$prefix}btn-padding-y) var(--#{$prefix}btn-padding-x);
+}
+.btn-lg {
+  padding: var(--#{$prefix}btn-padding-y-lg) var(--#{$prefix}btn-padding-x-lg);
+}
+"""
+    chunks = scss_parser.parse_content(code, "test.scss", file_id=1)
+    block_chunks = [c for c in chunks if c.chunk_type == ChunkType.BLOCK]
+    # Both rule sets are captured (cAST may merge adjacent small rules into one chunk)
+    assert len(block_chunks) >= 1, (
+        f"Expected >=1 BLOCK chunk for interpolated custom-prop file, got {len(block_chunks)}"
+    )
+    all_code = " ".join(c.code for c in block_chunks)
+    # Both selectors appear in the extracted code
+    assert ".btn" in all_code, ".btn selector not captured"
+    assert ".btn-lg" in all_code, ".btn-lg selector not captured"
+    # Original interpolation syntax must be preserved (not replaced with x's)
+    assert "#{$prefix}" in all_code, "#{$prefix} not preserved in stored chunk code"
+    assert "xxxxxxxx" not in all_code, "placeholder leaked into stored chunk code"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

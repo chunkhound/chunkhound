@@ -10,6 +10,7 @@ Extends CSS parsing with SCSS-specific constructs:
 - comment                → COMMENT
 """
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -23,12 +24,25 @@ from chunkhound.parsers.mappings._shared.css_family_helpers import (
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
+_INTERP_RE = re.compile(r"#\{[^}]*\}")
+
 
 class ScssMapping(BaseMapping):
     """SCSS-specific mapping for universal concepts."""
 
     def __init__(self) -> None:
         super().__init__(Language.SCSS)
+
+    def preprocess_for_ast(self, content: str) -> str:
+        """Replace SCSS interpolations with same-length placeholders.
+
+        The tree-sitter SCSS grammar cannot parse ``--#{$var}name`` (interpolated
+        CSS custom property names). Replacing every ``#{...}`` with an equal-length
+        run of ``x`` characters keeps byte offsets intact while producing a
+        grammar-valid token, so AST positions remain aligned with the original
+        source for text extraction.
+        """
+        return _INTERP_RE.sub(lambda m: "x" * len(m.group()), content)
 
     def get_function_query(self) -> str:
         return "(mixin_statement) @definition (function_statement) @definition"
