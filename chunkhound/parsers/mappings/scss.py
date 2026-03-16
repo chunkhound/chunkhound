@@ -65,6 +65,7 @@ class ScssMapping(BaseMapping):
         return "(mixin_statement) @definition (function_statement) @definition"
 
     def get_class_query(self) -> str:
+        """SCSS has no class definitions to extract."""
         return ""
 
     def get_comment_query(self) -> str:
@@ -76,6 +77,7 @@ class ScssMapping(BaseMapping):
         return _identifier_name(node, source.encode("utf-8", errors="replace"))
 
     def extract_class_name(self, node: Node | None, source: str) -> str:
+        """SCSS has no class definitions; always returns empty string."""
         return ""
 
     def get_query_for_concept(self, concept: UniversalConcept) -> str | None:

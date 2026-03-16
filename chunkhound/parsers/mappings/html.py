@@ -53,7 +53,9 @@ def _is_semantic_element(node: Node, content: bytes) -> bool:
         return False
     tag = content[tag_name_node.start_byte : tag_name_node.end_byte].decode(
         "utf-8", errors="replace"
-    ).lower()
+    ).strip().lower()
+    if not tag:
+        return False
     return tag in SEMANTIC_TAGS or "-" in tag
 
 
@@ -116,7 +118,8 @@ def _extract_element_name(node: Node, content: bytes) -> str:
             return f"{tag}#{id_val}"
         class_val = _get_attribute(start_tag, "class", content)
         if class_val:
-            first_class = class_val.split()[0] if class_val.split() else ""
+            class_parts = class_val.split()
+            first_class = class_parts[0] if class_parts else ""
             if first_class:
                 return f"{tag}.{first_class}"
         aria_val = _get_attribute(start_tag, "aria-label", content)
@@ -134,18 +137,22 @@ class HtmlMapping(BaseMapping):
         super().__init__(Language.HTML)
 
     def get_function_query(self) -> str:
+        """HTML has no function definitions to extract."""
         return ""
 
     def get_class_query(self) -> str:
+        """HTML has no class definitions to extract."""
         return ""
 
     def get_comment_query(self) -> str:
         return "(comment) @definition"
 
     def extract_function_name(self, node: Node | None, source: str) -> str:
+        """HTML has no function definitions; always returns empty string."""
         return ""
 
     def extract_class_name(self, node: Node | None, source: str) -> str:
+        """HTML has no class definitions; always returns empty string."""
         return ""
 
     def get_query_for_concept(self, concept: UniversalConcept) -> str | None:

@@ -98,10 +98,10 @@ _dart_lang = _get_lang("dart")
 class _LanguagePackWrapper:
     """Wraps a tree-sitter-language-pack Language into a ts_*-compatible module."""
 
-    def __init__(self, lang):
+    def __init__(self, lang: Any) -> None:
         self._lang = lang
 
-    def language(self):
+    def language(self) -> Any:
         return self._lang
 
 
@@ -356,6 +356,7 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     ".j2": Language.JINJA,
     ".njk": Language.JINJA,
     ".ejs": Language.JINJA,
+    ".erb": Language.JINJA,
     ".css": Language.CSS,
     ".scss": Language.SCSS,
     ".sass": Language.SCSS,

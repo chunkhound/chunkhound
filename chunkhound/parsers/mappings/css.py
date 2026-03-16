@@ -56,18 +56,22 @@ class CssMapping(BaseMapping):
         super().__init__(Language.CSS)
 
     def get_function_query(self) -> str:
+        """CSS has no function definitions to extract."""
         return ""
 
     def get_class_query(self) -> str:
+        """CSS has no class definitions to extract."""
         return ""
 
     def get_comment_query(self) -> str:
         return "(comment) @definition"
 
     def extract_function_name(self, node: Node | None, source: str) -> str:
+        """CSS has no function definitions; always returns empty string."""
         return ""
 
     def extract_class_name(self, node: Node | None, source: str) -> str:
+        """CSS has no class definitions; always returns empty string."""
         return ""
 
     def get_query_for_concept(self, concept: UniversalConcept) -> str | None:

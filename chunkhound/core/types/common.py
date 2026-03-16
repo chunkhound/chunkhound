@@ -289,6 +289,7 @@ class Language(Enum):
             ".lua": cls.LUA,
             ".html": cls.HTML,
             ".htm": cls.HTML,
+            ".xhtml": cls.HTML,
             ".css": cls.CSS,
             ".scss": cls.SCSS,
             ".sass": cls.SCSS,
