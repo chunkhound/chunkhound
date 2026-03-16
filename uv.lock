@@ -3222,6 +3222,9 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/96/74/9f269bb3644a0511c1c263135e32d38a7f2af39cbba24d59a1633a5ebbc1/tree_sitter_css-0.25.0-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:b486c097d250a598fba5f1f46f62697c7f4428252c8bdaad696a907ee913421d", size = 41490, upload-time = "2025-09-28T11:37:11.134Z" },
     { url = "https://files.pythonhosted.org/packages/04/9f/d4f1d3164b692b97266274dad6437586e0614f75080b7795fc7bfa5bf8ff/tree_sitter_css-0.25.0-cp310-abi3-win_amd64.whl", hash = "sha256:fe319e4ad1b8327afbd9758b3ae22b09226d6c28dc9b022bcadabdaf6ea3716c", size = 32416, upload-time = "2025-09-28T11:37:11.808Z" },
     { url = "https://files.pythonhosted.org/packages/39/5c/fa62d70cb324788bcced741b5e19864ccf4c51ca31766a9f56a6b46a5cf6/tree_sitter_css-0.25.0-cp310-abi3-win_arm64.whl", hash = "sha256:4fc2c82645cd593f1c695b4d6b678d71e633212ca030f26dedee4f92434bfe21", size = 31057, upload-time = "2025-09-28T11:37:12.734Z" },
+]
+
+[[package]]
 name = "tree-sitter-elixir"
 version = "0.3.5"
 source = { registry = "https://pypi.org/simple" }

@@ -153,30 +153,30 @@ def test_parses_media_as_block(scss_parser):
 
 
 def test_parses_import_as_import(scss_parser):
-    """@import statements are extracted as IMPORT (UNKNOWN) chunks."""
+    """@import statements are extracted as IMPORT chunks."""
     code = '@import "variables";\n@import "mixins";'
     chunks = scss_parser.parse_content(code, "test.scss", file_id=1)
-    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.UNKNOWN]
+    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
     assert len(import_chunks) > 0, "No IMPORT chunks for @import"
     symbols = {c.symbol for c in import_chunks}
     assert any("variables" in s for s in symbols), f"variables not in {symbols}"
 
 
 def test_parses_use_as_import(scss_parser):
-    """@use statements are extracted as IMPORT (UNKNOWN) chunks."""
+    """@use statements are extracted as IMPORT chunks."""
     code = '@use "sass:math";\n@use "sass:color";'
     chunks = scss_parser.parse_content(code, "test.scss", file_id=1)
-    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.UNKNOWN]
+    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
     assert len(import_chunks) > 0, "No IMPORT chunks for @use"
     symbols = {c.symbol for c in import_chunks}
     assert any("math" in s for s in symbols), f"sass:math not in {symbols}"
 
 
 def test_parses_forward_as_import(scss_parser):
-    """@forward statements are extracted as IMPORT (UNKNOWN) chunks."""
+    """@forward statements are extracted as IMPORT chunks."""
     code = '@forward "mixins";\n@forward "functions";'
     chunks = scss_parser.parse_content(code, "test.scss", file_id=1)
-    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.UNKNOWN]
+    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
     assert len(import_chunks) > 0, "No IMPORT chunks for @forward"
     symbols = {c.symbol for c in import_chunks}
     assert any("mixins" in s or "functions" in s for s in symbols), (
@@ -227,8 +227,8 @@ def test_comprehensive_file(scss_parser, comprehensive_scss):
     # Must have NAMESPACE (STRUCTURE: $variables)
     assert ChunkType.NAMESPACE in chunk_types, f"No NAMESPACE/STRUCTURE. Types: {chunk_types}"
 
-    # Must have UNKNOWN (IMPORT: @import, @use, @forward)
-    assert ChunkType.UNKNOWN in chunk_types, f"No IMPORT chunks. Types: {chunk_types}"
+    # Must have IMPORT (@import, @use, @forward)
+    assert ChunkType.IMPORT in chunk_types, f"No IMPORT chunks. Types: {chunk_types}"
 
     symbols = {c.symbol for c in chunks}
 
@@ -244,7 +244,7 @@ def test_comprehensive_file(scss_parser, comprehensive_scss):
     assert "@keyframes" in all_code, "No @keyframes in chunk code"
 
     # Check imports are captured (may be merged into one chunk)
-    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.UNKNOWN]
+    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
     assert len(import_chunks) >= 1, f"Expected at least 1 import, got {len(import_chunks)}"
     import_code = " ".join(c.symbol for c in import_chunks)
     assert "variables" in import_code or "math" in import_code or "sass" in import_code, (

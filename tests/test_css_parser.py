@@ -114,10 +114,10 @@ def test_parses_supports_as_block(css_parser):
 
 
 def test_parses_import_as_import(css_parser):
-    """@import statements are extracted as IMPORT (UNKNOWN) chunks."""
+    """@import statements are extracted as IMPORT chunks."""
     code = '@import "variables.css";\n@import url("reset.css");'
     chunks = css_parser.parse_content(code, "test.css", file_id=1)
-    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.UNKNOWN]
+    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
     assert len(import_chunks) > 0, "No IMPORT chunks for @import"
     symbols = {c.symbol for c in import_chunks}
     assert any("variables" in s for s in symbols), f"variables.css not in {symbols}"
@@ -185,8 +185,8 @@ def test_comprehensive_file(css_parser, comprehensive_css):
     # Must have COMMENT
     assert ChunkType.COMMENT in chunk_types, f"No COMMENT chunks. Types: {chunk_types}"
 
-    # Must have UNKNOWN (IMPORT: @import)
-    assert ChunkType.UNKNOWN in chunk_types, f"No IMPORT chunks. Types: {chunk_types}"
+    # Must have IMPORT (@import)
+    assert ChunkType.IMPORT in chunk_types, f"No IMPORT chunks. Types: {chunk_types}"
 
     symbols = {c.symbol for c in chunks}
     all_code = " ".join(c.code for c in chunks)
@@ -206,7 +206,7 @@ def test_comprehensive_file(css_parser, comprehensive_css):
     )
 
     # Check import symbols
-    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.UNKNOWN]
+    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
     assert len(import_chunks) >= 1, f"Expected at least 1 import, got {len(import_chunks)}"
 
 

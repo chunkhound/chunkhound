@@ -72,8 +72,7 @@ def test_parses_link_stylesheet_as_import(html_parser):
   <link rel="stylesheet" href="theme.css">
 </head><body></body></html>"""
     chunks = html_parser.parse_content(code, "test.html", file_id=1)
-    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.UNKNOWN]
-    # IMPORT maps to UNKNOWN in the universal parser
+    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
     assert len(import_chunks) > 0, "No import chunks found for link[rel=stylesheet]"
     symbols = {c.symbol for c in import_chunks}
     assert any("main.css" in s or "theme.css" in s for s in symbols), (
@@ -214,14 +213,14 @@ def test_comprehensive_file(html_parser, comprehensive_html):
     # Must have NAMESPACE (DOCTYPE = STRUCTURE)
     assert ChunkType.NAMESPACE in chunk_types, f"No NAMESPACE/STRUCTURE chunks. Types: {chunk_types}"
 
-    # Must have UNKNOWN (link[rel=stylesheet] imports)
-    assert ChunkType.UNKNOWN in chunk_types, f"No IMPORT chunks (UNKNOWN). Types: {chunk_types}"
+    # Must have IMPORT (link[rel=stylesheet] imports)
+    assert ChunkType.IMPORT in chunk_types, f"No IMPORT chunks. Types: {chunk_types}"
 
     # Verify that DOCTYPE chunk is present
     assert any(c.symbol == "doctype" for c in chunks), "doctype chunk not found"
 
     # Verify stylesheet imports are captured (may be merged into one chunk)
-    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.UNKNOWN]
+    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
     assert len(import_chunks) >= 1, f"Expected at least 1 import chunk, got {len(import_chunks)}"
     import_code = " ".join(c.code for c in import_chunks)
     assert "css" in import_code.lower() or "stylesheet" in import_code.lower(), (

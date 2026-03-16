@@ -112,55 +112,14 @@ ts_yaml = _LanguagePackWrapper(_yaml_lang)
 ts_hcl = _LanguagePackWrapper(_hcl_lang)
 ts_dart = _LanguagePackWrapper(_dart_lang)
 
-# SQL language support - direct import (required dependency in pyproject.toml)
-import tree_sitter_sql as ts_sql
-
 # Web language support - direct imports (required dependencies in pyproject.toml)
 import tree_sitter_html as ts_html
 import tree_sitter_css as ts_css
 
-try:
-    from tree_sitter_language_pack import get_language as _get_language_scss
+_scss_lang = _get_lang("scss")
+ts_scss: _LanguagePackWrapper | None = _LanguagePackWrapper(_scss_lang) if _scss_lang else None
+SCSS_AVAILABLE: bool = ts_scss is not None
 
-    _scss_lang = _get_language_scss("scss")
-    if _scss_lang:
-
-        class _ScssLanguageWrapper:
-            def language(self):
-                return _scss_lang
-
-        ts_scss = _ScssLanguageWrapper()  # type: ignore[assignment]
-        SCSS_AVAILABLE = True
-    else:
-        ts_scss = None  # type: ignore[assignment]
-        SCSS_AVAILABLE = False
-except ImportError:
-    ts_scss = None  # type: ignore[assignment]
-    SCSS_AVAILABLE = False
-
-try:
-    from tree_sitter_language_pack import get_language
-
-    _dart_lang = get_language("dart")
-    if _dart_lang:
-        # Create a module-like wrapper for compatibility with LanguageConfig
-        class _DartLanguageWrapper:
-            def language(self):
-                return _dart_lang
-
-        ts_dart = _DartLanguageWrapper()
-        DART_AVAILABLE = True
-    else:
-        ts_dart = None
-        DART_AVAILABLE = False
-except ImportError:
-    ts_dart = None
-    DART_AVAILABLE = False
-
-
-# Additional language extensions (these use TypeScript parser with TSX grammar)
-JSX_AVAILABLE = True
-TSX_AVAILABLE = True
 logger = logging.getLogger(__name__)
 
 
@@ -399,6 +358,7 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     ".ejs": Language.JINJA,
     ".css": Language.CSS,
     ".scss": Language.SCSS,
+    ".sass": Language.SCSS,
     ".make": Language.MAKEFILE,
     # Text files (fallback)
     ".txt": Language.TEXT,
