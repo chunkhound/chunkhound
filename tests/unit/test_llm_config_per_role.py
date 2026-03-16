@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
 from chunkhound.core.config.llm_config import LLMConfig
 from chunkhound.llm_manager import LLMManager
@@ -25,6 +26,37 @@ def test_llm_config_per_role_provider_overrides():
 
     assert synth_conf["provider"] == "codex-cli"
     assert synth_conf["model"] == "codex"
+
+
+def test_llm_config_model_field_sets_both_roles():
+    """Test that the convenience 'model' field sets both utility and synthesis models."""
+    cfg = LLMConfig(
+        provider="grok",
+        model="grok-4-1-fast-reas5oning",  # intentional typo to test
+    )
+
+    util_conf, synth_conf = cfg.get_provider_configs()
+
+    assert util_conf["provider"] == "grok"
+    assert util_conf["model"] == "grok-4-1-fast-reas5oning"
+
+    assert synth_conf["provider"] == "grok"
+    assert synth_conf["model"] == "grok-4-1-fast-reas5oning"
+
+
+def test_llm_config_model_field_overridden_by_specific_models():
+    """Test that utility_model and synthesis_model override the general model field."""
+    cfg = LLMConfig(
+        provider="grok",
+        model="grok-4-1-fast-reasoning",
+        utility_model="grok-4-1-fast-reas5oning",  # different model for utility
+        synthesis_model="grok-4-1-fast-reas5oning",  # same as utility
+    )
+
+    util_conf, synth_conf = cfg.get_provider_configs()
+
+    assert util_conf["model"] == "grok-4-1-fast-reas5oning"
+    assert synth_conf["model"] == "grok-4-1-fast-reas5oning"
 
 
 def test_llm_config_codex_reasoning_effort_per_role():
@@ -131,3 +163,81 @@ async def test_llm_codex_cli_status_reflects_configured_model_and_effort(monkeyp
 
     assert "MODEL=gpt-5.1-codex" in response.content
     assert "REASONING_EFFORT=high" in response.content
+
+
+def test_grok_config_validation_with_api_key():
+    """Test that Grok config is valid when API key is provided."""
+    cfg = LLMConfig(
+        provider="grok",
+        api_key=SecretStr("sk-test-key"),
+        model="grok-4-1-fast-reasoning",
+    )
+
+    assert cfg.is_provider_configured() is True
+    assert cfg.get_missing_config() == []
+
+
+def test_grok_config_validation_without_api_key():
+    """Test that Grok config is invalid when API key is missing."""
+    cfg = LLMConfig(
+        provider="grok",
+        model="grok-4-1-fast-reasoning",
+    )
+
+    assert cfg.is_provider_configured() is False
+    missing = cfg.get_missing_config()
+    assert len(missing) == 1
+    assert "api_key" in missing[0]
+    assert "CHUNKHOUND_LLM_API_KEY" in missing[0]
+
+
+def test_grok_config_validation_per_role_utility():
+    """Test Grok config validation for utility role specifically."""
+    cfg = LLMConfig(
+        provider="openai",  # default
+        utility_provider="grok",
+        utility_model="grok-4-1-fast-reasoning",
+        api_key=SecretStr("sk-test-key"),
+    )
+
+    # Should be configured for utility role
+    assert cfg.is_provider_configured() is True
+
+    util_conf, synth_conf = cfg.get_provider_configs()
+    assert util_conf["provider"] == "grok"
+    assert util_conf["api_key"] == "sk-test-key"
+
+
+def test_grok_config_validation_per_role_synthesis():
+    """Test Grok config validation for synthesis role specifically."""
+    cfg = LLMConfig(
+        provider="grok",
+        synthesis_provider="grok",
+        synthesis_model="grok-4-1-fast-reasoning",
+        api_key=SecretStr("sk-test-key"),
+    )
+
+    # Should be configured for synthesis role
+    assert cfg.is_provider_configured() is True
+
+    util_conf, synth_conf = cfg.get_provider_configs()
+    assert synth_conf["provider"] == "grok"
+    assert synth_conf["api_key"] == "sk-test-key"
+
+
+def test_grok_config_validation_missing_api_key_per_role():
+    """Test Grok config validation fails when API key missing for per-role config."""
+    cfg = LLMConfig(
+        provider="openai",  # default
+        utility_provider="grok",
+        synthesis_provider="grok",
+        utility_model="grok-4-1-fast-reasoning",
+        synthesis_model="grok-4-1-fast-reasoning",
+        # No api_key provided
+    )
+
+    # Should not be configured since Grok requires API key
+    assert cfg.is_provider_configured() is False
+    missing = cfg.get_missing_config()
+    assert len(missing) == 1
+    assert "api_key" in missing[0]

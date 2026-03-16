@@ -41,12 +41,12 @@ def _git_is_ignored(*, repo_root: Path, path: Path) -> bool:
         rel = path.resolve().relative_to(repo_root.resolve())
     except (OSError, RuntimeError, ValueError):
         return False
-    return git_check_ignored(repo_root=repo_root, rel_path=rel.as_posix(), timeout_s=5.0)
+    return git_check_ignored(
+        repo_root=repo_root, rel_path=rel.as_posix(), timeout_s=5.0
+    )
 
 
-def maybe_warn_git_output_dir(
-    output_dir: Path, formatter: RichOutputFormatter
-) -> None:
+def maybe_warn_git_output_dir(output_dir: Path, formatter: RichOutputFormatter) -> None:
     start_dir = _nearest_existing_dir(output_dir)
     if start_dir is None:
         return

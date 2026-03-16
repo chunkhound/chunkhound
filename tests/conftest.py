@@ -1,4 +1,9 @@
 import os
+
+from loguru import logger
+
+logger.remove()
+
 import pytest
 
 

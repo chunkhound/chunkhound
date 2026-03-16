@@ -383,7 +383,15 @@ class DuckDBChunkRepository:
             else:
                 results = self._connection_manager.connection.execute(
                     query,
-                    [file_id, start_line, end_line, start_line, end_line, start_line, end_line],
+                    [
+                        file_id,
+                        start_line,
+                        end_line,
+                        start_line,
+                        end_line,
+                        start_line,
+                        end_line,
+                    ],
                 ).fetchall()
 
             chunks = []

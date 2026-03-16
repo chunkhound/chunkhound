@@ -4,12 +4,16 @@ This module provides SQL-specific tree-sitter queries and extraction logic
 for the universal concept system. It maps SQL's AST nodes to universal
 semantic concepts used by the unified parser.
 
-Supported constructs: CREATE TABLE, CREATE VIEW, CREATE FUNCTION,
-CREATE INDEX, CREATE TRIGGER, ALTER TABLE, comments, and BEGIN...END blocks.
+Supported constructs: CREATE TABLE/VIEW/FUNCTION/INDEX/TRIGGER,
+DROP TABLE/VIEW/FUNCTION/INDEX, ALTER TABLE, comments, and BEGIN...END blocks.
 
-Note: CREATE PROCEDURE is not supported because tree-sitter-sql lacks a
-grammar rule for it (produces ERROR nodes).
+Note: CREATE PROCEDURE and DROP TRIGGER are not supported because
+tree-sitter-sql lacks grammar rules for them (produces ERROR nodes).
 Tracked upstream: https://github.com/DerekStride/tree-sitter-sql/issues/354
+
+DML statements (SELECT, INSERT, UPDATE, DELETE) are intentionally excluded —
+they are better captured as embedded SQL in host-language files where they
+have richer application context.
 """
 
 from typing import Any
@@ -19,6 +23,22 @@ from tree_sitter import Node as TSNode
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
+
+# Maps SQL node_type → (name_prefix, name_strategy).
+# strategy "object_ref": look for object_reference child (falls back to identifier).
+# strategy "identifier": look for identifier child directly on the node.
+_DEFINITION_NAME_MAP: dict[str, tuple[str, str]] = {
+    "create_table": ("table", "object_ref"),
+    "create_view": ("view", "object_ref"),
+    "create_function": ("function", "object_ref"),
+    "create_index": ("index", "identifier"),
+    "create_trigger": ("trigger", "object_ref"),
+    "alter_table": ("alter_table", "object_ref"),
+    "drop_table": ("drop_table", "object_ref"),
+    "drop_view": ("drop_view", "object_ref"),
+    "drop_function": ("drop_function", "object_ref"),
+    "drop_index": ("drop_index", "identifier"),
+}
 
 
 class SqlMapping(BaseMapping):
@@ -92,6 +112,16 @@ class SqlMapping(BaseMapping):
             (create_index) @definition
 
             (create_trigger) @definition
+
+            (alter_table) @definition
+
+            (drop_table) @definition
+
+            (drop_view) @definition
+
+            (drop_function) @definition
+
+            (drop_index) @definition
             """
 
         elif concept == UniversalConcept.BLOCK:
@@ -101,9 +131,9 @@ class SqlMapping(BaseMapping):
 
         elif concept == UniversalConcept.COMMENT:
             return """
-            (comment) @definition
+            (comment) @comment
 
-            (marginalia) @definition
+            (marginalia) @comment
             """
 
         elif concept == UniversalConcept.IMPORT:
@@ -111,9 +141,7 @@ class SqlMapping(BaseMapping):
             return None
 
         elif concept == UniversalConcept.STRUCTURE:
-            return """
-            (alter_table) @definition
-            """
+            return None
 
         return None
 
@@ -129,43 +157,24 @@ class SqlMapping(BaseMapping):
             if node is None:
                 return "unnamed_definition"
 
-            node_type = node.type
-            name = self._extract_object_name(node, source)
-
-            if node_type == "create_table":
-                if name:
-                    return f"table_{name}"
-                return self.get_fallback_name(node, "table")
-            elif node_type == "create_view":
-                if name:
-                    return f"view_{name}"
-                return self.get_fallback_name(node, "view")
-            elif node_type == "create_function":
-                if name:
-                    return f"function_{name}"
-                return self.get_fallback_name(node, "function")
-            elif node_type == "create_index":
-                # Index name is a direct identifier child, not
-                # inside object_reference
-                idx_name = self.find_child_by_type(
-                    node, "identifier"
-                )
-                if idx_name:
-                    idx_text = self.get_node_text(
-                        idx_name, source
-                    ).strip()
-                    return f"index_{idx_text}"
-                return self.get_fallback_name(node, "index")
-            elif node_type == "create_trigger":
-                if name:
-                    return f"trigger_{name}"
-                return self.get_fallback_name(node, "trigger")
+            entry = _DEFINITION_NAME_MAP.get(node.type)
+            if entry:
+                prefix, strategy = entry
+                if strategy == "identifier":
+                    ident = self.find_child_by_type(node, "identifier")
+                    if ident:
+                        return f"{prefix}_{self.get_node_text(ident, source).strip()}"
+                    return self.get_fallback_name(node, prefix)
+                else:  # object_ref
+                    name = self._extract_object_name(node, source)
+                    if name:
+                        return f"{prefix}_{name}"
+                    return self.get_fallback_name(node, prefix)
             else:
+                name = self._extract_object_name(node, source)
                 if name:
                     return name
-                return self.get_fallback_name(
-                    node, "definition"
-                )
+                return self.get_fallback_name(node, "definition")
 
         elif concept == UniversalConcept.BLOCK:
             node = captures.get("block")
@@ -175,24 +184,11 @@ class SqlMapping(BaseMapping):
             return "unnamed_block"
 
         elif concept == UniversalConcept.COMMENT:
-            node = captures.get("definition")
+            node = captures.get("comment")
             if node:
                 line = node.start_point[0] + 1
                 return f"comment_line_{line}"
             return "unnamed_comment"
-
-        elif concept == UniversalConcept.STRUCTURE:
-            node = captures.get("definition")
-            if node is None:
-                return "unnamed_structure"
-
-            if node.type == "alter_table":
-                name = self._extract_object_name(node, source)
-                if name:
-                    return f"alter_{name}"
-                return self.get_fallback_name(node, "alter")
-
-            return "unnamed_structure"
 
         return "unnamed"
 
@@ -205,6 +201,9 @@ class SqlMapping(BaseMapping):
 
         if concept == UniversalConcept.BLOCK and "block" in captures:
             node = captures["block"]
+            return self.get_node_text(node, source)
+        elif concept == UniversalConcept.COMMENT and "comment" in captures:
+            node = captures["comment"]
             return self.get_node_text(node, source)
         elif "definition" in captures:
             node = captures["definition"]
@@ -254,6 +253,21 @@ class SqlMapping(BaseMapping):
                 elif def_node.type == "create_trigger":
                     metadata["kind"] = "trigger"
 
+                elif def_node.type == "alter_table":
+                    metadata["kind"] = "alter_table"
+
+                elif def_node.type == "drop_table":
+                    metadata["kind"] = "drop_table"
+
+                elif def_node.type == "drop_view":
+                    metadata["kind"] = "drop_view"
+
+                elif def_node.type == "drop_function":
+                    metadata["kind"] = "drop_function"
+
+                elif def_node.type == "drop_index":
+                    metadata["kind"] = "drop_index"
+
         elif concept == UniversalConcept.BLOCK:
             if "block" in captures:
                 block_node = captures["block"]
@@ -263,8 +277,8 @@ class SqlMapping(BaseMapping):
                 metadata["statement_count"] = len(stmts)
 
         elif concept == UniversalConcept.COMMENT:
-            if "definition" in captures:
-                comment_node = captures["definition"]
+            if "comment" in captures:
+                comment_node = captures["comment"]
                 comment_text = self.get_node_text(comment_node, source)
 
                 clean_text = self.clean_comment_text(comment_text)
@@ -281,10 +295,5 @@ class SqlMapping(BaseMapping):
                         comment_type = "annotation"
 
                 metadata["comment_type"] = comment_type
-
-        elif concept == UniversalConcept.STRUCTURE:
-            node = captures.get("definition")
-            if node and node.type == "alter_table":
-                metadata["kind"] = "alter_table"
 
         return metadata

@@ -12,10 +12,10 @@
 
 import os
 import re
+from fnmatch import fnmatch, translate
 from functools import lru_cache
-from fnmatch import translate, fnmatch
 from pathlib import Path
-from typing import Pattern, Optional
+from re import Pattern
 
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 
@@ -337,7 +337,7 @@ def load_gitignore_patterns(dir_path: Path, root_dir: Path) -> list[str]:
                     patterns_from_gitignore.append(f"{rel_from_root.as_posix()}/{line}")
 
         return patterns_from_gitignore
-    except (OSError, Exception) as e:
+    except (OSError, Exception):
         # Return empty list on error - caller can log if needed
         return []
 
@@ -347,7 +347,7 @@ def scan_directory_files(
     patterns: list[str],
     exclude_patterns: list[str],
     gitignore_patterns: list[str] | None = None,
-    ignore_engine: Optional[object] = None,
+    ignore_engine: object | None = None,
 ) -> list[Path]:
     """Scan files in a single directory (non-recursive) with pattern filtering.
 
@@ -412,7 +412,7 @@ def walk_directory_tree(
     exclude_patterns: list[str],
     parent_gitignores: dict[Path, list[str]],
     use_inode_ordering: bool = False,
-    ignore_engine: Optional[object] = None,
+    ignore_engine: object | None = None,
     max_files: int | None = None,
 ) -> tuple[list[Path], dict[Path, list[str]]]:
     """Core directory traversal logic shared by sequential and parallel discovery.
@@ -441,7 +441,7 @@ def walk_directory_tree(
     # SAFETY: Handle race condition where start_path is deleted before walk begins
     try:
         walk_iter = os.walk(start_path, topdown=True)
-    except (FileNotFoundError, NotADirectoryError, PermissionError) as e:
+    except (FileNotFoundError, NotADirectoryError, PermissionError):
         # Directory deleted, became a file, or permission denied before walk started
         return files, gitignore_patterns
 
@@ -592,7 +592,7 @@ def walk_subtree_worker(
     exclude_patterns: list[str],
     parent_gitignores: dict[Path, list[str]],
     use_inode_ordering: bool = False,
-    ignore_engine_args: Optional[object] = None,
+    ignore_engine_args: object | None = None,
 ) -> tuple[list[Path], list[str]]:
     """Worker function for parallel directory traversal (must be module-level for pickling).
 

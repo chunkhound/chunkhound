@@ -22,7 +22,13 @@ def _pfr(path: Path, chunks: list[dict], ok: bool = True) -> ParsedFileResult:
 def test_per_file_transaction_isolated(tmp_path: Path):
     db = DuckDBProvider(db_path=tmp_path / "db", base_directory=tmp_path)
     db.connect()
+    try:
+        _run_test(db, tmp_path)
+    finally:
+        db.disconnect()
 
+
+def _run_test(db: DuckDBProvider, tmp_path: Path) -> None:
     coord = IndexingCoordinator(database_provider=db, base_directory=tmp_path)
 
     good_file = tmp_path / "good.yaml"
@@ -51,10 +57,10 @@ def test_per_file_transaction_isolated(tmp_path: Path):
     # Monkeypatch _store_file_record to fail for bad_file
     original_store = coord._store_file_record
 
-    def _failing_store(path, *args, **kwargs):
+    async def _failing_store(path, *args, **kwargs):
         if Path(path) == bad_file:
             raise RuntimeError("boom")
-        return original_store(path, *args, **kwargs)
+        return await original_store(path, *args, **kwargs)
 
     coord._store_file_record = _failing_store  # type: ignore[assignment]
 

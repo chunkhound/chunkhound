@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 # Global console for consistent colored output
 _console = Console()
 
+_PERMISSIONS_HINT = "This might be a permissions issue. Try creating the file manually."
+
 
 def console_print(message: str, style: str | None = None) -> None:
     """Print with colors using Rich console or fallback to plain print."""
@@ -731,8 +733,8 @@ def _display_detected_configs(
                 table.add_row(f"• {provider_name} configured via environment")
             else:
                 table.add_row(
-                        f"• {provider_name} server detected at "
-                        f"{config.get('base_url', 'unknown')}"
+                    f"• {provider_name} server detected at "
+                    f"{config.get('base_url', 'unknown')}"
                 )
 
     if formatter.console is not None:
@@ -748,8 +750,8 @@ def _display_detected_configs(
                 elif provider == "local":
                     provider_name = config.get("provider_name", "Unknown")
                     print(
-                    f"• {provider_name} server detected at "
-                    f"{config.get('base_url', 'unknown')}"
+                        f"• {provider_name} server detected at "
+                        f"{config.get('base_url', 'unknown')}"
                     )
 
 
@@ -899,7 +901,7 @@ async def _setup_claude_code(target_path: Path, formatter: RichOutputFormatter) 
 
     # Write updated configuration
     if _write_claude_mcp_config(mcp_path, config):
-        formatter.success(f"✓ ChunkHound MCP server added to {mcp_path}")
+        formatter.success(f"ChunkHound MCP server added to {mcp_path}")
         print("You can now use ChunkHound tools directly in Claude Code!")
         print(
             "Claude Code will prompt you to approve this project-scoped "
@@ -908,6 +910,7 @@ async def _setup_claude_code(target_path: Path, formatter: RichOutputFormatter) 
         return True
     else:
         formatter.error(f"Failed to write configuration to {mcp_path}")
+        print(_PERMISSIONS_HINT)
         _show_manual_claude_instructions(formatter, mcp_path)
         return False
 
@@ -1048,7 +1051,7 @@ async def _setup_vscode(target_path: Path, formatter: RichOutputFormatter) -> bo
     vscode_dir = _detect_vscode_workspace(target_path)
 
     if vscode_dir:
-        formatter.info(f"✓ VS Code workspace detected: {vscode_dir.parent}")
+        formatter.info(f"VS Code workspace detected: {vscode_dir.parent}")
         mcp_path = vscode_dir / "mcp.json"
 
         # Read existing configuration
@@ -1071,11 +1074,12 @@ async def _setup_vscode(target_path: Path, formatter: RichOutputFormatter) -> bo
 
         # Write updated configuration
         if _write_vscode_mcp_config(mcp_path, config):
-            formatter.success(f"✓ ChunkHound MCP server added to {mcp_path}")
+            formatter.success(f"ChunkHound MCP server added to {mcp_path}")
             print("You can now use ChunkHound tools in VS Code with GitHub Copilot!")
             return True
         else:
             formatter.error(f"Failed to write configuration to {mcp_path}")
+            print(_PERMISSIONS_HINT)
             _show_manual_vscode_instructions(formatter, mcp_path)
             return False
     else:
@@ -1098,7 +1102,7 @@ async def _setup_vscode(target_path: Path, formatter: RichOutputFormatter) -> bo
 
             if _write_vscode_mcp_config(mcp_path, config):
                 formatter.success(
-                    f"✓ Created VS Code workspace with ChunkHound MCP: {mcp_path}"
+                    f"Created VS Code workspace with ChunkHound MCP: {mcp_path}"
                 )
                 print(
                     "You can now use ChunkHound tools in VS Code with GitHub Copilot!"
@@ -1106,6 +1110,7 @@ async def _setup_vscode(target_path: Path, formatter: RichOutputFormatter) -> bo
                 return True
             else:
                 formatter.error(f"Failed to create {mcp_path}")
+                print(_PERMISSIONS_HINT)
                 _show_manual_vscode_instructions(formatter, mcp_path)
                 return False
         else:
@@ -1202,10 +1207,7 @@ async def _setup_opencode(target_path: Path, formatter: RichOutputFormatter) -> 
             return True
 
     # Add ChunkHound server configuration
-    mcp_config["chunkhound"] = {
-        "type": "local",
-        "command": ["chunkhound", "mcp"]
-    }
+    mcp_config["chunkhound"] = {"type": "local", "command": ["chunkhound", "mcp"]}
 
     # Ensure schema is present
     if "$schema" not in config:
@@ -1213,12 +1215,13 @@ async def _setup_opencode(target_path: Path, formatter: RichOutputFormatter) -> 
 
     # Write updated configuration
     if _write_opencode_config(opencode_path, config):
-        formatter.success(f"✓ ChunkHound MCP server added to {opencode_path}")
+        formatter.success(f"ChunkHound MCP server added to {opencode_path}")
         print("You can now use ChunkHound tools directly in OpenCode!")
         print("OpenCode will automatically detect and load the MCP server.")
         return True
     else:
         formatter.error(f"Failed to write configuration to {opencode_path}")
+        print(_PERMISSIONS_HINT)
         _show_manual_opencode_instructions(formatter, opencode_path)
         return False
 
@@ -1581,7 +1584,7 @@ async def _validate_detected_config(
 async def _validate_voyageai_key(api_key: str, formatter: RichOutputFormatter) -> bool:
     """Test VoyageAI API key with minimal embedding request"""
     try:
-        formatter.info("🔄 Validating API key...")
+        formatter.info("Validating API key...")
 
         # Create a test configuration
         config = EmbeddingConfig(
@@ -1600,6 +1603,7 @@ async def _validate_voyageai_key(api_key: str, formatter: RichOutputFormatter) -
 
     except Exception as e:
         formatter.error(f"Validation failed: {e}")
+        print("Double-check your API key and try again.")
         return False
 
 
@@ -1608,7 +1612,7 @@ async def _validate_openai_key(
 ) -> bool:
     """Test OpenAI API key with minimal embedding request"""
     try:
-        formatter.info("🔄 Validating API key...")
+        formatter.info("Validating API key...")
 
         # Create a test configuration
         config = EmbeddingConfig(
@@ -1627,6 +1631,7 @@ async def _validate_openai_key(
 
     except Exception as e:
         formatter.error(f"Validation failed: {e}")
+        print("Double-check your API key and try again.")
         return False
 
 
@@ -1635,7 +1640,7 @@ async def _validate_openai_compatible(
 ) -> bool:
     """Test OpenAI-compatible endpoint connection"""
     try:
-        formatter.info("🔄 Testing connection...")
+        formatter.info("Testing connection...")
 
         # Create a test configuration
         config_kwargs = {
@@ -1663,6 +1668,7 @@ async def _validate_openai_compatible(
 
     except Exception as e:
         formatter.error(f"Connection failed: {e}")
+        print("Make sure the endpoint is running and accessible.")
         return False
 
 
@@ -2087,4 +2093,8 @@ async def _save_configuration(
 
     except Exception as e:
         formatter.error(f"Failed to save configuration: {e}")
+        print(
+            "This might be a permissions issue. "
+            "Try running with appropriate permissions."
+        )
         return None, "error"

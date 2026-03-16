@@ -45,10 +45,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+from tree_sitter import Node as TSNode
+
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-from tree_sitter import Node as TSNode
 
 
 class PHPMapping(BaseMapping):
@@ -422,7 +423,9 @@ class PHPMapping(BaseMapping):
                         if child and child.type == "function_call_expression":
                             name_node = self.find_child_by_type(child, "name")
                             if name_node:
-                                func_name = self.get_node_text(name_node, source).strip()
+                                func_name = self.get_node_text(
+                                    name_node, source
+                                ).strip()
                                 if func_name == "define":
                                     metadata["kind"] = "define"
                                     break
@@ -697,7 +700,9 @@ class PHPMapping(BaseMapping):
                                 "boolean",
                                 "null",
                             ):
-                                value_text = self.get_node_text(value_child, source).strip()
+                                value_text = self.get_node_text(
+                                    value_child, source
+                                ).strip()
                                 break
 
                         # Truncate to 50 chars if longer
@@ -741,7 +746,9 @@ class PHPMapping(BaseMapping):
 
                                     # Truncate to 50 chars if longer
                                     if len(const_value) > MAX_CONSTANT_VALUE_LENGTH:
-                                        const_value = const_value[:MAX_CONSTANT_VALUE_LENGTH]
+                                        const_value = const_value[
+                                            :MAX_CONSTANT_VALUE_LENGTH
+                                        ]
 
                                     constants.append(
                                         {"name": const_name, "value": const_value}

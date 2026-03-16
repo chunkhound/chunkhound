@@ -3,6 +3,7 @@
 from typing import Any
 
 from chunkhound.core.exceptions.embedding import EmbeddingDimensionError
+from chunkhound.core.utils.token_utils import LLM_CHARS_PER_TOKEN
 
 
 def chunk_text_by_words(text: str, max_tokens: int) -> list[str]:
@@ -13,7 +14,7 @@ def chunk_text_by_words(text: str, max_tokens: int) -> list[str]:
     current_tokens = 0
 
     for word in words:
-        word_tokens = len(word) // 4 + 1  # Rough token estimate
+        word_tokens = len(word) // LLM_CHARS_PER_TOKEN + 1
         if current_tokens + word_tokens > max_tokens and current_chunk:
             chunks.append(" ".join(current_chunk))
             current_chunk = [word]

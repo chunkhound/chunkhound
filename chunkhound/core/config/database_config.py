@@ -149,7 +149,9 @@ class DatabaseConfig(BaseModel):
             config["provider"] = provider
         if index_type := os.getenv("CHUNKHOUND_DATABASE__LANCEDB_INDEX_TYPE"):
             config["lancedb_index_type"] = index_type
-        if threshold := os.getenv("CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_FRAGMENT_THRESHOLD"):
+        if threshold := os.getenv(
+            "CHUNKHOUND_DATABASE__LANCEDB_OPTIMIZE_FRAGMENT_THRESHOLD"
+        ):
             config["lancedb_optimize_fragment_threshold"] = int(threshold)
         # Disk usage limit from environment
         if max_disk_gb := os.getenv("CHUNKHOUND_DATABASE__MAX_DISK_USAGE_GB"):
