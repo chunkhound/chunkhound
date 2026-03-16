@@ -445,9 +445,14 @@ class TestRealtimeFunctional:
 
             stats = await service.get_health()
             assert stats["watchman_connection_state"] == "connected"
-            assert stats["watchman_subscription_count"] >= 1
+            assert stats["watchman_subscription_count"] >= 2
             assert isinstance(stats["watchman_scopes"], list)
-            assert stats["watchman_scopes"]
+            assert any(
+                scope["scope_kind"] == "nested_junction"
+                and scope["requested_path"] == str(junction_dir)
+                and scope["watch_root"] == str(physical_workspace.resolve())
+                for scope in stats["watchman_scopes"]
+            )
         finally:
             await service.stop()
             services.provider.disconnect()

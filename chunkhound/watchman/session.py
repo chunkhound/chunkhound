@@ -20,6 +20,7 @@ from .scope import (
     WatchmanSubscriptionScope,
     build_watchman_scope_plan,
     discover_nested_linux_mount_roots,
+    discover_nested_windows_junction_scopes,
 )
 
 _REQUIRED_CAPABILITIES: tuple[str, ...] = ("cmd-watch-project", "relative_root")
@@ -144,6 +145,7 @@ class WatchmanCliSession:
         subscription_name: str | None = None,
         scope_plan: WatchmanScopePlan | None = None,
         nested_mount_roots: Sequence[Path] | None = None,
+        additional_scopes: Sequence[WatchmanSubscriptionScope] | None = None,
     ) -> WatchmanSessionSetup:
         if self._process is not None and self._process.returncode is None:
             await self.stop()
@@ -163,15 +165,32 @@ class WatchmanCliSession:
                     if nested_mount_roots is None
                     else tuple(nested_mount_roots)
                 )
+                resolved_additional_scopes = (
+                    discover_nested_windows_junction_scopes(target_path)
+                    if additional_scopes is None
+                    else tuple(additional_scopes)
+                )
                 watch_project_response = await self._run_one_shot_command(
                     ["watch-project", str(target_path.resolve())]
                 )
+                watched_roots: set[Path] = set()
                 for mount_root in resolved_nested_mount_roots:
+                    if mount_root in watched_roots:
+                        continue
+                    watched_roots.add(mount_root)
                     await self._run_one_shot_command(["watch", str(mount_root)])
+                for extra_scope in resolved_additional_scopes:
+                    if extra_scope.watch_root in watched_roots:
+                        continue
+                    watched_roots.add(extra_scope.watch_root)
+                    await self._run_one_shot_command(
+                        ["watch", str(extra_scope.watch_root)]
+                    )
                 resolved_scope_plan = build_watchman_scope_plan(
                     target_path,
                     watch_project_response,
                     nested_mount_roots=resolved_nested_mount_roots,
+                    additional_scopes=resolved_additional_scopes,
                 )
             resolved_subscription_name = subscription_name or _DEFAULT_SUBSCRIPTION_NAME
 

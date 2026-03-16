@@ -35,6 +35,7 @@ from chunkhound.watchman import (
     WatchmanSubscriptionScope,
     build_watchman_scope_plan,
     discover_nested_linux_mount_roots,
+    discover_nested_windows_junction_scopes,
 )
 from chunkhound.watchman_runtime.loader import (
     default_realtime_backend_for_current_install,
@@ -622,16 +623,9 @@ class WatchmanRealtimeAdapter:
             )
             return None
 
-        relative_root = (
-            PurePosixPath(scope.relative_root) if scope.relative_root else None
-        )
-        mapped_parts = []
-        if relative_root is not None:
-            mapped_parts.extend(relative_root.parts)
-        mapped_parts.extend(relative_name.parts)
-        canonical_path = Path(
-            normalize_file_path(scope.watch_root.joinpath(*mapped_parts))
-        )
+        # Preserve the logical handled path under config.target_dir even when
+        # the Watchman watch root is a physical junction target outside it.
+        canonical_path = scope.requested_path.joinpath(*relative_name.parts)
         try:
             canonical_path.relative_to(scope.requested_path)
         except ValueError:
@@ -771,12 +765,25 @@ class WatchmanRealtimeAdapter:
                 ["watch-project", str(watch_path.resolve())]
             )
             nested_mount_roots = discover_nested_linux_mount_roots(watch_path)
+            additional_scopes = discover_nested_windows_junction_scopes(watch_path)
+            watched_roots: set[Path] = set()
             for mount_root in nested_mount_roots:
+                if mount_root in watched_roots:
+                    continue
+                watched_roots.add(mount_root)
                 await planning_session._run_one_shot_command(["watch", str(mount_root)])
+            for extra_scope in additional_scopes:
+                if extra_scope.watch_root in watched_roots:
+                    continue
+                watched_roots.add(extra_scope.watch_root)
+                await planning_session._run_one_shot_command(
+                    ["watch", str(extra_scope.watch_root)]
+                )
             scope_plan = build_watchman_scope_plan(
                 watch_path,
                 watch_project_response,
                 nested_mount_roots=nested_mount_roots,
+                additional_scopes=additional_scopes,
             )
 
             self._shared_subscription_queue = asyncio.Queue(

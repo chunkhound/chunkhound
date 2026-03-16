@@ -10,6 +10,7 @@ import chunkhound.services.realtime_indexing_service as realtime_service_module
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from chunkhound.watchman import WatchmanSubscriptionScope
 from tests.utils.windows_compat import wait_for_indexed
 
 pytestmark = pytest.mark.requires_native_watchman
@@ -251,6 +252,84 @@ async def test_watchman_multi_scope_translation_deduplicates_across_subscription
             for queued_path, priority in add_file_calls
             if priority == "change"
         ] == [(file_path.resolve(), "change")]
+    finally:
+        await service.stop()
+        services.provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_watchman_junction_scope_translation_preserves_logical_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target_dir = tmp_path / "workspace_root"
+    logical_junction = target_dir / "linked_workspace"
+    physical_root = tmp_path / "external_workspace"
+    target_dir.mkdir(parents=True)
+    logical_junction.mkdir(parents=True)
+    physical_root.mkdir(parents=True)
+    monkeypatch.setattr(
+        realtime_service_module,
+        "discover_nested_windows_junction_scopes",
+        lambda target_path: (
+            WatchmanSubscriptionScope(
+                requested_path=logical_junction,
+                watch_root=physical_root.resolve(),
+                relative_root=None,
+                scope_kind="nested_junction",
+            ),
+        ),
+    )
+
+    service, services = _build_watchman_service(target_dir)
+    add_file_calls: list[tuple[Path, str]] = []
+
+    original_add_file = service.add_file
+
+    async def counting_add_file(file_path: Path, priority: str = "change") -> None:
+        add_file_calls.append((file_path, priority))
+        await original_add_file(file_path, priority)
+
+    monkeypatch.setattr(service, "add_file", counting_add_file)
+
+    try:
+        await service.start(target_dir)
+        queue = service.watchman_subscription_queue
+        assert queue is not None
+
+        file_path = logical_junction / "src" / "junctioned.py"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text("def junctioned():\n    return 1\n", encoding="utf-8")
+
+        queue.put_nowait(
+            {
+                "subscription": "chunkhound-live-indexing--linked-workspace",
+                "clock": "c:0:5",
+                "files": [
+                    {
+                        "name": "src/junctioned.py",
+                        "exists": True,
+                        "new": True,
+                        "type": "f",
+                    }
+                ],
+            }
+        )
+
+        assert await wait_for_indexed(services.provider, file_path)
+
+        stats = await service.get_health()
+        assert stats["watchman_subscription_count"] == 2
+        assert any(
+            scope["scope_kind"] == "nested_junction"
+            and scope["requested_path"] == str(logical_junction)
+            and scope["watch_root"] == str(physical_root.resolve())
+            for scope in stats["watchman_scopes"]
+        )
+        assert [
+            (queued_path, priority)
+            for queued_path, priority in add_file_calls
+            if priority == "change"
+        ] == [(file_path, "change")]
     finally:
         await service.stop()
         services.provider.disconnect()

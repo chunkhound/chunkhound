@@ -11,6 +11,8 @@ Future coarse optimizations still live outside this step:
 
 from __future__ import annotations
 
+import os
+import stat
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -19,7 +21,7 @@ from pathlib import Path, PurePosixPath
 
 @dataclass(frozen=True)
 class WatchmanSubscriptionScope:
-    """A single Watchman subscription scope derived from `watch-project`."""
+    """A single Watchman subscription scope for one logical path surface."""
 
     requested_path: Path
     watch_root: Path
@@ -45,6 +47,7 @@ def build_watchman_scope_plan(
     watch_project_result: Mapping[str, object],
     *,
     nested_mount_roots: Sequence[Path] | None = None,
+    additional_scopes: Sequence[WatchmanSubscriptionScope] | None = None,
 ) -> WatchmanScopePlan:
     """Build the Watchman scope plan for a logical live-indexing target."""
 
@@ -57,6 +60,11 @@ def build_watchman_scope_plan(
         if nested_mount_roots is None
         else _normalize_nested_mount_roots(requested_path, nested_mount_roots)
     )
+    normalized_additional_scopes = (
+        ()
+        if additional_scopes is None
+        else _normalize_additional_scopes(requested_path, additional_scopes)
+    )
 
     scopes = [primary_scope]
     for mount_root in mount_roots:
@@ -68,6 +76,7 @@ def build_watchman_scope_plan(
                 scope_kind="nested_mount",
             )
         )
+    scopes.extend(normalized_additional_scopes)
     return WatchmanScopePlan(scopes=tuple(scopes))
 
 
@@ -90,6 +99,80 @@ def discover_nested_linux_mount_roots(
     except OSError:
         return ()
     return _mount_roots_from_mountinfo(requested_path, mountinfo_text)
+
+
+def discover_nested_windows_junction_scopes(
+    target_dir: Path,
+) -> tuple[WatchmanSubscriptionScope, ...]:
+    """Return logical junction-backed scopes that resolve outside the target."""
+
+    if not sys.platform.startswith("win"):
+        return ()
+
+    requested_path = target_dir.expanduser().resolve()
+    traversal_root = _lexical_absolute_path(target_dir)
+    discovered_scopes: dict[
+        tuple[str, str, str | None, str], WatchmanSubscriptionScope
+    ] = {}
+    pending_dirs = [traversal_root]
+
+    while pending_dirs:
+        current_dir = pending_dirs.pop()
+        try:
+            with os.scandir(current_dir) as entries:
+                for entry in entries:
+                    try:
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                        logical_path = _lexical_absolute_path(Path(entry.path))
+                        entry_stat = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+
+                    is_reparse_point = bool(
+                        getattr(entry_stat, "st_file_attributes", 0)
+                        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+                    )
+                    if is_reparse_point and not logical_path.is_symlink():
+                        try:
+                            watch_root = logical_path.resolve()
+                        except OSError:
+                            continue
+                        if watch_root == requested_path:
+                            continue
+                        try:
+                            watch_root.relative_to(requested_path)
+                        except ValueError:
+                            scope = WatchmanSubscriptionScope(
+                                requested_path=logical_path,
+                                watch_root=watch_root,
+                                relative_root=None,
+                                scope_kind="nested_junction",
+                            )
+                            scope_key = (
+                                _path_sort_key(scope.requested_path),
+                                str(scope.watch_root),
+                                scope.relative_root,
+                                scope.scope_kind,
+                            )
+                            discovered_scopes[scope_key] = scope
+                        continue
+
+                    pending_dirs.append(logical_path)
+        except OSError:
+            continue
+
+    return tuple(
+        scope
+        for _key, scope in sorted(
+            discovered_scopes.items(),
+            key=lambda item: (
+                len(item[1].requested_path.parts),
+                item[0][0],
+                str(item[1].watch_root),
+            ),
+        )
+    )
 
 
 def _build_scope_from_watch_project(
@@ -128,6 +211,47 @@ def _normalize_nested_mount_roots(
         normalized_mount_roots.add(mount_root)
     return tuple(
         sorted(normalized_mount_roots, key=lambda path: (len(path.parts), str(path)))
+    )
+
+
+def _normalize_additional_scopes(
+    requested_path: Path, additional_scopes: Sequence[WatchmanSubscriptionScope]
+) -> tuple[WatchmanSubscriptionScope, ...]:
+    normalized_scopes: dict[
+        tuple[str, str, str | None, str], WatchmanSubscriptionScope
+    ] = {}
+    for candidate in additional_scopes:
+        logical_requested_path = _lexical_absolute_path(candidate.requested_path)
+        if logical_requested_path == requested_path:
+            continue
+        try:
+            logical_requested_path.relative_to(requested_path)
+        except ValueError:
+            continue
+
+        normalized_scope = WatchmanSubscriptionScope(
+            requested_path=logical_requested_path,
+            watch_root=Path(candidate.watch_root).expanduser().resolve(),
+            relative_root=_normalize_relative_root(candidate.relative_root),
+            scope_kind=candidate.scope_kind,
+        )
+        scope_key = (
+            _path_sort_key(normalized_scope.requested_path),
+            str(normalized_scope.watch_root),
+            normalized_scope.relative_root,
+            normalized_scope.scope_kind,
+        )
+        normalized_scopes[scope_key] = normalized_scope
+    return tuple(
+        scope
+        for _key, scope in sorted(
+            normalized_scopes.items(),
+            key=lambda item: (
+                len(item[1].requested_path.parts),
+                item[0][0],
+                str(item[1].watch_root),
+            ),
+        )
     )
 
 
@@ -177,6 +301,18 @@ def _require_watch_root(watch_project_result: Mapping[str, object]) -> Path:
     if not watch_root.is_absolute():
         raise ValueError("watch-project result 'watch' must be an absolute path")
     return watch_root.resolve()
+
+
+def _lexical_absolute_path(path: Path) -> Path:
+    expanded_path = Path(path).expanduser()
+    if expanded_path.is_absolute():
+        return expanded_path
+    return Path(os.path.abspath(str(expanded_path)))
+
+
+def _path_sort_key(path: Path) -> str:
+    rendered = str(path)
+    return rendered.lower() if os.name == "nt" else rendered
 
 
 def _normalize_relative_root(relative_path: object) -> str | None:
