@@ -16,43 +16,12 @@ from typing import Any
 from tree_sitter import Node
 
 from chunkhound.core.types.common import Language
+from chunkhound.parsers.mappings._shared.css_family_helpers import (
+    node_text,
+    selector_text,
+)
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-
-_MAX_SELECTOR_LEN = 60
-
-
-def _selector_text(node: Node, content: bytes) -> str:
-    """Extract selector string from a rule_set node."""
-    for child in node.children:
-        if child.type == "selectors":
-            raw = content[child.start_byte : child.end_byte].decode(
-                "utf-8", errors="replace"
-            ).strip()
-            if len(raw) > _MAX_SELECTOR_LEN:
-                raw = raw[:_MAX_SELECTOR_LEN] + "…"
-            return raw
-    return f"rule_line{node.start_point[0] + 1}"
-
-
-def _identifier_name(node: Node, content: bytes) -> str:
-    """Get the identifier child text from a mixin/function statement."""
-    for child in node.children:
-        if child.type == "identifier":
-            return content[child.start_byte : child.end_byte].decode(
-                "utf-8", errors="replace"
-            ).strip()
-    return f"unknown_line{node.start_point[0] + 1}"
-
-
-def _property_name(node: Node, content: bytes) -> str:
-    """Get property_name from a declaration (SCSS $variable)."""
-    for child in node.children:
-        if child.type == "property_name":
-            return content[child.start_byte : child.end_byte].decode(
-                "utf-8", errors="replace"
-            ).strip()
-    return f"var_line{node.start_point[0] + 1}"
 
 
 class ScssMapping(BaseMapping):
@@ -74,11 +43,29 @@ class ScssMapping(BaseMapping):
     def extract_function_name(self, node: Node | None, source: str) -> str:
         if node is None:
             return ""
-        return _identifier_name(node, source.encode("utf-8", errors="replace"))
+        return self._identifier_name(node, source.encode("utf-8", errors="replace"))
 
     def extract_class_name(self, node: Node | None, source: str) -> str:
         """SCSS has no class definitions; always returns empty string."""
         return ""
+
+    # --- private helpers ---
+
+    def _identifier_name(self, node: Node, content: bytes) -> str:
+        """Get the identifier child text from a mixin/function statement."""
+        for child in node.children:
+            if child.type == "identifier":
+                return node_text(child, content).strip()
+        return f"unknown_line{node.start_point[0] + 1}"
+
+    def _property_name(self, node: Node, content: bytes) -> str:
+        """Get property_name from a declaration (SCSS $variable)."""
+        for child in node.children:
+            if child.type == "property_name":
+                return node_text(child, content).strip()
+        return f"var_line{node.start_point[0] + 1}"
+
+    # --- universal concept interface ---
 
     def get_query_for_concept(self, concept: UniversalConcept) -> str | None:
         if concept == UniversalConcept.DEFINITION:
@@ -121,27 +108,23 @@ class ScssMapping(BaseMapping):
 
         if concept == UniversalConcept.DEFINITION:
             if node.type == "mixin_statement":
-                return f"@mixin {_identifier_name(node, content)}"
+                return f"@mixin {self._identifier_name(node, content)}"
             elif node.type == "function_statement":
-                return f"@function {_identifier_name(node, content)}"
+                return f"@function {self._identifier_name(node, content)}"
             elif node.type == "rule_set":
-                return _selector_text(node, content)
+                return selector_text(node, content)
 
         elif concept == UniversalConcept.BLOCK:
             if node.type == "media_statement":
                 for child in node.children:
                     if child.type not in ("@media", "block"):
-                        cond = content[child.start_byte : child.end_byte].decode(
-                            "utf-8", errors="replace"
-                        ).strip()
+                        cond = node_text(child, content).strip()
                         return f"@media {cond[:40]}"
                 return f"@media_line{node.start_point[0] + 1}"
             elif node.type == "keyframes_statement":
                 for child in node.children:
                     if child.type == "keyframes_name":
-                        name = content[child.start_byte : child.end_byte].decode(
-                            "utf-8", errors="replace"
-                        ).strip()
+                        name = node_text(child, content).strip()
                         return f"@keyframes {name}"
                 return f"@keyframes_line{node.start_point[0] + 1}"
             elif node.type == "include_statement":
@@ -151,13 +134,10 @@ class ScssMapping(BaseMapping):
                 return f"@{type_name}_line{node.start_point[0] + 1}"
 
         elif concept == UniversalConcept.STRUCTURE:
-            name = _property_name(node, content)
-            return name
+            return self._property_name(node, content)
 
         elif concept == UniversalConcept.IMPORT:
-            raw = content[node.start_byte : node.end_byte].decode(
-                "utf-8", errors="replace"
-            ).strip()
+            raw = node_text(node, content).strip()
             # Strip @import/@use/@forward prefix and trailing semicolon
             for prefix in ("@forward", "@import", "@use"):
                 if raw.startswith(prefix):
@@ -182,12 +162,9 @@ class ScssMapping(BaseMapping):
         if concept == UniversalConcept.STRUCTURE:
             if node.type != "declaration":
                 return ""
-            prop = _property_name(node, content)
-            if not prop.startswith("$"):
+            if not self._property_name(node, content).startswith("$"):
                 return ""
-        return content[node.start_byte : node.end_byte].decode(
-            "utf-8", errors="replace"
-        )
+        return node_text(node, content)
 
     def extract_metadata(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
@@ -199,13 +176,13 @@ class ScssMapping(BaseMapping):
         if node is not None:
             metadata["node_type"] = node.type
             if node.type in ("mixin_statement", "function_statement"):
-                metadata["name"] = _identifier_name(node, content)
+                metadata["name"] = self._identifier_name(node, content)
                 metadata["chunk_type_hint"] = "function"
             elif node.type == "rule_set":
-                metadata["selector"] = _selector_text(node, content)
+                metadata["selector"] = selector_text(node, content)
                 metadata["chunk_type_hint"] = "block"
             elif node.type == "declaration":
-                prop = _property_name(node, content)
+                prop = self._property_name(node, content)
                 metadata["property"] = prop
                 if prop.startswith("$"):
                     metadata["kind"] = "variable"

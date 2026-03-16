@@ -14,39 +14,12 @@ from typing import Any
 from tree_sitter import Node
 
 from chunkhound.core.types.common import Language
+from chunkhound.parsers.mappings._shared.css_family_helpers import (
+    node_text,
+    selector_text,
+)
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-
-_MAX_SELECTOR_LEN = 60
-
-
-def _selector_text(node: Node, content: bytes) -> str:
-    """Extract selector string from a rule_set node."""
-    for child in node.children:
-        if child.type == "selectors":
-            raw = content[child.start_byte : child.end_byte].decode(
-                "utf-8", errors="replace"
-            ).strip()
-            if len(raw) > _MAX_SELECTOR_LEN:
-                raw = raw[:_MAX_SELECTOR_LEN] + "…"
-            return raw
-    return f"rule_line{node.start_point[0] + 1}"
-
-
-def _is_root_vars(node: Node, content: bytes) -> bool:
-    """Return True if rule_set is :root or * containing custom properties."""
-    sel = _selector_text(node, content)
-    if sel not in (":root", "*"):
-        return False
-    # Check if block contains any --var declarations
-    for child in node.children:
-        if child.type == "block":
-            block_text = content[child.start_byte : child.end_byte].decode(
-                "utf-8", errors="replace"
-            )
-            if "--" in block_text:
-                return True
-    return False
 
 
 class CssMapping(BaseMapping):
@@ -73,6 +46,22 @@ class CssMapping(BaseMapping):
     def extract_class_name(self, node: Node | None, source: str) -> str:
         """CSS has no class definitions; always returns empty string."""
         return ""
+
+    # --- private helpers ---
+
+    def _is_root_vars(self, node: Node, content: bytes) -> bool:
+        """Return True if rule_set is :root or * containing custom properties."""
+        sel = selector_text(node, content)
+        if sel not in (":root", "*"):
+            return False
+        # Check if block contains any --var declarations
+        for child in node.children:
+            if child.type == "block":
+                if "--" in node_text(child, content):
+                    return True
+        return False
+
+    # --- universal concept interface ---
 
     def get_query_for_concept(self, concept: UniversalConcept) -> str | None:
         if concept == UniversalConcept.DEFINITION:
@@ -102,24 +91,19 @@ class CssMapping(BaseMapping):
             return "unnamed"
 
         if concept == UniversalConcept.DEFINITION:
-            return _selector_text(node, content)
+            return selector_text(node, content)
 
         elif concept == UniversalConcept.BLOCK:
             if node.type == "media_statement":
-                # Get the media condition
                 for child in node.children:
                     if child.type not in ("@media", "block"):
-                        cond = content[child.start_byte : child.end_byte].decode(
-                            "utf-8", errors="replace"
-                        ).strip()
+                        cond = node_text(child, content).strip()
                         return f"@media {cond[:40]}"
                 return f"@media_line{node.start_point[0] + 1}"
             elif node.type == "keyframes_statement":
                 for child in node.children:
                     if child.type == "keyframes_name":
-                        name = content[child.start_byte : child.end_byte].decode(
-                            "utf-8", errors="replace"
-                        ).strip()
+                        name = node_text(child, content).strip()
                         return f"@keyframes {name}"
                 return f"@keyframes_line{node.start_point[0] + 1}"
             elif node.type == "supports_statement":
@@ -129,9 +113,7 @@ class CssMapping(BaseMapping):
             return ":root_vars"
 
         elif concept == UniversalConcept.IMPORT:
-            raw = content[node.start_byte : node.end_byte].decode(
-                "utf-8", errors="replace"
-            ).strip()
+            raw = node_text(node, content).strip()
             # Strip '@import ' prefix and trailing semicolon
             raw = raw.removeprefix("@import").strip().rstrip(";").strip()
             return raw[:60]
@@ -151,15 +133,13 @@ class CssMapping(BaseMapping):
             return ""
         # STRUCTURE: only :root/:* blocks with --variables
         if concept == UniversalConcept.STRUCTURE:
-            if not _is_root_vars(node, content):
+            if not self._is_root_vars(node, content):
                 return ""
         # DEFINITION: exclude :root/:* var blocks (those are STRUCTURE)
         if concept == UniversalConcept.DEFINITION:
-            if _is_root_vars(node, content):
+            if self._is_root_vars(node, content):
                 return ""
-        return content[node.start_byte : node.end_byte].decode(
-            "utf-8", errors="replace"
-        )
+        return node_text(node, content)
 
     def extract_metadata(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
@@ -171,8 +151,8 @@ class CssMapping(BaseMapping):
         if node is not None:
             metadata["node_type"] = node.type
             if node.type == "rule_set":
-                metadata["selector"] = _selector_text(node, content)
-                metadata["is_root_vars"] = _is_root_vars(node, content)
+                metadata["selector"] = selector_text(node, content)
+                metadata["is_root_vars"] = self._is_root_vars(node, content)
                 metadata["chunk_type_hint"] = "block"
         return metadata
 

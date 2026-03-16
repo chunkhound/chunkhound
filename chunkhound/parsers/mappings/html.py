@@ -12,6 +12,7 @@ from typing import Any
 from tree_sitter import Node
 
 from chunkhound.core.types.common import Language
+from chunkhound.parsers.mappings._shared.css_family_helpers import node_text
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
@@ -33,101 +34,6 @@ SEMANTIC_TAGS = frozenset(
         "fieldset",
     }
 )
-
-
-def _is_semantic_element(node: Node, content: bytes) -> bool:
-    """Return True if node is a semantic landmark or custom element."""
-    if node.type != "element":
-        return False
-    start_tag = node.child_by_field_name("start_tag") or (
-        node.children[0] if node.children else None
-    )
-    if start_tag is None or start_tag.type != "start_tag":
-        return False
-    tag_name_node = None
-    for child in start_tag.children:
-        if child.type == "tag_name":
-            tag_name_node = child
-            break
-    if tag_name_node is None:
-        return False
-    tag = content[tag_name_node.start_byte : tag_name_node.end_byte].decode(
-        "utf-8", errors="replace"
-    ).strip().lower()
-    if not tag:
-        return False
-    return tag in SEMANTIC_TAGS or "-" in tag
-
-
-def _get_tag_name(node: Node, content: bytes) -> str:
-    """Extract the tag name from an element node."""
-    start_tag = None
-    for child in node.children:
-        if child.type == "start_tag":
-            start_tag = child
-            break
-    if start_tag is None:
-        return ""
-    for child in start_tag.children:
-        if child.type == "tag_name":
-            return content[child.start_byte : child.end_byte].decode(
-                "utf-8", errors="replace"
-            ).lower()
-    return ""
-
-
-def _get_attribute(start_tag: Node, attr_name: str, content: bytes) -> str:
-    """Extract a specific attribute value from a start_tag node."""
-    for child in start_tag.children:
-        if child.type != "attribute":
-            continue
-        name_node = None
-        value_node = None
-        for attr_child in child.children:
-            if attr_child.type == "attribute_name":
-                name_node = attr_child
-            elif attr_child.type in ("quoted_attribute_value", "attribute_value"):
-                value_node = attr_child
-        if name_node is None:
-            continue
-        name = content[name_node.start_byte : name_node.end_byte].decode(
-            "utf-8", errors="replace"
-        ).lower()
-        if name == attr_name and value_node is not None:
-            raw = content[value_node.start_byte : value_node.end_byte].decode(
-                "utf-8", errors="replace"
-            )
-            # Strip surrounding quotes
-            return raw.strip("\"'")
-    return ""
-
-
-def _extract_element_name(node: Node, content: bytes) -> str:
-    """Derive a human-readable name for an HTML element."""
-    tag = _get_tag_name(node, content)
-    # Find start_tag to query attributes
-    start_tag = None
-    for child in node.children:
-        if child.type == "start_tag":
-            start_tag = child
-            break
-    if start_tag is not None:
-        # Prefer id > class > aria-label
-        id_val = _get_attribute(start_tag, "id", content)
-        if id_val:
-            return f"{tag}#{id_val}"
-        class_val = _get_attribute(start_tag, "class", content)
-        if class_val:
-            class_parts = class_val.split()
-            first_class = class_parts[0] if class_parts else ""
-            if first_class:
-                return f"{tag}.{first_class}"
-        aria_val = _get_attribute(start_tag, "aria-label", content)
-        if aria_val:
-            return f"{tag}[{aria_val[:30]}]"
-    if tag:
-        return f"{tag}_line{node.start_point[0] + 1}"
-    return f"element_line{node.start_point[0] + 1}"
 
 
 class HtmlMapping(BaseMapping):
@@ -154,6 +60,94 @@ class HtmlMapping(BaseMapping):
     def extract_class_name(self, node: Node | None, source: str) -> str:
         """HTML has no class definitions; always returns empty string."""
         return ""
+
+    # --- private helpers ---
+
+    def _is_semantic_element(self, node: Node, content: bytes) -> bool:
+        """Return True if node is a semantic landmark or custom element."""
+        if node.type != "element":
+            return False
+        start_tag = node.child_by_field_name("start_tag") or (
+            node.children[0] if node.children else None
+        )
+        if start_tag is None or start_tag.type != "start_tag":
+            return False
+        tag_name_node = None
+        for child in start_tag.children:
+            if child.type == "tag_name":
+                tag_name_node = child
+                break
+        if tag_name_node is None:
+            return False
+        tag = node_text(tag_name_node, content).strip().lower()
+        if not tag:
+            return False
+        return tag in SEMANTIC_TAGS or "-" in tag
+
+    def _get_tag_name(self, node: Node, content: bytes) -> str:
+        """Extract the tag name from an element node."""
+        start_tag = None
+        for child in node.children:
+            if child.type == "start_tag":
+                start_tag = child
+                break
+        if start_tag is None:
+            return ""
+        for child in start_tag.children:
+            if child.type == "tag_name":
+                return node_text(child, content).lower()
+        return ""
+
+    def _get_attribute(
+        self, start_tag: Node, attr_name: str, content: bytes
+    ) -> str:
+        """Extract a specific attribute value from a start_tag node."""
+        for child in start_tag.children:
+            if child.type != "attribute":
+                continue
+            name_node = None
+            value_node = None
+            for attr_child in child.children:
+                if attr_child.type == "attribute_name":
+                    name_node = attr_child
+                elif attr_child.type in ("quoted_attribute_value", "attribute_value"):
+                    value_node = attr_child
+            if name_node is None:
+                continue
+            name = node_text(name_node, content).lower()
+            if name == attr_name and value_node is not None:
+                # Strip surrounding quotes
+                return node_text(value_node, content).strip("\"'")
+        return ""
+
+    def _extract_element_name(self, node: Node, content: bytes) -> str:
+        """Derive a human-readable name for an HTML element."""
+        tag = self._get_tag_name(node, content)
+        # Find start_tag to query attributes
+        start_tag = None
+        for child in node.children:
+            if child.type == "start_tag":
+                start_tag = child
+                break
+        if start_tag is not None:
+            # Prefer id > class > aria-label
+            id_val = self._get_attribute(start_tag, "id", content)
+            if id_val:
+                return f"{tag}#{id_val}"
+            class_val = self._get_attribute(start_tag, "class", content)
+            if class_val:
+                class_parts = class_val.split()
+                first_class = class_parts[0] if class_parts else ""
+                if first_class:
+                    return f"{tag}.{first_class}"
+            aria_val = self._get_attribute(start_tag, "aria-label", content)
+            if aria_val:
+                return f"{tag}[{aria_val[:30]}]"
+        if tag:
+            return f"{tag}_line{node.start_point[0] + 1}"
+        return f"element_line{node.start_point[0] + 1}"
+
+    # --- universal concept interface ---
 
     def get_query_for_concept(self, concept: UniversalConcept) -> str | None:
         if concept == UniversalConcept.BLOCK:
@@ -193,14 +187,14 @@ class HtmlMapping(BaseMapping):
                         start_tag = child
                         break
                 if start_tag is not None:
-                    src = _get_attribute(start_tag, "src", content)
+                    src = self._get_attribute(start_tag, "src", content)
                     if src:
                         return f"script[src={src}]"
                 return f"script_line{node.start_point[0] + 1}"
             if node.type == "style_element":
                 return f"style_line{node.start_point[0] + 1}"
             if node.type == "element":
-                return _extract_element_name(node, content)
+                return self._extract_element_name(node, content)
 
         elif concept == UniversalConcept.COMMENT:
             return f"comment_line{node.start_point[0] + 1}"
@@ -210,19 +204,19 @@ class HtmlMapping(BaseMapping):
 
         elif concept == UniversalConcept.IMPORT:
             if node.type == "element":
-                tag = _get_tag_name(node, content)
+                tag = self._get_tag_name(node, content)
                 start_tag = None
                 for child in node.children:
                     if child.type == "start_tag":
                         start_tag = child
                         break
                 if tag == "link" and start_tag is not None:
-                    rel = _get_attribute(start_tag, "rel", content)
+                    rel = self._get_attribute(start_tag, "rel", content)
                     if rel == "stylesheet":
-                        href = _get_attribute(start_tag, "href", content)
+                        href = self._get_attribute(start_tag, "href", content)
                         return href or "link_stylesheet"
                 if tag == "script" and start_tag is not None:
-                    src = _get_attribute(start_tag, "src", content)
+                    src = self._get_attribute(start_tag, "src", content)
                     if src:
                         return src
 
@@ -240,33 +234,31 @@ class HtmlMapping(BaseMapping):
         # Filter BLOCK: only emit semantic/custom elements, script, style
         if concept == UniversalConcept.BLOCK:
             if node.type not in ("script_element", "style_element"):
-                if not _is_semantic_element(node, content):
+                if not self._is_semantic_element(node, content):
                     return ""
 
         # Filter IMPORT: only emit link[rel=stylesheet] and script[src=...]
         if concept == UniversalConcept.IMPORT:
             if node.type != "element":
                 return ""
-            tag = _get_tag_name(node, content)
+            tag = self._get_tag_name(node, content)
             start_tag = None
             for child in node.children:
                 if child.type == "start_tag":
                     start_tag = child
                     break
             if tag == "link" and start_tag is not None:
-                rel = _get_attribute(start_tag, "rel", content)
+                rel = self._get_attribute(start_tag, "rel", content)
                 if rel != "stylesheet":
                     return ""
             elif tag == "script" and start_tag is not None:
-                src = _get_attribute(start_tag, "src", content)
+                src = self._get_attribute(start_tag, "src", content)
                 if not src:
                     return ""
             else:
                 return ""
 
-        return content[node.start_byte : node.end_byte].decode(
-            "utf-8", errors="replace"
-        )
+        return node_text(node, content)
 
     def extract_metadata(
         self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
@@ -278,7 +270,7 @@ class HtmlMapping(BaseMapping):
         if node is not None:
             metadata["node_type"] = node.type
             if node.type == "element":
-                tag = _get_tag_name(node, content)
+                tag = self._get_tag_name(node, content)
                 metadata["tag_name"] = tag
                 metadata["is_custom_element"] = "-" in tag
                 metadata["is_semantic"] = tag in SEMANTIC_TAGS
@@ -300,4 +292,3 @@ class HtmlMapping(BaseMapping):
         content: bytes,
     ) -> list[dict[str, str]] | None:
         return None
-
