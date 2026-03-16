@@ -16,6 +16,7 @@ import gc
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
@@ -26,6 +27,9 @@ from watchdog.observers import Observer
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices
+from chunkhound.providers.database.duckdb_provider import (
+    DuckDBTransactionConflictError,
+)
 from chunkhound.services.realtime_path_filter import RealtimePathFilter
 from chunkhound.utils.windows_constants import IS_WINDOWS
 from chunkhound.watchman import (
@@ -109,6 +113,17 @@ def _enqueue_realtime_event(
             False,
             type(error).__name__,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeMutation:
+    """One downstream realtime pipeline operation."""
+
+    mutation_id: int
+    operation: str
+    path: Path
+    retry_count: int = 0
+    source_generation: int | None = None
 
 
 class SimpleEventHandler(FileSystemEventHandler):
@@ -1260,6 +1275,15 @@ class RealtimeIndexingService:
     _WATCHDOG_SETUP_TIMEOUT_SECONDS = 5.0
     _MONITORING_READY_TIMEOUT_SECONDS = 10.0
     _POLLING_STARTUP_SETTLE_SECONDS = 0.5
+    _DELETE_CONFLICT_MAX_RETRIES = 5
+    _DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS = 0.1
+    _MUTATION_PRIORITIES = {
+        "delete": 0,
+        "dir_delete": 0,
+        "change": 1,
+        "dir_index": 1,
+        "embed": 2,
+    }
 
     def __init__(
         self,
@@ -1285,8 +1309,13 @@ class RealtimeIndexingService:
         self.watchman_scope_plan: WatchmanScopePlan | None = None
         self.watchman_subscription_queue: asyncio.Queue[dict[str, object]] | None = None
 
-        # Existing asyncio queue for priority processing
-        self.file_queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue()
+        # Downstream mutation queue. Deletes, changes, and embed follow-ups all
+        # converge here so DB-changing realtime work stays serialized.
+        self.file_queue: asyncio.PriorityQueue[tuple[int, int, RealtimeMutation]] = (
+            asyncio.PriorityQueue()
+        )
+        self._queue_sequence = 0
+        self._next_mutation_id = 0
 
         # NEW: Async queue for events from watchdog (thread-safe via asyncio)
         self.event_queue: asyncio.Queue[tuple[str, Path]] = asyncio.Queue(
@@ -1295,6 +1324,8 @@ class RealtimeIndexingService:
 
         # Deduplication and error tracking
         self.pending_files: set[Path] = set()
+        self._pending_mutations: dict[tuple[str, str], RealtimeMutation] = {}
+        self._pending_path_counts: dict[str, int] = {}
         self.failed_files: set[str] = set()
         self._last_warning: str | None = None
         self._last_warning_at: str | None = None
@@ -1305,6 +1336,7 @@ class RealtimeIndexingService:
         self._pending_debounce: dict[str, float] = {}  # file_path -> timestamp
         self._debounce_delay = 0.5  # 500ms delay from research
         self._debounce_tasks: set[asyncio.Task] = set()  # Track active debounce tasks
+        self._retry_tasks: set[asyncio.Task[None]] = set()
 
         self._recent_file_events: dict[
             str, tuple[str, float]
@@ -1322,6 +1354,8 @@ class RealtimeIndexingService:
         self._last_accepted_event_at: str | None = None
         self._last_accepted_event_type: str | None = None
         self._last_accepted_event_path: str | None = None
+        self._next_source_generation = 0
+        self._latest_source_generation_by_path: dict[str, int] = {}
         self._last_processing_started_at: str | None = None
         self._last_processing_started_path: str | None = None
         self._last_processing_completed_at: str | None = None
@@ -1796,9 +1830,14 @@ class RealtimeIndexingService:
         self._last_source_event_path = str(file_path)
 
     def _record_accepted_event(self, event_type: str, file_path: Path | str) -> None:
+        normalized_path = str(self._normalize_mutation_path(file_path))
+        self._next_source_generation += 1
+        self._latest_source_generation_by_path[normalized_path] = (
+            self._next_source_generation
+        )
         self._last_accepted_event_at = self._utc_now()
         self._last_accepted_event_type = event_type
-        self._last_accepted_event_path = str(file_path)
+        self._last_accepted_event_path = normalized_path
         self._emit_status_update()
 
     def _record_filtered_event(self, event_type: str, file_path: Path | str) -> None:
@@ -1831,6 +1870,222 @@ class RealtimeIndexingService:
 
     def _record_processing_error(self) -> None:
         self._processing_error_count += 1
+
+    def _normalize_mutation_path(self, file_path: Path | str) -> Path:
+        path_obj = Path(file_path)
+        if not path_obj.is_absolute():
+            base_dir = self.watch_path or getattr(self.config, "target_dir", None)
+            if isinstance(base_dir, Path):
+                path_obj = base_dir / path_obj
+        return Path(normalize_file_path(path_obj))
+
+    @classmethod
+    def _mutation_priority(cls, operation: str) -> int:
+        return cls._MUTATION_PRIORITIES.get(
+            operation, cls._MUTATION_PRIORITIES["change"]
+        )
+
+    @classmethod
+    def _normalize_add_priority(cls, priority: str) -> tuple[str, bool]:
+        if priority == "change":
+            return "change", True
+        if priority == "priority":
+            return "change", False
+        if priority == "embed":
+            return "embed", False
+        if priority in cls._MUTATION_PRIORITIES:
+            return priority, False
+        return "change", False
+
+    def _build_mutation(
+        self,
+        operation: str,
+        file_path: Path | str,
+        retry_count: int = 0,
+        source_generation: int | None = None,
+    ) -> RealtimeMutation:
+        self._next_mutation_id += 1
+        return RealtimeMutation(
+            mutation_id=self._next_mutation_id,
+            operation=operation,
+            path=self._normalize_mutation_path(file_path),
+            retry_count=retry_count,
+            source_generation=source_generation,
+        )
+
+    def _current_source_generation(self, file_path: Path | str) -> int | None:
+        normalized_path = str(self._normalize_mutation_path(file_path))
+        return self._latest_source_generation_by_path.get(normalized_path)
+
+    def _delete_mutation_is_stale(self, mutation: RealtimeMutation) -> bool:
+        if mutation.source_generation is None:
+            return False
+
+        current_generation = self._current_source_generation(mutation.path)
+        return (
+            current_generation is not None
+            and current_generation > mutation.source_generation
+        )
+
+    @staticmethod
+    def _pending_mutation_key(mutation: RealtimeMutation) -> tuple[str, str]:
+        return (mutation.operation, str(mutation.path))
+
+    def _owns_pending_mutation(self, mutation: RealtimeMutation) -> bool:
+        current = self._pending_mutations.get(self._pending_mutation_key(mutation))
+        return current is not None and current.mutation_id == mutation.mutation_id
+
+    def _delete_mutation_supersedes_existing(
+        self, mutation: RealtimeMutation, existing: RealtimeMutation
+    ) -> bool:
+        if mutation.operation != "delete" or existing.operation != "delete":
+            return False
+
+        incoming_generation = mutation.source_generation
+        existing_generation = existing.source_generation
+
+        if incoming_generation is not None and existing_generation is None:
+            return True
+        if incoming_generation is None:
+            return False
+        if existing_generation is None:
+            return True
+        if incoming_generation > existing_generation:
+            return True
+        if (
+            incoming_generation == existing_generation
+            and mutation.retry_count < existing.retry_count
+        ):
+            return True
+        return False
+
+    def _register_pending_mutation(self, mutation: RealtimeMutation) -> bool:
+        key = self._pending_mutation_key(mutation)
+        existing = self._pending_mutations.get(key)
+        if existing is not None:
+            if self._delete_mutation_supersedes_existing(mutation, existing):
+                self._pending_mutations[key] = mutation
+                self._debug(
+                    "replaced pending delete ownership "
+                    f"path={mutation.path} old_generation="
+                    f"{existing.source_generation} new_generation="
+                    f"{mutation.source_generation}"
+                )
+                self._emit_status_update()
+                return True
+            return False
+
+        self._pending_mutations[key] = mutation
+        path_key = str(mutation.path)
+        self._pending_path_counts[path_key] = (
+            self._pending_path_counts.get(path_key, 0) + 1
+        )
+        self.pending_files.add(mutation.path)
+        return True
+
+    def _release_pending_mutation(self, mutation: RealtimeMutation) -> None:
+        key = self._pending_mutation_key(mutation)
+        current = self._pending_mutations.get(key)
+        if current is None or current.mutation_id != mutation.mutation_id:
+            return
+        self._pending_mutations.pop(key, None)
+
+        path_key = str(mutation.path)
+        remaining = self._pending_path_counts.get(path_key, 0) - 1
+        if remaining <= 0:
+            self._pending_path_counts.pop(path_key, None)
+            self.pending_files.discard(mutation.path)
+            return
+        self._pending_path_counts[path_key] = remaining
+
+    async def _enqueue_mutation(
+        self, mutation: RealtimeMutation, *, register: bool = True
+    ) -> bool:
+        if register and not self._register_pending_mutation(mutation):
+            return False
+        if not register and not self._owns_pending_mutation(mutation):
+            return False
+
+        self._queue_sequence += 1
+        await self.file_queue.put(
+            (
+                self._mutation_priority(mutation.operation),
+                self._queue_sequence,
+                mutation,
+            )
+        )
+        self._debug(
+            "queued "
+            f"{mutation.path} operation={mutation.operation} "
+            f"retry={mutation.retry_count}"
+        )
+        self._emit_status_update()
+        return True
+
+    async def _retry_mutation_after_delay(
+        self, mutation: RealtimeMutation, delay_seconds: float
+    ) -> None:
+        try:
+            await asyncio.sleep(delay_seconds)
+            if not self._owns_pending_mutation(mutation):
+                self._debug(
+                    "dropped superseded delete retry "
+                    f"path={mutation.path} source_generation="
+                    f"{mutation.source_generation}"
+                )
+                return
+            if self._delete_mutation_is_stale(mutation):
+                self._debug(
+                    "dropped stale delete retry "
+                    f"path={mutation.path} source_generation="
+                    f"{mutation.source_generation}"
+                )
+                self._release_pending_mutation(mutation)
+                self._emit_status_update()
+                return
+            await self._enqueue_mutation(mutation, register=False)
+        except asyncio.CancelledError:
+            self._release_pending_mutation(mutation)
+            raise
+        except Exception:
+            self._release_pending_mutation(mutation)
+            raise
+
+    def _schedule_delete_retry(self, mutation: RealtimeMutation) -> bool:
+        if self._delete_mutation_is_stale(mutation):
+            self._debug(
+                "skipped stale delete retry scheduling "
+                f"path={mutation.path} source_generation={mutation.source_generation}"
+            )
+            return True
+
+        if mutation.retry_count >= self._DELETE_CONFLICT_MAX_RETRIES:
+            return False
+
+        retry_mutation = self._build_mutation(
+            "delete",
+            mutation.path,
+            retry_count=mutation.retry_count + 1,
+            source_generation=mutation.source_generation,
+        )
+        if not self._register_pending_mutation(retry_mutation):
+            return True
+
+        delay_seconds = self._DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS * (
+            2**mutation.retry_count
+        )
+        retry_task = asyncio.create_task(
+            self._retry_mutation_after_delay(retry_mutation, delay_seconds)
+        )
+        self._retry_tasks.add(retry_task)
+        retry_task.add_done_callback(self._retry_tasks.discard)
+        self._debug(
+            "scheduled delete retry "
+            f"{retry_mutation.retry_count} for {retry_mutation.path} "
+            f"after {delay_seconds:.2f}s"
+        )
+        self._emit_status_update()
+        return True
 
     def _handle_queue_result(
         self, event_type: str, file_path: Path, accepted: bool, reason: str | None
@@ -2095,6 +2350,24 @@ class RealtimeIndexingService:
         if self._debounce_tasks:
             await asyncio.gather(*self._debounce_tasks, return_exceptions=True)
             self._debounce_tasks.clear()
+
+        for task in self._retry_tasks.copy():
+            task.cancel()
+
+        if self._retry_tasks:
+            await asyncio.gather(*self._retry_tasks, return_exceptions=True)
+            self._retry_tasks.clear()
+
+        self._pending_debounce.clear()
+        self._pending_mutations.clear()
+        self._pending_path_counts.clear()
+        self.pending_files.clear()
+        self._next_source_generation = 0
+        self._latest_source_generation_by_path.clear()
+        self.file_queue = asyncio.PriorityQueue()
+        self.event_queue = asyncio.Queue(maxsize=self._EVENT_QUEUE_MAXSIZE)
+        self._queue_sequence = 0
+        self._next_mutation_id = 0
 
         self._service_state = "stopped"
         self._monitor_adapter = None
@@ -2392,7 +2665,14 @@ class RealtimeIndexingService:
                         logger.debug(f"Polling detected deleted file: {file_path}")
                         self._record_source_event("deleted", file_path)
                         self._record_accepted_event("deleted", file_path)
-                        await self.remove_file(file_path)
+                        source_generation = self._current_source_generation(file_path)
+                        await self._enqueue_mutation(
+                            self._build_mutation(
+                                "delete",
+                                file_path,
+                                source_generation=source_generation,
+                            )
+                        )
                         self._debug(f"polling detected deleted file: {file_path}")
 
                     known_files = current_files
@@ -2420,42 +2700,53 @@ class RealtimeIndexingService:
 
     async def add_file(self, file_path: Path, priority: str = "change") -> bool:
         """Add file to the realtime pipeline and report whether work was admitted."""
-        if file_path in self.pending_files:
-            if priority == "change":
-                file_str = str(file_path)
-                current_time = time.monotonic()
+        operation, debounced = self._normalize_add_priority(priority)
+        mutation = self._build_mutation(operation, file_path)
+
+        if debounced:
+            file_str = str(mutation.path)
+            if file_str in self._pending_debounce:
+                # Keep the already-pending debounce horizon fresh.
+                self._pending_debounce[file_str] = time.monotonic()
+                return False
+
+        if not self._register_pending_mutation(mutation):
+            if debounced:
+                file_str = str(mutation.path)
                 if file_str in self._pending_debounce:
                     # Keep the already-pending debounce horizon fresh.
-                    self._pending_debounce[file_str] = current_time
+                    self._pending_debounce[file_str] = time.monotonic()
             return False
 
-        self.pending_files.add(file_path)
-
         # Simple debouncing for change events
-        if priority == "change":
-            file_str = str(file_path)
+        if debounced:
+            file_str = str(mutation.path)
             self._pending_debounce[file_str] = time.monotonic()
-            task = asyncio.create_task(self._debounced_add_file(file_path, priority))
+            task = asyncio.create_task(self._debounced_add_file(mutation))
             self._debounce_tasks.add(task)
             task.add_done_callback(self._debounce_tasks.discard)
-            self._debug(f"queued (debounced) {file_path} priority={priority}")
+            self._debug(f"queued (debounced) {mutation.path} operation={operation}")
             self._emit_status_update()
             return True
 
-        # Priority scan events bypass debouncing
-        await self.file_queue.put((priority, file_path))
-        self._debug(f"queued {file_path} priority={priority}")
-        self._emit_status_update()
-        return True
+        # Immediate mutations bypass debouncing.
+        return await self._enqueue_mutation(mutation, register=False)
 
-    async def _debounced_add_file(self, file_path: Path, priority: str) -> None:
+    async def _debounced_add_file(
+        self, file_or_mutation: Path | RealtimeMutation, priority: str = "change"
+    ) -> None:
         """Process file after debounce delay."""
+        if isinstance(file_or_mutation, RealtimeMutation):
+            mutation = file_or_mutation
+        else:
+            operation, _ = self._normalize_add_priority(priority)
+            mutation = self._build_mutation(operation, file_or_mutation)
         remaining_delay = self._debounce_delay
 
         while True:
             await asyncio.sleep(remaining_delay)
 
-            file_str = str(file_path)
+            file_str = str(mutation.path)
             if file_str not in self._pending_debounce:
                 return
 
@@ -2468,10 +2759,9 @@ class RealtimeIndexingService:
                 continue
 
             del self._pending_debounce[file_str]
-            await self.file_queue.put((priority, file_path))
-            logger.debug(f"Processing debounced file: {file_path}")
-            self._debug(f"processing debounced file: {file_path}")
-            self._emit_status_update()
+            await self._enqueue_mutation(mutation, register=False)
+            logger.debug(f"Processing debounced file: {mutation.path}")
+            self._debug(f"processing debounced file: {mutation.path}")
             return
 
     async def _consume_events(self) -> None:
@@ -2527,18 +2817,29 @@ class RealtimeIndexingService:
                     await self.add_file(file_path, priority="change")
                     self._debug(f"event {event_type}: {file_path}")
                 elif event_type == "deleted":
-                    # Handle deletion immediately
-                    await self.remove_file(file_path)
+                    source_generation = self._current_source_generation(file_path)
+                    await self._enqueue_mutation(
+                        self._build_mutation(
+                            "delete",
+                            file_path,
+                            source_generation=source_generation,
+                        )
+                    )
                     self._debug(f"event deleted: {file_path}")
                 elif event_type == "dir_created":
-                    # Handle new directory creation - with recursive monitoring,
-                    # we don't need to add individual watches
-                    # Index files in new directory
-                    await self._index_directory(file_path)
+                    await self._enqueue_mutation(
+                        self._build_mutation("dir_index", file_path)
+                    )
                     self._debug(f"event dir_created: {file_path}")
                 elif event_type == "dir_deleted":
-                    # Handle directory deletion - cleanup database
-                    await self._cleanup_deleted_directory(str(file_path))
+                    source_generation = self._current_source_generation(file_path)
+                    await self._enqueue_mutation(
+                        self._build_mutation(
+                            "dir_delete",
+                            file_path,
+                            source_generation=source_generation,
+                        )
+                    )
                     self._debug(f"event dir_deleted: {file_path}")
 
                 self.event_queue.task_done()
@@ -2550,19 +2851,9 @@ class RealtimeIndexingService:
 
     async def remove_file(self, file_path: Path) -> None:
         """Remove file from database."""
-        self._record_processing_started(file_path)
-        completed = False
-        try:
-            logger.debug(f"Removing file from database: {file_path}")
-            await self.services.provider.delete_file_completely_async(str(file_path))
-            self._debug(f"removed file from database: {file_path}")
-            completed = True
-        except Exception as e:
-            logger.error(f"Error removing file {file_path}: {e}")
-            self._record_processing_error()
-            self._set_error(f"Error removing file {file_path}: {e}")
-        finally:
-            self._record_processing_finished(file_path, completed=completed)
+        logger.debug(f"Removing file from database: {file_path}")
+        await self.services.provider.delete_file_completely_async(str(file_path))
+        self._debug(f"removed file from database: {file_path}")
 
     async def _add_directory_watch(self, dir_path: str) -> None:
         """Add a new directory to monitoring with recursive watching."""
@@ -2585,40 +2876,132 @@ class RealtimeIndexingService:
                 self.watched_directories.discard(dir_path)
 
                 # Clean up database entries for files in deleted directory
-                await self._cleanup_deleted_directory(dir_path)
+                await self._cleanup_deleted_directory(
+                    dir_path,
+                    source_generation=self._current_source_generation(dir_path),
+                )
                 logger.debug(f"Removed watch for deleted directory: {dir_path}")
 
-    async def _cleanup_deleted_directory(self, dir_path: str) -> None:
-        """Clean up database entries for files in a deleted directory."""
-        self._record_processing_started(dir_path)
+    async def _cleanup_deleted_directory(
+        self, dir_path: str | Path, *, source_generation: int | None = None
+    ) -> int:
+        """Queue cleanup work for files that were under a deleted directory."""
+        normalized_dir = str(self._normalize_mutation_path(dir_path))
+
+        search_results, _ = await self.services.provider.search_regex_async(
+            pattern=f"^{normalized_dir}/.*",
+            page_size=1000,
+        )
+
+        queued_files = 0
+        for result in search_results:
+            file_path = result.get("file_path", result.get("path", ""))
+            if not file_path:
+                continue
+            accepted = await self._enqueue_mutation(
+                self._build_mutation(
+                    "delete",
+                    file_path,
+                    source_generation=source_generation,
+                )
+            )
+            if accepted:
+                queued_files += 1
+
+        logger.info(
+            "Queued cleanup for "
+            f"{queued_files} files from deleted directory: {normalized_dir}"
+        )
+        self._debug(
+            f"queued deleted directory cleanup {normalized_dir} files={queued_files}"
+        )
+        return queued_files
+
+    async def _process_delete_mutation(
+        self, mutation: RealtimeMutation, *, owned_when_dequeued: bool
+    ) -> None:
+        """Apply one queued delete with bounded retry for transaction conflicts."""
+        if not owned_when_dequeued and not self._delete_mutation_is_stale(mutation):
+            self._debug(
+                "skipped superseded delete "
+                f"path={mutation.path} source_generation={mutation.source_generation}"
+            )
+            return
+
+        self._record_processing_started(mutation.path)
         completed = False
         try:
-            # Get all files that were in this directory from database
-            # Use the provider's search capability to find files with this path prefix
-            search_results, _ = await self.services.provider.search_regex_async(
-                pattern=f"^{dir_path}/.*",
-                page_size=1000,  # Large page to get all matches
-            )
+            if self._delete_mutation_is_stale(mutation):
+                self._debug(
+                    "skipped stale delete "
+                    f"path={mutation.path} source_generation="
+                    f"{mutation.source_generation}"
+                )
+                completed = True
+                return
 
-            # Delete each file found in the directory
-            for result in search_results:
-                file_path = result.get("file_path", result.get("path", ""))
-                if file_path:
-                    logger.debug(f"Cleaning up deleted file: {file_path}")
-                    await self.services.provider.delete_file_completely_async(file_path)
+            await self.remove_file(mutation.path)
+            completed = True
+        except DuckDBTransactionConflictError as error:
+            if self._delete_mutation_is_stale(mutation):
+                self._debug(
+                    "ignored stale delete conflict "
+                    f"path={mutation.path} source_generation="
+                    f"{mutation.source_generation}"
+                )
+                completed = True
+                return
 
-            logger.info(
-                "Cleaned up "
-                f"{len(search_results)} files from deleted directory: {dir_path}"
+            if self._schedule_delete_retry(mutation):
+                if self._delete_mutation_is_stale(mutation):
+                    completed = True
+                    return
+                logger.info(
+                    "Retrying realtime delete for "
+                    f"{mutation.path} after transaction conflict "
+                    f"(attempt {mutation.retry_count + 1}/"
+                    f"{self._DELETE_CONFLICT_MAX_RETRIES})"
+                )
+                self._debug(
+                    "retrying delete after transaction conflict "
+                    f"path={mutation.path} attempt={mutation.retry_count + 1}"
+                )
+                return
+
+            logger.error(f"Error removing file {mutation.path}: {error}")
+            self.failed_files.add(str(mutation.path))
+            self._record_processing_error()
+            self._set_error(f"Error removing file {mutation.path}: {error}")
+        except Exception as error:
+            logger.error(f"Error removing file {mutation.path}: {error}")
+            self.failed_files.add(str(mutation.path))
+            self._record_processing_error()
+            self._set_error(f"Error removing file {mutation.path}: {error}")
+        finally:
+            self._record_processing_finished(mutation.path, completed=completed)
+
+    async def _process_deleted_directory_mutation(
+        self, mutation: RealtimeMutation
+    ) -> None:
+        self._record_processing_started(mutation.path)
+        completed = False
+        try:
+            await self._cleanup_deleted_directory(
+                mutation.path,
+                source_generation=mutation.source_generation,
             )
             completed = True
-
-        except Exception as e:
-            logger.error(f"Error cleaning up deleted directory {dir_path}: {e}")
+        except Exception as error:
+            logger.error(
+                f"Error cleaning up deleted directory {mutation.path}: {error}"
+            )
+            self.failed_files.add(str(mutation.path))
             self._record_processing_error()
-            self._set_error(f"Error cleaning up deleted directory {dir_path}: {e}")
+            self._set_error(
+                f"Error cleaning up deleted directory {mutation.path}: {error}"
+            )
         finally:
-            self._record_processing_finished(dir_path, completed=completed)
+            self._record_processing_finished(mutation.path, completed=completed)
 
     async def _index_directory(self, dir_path: Path) -> None:
         """Index files in a newly created directory."""
@@ -2654,11 +3037,51 @@ class RealtimeIndexingService:
 
         while True:
             try:
-                # Wait for next file (blocks if queue is empty)
-                priority, file_path = await self.file_queue.get()
+                # Wait for next mutation (blocks if queue is empty)
+                _, _, mutation = await self.file_queue.get()
+                owned_when_dequeued = self._owns_pending_mutation(mutation)
+                self._release_pending_mutation(mutation)
 
-                # Remove from pending set
-                self.pending_files.discard(file_path)
+                # Fast path for embedding generation without re-parsing the file.
+                if mutation.operation == "embed":
+                    completed = False
+                    try:
+                        self._record_processing_started(mutation.path)
+                        indexing_coordinator = self.services.indexing_coordinator
+                        await indexing_coordinator.generate_missing_embeddings()
+                        completed = True
+                    except Exception as error:
+                        logger.warning(
+                            "Embedding generation failed in realtime "
+                            f"(embed pass): {error}"
+                        )
+                        self._record_processing_error()
+                        self._set_warning(
+                            "Embedding generation failed in realtime "
+                            f"embed pass: {error}"
+                        )
+                    finally:
+                        self._record_processing_finished(
+                            mutation.path, completed=completed
+                        )
+                    continue
+
+                if mutation.operation == "delete":
+                    await self._process_delete_mutation(
+                        mutation,
+                        owned_when_dequeued=owned_when_dequeued,
+                    )
+                    continue
+
+                if mutation.operation == "dir_delete":
+                    await self._process_deleted_directory_mutation(mutation)
+                    continue
+
+                if mutation.operation == "dir_index":
+                    await self._index_directory(mutation.path)
+                    continue
+
+                file_path = mutation.path
 
                 # Check if file still exists (prevent race condition with deletion)
                 if not file_path.exists():
@@ -2666,27 +3089,9 @@ class RealtimeIndexingService:
                     continue
 
                 # Process the file
-                logger.debug(f"Processing {file_path} (priority: {priority})")
-
-                # Fast path for embedding generation without re-parsing the file.
-                if priority == "embed":
-                    completed = False
-                    try:
-                        self._record_processing_started(file_path)
-                        indexing_coordinator = self.services.indexing_coordinator
-                        await indexing_coordinator.generate_missing_embeddings()
-                        completed = True
-                    except Exception as e:
-                        logger.warning(
-                            f"Embedding generation failed in realtime (embed pass): {e}"
-                        )
-                        self._record_processing_error()
-                        self._set_warning(
-                            f"Embedding generation failed in realtime embed pass: {e}"
-                        )
-                    finally:
-                        self._record_processing_finished(file_path, completed=completed)
-                    continue
+                logger.debug(
+                    f"Processing {file_path} (operation: {mutation.operation})"
+                )
 
                 # Skip embeddings for initial and change events to keep loop responsive.
                 # An explicit 'embed' follow-up event will generate embeddings.
@@ -2724,7 +3129,7 @@ class RealtimeIndexingService:
                             else None
                         )
                         self._debug(
-                            f"processed {file_path} priority={priority} "
+                            f"processed {file_path} operation={mutation.operation} "
                             f"skip_embeddings={skip_embeddings} "
                             f"chunks={chunks} embeddings={embeds}"
                         )
@@ -2737,12 +3142,15 @@ class RealtimeIndexingService:
             except asyncio.CancelledError:
                 logger.debug("Processing loop cancelled")
                 raise
-            except Exception as e:
-                logger.error(f"Error processing {file_path}: {e}")
+            except Exception as error:
+                mutation_path = (
+                    mutation.path if "mutation" in locals() else Path("<unknown>")
+                )
+                logger.error(f"Error processing {mutation_path}: {error}")
                 # Track failed files for debugging and monitoring
-                self.failed_files.add(str(file_path))
+                self.failed_files.add(str(mutation_path))
                 self._record_processing_error()
-                self._set_error(f"Error processing {file_path}: {e}")
+                self._set_error(f"Error processing {mutation_path}: {error}")
                 # Continue processing other files
 
     async def get_health(self) -> dict[str, Any]:

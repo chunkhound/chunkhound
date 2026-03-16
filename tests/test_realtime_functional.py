@@ -17,6 +17,9 @@ import pytest
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
+from chunkhound.providers.database.duckdb_provider import (
+    DuckDBTransactionConflictError,
+)
 from chunkhound.services.realtime_indexing_service import (
     RealtimeIndexingService,
     SimpleEventHandler,
@@ -227,10 +230,10 @@ class TestRealtimeFunctional:
         service._effective_backend = "watchdog"
         service.monitoring_ready.set()
         service._monitoring_ready_at = service._utc_now()
-        service.pending_files.add(target_file)
-        await service.file_queue.put(("change", target_file))
+        await service.add_file(target_file, priority="priority")
 
         process_task = asyncio.create_task(service._process_loop())
+        service.process_task = process_task
 
         try:
             await asyncio.wait_for(process_started.wait(), timeout=1.0)
@@ -246,6 +249,495 @@ class TestRealtimeFunctional:
             process_task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await process_task
+
+    @pytest.mark.asyncio
+    async def test_delete_mutation_waits_for_inflight_change_processing(
+        self, realtime_setup, monkeypatch
+    ):
+        """Delete work should wait behind the in-flight change mutation."""
+        service, watch_dir, _, _ = realtime_setup
+        target_file = watch_dir / "checkout_storm.py"
+        target_file.write_text("def checkout_storm(): pass")
+        process_started = asyncio.Event()
+        release_processing = asyncio.Event()
+        delete_called = asyncio.Event()
+        original_process_file = service.services.indexing_coordinator.process_file
+
+        async def blocked_process_file(
+            file_path: Path, skip_embeddings: bool = False
+        ) -> dict[str, object]:
+            assert file_path == target_file
+            assert skip_embeddings is True
+            process_started.set()
+            await release_processing.wait()
+            return await original_process_file(
+                file_path, skip_embeddings=skip_embeddings
+            )
+
+        async def record_delete(file_path: str) -> bool:
+            assert Path(file_path) == target_file
+            delete_called.set()
+            return True
+
+        monkeypatch.setattr(
+            service.services.indexing_coordinator,
+            "process_file",
+            blocked_process_file,
+        )
+        monkeypatch.setattr(
+            service.services.provider,
+            "delete_file_completely_async",
+            record_delete,
+        )
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+        await service.add_file(target_file, priority="priority")
+
+        process_task = asyncio.create_task(service._process_loop())
+        service.process_task = process_task
+
+        try:
+            await asyncio.wait_for(process_started.wait(), timeout=1.0)
+            await service._enqueue_mutation(
+                service._build_mutation("delete", target_file)
+            )
+            await asyncio.sleep(0)
+            assert not delete_called.is_set()
+
+            target_file.unlink()
+            release_processing.set()
+
+            await asyncio.wait_for(delete_called.wait(), timeout=1.0)
+            stats = await _wait_for_realtime_condition(
+                service,
+                lambda snapshot: snapshot["queue_size"] == 0
+                and snapshot["pending_files"] == 0,
+            )
+            assert stats["last_error"] is None
+            assert stats["pipeline"]["processing_error_count"] == 0
+        finally:
+            release_processing.set()
+            await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_delete_conflict_retries_without_sticky_degraded_state(
+        self, realtime_setup, monkeypatch
+    ):
+        """Transient delete conflicts should retry and recover without degradation."""
+        service, watch_dir, _, _ = realtime_setup
+        target_file = watch_dir / "retry_delete.py"
+        target_file.write_text("def retry_delete(): pass")
+        delete_attempts = 0
+        delete_completed = asyncio.Event()
+
+        async def flaky_delete(file_path: str) -> bool:
+            nonlocal delete_attempts
+            assert Path(file_path) == target_file
+            delete_attempts += 1
+            if delete_attempts == 1:
+                raise DuckDBTransactionConflictError(
+                    "delete_file_completely(retry_delete.py) "
+                    "cannot run while another DuckDB transaction is active"
+                )
+            delete_completed.set()
+            return True
+
+        monkeypatch.setattr(
+            service.services.provider,
+            "delete_file_completely_async",
+            flaky_delete,
+        )
+        monkeypatch.setattr(
+            service,
+            "_DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS",
+            0.01,
+            raising=False,
+        )
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+        await service._enqueue_mutation(service._build_mutation("delete", target_file))
+
+        process_task = asyncio.create_task(service._process_loop())
+        service.process_task = process_task
+
+        try:
+            await asyncio.wait_for(delete_completed.wait(), timeout=2.0)
+            stats = await _wait_for_realtime_condition(
+                service,
+                lambda snapshot: snapshot["queue_size"] == 0
+                and snapshot["pending_files"] == 0,
+                timeout=2.0,
+            )
+            assert delete_attempts == 2
+            assert stats["service_state"] == "running"
+            assert stats["last_error"] is None
+            assert stats["pipeline"]["processing_error_count"] == 0
+            assert stats["live_indexing_state"] == "idle"
+        finally:
+            await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_stale_delete_retry_is_dropped_after_newer_change(
+        self, realtime_setup, monkeypatch
+    ):
+        """A retried delete must not run after a newer recreate/change."""
+        service, watch_dir, _, services = realtime_setup
+        target_file = watch_dir / "stale_retry.py"
+        target_file.write_text("def stale_retry(): return 1")
+        delete_attempts = 0
+        conflict_seen = asyncio.Event()
+        change_processed = asyncio.Event()
+        original_process_file = service.services.indexing_coordinator.process_file
+
+        async def conflicting_delete(file_path: str) -> bool:
+            nonlocal delete_attempts
+            assert Path(file_path) == target_file
+            delete_attempts += 1
+            if delete_attempts == 1:
+                conflict_seen.set()
+                raise DuckDBTransactionConflictError(
+                    "delete_file_completely(stale_retry.py) "
+                    "cannot run while another DuckDB transaction is active"
+                )
+            raise AssertionError("stale delete retry should not execute")
+
+        async def wrapped_process_file(
+            file_path: Path, skip_embeddings: bool = False
+        ) -> dict[str, object]:
+            result = await original_process_file(
+                file_path, skip_embeddings=skip_embeddings
+            )
+            if file_path == target_file:
+                change_processed.set()
+            return result
+
+        async def no_op_embed() -> dict[str, object]:
+            return {"status": "up_to_date", "generated": 0}
+
+        monkeypatch.setattr(
+            service.services.provider,
+            "delete_file_completely_async",
+            conflicting_delete,
+        )
+        monkeypatch.setattr(
+            service.services.indexing_coordinator,
+            "process_file",
+            wrapped_process_file,
+        )
+        monkeypatch.setattr(
+            service.services.indexing_coordinator,
+            "generate_missing_embeddings",
+            no_op_embed,
+        )
+        monkeypatch.setattr(
+            service,
+            "_DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS",
+            0.05,
+            raising=False,
+        )
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+        service._record_accepted_event("deleted", target_file)
+        delete_generation = service._current_source_generation(target_file)
+        await service._enqueue_mutation(
+            service._build_mutation(
+                "delete",
+                target_file,
+                source_generation=delete_generation,
+            )
+        )
+
+        process_task = asyncio.create_task(service._process_loop())
+        service.process_task = process_task
+
+        try:
+            await asyncio.wait_for(conflict_seen.wait(), timeout=1.0)
+
+            target_file.write_text("def stale_retry(): return 2")
+            service._record_accepted_event("modified", target_file)
+            await service.add_file(target_file, priority="priority")
+
+            await asyncio.wait_for(change_processed.wait(), timeout=2.0)
+            stats = await _wait_for_realtime_condition(
+                service,
+                lambda snapshot: snapshot["queue_size"] == 0
+                and snapshot["pending_files"] == 0
+                and snapshot["pipeline"]["last_processing_completed_path"]
+                == str(target_file),
+                timeout=2.0,
+            )
+            assert delete_attempts == 1
+            assert stats["last_error"] is None
+            assert stats["pipeline"]["processing_error_count"] == 0
+            assert services.provider.get_file_by_path(str(target_file)) is not None
+        finally:
+            await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_fresh_delete_supersedes_pending_stale_retry(
+        self, realtime_setup, monkeypatch
+    ):
+        """A second delete must replace an older pending retry for the same path."""
+        service, watch_dir, _, services = realtime_setup
+        target_file = watch_dir / "delete_again.py"
+        target_file.write_text("def delete_again(): return 1")
+        conflict_seen = asyncio.Event()
+        recreate_processed = asyncio.Event()
+        delete_attempts = 0
+        original_delete = service.services.provider.delete_file_completely_async
+        original_process_file = service.services.indexing_coordinator.process_file
+
+        async def conflicting_then_real_delete(file_path: str) -> bool:
+            nonlocal delete_attempts
+            assert Path(file_path) == target_file
+            delete_attempts += 1
+            if delete_attempts == 1:
+                conflict_seen.set()
+                raise DuckDBTransactionConflictError(
+                    "delete_file_completely(delete_again.py) "
+                    "cannot run while another DuckDB transaction is active"
+                )
+            return await original_delete(file_path)
+
+        async def wrapped_process_file(
+            file_path: Path, skip_embeddings: bool = False
+        ) -> dict[str, object]:
+            result = await original_process_file(
+                file_path,
+                skip_embeddings=skip_embeddings,
+            )
+            if file_path == target_file:
+                recreate_processed.set()
+            return result
+
+        async def no_op_embed() -> dict[str, object]:
+            return {"status": "up_to_date", "generated": 0}
+
+        monkeypatch.setattr(
+            service.services.provider,
+            "delete_file_completely_async",
+            conflicting_then_real_delete,
+        )
+        monkeypatch.setattr(
+            service.services.indexing_coordinator,
+            "process_file",
+            wrapped_process_file,
+        )
+        monkeypatch.setattr(
+            service.services.indexing_coordinator,
+            "generate_missing_embeddings",
+            no_op_embed,
+        )
+        monkeypatch.setattr(
+            service,
+            "_DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS",
+            0.05,
+            raising=False,
+        )
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+
+        process_task = asyncio.create_task(service._process_loop())
+        service.process_task = process_task
+
+        try:
+            await service.add_file(target_file, priority="priority")
+            assert await _wait_for_logical_indexed(services.provider, target_file)
+            recreate_processed.clear()
+
+            target_file.unlink()
+            service._record_accepted_event("deleted", target_file)
+            first_delete_generation = service._current_source_generation(target_file)
+            await service._enqueue_mutation(
+                service._build_mutation(
+                    "delete",
+                    target_file,
+                    source_generation=first_delete_generation,
+                )
+            )
+
+            await asyncio.wait_for(conflict_seen.wait(), timeout=1.0)
+
+            target_file.write_text("def delete_again(): return 2")
+            service._record_accepted_event("modified", target_file)
+            await service.add_file(target_file, priority="priority")
+            await asyncio.wait_for(recreate_processed.wait(), timeout=2.0)
+
+            target_file.unlink()
+            service._record_accepted_event("deleted", target_file)
+            second_delete_generation = service._current_source_generation(target_file)
+            accepted = await service._enqueue_mutation(
+                service._build_mutation(
+                    "delete",
+                    target_file,
+                    source_generation=second_delete_generation,
+                )
+            )
+            assert accepted is True
+
+            await _wait_for_realtime_condition(
+                service,
+                lambda snapshot: snapshot["queue_size"] == 0
+                and snapshot["pending_files"] == 0,
+                timeout=2.0,
+            )
+
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if services.provider.get_file_by_path(str(target_file)) is None:
+                    break
+                await asyncio.sleep(0.05)
+            assert services.provider.get_file_by_path(str(target_file)) is None
+            assert delete_attempts == 2
+        finally:
+            await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_delete_conflict_exhaustion_sets_realtime_error(
+        self, realtime_setup, monkeypatch
+    ):
+        """Exhausted delete retries should surface as realtime failures."""
+        service, watch_dir, _, _ = realtime_setup
+        target_file = watch_dir / "exhausted_retry.py"
+        target_file.write_text("def exhausted_retry(): pass")
+        delete_attempts = 0
+
+        async def always_conflict(file_path: str) -> bool:
+            nonlocal delete_attempts
+            assert Path(file_path) == target_file
+            delete_attempts += 1
+            raise DuckDBTransactionConflictError(
+                "delete_file_completely(exhausted_retry.py) "
+                "cannot run while another DuckDB transaction is active"
+            )
+
+        monkeypatch.setattr(
+            service.services.provider,
+            "delete_file_completely_async",
+            always_conflict,
+        )
+        monkeypatch.setattr(
+            service,
+            "_DELETE_CONFLICT_MAX_RETRIES",
+            1,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            service,
+            "_DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS",
+            0.01,
+            raising=False,
+        )
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+        await service._enqueue_mutation(service._build_mutation("delete", target_file))
+
+        process_task = asyncio.create_task(service._process_loop())
+        service.process_task = process_task
+
+        try:
+            stats = await _wait_for_realtime_condition(
+                service,
+                lambda snapshot: snapshot["service_state"] == "degraded"
+                and snapshot["last_error"] is not None,
+                timeout=2.0,
+            )
+            assert delete_attempts == 2
+            assert (
+                "cannot run while another DuckDB transaction is active"
+                in stats["last_error"]
+            )
+            assert stats["pipeline"]["processing_error_count"] == 1
+            assert stats["failed_files"] == 1
+            assert stats["live_indexing_state"] == "degraded"
+        finally:
+            await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_deleted_directory_cleanup_queues_child_deletes(
+        self, realtime_setup, monkeypatch
+    ):
+        """Deleted-directory cleanup should only expand into queued delete work."""
+        service, watch_dir, _, _ = realtime_setup
+        deleted_dir = watch_dir / "deleted_dir"
+        first_file = deleted_dir / "first.py"
+        second_file = deleted_dir / "second.py"
+        direct_delete_calls = 0
+
+        async def fake_search_regex_async(pattern: str, page_size: int = 1000):
+            assert pattern == f"^{deleted_dir.resolve()}/.*"
+            assert page_size == 1000
+            return (
+                [
+                    {"file_path": str(first_file)},
+                    {"file_path": str(second_file)},
+                ],
+                {},
+            )
+
+        async def unexpected_direct_delete(_file_path: str) -> bool:
+            nonlocal direct_delete_calls
+            direct_delete_calls += 1
+            raise AssertionError("directory cleanup should not delete directly")
+
+        monkeypatch.setattr(
+            service.services.provider,
+            "search_regex_async",
+            fake_search_regex_async,
+        )
+        monkeypatch.setattr(
+            service.services.provider,
+            "delete_file_completely_async",
+            unexpected_direct_delete,
+        )
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+        service._record_accepted_event("dir_deleted", deleted_dir)
+        dir_delete_generation = service._current_source_generation(deleted_dir)
+
+        await service._process_deleted_directory_mutation(
+            service._build_mutation(
+                "dir_delete",
+                deleted_dir,
+                source_generation=dir_delete_generation,
+            )
+        )
+
+        queued_mutations = []
+        while not service.file_queue.empty():
+            _, _, mutation = await service.file_queue.get()
+            queued_mutations.append(mutation)
+
+        assert direct_delete_calls == 0
+        assert [mutation.operation for mutation in queued_mutations] == [
+            "delete",
+            "delete",
+        ]
+        assert {mutation.path for mutation in queued_mutations} == {
+            first_file.resolve(),
+            second_file.resolve(),
+        }
+        assert {mutation.source_generation for mutation in queued_mutations} == {
+            dir_delete_generation
+        }
 
     @pytest.mark.asyncio
     async def test_request_resync_is_debounced(self, realtime_setup):
@@ -1043,7 +1535,8 @@ class TestRealtimeFunctional:
         sleep_calls: list[float] = []
         monotonic_values = iter([100.49, 100.5001])
 
-        service.pending_files.add(target_file)
+        mutation = service._build_mutation("change", target_file)
+        assert service._register_pending_mutation(mutation)
         service._pending_debounce[file_key] = 100.0
 
         async def fake_sleep(delay: float) -> None:
@@ -1058,13 +1551,15 @@ class TestRealtimeFunctional:
         monkeypatch.setattr(asyncio, "sleep", fake_sleep)
         monkeypatch.setattr(time, "monotonic", fake_monotonic)
 
-        await service._debounced_add_file(target_file, "change")
+        await service._debounced_add_file(mutation)
 
         assert len(sleep_calls) == 2
         assert sleep_calls[0] == service._debounce_delay
         assert sleep_calls[1] == pytest.approx(0.01, abs=1e-6)
         assert file_key not in service._pending_debounce
-        assert await service.file_queue.get() == ("change", target_file)
+        priority, _, queued_mutation = await service.file_queue.get()
+        assert priority == service._mutation_priority("change")
+        assert queued_mutation == mutation
 
     @pytest.mark.asyncio
     async def test_filesystem_monitoring_detects_changes(self, realtime_setup):

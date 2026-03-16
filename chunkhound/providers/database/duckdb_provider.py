@@ -50,6 +50,10 @@ if TYPE_CHECKING:
     from chunkhound.core.config.database_config import DatabaseConfig
 
 
+class DuckDBTransactionConflictError(RuntimeError):
+    """A guarded mutation collided with an already-open DuckDB transaction."""
+
+
 class DuckDBProvider(SerialDatabaseProvider):
     """DuckDB implementation of DatabaseProvider protocol.
 
@@ -1083,7 +1087,7 @@ class DuckDBProvider(SerialDatabaseProvider):
     ):
         """Run a mutation behind one transactional HNSW drop/recreate guard."""
         if state.get("transaction_active", False):
-            raise RuntimeError(
+            raise DuckDBTransactionConflictError(
                 f"{mutation_label} cannot run while another DuckDB transaction is active"
             )
 
