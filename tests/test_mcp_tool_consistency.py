@@ -366,6 +366,102 @@ async def test_daemon_status_tool_keeps_stalled_pipeline_summary_ready():
 
 
 @pytest.mark.asyncio
+async def test_daemon_status_tool_exposes_pending_mutation_backlog_details():
+    """Pending mutation composition should be visible through daemon_status."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "realtime": {
+            "service_state": "running",
+            "last_error": None,
+            "pending_files": 3,
+            "pending_mutations": {
+                "total": 4,
+                "unique_paths": 3,
+                "counts_by_operation": {
+                    "change": 2,
+                    "delete": 1,
+                    "embed": 1,
+                    "dir_delete": 0,
+                    "dir_index": 0,
+                },
+                "retry_counts_by_operation": {
+                    "change": 0,
+                    "delete": 1,
+                    "embed": 0,
+                    "dir_delete": 0,
+                    "dir_index": 0,
+                },
+                "retrying_mutations": 1,
+                "oldest_pending_at": "2026-03-08T00:00:01Z",
+                "oldest_pending_age_seconds": 37,
+                "oldest_pending_operation": "delete",
+                "oldest_pending_path": "/repo/retry_delete.py",
+                "oldest_pending_retry_count": 1,
+                "recovery_phase": "mutation_drain",
+                "resync_reason": None,
+            },
+            "resync": {
+                "needs_resync": False,
+                "in_progress": False,
+                "last_reason": None,
+                "last_error": None,
+            },
+            "live_indexing_state": "busy",
+            "live_indexing_hint": "Live indexing is actively processing changes.",
+            "pipeline": {
+                "last_source_event_at": "2026-03-08T00:00:01Z",
+                "last_source_event_type": "modified",
+                "last_source_event_path": "/repo/retry_delete.py",
+                "last_accepted_event_at": "2026-03-08T00:00:01Z",
+                "last_accepted_event_type": "modified",
+                "last_accepted_event_path": "/repo/retry_delete.py",
+                "last_processing_started_at": "2026-03-08T00:00:02Z",
+                "last_processing_started_path": "/repo/retry_delete.py",
+                "last_processing_completed_at": "2026-03-08T00:00:03Z",
+                "last_processing_completed_path": "/repo/retry_delete.py",
+                "filtered_event_count": 0,
+                "suppressed_duplicate_count": 0,
+                "translation_error_count": 0,
+                "processing_error_count": 0,
+                "stall_threshold_seconds": 30.0,
+            },
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    realtime = result["scan_progress"]["realtime"]
+    assert result["status"] == "ready"
+    assert result["query_ready"] is True
+    assert realtime["live_indexing_state"] == "busy"
+    assert realtime["pending_files"] == 3
+    assert realtime["pending_mutations"]["total"] == 4
+    assert realtime["pending_mutations"]["unique_paths"] == 3
+    assert realtime["pending_mutations"]["counts_by_operation"]["change"] == 2
+    assert realtime["pending_mutations"]["counts_by_operation"]["delete"] == 1
+    assert realtime["pending_mutations"]["retry_counts_by_operation"]["delete"] == 1
+    assert realtime["pending_mutations"]["retrying_mutations"] == 1
+    assert realtime["pending_mutations"]["oldest_pending_operation"] == "delete"
+    assert realtime["pending_mutations"]["oldest_pending_path"] == (
+        "/repo/retry_delete.py"
+    )
+    assert realtime["pending_mutations"]["recovery_phase"] == "mutation_drain"
+    assert realtime["pending_mutations"]["resync_reason"] is None
+
+
+@pytest.mark.asyncio
 async def test_daemon_status_tool_exposes_event_queue_overflow_reconciling_payload():
     """Overflow-burst status should be visible through the public daemon_status tool."""
     from chunkhound.mcp_server.tools import execute_tool

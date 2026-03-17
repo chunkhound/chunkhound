@@ -124,6 +124,7 @@ class RealtimeMutation:
     mutation_id: int
     operation: str
     path: Path
+    first_queued_at: str
     retry_count: int = 0
     source_generation: int | None = None
 
@@ -1267,6 +1268,13 @@ class WatchmanRealtimeAdapter:
 class RealtimeIndexingService:
     """Simple real-time indexing service with search responsiveness."""
 
+    _PENDING_MUTATION_STATUS_OPERATIONS = (
+        "change",
+        "delete",
+        "embed",
+        "dir_delete",
+        "dir_index",
+    )
     # Event deduplication window - suppress duplicate events within this period
     _EVENT_DEDUP_WINDOW_SECONDS = 2.0
     # Retention period for event history - entries older than this are cleaned up
@@ -1449,6 +1457,26 @@ class RealtimeIndexingService:
             "stall_threshold_seconds": cls._STALL_THRESHOLD_SECONDS,
         }
 
+    @classmethod
+    def _default_pending_mutation_snapshot(cls) -> dict[str, Any]:
+        counts_by_operation = {
+            operation: 0 for operation in cls._PENDING_MUTATION_STATUS_OPERATIONS
+        }
+        return {
+            "total": 0,
+            "unique_paths": 0,
+            "counts_by_operation": counts_by_operation,
+            "retry_counts_by_operation": dict(counts_by_operation),
+            "retrying_mutations": 0,
+            "oldest_pending_at": None,
+            "oldest_pending_age_seconds": None,
+            "oldest_pending_operation": None,
+            "oldest_pending_path": None,
+            "oldest_pending_retry_count": None,
+            "recovery_phase": "idle",
+            "resync_reason": None,
+        }
+
     @staticmethod
     def _parse_status_timestamp(value: Any) -> datetime | None:
         if not isinstance(value, str) or not value:
@@ -1492,6 +1520,7 @@ class RealtimeIndexingService:
             "watched_directories_count": 0,
             "queue_size": 0,
             "pending_files": 0,
+            "pending_mutations": cls._default_pending_mutation_snapshot(),
             "failed_files": 0,
             "last_warning": None,
             "last_warning_at": None,
@@ -1702,6 +1731,7 @@ class RealtimeIndexingService:
                 "last_error_at": self._last_error_at,
             }
         )
+        status["pending_mutations"] = self._build_pending_mutation_snapshot()
         for key, value in adapter_health.items():
             if key != "observer_alive":
                 status[key] = value
@@ -1762,6 +1792,69 @@ class RealtimeIndexingService:
             live_indexing_state
         )
         return status
+
+    def _pending_mutation_recovery_phase(
+        self, total_pending_mutations: int
+    ) -> tuple[str, str | None]:
+        if self._resync_in_progress:
+            return "resync_in_progress", self._last_resync_reason
+        if self._needs_resync:
+            return "resync_pending", self._last_resync_reason
+        if total_pending_mutations > 0:
+            return "mutation_drain", None
+        return "idle", None
+
+    def _build_pending_mutation_snapshot(self) -> dict[str, Any]:
+        snapshot = self._default_pending_mutation_snapshot()
+        pending_mutations = list(self._pending_mutations.values())
+        total_pending_mutations = len(pending_mutations)
+        recovery_phase, resync_reason = self._pending_mutation_recovery_phase(
+            total_pending_mutations
+        )
+        snapshot["total"] = total_pending_mutations
+        snapshot["unique_paths"] = max(
+            len(self._pending_path_counts), len(self.pending_files)
+        )
+        snapshot["recovery_phase"] = recovery_phase
+        snapshot["resync_reason"] = resync_reason
+
+        if not pending_mutations:
+            return snapshot
+
+        counts_by_operation = snapshot["counts_by_operation"]
+        retry_counts_by_operation = snapshot["retry_counts_by_operation"]
+        retrying_mutations = 0
+        oldest_mutation: RealtimeMutation | None = None
+        oldest_pending_at: datetime | None = None
+
+        for mutation in pending_mutations:
+            counts_by_operation.setdefault(mutation.operation, 0)
+            counts_by_operation[mutation.operation] += 1
+            if mutation.retry_count > 0:
+                retrying_mutations += 1
+                retry_counts_by_operation.setdefault(mutation.operation, 0)
+                retry_counts_by_operation[mutation.operation] += 1
+
+            queued_at = self._parse_status_timestamp(mutation.first_queued_at)
+            if queued_at is None:
+                continue
+            if oldest_pending_at is None or queued_at < oldest_pending_at:
+                oldest_pending_at = queued_at
+                oldest_mutation = mutation
+
+        snapshot["retrying_mutations"] = retrying_mutations
+        if oldest_mutation is None or oldest_pending_at is None:
+            return snapshot
+
+        snapshot["oldest_pending_at"] = oldest_mutation.first_queued_at
+        snapshot["oldest_pending_age_seconds"] = max(
+            int((datetime.now(timezone.utc) - oldest_pending_at).total_seconds()),
+            0,
+        )
+        snapshot["oldest_pending_operation"] = oldest_mutation.operation
+        snapshot["oldest_pending_path"] = str(oldest_mutation.path)
+        snapshot["oldest_pending_retry_count"] = oldest_mutation.retry_count
+        return snapshot
 
     def _build_pipeline_snapshot(self) -> dict[str, Any]:
         pipeline = self._default_pipeline_snapshot()
@@ -1946,12 +2039,14 @@ class RealtimeIndexingService:
         file_path: Path | str,
         retry_count: int = 0,
         source_generation: int | None = None,
+        first_queued_at: str | None = None,
     ) -> RealtimeMutation:
         self._next_mutation_id += 1
         return RealtimeMutation(
             mutation_id=self._next_mutation_id,
             operation=operation,
             path=self._normalize_mutation_path(file_path),
+            first_queued_at=first_queued_at or self._utc_now(),
             retry_count=retry_count,
             source_generation=source_generation,
         )
@@ -2110,6 +2205,7 @@ class RealtimeIndexingService:
             mutation.path,
             retry_count=mutation.retry_count + 1,
             source_generation=mutation.source_generation,
+            first_queued_at=mutation.first_queued_at,
         )
         if not self._register_pending_mutation(retry_mutation):
             return True

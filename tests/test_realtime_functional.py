@@ -251,6 +251,163 @@ class TestRealtimeFunctional:
                 await process_task
 
     @pytest.mark.asyncio
+    async def test_health_snapshot_exposes_pending_mutation_composition_and_age(
+        self, realtime_setup
+    ):
+        """Pending mutation status should explain backlog composition and age."""
+        service, watch_dir, _, _ = realtime_setup
+        change_file = watch_dir / "mixed_change.py"
+        delete_file = watch_dir / "mixed_delete.py"
+        embed_file = watch_dir / "mixed_embed.py"
+        oldest_at = (
+            (datetime.now(timezone.utc) - timedelta(seconds=45))
+            .replace(microsecond=0)
+            .isoformat()
+        )
+        newer_at = (
+            (datetime.now(timezone.utc) - timedelta(seconds=12))
+            .replace(microsecond=0)
+            .isoformat()
+        )
+        zero_counts = {
+            "change": 0,
+            "delete": 0,
+            "embed": 0,
+            "dir_delete": 0,
+            "dir_index": 0,
+        }
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+        assert service._register_pending_mutation(
+            service._build_mutation(
+                "change",
+                change_file,
+                first_queued_at=oldest_at,
+            )
+        )
+        assert service._register_pending_mutation(
+            service._build_mutation(
+                "delete",
+                delete_file,
+                retry_count=2,
+                first_queued_at=newer_at,
+            )
+        )
+        assert service._register_pending_mutation(
+            service._build_mutation(
+                "embed",
+                embed_file,
+                first_queued_at=newer_at,
+            )
+        )
+
+        stats = await service.get_health()
+        pending = stats["pending_mutations"]
+
+        assert stats["live_indexing_state"] == "busy"
+        assert stats["pending_files"] == 3
+        assert pending["total"] == 3
+        assert pending["unique_paths"] == 3
+        assert pending["counts_by_operation"] == {
+            **zero_counts,
+            "change": 1,
+            "delete": 1,
+            "embed": 1,
+        }
+        assert pending["retry_counts_by_operation"] == {
+            **zero_counts,
+            "delete": 1,
+        }
+        assert pending["retrying_mutations"] == 1
+        assert pending["oldest_pending_at"] == oldest_at
+        assert pending["oldest_pending_age_seconds"] >= 44
+        assert pending["oldest_pending_operation"] == "change"
+        assert pending["oldest_pending_path"] == str(change_file)
+        assert pending["oldest_pending_retry_count"] == 0
+        assert pending["recovery_phase"] == "mutation_drain"
+        assert pending["resync_reason"] is None
+
+    @pytest.mark.asyncio
+    async def test_health_snapshot_marks_backlog_as_pending_behind_resync(
+        self, realtime_setup
+    ):
+        """Pending mutation status should show when backlog is blocked on resync."""
+        service, watch_dir, _, _ = realtime_setup
+        target_file = watch_dir / "resync_pending.py"
+        queued_at = (
+            (datetime.now(timezone.utc) - timedelta(seconds=20))
+            .replace(microsecond=0)
+            .isoformat()
+        )
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+        service._needs_resync = True
+        service._resync_in_progress = True
+        service._last_resync_reason = "event_queue_overflow"
+        service._event_queue_overflow_state = "reconciling"
+        assert service._register_pending_mutation(
+            service._build_mutation(
+                "delete",
+                target_file,
+                retry_count=1,
+                first_queued_at=queued_at,
+            )
+        )
+
+        stats = await service.get_health()
+        pending = stats["pending_mutations"]
+
+        assert stats["live_indexing_state"] == "degraded"
+        assert pending["total"] == 1
+        assert pending["retrying_mutations"] == 1
+        assert pending["recovery_phase"] == "resync_in_progress"
+        assert pending["resync_reason"] == "event_queue_overflow"
+
+    @pytest.mark.asyncio
+    async def test_idle_health_snapshot_exposes_empty_pending_mutation_details(
+        self, realtime_setup
+    ):
+        """Idle realtime health should keep top-level fields stable and compact."""
+        service, watch_dir, _, _ = realtime_setup
+        del watch_dir
+        zero_counts = {
+            "change": 0,
+            "delete": 0,
+            "embed": 0,
+            "dir_delete": 0,
+            "dir_index": 0,
+        }
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+
+        stats = await service.get_health()
+        pending = stats["pending_mutations"]
+
+        assert stats["live_indexing_state"] == "idle"
+        assert stats["pending_files"] == 0
+        assert pending["total"] == 0
+        assert pending["unique_paths"] == 0
+        assert pending["counts_by_operation"] == zero_counts
+        assert pending["retry_counts_by_operation"] == zero_counts
+        assert pending["retrying_mutations"] == 0
+        assert pending["oldest_pending_at"] is None
+        assert pending["oldest_pending_age_seconds"] is None
+        assert pending["oldest_pending_operation"] is None
+        assert pending["oldest_pending_path"] is None
+        assert pending["oldest_pending_retry_count"] is None
+        assert pending["recovery_phase"] == "idle"
+        assert pending["resync_reason"] is None
+
+    @pytest.mark.asyncio
     async def test_delete_mutation_waits_for_inflight_change_processing(
         self, realtime_setup, monkeypatch
     ):
