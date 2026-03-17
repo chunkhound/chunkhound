@@ -63,6 +63,7 @@ class MCPServerBase(ABC):
         # Initialization state
         self._initialized = False
         self._init_lock = asyncio.Lock()
+        self._connect_lock = asyncio.Lock()
 
         # Background tasks
         self._scan_task: asyncio.Task | None = None
@@ -186,9 +187,7 @@ class MCPServerBase(ABC):
             # Ensure services exist
             if not self.services:
                 return
-            # Connect to database lazily
-            if not self.services.provider.is_connected:
-                self.services.provider.connect()
+            await self._connect_provider()
 
             # Start real-time indexing service
             self.debug_log("Starting real-time indexing service (deferred)")
@@ -311,7 +310,7 @@ class MCPServerBase(ABC):
                 self.services.provider.disconnect()
             self._initialized = False
 
-    def ensure_services(self) -> DatabaseServices:
+    async def ensure_services(self) -> DatabaseServices:
         """Ensure services are initialized and return them.
 
         Returns:
@@ -323,11 +322,21 @@ class MCPServerBase(ABC):
         if not self.services:
             raise RuntimeError("Services not initialized. Call initialize() first.")
 
-        # Ensure database connection is active
-        if not self.services.provider.is_connected:
-            self.services.provider.connect()
-
+        await self._connect_provider()
         return self.services
+
+    async def _connect_provider(self) -> None:
+        """Connect the database provider if not already connected.
+
+        Uses a lock to prevent concurrent connect() calls which would
+        leak a DuckDB connection handle.
+        """
+        if not self.services or self.services.provider.is_connected:
+            return
+        async with self._connect_lock:
+            if not self.services.provider.is_connected:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self.services.provider.connect)
 
     def ensure_embedding_manager(self) -> EmbeddingManager:
         """Ensure embedding manager is available and has providers.
