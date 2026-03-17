@@ -365,6 +365,181 @@ async def test_daemon_status_tool_keeps_stalled_pipeline_summary_ready():
     assert result["scan_progress"]["realtime"]["live_indexing_state"] == "stalled"
 
 
+@pytest.mark.asyncio
+async def test_daemon_status_tool_exposes_event_queue_overflow_reconciling_payload():
+    """Overflow-burst status should be visible through the public daemon_status tool."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "realtime": {
+            "service_state": "running",
+            "last_error": None,
+            "live_indexing_state": "degraded",
+            "live_indexing_hint": (
+                "Live indexing is reconciling after internal event queue "
+                "overflow; inspect event_queue.overflow and resync.last_reason."
+            ),
+            "event_queue": {
+                "size": 1000,
+                "maxsize": 1000,
+                "accepted": 1007,
+                "dropped": 2097,
+                "last_reason": "queue_full",
+                "last_event_type": "modified",
+                "last_file_path": "/repo/overflow.py",
+                "last_enqueued_at": "2026-03-08T00:00:04Z",
+                "last_dropped_at": "2026-03-08T00:00:04Z",
+                "overflow": {
+                    "state": "reconciling",
+                    "burst_count": 1,
+                    "current_burst_dropped": 2097,
+                    "last_burst_dropped": 0,
+                    "last_started_at": "2026-03-08T00:00:04Z",
+                    "last_cleared_at": None,
+                    "sample_event_type": "modified",
+                    "sample_file_path": "/repo/overflow.py",
+                },
+            },
+            "resync": {
+                "needs_resync": True,
+                "in_progress": False,
+                "last_reason": "event_queue_overflow",
+                "last_error": None,
+            },
+            "pipeline": {
+                "last_source_event_at": "2026-03-08T00:00:04Z",
+                "last_source_event_type": "modified",
+                "last_source_event_path": "/repo/overflow.py",
+                "last_accepted_event_at": "2026-03-08T00:00:04Z",
+                "last_accepted_event_type": "modified",
+                "last_accepted_event_path": "/repo/overflow.py",
+                "last_processing_started_at": None,
+                "last_processing_started_path": None,
+                "last_processing_completed_at": None,
+                "last_processing_completed_path": None,
+                "filtered_event_count": 0,
+                "suppressed_duplicate_count": 0,
+                "translation_error_count": 0,
+                "processing_error_count": 0,
+                "stall_threshold_seconds": 30.0,
+            },
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    realtime = result["scan_progress"]["realtime"]
+    assert result["status"] == "degraded"
+    assert result["query_ready"] is True
+    assert realtime["event_queue"]["overflow"]["state"] == "reconciling"
+    assert realtime["event_queue"]["overflow"]["current_burst_dropped"] == 2097
+    assert realtime["event_queue"]["overflow"]["sample_file_path"] == (
+        "/repo/overflow.py"
+    )
+    assert realtime["resync"]["last_reason"] == "event_queue_overflow"
+    assert realtime["live_indexing_hint"] == (
+        "Live indexing is reconciling after internal event queue overflow; "
+        "inspect event_queue.overflow and resync.last_reason."
+    )
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_exposes_event_queue_overflow_failed_payload():
+    """Failed overflow recovery should stay explicit through daemon_status."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "realtime": {
+            "service_state": "degraded",
+            "last_error": "No resync callback configured",
+            "live_indexing_state": "degraded",
+            "live_indexing_hint": (
+                "Live indexing remains degraded after internal event queue "
+                "overflow; inspect event_queue.overflow and resync.last_error."
+            ),
+            "event_queue": {
+                "size": 1000,
+                "maxsize": 1000,
+                "accepted": 1007,
+                "dropped": 2097,
+                "last_reason": "queue_full",
+                "last_event_type": "modified",
+                "last_file_path": "/repo/overflow.py",
+                "last_enqueued_at": "2026-03-08T00:00:04Z",
+                "last_dropped_at": "2026-03-08T00:00:04Z",
+                "overflow": {
+                    "state": "failed",
+                    "burst_count": 1,
+                    "current_burst_dropped": 2097,
+                    "last_burst_dropped": 2097,
+                    "last_started_at": "2026-03-08T00:00:04Z",
+                    "last_cleared_at": None,
+                    "sample_event_type": "modified",
+                    "sample_file_path": "/repo/overflow.py",
+                },
+            },
+            "resync": {
+                "needs_resync": True,
+                "in_progress": False,
+                "last_reason": "event_queue_overflow",
+                "last_error": "No resync callback configured",
+            },
+            "pipeline": {
+                "last_source_event_at": "2026-03-08T00:00:04Z",
+                "last_source_event_type": "modified",
+                "last_source_event_path": "/repo/overflow.py",
+                "last_accepted_event_at": "2026-03-08T00:00:04Z",
+                "last_accepted_event_type": "modified",
+                "last_accepted_event_path": "/repo/overflow.py",
+                "last_processing_started_at": None,
+                "last_processing_started_path": None,
+                "last_processing_completed_at": None,
+                "last_processing_completed_path": None,
+                "filtered_event_count": 0,
+                "suppressed_duplicate_count": 0,
+                "translation_error_count": 0,
+                "processing_error_count": 0,
+                "stall_threshold_seconds": 30.0,
+            },
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    realtime = result["scan_progress"]["realtime"]
+    assert result["status"] == "degraded"
+    assert result["query_ready"] is True
+    assert realtime["event_queue"]["overflow"]["state"] == "failed"
+    assert realtime["event_queue"]["overflow"]["last_burst_dropped"] == 2097
+    assert realtime["resync"]["last_error"] == "No resync callback configured"
+    assert realtime["live_indexing_hint"] == (
+        "Live indexing remains degraded after internal event queue overflow; "
+        "inspect event_queue.overflow and resync.last_error."
+    )
+
+
 def test_stdio_server_uses_registry_descriptions():
     """Verify MCP server base imports and uses TOOL_REGISTRY for descriptions.
 

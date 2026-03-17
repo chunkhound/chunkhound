@@ -95,9 +95,10 @@ def _enqueue_realtime_event(
             None,
         )
     except asyncio.QueueFull:
-        logger.warning(
-            f"Realtime event queue full; dropped {event_type} for {file_path}"
-        )
+        if queue_result_callback is None:
+            logger.warning(
+                f"Realtime event queue full; dropped {event_type} for {file_path}"
+            )
         _record_realtime_queue_result(
             queue_result_callback,
             event_type,
@@ -1349,6 +1350,14 @@ class RealtimeIndexingService:
         self._event_queue_last_file_path: str | None = None
         self._event_queue_last_enqueued_at: str | None = None
         self._event_queue_last_dropped_at: str | None = None
+        self._event_queue_overflow_state = "idle"
+        self._event_queue_overflow_burst_count = 0
+        self._event_queue_overflow_current_burst_dropped = 0
+        self._event_queue_overflow_last_burst_dropped = 0
+        self._event_queue_overflow_last_started_at: str | None = None
+        self._event_queue_overflow_last_cleared_at: str | None = None
+        self._event_queue_overflow_sample_event_type: str | None = None
+        self._event_queue_overflow_sample_file_path: str | None = None
         self._last_source_event_at: str | None = None
         self._last_source_event_type: str | None = None
         self._last_source_event_path: str | None = None
@@ -1498,6 +1507,16 @@ class RealtimeIndexingService:
                 "last_file_path": None,
                 "last_enqueued_at": None,
                 "last_dropped_at": None,
+                "overflow": {
+                    "state": "idle",
+                    "burst_count": 0,
+                    "current_burst_dropped": 0,
+                    "last_burst_dropped": 0,
+                    "last_started_at": None,
+                    "last_cleared_at": None,
+                    "sample_event_type": None,
+                    "sample_file_path": None,
+                },
             },
             "resync": {
                 "needs_resync": False,
@@ -1699,6 +1718,20 @@ class RealtimeIndexingService:
                 "last_dropped_at": self._event_queue_last_dropped_at,
             }
         )
+        status["event_queue"]["overflow"].update(
+            {
+                "state": self._event_queue_overflow_state,
+                "burst_count": self._event_queue_overflow_burst_count,
+                "current_burst_dropped": (
+                    self._event_queue_overflow_current_burst_dropped
+                ),
+                "last_burst_dropped": self._event_queue_overflow_last_burst_dropped,
+                "last_started_at": self._event_queue_overflow_last_started_at,
+                "last_cleared_at": self._event_queue_overflow_last_cleared_at,
+                "sample_event_type": self._event_queue_overflow_sample_event_type,
+                "sample_file_path": self._event_queue_overflow_sample_file_path,
+            }
+        )
         status["resync"].update(
             {
                 "needs_resync": self._needs_resync,
@@ -1798,6 +1831,16 @@ class RealtimeIndexingService:
 
     def _derive_live_indexing_hint(self, live_indexing_state: str) -> str:
         if live_indexing_state == "degraded":
+            if self._event_queue_overflow_state == "reconciling":
+                return (
+                    "Live indexing is reconciling after internal event queue "
+                    "overflow; inspect event_queue.overflow and resync.last_reason."
+                )
+            if self._event_queue_overflow_state == "failed":
+                return (
+                    "Live indexing remains degraded after internal event queue "
+                    "overflow; inspect event_queue.overflow and resync.last_error."
+                )
             if self._needs_resync:
                 return (
                     "Live indexing needs reconciliation; inspect resync.last_reason "
@@ -2087,6 +2130,70 @@ class RealtimeIndexingService:
         self._emit_status_update()
         return True
 
+    @staticmethod
+    def _overflow_drop_label(drop_count: int) -> str:
+        return "event" if drop_count == 1 else "events"
+
+    def _record_event_queue_overflow(
+        self, event_type: str, file_path: Path, *, timestamp: str
+    ) -> None:
+        if self._event_queue_overflow_state == "idle":
+            self._event_queue_overflow_state = "reconciling"
+            self._event_queue_overflow_burst_count += 1
+            self._event_queue_overflow_current_burst_dropped = 1
+            self._event_queue_overflow_sample_event_type = event_type
+            self._event_queue_overflow_sample_file_path = str(file_path)
+            self._event_queue_overflow_last_started_at = timestamp
+            message = (
+                "Realtime event queue overflow detected; entering reconciliation mode."
+            )
+            logger.warning(message)
+            self._set_warning(message)
+            asyncio.create_task(
+                self.request_resync(
+                    "event_queue_overflow",
+                    {
+                        "event_type": event_type,
+                        "file_path": str(file_path),
+                        "drop_reason": "queue_full",
+                        "overflow_burst": self._event_queue_overflow_burst_count,
+                        "dropped_events": (
+                            self._event_queue_overflow_current_burst_dropped
+                        ),
+                    },
+                )
+            )
+            return
+
+        self._event_queue_overflow_current_burst_dropped += 1
+
+    def _complete_event_queue_overflow_burst(self, *, success: bool) -> None:
+        if self._event_queue_overflow_state == "idle":
+            return
+
+        drop_count = max(self._event_queue_overflow_current_burst_dropped, 1)
+        self._event_queue_overflow_last_burst_dropped = drop_count
+
+        if success:
+            self._event_queue_overflow_state = "idle"
+            self._event_queue_overflow_current_burst_dropped = 0
+            self._event_queue_overflow_last_cleared_at = self._utc_now()
+            message = (
+                "Realtime event queue overflow recovered after dropping "
+                f"{drop_count} {self._overflow_drop_label(drop_count)}."
+            )
+            logger.info(message)
+            self._set_warning(message)
+            return
+
+        self._event_queue_overflow_state = "failed"
+        message = (
+            "Realtime event queue overflow reconciliation failed after dropping "
+            f"{drop_count} {self._overflow_drop_label(drop_count)}."
+        )
+        logger.warning(message)
+        self._set_warning(message)
+
     def _handle_queue_result(
         self, event_type: str, file_path: Path, accepted: bool, reason: str | None
     ) -> None:
@@ -2102,17 +2209,15 @@ class RealtimeIndexingService:
             self._event_queue_dropped += 1
             self._event_queue_last_reason = reason
             self._event_queue_last_dropped_at = timestamp
-            self._set_warning(f"realtime event dropped ({reason or 'unknown_reason'})")
             if reason == "queue_full":
-                asyncio.create_task(
-                    self.request_resync(
-                        "event_queue_overflow",
-                        {
-                            "event_type": event_type,
-                            "file_path": str(file_path),
-                            "drop_reason": reason,
-                        },
-                    )
+                self._record_event_queue_overflow(
+                    event_type,
+                    file_path,
+                    timestamp=timestamp,
+                )
+            else:
+                self._set_warning(
+                    f"realtime event dropped ({reason or 'unknown_reason'})"
                 )
 
         self._emit_status_update()
@@ -2149,6 +2254,7 @@ class RealtimeIndexingService:
             callback = self._resync_callback
             if callback is None:
                 self._last_resync_error = "No resync callback configured"
+                self._complete_event_queue_overflow_burst(success=False)
                 self._set_error(self._last_resync_error)
                 return
 
@@ -2167,10 +2273,12 @@ class RealtimeIndexingService:
                     self._needs_resync = False
                     self._resync_performed_count += 1
                     self._last_resync_completed_at = self._utc_now()
+                    self._complete_event_queue_overflow_burst(success=True)
                     if self._service_state not in {"stopping", "stopped"}:
                         self._clear_resync_error_state()
                 except Exception as e:
                     self._last_resync_error = str(e)
+                    self._complete_event_queue_overflow_burst(success=False)
                     self._set_error(f"Realtime resync failed: {e}")
                     break
                 finally:

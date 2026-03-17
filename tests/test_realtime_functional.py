@@ -1376,18 +1376,31 @@ class TestRealtimeFunctional:
         assert not (watch_dir / ".chunkhound" / "watchman" / "metadata.json").exists()
 
     @pytest.mark.asyncio
-    async def test_full_event_queue_tracks_drop_and_requests_resync(
-        self, realtime_setup
+    async def test_full_event_queue_collapses_overflow_burst_into_one_resync(
+        self, realtime_setup, monkeypatch
     ):
-        """Dropped realtime events should be counted and escalated via resync."""
+        """Dense queue overflow should converge as one reconciliation burst."""
         service, watch_dir, _, _ = realtime_setup
+        warning_messages: list[str] = []
         callback_event = asyncio.Event()
+        resync_calls: list[tuple[str, dict[str, object] | None]] = []
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+
+        monkeypatch.setattr(
+            "chunkhound.services.realtime_indexing_service.logger.warning",
+            lambda message: warning_messages.append(message),
+        )
 
         async def resync_callback(
             reason: str, details: dict[str, object] | None
         ) -> None:
-            assert reason == "event_queue_overflow"
-            assert details is not None
+            resync_calls.append((reason, details))
+            while not service.event_queue.empty():
+                service.event_queue.get_nowait()
             callback_event.set()
 
         service._resync_callback = resync_callback
@@ -1401,15 +1414,156 @@ class TestRealtimeFunctional:
             root_path=watch_dir,
             queue_result_callback=service._handle_queue_result,
         )
-        handler._queue_event("modified", watch_dir / "overflow.py")
+        handler._queue_event("modified", watch_dir / "overflow_one.py")
+        handler._queue_event("deleted", watch_dir / "overflow_two.py")
+        handler._queue_event("created", watch_dir / "overflow_three.py")
+
+        pending_stats = await _wait_for_realtime_condition(
+            service,
+            lambda stats: (
+                stats["event_queue"]["dropped"] == 3
+                and stats["event_queue"]["overflow"]["state"] == "reconciling"
+                and stats["resync"]["request_count"] == 1
+            ),
+        )
+
+        assert pending_stats["event_queue"]["overflow"]["current_burst_dropped"] == 3
+        assert pending_stats["event_queue"]["last_reason"] == "queue_full"
+        assert pending_stats["resync"]["request_count"] == 1
+        assert pending_stats["resync"]["last_reason"] == "event_queue_overflow"
+        assert pending_stats["live_indexing_state"] == "degraded"
+        assert len(resync_calls) == 0
+        assert warning_messages == [
+            "Realtime event queue overflow detected; entering reconciliation mode."
+        ]
 
         await asyncio.wait_for(callback_event.wait(), timeout=5.0)
 
-        stats = await service.get_health()
-        assert stats["event_queue"]["dropped"] == 1
+        stats = await _wait_for_realtime_condition(
+            service,
+            lambda current: (
+                current["event_queue"]["overflow"]["state"] == "idle"
+                and current["live_indexing_state"] == "idle"
+            ),
+        )
+
+        assert len(resync_calls) == 1
+        assert resync_calls[0][0] == "event_queue_overflow"
+        assert resync_calls[0][1] is not None
+        assert stats["event_queue"]["dropped"] == 3
         assert stats["event_queue"]["last_reason"] == "queue_full"
+        assert stats["event_queue"]["overflow"]["current_burst_dropped"] == 0
+        assert stats["event_queue"]["overflow"]["last_burst_dropped"] == 3
+        assert stats["event_queue"]["overflow"]["last_cleared_at"] is not None
         assert stats["resync"]["request_count"] == 1
-        assert stats["resync"]["last_reason"] == "event_queue_overflow"
+        assert stats["resync"]["performed_count"] == 1
+        assert stats["resync"]["needs_resync"] is False
+        assert stats["last_warning"] == (
+            "Realtime event queue overflow recovered after dropping 3 events."
+        )
+
+    @pytest.mark.asyncio
+    async def test_full_event_queue_keeps_overflow_state_when_resync_fails(
+        self, realtime_setup
+    ):
+        """Overflow state should stay explicit until a reconciliation succeeds."""
+        service, watch_dir, _, _ = realtime_setup
+        callback_event = asyncio.Event()
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+
+        async def resync_callback(
+            reason: str, details: dict[str, object] | None
+        ) -> None:
+            assert reason == "event_queue_overflow"
+            assert details is not None
+            callback_event.set()
+            raise RuntimeError("simulated overflow reconciliation failure")
+
+        service._resync_callback = resync_callback
+        service.event_queue = asyncio.Queue(maxsize=1)
+        service.event_queue.put_nowait(("created", watch_dir / "already_full.py"))
+
+        handler = SimpleEventHandler(
+            service.event_queue,
+            service.config,
+            asyncio.get_running_loop(),
+            root_path=watch_dir,
+            queue_result_callback=service._handle_queue_result,
+        )
+        handler._queue_event("modified", watch_dir / "overflow_failure.py")
+
+        await asyncio.wait_for(callback_event.wait(), timeout=5.0)
+
+        stats = await _wait_for_realtime_condition(
+            service,
+            lambda current: current["event_queue"]["overflow"]["state"] == "failed",
+        )
+
+        assert stats["event_queue"]["dropped"] == 1
+        assert stats["event_queue"]["overflow"]["current_burst_dropped"] == 1
+        assert stats["event_queue"]["overflow"]["last_burst_dropped"] == 1
+        assert stats["resync"]["request_count"] == 1
+        assert stats["resync"]["performed_count"] == 0
+        assert stats["resync"]["needs_resync"] is True
+        assert (
+            stats["resync"]["last_error"] == "simulated overflow reconciliation failure"
+        )
+        assert stats["service_state"] == "degraded"
+        assert stats["live_indexing_state"] == "degraded"
+        assert stats["live_indexing_hint"] == (
+            "Live indexing remains degraded after internal event queue overflow; "
+            "inspect event_queue.overflow and resync.last_error."
+        )
+
+    @pytest.mark.asyncio
+    async def test_full_event_queue_sets_failed_state_when_resync_callback_missing(
+        self, realtime_setup
+    ):
+        """Missing resync callback should leave overflow in an explicit failed state."""
+        service, watch_dir, _, _ = realtime_setup
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+        service._resync_callback = None
+        service.event_queue = asyncio.Queue(maxsize=1)
+        service.event_queue.put_nowait(("created", watch_dir / "already_full.py"))
+
+        handler = SimpleEventHandler(
+            service.event_queue,
+            service.config,
+            asyncio.get_running_loop(),
+            root_path=watch_dir,
+            queue_result_callback=service._handle_queue_result,
+        )
+        handler._queue_event("modified", watch_dir / "overflow_missing_callback.py")
+
+        stats = await _wait_for_realtime_condition(
+            service,
+            lambda current: (
+                current["event_queue"]["overflow"]["state"] == "failed"
+                and current["resync"]["last_error"] == "No resync callback configured"
+            ),
+        )
+
+        assert stats["event_queue"]["dropped"] == 1
+        assert stats["event_queue"]["overflow"]["current_burst_dropped"] == 1
+        assert stats["event_queue"]["overflow"]["last_burst_dropped"] == 1
+        assert stats["resync"]["request_count"] == 1
+        assert stats["resync"]["performed_count"] == 0
+        assert stats["resync"]["needs_resync"] is True
+        assert stats["service_state"] == "degraded"
+        assert stats["last_error"] == "No resync callback configured"
+        assert stats["live_indexing_state"] == "degraded"
+        assert stats["live_indexing_hint"] == (
+            "Live indexing remains degraded after internal event queue overflow; "
+            "inspect event_queue.overflow and resync.last_error."
+        )
 
     @pytest.mark.asyncio
     async def test_polling_monitor_uses_to_thread_snapshot(
