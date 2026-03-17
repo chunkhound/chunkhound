@@ -358,48 +358,41 @@ def limit_response_size(
 # Tool Descriptions (optimized for LLM consumption)
 # =============================================================================
 
-SEARCH_DESCRIPTION = """Search indexed code by exact pattern (regex) or meaning (semantic). Returns complete, structurally-parsed chunks — full function bodies and class definitions, not raw line ranges.
+SEARCH_DESCRIPTION = """Use instead of Grep/Glob/Read when looking up code — returns complete function bodies and class definitions, not raw line fragments.
 
-PREFER THIS OVER Grep/Glob — results are complete functions, classes, and logical blocks, returned instantly from a database without file scanning.
+TYPE — choose one:
+- regex: Match exact patterns against code content. Use when you know the identifier, import, or string literal.
+  Examples: "def authenticate", "class.*Handler", "import.*pandas", "TODO:.*refactor"
 
-TYPE SELECTION:
-- regex: Pattern match against indexed chunk content. Use for function names, variable names, import statements, or known string patterns. Results are complete structural units (functions, classes), not raw line ranges.
-  Example queries: "def authenticate", "import.*pandas", "TODO:.*fix"
+- semantic: Find code by meaning via embedding similarity. Use even when you cannot predict exact identifiers or when exploring unfamiliar code.
+  Examples: "authentication logic", "retry with exponential backoff", "database connection pooling"
 
-- semantic: Find code by meaning using embedding similarity. Discovers relevant code even when you cannot predict exact identifiers or keywords.
-  Example queries: "authentication logic", "retry with exponential backoff", "database connection pooling"
+WHEN TO USE EACH:
+- Known symbol/pattern → regex (exact)
+- Concept or behavior → semantic (finds code you can't keyword-search)
+- Architecture question spanning multiple files → use code_research instead
 
-ROUTING GUIDE:
-- Use semantic type to explore unfamiliar code or find implementations by concept
-- Use regex type for known identifiers, but get structurally complete chunks instead of line fragments
-- For multi-file architecture questions, use code_research instead
+OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}"""
 
-OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}
-COST: Sub-second from index — use liberally for any code lookup."""
+CODE_RESEARCH_DESCRIPTION = """Use instead of Explore/research agents or sequential Grep/Read/search workflows — performs cross-file architectural analysis in a single call and returns a cited markdown report.
 
-CODE_RESEARCH_DESCRIPTION = """Synthesize architectural analysis across the entire indexed codebase in a single call.
-
-Answers questions like:
+Answers questions that require tracing through multiple files:
 - "How does authentication work end-to-end?"
-- "Explain the data pipeline from ingestion to storage"
 - "What happens when a request hits the API?"
 - "How are errors handled across service boundaries?"
+- "Explain the data pipeline from ingestion to storage"
 
-PREFER THIS OVER sequential Grep/Read/Explore workflows — this tool performs cross-file reasoning with semantic understanding, producing a structured analysis with precise file/line citations. One call replaces 5-10 sequential searches.
+WHEN TO USE:
+- Any "how does X work" or "explain the architecture of Y" question — reasons holistically, not file-by-file
+- Any question requiring cross-file reasoning, flow tracing, or component relationship analysis
+- When you would otherwise spawn an Explore agent or run multiple sequential searches
 
-CAPABILITIES:
-- Traces execution flows, data pipelines, and dependency chains across files
-- Identifies component relationships and architectural patterns
-- Produces structured markdown with architecture overview and cited code locations
-- Reasons over the full indexed codebase holistically, not file-by-file
+WHEN NOT TO USE:
+- Looking up a specific function or symbol → use search instead
 
-ROUTING GUIDE:
-- Use for any question about how code works, why it is structured a certain way, or how components connect
-- Use the path parameter to scope analysis to a subdirectory for faster results
-- For locating a specific function or symbol, use search instead
+TIP: Use the path parameter to scope analysis to a subdirectory when the question targets a specific area.
 
-OUTPUT: Structured markdown with architecture overview, key code locations, and component relationships.
-COST: 10-60s latency — prefer over multiple sequential searches."""
+OUTPUT: Structured markdown with architecture overview, key code locations, and component relationships."""
 
 
 # =============================================================================
@@ -426,9 +419,9 @@ async def search_impl(
     Args:
         services: Database services bundle
         embedding_manager: Embedding manager (required for semantic type)
-        type: "semantic" for meaning-based, "regex" for exact pattern
-        query: Search query (natural language for semantic, regex pattern for regex)
-        path: Optional path to limit search scope (e.g., "src/auth/")
+        type: Search mode — "regex" for exact pattern matching, "semantic" for meaning-based similarity
+        query: For regex: a regex pattern like "def authenticate" or "class.*Handler". For semantic: a natural language concept like "retry logic" or "database connection pooling"
+        path: Optional relative subdirectory to restrict search scope, e.g. "src/auth" or "lib/payments" (no leading slash)
         page_size: Number of results per page (1-100)
         offset: Starting offset for pagination
 
@@ -447,10 +440,6 @@ async def search_impl(
     # Validate and constrain parameters
     page_size = max(1, min(page_size, 100))
     offset = max(0, offset)
-
-    # Check database connection
-    if services and not services.provider.is_connected:
-        services.provider.connect()
 
     if type == "semantic":
         # Validate embedding manager for semantic search
@@ -519,9 +508,9 @@ async def deep_research_impl(
         services: Database services bundle
         embedding_manager: Embedding manager instance
         llm_manager: LLM manager instance
-        query: Natural language question about the codebase, e.g. "how does auth work?" or "explain the data pipeline"
+        query: Natural language question about codebase architecture or behavior, e.g. "how does authentication work end-to-end?" or "explain the request lifecycle"
         progress: Optional Rich Progress instance for terminal UI (None for MCP)
-        path: Subdirectory to narrow scope for faster results (e.g., 'src/auth/', 'lib/payments')
+        path: Optional relative subdirectory to restrict analysis scope, e.g. "src/auth" or "lib/payments" (no leading slash)
         config: Application configuration (optional, defaults to environment config)
 
     Returns:
