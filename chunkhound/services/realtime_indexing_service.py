@@ -2808,7 +2808,12 @@ class RealtimeIndexingService:
 
     def _collect_supported_files(self, dir_path: Path) -> list[Path]:
         """Collect supported files in a directory off the event loop."""
-        simple_handler = SimpleEventHandler(None, self.config, None, root_path=dir_path)
+        simple_handler = SimpleEventHandler(
+            None,
+            self.config,
+            None,
+            root_path=self._path_filter_root(dir_path),
+        )
         supported_files: list[Path] = []
 
         for file_path in dir_path.rglob("*"):
@@ -2819,6 +2824,20 @@ class RealtimeIndexingService:
                 continue
 
         return supported_files
+
+    def _path_filter_root(self, fallback_path: Path | None = None) -> Path:
+        """Return the logical workspace root for realtime scope decisions."""
+        if self.watch_path is not None:
+            return self.watch_path
+
+        target_dir = getattr(self.config, "target_dir", None)
+        if isinstance(target_dir, Path):
+            return target_dir
+
+        if fallback_path is not None:
+            return fallback_path
+
+        return Path.cwd()
 
     async def _polling_monitor(self, watch_path: Path) -> None:
         """Simple polling monitor for large directories."""

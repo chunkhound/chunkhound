@@ -55,6 +55,7 @@ from chunkhound.utils.hashing import compute_file_hash
 from .base_service import BaseService
 from .batch_processor import ParsedFileResult, process_file_batch
 from .chunk_cache_service import ChunkCacheService
+from .realtime_path_filter import RealtimePathFilter, RealtimePathFilterSettings
 
 # Lazy multiprocessing start-method guard — applied once before pool creation.
 # RATIONALE: Linux defaults to 'fork' which is unsafe with asyncio event loops.
@@ -1105,7 +1106,7 @@ class IndexingCoordinator(BaseService):
             if do_cleanup:
                 _t2 = _t.perf_counter() if _t0 is not None else None
                 cleaned_files = self._cleanup_orphaned_files(
-                    directory, files, exclude_patterns
+                    directory, files, patterns, exclude_patterns
                 )
                 _t3 = _t.perf_counter() if _t0 is not None else None
             else:
@@ -2791,10 +2792,53 @@ class IndexingCoordinator(BaseService):
 
         return files
 
+    def _build_cleanup_path_filter(
+        self,
+        include_patterns: list[str] | None,
+        exclude_patterns: list[str] | None,
+    ) -> RealtimePathFilter:
+        settings = RealtimePathFilterSettings.from_config(
+            self.config,
+            include_patterns=include_patterns,
+        )
+        if settings is None:
+            settings = RealtimePathFilterSettings(
+                include_patterns=(
+                    tuple(include_patterns) if include_patterns is not None else None
+                ),
+                ignore_sources=("config",) if exclude_patterns else (),
+                config_excludes=tuple(exclude_patterns or ()),
+            )
+
+        return RealtimePathFilter(
+            config=None,
+            root_path=self._base_directory,
+            settings=settings,
+        )
+
+    def _classify_cleanup_candidate(
+        self,
+        db_relative_path: str,
+        current_file_paths: set[str],
+        path_filter: RealtimePathFilter,
+    ) -> str | None:
+        if db_relative_path in current_file_paths:
+            return None
+
+        full_path = self._base_directory / Path(db_relative_path)
+        if not full_path.exists():
+            return "missing_on_disk"
+
+        if not path_filter.should_index(full_path):
+            return "excluded_by_current_policy"
+
+        return None
+
     def _cleanup_orphaned_files(
         self,
         directory: Path,
         current_files: list[Path],
+        include_patterns: list[str] | None,
         exclude_patterns: list[str] | None = None,
     ) -> int:
         """Remove database entries for files that no longer exist in the directory.
@@ -2802,6 +2846,7 @@ class IndexingCoordinator(BaseService):
         Args:
             directory: Directory being processed
             current_files: List of files currently in the directory
+            include_patterns: Active include patterns used during discovery
             exclude_patterns: Optional list of exclude patterns to check against
 
         Returns:
@@ -2822,45 +2867,29 @@ class IndexingCoordinator(BaseService):
             """
             db_files = self._db.execute_query(query, [])
 
-            # Find orphaned files (in DB but not on disk or excluded by patterns)
-            orphaned_files = []
-            if not exclude_patterns:
-                # Prefer the coordinator's current config; fall back to defaults
-                try:
-                    cfg = self.config if getattr(self, "config", None) else None
-                    if cfg is None:
-                        from chunkhound.core.config.config import Config as _Cfg
-
-                        cfg = _Cfg()
-                    patterns_to_check = cfg.indexing.get_effective_config_excludes()
-                except Exception:
-                    # Final fallback to static defaults
-                    from chunkhound.core.config.indexing_config import (
-                        IndexingConfig as _Idx,
-                    )
-
-                    patterns_to_check = _Idx._default_excludes()
-            else:
-                patterns_to_check = exclude_patterns
+            # Find DB entries that are now missing on disk or excluded by the
+            # same effective scope rules used by discovery/realtime admission.
+            orphaned_files: list[tuple[str, str]] = []
+            cleanup_reason_counts = {
+                "missing_on_disk": 0,
+                "excluded_by_current_policy": 0,
+            }
+            cleanup_filter = self._build_cleanup_path_filter(
+                include_patterns, exclude_patterns
+            )
 
             for db_file in db_files:
                 file_path = db_file["path"]
+                cleanup_reason = self._classify_cleanup_candidate(
+                    file_path,
+                    current_file_paths,
+                    cleanup_filter,
+                )
+                if cleanup_reason is None:
+                    continue
 
-                # Check if file should be excluded based on current patterns
-                should_exclude = False
-
-                # File path is already relative (stored as relative with forward slashes)
-                rel_path = Path(file_path)
-
-                for exclude_pattern in patterns_to_check:
-                    # Check relative path pattern
-                    if fnmatch(str(rel_path), exclude_pattern):
-                        should_exclude = True
-                        break
-
-                # Mark for removal if not in current files or should be excluded
-                if file_path not in current_file_paths or should_exclude:
-                    orphaned_files.append(file_path)
+                orphaned_files.append((file_path, cleanup_reason))
+                cleanup_reason_counts[cleanup_reason] += 1
 
             # Remove orphaned files with progress tracking
             orphaned_count = 0
@@ -2874,19 +2903,21 @@ class IndexingCoordinator(BaseService):
                         info="",
                     )
 
-                for file_path in orphaned_files:
+                for file_path, cleanup_reason in orphaned_files:
                     try:
                         deleted = self._db.delete_file_completely(file_path)
                     except Exception as e:
                         raise RuntimeError(
                             "orphan/excluded cleanup delete failed "
-                            f"for {file_path}: {e}"
+                            f"for {file_path} "
+                            f"(reason={cleanup_reason}): {e}"
                         ) from e
 
                     if not deleted:
                         raise RuntimeError(
                             "orphan/excluded cleanup delete returned false "
-                            f"for {file_path}"
+                            f"for {file_path} "
+                            f"(reason={cleanup_reason})"
                         )
 
                     orphaned_count += 1
@@ -2902,7 +2933,15 @@ class IndexingCoordinator(BaseService):
                     if task.total:
                         self.progress.update(cleanup_task, completed=task.total)
 
-                logger.info(f"Cleaned up {orphaned_count} orphaned files from database")
+                logger.info(
+                    "Cleaned up "
+                    f"{orphaned_count} orphaned files from database "
+                    "("
+                    f"missing_on_disk={cleanup_reason_counts['missing_on_disk']}, "
+                    "excluded_by_current_policy="
+                    f"{cleanup_reason_counts['excluded_by_current_policy']}"
+                    ")"
+                )
 
             return orphaned_count
 
