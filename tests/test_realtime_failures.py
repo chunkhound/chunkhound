@@ -99,33 +99,29 @@ class TestRealtimeFailures:
             )
 
     @pytest.mark.asyncio
-    async def test_file_debouncing_creates_memory_leaks(self, realtime_setup):
-        """Test that file debouncing properly cleans up timers."""
+    async def test_file_debouncing_cleans_up_state(self, realtime_setup):
+        """Test that rapid changes to one file leave no stale debounce state."""
         service, watch_dir, _, _ = realtime_setup
         await service.start(watch_dir)
 
         # Wait for initial scan to complete
         await asyncio.sleep(1.0)
 
-        # Create many rapid file changes to the SAME file - should reuse timer slot
+        # Rapid writes to the same file — should coalesce into one debounce task
         test_file = watch_dir / "reused_file.py"
         for i in range(20):
-            test_file.write_text(f"def func_{i}(): pass # iteration {i}")
-            await asyncio.sleep(0.01)  # Very rapid changes to same file
+            test_file.write_text(f"def func_{i}(): pass")
+            await asyncio.sleep(0.01)
 
-        # Wait for debounce delay to let timers execute and cleanup
-        await asyncio.sleep(1.0)
+        # Wait for debounce delay + buffer to let the task complete and clean up
+        await asyncio.sleep(2.0)
 
-        # Get reference to debouncer timers after cleanup should occur
-        if service.event_handler and hasattr(service.event_handler, 'debouncer'):
-            active_timers = len(service.event_handler.debouncer.timers)
-            # Should only have 1 timer max for the single file, or 0 if cleaned up
-            assert active_timers <= 1, (
-                f"Too many active timers ({active_timers}) "
-                "- should cleanup after execution"
-            )
-
-        await service.stop()
+        assert len(service._pending_debounce) == 0, (
+            f"Stale debounce entries after processing: {list(service._pending_debounce)}"
+        )
+        assert len(service._debounce_tasks) == 0, (
+            f"Leaked debounce tasks after processing: {len(service._debounce_tasks)}"
+        )
 
     @pytest.mark.asyncio
     async def test_background_scan_conflicts_with_realtime(self, realtime_setup):

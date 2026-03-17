@@ -429,16 +429,6 @@ class EmbeddingService(BaseService):
 
         # Get existing embeddings from database
         try:
-            # Determine table name based on embedding dimensions
-            # We need to check what dimensions this provider/model uses
-            if hasattr(self._embedding_provider, "get_dimensions"):
-                dims = self._embedding_provider.get_dimensions()
-            else:
-                # Default to 1536 for most embedding models (OpenAI, etc.)
-                dims = 1536
-
-            table_name = f"embeddings_{dims}"
-
             existing_chunk_ids = self._db.get_existing_embeddings(
                 chunk_ids=[int(cid) for cid in chunk_ids],
                 provider=provider_name,

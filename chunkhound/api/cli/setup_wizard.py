@@ -24,7 +24,7 @@ from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_config import EmbeddingConfig
 from chunkhound.core.config.embedding_factory import EmbeddingProviderFactory
 from chunkhound.core.config.openai_utils import is_official_openai_endpoint
-from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
+from chunkhound.core.constants import OPENAI_DEFAULT_MODEL, VOYAGE_DEFAULT_MODEL
 from chunkhound.version import __version__
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ _console = Console()
 _PERMISSIONS_HINT = "This might be a permissions issue. Try creating the file manually."
 
 
-def console_print(message: str, style: str = None) -> None:
+def console_print(message: str, style: str | None = None) -> None:
     """Print with colors using Rich console or fallback to plain print."""
     try:
         if style:
@@ -459,13 +459,14 @@ async def _rich_select_interactive(
 
 
 async def _fetch_available_models(
-    base_url: str, api_key: str | None = None
+    base_url: str, api_key: str | None = None, verify_ssl: bool = True
 ) -> tuple[list[str] | None, bool]:
     """Fetch available models from OpenAI-compatible endpoint.
 
     Args:
         base_url: Base URL of the OpenAI-compatible endpoint
         api_key: Optional API key for authentication
+        verify_ssl: Whether to verify SSL certificates (default True)
 
     Returns:
         Tuple of (models_list, needs_auth)
@@ -484,14 +485,8 @@ async def _fetch_available_models(
         if api_key and api_key.strip():
             headers["Authorization"] = f"Bearer {api_key.strip()}"
 
-        # Configure HTTP client with SSL handling (same pattern as OpenAI provider)
-        client_kwargs = {"timeout": 10.0}  # Increased timeout for corporate networks
-
-        # Apply SSL verification logic - reuse existing pattern
-        is_openai_official = is_official_openai_endpoint(base_url)
-        if not is_openai_official:
-            # For custom endpoints, disable SSL verification
-            # These often use self-signed certificates (corporate servers, Ollama)
+        client_kwargs: dict[str, Any] = {"timeout": 10.0}
+        if not verify_ssl:
             client_kwargs["verify"] = False
             logger.debug(f"SSL verification disabled for custom endpoint: {base_url}")
 
@@ -518,14 +513,65 @@ async def _fetch_available_models(
         # Check if it's an authentication error
         if e.response.status_code in [401, 403]:
             return (None, True)  # Definitely needs authentication
-        elif e.response.status_code in [200, 404]:
-            return (None, False)  # Clear no-auth cases (success or not found)
+        elif e.response.status_code == 404:
+            return (None, False)  # Not found - no auth issue
         else:
             # Other HTTP errors (500, etc.) - assume auth needed to be safe
             return (None, True)
     except Exception:
         # Network or parsing error - assume auth needed to be safe
         return (None, True)
+
+
+async def _fetch_models_with_ssl_fallback(
+    base_url: str,
+    api_key: str | None = None,
+) -> tuple[list[str] | None, bool, bool]:
+    """Fetch models, offering to disable SSL verification if a cert error is detected.
+
+    Defaults to verify_ssl=True (secure). For HTTPS custom endpoints that fail, probes
+    without credentials to detect self-signed cert issues and prompts the user if found.
+
+    Note: If the endpoint requires authentication AND uses a self-signed cert, the SSL
+    issue will not be detected — the probe runs without credentials, so an auth failure
+    masks the cert error. In that case the user must disable SSL verification manually.
+
+    Returns:
+        (models, needs_auth, verify_ssl) -- verify_ssl=False if user opted to skip SSL.
+    """
+    # Phase 1: try with SSL verification enabled (the secure default)
+    models, needs_auth = await _fetch_available_models(
+        base_url, api_key, verify_ssl=True
+    )
+    if models is not None:
+        return models, needs_auth, True
+
+    # Only attempt SSL fallback for HTTPS custom (non-official) endpoints
+    is_https = base_url.startswith("https://")
+    is_official = is_official_openai_endpoint(base_url)
+    if not is_https or is_official:
+        return models, needs_auth, True
+
+    # Phase 2: probe without credentials and without SSL to detect cert issues
+    # (safe: no API key transmitted over the unverified connection)
+    probe_models, probe_needs_auth = await _fetch_available_models(
+        base_url, api_key=None, verify_ssl=False
+    )
+    if probe_models is None:
+        # SSL was not the issue; return original result
+        return models, needs_auth, True
+
+    # SSL is preventing connection — ask the user explicitly
+    disable_ssl = await rich_confirm(
+        "SSL certificate verification failed. "
+        "Disable SSL verification for this endpoint? "
+        "(Only do this for trusted private networks)",
+        default=False,
+    )
+    if not disable_ssl:
+        return models, needs_auth, True
+
+    return probe_models, probe_needs_auth, False
 
 
 def _filter_embedding_models(models: list[str]) -> tuple[list[str], list[str]]:
@@ -1510,7 +1556,7 @@ async def _validate_detected_config(
         elif provider == "openai":
             api_key = config_data.get("api_key")
             base_url = config_data.get("base_url")
-            model = config_data.get("model", "text-embedding-3-small")
+            model = config_data.get("model", OPENAI_DEFAULT_MODEL)
 
             if not api_key:
                 formatter.error("OpenAI API key not found")
@@ -1605,6 +1651,8 @@ async def _validate_openai_compatible(
 
         if "api_key" in config_data:
             config_kwargs["api_key"] = SecretStr(config_data["api_key"])
+        if config_data.get("verify_ssl") is False:
+            config_kwargs["verify_ssl"] = False
 
         config = EmbeddingConfig(**config_kwargs)
 
@@ -1630,7 +1678,7 @@ async def _ensure_api_key(
     api_key: str | None,
     formatter: RichOutputFormatter,
     already_declined: bool = False,
-) -> str | None:
+) -> tuple[str | None, bool]:
     """
     Ensure we have an API key if needed for the provider.
 
@@ -1642,17 +1690,17 @@ async def _ensure_api_key(
         already_declined: True if user already declined a detected key
 
     Returns:
-        API key string if needed, None if not needed, or None if user cancelled
+        (api_key, verify_ssl) -- verify_ssl=False if user opted to skip SSL.
     """
     provider_info = EmbeddingProviderFactory.get_provider_info(provider_type)
 
     if provider_info["requires_api_key"] is True:
-        # Always require API key
+        # Always require API key; no discovery needed so no SSL negotiation here
         if not api_key:
             api_key = await _prompt_for_api_key(
                 provider_type, formatter, already_declined
             )
-        return api_key
+        return api_key, True
     elif provider_info["requires_api_key"] == "auto":
         # Test connection first, prompt for key if needed
         if not api_key:
@@ -1662,19 +1710,24 @@ async def _ensure_api_key(
                     provider_type, formatter, already_declined
                 )
                 # Return whatever the user enters (could be None if they skip, which is valid for auto providers)
-                return api_key
+                return api_key, True
             else:
-                needs_auth = await _test_needs_auth(base_url, formatter)
+                needs_auth, verify_ssl = await _probe_endpoint(base_url, formatter)
                 if needs_auth:
                     api_key = await _prompt_for_api_key(
                         provider_type, formatter, already_declined
                     )
                     # For openai_compatible, API key is optional - allow empty
                     if not api_key and provider_type != "openai_compatible":
-                        return None
-        return api_key
+                        return None, verify_ssl
+                return api_key, verify_ssl
+        elif base_url:
+            # api_key already set — still probe for SSL issues on custom HTTPS endpoints
+            _, verify_ssl = await _probe_endpoint(base_url, formatter)
+            return api_key, verify_ssl
+        return api_key, True
 
-    return api_key
+    return api_key, True
 
 
 async def _prompt_for_api_key(
@@ -1768,24 +1821,30 @@ async def _prompt_for_api_key(
     return None
 
 
-async def _test_needs_auth(
+async def _probe_endpoint(
     base_url: str | None, formatter: RichOutputFormatter
-) -> bool:
-    """Test if the endpoint needs authentication by making a request without API key."""
+) -> tuple[bool, bool]:
+    """Probe endpoint for auth requirements and SSL certificate issues.
+
+    Returns:
+        (needs_auth, verify_ssl) -- verify_ssl=False if user opted to skip SSL.
+    """
     if not base_url:
-        return False
+        return False, True
 
     try:
         formatter.safe_progress_indicator(
             "Testing endpoint authentication requirements..."
         )
 
-        # Try to fetch models without API key
-        models, needs_auth = await _fetch_available_models(base_url, None)
-        return needs_auth
+        # Probe without API key; may prompt about SSL if cert is self-signed
+        _, needs_auth, verify_ssl = await _fetch_models_with_ssl_fallback(
+            base_url, api_key=None
+        )
+        return needs_auth, verify_ssl
     except Exception:
         # If we can't test, assume auth is needed to be safe
-        return True
+        return True, True
 
 
 async def _select_model_unified(
@@ -1794,6 +1853,7 @@ async def _select_model_unified(
     api_key: str | None,
     formatter: RichOutputFormatter,
     model_type: str = "embedding",  # "embedding" or "reranking"
+    verify_ssl: bool = True,
 ) -> tuple[str | None, str | None]:
     """
     Select model - either from API discovery or defaults.
@@ -1804,6 +1864,7 @@ async def _select_model_unified(
         api_key: API key for authentication
         formatter: Output formatter
         model_type: Type of model to select ("embedding" or "reranking")
+        verify_ssl: Whether to verify SSL certificates
 
     Returns:
         Tuple of (selected_model, api_key_used)
@@ -1813,7 +1874,9 @@ async def _select_model_unified(
     # Try dynamic discovery for openai_compatible
     if provider_info["supports_model_listing"] and base_url:
         formatter.safe_progress_indicator("Detecting available models...")
-        models, needs_auth = await _fetch_available_models(base_url, api_key)
+        models, needs_auth = await _fetch_available_models(
+            base_url, api_key, verify_ssl
+        )
 
         # If we still need auth, the API key resolution in _configure_provider_unified failed
         # In this case, we should not try to prompt again - just proceed without dynamic discovery
@@ -1901,7 +1964,8 @@ async def _configure_provider_unified(
         formatter.section_header(f"{provider_info['display_name']} Configuration")
 
     # Step 1: Handle API key - ensure we have credentials before model discovery
-    api_key = await _ensure_api_key(
+    # Also captures verify_ssl state in case the endpoint needs SSL opt-out
+    api_key, verify_ssl = await _ensure_api_key(
         provider_type, base_url, api_key, formatter, already_declined_key
     )
     if not api_key and provider_info["requires_api_key"] is True:
@@ -1909,7 +1973,8 @@ async def _configure_provider_unified(
 
     # Step 2: Select embedding model
     model, used_api_key = await _select_model_unified(
-        provider_type, base_url, api_key, formatter, model_type="embedding"
+        provider_type, base_url, api_key, formatter, model_type="embedding",
+        verify_ssl=verify_ssl,
     )
     if not model:
         return None
@@ -1922,11 +1987,12 @@ async def _configure_provider_unified(
     rerank_model = None
     if provider_info["supports_reranking"]:
         rerank_model, _ = await _select_model_unified(
-            provider_type, base_url, api_key, formatter, model_type="reranking"
+            provider_type, base_url, api_key, formatter, model_type="reranking",
+            verify_ssl=verify_ssl,
         )
 
     # Step 4: Build configuration
-    config_data = {
+    config_data: dict[str, Any] = {
         "provider": "openai" if provider_type == "openai_compatible" else provider_type,
         "model": model,
     }
@@ -1937,6 +2003,8 @@ async def _configure_provider_unified(
         config_data["api_key"] = api_key
     if rerank_model:
         config_data["rerank_model"] = rerank_model
+    if not verify_ssl:
+        config_data["verify_ssl"] = False
 
     # Step 5: Validate configuration
     if await _validate_provider_config(config_data, formatter):
@@ -1962,7 +2030,7 @@ async def _validate_provider_config(
     elif provider == "openai":
         api_key = config_data.get("api_key")
         base_url = config_data.get("base_url")
-        model = config_data.get("model", "text-embedding-3-small")
+        model = config_data.get("model", OPENAI_DEFAULT_MODEL)
 
         # Only require API key for official OpenAI endpoints
         if is_official_openai_endpoint(base_url):
