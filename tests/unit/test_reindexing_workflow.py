@@ -173,14 +173,12 @@ def test_process_directory_returns_deterministic_error_when_orphan_cleanup_fails
         )
     )
 
-    assert result == {
-        "status": "error",
-        "error": (
-            "Storage reconciliation cleanup failed: "
-            "orphan/excluded cleanup delete failed for orphan.py: "
-            "hnsw delete exploded"
-        ),
-    }
+    assert result["status"] == "error"
+    error = result["error"]
+    assert "Storage reconciliation cleanup failed:" in error
+    assert "orphan/excluded cleanup delete failed for orphan.py" in error
+    assert "reason=missing_on_disk" in error
+    assert "hnsw delete exploded" in error
 
 
 def test_orphan_cleanup_restores_rows_when_hnsw_index_recreation_fails(
@@ -257,14 +255,12 @@ def test_orphan_cleanup_restores_rows_when_hnsw_index_recreation_fails(
         )
     )
 
-    assert failed_result == {
-        "status": "error",
-        "error": (
-            "Storage reconciliation cleanup failed: "
-            "orphan/excluded cleanup delete failed for orphan.py: "
-            "forced hnsw recreate failure"
-        ),
-    }
+    assert failed_result["status"] == "error"
+    error = failed_result["error"]
+    assert "Storage reconciliation cleanup failed:" in error
+    assert "orphan/excluded cleanup delete failed for orphan.py" in error
+    assert "reason=missing_on_disk" in error
+    assert "forced hnsw recreate failure" in error
     assert recreate_attempts["count"] >= 2
     assert provider.get_file_by_path("orphan.py", as_model=False) is not None
     assert provider.get_chunks_by_file_id(orphan_file_id, as_model=False) != []
@@ -336,14 +332,14 @@ def test_process_directory_fails_closed_when_orphan_cleanup_delete_returns_false
         )
     )
 
-    assert result == {
-        "status": "error",
-        "error": (
-            "Storage reconciliation cleanup failed: "
-            "orphan/excluded cleanup delete returned false for "
-            "excluded/still_here.py"
-        ),
-    }
+    assert result["status"] == "error"
+    error = result["error"]
+    assert "Storage reconciliation cleanup failed:" in error
+    assert (
+        "orphan/excluded cleanup delete returned false for "
+        "excluded/still_here.py"
+    ) in error
+    assert "reason=excluded_by_current_policy" in error
 
 
 def test_process_directory_drops_nonstandard_hnsw_indexes_for_excluded_existing_files(
