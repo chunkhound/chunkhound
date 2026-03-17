@@ -175,7 +175,11 @@ def test_process_directory_returns_deterministic_error_when_orphan_cleanup_fails
 
     assert result == {
         "status": "error",
-        "error": "Storage reconciliation cleanup failed: hnsw delete exploded",
+        "error": (
+            "Storage reconciliation cleanup failed: "
+            "orphan/excluded cleanup delete failed for orphan.py: "
+            "hnsw delete exploded"
+        ),
     }
 
 
@@ -255,7 +259,11 @@ def test_orphan_cleanup_restores_rows_when_hnsw_index_recreation_fails(
 
     assert failed_result == {
         "status": "error",
-        "error": "Storage reconciliation cleanup failed: forced hnsw recreate failure",
+        "error": (
+            "Storage reconciliation cleanup failed: "
+            "orphan/excluded cleanup delete failed for orphan.py: "
+            "forced hnsw recreate failure"
+        ),
     }
     assert recreate_attempts["count"] >= 2
     assert provider.get_file_by_path("orphan.py", as_model=False) is not None
@@ -287,6 +295,276 @@ def test_orphan_cleanup_restores_rows_when_hnsw_index_recreation_fails(
     )
     assert successful_result["status"] == "success"
     assert provider.get_file_by_path("orphan.py", as_model=False) is None
+
+
+def test_process_directory_fails_closed_when_orphan_cleanup_delete_returns_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import asyncio
+
+    provider = DuckDBProvider(db_path=tmp_path / "db.duckdb", base_directory=tmp_path)
+    provider.connect()
+
+    current_file = tmp_path / "current.py"
+    current_file.write_text("def current():\n    return 1\n")
+
+    excluded_dir = tmp_path / "excluded"
+    excluded_dir.mkdir()
+    excluded_file = excluded_dir / "still_here.py"
+    excluded_file.write_text("def excluded():\n    return 2\n")
+
+    provider.insert_file(
+        File(
+            path="excluded/still_here.py",
+            mtime=1.0,
+            size_bytes=28,
+            language=Language.PYTHON,
+        )
+    )
+
+    coordinator = IndexingCoordinator(provider, tmp_path)
+
+    async def _skip_processing(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(coordinator, "_process_files_in_batches", _skip_processing)
+    monkeypatch.setattr(provider, "delete_file_completely", lambda file_path: False)
+
+    result = asyncio.run(
+        coordinator.process_directory(
+            tmp_path, patterns=["**/*.py"], exclude_patterns=["**/excluded/**"]
+        )
+    )
+
+    assert result == {
+        "status": "error",
+        "error": (
+            "Storage reconciliation cleanup failed: "
+            "orphan/excluded cleanup delete returned false for "
+            "excluded/still_here.py"
+        ),
+    }
+
+
+def test_process_directory_drops_nonstandard_hnsw_indexes_for_excluded_existing_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import asyncio
+
+    pytest.importorskip("duckdb")
+
+    provider = DuckDBProvider(db_path=tmp_path / "db.duckdb", base_directory=tmp_path)
+    provider.connect()
+
+    current_file = tmp_path / "current.py"
+    current_file.write_text("def current():\n    return 1\n")
+
+    excluded_dir = tmp_path / "excluded"
+    excluded_dir.mkdir()
+    excluded_file = excluded_dir / "still_here.py"
+    excluded_file.write_text("def excluded():\n    return 2\n")
+
+    excluded_file_id = provider.insert_file(
+        File(
+            path="excluded/still_here.py",
+            mtime=1.0,
+            size_bytes=28,
+            language=Language.PYTHON,
+        )
+    )
+    excluded_chunk_id = provider.insert_chunk(
+        Chunk(
+            file_id=FileId(excluded_file_id),
+            symbol="excluded",
+            start_line=LineNumber(1),
+            end_line=LineNumber(2),
+            code="def excluded():\n    return 2\n",
+            chunk_type=ChunkType.FUNCTION,
+            language=Language.PYTHON,
+        )
+    )
+    provider.insert_embedding(
+        Embedding(
+            chunk_id=excluded_chunk_id,
+            provider="test",
+            model="mini",
+            dims=3,
+            vector=[0.1, 0.2, 0.3],
+        )
+    )
+
+    provider.execute_query("DROP INDEX IF EXISTS idx_hnsw_3", [])
+    provider.execute_query(
+        "CREATE INDEX alt_live_idx ON embeddings_3 USING HNSW (embedding)", []
+    )
+
+    initial_indexes = provider.execute_query(
+        """
+        SELECT index_name
+        FROM duckdb_indexes()
+        WHERE table_name = 'embeddings_3'
+        ORDER BY index_name
+        """,
+        [],
+    )
+    assert [row["index_name"] for row in initial_indexes] == [
+        "alt_live_idx",
+        "idx_3_chunk_id",
+        "idx_3_provider_model",
+    ]
+
+    dropped_indexes: list[str] = []
+    original_drop = provider._executor_drop_vector_index_by_name
+
+    def _record_drop(conn, index_name: str) -> None:
+        dropped_indexes.append(index_name)
+        original_drop(conn, index_name)
+
+    monkeypatch.setattr(provider, "_executor_drop_vector_index_by_name", _record_drop)
+
+    coordinator = IndexingCoordinator(provider, tmp_path)
+
+    async def _skip_processing(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(coordinator, "_process_files_in_batches", _skip_processing)
+
+    result = asyncio.run(
+        coordinator.process_directory(
+            tmp_path, patterns=["**/*.py"], exclude_patterns=["**/excluded/**"]
+        )
+    )
+
+    assert result["status"] == "success"
+    assert "alt_live_idx" in dropped_indexes
+    assert provider.get_file_by_path("excluded/still_here.py", as_model=False) is None
+
+    remaining_indexes = provider.execute_query(
+        """
+        SELECT index_name
+        FROM duckdb_indexes()
+        WHERE table_name = 'embeddings_3'
+        ORDER BY index_name
+        """,
+        [],
+    )
+    assert [row["index_name"] for row in remaining_indexes] == [
+        row["index_name"] for row in initial_indexes
+    ]
+
+    followup_file_id = provider.insert_file(
+        File(path="followup.py", mtime=2.0, size_bytes=27, language=Language.PYTHON)
+    )
+    followup_chunk_id = provider.insert_chunk(
+        Chunk(
+            file_id=FileId(followup_file_id),
+            symbol="followup",
+            start_line=LineNumber(1),
+            end_line=LineNumber(2),
+            code="def followup():\n    return 3\n",
+            chunk_type=ChunkType.FUNCTION,
+            language=Language.PYTHON,
+        )
+    )
+    provider.insert_embedding(
+        Embedding(
+            chunk_id=followup_chunk_id,
+            provider="test",
+            model="mini",
+            dims=3,
+            vector=[0.4, 0.5, 0.6],
+        )
+    )
+
+    followup_embeddings = provider.execute_query(
+        "SELECT COUNT(*) AS count FROM embeddings_3 WHERE chunk_id = ?",
+        [followup_chunk_id],
+    )
+    assert followup_embeddings[0]["count"] == 1
+
+
+def test_large_batch_insert_preserves_custom_hnsw_index_identity(tmp_path: Path):
+    pytest.importorskip("duckdb")
+
+    provider = DuckDBProvider(db_path=tmp_path / "db.duckdb", base_directory=tmp_path)
+    provider.connect()
+
+    file_id = provider.insert_file(
+        File(path="batch.py", mtime=1.0, size_bytes=4096, language=Language.PYTHON)
+    )
+
+    chunk_ids = []
+    for i in range(60):
+        chunk_id = provider.insert_chunk(
+            Chunk(
+                file_id=FileId(file_id),
+                symbol=f"batch_{i}",
+                start_line=LineNumber(i + 1),
+                end_line=LineNumber(i + 1),
+                code=f"def batch_{i}(): return {i}",
+                chunk_type=ChunkType.FUNCTION,
+                language=Language.PYTHON,
+            )
+        )
+        chunk_ids.append(chunk_id)
+
+    provider.create_vector_index("test", "mini", 3, "cosine")
+
+    initial_indexes = provider.execute_query(
+        """
+        SELECT index_name
+        FROM duckdb_indexes()
+        WHERE table_name = 'embeddings_3'
+        ORDER BY index_name
+        """,
+        [],
+    )
+    assert [row["index_name"] for row in initial_indexes] == [
+        "hnsw_test_mini_3_cosine",
+        "idx_3_chunk_id",
+        "idx_3_provider_model",
+        "idx_hnsw_3",
+    ]
+
+    embeddings_data = [
+        {
+            "chunk_id": chunk_id,
+            "provider": "test",
+            "model": "mini",
+            "embedding": [float(i), float(i + 1), float(i + 2)],
+            "dims": 3,
+        }
+        for i, chunk_id in enumerate(chunk_ids)
+    ]
+
+    inserted = provider._embedding_repository.insert_embeddings_batch(
+        embeddings_data,
+        batch_size=50,
+        connection=provider.connection,
+    )
+    assert inserted == len(embeddings_data)
+
+    remaining_indexes = provider.execute_query(
+        """
+        SELECT index_name
+        FROM duckdb_indexes()
+        WHERE table_name = 'embeddings_3'
+        ORDER BY index_name
+        """,
+        [],
+    )
+    assert [row["index_name"] for row in remaining_indexes] == [
+        row["index_name"] for row in initial_indexes
+    ]
+    assert "hnsw_generic_generic_3_cosine" not in {
+        row["index_name"] for row in remaining_indexes
+    }
+
+    embedding_count = provider.execute_query(
+        "SELECT COUNT(*) AS count FROM embeddings_3",
+        [],
+    )
+    assert embedding_count[0]["count"] == len(embeddings_data)
 
 
 class TestChunkPreservationLogic:

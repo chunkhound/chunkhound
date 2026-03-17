@@ -851,6 +851,50 @@ class DuckDBProvider(SerialDatabaseProvider):
             logger.error(f"Failed to drop HNSW indexes: {e}")
             raise
 
+    def _quote_duckdb_identifier(self, identifier: str) -> str:
+        """Quote an identifier for DuckDB SQL."""
+        return f'"{identifier.replace(chr(34), chr(34) * 2)}"'
+
+    def _is_hnsw_index_definition(
+        self, index_name: str, create_sql: str | None
+    ) -> bool:
+        """Return True when duckdb_indexes() describes an HNSW index."""
+        if create_sql and "USING HNSW" in create_sql.upper():
+            return True
+        return index_name.startswith("hnsw_") or index_name.startswith("idx_hnsw_")
+
+    def _extract_hnsw_metric(self, create_sql: str | None) -> str:
+        """Best-effort metric extraction from a DuckDB HNSW CREATE INDEX statement."""
+        if not create_sql:
+            return "cosine"
+
+        match = re.search(r"metric\s*=\s*'([^']+)'", create_sql, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+        return "cosine"
+
+    def _extract_custom_hnsw_identity(
+        self, index_name: str
+    ) -> tuple[str | None, str | None]:
+        """Best-effort provider/model extraction from custom HNSW index names."""
+        if not index_name.startswith("hnsw_"):
+            return None, None
+
+        parts = index_name[5:].split("_")  # Remove 'hnsw_' prefix
+        if len(parts) < 4:
+            return None, None
+
+        provider_model = "_".join(parts[:-2])
+        last_underscore = provider_model.rfind("_")
+        if last_underscore > 0:
+            return (
+                provider_model[:last_underscore],
+                provider_model[last_underscore + 1 :],
+            )
+        if provider_model:
+            return provider_model, ""
+        return None, None
+
     def get_existing_vector_indexes(self) -> list[dict[str, Any]]:
         """Get list of existing HNSW vector indexes on all embedding tables."""
         return self._execute_in_db_thread_sync("get_existing_vector_indexes")
@@ -860,76 +904,47 @@ class DuckDBProvider(SerialDatabaseProvider):
     ) -> list[dict[str, Any]]:
         """Executor method for get_existing_vector_indexes - runs in DB thread."""
         try:
-            # Query DuckDB system tables for indexes on all embedding tables
-            # Look for both legacy 'hnsw_' and standard 'idx_hnsw_' index patterns
             results = conn.execute("""
-                SELECT index_name, table_name
+                SELECT index_name, table_name, sql
                 FROM duckdb_indexes()
                 WHERE table_name LIKE 'embeddings_%'
-                AND (index_name LIKE 'hnsw_%' OR index_name LIKE 'idx_hnsw_%')
             """).fetchall()
 
             indexes = []
             for result in results:
                 index_name = result[0]
                 table_name = result[1]
+                create_sql = result[2]
+                if not self._is_hnsw_index_definition(index_name, create_sql):
+                    continue
 
-                # Handle different index naming patterns
+                try:
+                    dims = int(table_name[11:])  # Remove 'embeddings_' prefix
+                except ValueError:
+                    logger.warning(
+                        f"Could not parse dims from HNSW index {index_name} on {table_name}"
+                    )
+                    continue
+
+                provider: str | None = None
+                model: str | None = None
                 if index_name.startswith("hnsw_"):
-                    # Parse custom index name: hnsw_{provider}_{model}_{dims}_{metric}
-                    parts = index_name[5:].split("_")  # Remove 'hnsw_' prefix
-                    if len(parts) >= 4:
-                        # Reconstruct provider/model from parts (they may contain underscores)
-                        metric = parts[-1]
-                        dims_str = parts[-2]
-                        try:
-                            dims = int(dims_str)
-                            # Join remaining parts as provider_model, then split on last underscore
-                            provider_model = "_".join(parts[:-2])
-                            # Find last underscore to separate provider and model
-                            last_underscore = provider_model.rfind("_")
-                            if last_underscore > 0:
-                                provider = provider_model[:last_underscore]
-                                model = provider_model[last_underscore + 1 :]
-                            else:
-                                provider = provider_model
-                                model = ""
-
-                            indexes.append(
-                                {
-                                    "index_name": index_name,
-                                    "table_name": table_name,
-                                    "provider": provider,
-                                    "model": model,
-                                    "dims": dims,
-                                    "metric": metric,
-                                }
-                            )
-                        except ValueError:
-                            logger.warning(
-                                f"Could not parse dims from custom index name: {index_name}"
-                            )
-
+                    provider, model = self._extract_custom_hnsw_identity(index_name)
                 elif index_name.startswith("idx_hnsw_"):
-                    # Parse standard index name: idx_hnsw_{dims}
-                    # Extract dims from table name: embeddings_{dims}
-                    try:
-                        if table_name.startswith("embeddings_"):
-                            dims = int(table_name[11:])  # Remove 'embeddings_' prefix
-                            indexes.append(
-                                {
-                                    "index_name": index_name,
-                                    "table_name": table_name,
-                                    "provider": "generic",  # Standard index doesn't specify provider
-                                    "model": "generic",  # Standard index doesn't specify model
-                                    "dims": dims,
-                                    "metric": "cosine",  # Default metric for standard indexes
-                                }
-                            )
-                    except ValueError:
-                        logger.warning(
-                            f"Could not parse dims from standard index: {index_name} on {table_name}"
-                        )
+                    provider = "generic"
+                    model = "generic"
+
+                indexes.append(
+                    {
+                        "index_name": index_name,
+                        "table_name": table_name,
+                        "provider": provider,
+                        "model": model,
+                        "dims": dims,
+                        "metric": self._extract_hnsw_metric(create_sql),
+                        "create_sql": create_sql,
+                    }
+                )
 
             return indexes
 
@@ -939,17 +954,24 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     def _executor_drop_vector_index_by_name(self, conn: Any, index_name: str) -> None:
         """Drop a specific HNSW index by its current name."""
-        conn.execute(f"DROP INDEX IF EXISTS {index_name}")
+        conn.execute(
+            f"DROP INDEX IF EXISTS {self._quote_duckdb_identifier(index_name)}"
+        )
 
     def _executor_recreate_vector_index_from_info(
         self, conn: Any, state: dict[str, Any], index_info: dict[str, Any]
     ) -> None:
         """Recreate one previously discovered HNSW index with its original name."""
         table_name = index_info["table_name"]
-        index_name = index_info["index_name"]
-        metric = index_info.get("metric", "cosine")
         dims = int(index_info["dims"])
         self._executor_ensure_embedding_table_exists(conn, state, dims)
+        create_sql = index_info.get("create_sql")
+        if create_sql:
+            conn.execute(create_sql)
+            return
+
+        index_name = index_info["index_name"]
+        metric = index_info.get("metric", "cosine")
         conn.execute(f"""
             CREATE INDEX {index_name} ON {table_name}
             USING HNSW (embedding)

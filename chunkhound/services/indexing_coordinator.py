@@ -2875,10 +2875,23 @@ class IndexingCoordinator(BaseService):
                     )
 
                 for file_path in orphaned_files:
-                    if self._db.delete_file_completely(file_path):
-                        orphaned_count += 1
-                        # Clean up the file lock for orphaned file
-                        self._cleanup_file_lock(Path(file_path))
+                    try:
+                        deleted = self._db.delete_file_completely(file_path)
+                    except Exception as e:
+                        raise RuntimeError(
+                            "orphan/excluded cleanup delete failed "
+                            f"for {file_path}: {e}"
+                        ) from e
+
+                    if not deleted:
+                        raise RuntimeError(
+                            "orphan/excluded cleanup delete returned false "
+                            f"for {file_path}"
+                        )
+
+                    orphaned_count += 1
+                    # Clean up the file lock for orphaned file
+                    self._cleanup_file_lock(Path(file_path))
 
                     if cleanup_task is not None and self.progress:
                         self.progress.advance(cleanup_task, 1)
@@ -2894,6 +2907,8 @@ class IndexingCoordinator(BaseService):
             return orphaned_count
 
         except Exception as e:
-            message = f"Storage reconciliation cleanup failed: {e}"
+            message = str(e)
+            if not message.startswith("Storage reconciliation cleanup failed:"):
+                message = f"Storage reconciliation cleanup failed: {message}"
             logger.error(message)
             raise RuntimeError(message) from e
