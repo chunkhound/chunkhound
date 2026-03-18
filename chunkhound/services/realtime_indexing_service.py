@@ -16,8 +16,9 @@ import copy
 import gc
 import threading
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
@@ -342,6 +343,18 @@ class RealtimeMutation:
     first_queued_at: str
     retry_count: int = 0
     source_generation: int | None = None
+
+
+@dataclass(slots=True)
+class HotPathPressure:
+    """Bounded rolling event-pressure accounting for one logical path."""
+
+    event_timestamps: deque[float] = field(default_factory=deque)
+    coalesced_timestamps: deque[float] = field(default_factory=deque)
+    last_scope: str | None = None
+    last_event_type: str | None = None
+    last_observed_at: str | None = None
+    last_observed_monotonic: float = 0.0
 
 
 class SimpleEventHandler(FileSystemEventHandler):
@@ -1516,6 +1529,12 @@ class RealtimeIndexingService:
     _EVENT_QUEUE_MAXSIZE = 1000
     _RESYNC_DEBOUNCE_SECONDS = 1.0
     _STALL_THRESHOLD_SECONDS = 30.0
+    _EVENT_PRESSURE_WINDOW_SECONDS = 30.0
+    _EVENT_PRESSURE_MAX_TRACKED_PATHS = 64
+    _EVENT_PRESSURE_ELEVATED_EVENTS = 20
+    _EVENT_PRESSURE_OVERLOADED_EVENTS = 100
+    _EVENT_PRESSURE_ELEVATED_COALESCED_UPDATES = 5
+    _EVENT_PRESSURE_OVERLOADED_COALESCED_UPDATES = 20
     _WATCHDOG_SETUP_TIMEOUT_SECONDS = 5.0
     _MONITORING_READY_TIMEOUT_SECONDS = 10.0
     _POLLING_STARTUP_SETTLE_SECONDS = 0.5
@@ -1625,6 +1644,7 @@ class RealtimeIndexingService:
         self._translation_error_count = 0
         self._processing_error_count = 0
         self._active_processing_count = 0
+        self._event_pressure_by_path: dict[str, HotPathPressure] = {}
 
         # Background scan state
         self.scan_iterator: Iterator | None = None
@@ -1697,6 +1717,19 @@ class RealtimeIndexingService:
             "translation_error_count": 0,
             "processing_error_count": 0,
             "stall_threshold_seconds": cls._STALL_THRESHOLD_SECONDS,
+        }
+
+    @classmethod
+    def _default_event_pressure_snapshot(cls) -> dict[str, Any]:
+        return {
+            "state": "idle",
+            "sample_path": None,
+            "sample_scope": None,
+            "sample_event_type": None,
+            "events_in_window": 0,
+            "coalesced_updates": 0,
+            "window_seconds": cls._EVENT_PRESSURE_WINDOW_SECONDS,
+            "last_observed_at": None,
         }
 
     @classmethod
@@ -1809,6 +1842,7 @@ class RealtimeIndexingService:
                 "last_files_checked": 0,
                 "last_snapshot_truncated": False,
             },
+            "event_pressure": cls._default_event_pressure_snapshot(),
             "pipeline": cls._default_pipeline_snapshot(),
             "startup": RealtimeStartupStatusTracker.default_snapshot(startup_mode),
         }
@@ -2050,6 +2084,7 @@ class RealtimeIndexingService:
                 "last_snapshot_truncated": self._last_poll_snapshot_truncated,
             }
         )
+        status["event_pressure"].update(self._build_event_pressure_snapshot())
         pipeline = self._build_pipeline_snapshot()
         status["pipeline"].update(pipeline)
         status["startup"] = self._startup_tracker.snapshot()
@@ -2124,6 +2159,152 @@ class RealtimeIndexingService:
         )
         snapshot["oldest_pending_path"] = str(oldest_mutation.path)
         snapshot["oldest_pending_retry_count"] = oldest_mutation.retry_count
+        return snapshot
+
+    def _prune_event_pressure_entry(
+        self, entry: HotPathPressure, *, now_monotonic: float
+    ) -> tuple[int, int]:
+        cutoff = now_monotonic - self._EVENT_PRESSURE_WINDOW_SECONDS
+        while entry.event_timestamps and entry.event_timestamps[0] < cutoff:
+            entry.event_timestamps.popleft()
+        while (
+            entry.coalesced_timestamps
+            and entry.coalesced_timestamps[0] < cutoff
+        ):
+            entry.coalesced_timestamps.popleft()
+        return len(entry.event_timestamps), len(entry.coalesced_timestamps)
+
+    def _trim_event_pressure_state(self, *, now_monotonic: float) -> None:
+        removable_paths: list[str] = []
+        ranked_paths: list[tuple[int, int, float, str]] = []
+
+        for path, entry in self._event_pressure_by_path.items():
+            events_in_window, coalesced_updates = self._prune_event_pressure_entry(
+                entry,
+                now_monotonic=now_monotonic,
+            )
+            if events_in_window == 0 and coalesced_updates == 0:
+                removable_paths.append(path)
+                continue
+            ranked_paths.append(
+                (
+                    events_in_window,
+                    coalesced_updates,
+                    entry.last_observed_monotonic,
+                    path,
+                )
+            )
+
+        for path in removable_paths:
+            self._event_pressure_by_path.pop(path, None)
+
+        if len(self._event_pressure_by_path) <= self._EVENT_PRESSURE_MAX_TRACKED_PATHS:
+            return
+
+        ranked_paths.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3]))
+        keep_paths = {
+            path
+            for _, _, _, path in ranked_paths[: self._EVENT_PRESSURE_MAX_TRACKED_PATHS]
+        }
+        self._event_pressure_by_path = {
+            path: entry
+            for path, entry in self._event_pressure_by_path.items()
+            if path in keep_paths
+        }
+
+    def _track_event_pressure(
+        self,
+        file_path: Path | str,
+        *,
+        event_type: str | None = None,
+        scope: str | None = None,
+        count_event: bool = False,
+        count_coalesced: bool = False,
+    ) -> None:
+        normalized_path = str(self._normalize_mutation_path(file_path))
+        now_monotonic = time.monotonic()
+        entry = self._event_pressure_by_path.get(normalized_path)
+        if entry is None:
+            entry = HotPathPressure()
+            self._event_pressure_by_path[normalized_path] = entry
+
+        if count_event:
+            entry.event_timestamps.append(now_monotonic)
+        if count_coalesced:
+            entry.coalesced_timestamps.append(now_monotonic)
+        if scope in {"included", "excluded"}:
+            entry.last_scope = scope
+        if event_type is not None:
+            entry.last_event_type = event_type
+        entry.last_observed_at = self._utc_now()
+        entry.last_observed_monotonic = now_monotonic
+        self._prune_event_pressure_entry(entry, now_monotonic=now_monotonic)
+        self._trim_event_pressure_state(now_monotonic=now_monotonic)
+
+    def _event_pressure_state_for_counts(
+        self, *, events_in_window: int, coalesced_updates: int
+    ) -> str:
+        if (
+            events_in_window >= self._EVENT_PRESSURE_OVERLOADED_EVENTS
+            or coalesced_updates >= self._EVENT_PRESSURE_OVERLOADED_COALESCED_UPDATES
+        ):
+            return "overloaded"
+        if (
+            events_in_window >= self._EVENT_PRESSURE_ELEVATED_EVENTS
+            or coalesced_updates >= self._EVENT_PRESSURE_ELEVATED_COALESCED_UPDATES
+        ):
+            return "elevated"
+        return "idle"
+
+    def _build_event_pressure_snapshot(self) -> dict[str, Any]:
+        snapshot = self._default_event_pressure_snapshot()
+        if not self._event_pressure_by_path:
+            return snapshot
+
+        now_monotonic = time.monotonic()
+        self._trim_event_pressure_state(now_monotonic=now_monotonic)
+        if not self._event_pressure_by_path:
+            return snapshot
+
+        ranked_entries: list[tuple[int, int, float, str, HotPathPressure]] = []
+        for path, entry in self._event_pressure_by_path.items():
+            events_in_window, coalesced_updates = self._prune_event_pressure_entry(
+                entry,
+                now_monotonic=now_monotonic,
+            )
+            if events_in_window == 0 and coalesced_updates == 0:
+                continue
+            ranked_entries.append(
+                (
+                    events_in_window,
+                    coalesced_updates,
+                    entry.last_observed_monotonic,
+                    path,
+                    entry,
+                )
+            )
+
+        if not ranked_entries:
+            return snapshot
+
+        ranked_entries.sort(
+            key=lambda item: (-item[0], -item[1], -item[2], item[3]),
+        )
+        events_in_window, coalesced_updates, _, sample_path, entry = ranked_entries[0]
+        snapshot.update(
+            {
+                "state": self._event_pressure_state_for_counts(
+                    events_in_window=events_in_window,
+                    coalesced_updates=coalesced_updates,
+                ),
+                "sample_path": sample_path,
+                "sample_scope": entry.last_scope,
+                "sample_event_type": entry.last_event_type,
+                "events_in_window": events_in_window,
+                "coalesced_updates": coalesced_updates,
+                "last_observed_at": entry.last_observed_at,
+            }
+        )
         return snapshot
 
     def _build_pipeline_snapshot(self) -> dict[str, Any]:
@@ -2232,31 +2413,51 @@ class RealtimeIndexingService:
             pass
 
     def _record_source_event(self, event_type: str, file_path: Path | str) -> None:
+        normalized_path = str(self._normalize_mutation_path(file_path))
         self._last_source_event_at = self._utc_now()
         self._last_source_event_type = event_type
-        self._last_source_event_path = str(file_path)
+        self._last_source_event_path = normalized_path
+        self._track_event_pressure(
+            normalized_path,
+            event_type=event_type,
+            count_event=True,
+        )
 
     def _record_accepted_event(self, event_type: str, file_path: Path | str) -> None:
         normalized_path = str(self._normalize_mutation_path(file_path))
-        self._next_source_generation += 1
-        self._latest_source_generation_by_path[normalized_path] = (
-            self._next_source_generation
-        )
+        source_generation = self._advance_source_generation(normalized_path)
+        self._refresh_pending_change_generation(normalized_path, source_generation)
         self._last_accepted_event_at = self._utc_now()
         self._last_accepted_event_type = event_type
         self._last_accepted_event_path = normalized_path
+        self._track_event_pressure(
+            normalized_path,
+            event_type=event_type,
+            scope="included",
+        )
         self._emit_status_update()
 
     def _record_filtered_event(self, event_type: str, file_path: Path | str) -> None:
-        del event_type, file_path
         self._filtered_event_count += 1
+        self._track_event_pressure(
+            file_path,
+            event_type=event_type,
+            scope="excluded",
+        )
         self._emit_status_update()
 
     def _record_translation_error(self) -> None:
         self._translation_error_count += 1
 
-    def _record_duplicate_suppression(self) -> None:
+    def _record_duplicate_suppression(
+        self, event_type: str, file_path: Path | str
+    ) -> None:
         self._suppressed_duplicate_count += 1
+        self._track_event_pressure(
+            file_path,
+            event_type=event_type,
+            scope="included",
+        )
         self._emit_status_update()
 
     def _record_processing_started(self, file_path: Path | str) -> None:
@@ -2327,9 +2528,60 @@ class RealtimeIndexingService:
             source_generation=source_generation,
         )
 
+    def _advance_source_generation(self, file_path: Path | str) -> int:
+        normalized_path = str(self._normalize_mutation_path(file_path))
+        self._next_source_generation += 1
+        self._latest_source_generation_by_path[normalized_path] = (
+            self._next_source_generation
+        )
+        return self._next_source_generation
+
     def _current_source_generation(self, file_path: Path | str) -> int | None:
         normalized_path = str(self._normalize_mutation_path(file_path))
         return self._latest_source_generation_by_path.get(normalized_path)
+
+    def _refresh_pending_change_generation(
+        self, file_path: Path | str, source_generation: int | None = None
+    ) -> None:
+        normalized_path = str(self._normalize_mutation_path(file_path))
+        current_generation = source_generation
+        if current_generation is None:
+            current_generation = self._latest_source_generation_by_path.get(
+                normalized_path
+            )
+        if current_generation is None:
+            return
+
+        key = ("change", normalized_path)
+        existing = self._pending_mutations.get(key)
+        if existing is None or existing.source_generation == current_generation:
+            return
+        self._pending_mutations[key] = replace(
+            existing,
+            source_generation=current_generation,
+        )
+
+    def _mark_coalesced_change(
+        self, file_path: Path | str, event_type: str = "modified"
+    ) -> None:
+        self._refresh_pending_change_generation(file_path)
+        self._track_event_pressure(
+            file_path,
+            event_type=event_type,
+            scope="included",
+            count_coalesced=True,
+        )
+
+    def _mutation_for_processing(self, mutation: RealtimeMutation) -> RealtimeMutation:
+        if mutation.operation not in {"change", "scan"}:
+            return mutation
+        current_generation = self._current_source_generation(mutation.path)
+        if (
+            current_generation is None
+            or mutation.source_generation == current_generation
+        ):
+            return mutation
+        return replace(mutation, source_generation=current_generation)
 
     def _delete_mutation_is_stale(self, mutation: RealtimeMutation) -> bool:
         if mutation.source_generation is None:
@@ -2502,6 +2754,24 @@ class RealtimeIndexingService:
         self._emit_status_update()
         return True
 
+    async def _queue_follow_up_change(
+        self,
+        file_path: Path | str,
+        *,
+        source_generation: int,
+        first_queued_at: str | None = None,
+    ) -> bool:
+        follow_up = self._build_mutation(
+            "change",
+            file_path,
+            source_generation=source_generation,
+            first_queued_at=first_queued_at,
+        )
+        if not self._register_pending_mutation(follow_up):
+            self._refresh_pending_change_generation(file_path, source_generation)
+            return False
+        return await self._enqueue_mutation(follow_up, register=False)
+
     @staticmethod
     def _overflow_drop_label(drop_count: int) -> str:
         return "event" if drop_count == 1 else "events"
@@ -2581,6 +2851,11 @@ class RealtimeIndexingService:
             self._event_queue_dropped += 1
             self._event_queue_last_reason = reason
             self._event_queue_last_dropped_at = timestamp
+            self._track_event_pressure(
+                file_path,
+                event_type=event_type,
+                scope="included",
+            )
             if reason == "queue_full":
                 self._record_event_queue_overflow(
                     event_type,
@@ -2838,7 +3113,8 @@ class RealtimeIndexingService:
         for task in self._debounce_tasks.copy():
             task.cancel()
 
-        # Wait for debounce tasks to finish cancelling (done_callbacks discard each task)
+        # Wait for debounce tasks to finish cancelling.
+        # Each task removes itself from the tracking set via its done callback.
         if self._debounce_tasks:
             await asyncio.gather(*self._debounce_tasks, return_exceptions=True)
 
@@ -2861,6 +3137,7 @@ class RealtimeIndexingService:
         self.pending_files.clear()
         self._next_source_generation = 0
         self._latest_source_generation_by_path.clear()
+        self._event_pressure_by_path.clear()
         self.file_queue = asyncio.PriorityQueue()
         self.event_queue = asyncio.Queue(maxsize=self._EVENT_QUEUE_MAXSIZE)
         self._queue_sequence = 0
@@ -3178,6 +3455,9 @@ class RealtimeIndexingService:
                             accepted = await self.add_file(file_path, priority="change")
                             if accepted:
                                 self._record_accepted_event("created", file_path)
+                            else:
+                                self._advance_source_generation(file_path)
+                                self._refresh_pending_change_generation(file_path)
                         elif known_files[file_path] != current_fingerprint:
                             logger.debug(f"Polling detected modified file: {file_path}")
                             self._debug(f"polling detected modified file: {file_path}")
@@ -3185,6 +3465,9 @@ class RealtimeIndexingService:
                             accepted = await self.add_file(file_path, priority="change")
                             if accepted:
                                 self._record_accepted_event("modified", file_path)
+                            else:
+                                self._advance_source_generation(file_path)
+                                self._refresh_pending_change_generation(file_path)
 
                     # Check for deleted files.
                     deleted = set(known_files.keys()) - set(current_files.keys())
@@ -3228,12 +3511,23 @@ class RealtimeIndexingService:
     async def add_file(self, file_path: Path, priority: str = "change") -> bool:
         """Add file to the realtime pipeline and report whether work was admitted."""
         operation, debounced = self._normalize_add_priority(priority)
-        mutation = self._build_mutation(operation, file_path)
+        source_generation = (
+            self._current_source_generation(file_path)
+            if operation == "change"
+            else None
+        )
+        mutation = self._build_mutation(
+            operation,
+            file_path,
+            source_generation=source_generation,
+        )
         if debounced:
             file_str = str(mutation.path)
             if file_str in self._pending_debounce:
                 # Keep the already-pending debounce horizon fresh.
                 self._pending_debounce[file_str] = time.monotonic()
+                self._mark_coalesced_change(mutation.path)
+                self._emit_status_update()
                 return False
 
         if not self._register_pending_mutation(mutation):
@@ -3242,6 +3536,8 @@ class RealtimeIndexingService:
                 if file_str in self._pending_debounce:
                     # Keep the already-pending debounce horizon fresh.
                     self._pending_debounce[file_str] = time.monotonic()
+                self._mark_coalesced_change(mutation.path)
+                self._emit_status_update()
             return False
 
         # Simple debouncing for change events
@@ -3299,11 +3595,15 @@ class RealtimeIndexingService:
             raise
 
         del self._pending_debounce[file_str]
-        if not await self._enqueue_mutation(mutation, register=False):
-            self._release_pending_mutation(mutation)
+        current_mutation = self._pending_mutations.get(
+            self._pending_mutation_key(mutation),
+            mutation,
+        )
+        if not await self._enqueue_mutation(current_mutation, register=False):
+            self._release_pending_mutation(current_mutation)
             return
-        logger.debug(f"Processing debounced file: {mutation.path}")
-        self._debug(f"processing debounced file: {mutation.path}")
+        logger.debug(f"Processing debounced file: {current_mutation.path}")
+        self._debug(f"processing debounced file: {current_mutation.path}")
         return
 
     async def _consume_events(self) -> None:
@@ -3338,7 +3638,7 @@ class RealtimeIndexingService:
                             f"(within {self._EVENT_DEDUP_WINDOW_SECONDS}s window)"
                         )
                         self._debug(f"suppressed duplicate {event_type}: {file_path}")
-                        self._record_duplicate_suppression()
+                        self._record_duplicate_suppression(event_type, file_path)
                         self.event_queue.task_done()
                         continue
 
@@ -3583,6 +3883,7 @@ class RealtimeIndexingService:
                 _, _, mutation = await self.file_queue.get()
                 owned_when_dequeued = self._owns_pending_mutation(mutation)
                 self._release_pending_mutation(mutation)
+                mutation = self._mutation_for_processing(mutation)
 
                 # Fast path for embedding generation without re-parsing the file.
                 if mutation.operation == "embed":
@@ -3642,6 +3943,7 @@ class RealtimeIndexingService:
                 # Use existing indexing coordinator
                 self._record_processing_started(file_path)
                 completed = False
+                follow_up_generation: int | None = None
                 try:
                     result = await self.services.indexing_coordinator.process_file(
                         file_path, skip_embeddings=skip_embeddings
@@ -3678,8 +3980,22 @@ class RealtimeIndexingService:
                     except Exception:
                         pass
                     completed = True
+                    current_generation = self._current_source_generation(file_path)
+                    if (
+                        mutation.operation in {"change", "scan"}
+                        and mutation.source_generation is not None
+                        and current_generation is not None
+                        and current_generation > mutation.source_generation
+                    ):
+                        follow_up_generation = current_generation
                 finally:
                     self._record_processing_finished(file_path, completed=completed)
+
+                if follow_up_generation is not None:
+                    await self._queue_follow_up_change(
+                        file_path,
+                        source_generation=follow_up_generation,
+                    )
 
             except asyncio.CancelledError:
                 logger.debug("Processing loop cancelled")

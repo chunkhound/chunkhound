@@ -597,6 +597,275 @@ class TestRealtimeFunctional:
         assert pending["resync_reason"] is None
 
     @pytest.mark.asyncio
+    async def test_event_pressure_reports_excluded_hot_path_without_queue_admission(
+        self, realtime_setup
+    ):
+        """Excluded noisy paths should stay out of the queue and remain diagnosable."""
+        service, watch_dir, _, _ = realtime_setup
+        noisy_log = watch_dir / "generated" / "steady.log"
+        noisy_log.parent.mkdir(parents=True, exist_ok=True)
+        noisy_log.write_text("steady\n")
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+
+        handler = SimpleEventHandler(
+            service.event_queue,
+            service.config,
+            asyncio.get_running_loop(),
+            root_path=watch_dir,
+            queue_result_callback=service._handle_queue_result,
+            source_event_callback=service._record_source_event,
+            filtered_event_callback=service._record_filtered_event,
+        )
+        event = SimpleNamespace(
+            event_type="modified",
+            is_directory=False,
+            src_path=str(noisy_log),
+        )
+
+        for _ in range(25):
+            handler.on_any_event(event)
+
+        await asyncio.sleep(0)
+        stats = await service.get_health()
+
+        assert service.event_queue.empty()
+        assert stats["event_queue"]["accepted"] == 0
+        assert stats["event_queue"]["dropped"] == 0
+        assert stats["pipeline"]["filtered_event_count"] == 25
+        assert stats["resync"]["request_count"] == 0
+        assert stats["event_pressure"]["state"] == "elevated"
+        assert stats["event_pressure"]["sample_path"] == str(noisy_log.resolve())
+        assert stats["event_pressure"]["sample_scope"] == "excluded"
+        assert stats["event_pressure"]["sample_event_type"] == "modified"
+        assert stats["event_pressure"]["events_in_window"] == 25
+        assert stats["event_pressure"]["coalesced_updates"] == 0
+
+    @pytest.mark.asyncio
+    async def test_hot_file_pending_change_tracks_latest_generation_and_coalescing(
+        self, realtime_setup
+    ):
+        """Repeated writes to one pending file should keep one newest change."""
+        service, watch_dir, _, _ = realtime_setup
+        target_file = watch_dir / "steady_hot.py"
+        target_file.write_text("value = 1\n")
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+
+        admitted: list[bool] = []
+        for version in range(1, 5):
+            target_file.write_text(f"value = {version}\n")
+            service._record_source_event("modified", target_file)
+            service._record_accepted_event("modified", target_file)
+            admitted.append(await service.add_file(target_file, priority="change"))
+
+        pending_key = ("change", str(target_file.resolve()))
+        pending_mutation = service._pending_mutations[pending_key]
+        stats = await service.get_health()
+
+        assert admitted == [True, False, False, False]
+        assert stats["pending_files"] == 1
+        assert stats["pending_mutations"]["total"] == 1
+        assert stats["pending_mutations"]["unique_paths"] == 1
+        assert pending_mutation.source_generation == service._current_source_generation(
+            target_file
+        )
+        assert stats["event_pressure"]["sample_path"] == str(target_file.resolve())
+        assert stats["event_pressure"]["sample_scope"] == "included"
+        assert stats["event_pressure"]["sample_event_type"] == "modified"
+        assert stats["event_pressure"]["events_in_window"] == 4
+        assert stats["event_pressure"]["coalesced_updates"] == 3
+
+        if service._debounce_tasks:
+            await asyncio.wait_for(
+                asyncio.gather(*service._debounce_tasks.copy(), return_exceptions=True),
+                timeout=2.0,
+            )
+        _, _, queued_mutation = await service.file_queue.get()
+        assert queued_mutation.source_generation == service._current_source_generation(
+            target_file
+        )
+
+    @pytest.mark.asyncio
+    async def test_hot_file_continuous_writes_keep_one_latest_follow_up(
+        self,
+        realtime_setup,
+        monkeypatch,
+    ):
+        """Slow in-scope processing should retain only one newest follow-up change."""
+        service, watch_dir, _, _ = realtime_setup
+        target_file = watch_dir / "continuous_hot.py"
+        target_file.write_text("value = 1\n")
+        processed_contents: list[str] = []
+        first_processing_started = asyncio.Event()
+        release_first_processing = asyncio.Event()
+        second_processing_completed = asyncio.Event()
+
+        async def controlled_process_file(
+            file_path: Path, skip_embeddings: bool = False
+        ) -> dict[str, object]:
+            assert file_path == target_file
+            assert skip_embeddings is True
+            processed_contents.append(file_path.read_text())
+            if len(processed_contents) == 1:
+                first_processing_started.set()
+                await release_first_processing.wait()
+            else:
+                second_processing_completed.set()
+            return {"status": "processed", "chunks": 1, "embeddings": 0}
+
+        original_add_file = service.add_file
+
+        async def skip_embed_follow_up(
+            file_path: Path, priority: str = "change"
+        ) -> bool:
+            if priority == "embed":
+                return True
+            return await original_add_file(file_path, priority)
+
+        monkeypatch.setattr(
+            service.services.indexing_coordinator,
+            "process_file",
+            controlled_process_file,
+        )
+        monkeypatch.setattr(service, "add_file", skip_embed_follow_up)
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+
+        service._record_source_event("modified", target_file)
+        service._record_accepted_event("modified", target_file)
+        assert await service.add_file(target_file, priority="change") is True
+        if service._debounce_tasks:
+            await asyncio.wait_for(
+                asyncio.gather(*service._debounce_tasks.copy(), return_exceptions=True),
+                timeout=2.0,
+            )
+
+        process_task = asyncio.create_task(service._process_loop())
+        service.process_task = process_task
+
+        try:
+            await asyncio.wait_for(first_processing_started.wait(), timeout=1.0)
+
+            target_file.write_text("value = 2\n")
+            service._record_source_event("modified", target_file)
+            service._record_accepted_event("modified", target_file)
+            assert await service.add_file(target_file, priority="change") is True
+
+            target_file.write_text("value = 3\n")
+            service._record_source_event("modified", target_file)
+            service._record_accepted_event("modified", target_file)
+            assert await service.add_file(target_file, priority="change") is False
+
+            if service._debounce_tasks:
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        *service._debounce_tasks.copy(),
+                        return_exceptions=True,
+                    ),
+                    timeout=2.0,
+                )
+
+            pending_stats = await service.get_health()
+            assert pending_stats["pending_mutations"]["counts_by_operation"][
+                "change"
+            ] == 1
+            assert pending_stats["event_pressure"]["sample_scope"] == "included"
+            assert pending_stats["event_pressure"]["coalesced_updates"] >= 1
+            assert pending_stats["resync"]["request_count"] == 0
+
+            release_first_processing.set()
+            await asyncio.wait_for(second_processing_completed.wait(), timeout=2.0)
+            final_stats = await _wait_for_realtime_condition(
+                service,
+                lambda snapshot: (
+                    snapshot["pending_files"] == 0
+                    and snapshot["queue_size"] == 0
+                    and snapshot["pending_mutations"]["total"] == 0
+                ),
+            )
+
+            assert processed_contents == ["value = 1\n", "value = 3\n"]
+            assert final_stats["last_error"] is None
+        finally:
+            release_first_processing.set()
+            process_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await process_task
+
+    @pytest.mark.asyncio
+    async def test_event_pressure_interoperates_with_event_queue_overflow(
+        self, realtime_setup
+    ):
+        """Hot-path pressure should remain visible during overflow recovery."""
+        service, watch_dir, _, _ = realtime_setup
+        callback_event = asyncio.Event()
+        noisy_file = watch_dir / "overflow_hot.py"
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+
+        async def resync_callback(
+            reason: str, details: dict[str, object] | None
+        ) -> None:
+            assert reason == "event_queue_overflow"
+            assert details is not None
+            while not service.event_queue.empty():
+                service.event_queue.get_nowait()
+            callback_event.set()
+
+        service._resync_callback = resync_callback
+        service.event_queue = asyncio.Queue(maxsize=1)
+        service.event_queue.put_nowait(("created", watch_dir / "already_full.py"))
+
+        handler = SimpleEventHandler(
+            service.event_queue,
+            service.config,
+            asyncio.get_running_loop(),
+            root_path=watch_dir,
+            queue_result_callback=service._handle_queue_result,
+            source_event_callback=service._record_source_event,
+            filtered_event_callback=service._record_filtered_event,
+        )
+        event = SimpleNamespace(
+            event_type="modified",
+            is_directory=False,
+            src_path=str(noisy_file),
+        )
+
+        for _ in range(25):
+            handler.on_any_event(event)
+
+        pending_stats = await _wait_for_realtime_condition(
+            service,
+            lambda stats: (
+                stats["event_queue"]["overflow"]["state"] == "reconciling"
+                and stats["resync"]["request_count"] == 1
+            ),
+        )
+
+        assert pending_stats["live_indexing_state"] == "degraded"
+        assert pending_stats["event_pressure"]["state"] == "elevated"
+        assert pending_stats["event_pressure"]["sample_path"] == str(
+            noisy_file.resolve()
+        )
+        assert pending_stats["event_pressure"]["sample_scope"] == "included"
+        assert pending_stats["event_pressure"]["events_in_window"] == 25
+
+        await asyncio.wait_for(callback_event.wait(), timeout=5.0)
+
+    @pytest.mark.asyncio
     async def test_delete_mutation_waits_for_inflight_change_processing(
         self, realtime_setup, monkeypatch
     ):

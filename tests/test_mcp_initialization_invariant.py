@@ -325,6 +325,16 @@ class TestNonBlockingInitialization:
                     "processing_error_count": 0,
                     "stall_threshold_seconds": 30.0,
                 }
+                assert realtime["event_pressure"] == {
+                    "state": "idle",
+                    "sample_path": None,
+                    "sample_scope": None,
+                    "sample_event_type": None,
+                    "events_in_window": 0,
+                    "coalesced_updates": 0,
+                    "window_seconds": 30.0,
+                    "last_observed_at": None,
+                }
                 assert realtime["watchman_loss_of_sync"] == {
                     "count": 0,
                     "fresh_instance_count": 0,

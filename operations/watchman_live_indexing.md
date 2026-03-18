@@ -121,6 +121,10 @@ Fields that are useful during diagnosis:
 - `pipeline.filtered_event_count`, `pipeline.suppressed_duplicate_count`,
   `pipeline.translation_error_count`, `pipeline.processing_error_count`: counts
   for common “connected but not converging” failure modes
+- `event_pressure`: bounded hot-path diagnosis for one representative noisy path
+  or subtree, including whether the culprit is `included` or `excluded`, the
+  recent `events_in_window`, and how many same-path updates were collapsed into
+  `coalesced_updates`
 - `watchman_watch_root` and `watchman_relative_root`: the resolved
   `watch-project` mapping
 - `watchman_socket_path`, `watchman_statefile_path`, `watchman_logfile_path`,
@@ -151,6 +155,15 @@ Quick interpretation guide:
   advancing accepted backlog work.
 - `live_indexing_state == "stalled"`: accepted events exist, but downstream
   processing has not advanced for at least 30 seconds.
+- `event_pressure.sample_scope == "excluded"` with rising
+  `event_pressure.events_in_window`: an excluded noisy path is dominating watch
+  traffic, but it is still being filtered before queue admission; adjust your
+  explicit include/exclude config or move that subtree outside the watched root
+  if the noise is expected.
+- `event_pressure.sample_scope == "included"` with rising
+  `event_pressure.coalesced_updates`: one in-scope file is being rewritten
+  continuously; ChunkHound is collapsing same-path follow-up work to the newest
+  generation instead of growing the queue without bound.
 - `status == "degraded"` or `service_state == "degraded"`: inspect
   `last_error`, `watchman_loss_of_sync`, and the daemon/Watchman log files.
 - Top-level `daemon_status.status` remains the coarse readiness summary.

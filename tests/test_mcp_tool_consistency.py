@@ -576,6 +576,72 @@ async def test_daemon_status_tool_exposes_pending_mutation_backlog_details():
 
 
 @pytest.mark.asyncio
+async def test_daemon_status_tool_exposes_hot_path_event_pressure():
+    """Hot-path pressure detail should surface through daemon_status unchanged."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "realtime": {
+            "service_state": "running",
+            "last_error": None,
+            "live_indexing_state": "busy",
+            "live_indexing_hint": "Live indexing is actively processing changes.",
+            "event_pressure": {
+                "state": "elevated",
+                "sample_path": "/repo/generated/build.log",
+                "sample_scope": "excluded",
+                "sample_event_type": "modified",
+                "events_in_window": 42,
+                "coalesced_updates": 0,
+                "window_seconds": 30.0,
+                "last_observed_at": "2026-03-08T00:00:04Z",
+            },
+            "pipeline": {
+                "last_source_event_at": "2026-03-08T00:00:04Z",
+                "last_source_event_type": "modified",
+                "last_source_event_path": "/repo/generated/build.log",
+                "last_accepted_event_at": "2026-03-08T00:00:01Z",
+                "last_accepted_event_type": "modified",
+                "last_accepted_event_path": "/repo/app.py",
+                "last_processing_started_at": "2026-03-08T00:00:03Z",
+                "last_processing_started_path": "/repo/app.py",
+                "last_processing_completed_at": "2026-03-08T00:00:03Z",
+                "last_processing_completed_path": "/repo/app.py",
+                "filtered_event_count": 42,
+                "suppressed_duplicate_count": 0,
+                "translation_error_count": 0,
+                "processing_error_count": 0,
+                "stall_threshold_seconds": 30.0,
+            },
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    realtime = result["scan_progress"]["realtime"]
+    assert result["status"] == "ready"
+    assert result["query_ready"] is True
+    assert realtime["event_pressure"]["state"] == "elevated"
+    assert realtime["event_pressure"]["sample_path"] == "/repo/generated/build.log"
+    assert realtime["event_pressure"]["sample_scope"] == "excluded"
+    assert realtime["event_pressure"]["sample_event_type"] == "modified"
+    assert realtime["event_pressure"]["events_in_window"] == 42
+    assert realtime["event_pressure"]["coalesced_updates"] == 0
+    assert realtime["event_pressure"]["window_seconds"] == 30.0
+
+
+@pytest.mark.asyncio
 async def test_daemon_status_tool_exposes_event_queue_overflow_reconciling_payload():
     """Overflow-burst status should be visible through the public daemon_status tool."""
     from chunkhound.mcp_server.tools import execute_tool
