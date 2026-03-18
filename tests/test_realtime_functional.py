@@ -2380,12 +2380,18 @@ class TestRealtimeFunctional:
 
         # This tests the full pipeline: detection -> processing -> storage
         assert found, "File should be detected and processed by filesystem monitoring"
-        stats = await service.get_health()
+        stats = await _wait_for_realtime_condition(
+            service,
+            lambda current: (
+                current["pipeline"]["last_source_event_at"] is not None
+                and current["pipeline"]["last_accepted_event_at"] is not None
+                and current["pipeline"]["last_processing_started_at"] is not None
+                and current["pipeline"]["last_processing_completed_at"] is not None
+                and current["pipeline"]["last_processing_completed_path"]
+                == str(test_file)
+            ),
+        )
         pipeline = stats["pipeline"]
-        assert pipeline["last_source_event_at"] is not None
-        assert pipeline["last_accepted_event_at"] is not None
-        assert pipeline["last_processing_started_at"] is not None
-        assert pipeline["last_processing_completed_at"] is not None
         assert pipeline["last_processing_completed_path"] == str(test_file)
         assert stats["live_indexing_state"] in {"idle", "busy"}
 
