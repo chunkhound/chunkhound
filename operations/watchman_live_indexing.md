@@ -91,6 +91,20 @@ Healthy Watchman-backed live indexing should normally show:
 
 Fields that are useful during diagnosis:
 
+- `startup.state`, `startup.mode`, `startup.current_phase`,
+  `startup.last_error`: bounded daemon-side bootstrap summary for the current
+  process
+- `startup.phases.*`: per-phase wall-clock timestamps plus monotonic
+  `duration_seconds` for `initialize`, `db_connect`, `realtime_start`,
+  `startup_barrier`, `daemon_publish`, and backend-specific setup such as
+  `watchman_sidecar_start`, `watchman_watch_project`,
+  `watchman_scope_discovery`, or `watchman_subscription_setup`
+- `startup.exposure_ready_at`: in daemon mode, the first point after IPC bind
+  and lock-file publication when a proxy client can connect; this remains
+  `null` in stdio mode
+- `startup.total_duration_seconds`: daemon-side blocking bootstrap budget only;
+  it does not include the deferred initial directory scan that starts after
+  realtime readiness
 - `live_indexing_state` and `live_indexing_hint`: backend-neutral summary of
   whether live indexing is `uninitialized`, `idle`, `busy`, `stalled`, or
   `degraded`
@@ -125,6 +139,10 @@ Quick interpretation guide:
 - `watchman_connection_state == "connected"`: sidecar and session are both up.
 - `watchman_connection_state == "sidecar_only"`: sidecar is alive, but the MCP
   session bridge is not healthy.
+- `startup.state == "running"`: bootstrap is still underway; inspect
+  `startup.current_phase` and `startup.phases.*.duration_seconds`.
+- `startup.state == "failed"`: bootstrap did not reach readiness; inspect
+  `startup.last_error` and the failed `startup.phases.*` entry.
 - `live_indexing_state == "idle"`: monitoring is ready and no backlog is
   pending.
 - `live_indexing_state == "busy"`: ChunkHound is actively processing changes or

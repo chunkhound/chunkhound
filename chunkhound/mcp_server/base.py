@@ -13,6 +13,7 @@ to ensure consistent initialization while respecting protocol-specific constrain
 import asyncio
 import copy
 import os
+import sys
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
@@ -24,7 +25,10 @@ from chunkhound.database_factory import DatabaseServices, create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
-from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from chunkhound.services.realtime_indexing_service import (
+    RealtimeIndexingService,
+    RealtimeStartupStatusTracker,
+)
 
 
 class MCPServerBase(ABC):
@@ -71,6 +75,13 @@ class MCPServerBase(ABC):
         self._scan_lock = asyncio.Lock()
         self._scan_target_path: Path | None = None
         self._startup_failure_message: str | None = None
+        self._startup_publish_complete = asyncio.Event()
+        if self._realtime_startup_mode() != "daemon":
+            self._startup_publish_complete.set()
+        self._startup_tracker = RealtimeStartupStatusTracker(
+            mode=self._realtime_startup_mode(),
+            debug_sink=self._startup_log,
+        )
 
         # Scan progress tracking
         self._scan_complete = False
@@ -80,7 +91,10 @@ class MCPServerBase(ABC):
             "is_scanning": False,
             "scan_started_at": None,
             "scan_completed_at": None,
-            "realtime": RealtimeIndexingService.health_snapshot_for_config(config),
+            "realtime": RealtimeIndexingService.health_snapshot_for_config(
+                config,
+                startup_mode=self._realtime_startup_mode(),
+            ),
         }
 
         # Set MCP mode to suppress stderr output that interferes with JSON-RPC
@@ -102,6 +116,55 @@ class MCPServerBase(ABC):
                 # Silently fail if we can't write to debug file
                 pass
 
+    def _startup_log(self, message: str) -> None:
+        """Emit startup breadcrumbs to debug logs and the daemon stderr log path."""
+        self.debug_log(message)
+        if self._realtime_startup_mode() != "daemon":
+            return
+        try:
+            timestamp = datetime.now().isoformat()
+            sys.stderr.write(f"[{timestamp}] [startup] {message}\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+    def _realtime_startup_mode(self) -> str:
+        """Return the status mode for startup timing surfaces."""
+        return "stdio"
+
+    def _default_realtime_scan_status(self) -> dict[str, Any]:
+        return RealtimeIndexingService.health_snapshot_for_config(
+            self.config,
+            startup_mode=self._realtime_startup_mode(),
+        )
+
+    def _sync_startup_snapshot(self) -> None:
+        realtime = copy.deepcopy(
+            self._scan_progress.get("realtime") or self._default_realtime_scan_status()
+        )
+        realtime["startup"] = self._startup_tracker.snapshot()
+        self._scan_progress["realtime"] = realtime
+
+    def _start_startup_phase(self, phase_name: str) -> None:
+        self._startup_tracker.start_phase(phase_name)
+        self._sync_startup_snapshot()
+
+    def _complete_startup_phase(self, phase_name: str) -> None:
+        self._startup_tracker.complete_phase(phase_name)
+        self._sync_startup_snapshot()
+
+    def _fail_startup(self, message: str, *, phase_name: str | None = None) -> None:
+        self._startup_tracker.fail_startup(message, phase_name=phase_name)
+        self._sync_startup_snapshot()
+
+    def _complete_startup(self) -> None:
+        self._startup_tracker.complete_startup()
+        self._sync_startup_snapshot()
+
+    def _mark_startup_exposure_ready(self) -> None:
+        self._startup_tracker.mark_exposure_ready()
+        self._sync_startup_snapshot()
+
     async def initialize(self) -> None:
         """Initialize services and database connection.
 
@@ -118,80 +181,103 @@ class MCPServerBase(ABC):
 
             self.debug_log("Starting service initialization")
             self._startup_failure_message = None
-
-            # Validate database configuration
-            if not self.config.database or not self.config.database.path:
-                raise ValueError("Database configuration not initialized")
-
-            db_path = Path(self.config.database.path)
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Initialize embedding manager
-            self.embedding_manager = EmbeddingManager()
-
-            # Setup embedding provider (optional - continue if it fails)
-            try:
-                if self.config.embedding:
-                    provider = EmbeddingProviderFactory.create_provider(
-                        self.config.embedding
-                    )
-                    self.embedding_manager.register_provider(provider, set_default=True)
-                    self.debug_log(
-                        "Embedding provider registered: "
-                        f"{self.config.embedding.provider}"
-                    )
-            except ValueError as e:
-                # API key or configuration issue - expected for search-only usage
-                self.debug_log(f"Embedding provider setup skipped: {e}")
-            except Exception as e:
-                # Unexpected error - log but continue
-                self.debug_log(f"Unexpected error setting up embedding provider: {e}")
-
-            # Initialize LLM manager with dual providers
-            # (optional - continue if it fails)
-            try:
-                if self.config.llm:
-                    utility_config, synthesis_config = (
-                        self.config.llm.get_provider_configs()
-                    )
-                    self.llm_manager = LLMManager(utility_config, synthesis_config)
-                    self.debug_log(
-                        f"LLM providers registered: {self.config.llm.provider} "
-                        f"(utility: {utility_config['model']}, "
-                        f"synthesis: {synthesis_config['model']})"
-                    )
-            except ValueError as e:
-                # API key or configuration issue - expected if LLM not needed
-                self.debug_log(f"LLM provider setup skipped: {e}")
-            except Exception as e:
-                # Unexpected error - log but continue
-                self.debug_log(f"Unexpected error setting up LLM provider: {e}")
-
-            # Create services using unified factory (lazy connect for fast init)
-            self.services = create_services(
-                db_path=db_path,
-                config=self.config,
-                embedding_manager=self.embedding_manager,
-            )
-
-            # Determine target path for scanning and watching
-            if self.args and hasattr(self.args, "path"):
-                target_path = Path(self.args.path)
-                self.debug_log(f"Using direct path from args: {target_path}")
+            self._startup_tracker.reset(self._realtime_startup_mode())
+            self._scan_progress["realtime"] = self._default_realtime_scan_status()
+            if self._realtime_startup_mode() == "daemon":
+                self._startup_publish_complete.clear()
             else:
-                # Fallback to config resolution (shouldn't happen in normal usage)
-                target_path = self.config.target_dir or db_path.parent.parent
-                self.debug_log(f"Using fallback path resolution: {target_path}")
-            self._scan_target_path = target_path.resolve()
+                self._startup_publish_complete.set()
+            self._start_startup_phase("initialize")
 
-            # Mark as initialized immediately (tools available)
-            self._initialized = True
-            self.debug_log("Service initialization complete")
+            try:
+                # Validate database configuration
+                if not self.config.database or not self.config.database.path:
+                    raise ValueError("Database configuration not initialized")
 
-            # Defer DB connect + realtime start to background so initialize is fast
-            self._deferred_start_task = asyncio.create_task(
-                self._deferred_connect_and_start(self._scan_target_path)
-            )
+                db_path = Path(self.config.database.path)
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # Initialize embedding manager
+                self.embedding_manager = EmbeddingManager()
+
+                # Setup embedding provider (optional - continue if it fails)
+                try:
+                    if self.config.embedding:
+                        provider = EmbeddingProviderFactory.create_provider(
+                            self.config.embedding
+                        )
+                        self.embedding_manager.register_provider(
+                            provider,
+                            set_default=True,
+                        )
+                        self.debug_log(
+                            "Embedding provider registered: "
+                            f"{self.config.embedding.provider}"
+                        )
+                except ValueError as e:
+                    # API key or configuration issue - expected for search-only usage
+                    self.debug_log(f"Embedding provider setup skipped: {e}")
+                except Exception as e:
+                    # Unexpected error - log but continue
+                    self.debug_log(
+                        f"Unexpected error setting up embedding provider: {e}"
+                    )
+
+                # Initialize LLM manager with dual providers
+                # (optional - continue if it fails)
+                try:
+                    if self.config.llm:
+                        utility_config, synthesis_config = (
+                            self.config.llm.get_provider_configs()
+                        )
+                        self.llm_manager = LLMManager(
+                            utility_config,
+                            synthesis_config,
+                        )
+                        self.debug_log(
+                            f"LLM providers registered: {self.config.llm.provider} "
+                            f"(utility: {utility_config['model']}, "
+                            f"synthesis: {synthesis_config['model']})"
+                        )
+                except ValueError as e:
+                    # API key or configuration issue - expected if LLM not needed
+                    self.debug_log(f"LLM provider setup skipped: {e}")
+                except Exception as e:
+                    # Unexpected error - log but continue
+                    self.debug_log(f"Unexpected error setting up LLM provider: {e}")
+
+                # Create services using unified factory (lazy connect for fast init)
+                self.services = create_services(
+                    db_path=db_path,
+                    config=self.config,
+                    embedding_manager=self.embedding_manager,
+                )
+
+                # Determine target path for scanning and watching
+                if self.args and hasattr(self.args, "path"):
+                    target_path = Path(self.args.path)
+                    self.debug_log(f"Using direct path from args: {target_path}")
+                else:
+                    # Fallback to config resolution (shouldn't happen in normal usage)
+                    target_path = self.config.target_dir or db_path.parent.parent
+                    self.debug_log(f"Using fallback path resolution: {target_path}")
+                self._scan_target_path = target_path.resolve()
+
+                # Mark as initialized immediately (tools available)
+                self._initialized = True
+                self.debug_log("Service initialization complete")
+                self._complete_startup_phase("initialize")
+
+                # Defer DB connect + realtime start to background so initialize is fast
+                self._deferred_start_task = asyncio.create_task(
+                    self._deferred_connect_and_start(self._scan_target_path)
+                )
+            except Exception as error:
+                self._fail_startup(
+                    f"Initialization failed: {error}",
+                    phase_name="initialize",
+                )
+                raise
 
     def _configured_realtime_backend(self) -> str | None:
         """Return the configured realtime backend when it is explicitly supported."""
@@ -209,9 +295,18 @@ class MCPServerBase(ABC):
         """Return whether daemon startup must block on realtime readiness."""
         return self._configured_realtime_backend() == "watchman"
 
-    def _set_startup_failure(self, message: str) -> None:
+    def _set_startup_failure(
+        self,
+        message: str,
+        *,
+        phase_name: str | None = None,
+    ) -> None:
         """Persist a startup failure for later fail-fast barrier checks."""
         self._startup_failure_message = message
+        if phase_name is None:
+            current_phase = self._startup_tracker.snapshot().get("current_phase")
+            phase_name = current_phase if isinstance(current_phase, str) else None
+        self._fail_startup(message, phase_name=phase_name)
         self._record_realtime_failure(message)
 
     async def _deferred_connect_and_start(self, target_path: Path) -> None:
@@ -221,17 +316,22 @@ class MCPServerBase(ABC):
             if not self.services:
                 return
             # Connect to database lazily
+            self._start_startup_phase("db_connect")
             if not self.services.provider.is_connected:
                 self.services.provider.connect()
+            self._complete_startup_phase("db_connect")
 
             # Start real-time indexing service
             self.debug_log("Starting real-time indexing service (deferred)")
+            self._start_startup_phase("realtime_start")
             self.realtime_indexing = RealtimeIndexingService(
                 self.services,
                 self.config,
                 debug_sink=self.debug_log,
+                startup_log_sink=self._startup_log,
                 status_callback=self._update_realtime_status,
                 resync_callback=self._request_realtime_resync,
+                startup_tracker=self._startup_tracker,
             )
             monitoring_task = asyncio.create_task(
                 self.realtime_indexing.start(target_path)
@@ -244,20 +344,30 @@ class MCPServerBase(ABC):
             )
         except Exception as e:
             self.debug_log(f"Deferred connect/start failed: {e}")
-            self._set_startup_failure(f"Deferred connect/start failed: {e}")
+            self._set_startup_failure(
+                f"Deferred connect/start failed: {e}",
+            )
 
     async def await_startup_barrier(self) -> None:
         """Block daemon exposure until strict realtime startup requirements pass."""
+        self._start_startup_phase("startup_barrier")
         if not self.requires_strict_startup_barrier():
+            self._complete_startup_phase("startup_barrier")
             return
 
         if self._deferred_start_task is None:
+            message = "Watchman startup barrier requested before deferred startup began"
+            self._set_startup_failure(message, phase_name="startup_barrier")
             raise RuntimeError(
                 "Watchman startup barrier requested before deferred startup began"
             )
 
         await asyncio.shield(self._deferred_start_task)
         if self._startup_failure_message is not None:
+            self._set_startup_failure(
+                self._startup_failure_message,
+                phase_name="startup_barrier",
+            )
             raise RuntimeError(self._startup_failure_message)
 
         if self._realtime_start_task is None:
@@ -265,21 +375,25 @@ class MCPServerBase(ABC):
                 "Watchman startup barrier requested but realtime startup task "
                 "was never created"
             )
-            self._set_startup_failure(message)
+            self._set_startup_failure(message, phase_name="startup_barrier")
             raise RuntimeError(message)
 
         try:
             await asyncio.shield(self._realtime_start_task)
         except asyncio.CancelledError as error:
             message = "Watchman realtime startup was cancelled before readiness"
-            self._set_startup_failure(message)
+            self._set_startup_failure(message, phase_name="startup_barrier")
             raise RuntimeError(message) from error
         except Exception as error:
             message = self._startup_failure_message or str(error)
-            self._set_startup_failure(message)
+            self._set_startup_failure(message, phase_name="startup_barrier")
             raise RuntimeError(message) from error
 
         if self._startup_failure_message is not None:
+            self._set_startup_failure(
+                self._startup_failure_message,
+                phase_name="startup_barrier",
+            )
             raise RuntimeError(self._startup_failure_message)
 
         if (
@@ -287,8 +401,9 @@ class MCPServerBase(ABC):
             or not self.realtime_indexing.monitoring_ready.is_set()
         ):
             message = "Watchman startup finished without monitoring readiness"
-            self._set_startup_failure(message)
+            self._set_startup_failure(message, phase_name="startup_barrier")
             raise RuntimeError(message)
+        self._complete_startup_phase("startup_barrier")
 
     async def _coordinated_initial_scan(
         self, target_path: Path, monitoring_task: asyncio.Task
@@ -308,6 +423,18 @@ class MCPServerBase(ABC):
             )
 
             if ready_task in done:
+                if self._realtime_startup_mode() == "daemon":
+                    if not self._startup_publish_complete.is_set():
+                        self.debug_log(
+                            "Monitoring confirmed ready; waiting for daemon publish "
+                            "before initial scan"
+                        )
+                    await self._startup_publish_complete.wait()
+                    if self._startup_failure_message is not None:
+                        self.debug_log(
+                            "Daemon publish never completed; skipping initial scan"
+                        )
+                        return
                 self.debug_log("Monitoring confirmed ready, starting initial scan")
                 # Add small delay to ensure any startup files are captured
                 # by monitoring.
@@ -350,22 +477,29 @@ class MCPServerBase(ABC):
 
     def _update_realtime_status(self, status: dict[str, Any]) -> None:
         """Persist the latest realtime snapshot for daemon status surfaces."""
-        self._scan_progress["realtime"] = copy.deepcopy(status)
+        realtime = copy.deepcopy(status)
+        realtime["startup"] = self._startup_tracker.snapshot()
+        self._scan_progress["realtime"] = realtime
 
     def _record_realtime_failure(self, message: str) -> None:
         """Persist a startup failure into the shared realtime status snapshot."""
         realtime = copy.deepcopy(
-            self._scan_progress.get("realtime")
-            or RealtimeIndexingService.health_snapshot_for_config(self.config)
+            self._scan_progress.get("realtime") or self._default_realtime_scan_status()
         )
         realtime["service_state"] = "degraded"
         realtime["last_error"] = message
         realtime["last_error_at"] = datetime.now().isoformat()
+        realtime["startup"] = self._startup_tracker.snapshot()
         self._scan_progress["realtime"] = realtime
 
     def _handle_realtime_start_task_done(self, task: asyncio.Task) -> None:
         """Capture realtime startup task failures so they are never silent."""
         if task.cancelled():
+            if self._startup_tracker.snapshot()["state"] == "running":
+                self._set_startup_failure(
+                    "Realtime startup task was cancelled before completion",
+                    phase_name="realtime_start",
+                )
             return
 
         try:
@@ -375,10 +509,15 @@ class MCPServerBase(ABC):
             return
 
         if exc is None:
+            if self._realtime_startup_mode() == "stdio":
+                self._complete_startup()
             return
 
         self.debug_log(f"Realtime startup task failed: {exc}")
-        self._set_startup_failure(f"Realtime startup task failed: {exc}")
+        self._set_startup_failure(
+            f"Realtime startup task failed: {exc}",
+            phase_name="realtime_start",
+        )
 
     async def _request_realtime_resync(
         self, reason: str, details: dict[str, Any] | None = None

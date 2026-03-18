@@ -11,6 +11,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -154,6 +155,194 @@ class TestRealtimeFunctional:
 
         # Should be able to stop cleanly
         await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_watchman_startup_timing_tracks_sidecar_delay(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        """Synthetic Watchman startup delays should land in the sidecar phase bucket."""
+        temp_dir = tmp_path.resolve()
+        db_path = temp_dir / ".chunkhound" / "test.db"
+        watch_dir = temp_dir / "project"
+        watch_dir.mkdir(parents=True)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        config = Config(
+            args=SimpleNamespace(path=temp_dir),
+            database={"path": str(db_path), "provider": "duckdb"},
+            indexing={
+                "include": ["*.py"],
+                "exclude": [],
+                "realtime_backend": "watchman",
+            },
+        )
+
+        services = create_services(db_path, config)
+        services.provider.connect()
+        sidecar_delay_seconds = 0.05
+
+        class _FakeSidecar:
+            def __init__(self, target_dir: Path, debug_sink=None) -> None:
+                del debug_sink
+                runtime_root = target_dir / ".chunkhound" / "watchman"
+                runtime_root.mkdir(parents=True, exist_ok=True)
+                self.paths = SimpleNamespace(
+                    listener_path=runtime_root / "sock",
+                    statefile_path=runtime_root / "state",
+                    logfile_path=runtime_root / "watchman.log",
+                    pidfile_path=runtime_root / "pid",
+                    project_root=target_dir,
+                )
+                self._target_dir = target_dir
+
+            async def start(self):
+                await asyncio.sleep(sidecar_delay_seconds)
+                return SimpleNamespace(binary_path="/tmp/fake-watchman")
+
+            async def stop(self) -> None:
+                return None
+
+            def get_health(self) -> dict[str, object]:
+                return {
+                    "watchman_pid": 12345,
+                    "watchman_started_at": "2026-03-08T00:00:01Z",
+                    "watchman_process_start_time_epoch": 1.0,
+                    "watchman_runtime_version": "fake",
+                    "watchman_binary_path": "/tmp/fake-watchman",
+                    "watchman_socket_path": str(self.paths.listener_path),
+                    "watchman_statefile_path": str(self.paths.statefile_path),
+                    "watchman_logfile_path": str(self.paths.logfile_path),
+                    "watchman_metadata_path": str(
+                        self._target_dir / ".chunkhound" / "watchman" / "metadata.json"
+                    ),
+                    "watchman_alive": True,
+                }
+
+        class _FakeSession:
+            _SUBSCRIPTION_QUEUE_MAXSIZE = 1000
+
+            def __init__(self, *args, **kwargs) -> None:
+                del args, kwargs
+                self.subscription_queue = asyncio.Queue(
+                    maxsize=self._SUBSCRIPTION_QUEUE_MAXSIZE
+                )
+                self._subscription_name: str | None = None
+                self._scope = None
+
+            @staticmethod
+            def _sanitize_subscription_suffix(value: str) -> str:
+                return value.replace("/", "-").replace("\\", "-")
+
+            async def _run_one_shot_command(self, command: list[str]):
+                if command[0] == "watch-project":
+                    return {"watch": str(watch_dir.resolve()), "relative_path": None}
+                return {"watch": command[1], "relative_path": None}
+
+            async def start(
+                self,
+                target_path: Path,
+                subscription_name: str,
+                scope_plan,
+                nested_mount_roots,
+            ) -> None:
+                del target_path, nested_mount_roots
+                self._subscription_name = subscription_name
+                self._scope = scope_plan.primary_scope
+
+            async def stop(self) -> None:
+                return None
+
+            async def wait_for_unexpected_exit(self) -> str | None:
+                await asyncio.Event().wait()
+                return None
+
+            def get_health(self) -> dict[str, object]:
+                scope = self._scope
+                scopes = []
+                if scope is not None:
+                    scopes.append(
+                        {
+                            "subscription_name": self._subscription_name,
+                            "scope_kind": scope.scope_kind,
+                            "requested_path": str(scope.requested_path),
+                            "watch_root": str(scope.watch_root),
+                            "relative_root": scope.relative_root,
+                        }
+                    )
+                subscription_names = (
+                    [self._subscription_name] if self._subscription_name else []
+                )
+                return {
+                    "watchman_session_alive": True,
+                    "watchman_session_pid": 54321,
+                    "watchman_session_last_warning": None,
+                    "watchman_session_last_warning_at": None,
+                    "watchman_session_last_error": None,
+                    "watchman_session_last_error_at": None,
+                    "watchman_session_last_response_at": "2026-03-08T00:00:02Z",
+                    "watchman_subscription_last_received_at": None,
+                    "watchman_session_command_count": 2,
+                    "watchman_subscription_queue_size": self.subscription_queue.qsize(),
+                    "watchman_subscription_queue_maxsize": (
+                        self.subscription_queue.maxsize
+                    ),
+                    "watchman_subscription_pdu_count": 0,
+                    "watchman_subscription_pdu_dropped": 0,
+                    "watchman_subscription_name": self._subscription_name,
+                    "watchman_subscription_names": subscription_names,
+                    "watchman_watch_root": (
+                        str(scope.watch_root) if scope is not None else None
+                    ),
+                    "watchman_relative_root": (
+                        scope.relative_root if scope is not None else None
+                    ),
+                    "watchman_scopes": scopes,
+                    "watchman_session_capabilities": {
+                        "cmd-watch-project": True,
+                        "relative_root": True,
+                    },
+                }
+
+        monkeypatch.setattr(
+            "chunkhound.services.realtime_indexing_service.PrivateWatchmanSidecar",
+            _FakeSidecar,
+        )
+        monkeypatch.setattr(
+            "chunkhound.services.realtime_indexing_service.WatchmanCliSession",
+            _FakeSession,
+        )
+        monkeypatch.setattr(
+            "chunkhound.services.realtime_indexing_service.discover_nested_linux_mount_roots",
+            lambda target_path: (),
+        )
+        monkeypatch.setattr(
+            "chunkhound.services.realtime_indexing_service.discover_nested_windows_junction_scopes",
+            lambda target_path: (),
+        )
+
+        service = RealtimeIndexingService(services, config)
+
+        try:
+            await service.start(watch_dir)
+            stats = await service.get_health()
+            startup = stats["startup"]
+
+            assert startup["state"] == "completed"
+            assert startup["mode"] == "stdio"
+            assert startup["phases"]["watchman_sidecar_start"]["state"] == "completed"
+            assert (
+                startup["phases"]["watchman_sidecar_start"]["duration_seconds"]
+                >= sidecar_delay_seconds
+            )
+            assert startup["phases"]["watchman_watch_project"]["state"] == "completed"
+            assert (
+                startup["phases"]["watchman_subscription_setup"]["state"] == "completed"
+            )
+        finally:
+            await service.stop()
+            services.provider.disconnect()
 
     @pytest.mark.asyncio
     async def test_live_indexing_state_distinguishes_busy_from_stalled(

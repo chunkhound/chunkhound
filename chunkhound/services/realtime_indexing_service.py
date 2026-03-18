@@ -12,6 +12,7 @@ Architecture:
 """
 
 import asyncio
+import copy
 import gc
 import threading
 import time
@@ -115,6 +116,220 @@ def _enqueue_realtime_event(
             False,
             type(error).__name__,
         )
+
+
+class RealtimeStartupStatusTracker:
+    """Track bounded daemon-side startup timing for public status surfaces."""
+
+    _PHASE_NAMES = (
+        "initialize",
+        "db_connect",
+        "realtime_start",
+        "startup_barrier",
+        "daemon_publish",
+        "watchman_sidecar_start",
+        "watchman_watch_project",
+        "watchman_scope_discovery",
+        "watchman_subscription_setup",
+        "watchdog_setup",
+        "polling_setup",
+    )
+
+    def __init__(
+        self,
+        mode: str = "stdio",
+        debug_sink: Callable[[str], None] | None = None,
+    ) -> None:
+        self._debug_sink = debug_sink
+        self.reset(mode)
+
+    @staticmethod
+    def _utc_now() -> str:
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    @staticmethod
+    def _default_phase_snapshot() -> dict[str, Any]:
+        return {
+            "state": "uninitialized",
+            "started_at": None,
+            "completed_at": None,
+            "duration_seconds": None,
+        }
+
+    @staticmethod
+    def _duration_seconds(
+        start_monotonic: float | None,
+        end_monotonic: float | None,
+    ) -> float | None:
+        if start_monotonic is None or end_monotonic is None:
+            return None
+        return round(max(end_monotonic - start_monotonic, 0.0), 3)
+
+    @classmethod
+    def default_snapshot(cls, mode: str = "stdio") -> dict[str, Any]:
+        normalized_mode = mode if mode in {"daemon", "stdio"} else "stdio"
+        return {
+            "state": "uninitialized",
+            "mode": normalized_mode,
+            "started_at": None,
+            "completed_at": None,
+            "exposure_ready_at": None,
+            "total_duration_seconds": None,
+            "current_phase": None,
+            "last_error": None,
+            "phases": {
+                phase_name: cls._default_phase_snapshot()
+                for phase_name in cls._PHASE_NAMES
+            },
+        }
+
+    def reset(self, mode: str = "stdio") -> None:
+        self._snapshot = self.default_snapshot(mode)
+        self._startup_started_monotonic: float | None = None
+        self._phase_started_monotonic: dict[str, float] = {}
+        self._phase_stack: list[str] = []
+
+    def set_debug_sink(self, debug_sink: Callable[[str], None] | None) -> None:
+        self._debug_sink = debug_sink
+
+    def _log(self, message: str) -> None:
+        if self._debug_sink is None:
+            return
+        try:
+            self._debug_sink(f"startup: {message}")
+        except Exception:
+            pass
+
+    def _ensure_started(self) -> None:
+        if self._snapshot["state"] != "uninitialized":
+            return
+        self._snapshot["state"] = "running"
+        self._snapshot["started_at"] = self._utc_now()
+        self._snapshot["completed_at"] = None
+        self._snapshot["total_duration_seconds"] = None
+        self._snapshot["current_phase"] = None
+        self._snapshot["last_error"] = None
+        self._startup_started_monotonic = time.monotonic()
+        self._log(f"startup tracking began mode={self._snapshot['mode']}")
+
+    def start_phase(self, phase_name: str) -> None:
+        if phase_name not in self._snapshot["phases"]:
+            return
+        if self._snapshot["state"] in {"completed", "failed"}:
+            return
+        self._ensure_started()
+        phase = self._snapshot["phases"][phase_name]
+        if phase["state"] == "running":
+            return
+        phase["state"] = "running"
+        phase["started_at"] = self._utc_now()
+        phase["completed_at"] = None
+        phase["duration_seconds"] = None
+        self._phase_started_monotonic[phase_name] = time.monotonic()
+        self._phase_stack = [name for name in self._phase_stack if name != phase_name]
+        self._phase_stack.append(phase_name)
+        self._snapshot["current_phase"] = phase_name
+        self._log(f"phase started: {phase_name}")
+
+    def _close_phase(
+        self, phase_name: str, state: str, error: str | None = None
+    ) -> None:
+        if phase_name not in self._snapshot["phases"]:
+            return
+        phase = self._snapshot["phases"][phase_name]
+        if phase["state"] not in {"running", "uninitialized"}:
+            return
+        if phase["state"] == "uninitialized":
+            self.start_phase(phase_name)
+            phase = self._snapshot["phases"][phase_name]
+        completed_at = self._utc_now()
+        end_monotonic = time.monotonic()
+        started_monotonic = self._phase_started_monotonic.pop(phase_name, None)
+        phase["state"] = state
+        phase["completed_at"] = completed_at
+        phase["duration_seconds"] = self._duration_seconds(
+            started_monotonic,
+            end_monotonic,
+        )
+        self._phase_stack = [name for name in self._phase_stack if name != phase_name]
+        self._snapshot["current_phase"] = (
+            self._phase_stack[-1] if self._phase_stack else None
+        )
+        if state == "failed":
+            self._log(
+                "phase failed: "
+                f"{phase_name} duration={phase['duration_seconds']}s "
+                f"error={error}"
+            )
+        else:
+            self._log(
+                f"phase completed: {phase_name} duration={phase['duration_seconds']}s"
+            )
+
+    def complete_phase(self, phase_name: str) -> None:
+        self._close_phase(phase_name, "completed")
+
+    def fail_phase(self, phase_name: str, error: str) -> None:
+        self._close_phase(phase_name, "failed", error)
+
+    def fail_startup(self, error: str, *, phase_name: str | None = None) -> None:
+        if phase_name:
+            self.fail_phase(phase_name, error)
+        if self._snapshot["state"] == "completed":
+            return
+        self._ensure_started()
+        self._snapshot["state"] = "failed"
+        self._snapshot["completed_at"] = self._utc_now()
+        self._snapshot["last_error"] = error
+        self._snapshot["total_duration_seconds"] = self._duration_seconds(
+            self._startup_started_monotonic,
+            time.monotonic(),
+        )
+        self._phase_stack = []
+        self._snapshot["current_phase"] = phase_name
+        self._log(
+            "startup failed"
+            f" duration={self._snapshot['total_duration_seconds']}s error={error}"
+        )
+
+    def complete_startup(self) -> None:
+        if self._snapshot["state"] in {"completed", "failed"}:
+            return
+        self._ensure_started()
+        self._snapshot["state"] = "completed"
+        self._snapshot["completed_at"] = self._utc_now()
+        self._snapshot["total_duration_seconds"] = self._duration_seconds(
+            self._startup_started_monotonic,
+            time.monotonic(),
+        )
+        self._phase_stack = []
+        self._snapshot["current_phase"] = None
+        self._log(
+            f"startup completed duration={self._snapshot['total_duration_seconds']}s"
+        )
+
+    def mark_exposure_ready(self) -> None:
+        if self._snapshot["mode"] != "daemon":
+            return
+        if self._snapshot["exposure_ready_at"] is None:
+            self._snapshot["exposure_ready_at"] = self._utc_now()
+            self._log("daemon exposure became ready")
+
+    def snapshot(self) -> dict[str, Any]:
+        snapshot = copy.deepcopy(self._snapshot)
+        if self._snapshot["state"] == "running":
+            snapshot["total_duration_seconds"] = self._duration_seconds(
+                self._startup_started_monotonic,
+                time.monotonic(),
+            )
+        for phase_name, phase in snapshot["phases"].items():
+            if phase["state"] != "running":
+                continue
+            phase["duration_seconds"] = self._duration_seconds(
+                self._phase_started_monotonic.get(phase_name),
+                time.monotonic(),
+            )
+        return snapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,6 +588,7 @@ class WatchdogRealtimeAdapter:
 
     async def start(self, watch_path: Path, loop: asyncio.AbstractEventLoop) -> None:
         self._service._set_effective_backend(self.backend_name)
+        self._service._start_startup_phase("watchdog_setup")
         await self._service._setup_watchdog_with_timeout(watch_path, loop)
 
     async def stop(self) -> None:
@@ -404,6 +620,7 @@ class PollingRealtimeAdapter:
 
     async def start(self, watch_path: Path, loop: asyncio.AbstractEventLoop) -> None:
         del loop
+        self._service._start_startup_phase("polling_setup")
         await self._service._start_polling_backend(
             watch_path,
             reason="Configured realtime backend is polling",
@@ -790,10 +1007,16 @@ class WatchmanRealtimeAdapter:
         *,
         phase: str,
     ) -> None:
+        self._service._start_startup_phase("watchman_sidecar_start")
         try:
             metadata = await self._sidecar.start()
         except Exception as error:
+            self._service._fail_startup_phase(
+                "watchman_sidecar_start",
+                f"Watchman sidecar {phase} failed: {error}",
+            )
             raise RuntimeError(f"Watchman sidecar {phase} failed: {error}") from error
+        self._service._complete_startup_phase("watchman_sidecar_start")
 
         self._service.watchman_scope_plan = None
         self._service.watchman_subscription_queue = None
@@ -811,9 +1034,12 @@ class WatchmanRealtimeAdapter:
         sessions: list[WatchmanCliSession] = []
         subscription_scope_map: dict[str, WatchmanSubscriptionScope] = {}
         try:
+            self._service._start_startup_phase("watchman_watch_project")
             watch_project_response = await planning_session._run_one_shot_command(
                 ["watch-project", str(watch_path.resolve())]
             )
+            self._service._complete_startup_phase("watchman_watch_project")
+            self._service._start_startup_phase("watchman_scope_discovery")
             nested_mount_roots = discover_nested_linux_mount_roots(watch_path)
             additional_scopes = discover_nested_windows_junction_scopes(watch_path)
             watched_roots: set[Path] = set()
@@ -835,7 +1061,9 @@ class WatchmanRealtimeAdapter:
                 nested_mount_roots=nested_mount_roots,
                 additional_scopes=additional_scopes,
             )
+            self._service._complete_startup_phase("watchman_scope_discovery")
 
+            self._service._start_startup_phase("watchman_subscription_setup")
             self._shared_subscription_queue = asyncio.Queue(
                 maxsize=WatchmanCliSession._SUBSCRIPTION_QUEUE_MAXSIZE
             )
@@ -868,6 +1096,11 @@ class WatchmanRealtimeAdapter:
                 sessions.append(session)
                 subscription_scope_map[scoped_subscription_name] = scope
         except Exception as error:
+            current_phase = self._service._startup_tracker.snapshot().get(
+                "current_phase"
+            )
+            if isinstance(current_phase, str):
+                self._service._fail_startup_phase(current_phase, str(error))
             for session in sessions:
                 await session.stop()
             await self._sidecar.stop()
@@ -899,6 +1132,7 @@ class WatchmanRealtimeAdapter:
         self._service._set_effective_backend(self.backend_name)
         self._service._monitoring_ready_at = self._service._utc_now()
         self._service.monitoring_ready.set()
+        self._service._complete_startup_phase("watchman_subscription_setup")
         self._service._emit_status_update()
 
     def _begin_reconnect_cycle(self) -> None:
@@ -1300,11 +1534,13 @@ class RealtimeIndexingService:
         services: DatabaseServices,
         config: Config,
         debug_sink: Callable[[str], None] | None = None,
+        startup_log_sink: Callable[[str], None] | None = None,
         status_callback: Callable[[dict[str, Any]], None] | None = None,
         resync_callback: Callable[
             [str, dict[str, Any] | None], Awaitable[dict[str, Any] | None]
         ]
         | None = None,
+        startup_tracker: RealtimeStartupStatusTracker | None = None,
     ):
         self.services = services
         self.config = config
@@ -1313,6 +1549,11 @@ class RealtimeIndexingService:
         self._debug_sink = debug_sink
         self._status_callback = status_callback
         self._resync_callback = resync_callback
+        resolved_startup_log_sink = startup_log_sink or debug_sink
+        self._startup_tracker = startup_tracker or RealtimeStartupStatusTracker(
+            debug_sink=resolved_startup_log_sink
+        )
+        self._startup_tracker.set_debug_sink(resolved_startup_log_sink)
         self._configured_backend = self._resolve_configured_backend()
         self._effective_backend = "uninitialized"
         self._monitor_adapter: RealtimeMonitorAdapter | None = None
@@ -1503,7 +1744,9 @@ class RealtimeIndexingService:
 
     @classmethod
     def default_health_snapshot(
-        cls, configured_backend: str | None = None
+        cls,
+        configured_backend: str | None = None,
+        startup_mode: str = "stdio",
     ) -> dict[str, Any]:
         """Return the neutral realtime health structure used by MCP status plumbing."""
         status = {
@@ -1566,13 +1809,18 @@ class RealtimeIndexingService:
                 "last_snapshot_truncated": False,
             },
             "pipeline": cls._default_pipeline_snapshot(),
+            "startup": RealtimeStartupStatusTracker.default_snapshot(startup_mode),
         }
         if configured_backend == "watchman":
             status.update(_default_watchman_health_snapshot())
         return status
 
     @classmethod
-    def health_snapshot_for_config(cls, config: Any | None) -> dict[str, Any]:
+    def health_snapshot_for_config(
+        cls,
+        config: Any | None,
+        startup_mode: str = "stdio",
+    ) -> dict[str, Any]:
         """Return the neutral realtime health snapshot seeded from config."""
         configured_backend = None
         try:
@@ -1583,7 +1831,10 @@ class RealtimeIndexingService:
                 configured_backend = str(backend)
         except Exception:
             configured_backend = None
-        return cls.default_health_snapshot(configured_backend=configured_backend)
+        return cls.default_health_snapshot(
+            configured_backend=configured_backend,
+            startup_mode=startup_mode,
+        )
 
     # Internal helper to forward realtime events into the MCP debug log file
     def _debug(self, message: str) -> None:
@@ -1594,6 +1845,18 @@ class RealtimeIndexingService:
         except Exception:
             # Never let debug plumbing affect runtime
             pass
+
+    def _start_startup_phase(self, phase_name: str) -> None:
+        self._startup_tracker.start_phase(phase_name)
+        self._emit_status_update()
+
+    def _complete_startup_phase(self, phase_name: str) -> None:
+        self._startup_tracker.complete_phase(phase_name)
+        self._emit_status_update()
+
+    def _fail_startup_phase(self, phase_name: str, error: str) -> None:
+        self._startup_tracker.fail_phase(phase_name, error)
+        self._emit_status_update()
 
     def _set_warning(self, message: str) -> None:
         self._last_warning = message
@@ -1710,7 +1973,9 @@ class RealtimeIndexingService:
         else:
             monitoring_mode = effective_backend
 
-        status = self.default_health_snapshot()
+        status = self.default_health_snapshot(
+            startup_mode=self._startup_tracker.snapshot()["mode"]
+        )
         status.update(
             {
                 "configured_backend": self._configured_backend,
@@ -1786,6 +2051,7 @@ class RealtimeIndexingService:
         )
         pipeline = self._build_pipeline_snapshot()
         status["pipeline"].update(pipeline)
+        status["startup"] = self._startup_tracker.snapshot()
         live_indexing_state = self._derive_live_indexing_state(pipeline)
         status["live_indexing_state"] = live_indexing_state
         status["live_indexing_hint"] = self._derive_live_indexing_hint(
@@ -2458,6 +2724,7 @@ class RealtimeIndexingService:
         self._active_start_task = start_task
         self._start_generation += 1
         start_generation = self._start_generation
+        self._start_startup_phase("realtime_start")
 
         # Resolve path to canonical form for Windows 8.3 short name handling
         # This ensures polling monitor paths stay aligned with the coordinator's
@@ -2498,14 +2765,25 @@ class RealtimeIndexingService:
             if monitoring_ok:
                 self._service_state = "running"
                 self._debug("monitoring ready")
+                self._complete_startup_phase("realtime_start")
+                if self._startup_tracker.snapshot()["mode"] == "stdio":
+                    self._startup_tracker.complete_startup()
             else:
                 self._service_state = "degraded"
-                self._set_warning(
+                timeout_message = (
                     "Monitoring did not become ready before startup timeout"
                 )
+                self._set_warning(timeout_message)
                 self._debug("monitoring timeout; continuing")
+                self._fail_startup_phase("realtime_start", timeout_message)
+                if self._startup_tracker.snapshot()["mode"] == "stdio":
+                    self._startup_tracker.fail_startup(
+                        timeout_message,
+                        phase_name="realtime_start",
+                    )
             self._emit_status_update()
-        except Exception:
+        except Exception as error:
+            self._fail_startup_phase("realtime_start", str(error))
             await self._cancel_processing_tasks()
             raise
         finally:
@@ -2604,6 +2882,10 @@ class RealtimeIndexingService:
             self._adopt_watchdog_monitor(observer, event_handler, watch_path)
         except asyncio.TimeoutError:
             self._watchdog_bootstrap_abort.set()
+            self._fail_startup_phase(
+                "watchdog_setup",
+                "Watchdog setup timed out",
+            )
             logger.info(
                 f"Watchdog setup timed out for {watch_path} - falling back to polling"
             )
@@ -2613,6 +2895,10 @@ class RealtimeIndexingService:
             )
         except Exception as e:
             self._watchdog_bootstrap_abort.set()
+            self._fail_startup_phase(
+                "watchdog_setup",
+                f"Watchdog setup failed: {e}",
+            )
             logger.warning(f"Watchdog setup failed: {e} - falling back to polling")
             await self._start_polling_backend(
                 watch_path,
@@ -2660,6 +2946,7 @@ class RealtimeIndexingService:
         self, watch_path: Path, reason: str, emit_warning: bool = True
     ) -> None:
         """Start polling mode and optionally record it as a fallback warning."""
+        self._start_startup_phase("polling_setup")
         if not self._using_polling or not self._polling_task:
             self._using_polling = True
             self._polling_task = asyncio.create_task(self._polling_monitor(watch_path))
@@ -2668,6 +2955,7 @@ class RealtimeIndexingService:
         self._monitoring_ready_at = self._utc_now()
         self.monitoring_ready.set()
         self._debug(reason)
+        self._complete_startup_phase("polling_setup")
         if emit_warning:
             self._set_warning(reason)
         else:
@@ -2697,6 +2985,7 @@ class RealtimeIndexingService:
         self._set_effective_backend("watchdog")
         self._monitoring_ready_at = self._utc_now()
         self.monitoring_ready.set()
+        self._complete_startup_phase("watchdog_setup")
         self._emit_status_update()
 
     @staticmethod

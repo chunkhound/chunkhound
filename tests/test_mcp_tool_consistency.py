@@ -308,6 +308,118 @@ async def test_daemon_status_tool_exposes_watchman_realtime_details():
 
 
 @pytest.mark.asyncio
+async def test_daemon_status_tool_exposes_startup_timing_breakdown():
+    """Startup phase timing should surface without changing the top-level summary."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "realtime": {
+            "service_state": "running",
+            "last_error": None,
+            "startup": {
+                "state": "completed",
+                "mode": "daemon",
+                "started_at": "2026-03-08T00:00:00Z",
+                "completed_at": "2026-03-08T00:00:04Z",
+                "exposure_ready_at": "2026-03-08T00:00:04Z",
+                "total_duration_seconds": 4.0,
+                "current_phase": None,
+                "last_error": None,
+                "phases": {
+                    "initialize": {
+                        "state": "completed",
+                        "started_at": "2026-03-08T00:00:00Z",
+                        "completed_at": "2026-03-08T00:00:00Z",
+                        "duration_seconds": 0.12,
+                    },
+                    "db_connect": {
+                        "state": "completed",
+                        "started_at": "2026-03-08T00:00:00Z",
+                        "completed_at": "2026-03-08T00:00:01Z",
+                        "duration_seconds": 0.83,
+                    },
+                    "realtime_start": {
+                        "state": "completed",
+                        "started_at": "2026-03-08T00:00:01Z",
+                        "completed_at": "2026-03-08T00:00:03Z",
+                        "duration_seconds": 2.0,
+                    },
+                    "startup_barrier": {
+                        "state": "completed",
+                        "started_at": "2026-03-08T00:00:03Z",
+                        "completed_at": "2026-03-08T00:00:03Z",
+                        "duration_seconds": 0.01,
+                    },
+                    "daemon_publish": {
+                        "state": "completed",
+                        "started_at": "2026-03-08T00:00:03Z",
+                        "completed_at": "2026-03-08T00:00:04Z",
+                        "duration_seconds": 1.04,
+                    },
+                    "watchman_sidecar_start": {
+                        "state": "completed",
+                        "started_at": "2026-03-08T00:00:01Z",
+                        "completed_at": "2026-03-08T00:00:02Z",
+                        "duration_seconds": 1.2,
+                    },
+                    "watchman_watch_project": {
+                        "state": "completed",
+                        "started_at": "2026-03-08T00:00:02Z",
+                        "completed_at": "2026-03-08T00:00:02Z",
+                        "duration_seconds": 0.3,
+                    },
+                    "watchman_scope_discovery": {
+                        "state": "completed",
+                        "started_at": "2026-03-08T00:00:02Z",
+                        "completed_at": "2026-03-08T00:00:02Z",
+                        "duration_seconds": 0.2,
+                    },
+                    "watchman_subscription_setup": {
+                        "state": "completed",
+                        "started_at": "2026-03-08T00:00:02Z",
+                        "completed_at": "2026-03-08T00:00:03Z",
+                        "duration_seconds": 0.3,
+                    },
+                    "watchdog_setup": {
+                        "state": "uninitialized",
+                        "started_at": None,
+                        "completed_at": None,
+                        "duration_seconds": None,
+                    },
+                    "polling_setup": {
+                        "state": "uninitialized",
+                        "started_at": None,
+                        "completed_at": None,
+                        "duration_seconds": None,
+                    },
+                },
+            },
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    startup = result["scan_progress"]["realtime"]["startup"]
+    assert result["status"] == "ready"
+    assert result["query_ready"] is True
+    assert startup["mode"] == "daemon"
+    assert startup["exposure_ready_at"] == "2026-03-08T00:00:04Z"
+    assert startup["phases"]["watchman_sidecar_start"]["duration_seconds"] == 1.2
+    assert startup["phases"]["daemon_publish"]["duration_seconds"] == 1.04
+
+
+@pytest.mark.asyncio
 async def test_daemon_status_tool_keeps_stalled_pipeline_summary_ready():
     """A stalled pipeline should not change the top-level daemon summary."""
     from chunkhound.mcp_server.tools import execute_tool

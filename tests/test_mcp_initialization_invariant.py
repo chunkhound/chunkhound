@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from chunkhound.daemon.server import ChunkHoundDaemon
 from chunkhound.mcp_server.base import MCPServerBase
 from chunkhound.mcp_server.status import derive_daemon_status
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
@@ -21,6 +23,13 @@ class ConcreteMCPServer(MCPServerBase):
 
     async def run(self) -> None:
         pass
+
+
+class DaemonModeMCPServer(ConcreteMCPServer):
+    """Concrete base server variant that reports daemon startup mode."""
+
+    def _realtime_startup_mode(self) -> str:
+        return "daemon"
 
 
 class TestNonBlockingInitialization:
@@ -178,6 +187,50 @@ class TestNonBlockingInitialization:
         server._run_directory_scan.assert_not_awaited()  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
+    async def test_initial_scan_waits_for_daemon_publish_completion(
+        self, tmp_path: Path
+    ) -> None:
+        """Daemon-mode initial scans must wait until daemon publish completes."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.realtime_backend = "watchdog"
+
+        server = DaemonModeMCPServer(config=config)
+        server.realtime_indexing = MagicMock()
+        server.realtime_indexing.monitoring_ready = asyncio.Event()
+        server.realtime_indexing.monitoring_ready.set()
+        server.realtime_indexing._MONITORING_READY_TIMEOUT_SECONDS = 0.01
+        server._run_directory_scan = AsyncMock()  # type: ignore[method-assign]
+
+        async def never_finishes() -> None:
+            await asyncio.Event().wait()
+
+        monitoring_task = asyncio.create_task(never_finishes())
+        with patch(
+            "chunkhound.mcp_server.base.asyncio.sleep",
+            AsyncMock(return_value=None),
+        ):
+            scan_task = asyncio.create_task(
+                server._coordinated_initial_scan(tmp_path, monitoring_task)
+            )
+            await asyncio.sleep(0)
+            server._run_directory_scan.assert_not_awaited()  # type: ignore[attr-defined]
+
+            server._startup_publish_complete.set()
+            await asyncio.wait_for(scan_task, timeout=1.0)
+
+        server._run_directory_scan.assert_awaited_once_with(  # type: ignore[attr-defined]
+            tmp_path,
+            trigger="initial",
+        )
+        monitoring_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await monitoring_task
+
+    @pytest.mark.asyncio
     async def test_deferred_start_failure_preserves_configured_backend(
         self, tmp_path: Path
     ):
@@ -200,6 +253,15 @@ class TestNonBlockingInitialization:
         assert realtime["configured_backend"] == "polling"
         assert realtime["service_state"] == "degraded"
         assert "Deferred connect/start failed" in realtime["last_error"]
+        assert realtime["startup"]["state"] == "failed"
+        assert realtime["startup"]["phases"]["db_connect"]["state"] == "failed"
+        assert realtime["startup"]["phases"]["realtime_start"]["state"] == (
+            "uninitialized"
+        )
+        assert realtime["startup"]["last_error"].startswith(
+            "Deferred connect/start failed:"
+        )
+        assert realtime["startup"]["total_duration_seconds"] is not None
 
     @pytest.mark.asyncio
     async def test_watchman_config_seeds_realtime_status_surface(
@@ -234,6 +296,18 @@ class TestNonBlockingInitialization:
                 assert realtime["watchman_subscription_count"] == 0
                 assert realtime["watchman_subscription_names"] == []
                 assert realtime["watchman_scopes"] == []
+                assert realtime["startup"]["mode"] == "stdio"
+                assert realtime["startup"]["exposure_ready_at"] is None
+                assert realtime["startup"]["phases"]["initialize"]["state"] in {
+                    "running",
+                    "completed",
+                }
+                assert realtime["startup"]["phases"]["watchman_sidecar_start"] == {
+                    "state": "uninitialized",
+                    "started_at": None,
+                    "completed_at": None,
+                    "duration_seconds": None,
+                }
                 assert realtime["pipeline"] == {
                     "last_source_event_at": None,
                     "last_source_event_type": None,
@@ -291,6 +365,89 @@ class TestNonBlockingInitialization:
 
         with pytest.raises(RuntimeError, match="Watchman sidecar startup failed: boom"):
             await server.await_startup_barrier()
+
+        startup = server._scan_progress["realtime"]["startup"]
+        assert startup["state"] == "failed"
+        assert startup["last_error"] == "Watchman sidecar startup failed: boom"
+        assert startup["phases"]["startup_barrier"]["state"] == "failed"
+        assert startup["phases"]["startup_barrier"]["completed_at"] is not None
+
+    @pytest.mark.asyncio
+    async def test_daemon_run_records_publish_exposure_ready_timestamp(
+        self, tmp_path: Path
+    ) -> None:
+        """Daemon-mode startup timing should expose the daemon publish seam."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.realtime_backend = "watchdog"
+        args = MagicMock()
+        args.path = str(tmp_path)
+
+        daemon = ChunkHoundDaemon(
+            config=config,
+            args=args,
+            socket_path="tcp:127.0.0.1:0",
+            project_dir=tmp_path,
+        )
+        daemon.initialize = AsyncMock()
+        daemon.await_startup_barrier = AsyncMock()
+        daemon.cleanup = AsyncMock()
+        daemon._client_manager.poll_pids = AsyncMock(return_value=None)
+        daemon._discovery.write_lock = MagicMock()
+        daemon._discovery.read_lock = MagicMock(return_value={"pid": os.getpid()})
+        daemon._discovery.write_registry_entry = MagicMock()
+
+        class _FakeServer:
+            async def __aenter__(self):
+                daemon._shutdown_event.set()
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                del exc_type, exc, tb
+                return False
+
+        with patch(
+            "chunkhound.daemon.server.ipc.create_server",
+            AsyncMock(return_value=(_FakeServer(), "tcp:127.0.0.1:7788")),
+        ):
+            await daemon.run()
+
+        startup = daemon._scan_progress["realtime"]["startup"]
+        assert startup["mode"] == "daemon"
+        assert startup["state"] == "completed"
+        assert startup["exposure_ready_at"] is not None
+        assert startup["phases"]["daemon_publish"]["state"] == "completed"
+        assert startup["phases"]["daemon_publish"]["completed_at"] is not None
+
+    def test_daemon_startup_phase_breadcrumbs_emit_to_stderr(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Daemon startup phase breadcrumbs should reach the daemon stderr log path."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.realtime_backend = "watchdog"
+        args = MagicMock()
+        args.path = str(tmp_path)
+
+        daemon = ChunkHoundDaemon(
+            config=config,
+            args=args,
+            socket_path="tcp:127.0.0.1:0",
+            project_dir=tmp_path,
+        )
+
+        daemon._start_startup_phase("daemon_publish")
+        daemon._complete_startup_phase("daemon_publish")
+
+        captured = capsys.readouterr()
+        assert "[startup] startup: phase started: daemon_publish" in captured.err
+        assert "[startup] startup: phase completed: daemon_publish" in captured.err
 
     @pytest.mark.asyncio
     async def test_run_directory_scan_surfaces_reconciliation_cleanup_failures(
