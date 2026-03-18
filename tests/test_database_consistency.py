@@ -1,16 +1,17 @@
 """Database consistency tests for ChunkHound.
 
-These tests verify that the database maintains consistency between files, chunks, 
-and embeddings. They should be added to the regular test suite to catch 
+These tests verify that the database maintains consistency between files, chunks,
+and embeddings. They should be added to the regular test suite to catch
 consistency issues early.
 """
 
-import pytest
 import asyncio
-from pathlib import Path
 
-from chunkhound.database_factory import create_services
+import pytest
+
 from chunkhound.core.config.config import Config
+from chunkhound.database_factory import create_services
+
 from .test_utils import get_api_key_for_tests, get_embedding_config_for_tests, build_embedding_config_from_dict
 
 
@@ -41,7 +42,7 @@ async def consistency_services(tmp_path):
 async def test_database_embedding_chunk_consistency(consistency_services, tmp_path):
     """Test that database maintains consistency between chunks and embeddings."""
     services = consistency_services
-    
+
     # Create test files
     test_files = []
     for i in range(3):
@@ -56,24 +57,24 @@ class Class_{i}:
         return "method {i}"
 """)
         test_files.append(test_file)
-    
+
     # Process files with embeddings
     total_chunks_expected = 0
     for test_file in test_files:
         result = await services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
         assert result['status'] == 'success'
         total_chunks_expected += result['chunks']
-    
+
     # Wait for any async processing
     await asyncio.sleep(2.0)
-    
+
     # Get database statistics
     stats = await services.indexing_coordinator.get_stats()
-    
+
     # Verify basic counts
     assert stats['files'] == len(test_files)
     assert stats['chunks'] == total_chunks_expected
-    
+
     # Critical consistency check
     if 'total_embeddings' in stats:
         assert stats.get('embeddings', 0) == stats['chunks'], \
@@ -81,21 +82,26 @@ class Class_{i}:
 
 
 @pytest.mark.skipif(get_api_key_for_tests()[0] is None, reason="No API key available")
-@pytest.mark.asyncio 
+@pytest.mark.asyncio
 async def test_orphaned_embeddings_cleanup(consistency_services, tmp_path):
     """Test that no orphaned embeddings exist in the database."""
     services = consistency_services
-    
-    # Create and process a test file
-    test_file = tmp_path / "orphan_test.py"
-    test_file.write_text("""
-def orphan_test():
-    return "test"
+
+    # Create and process test files
+    for i in range(3):
+        test_file = tmp_path / f"orphan_test_{i}.py"
+        test_file.write_text(f"""
+def orphan_test_function_{i}():
+    '''Function {i} for orphan cleanup testing.'''
+    return "test content {i}"
+
+class OrphanTestClass_{i}:
+    def orphan_method_{i}(self):
+        return "orphan method {i}"
 """)
-    
-    result = await services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
-    assert result['status'] == 'success'
-    assert not result.get('embeddings_skipped', True), "Should not skip embeddings"
+        result = await services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
+        assert result['status'] == 'success'
+        assert not result.get('embeddings_skipped', True), "Should not skip embeddings"
 
     # Wait for async embedding processing
     await asyncio.sleep(3.0)
@@ -105,16 +111,16 @@ def orphan_test():
     if embedding_result['status'] == 'success':
         # If we generated embeddings, wait a bit more
         await asyncio.sleep(1.0)
-    
+
     # Query database directly to check for orphaned embeddings
     # This would need to be implemented based on the actual database schema
     db = services.provider
-    
+
     # Get chunk count
     chunks_query = "SELECT COUNT(*) FROM chunks"
     chunk_result = db.execute_query(chunks_query)
     chunk_count = list(chunk_result[0].values())[0] if chunk_result else 0
-    
+
     # Get embedding count by discovering actual tables via information_schema.
     # DuckDB insert paths select the embeddings table based on detected vector length,
     # so we discover the actual embeddings_* table(s) present and select the one with
@@ -178,7 +184,7 @@ def orphan_test():
 async def test_file_deletion_cleanup(consistency_services, tmp_path):
     """Test that file deletion properly cleans up chunks and embeddings."""
     services = consistency_services
-    
+
     # Create and process a test file
     test_file = tmp_path / "deletion_test.py"
     test_file.write_text("""
@@ -189,32 +195,32 @@ class DeletionClass:
     def method(self):
         return "also deleted"
 """)
-    
+
     # Process file
     result = await services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
     assert result['status'] == 'success'
     chunks_created = result['chunks']
-    
+
     # Wait for processing
     await asyncio.sleep(1.0)
-    
+
     # Get initial stats
     initial_stats = await services.indexing_coordinator.get_stats()
-    
+
     # Delete the file and remove from database
     chunks_removed = await services.indexing_coordinator.remove_file(str(test_file))
     assert chunks_removed == chunks_created
-    
+
     # Wait for cleanup
     await asyncio.sleep(1.0)
-    
+
     # Get final stats
     final_stats = await services.indexing_coordinator.get_stats()
-    
+
     # Verify cleanup
     assert final_stats['files'] == initial_stats['files'] - 1
     assert final_stats['chunks'] == initial_stats['chunks'] - chunks_created
-    
+
     # Verify embeddings were also cleaned up
     if 'total_embeddings' in initial_stats and 'total_embeddings' in final_stats:
         embeddings_removed = initial_stats['total_embeddings'] - final_stats['total_embeddings']
@@ -227,11 +233,11 @@ class DeletionClass:
 async def test_database_state_after_processing(consistency_services, tmp_path):
     """Test database state verification after file processing."""
     services = consistency_services
-    
+
     # Process multiple files
     processed_files = 0
     total_chunks = 0
-    
+
     for i in range(5):
         test_file = tmp_path / f"state_test_{i}.py"
         test_file.write_text(f"""
@@ -239,25 +245,25 @@ def state_function_{i}():
     '''Function {i}.'''
     return "state test {i}"
 """)
-        
+
         result = await services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
         if result['status'] == 'success':
             processed_files += 1
             total_chunks += result['chunks']
-    
+
     # Wait for processing
     await asyncio.sleep(2.0)
-    
+
     # Verify database state
     stats = await services.indexing_coordinator.get_stats()
-    
+
     assert stats['files'] >= processed_files
     assert stats['chunks'] >= total_chunks
-    
+
     # State consistency checks
     assert stats['files'] > 0, "Should have processed files"
     assert stats['chunks'] > 0, "Should have created chunks"
-    
+
     # If embeddings are tracked, verify consistency
     if 'total_embeddings' in stats:
         assert stats.get('embeddings', 0) <= stats['chunks'], \
@@ -269,7 +275,7 @@ def state_function_{i}():
 async def test_concurrent_processing_consistency(consistency_services, tmp_path):
     """Test that concurrent file processing maintains database consistency."""
     services = consistency_services
-    
+
     # Create multiple test files
     test_files = []
     for i in range(10):
@@ -279,28 +285,28 @@ def concurrent_function_{i}():
     return "concurrent {i}"
 """)
         test_files.append(test_file)
-    
+
     # Process files concurrently
     tasks = []
     for test_file in test_files:
         task = services.indexing_coordinator.process_file(test_file, skip_embeddings=False)
         tasks.append(task)
-    
+
     # Wait for all processing to complete
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    
+
     # Count successful processing
     successful_results = [r for r in results if isinstance(r, dict) and r.get('status') == 'success']
     total_chunks_expected = sum(r['chunks'] for r in successful_results)
-    
+
     # Wait for any async processing
     await asyncio.sleep(3.0)
-    
+
     # Verify final state
     stats = await services.indexing_coordinator.get_stats()
-    
+
     assert stats['chunks'] >= total_chunks_expected
-    
+
     # Critical consistency check for concurrent processing
     if 'embeddings' in stats:
         assert stats['embeddings'] == stats['chunks'], \

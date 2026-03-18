@@ -1525,6 +1525,7 @@ class RealtimeIndexingService:
         "delete": 0,
         "dir_delete": 0,
         "change": 1,
+        "scan": 1,
         "dir_index": 1,
         "embed": 2,
     }
@@ -2094,12 +2095,13 @@ class RealtimeIndexingService:
         oldest_pending_at: datetime | None = None
 
         for mutation in pending_mutations:
-            counts_by_operation.setdefault(mutation.operation, 0)
-            counts_by_operation[mutation.operation] += 1
+            status_operation = self._status_operation(mutation.operation)
+            counts_by_operation.setdefault(status_operation, 0)
+            counts_by_operation[status_operation] += 1
             if mutation.retry_count > 0:
                 retrying_mutations += 1
-                retry_counts_by_operation.setdefault(mutation.operation, 0)
-                retry_counts_by_operation[mutation.operation] += 1
+                retry_counts_by_operation.setdefault(status_operation, 0)
+                retry_counts_by_operation[status_operation] += 1
 
             queued_at = self._parse_status_timestamp(mutation.first_queued_at)
             if queued_at is None:
@@ -2117,7 +2119,9 @@ class RealtimeIndexingService:
             int((datetime.now(timezone.utc) - oldest_pending_at).total_seconds()),
             0,
         )
-        snapshot["oldest_pending_operation"] = oldest_mutation.operation
+        snapshot["oldest_pending_operation"] = self._status_operation(
+            oldest_mutation.operation
+        )
         snapshot["oldest_pending_path"] = str(oldest_mutation.path)
         snapshot["oldest_pending_retry_count"] = oldest_mutation.retry_count
         return snapshot
@@ -2291,13 +2295,19 @@ class RealtimeIndexingService:
     def _normalize_add_priority(cls, priority: str) -> tuple[str, bool]:
         if priority == "change":
             return "change", True
-        if priority == "priority":
-            return "change", False
+        if priority in {"priority", "scan"}:
+            return "scan", False
         if priority == "embed":
             return "embed", False
         if priority in cls._MUTATION_PRIORITIES:
             return priority, False
         return "change", False
+
+    @staticmethod
+    def _status_operation(operation: str) -> str:
+        if operation == "scan":
+            return "change"
+        return operation
 
     def _build_mutation(
         self,
@@ -2828,10 +2838,15 @@ class RealtimeIndexingService:
         for task in self._debounce_tasks.copy():
             task.cancel()
 
-        # Wait for debounce tasks to finish cancelling
+        # Wait for debounce tasks to finish cancelling (done_callbacks discard each task)
         if self._debounce_tasks:
             await asyncio.gather(*self._debounce_tasks, return_exceptions=True)
-            self._debounce_tasks.clear()
+
+        # Defensive: clear all deduplication state (debounce + scan-tracked files).
+        # pending_files tracks both change-debounced and scan-priority files; stop() is
+        # the only place that purges scan entries.
+        self._pending_debounce.clear()
+        self.pending_files.clear()
 
         for task in self._retry_tasks.copy():
             task.cancel()
@@ -3214,7 +3229,6 @@ class RealtimeIndexingService:
         """Add file to the realtime pipeline and report whether work was admitted."""
         operation, debounced = self._normalize_add_priority(priority)
         mutation = self._build_mutation(operation, file_path)
-
         if debounced:
             file_str = str(mutation.path)
             if file_str in self._pending_debounce:
@@ -3247,34 +3261,50 @@ class RealtimeIndexingService:
     async def _debounced_add_file(
         self, file_or_mutation: Path | RealtimeMutation, priority: str = "change"
     ) -> None:
-        """Process file after debounce delay."""
+        """Process file after debounce delay.
+
+        Loops until the debounce window has been quiet for at least
+        ``_debounce_delay``. If debounce state is cleared externally, release the
+        registered mutation ownership so pending counts do not leak.
+        """
         if isinstance(file_or_mutation, RealtimeMutation):
             mutation = file_or_mutation
         else:
             operation, _ = self._normalize_add_priority(priority)
             mutation = self._build_mutation(operation, file_or_mutation)
+        file_str = str(mutation.path)
         remaining_delay = self._debounce_delay
 
-        while True:
-            await asyncio.sleep(remaining_delay)
+        try:
+            while True:
+                await asyncio.sleep(remaining_delay)
 
-            file_str = str(mutation.path)
-            if file_str not in self._pending_debounce:
-                return
+                if file_str not in self._pending_debounce:
+                    self._release_pending_mutation(mutation)
+                    return
 
-            last_update = self._pending_debounce[file_str]
-            remaining_delay = self._debounce_delay - (time.monotonic() - last_update)
+                last_update = self._pending_debounce[file_str]
+                remaining_delay = self._debounce_delay - (
+                    time.monotonic() - last_update
+                )
 
-            # Windows timer granularity can wake slightly before the debounce
-            # horizon; retry instead of leaving the file stuck in pending state.
-            if remaining_delay > 0:
-                continue
+                # Windows timer granularity can wake slightly before the debounce
+                # horizon; retry instead of leaving the file stuck in pending state.
+                if remaining_delay > 0:
+                    continue
+                break
+        except asyncio.CancelledError:
+            self._pending_debounce.pop(file_str, None)
+            self._release_pending_mutation(mutation)
+            raise
 
-            del self._pending_debounce[file_str]
-            await self._enqueue_mutation(mutation, register=False)
-            logger.debug(f"Processing debounced file: {mutation.path}")
-            self._debug(f"processing debounced file: {mutation.path}")
+        del self._pending_debounce[file_str]
+        if not await self._enqueue_mutation(mutation, register=False):
+            self._release_pending_mutation(mutation)
             return
+        logger.debug(f"Processing debounced file: {mutation.path}")
+        self._debug(f"processing debounced file: {mutation.path}")
+        return
 
     async def _consume_events(self) -> None:
         """Simple event consumer - pure asyncio queue."""

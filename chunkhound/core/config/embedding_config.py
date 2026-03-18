@@ -1,12 +1,13 @@
 """
-OpenAI embedding configuration for ChunkHound.
+Embedding provider configuration for ChunkHound.
 
-This module provides a type-safe, validated configuration system for OpenAI
-embeddings with support for multiple configuration sources (environment
+This module provides a type-safe, validated configuration system for embedding
+providers with support for multiple configuration sources (environment
 variables, config files, CLI arguments) across MCP server and indexing flows.
 """
 
 import argparse
+import functools
 import os
 import re
 from typing import Any, Literal
@@ -15,10 +16,43 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import Self
 
-from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
+from chunkhound.core.constants import OPENAI_DEFAULT_MODEL, VOYAGE_DEFAULT_MODEL
+from chunkhound.core.exceptions.embedding import EmbeddingConfigurationError
 
 from .openai_utils import is_azure_openai_endpoint, is_official_openai_endpoint
 from .voyageai_utils import is_official_voyageai_endpoint
+
+
+@functools.lru_cache(maxsize=1)
+def _get_openai_model_whitelist() -> frozenset[str]:
+    """Derive OpenAI whitelist from provider config (lazy to avoid circular import)."""
+    from chunkhound.providers.embeddings.openai_provider import OPENAI_MODEL_CONFIG
+
+    return frozenset(OPENAI_MODEL_CONFIG.keys())
+
+
+@functools.lru_cache(maxsize=1)
+def _get_voyageai_model_whitelist() -> frozenset[str]:
+    """Derive VoyageAI whitelist from provider config.
+
+    Lazy import to avoid circular dependency.
+    """
+    from chunkhound.providers.embeddings.voyageai_provider import VOYAGE_MODEL_CONFIG
+
+    return frozenset(VOYAGE_MODEL_CONFIG.keys())
+
+
+@functools.lru_cache(maxsize=1)
+def _get_voyageai_reranker_whitelist() -> frozenset[str]:
+    """Derive VoyageAI reranker whitelist from provider config.
+
+    Lazy import to avoid circular dependency.
+    """
+    from chunkhound.providers.embeddings.voyageai_provider import (
+        VOYAGE_RERANKER_CONFIG,
+    )
+
+    return frozenset(VOYAGE_RERANKER_CONFIG.keys())
 
 # Error message constants for consistent messaging across config and provider
 RERANK_MODEL_REQUIRED_COHERE = (
@@ -75,7 +109,7 @@ def validate_rerank_configuration(
 
 class EmbeddingConfig(BaseSettings):
     """
-    OpenAI embedding configuration for ChunkHound.
+    Embedding provider configuration for ChunkHound.
 
     Configuration Sources (in order of precedence):
     1. CLI arguments
@@ -84,9 +118,20 @@ class EmbeddingConfig(BaseSettings):
     4. Default values
 
     Environment Variables:
-        CHUNKHOUND_EMBEDDING__API_KEY=sk-...
-        CHUNKHOUND_EMBEDDING__MODEL=text-embedding-3-small
+        CHUNKHOUND_EMBEDDING__PROVIDER=openai  # openai | voyageai | openai_compatible
+        CHUNKHOUND_EMBEDDING__API_KEY=sk-...           # API key for authentication
+        CHUNKHOUND_EMBEDDING__MODEL=text-embedding-3-large
         CHUNKHOUND_EMBEDDING__BASE_URL=https://api.openai.com/v1
+        CHUNKHOUND_EMBEDDING__API_VERSION=2024-02-01  # Azure OpenAI API version
+        CHUNKHOUND_EMBEDDING__AZURE_ENDPOINT=https://myresource.openai.azure.com
+        CHUNKHOUND_EMBEDDING__AZURE_DEPLOYMENT=my-deployment
+        CHUNKHOUND_EMBEDDING__RERANK_MODEL=rerank-model-name
+        CHUNKHOUND_EMBEDDING__RERANK_URL=/rerank      # Absolute or relative rerank URL
+        CHUNKHOUND_EMBEDDING__RERANK_FORMAT=auto      # auto | cohere | tei
+        CHUNKHOUND_EMBEDDING__RERANK_BATCH_SIZE=32
+        CHUNKHOUND_EMBEDDING__OUTPUT_DIMS=256         # Matryoshka dimension truncation
+        CHUNKHOUND_EMBEDDING__CLIENT_SIDE_TRUNCATION=false
+        CHUNKHOUND_EMBEDDING__VERIFY_SSL=true         # Set false for self-signed certs
     """
 
     model_config = SettingsConfigDict(
@@ -98,8 +143,9 @@ class EmbeddingConfig(BaseSettings):
     )
 
     # Provider Selection
-    provider: Literal["openai", "voyageai"] = Field(
-        default="openai", description="Embedding provider (openai, voyageai)"
+    provider: Literal["openai", "voyageai", "openai_compatible"] = Field(
+        default="openai",
+        description="Embedding provider (openai, voyageai, openai_compatible)",
     )
 
     # Common Configuration
@@ -154,6 +200,30 @@ class EmbeddingConfig(BaseSettings):
         ),
     )
 
+    output_dims: int | None = Field(
+        default=None,
+        description="Output embedding dimension. If None, uses model default. "
+        "Validated against model's supported dimensions when known; "
+        "for custom models, validated at runtime after dimension discovery.",
+    )
+
+    client_side_truncation: bool = Field(
+        default=False,
+        description=(
+            "Truncate embeddings client-side instead of using API dimensions "
+            "parameter. Requires output_dims. Use for APIs that don't support "
+            "the dimensions parameter."
+        ),
+    )
+
+    verify_ssl: bool = Field(
+        default=True,
+        description=(
+            "Verify SSL certificates for custom endpoints. "
+            "Set to false only for self-signed certificates in trusted networks."
+        ),
+    )
+
     # Internal settings - not exposed to users
     batch_size: int = Field(default=100, description="Internal batch size")
     rerank_batch_size: int | None = Field(
@@ -176,6 +246,20 @@ class EmbeddingConfig(BaseSettings):
         if v is not None and v <= 0:
             raise ValueError("rerank_batch_size must be positive")
         return v
+
+    @field_validator("output_dims")
+    def validate_output_dims(cls, v: int | None) -> int | None:  # noqa: N805
+        """Validate output_dims is positive."""
+        if v is not None and v <= 0:
+            raise ValueError("output_dims must be positive")
+        return v
+
+    @model_validator(mode="after")
+    def validate_client_side_truncation(self) -> Self:
+        """Validate client_side_truncation requires output_dims."""
+        if self.client_side_truncation and self.output_dims is None:
+            raise ValueError("client_side_truncation requires output_dims to be set")
+        return self
 
     @field_validator("model")
     def validate_model(cls, v: str | None) -> str | None:  # noqa: N805
@@ -207,6 +291,16 @@ class EmbeddingConfig(BaseSettings):
         return v
 
     @model_validator(mode="after")
+    def validate_openai_compatible_requires_base_url(self) -> Self:
+        """Require base_url when provider is openai_compatible."""
+        if self.provider == "openai_compatible" and not self.base_url:
+            raise ValueError(
+                "base_url is required when provider is 'openai_compatible'. "
+                "Set CHUNKHOUND_EMBEDDING__BASE_URL or use --base-url."
+            )
+        return self
+
+    @model_validator(mode="after")
     def validate_rerank_config(self) -> Self:
         """Validate rerank configuration using shared validation logic."""
         # TEI format implies a relative /rerank endpoint when no explicit URL is given.
@@ -232,6 +326,47 @@ class EmbeddingConfig(BaseSettings):
             rerank_url=self.rerank_url,
             base_url=self.base_url,
         )
+        return self
+
+    @model_validator(mode="after")
+    def validate_model_whitelist(self) -> Self:
+        """Validate model and reranker against whitelists for official APIs."""
+        # Skip validation for openai_compatible and custom OpenAI-compatible endpoints
+        if self.provider == "openai_compatible":
+            return self
+        if (
+            self.provider == "openai"
+            and self.base_url is not None
+            and not is_official_openai_endpoint(self.base_url)
+        ):
+            return self
+
+        model = self.get_default_model()
+
+        if self.provider == "openai":
+            whitelist = _get_openai_model_whitelist()
+            if model not in whitelist:
+                raise EmbeddingConfigurationError(
+                    f"Unknown model '{model}' for OpenAI. "
+                    f"Valid models: {sorted(whitelist)}"
+                )
+        elif self.provider == "voyageai":
+            whitelist = _get_voyageai_model_whitelist()
+            if model not in whitelist:
+                raise EmbeddingConfigurationError(
+                    f"Unknown model '{model}' for VoyageAI. "
+                    f"Valid models: {sorted(whitelist)}"
+                )
+            reranker_whitelist = _get_voyageai_reranker_whitelist()
+            if (
+                self.rerank_model is not None
+                and self.rerank_model not in reranker_whitelist
+            ):
+                raise EmbeddingConfigurationError(
+                    f"Unknown reranker model '{self.rerank_model}' for VoyageAI. "
+                    f"Valid reranker models: {sorted(reranker_whitelist)}"
+                )
+
         return self
 
     @model_validator(mode="after")
@@ -316,6 +451,17 @@ class EmbeddingConfig(BaseSettings):
         if self.max_concurrent_batches is not None:
             base_config["max_concurrent_batches"] = self.max_concurrent_batches
 
+        # Add output_dims if specified
+        if self.output_dims is not None:
+            base_config["output_dims"] = self.output_dims
+
+        # Add client_side_truncation if enabled
+        if self.client_side_truncation:
+            base_config["client_side_truncation"] = self.client_side_truncation
+
+        # Always include verify_ssl so providers can use it
+        base_config["verify_ssl"] = self.verify_ssl
+
         return base_config
 
     def get_default_model(self) -> str:
@@ -331,8 +477,8 @@ class EmbeddingConfig(BaseSettings):
         # Provider defaults
         if self.provider == "voyageai":
             return VOYAGE_DEFAULT_MODEL
-        else:  # openai
-            return "text-embedding-3-small"
+        else:  # openai, openai_compatible
+            return OPENAI_DEFAULT_MODEL
 
     def is_provider_configured(self) -> bool:
         """
@@ -341,7 +487,7 @@ class EmbeddingConfig(BaseSettings):
         Returns:
             True if provider is properly configured
         """
-        if self.provider == "openai":
+        if self.provider in ("openai", "openai_compatible"):
             # Azure OpenAI always requires API key
             if self.azure_endpoint:
                 return self.api_key is not None and self.api_version is not None
@@ -349,7 +495,7 @@ class EmbeddingConfig(BaseSettings):
             if is_official_openai_endpoint(self.base_url):
                 return self.api_key is not None
             else:
-                # Custom endpoints don't require API key
+                # Custom endpoints (including openai_compatible) don't require API key
                 return True
         else:
             # VoyageAI: only the official endpoint requires an API key
@@ -366,7 +512,7 @@ class EmbeddingConfig(BaseSettings):
         """
         missing = []
 
-        if self.provider == "openai":
+        if self.provider in ("openai", "openai_compatible"):
             # Azure OpenAI always requires API key
             if self.azure_endpoint:
                 if not self.api_key:
@@ -393,14 +539,14 @@ class EmbeddingConfig(BaseSettings):
         parser.add_argument(
             "--provider",
             "--embedding-provider",
-            choices=["openai", "voyageai"],
-            help="Embedding provider (openai or voyageai)",
+            choices=["openai", "voyageai", "openai_compatible"],
+            help="Embedding provider (default: openai)",
         )
 
         parser.add_argument(
             "--model",
             "--embedding-model",
-            help="Embedding model (default: text-embedding-3-small)",
+            help=f"Embedding model (default: {OPENAI_DEFAULT_MODEL})",
         )
 
         parser.add_argument(
@@ -438,6 +584,27 @@ class EmbeddingConfig(BaseSettings):
             "--azure-deployment",
             "--embedding-azure-deployment",
             help="Azure OpenAI deployment name",
+        )
+
+        parser.add_argument(
+            "--output-dims",
+            "--embedding-output-dims",
+            type=int,
+            help="Output embedding dimensions for matryoshka models",
+        )
+
+        parser.add_argument(
+            "--client-side-truncation",
+            "--embedding-client-side-truncation",
+            action="store_true",
+            help="Truncate embeddings client-side instead of via API",
+        )
+
+        parser.add_argument(
+            "--no-verify-ssl",
+            "--embedding-no-verify-ssl",
+            action="store_true",
+            help="Disable SSL certificate verification for custom endpoints",
         )
 
     @classmethod
@@ -507,6 +674,29 @@ class EmbeddingConfig(BaseSettings):
             except ValueError:
                 pass
 
+        if output_dims := os.getenv("CHUNKHOUND_EMBEDDING__OUTPUT_DIMS"):
+            try:
+                config["output_dims"] = int(output_dims)
+            except ValueError:
+                from loguru import logger
+
+                logger.warning(
+                    f"Invalid CHUNKHOUND_EMBEDDING__OUTPUT_DIMS='{output_dims}', "
+                    "must be a positive integer. Using default."
+                )
+
+        if client_side_truncation := os.getenv(
+            "CHUNKHOUND_EMBEDDING__CLIENT_SIDE_TRUNCATION"
+        ):
+            config["client_side_truncation"] = client_side_truncation.lower() in (
+                "true",
+                "1",
+                "yes",
+            )
+
+        if verify_ssl := os.getenv("CHUNKHOUND_EMBEDDING__VERIFY_SSL"):
+            config["verify_ssl"] = verify_ssl.lower() not in ("false", "0", "no")
+
         return config
 
     @classmethod
@@ -514,46 +704,36 @@ class EmbeddingConfig(BaseSettings):
         """Extract embedding config from CLI arguments."""
         overrides = {}
 
-        # Handle provider arguments (both variations)
         if hasattr(args, "provider") and args.provider:
             overrides["provider"] = args.provider
 
-        # Handle model arguments (both variations)
         if hasattr(args, "model") and args.model:
             overrides["model"] = args.model
-        if hasattr(args, "embedding_model") and args.embedding_model:
-            overrides["model"] = args.embedding_model
 
-        # Handle API key arguments (both variations)
         if hasattr(args, "api_key") and args.api_key:
             overrides["api_key"] = args.api_key
-        if hasattr(args, "embedding_api_key") and args.embedding_api_key:
-            overrides["api_key"] = args.embedding_api_key
 
-        # Handle base URL arguments (both variations)
         if hasattr(args, "base_url") and args.base_url:
             overrides["base_url"] = args.base_url
-        if hasattr(args, "embedding_base_url") and args.embedding_base_url:
-            overrides["base_url"] = args.embedding_base_url
 
-        # Handle Azure OpenAI arguments
+        # Azure OpenAI arguments
         if hasattr(args, "azure_endpoint") and args.azure_endpoint:
             overrides["azure_endpoint"] = args.azure_endpoint
-        if hasattr(args, "embedding_azure_endpoint") and args.embedding_azure_endpoint:
-            overrides["azure_endpoint"] = args.embedding_azure_endpoint
 
         if hasattr(args, "api_version") and args.api_version:
             overrides["api_version"] = args.api_version
-        if hasattr(args, "embedding_api_version") and args.embedding_api_version:
-            overrides["api_version"] = args.embedding_api_version
 
         if hasattr(args, "azure_deployment") and args.azure_deployment:
             overrides["azure_deployment"] = args.azure_deployment
-        if (
-            hasattr(args, "embedding_azure_deployment")
-            and args.embedding_azure_deployment
-        ):
-            overrides["azure_deployment"] = args.embedding_azure_deployment
+
+        if hasattr(args, "output_dims") and args.output_dims is not None:
+            overrides["output_dims"] = args.output_dims
+
+        if hasattr(args, "client_side_truncation") and args.client_side_truncation:
+            overrides["client_side_truncation"] = True
+
+        if hasattr(args, "no_verify_ssl") and args.no_verify_ssl:
+            overrides["verify_ssl"] = False
 
         # Handle no-embeddings flag (special case - disables embeddings)
         if hasattr(args, "no_embeddings") and args.no_embeddings:
