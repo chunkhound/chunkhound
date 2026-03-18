@@ -182,6 +182,7 @@ class TestRealtimeFunctional:
         services = create_services(db_path, config)
         services.provider.connect()
         sidecar_delay_seconds = 0.05
+        timing_tolerance_seconds = 0.01
 
         class _FakeSidecar:
             def __init__(self, target_dir: Path, debug_sink=None) -> None:
@@ -332,9 +333,12 @@ class TestRealtimeFunctional:
             assert startup["state"] == "completed"
             assert startup["mode"] == "stdio"
             assert startup["phases"]["watchman_sidecar_start"]["state"] == "completed"
+            # Hosted Windows runners can undershoot a nominal 50 ms sleep by a
+            # few milliseconds; the contract here is timing capture, not
+            # exact profiling precision.
             assert (
                 startup["phases"]["watchman_sidecar_start"]["duration_seconds"]
-                >= sidecar_delay_seconds
+                >= sidecar_delay_seconds - timing_tolerance_seconds
             )
             assert startup["phases"]["watchman_watch_project"]["state"] == "completed"
             assert (
