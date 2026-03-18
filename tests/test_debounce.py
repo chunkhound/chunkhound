@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from chunkhound.core.utils.path_utils import normalize_realtime_path
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 
 
@@ -42,6 +43,11 @@ async def _wait_for_tasks(svc: RealtimeIndexingService, timeout: float = 2.0) ->
         )
 
 
+def _expected_mutation_path(path: Path) -> Path:
+    """Match the realtime service's cross-platform path normalization."""
+    return normalize_realtime_path(path)
+
+
 class TestDebounce:
     async def test_rapid_changes_single_queue_entry(self, service):
         """10 rapid add_file calls for the same file produce exactly 1 queue entry."""
@@ -52,7 +58,7 @@ class TestDebounce:
         await _wait_for_tasks(service)
         items = await _drain_queue(service.file_queue)
         assert len(items) == 1
-        assert items[0][2].path == path
+        assert items[0][2].path == _expected_mutation_path(path)
 
     async def test_debounce_timestamp_refresh(self, service):
         """A second add_file during the delay resets the clock; file not queued early."""
@@ -115,7 +121,10 @@ class TestDebounce:
         await _wait_for_tasks(service)
         items = await _drain_queue(service.file_queue)
         paths = {item[2].path for item in items}
-        assert paths == {path_a, path_b}
+        assert paths == {
+            _expected_mutation_path(path_a),
+            _expected_mutation_path(path_b),
+        }
 
     async def test_scan_then_change_produces_two_queue_entries(self, service):
         """scan followed by change for the same file queues the file twice.
@@ -164,4 +173,4 @@ class TestDebounce:
         await _wait_for_tasks(service)
         items = await _drain_queue(service.file_queue)
         assert len(items) == 1
-        assert items[0][2].path == path
+        assert items[0][2].path == _expected_mutation_path(path)
