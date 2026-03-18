@@ -365,7 +365,7 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     ".scss": Language.SCSS,
     # .sass uses indented syntax (no braces/semicolons) which is structurally
     # incompatible with the tree-sitter SCSS grammar — fall back to text parser.
-    ".sass": Language.UNKNOWN,
+    ".sass": Language.TEXT,
     ".make": Language.MAKEFILE,
     # Text files (fallback)
     ".txt": Language.TEXT,

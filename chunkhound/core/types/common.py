@@ -294,9 +294,9 @@ class Language(Enum):
             ".scss": cls.SCSS,
             # .sass uses indented syntax (no braces/semicolons) which is
             # structurally incompatible with the tree-sitter SCSS grammar.
-            # Treat as UNKNOWN so the text fallback parser is used instead of
-            # silently producing misaligned / empty chunks.
-            ".sass": cls.UNKNOWN,
+            # Use text fallback parser instead of silently producing
+            # misaligned / empty chunks.
+            ".sass": cls.TEXT,
             ".jinja": cls.JINJA,
             ".j2": cls.JINJA,
             ".njk": cls.JINJA,
