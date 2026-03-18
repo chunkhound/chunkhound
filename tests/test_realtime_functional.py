@@ -698,7 +698,7 @@ class TestRealtimeFunctional:
         realtime_setup,
         monkeypatch,
     ):
-        """Slow in-scope processing should retain only one newest follow-up change."""
+        """Slow in-scope processing should retain one newest follow-up for a burst."""
         service, watch_dir, _, _ = realtime_setup
         target_file = watch_dir / "continuous_hot.py"
         target_file.write_text("value = 1\n")
@@ -756,31 +756,17 @@ class TestRealtimeFunctional:
         try:
             await asyncio.wait_for(first_processing_started.wait(), timeout=1.0)
 
-            target_file.write_text("value = 2\n")
-            service._record_source_event("modified", target_file)
-            service._record_accepted_event("modified", target_file)
-            assert await service.add_file(target_file, priority="change") is True
-
-            target_file.write_text("value = 3\n")
-            service._record_source_event("modified", target_file)
-            service._record_accepted_event("modified", target_file)
-            assert await service.add_file(target_file, priority="change") is False
-
-            if service._debounce_tasks:
-                await asyncio.wait_for(
-                    asyncio.gather(
-                        *service._debounce_tasks.copy(),
-                        return_exceptions=True,
-                    ),
-                    timeout=2.0,
-                )
+            for version in range(2, 12):
+                target_file.write_text(f"value = {version}\n")
+                service._record_source_event("modified", target_file)
+                service._record_accepted_event("modified", target_file)
+                assert await service.add_file(target_file, priority="change") is False
 
             pending_stats = await service.get_health()
-            assert pending_stats["pending_mutations"]["counts_by_operation"][
-                "change"
-            ] == 1
+            assert pending_stats["queue_size"] == 0
+            assert pending_stats["pending_files"] == 0
             assert pending_stats["event_pressure"]["sample_scope"] == "included"
-            assert pending_stats["event_pressure"]["coalesced_updates"] >= 1
+            assert pending_stats["event_pressure"]["coalesced_updates"] >= 10
             assert pending_stats["resync"]["request_count"] == 0
 
             release_first_processing.set()
@@ -794,7 +780,7 @@ class TestRealtimeFunctional:
                 ),
             )
 
-            assert processed_contents == ["value = 1\n", "value = 3\n"]
+            assert processed_contents == ["value = 1\n", "value = 11\n"]
             assert final_stats["last_error"] is None
         finally:
             release_first_processing.set()

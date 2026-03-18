@@ -1645,6 +1645,8 @@ class RealtimeIndexingService:
         self._processing_error_count = 0
         self._active_processing_count = 0
         self._event_pressure_by_path: dict[str, HotPathPressure] = {}
+        self._active_change_generations: dict[str, int | None] = {}
+        self._reserved_follow_up_change_generations: dict[str, int] = {}
 
         # Background scan state
         self.scan_iterator: Iterator | None = None
@@ -2572,6 +2574,24 @@ class RealtimeIndexingService:
             count_coalesced=True,
         )
 
+    def _reserve_change_follow_up(
+        self, file_path: Path | str, source_generation: int | None = None
+    ) -> None:
+        normalized_path = str(self._normalize_mutation_path(file_path))
+        current_generation = source_generation
+        if current_generation is None:
+            current_generation = self._current_source_generation(normalized_path)
+        if current_generation is None:
+            return
+
+        existing_generation = self._reserved_follow_up_change_generations.get(
+            normalized_path
+        )
+        if existing_generation is None or current_generation > existing_generation:
+            self._reserved_follow_up_change_generations[normalized_path] = (
+                current_generation
+            )
+
     def _mutation_for_processing(self, mutation: RealtimeMutation) -> RealtimeMutation:
         if mutation.operation not in {"change", "scan"}:
             return mutation
@@ -3138,6 +3158,8 @@ class RealtimeIndexingService:
         self._next_source_generation = 0
         self._latest_source_generation_by_path.clear()
         self._event_pressure_by_path.clear()
+        self._active_change_generations.clear()
+        self._reserved_follow_up_change_generations.clear()
         self.file_queue = asyncio.PriorityQueue()
         self.event_queue = asyncio.Queue(maxsize=self._EVENT_QUEUE_MAXSIZE)
         self._queue_sequence = 0
@@ -3456,8 +3478,17 @@ class RealtimeIndexingService:
                             if accepted:
                                 self._record_accepted_event("created", file_path)
                             else:
-                                self._advance_source_generation(file_path)
-                                self._refresh_pending_change_generation(file_path)
+                                source_generation = self._advance_source_generation(
+                                    file_path
+                                )
+                                self._refresh_pending_change_generation(
+                                    file_path,
+                                    source_generation,
+                                )
+                                self._reserve_change_follow_up(
+                                    file_path,
+                                    source_generation,
+                                )
                         elif known_files[file_path] != current_fingerprint:
                             logger.debug(f"Polling detected modified file: {file_path}")
                             self._debug(f"polling detected modified file: {file_path}")
@@ -3466,8 +3497,17 @@ class RealtimeIndexingService:
                             if accepted:
                                 self._record_accepted_event("modified", file_path)
                             else:
-                                self._advance_source_generation(file_path)
-                                self._refresh_pending_change_generation(file_path)
+                                source_generation = self._advance_source_generation(
+                                    file_path
+                                )
+                                self._refresh_pending_change_generation(
+                                    file_path,
+                                    source_generation,
+                                )
+                                self._reserve_change_follow_up(
+                                    file_path,
+                                    source_generation,
+                                )
 
                     # Check for deleted files.
                     deleted = set(known_files.keys()) - set(current_files.keys())
@@ -3521,8 +3561,17 @@ class RealtimeIndexingService:
             file_path,
             source_generation=source_generation,
         )
+        file_str = str(mutation.path)
+        if (
+            operation == "change"
+            and file_str in self._active_change_generations
+            and ("change", file_str) not in self._pending_mutations
+        ):
+            self._reserve_change_follow_up(mutation.path, source_generation)
+            self._mark_coalesced_change(mutation.path)
+            self._emit_status_update()
+            return False
         if debounced:
-            file_str = str(mutation.path)
             if file_str in self._pending_debounce:
                 # Keep the already-pending debounce horizon fresh.
                 self._pending_debounce[file_str] = time.monotonic()
@@ -3532,7 +3581,6 @@ class RealtimeIndexingService:
 
         if not self._register_pending_mutation(mutation):
             if debounced:
-                file_str = str(mutation.path)
                 if file_str in self._pending_debounce:
                     # Keep the already-pending debounce horizon fresh.
                     self._pending_debounce[file_str] = time.monotonic()
@@ -3881,9 +3929,15 @@ class RealtimeIndexingService:
             try:
                 # Wait for next mutation (blocks if queue is empty)
                 _, _, mutation = await self.file_queue.get()
-                owned_when_dequeued = self._owns_pending_mutation(mutation)
-                self._release_pending_mutation(mutation)
                 mutation = self._mutation_for_processing(mutation)
+                owned_when_dequeued = self._owns_pending_mutation(mutation)
+                active_change_path: str | None = None
+                if mutation.operation in {"change", "scan"}:
+                    active_change_path = str(mutation.path)
+                    self._active_change_generations[active_change_path] = (
+                        mutation.source_generation
+                    )
+                self._release_pending_mutation(mutation)
 
                 # Fast path for embedding generation without re-parsing the file.
                 if mutation.operation == "embed":
@@ -3928,6 +3982,8 @@ class RealtimeIndexingService:
 
                 # Check if file still exists (prevent race condition with deletion)
                 if not file_path.exists():
+                    if active_change_path is not None:
+                        self._active_change_generations.pop(active_change_path, None)
                     logger.debug(f"Skipping {file_path} - file no longer exists")
                     continue
 
@@ -3943,7 +3999,6 @@ class RealtimeIndexingService:
                 # Use existing indexing coordinator
                 self._record_processing_started(file_path)
                 completed = False
-                follow_up_generation: int | None = None
                 try:
                     result = await self.services.indexing_coordinator.process_file(
                         file_path, skip_embeddings=skip_embeddings
@@ -3980,22 +4035,23 @@ class RealtimeIndexingService:
                     except Exception:
                         pass
                     completed = True
-                    current_generation = self._current_source_generation(file_path)
-                    if (
-                        mutation.operation in {"change", "scan"}
-                        and mutation.source_generation is not None
-                        and current_generation is not None
-                        and current_generation > mutation.source_generation
-                    ):
-                        follow_up_generation = current_generation
                 finally:
                     self._record_processing_finished(file_path, completed=completed)
+                    if active_change_path is not None:
+                        self._active_change_generations.pop(active_change_path, None)
 
-                if follow_up_generation is not None:
-                    await self._queue_follow_up_change(
-                        file_path,
-                        source_generation=follow_up_generation,
+                if active_change_path is not None:
+                    follow_up_generation = (
+                        self._reserved_follow_up_change_generations.pop(
+                            active_change_path,
+                            None,
+                        )
                     )
+                    if follow_up_generation is not None:
+                        await self._queue_follow_up_change(
+                            file_path,
+                            source_generation=follow_up_generation,
+                        )
 
             except asyncio.CancelledError:
                 logger.debug("Processing loop cancelled")
