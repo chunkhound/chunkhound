@@ -118,7 +118,9 @@ class ScssMapping(BaseMapping):
                 (if_statement) @definition
             """
         elif concept == UniversalConcept.STRUCTURE:
-            # $variable declarations (top-level declarations starting with $)
+            # All declaration nodes (CSS properties AND SCSS $variables).
+            # extract_content filters to only $-prefixed property names, so plain
+            # CSS properties (color, margin, etc.) are silently skipped.
             return "(declaration) @definition"
         elif concept == UniversalConcept.IMPORT:
             return """

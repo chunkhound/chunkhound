@@ -18,6 +18,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
 from tree_sitter import Tree
 
 from chunkhound.core.models.chunk import Chunk
@@ -36,8 +37,6 @@ from chunkhound.utils.chunk_deduplication import (
     get_chunk_specificity,
 )
 from chunkhound.utils.normalization import normalize_content
-
-from loguru import logger
 
 from .chunk_splitter import CASTConfig, ChunkMetrics, ChunkSplitter
 from .concept_extractor import ConceptExtractor

@@ -85,19 +85,7 @@ class HtmlMapping(BaseMapping):
         """Return True if node is a semantic landmark or custom element."""
         if node.type != "element":
             return False
-        start_tag = node.child_by_field_name("start_tag") or (
-            node.children[0] if node.children else None
-        )
-        if start_tag is None or start_tag.type != "start_tag":
-            return False
-        tag_name_node = None
-        for child in start_tag.children:
-            if child.type == "tag_name":
-                tag_name_node = child
-                break
-        if tag_name_node is None:
-            return False
-        tag = node_text(tag_name_node, content).strip().lower()
+        tag = self._get_tag_name(node, content)
         if not tag:
             return False
         return tag in SEMANTIC_TAGS or "-" in tag
@@ -325,6 +313,4 @@ class JinjaMapping(HtmlMapping):
     """
 
     def __init__(self) -> None:
-        # Skip HtmlMapping.__init__ and call BaseMapping directly so we can
-        # pass Language.JINJA without duplicating any other logic.
-        super(HtmlMapping, self).__init__(Language.JINJA)
+        BaseMapping.__init__(self, Language.JINJA)
