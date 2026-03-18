@@ -6,6 +6,7 @@ import stat
 import sys
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -258,6 +259,43 @@ def _write_fake_watchman_cli(tmp_path: Path) -> Path:
     script_path.write_text(textwrap.dedent(_FAKE_WATCHMAN_CLI), encoding="utf-8")
     script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR)
     return script_path
+
+
+def test_watchman_cli_session_prepared_startup_support_is_transport_aware(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = WatchmanCliSession(
+        binary_path=tmp_path / "watchman",
+        socket_path=tmp_path / "watchman.sock",
+        statefile_path=tmp_path / "watchman.state",
+        logfile_path=tmp_path / "watchman.log",
+        pidfile_path=tmp_path / "watchman.pid",
+        project_root=tmp_path,
+    )
+    shimmed_session = WatchmanCliSession(
+        binary_path=tmp_path / "watchman",
+        socket_path=tmp_path / "watchman.sock",
+        statefile_path=tmp_path / "watchman.state",
+        logfile_path=tmp_path / "watchman.log",
+        pidfile_path=tmp_path / "watchman.pid",
+        project_root=tmp_path,
+        command_prefix=[sys.executable, "fake-watchman"],
+    )
+
+    monkeypatch.setattr(
+        watchman_session_module,
+        "resolve_packaged_watchman_runtime",
+        lambda: SimpleNamespace(listener_transport="unix_socket"),
+    )
+    assert session.supports_prepared_session_startup() is True
+    assert shimmed_session.supports_prepared_session_startup() is False
+
+    monkeypatch.setattr(
+        watchman_session_module,
+        "resolve_packaged_watchman_runtime",
+        lambda: SimpleNamespace(listener_transport="named_pipe"),
+    )
+    assert session.supports_prepared_session_startup() is False
 
 
 @pytest.mark.asyncio

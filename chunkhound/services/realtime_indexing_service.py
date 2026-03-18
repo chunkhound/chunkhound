@@ -1047,22 +1047,30 @@ class WatchmanRealtimeAdapter:
             )
 
         primary_session = _new_session()
+        use_prepared_startup = primary_session.supports_prepared_session_startup()
         sessions: list[WatchmanCliSession] = []
         subscription_scope_map: dict[str, WatchmanSubscriptionScope] = {}
         try:
             self._service._start_startup_phase("watchman_watch_project")
-            await primary_session.prepare()
-            watch_project_response = await primary_session.watch_project(watch_path)
+            if use_prepared_startup:
+                await primary_session.prepare()
+                watch_project_response = await primary_session.watch_project(watch_path)
+            else:
+                watch_project_response = (
+                    await primary_session.startup_watch_project_once(watch_path)
+                )
             self._service._complete_startup_phase("watchman_watch_project")
             self._service._start_startup_phase("watchman_scope_discovery")
             nested_mount_roots = discover_nested_linux_mount_roots(watch_path)
             additional_scopes = discover_nested_windows_junction_scopes(watch_path)
-            await primary_session.watch_roots(
-                [
-                    *nested_mount_roots,
-                    *(scope.watch_root for scope in additional_scopes),
-                ]
-            )
+            startup_watch_roots = [
+                *nested_mount_roots,
+                *(scope.watch_root for scope in additional_scopes),
+            ]
+            if use_prepared_startup:
+                await primary_session.watch_roots(startup_watch_roots)
+            else:
+                await primary_session.startup_watch_roots_once(startup_watch_roots)
             scope_plan = build_watchman_scope_plan(
                 watch_path,
                 watch_project_response,
@@ -1080,11 +1088,21 @@ class WatchmanRealtimeAdapter:
                 raise RuntimeError("Watchman scope plan did not contain any scopes")
 
             primary_scope = scope_plan.primary_scope
-            primary_setup = await primary_session.subscribe_scopes(
-                target_path=watch_path,
-                subscription_name=self._SUBSCRIPTION_NAME,
-                scope_plan=WatchmanScopePlan(scopes=(primary_scope,)),
-            )
+            primary_scope_plan = WatchmanScopePlan(scopes=(primary_scope,))
+            if use_prepared_startup:
+                primary_setup = await primary_session.subscribe_scopes(
+                    target_path=watch_path,
+                    subscription_name=self._SUBSCRIPTION_NAME,
+                    scope_plan=primary_scope_plan,
+                )
+            else:
+                primary_setup = await primary_session.start(
+                    target_path=watch_path,
+                    subscription_name=self._SUBSCRIPTION_NAME,
+                    scope_plan=primary_scope_plan,
+                    nested_mount_roots=(),
+                    additional_scopes=(),
+                )
             sessions.append(primary_session)
             for subscription_name in primary_setup.subscription_names:
                 subscription_scope_map[subscription_name] = primary_scope

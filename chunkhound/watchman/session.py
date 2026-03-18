@@ -140,6 +140,12 @@ class WatchmanCliSession:
             return None
         return self._subscription_scopes.get(subscription_name)
 
+    def supports_prepared_session_startup(self) -> bool:
+        if self._command_prefix is not None:
+            return False
+        runtime = resolve_packaged_watchman_runtime()
+        return runtime.listener_transport == "unix_socket"
+
     async def prepare(self) -> dict[str, bool]:
         if self._process is not None and self._process.returncode is None:
             await self.stop()
@@ -197,6 +203,13 @@ class WatchmanCliSession:
         self._ensure_process_running()
         return await self._send_command(["watch-project", str(target_path.resolve())])
 
+    async def startup_watch_project_once(
+        self, target_path: Path
+    ) -> dict[str, object]:
+        return await self._run_one_shot_command(
+            ["watch-project", str(target_path.resolve())]
+        )
+
     async def watch_roots(self, roots: Sequence[Path]) -> tuple[Path, ...]:
         self._ensure_process_running()
         watched_roots: list[Path] = []
@@ -206,6 +219,17 @@ class WatchmanCliSession:
                 continue
             seen_roots.add(root)
             await self._send_command(["watch", str(root)])
+            watched_roots.append(root)
+        return tuple(watched_roots)
+
+    async def startup_watch_roots_once(self, roots: Sequence[Path]) -> tuple[Path, ...]:
+        watched_roots: list[Path] = []
+        seen_roots: set[Path] = set()
+        for root in roots:
+            if root in seen_roots:
+                continue
+            seen_roots.add(root)
+            await self._run_one_shot_command(["watch", str(root)])
             watched_roots.append(root)
         return tuple(watched_roots)
 
@@ -772,7 +796,7 @@ class WatchmanCliSession:
             future.set_result(message)
 
     def _use_direct_socket_session(self) -> bool:
-        return self._command_prefix is None and os.name != "nt"
+        return self.supports_prepared_session_startup()
 
     async def _wait_for_process_exit(self) -> None:
         process = self._process

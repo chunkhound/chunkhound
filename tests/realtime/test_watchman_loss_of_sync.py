@@ -49,6 +49,34 @@ async def _wait_for_watchman_reconnect_state(
     return await asyncio.wait_for(_poll(), timeout=timeout)
 
 
+def _active_watchman_disconnect_process(adapter: WatchmanRealtimeAdapter) -> object:
+    session = getattr(adapter, "_session", None)
+    process = getattr(session, "_process", None)
+    if process is not None:
+        return process
+
+    sidecar = getattr(adapter, "_sidecar", None)
+    sidecar_process = getattr(sidecar, "_process", None)
+    if sidecar_process is not None:
+        return sidecar_process
+
+    raise AssertionError("No active Watchman process available to trigger disconnect")
+
+
+def _active_session_close_handle(adapter: WatchmanRealtimeAdapter) -> object:
+    session = getattr(adapter, "_session", None)
+    process = getattr(session, "_process", None)
+    stdin = getattr(process, "stdin", None)
+    if stdin is not None:
+        return stdin
+
+    writer = getattr(session, "_stream_writer", None)
+    if writer is not None:
+        return writer
+
+    raise AssertionError("No active Watchman session close handle is available")
+
+
 @pytest.mark.asyncio
 async def test_watchman_fresh_instance_requests_resync_without_incremental_translation(
     tmp_path: Path,
@@ -336,12 +364,11 @@ async def test_watchman_unexpected_session_exit_requests_resync_and_restores_mon
     try:
         await service.start(watch_dir)
         adapter = service._monitor_adapter
-        session = getattr(adapter, "_session", None)
-        process = getattr(session, "_process", None)
-        assert process is not None
+        assert adapter is not None
+        disconnect_process = _active_watchman_disconnect_process(adapter)
         baseline_loss_of_sync = (await service.get_health())["watchman_loss_of_sync"]
 
-        process.terminate()
+        disconnect_process.terminate()
 
         await asyncio.wait_for(callback_event.wait(), timeout=5.0)
         stats = await _wait_for_watchman_reconnect_state(service, "restored")
@@ -395,11 +422,8 @@ async def test_watchman_failed_reconnect_state_is_observable(
 
         monkeypatch.setattr(adapter, "_establish_monitoring", failing_establish)
 
-        session = getattr(adapter, "_session", None)
-        process = getattr(session, "_process", None)
-        assert process is not None
-
-        process.terminate()
+        disconnect_process = _active_watchman_disconnect_process(adapter)
+        disconnect_process.terminate()
 
         await asyncio.wait_for(callback_event.wait(), timeout=5.0)
         stats = await _wait_for_watchman_reconnect_state(service, "failed")
@@ -434,23 +458,20 @@ async def test_service_stop_during_reconnect_teardown_does_not_orphan_cli_proces
         await service.start(watch_dir)
         adapter = service._monitor_adapter
         assert adapter is not None
-        session = getattr(adapter, "_session", None)
-        process = getattr(session, "_process", None)
-        stdin = getattr(process, "stdin", None)
-        assert process is not None
-        assert stdin is not None
-        old_pid = process.pid
+        close_handle = _active_session_close_handle(adapter)
+        disconnect_process = _active_watchman_disconnect_process(adapter)
+        old_pid = disconnect_process.pid
 
         teardown_waiting = asyncio.Event()
         allow_wait_closed = asyncio.Event()
 
-        monkeypatch.setattr(stdin, "close", lambda: None)
+        monkeypatch.setattr(close_handle, "close", lambda: None)
 
         async def blocked_wait_closed() -> None:
             teardown_waiting.set()
             await allow_wait_closed.wait()
 
-        monkeypatch.setattr(stdin, "wait_closed", blocked_wait_closed)
+        monkeypatch.setattr(close_handle, "wait_closed", blocked_wait_closed)
 
         adapter._begin_reconnect_cycle()
         await asyncio.wait_for(teardown_waiting.wait(), timeout=5.0)

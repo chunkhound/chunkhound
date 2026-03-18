@@ -231,26 +231,62 @@ class TestRealtimeFunctional:
                 )
                 self._subscription_name: str | None = None
                 self._scope = None
+                self._capabilities = {
+                    "cmd-watch-project": True,
+                    "relative_root": True,
+                }
 
             @staticmethod
             def _sanitize_subscription_suffix(value: str) -> str:
                 return value.replace("/", "-").replace("\\", "-")
 
-            async def _run_one_shot_command(self, command: list[str]):
-                if command[0] == "watch-project":
-                    return {"watch": str(watch_dir.resolve()), "relative_path": None}
-                return {"watch": command[1], "relative_path": None}
+            def supports_prepared_session_startup(self) -> bool:
+                return True
+
+            async def prepare(self) -> dict[str, bool]:
+                return dict(self._capabilities)
+
+            async def watch_project(self, target_path: Path) -> dict[str, object]:
+                del target_path
+                return {"watch": str(watch_dir.resolve()), "relative_path": None}
+
+            async def watch_roots(self, roots: list[Path]) -> tuple[Path, ...]:
+                return tuple(roots)
+
+            async def subscribe_scopes(
+                self,
+                *,
+                target_path: Path,
+                scope_plan,
+                subscription_name: str | None = None,
+            ) -> SimpleNamespace:
+                del target_path
+                self._subscription_name = (
+                    subscription_name or "chunkhound-live-indexing"
+                )
+                self._scope = scope_plan.primary_scope
+                return SimpleNamespace(
+                    scope_plan=scope_plan,
+                    subscription_name=self._subscription_name,
+                    subscription_names=(self._subscription_name,),
+                    capabilities=dict(self._capabilities),
+                )
 
             async def start(
                 self,
                 target_path: Path,
                 subscription_name: str,
                 scope_plan,
-                nested_mount_roots,
-            ) -> None:
-                del target_path, nested_mount_roots
-                self._subscription_name = subscription_name
-                self._scope = scope_plan.primary_scope
+                nested_mount_roots=(),
+                additional_scopes=(),
+            ) -> SimpleNamespace:
+                del nested_mount_roots, additional_scopes
+                await self.prepare()
+                return await self.subscribe_scopes(
+                    target_path=target_path,
+                    subscription_name=subscription_name,
+                    scope_plan=scope_plan,
+                )
 
             async def stop(self) -> None:
                 return None
@@ -300,10 +336,7 @@ class TestRealtimeFunctional:
                         scope.relative_root if scope is not None else None
                     ),
                     "watchman_scopes": scopes,
-                    "watchman_session_capabilities": {
-                        "cmd-watch-project": True,
-                        "relative_root": True,
-                    },
+                    "watchman_session_capabilities": dict(self._capabilities),
                 }
 
         monkeypatch.setattr(

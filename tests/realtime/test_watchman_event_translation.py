@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
@@ -11,8 +10,7 @@ import chunkhound.services.realtime_indexing_service as realtime_service_module
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
-from chunkhound.watchman import WatchmanCliSession, WatchmanSubscriptionScope
-from tests.realtime.test_watchman_session_bridge import _write_fake_watchman_cli
+from chunkhound.watchman import WatchmanSubscriptionScope
 from tests.utils.windows_compat import wait_for_indexed
 
 pytestmark = pytest.mark.requires_native_watchman
@@ -101,19 +99,10 @@ async def _start_isolated_watchman_translation(
 async def test_watchman_mount_aware_startup_reuses_primary_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    script_path = _write_fake_watchman_cli(tmp_path)
     target_dir = tmp_path / "workspace_root"
     nested_mount = (target_dir / "chunkhound_workspace").resolve()
     target_dir.mkdir(parents=True)
     nested_mount.mkdir(parents=True)
-    socket_path = tmp_path / "watchman.sock"
-    socket_path.write_text("socket ready\n", encoding="utf-8")
-    statefile_path = tmp_path / "watchman.state"
-    statefile_path.write_text("state ready\n", encoding="utf-8")
-    logfile_path = tmp_path / "watchman.log"
-    logfile_path.write_text("log ready\n", encoding="utf-8")
-    pidfile_path = tmp_path / "watchman.pid"
-    pidfile_path.write_text("123\n", encoding="utf-8")
     service, services = _build_watchman_service(target_dir)
     prepare_delay = 1.0
     prepare_calls: list[int] = []
@@ -138,25 +127,54 @@ async def test_watchman_mount_aware_startup_reuses_primary_session(
         def get_health(self) -> dict[str, object]:
             return {"watchman_alive": True}
 
-    class TrackingSession(WatchmanCliSession):
+    class TrackingSession:
+        _SUBSCRIPTION_QUEUE_MAXSIZE = 1000
         _created_sessions: list[TrackingSession] = []
+        _capabilities = {
+            "cmd-watch-project": True,
+            "relative_root": True,
+        }
 
         def __init__(self, **kwargs: object) -> None:
-            kwargs.setdefault("command_prefix", [sys.executable, str(script_path)])
-            super().__init__(**kwargs)
+            del kwargs
+            self.subscription_queue = asyncio.Queue(
+                maxsize=self._SUBSCRIPTION_QUEUE_MAXSIZE
+            )
             self.session_id = len(self._created_sessions)
             self._created_sessions.append(self)
+            self._subscription_name: str | None = None
+            self._subscription_names: tuple[str, ...] = ()
+            self._subscription_scopes: dict[str, WatchmanSubscriptionScope] = {}
+            self._scope_plan = None
+
+        @staticmethod
+        def _sanitize_subscription_suffix(value: str) -> str:
+            candidate = value.replace("\\", "/").strip("/")
+            if not candidate:
+                return ""
+            parts: list[str] = []
+            for chunk in PurePosixPath(candidate).parts:
+                normalized_chunk = "".join(
+                    character.lower() if character.isalnum() else "-"
+                    for character in chunk
+                ).strip("-")
+                if normalized_chunk:
+                    parts.append(normalized_chunk)
+            return "-".join(parts)
+
+        def supports_prepared_session_startup(self) -> bool:
+            return True
 
         async def prepare(self) -> dict[str, bool]:
             prepare_calls.append(self.session_id)
             await asyncio.sleep(prepare_delay)
-            return await super().prepare()
+            return dict(self._capabilities)
 
         async def watch_project(self, target_path: Path) -> dict[str, object]:
             operations.append(
                 ("watch_project", self.session_id, str(target_path.resolve()))
             )
-            return await super().watch_project(target_path)
+            return {"watch": str(target_path.resolve()), "relative_path": None}
 
         async def watch_roots(self, roots: list[Path]) -> tuple[Path, ...]:
             operations.append(
@@ -166,7 +184,22 @@ async def test_watchman_mount_aware_startup_reuses_primary_session(
                     tuple(str(root) for root in roots),
                 )
             )
-            return await super().watch_roots(roots)
+            return tuple(roots)
+
+        async def startup_watch_project_once(
+            self, target_path: Path
+        ) -> dict[str, object]:
+            raise AssertionError(
+                "unexpected one-shot watch-project during prepared startup: "
+                f"{target_path}"
+            )
+
+        async def startup_watch_roots_once(
+            self, roots: list[Path]
+        ) -> tuple[Path, ...]:
+            raise AssertionError(
+                f"unexpected one-shot watch during prepared startup: {roots!r}"
+            )
 
         async def subscribe_scopes(
             self,
@@ -174,7 +207,8 @@ async def test_watchman_mount_aware_startup_reuses_primary_session(
             target_path: Path,
             scope_plan: object,
             subscription_name: str | None = None,
-        ) -> object:
+        ) -> SimpleNamespace:
+            del target_path
             resolved_subscription_name = subscription_name or "chunkhound-live-indexing"
             operations.append(
                 (
@@ -184,20 +218,84 @@ async def test_watchman_mount_aware_startup_reuses_primary_session(
                     tuple(item.scope_kind for item in scope_plan.scopes),
                 )
             )
-            return await super().subscribe_scopes(
+            self._scope_plan = scope_plan
+            self._subscription_name = resolved_subscription_name
+            self._subscription_names = (resolved_subscription_name,)
+            self._subscription_scopes = {
+                resolved_subscription_name: scope_plan.primary_scope
+            }
+            return SimpleNamespace(
+                scope_plan=scope_plan,
+                subscription_name=resolved_subscription_name,
+                subscription_names=self._subscription_names,
+                capabilities=dict(self._capabilities),
+            )
+
+        async def start(
+            self,
+            *,
+            target_path: Path,
+            subscription_name: str | None = None,
+            scope_plan=None,
+            nested_mount_roots=(),
+            additional_scopes=(),
+        ) -> SimpleNamespace:
+            del nested_mount_roots, additional_scopes
+            await self.prepare()
+            return await self.subscribe_scopes(
                 target_path=target_path,
                 scope_plan=scope_plan,
                 subscription_name=subscription_name,
             )
 
-        async def _run_one_shot_command(
-            self, command: list[object]
-        ) -> dict[str, object]:
-            if command[0] != "version":
-                raise AssertionError(
-                    f"unexpected one-shot command during startup: {command[0]!r}"
+        async def stop(self) -> None:
+            return None
+
+        async def wait_for_unexpected_exit(self) -> str | None:
+            await asyncio.Event().wait()
+            return None
+
+        def get_health(self) -> dict[str, object]:
+            watchman_scopes = []
+            for subscription_name in self._subscription_names:
+                scope = self._subscription_scopes.get(subscription_name)
+                if scope is None:
+                    continue
+                watchman_scopes.append(
+                    {
+                        "subscription_name": subscription_name,
+                        "scope_kind": scope.scope_kind,
+                        "requested_path": str(scope.requested_path),
+                        "watch_root": str(scope.watch_root),
+                        "relative_root": scope.relative_root,
+                    }
                 )
-            return await super()._run_one_shot_command(command)
+            primary_scope = self._scope_plan.primary_scope if self._scope_plan else None
+            return {
+                "watchman_session_alive": True,
+                "watchman_session_pid": None,
+                "watchman_session_last_warning": None,
+                "watchman_session_last_warning_at": None,
+                "watchman_session_last_error": None,
+                "watchman_session_last_error_at": None,
+                "watchman_session_last_response_at": None,
+                "watchman_subscription_last_received_at": None,
+                "watchman_session_command_count": len(operations),
+                "watchman_subscription_queue_size": self.subscription_queue.qsize(),
+                "watchman_subscription_queue_maxsize": self.subscription_queue.maxsize,
+                "watchman_subscription_pdu_count": 0,
+                "watchman_subscription_pdu_dropped": 0,
+                "watchman_subscription_name": self._subscription_name,
+                "watchman_subscription_names": list(self._subscription_names),
+                "watchman_watch_root": (
+                    str(primary_scope.watch_root) if primary_scope else None
+                ),
+                "watchman_relative_root": (
+                    primary_scope.relative_root if primary_scope else None
+                ),
+                "watchman_scopes": watchman_scopes,
+                "watchman_session_capabilities": dict(self._capabilities),
+            }
 
     monkeypatch.setattr(
         realtime_service_module,
@@ -275,6 +373,266 @@ async def test_watchman_mount_aware_startup_reuses_primary_session(
             startup_snapshot["phases"]["watchman_subscription_setup"]["state"]
             == "completed"
         )
+    finally:
+        await adapter.stop()
+        services.provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_watchman_mount_aware_startup_uses_fallback_planning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target_dir = tmp_path / "workspace_root"
+    nested_mount = (target_dir / "chunkhound_workspace").resolve()
+    target_dir.mkdir(parents=True)
+    nested_mount.mkdir(parents=True)
+    service, services = _build_watchman_service(target_dir)
+    prepare_calls: list[int] = []
+    operations: list[tuple[object, ...]] = []
+
+    class FakeSidecar:
+        def __init__(self) -> None:
+            self.paths = SimpleNamespace(
+                listener_path=str(tmp_path / "watchman.sock"),
+                statefile_path=tmp_path / "watchman.state",
+                logfile_path=tmp_path / "watchman.log",
+                pidfile_path=tmp_path / "watchman.pid",
+                project_root=target_dir,
+            )
+
+        async def start(self) -> SimpleNamespace:
+            return SimpleNamespace(binary_path=str(tmp_path / "watchman"))
+
+        async def stop(self) -> None:
+            operations.append(("sidecar_stop",))
+
+        def get_health(self) -> dict[str, object]:
+            return {"watchman_alive": True}
+
+    class TrackingSession:
+        _SUBSCRIPTION_QUEUE_MAXSIZE = 1000
+        _created_sessions: list[TrackingSession] = []
+        _capabilities = {
+            "cmd-watch-project": True,
+            "relative_root": True,
+        }
+
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+            self.subscription_queue = asyncio.Queue(
+                maxsize=self._SUBSCRIPTION_QUEUE_MAXSIZE
+            )
+            self.session_id = len(self._created_sessions)
+            self._created_sessions.append(self)
+            self._subscription_name: str | None = None
+            self._subscription_names: tuple[str, ...] = ()
+            self._subscription_scopes: dict[str, WatchmanSubscriptionScope] = {}
+            self._scope_plan = None
+
+        @staticmethod
+        def _sanitize_subscription_suffix(value: str) -> str:
+            candidate = value.replace("\\", "/").strip("/")
+            if not candidate:
+                return ""
+            parts: list[str] = []
+            for chunk in PurePosixPath(candidate).parts:
+                normalized_chunk = "".join(
+                    character.lower() if character.isalnum() else "-"
+                    for character in chunk
+                ).strip("-")
+                if normalized_chunk:
+                    parts.append(normalized_chunk)
+            return "-".join(parts)
+
+        def supports_prepared_session_startup(self) -> bool:
+            return False
+
+        async def prepare(self) -> dict[str, bool]:
+            prepare_calls.append(self.session_id)
+            return dict(self._capabilities)
+
+        async def watch_project(self, target_path: Path) -> dict[str, object]:
+            raise AssertionError(
+                "unexpected persistent watch-project during fallback startup: "
+                f"{target_path}"
+            )
+
+        async def watch_roots(self, roots: list[Path]) -> tuple[Path, ...]:
+            raise AssertionError(
+                f"unexpected persistent watch during fallback startup: {roots!r}"
+            )
+
+        async def startup_watch_project_once(
+            self, target_path: Path
+        ) -> dict[str, object]:
+            operations.append(
+                (
+                    "startup_watch_project_once",
+                    self.session_id,
+                    str(target_path.resolve()),
+                )
+            )
+            return {"watch": str(target_path.resolve()), "relative_path": None}
+
+        async def startup_watch_roots_once(
+            self, roots: list[Path]
+        ) -> tuple[Path, ...]:
+            operations.append(
+                (
+                    "startup_watch_roots_once",
+                    self.session_id,
+                    tuple(str(root) for root in roots),
+                )
+            )
+            return tuple(roots)
+
+        async def subscribe_scopes(
+            self,
+            *,
+            target_path: Path,
+            scope_plan: object,
+            subscription_name: str | None = None,
+        ) -> SimpleNamespace:
+            del target_path
+            resolved_subscription_name = subscription_name or "chunkhound-live-indexing"
+            self._scope_plan = scope_plan
+            self._subscription_name = resolved_subscription_name
+            self._subscription_names = (resolved_subscription_name,)
+            self._subscription_scopes = {
+                resolved_subscription_name: scope_plan.primary_scope
+            }
+            return SimpleNamespace(
+                scope_plan=scope_plan,
+                subscription_name=resolved_subscription_name,
+                subscription_names=self._subscription_names,
+                capabilities=dict(self._capabilities),
+            )
+
+        async def start(
+            self,
+            *,
+            target_path: Path,
+            subscription_name: str | None = None,
+            scope_plan=None,
+            nested_mount_roots=(),
+            additional_scopes=(),
+        ) -> SimpleNamespace:
+            del nested_mount_roots, additional_scopes
+            await self.prepare()
+            resolved_subscription_name = subscription_name or "chunkhound-live-indexing"
+            operations.append(
+                (
+                    "start",
+                    self.session_id,
+                    str(target_path.resolve()),
+                    resolved_subscription_name,
+                    tuple(item.scope_kind for item in scope_plan.scopes),
+                )
+            )
+            return await self.subscribe_scopes(
+                target_path=target_path,
+                subscription_name=resolved_subscription_name,
+                scope_plan=scope_plan,
+            )
+
+        async def stop(self) -> None:
+            return None
+
+        async def wait_for_unexpected_exit(self) -> str | None:
+            await asyncio.Event().wait()
+            return None
+
+        def get_health(self) -> dict[str, object]:
+            watchman_scopes = []
+            for subscription_name in self._subscription_names:
+                scope = self._subscription_scopes.get(subscription_name)
+                if scope is None:
+                    continue
+                watchman_scopes.append(
+                    {
+                        "subscription_name": subscription_name,
+                        "scope_kind": scope.scope_kind,
+                        "requested_path": str(scope.requested_path),
+                        "watch_root": str(scope.watch_root),
+                        "relative_root": scope.relative_root,
+                    }
+                )
+            primary_scope = self._scope_plan.primary_scope if self._scope_plan else None
+            return {
+                "watchman_session_alive": True,
+                "watchman_session_pid": 54321,
+                "watchman_session_last_warning": None,
+                "watchman_session_last_warning_at": None,
+                "watchman_session_last_error": None,
+                "watchman_session_last_error_at": None,
+                "watchman_session_last_response_at": None,
+                "watchman_subscription_last_received_at": None,
+                "watchman_session_command_count": len(operations),
+                "watchman_subscription_queue_size": self.subscription_queue.qsize(),
+                "watchman_subscription_queue_maxsize": self.subscription_queue.maxsize,
+                "watchman_subscription_pdu_count": 0,
+                "watchman_subscription_pdu_dropped": 0,
+                "watchman_subscription_name": self._subscription_name,
+                "watchman_subscription_names": list(self._subscription_names),
+                "watchman_watch_root": (
+                    str(primary_scope.watch_root) if primary_scope else None
+                ),
+                "watchman_relative_root": (
+                    primary_scope.relative_root if primary_scope else None
+                ),
+                "watchman_scopes": watchman_scopes,
+                "watchman_session_capabilities": dict(self._capabilities),
+            }
+
+    monkeypatch.setattr(
+        realtime_service_module,
+        "discover_nested_linux_mount_roots",
+        lambda target_path: (nested_mount,),
+    )
+    monkeypatch.setattr(
+        realtime_service_module,
+        "discover_nested_windows_junction_scopes",
+        lambda target_path: (),
+    )
+    monkeypatch.setattr(
+        realtime_service_module,
+        "WatchmanCliSession",
+        TrackingSession,
+    )
+
+    adapter = realtime_service_module.WatchmanRealtimeAdapter(service)
+    adapter._sidecar = FakeSidecar()
+    try:
+        await adapter.start(target_dir, asyncio.get_running_loop())
+
+        assert prepare_calls == [0, 1]
+        assert len(TrackingSession._created_sessions) == 2
+        assert operations == [
+            ("startup_watch_project_once", 0, str(target_dir.resolve())),
+            ("startup_watch_roots_once", 0, (str(nested_mount),)),
+            (
+                "start",
+                0,
+                str(target_dir.resolve()),
+                "chunkhound-live-indexing",
+                ("primary",),
+            ),
+            (
+                "start",
+                1,
+                str(nested_mount),
+                "chunkhound-live-indexing--chunkhound-workspace",
+                ("nested_mount",),
+            ),
+        ]
+        assert service.monitoring_ready.is_set()
+        assert service.watchman_scope_plan is not None
+        assert [scope.scope_kind for scope in service.watchman_scope_plan.scopes] == [
+            "primary",
+            "nested_mount",
+        ]
+        assert adapter._session is TrackingSession._created_sessions[0]
+        assert adapter._sessions == TrackingSession._created_sessions
     finally:
         await adapter.stop()
         services.provider.disconnect()
