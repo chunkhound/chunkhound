@@ -220,12 +220,9 @@ class HtmlMapping(BaseMapping):
                     if rel == "stylesheet":
                         href = self._get_attribute(start_tag, "href", content)
                         return href or "link_stylesheet"
-                if tag == "script" and start_tag is not None:
-                    src = self._get_attribute(start_tag, "src", content)
-                    if src:
-                        return src
-                # Unrecognised import tag (no start_tag, or not link/script) —
-                # fall through to "unnamed".
+                # Only link[rel=stylesheet] is captured as IMPORT.
+                # <script src=...> maps to script_element (not element) in the
+                # tree-sitter HTML grammar, so it is captured as BLOCK instead.
 
         return "unnamed"
 
@@ -243,21 +240,18 @@ class HtmlMapping(BaseMapping):
                 if not self._is_semantic_element(node, content):
                     return ""
 
-        # Filter IMPORT: only emit link[rel=stylesheet] and script[src=...]
+        # Filter IMPORT: only emit link[rel=stylesheet].
+        # <script src=...> uses script_element (not element) in the grammar,
+        # so it is captured as BLOCK and never reaches this path.
         if concept == UniversalConcept.IMPORT:
             if node.type != "element":
                 return ""
             tag = self._get_tag_name(node, content)
             start_tag = self._get_start_tag(node)
-            if tag == "link" and start_tag is not None:
-                rel = self._get_attribute(start_tag, "rel", content)
-                if rel != "stylesheet":
-                    return ""
-            elif tag == "script" and start_tag is not None:
-                src = self._get_attribute(start_tag, "src", content)
-                if not src:
-                    return ""
-            else:
+            if tag != "link" or start_tag is None:
+                return ""
+            rel = self._get_attribute(start_tag, "rel", content)
+            if rel != "stylesheet":
                 return ""
 
         return node_text(node, content)
