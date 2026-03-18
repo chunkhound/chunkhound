@@ -94,6 +94,8 @@ Fields that are useful during diagnosis:
 - `startup.state`, `startup.mode`, `startup.current_phase`,
   `startup.last_error`: bounded daemon-side bootstrap summary for the current
   process
+- `server_version`: the ChunkHound daemon build version serving this
+  `daemon_status` response
 - `startup.phases.*`: per-phase wall-clock timestamps plus monotonic
   `duration_seconds` for `initialize`, `db_connect`, `realtime_start`,
   `startup_barrier`, `daemon_publish`, and backend-specific setup such as

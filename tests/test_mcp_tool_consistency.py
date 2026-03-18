@@ -7,6 +7,7 @@ preventing issues where tools have incorrect or missing descriptions.
 import pytest
 
 from chunkhound.mcp_server.tools import TOOL_REGISTRY
+from chunkhound.version import __version__
 
 
 def test_tool_registry_populated():
@@ -152,6 +153,7 @@ async def test_daemon_status_tool_returns_scan_progress_snapshot():
     )
 
     assert result["status"] == "ready"
+    assert result["server_version"] == __version__
     assert result["query_ready"] is True
     assert result["scan_progress"]["realtime"]["service_state"] == "running"
 

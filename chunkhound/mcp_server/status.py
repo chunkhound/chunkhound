@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from chunkhound.version import __version__
+
 
 def normalize_scan_progress(scan_progress: dict[str, Any] | None) -> dict[str, Any]:
     """Return a normalized scan_progress payload with a realtime section."""
@@ -48,6 +50,7 @@ def derive_daemon_status(scan_progress: dict[str, Any] | None) -> dict[str, Any]
 
     return {
         "status": status,
+        "server_version": __version__,
         "query_ready": query_ready,
         "scan_progress": progress,
     }
