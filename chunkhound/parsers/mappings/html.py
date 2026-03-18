@@ -1,9 +1,13 @@
-"""HTML language mapping for unified parser architecture.
+"""HTML and Jinja language mappings for unified parser architecture.
 
 Provides semantic chunking for HTML documents. Semantic landmark elements
 (section, article, main, header, footer, nav, aside, form, table, etc.)
 and custom elements (tag names containing '-') are extracted as BLOCK chunks.
 Script/style blocks, comments, and imports are also captured.
+
+``JinjaMapping`` is a thin subclass of ``HtmlMapping`` that overrides the
+language label to ``Language.JINJA``, ensuring chunks produced from ``.jinja``,
+``.j2``, ``.njk``, ``.erb``, and ``.ejs`` files are tagged correctly.
 """
 
 from pathlib import Path
@@ -233,9 +237,6 @@ class HtmlMapping(BaseMapping):
                     if rel == "stylesheet":
                         href = self._get_attribute(start_tag, "href", content)
                         return href or "link_stylesheet"
-                # Only link[rel=stylesheet] is captured as IMPORT.
-                # <script src=...> maps to script_element (not element) in the
-                # tree-sitter HTML grammar, so it is captured as BLOCK instead.
 
         return "unnamed"
 
@@ -311,3 +312,19 @@ class HtmlMapping(BaseMapping):
     ) -> list[dict[str, str]] | None:
         """HTML does not define constants via this interface; always returns None."""
         return None
+
+
+class JinjaMapping(HtmlMapping):
+    """Jinja/template mapping — identical to HTML but labels chunks as JINJA.
+
+    Jinja ``{{ }}``, ``{% %}``, and ``{# #}`` tokens are treated as plain
+    text by the tree-sitter HTML grammar, so the HTML mapping is reused as a
+    best-effort approximation.  Overriding ``__init__`` is sufficient to
+    ensure all output chunks carry ``Language.JINJA`` rather than
+    ``Language.HTML``.
+    """
+
+    def __init__(self) -> None:
+        # Skip HtmlMapping.__init__ and call BaseMapping directly so we can
+        # pass Language.JINJA without duplicating any other logic.
+        super(HtmlMapping, self).__init__(Language.JINJA)

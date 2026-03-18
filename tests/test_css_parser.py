@@ -39,24 +39,24 @@ def test_parses_rule_set_as_definition(css_parser):
 
 
 def test_parses_root_variables_as_structure(css_parser):
-    """:root rule with custom properties is extracted as a BLOCK with symbol ':root_vars'.
+    """:root rule with custom properties is extracted as NAMESPACE with symbol containing ':root_vars'.
 
-    Note: The chunk_type_hint 'block' in metadata means the chunk type is BLOCK,
-    not NAMESPACE, even though the concept is STRUCTURE. The symbol ':root_vars'
-    distinguishes it from regular rule sets.
+    The chunk_type_hint 'namespace' in metadata maps to ChunkType.NAMESPACE,
+    distinguishing these design-token blocks from regular rule sets (ChunkType.BLOCK).
+    The symbol includes the selector and line number for uniqueness.
     """
     code = """:root {
   --primary: #333;
   --secondary: #999;
 }"""
     chunks = css_parser.parse_content(code, "test.css", file_id=1)
-    block_chunks = [c for c in chunks if c.chunk_type == ChunkType.BLOCK]
-    assert len(block_chunks) > 0, "No BLOCK chunk for :root vars"
-    assert any(":root_vars" in c.symbol or "root" in c.symbol for c in block_chunks), (
-        f":root_vars not in {[c.symbol for c in block_chunks]}"
+    ns_chunks = [c for c in chunks if c.chunk_type == ChunkType.NAMESPACE]
+    assert len(ns_chunks) > 0, "No NAMESPACE chunk for :root vars"
+    assert any(":root_vars" in c.symbol for c in ns_chunks), (
+        f":root_vars not in {[c.symbol for c in ns_chunks]}"
     )
     # Metadata should indicate is_root_vars
-    root_chunk = next((c for c in block_chunks if "root" in c.symbol), None)
+    root_chunk = next((c for c in ns_chunks if ":root_vars" in c.symbol), None)
     assert root_chunk is not None
     assert root_chunk.metadata and root_chunk.metadata.get("is_root_vars") is True
 
@@ -200,9 +200,10 @@ def test_comprehensive_file(css_parser, comprehensive_css):
     assert "@keyframes" in all_code, f"@keyframes not found in chunk code"
     assert "@supports" in all_code, f"@supports not found in chunk code"
 
-    # :root vars → BLOCK with ':root_vars' symbol (not NAMESPACE)
-    assert any(":root_vars" in s for s in symbols), (
-        f":root_vars not in {symbols}"
+    # :root vars → NAMESPACE with symbol containing ':root_vars'
+    ns_symbols = {c.symbol for c in chunks if c.chunk_type == ChunkType.NAMESPACE}
+    assert any(":root_vars" in s for s in ns_symbols), (
+        f":root_vars not in namespace symbols {ns_symbols}"
     )
 
     # Check import symbols
@@ -211,16 +212,16 @@ def test_comprehensive_file(css_parser, comprehensive_css):
 
 
 def test_parses_star_variables_chunk_type(css_parser):
-    """* rule with custom properties produces a BLOCK chunk with is_root_vars=True."""
+    """* rule with custom properties produces a NAMESPACE chunk with is_root_vars=True."""
     code = """* {
   --margin: 0;
   --padding: 0;
 }"""
     chunks = css_parser.parse_content(code, "test.css", file_id=1)
-    block_chunks = [c for c in chunks if c.chunk_type == ChunkType.BLOCK]
-    assert len(block_chunks) > 0, "No BLOCK chunk for * with custom properties"
+    ns_chunks = [c for c in chunks if c.chunk_type == ChunkType.NAMESPACE]
+    assert len(ns_chunks) > 0, "No NAMESPACE chunk for * with custom properties"
     assert any(
-        c.metadata and c.metadata.get("is_root_vars") is True for c in block_chunks
+        c.metadata and c.metadata.get("is_root_vars") is True for c in ns_chunks
     ), "is_root_vars not True for * with --vars"
 
 

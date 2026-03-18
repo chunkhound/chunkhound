@@ -128,7 +128,8 @@ class CssMapping(BaseMapping):
             return extract_at_rule_name(node, content)
 
         elif concept == UniversalConcept.STRUCTURE:
-            return ":root_vars"
+            sel = selector_text(node, content)
+            return f"{sel}_vars_line{node.start_point[0] + 1}"
 
         elif concept == UniversalConcept.IMPORT:
             raw = node_text(node, content).strip()
@@ -168,8 +169,10 @@ class CssMapping(BaseMapping):
             metadata["node_type"] = node.type
             if node.type == "rule_set":
                 metadata["selector"] = selector_text(node, content)
-                metadata["is_root_vars"] = self._is_root_vars(node, content)
-                metadata["chunk_type_hint"] = "block"
+                is_root_vars = self._is_root_vars(node, content)
+                metadata["is_root_vars"] = is_root_vars
+                # :root/:* var blocks are STRUCTURE (namespace); plain rule sets are blocks.
+                metadata["chunk_type_hint"] = "namespace" if is_root_vars else "block"
         return metadata
 
     def resolve_import_paths(

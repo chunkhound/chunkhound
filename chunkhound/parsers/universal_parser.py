@@ -14,7 +14,6 @@ recursive approach to create chunks that:
 - Ensure plug-and-play compatibility with existing systems
 """
 
-import logging
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -37,6 +36,8 @@ from chunkhound.utils.chunk_deduplication import (
     get_chunk_specificity,
 )
 from chunkhound.utils.normalization import normalize_content
+
+from loguru import logger
 
 from .chunk_splitter import CASTConfig, ChunkMetrics, ChunkSplitter
 from .concept_extractor import ConceptExtractor
@@ -238,17 +239,18 @@ class UniversalParser:
         # content_bytes always comes from the *original* source so that
         # extracted chunk text is faithful to what the user wrote.
         ast_source = self.base_mapping.preprocess_for_ast(content)
-        ast_tree = self.engine.parse_to_ast(ast_source)
         content_bytes = content.encode("utf-8")
         ast_bytes_len = len(ast_source.encode("utf-8"))
         if ast_bytes_len != len(content_bytes):
-            logging.getLogger(__name__).warning(
-                "preprocess_for_ast changed byte length (%d → %d) for %s; "
-                "chunk text may be misaligned",
+            logger.warning(
+                "preprocess_for_ast changed byte length ({} → {}) for {}; "
+                "falling back to original source to avoid misaligned chunks",
                 len(content_bytes),
                 ast_bytes_len,
                 file_path,
             )
+            ast_source = content
+        ast_tree = self.engine.parse_to_ast(ast_source)
 
         # Extract universal concepts using ConceptExtractor
         if self.extractor is None:

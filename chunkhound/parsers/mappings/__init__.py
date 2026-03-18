@@ -16,7 +16,7 @@ from .go import GoMapping
 from .groovy import GroovyMapping
 from .haskell import HaskellMapping
 from .hcl import HclMapping
-from .html import HtmlMapping
+from .html import HtmlMapping, JinjaMapping
 from .java import JavaMapping
 from .javascript import JavaScriptMapping
 from .json import JsonMapping
@@ -58,6 +58,7 @@ __all__ = [
     "HaskellMapping",
     "HclMapping",
     "HtmlMapping",
+    "JinjaMapping",
     "JavaMapping",
     "JavaScriptMapping",
     "JsonMapping",

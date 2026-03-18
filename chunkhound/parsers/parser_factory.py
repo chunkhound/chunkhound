@@ -59,6 +59,7 @@ from chunkhound.parsers.mappings import (
     HaskellMapping,
     HclMapping,
     HtmlMapping,
+    JinjaMapping,
     JavaMapping,
     JavaScriptMapping,
     JsonMapping,
@@ -250,7 +251,7 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     # JINJA uses the HTML grammar as a best-effort approximation.
     # Jinja {{ }}/{% %}/{# #} tokens are treated as plain text by the HTML
     # grammar.  A dedicated tree-sitter-jinja grammar could be added later.
-    Language.JINJA: LanguageConfig(ts_html, HtmlMapping, True, "html"),
+    Language.JINJA: LanguageConfig(ts_html, JinjaMapping, True, "jinja"),
     # Non-tree-sitter languages
     Language.TEXT: LanguageConfig(
         None, TextMapping, True, "text"
