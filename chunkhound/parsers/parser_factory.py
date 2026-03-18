@@ -362,7 +362,9 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     ".erb": Language.JINJA,
     ".css": Language.CSS,
     ".scss": Language.SCSS,
-    ".sass": Language.SCSS,
+    # .sass uses indented syntax (no braces/semicolons) which is structurally
+    # incompatible with the tree-sitter SCSS grammar — fall back to text parser.
+    ".sass": Language.UNKNOWN,
     ".make": Language.MAKEFILE,
     # Text files (fallback)
     ".txt": Language.TEXT,

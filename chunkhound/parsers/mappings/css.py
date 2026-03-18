@@ -6,6 +6,13 @@ Maps CSS AST nodes to semantic chunks:
 - :root / * with vars → STRUCTURE
 - @import             → IMPORT
 - comment             → COMMENT
+
+Design note — dual-query for DEFINITION and STRUCTURE:
+Both concepts use ``(rule_set) @definition`` as their tree-sitter query.
+``extract_content`` acts as the discriminator: it returns ``""`` (skip) for
+``DEFINITION`` when the rule set is a ``:root``/``*`` var block, and returns
+``""`` for ``STRUCTURE`` when it is not.  This ensures each ``rule_set`` node
+produces exactly one chunk with no duplicates.
 """
 
 from pathlib import Path

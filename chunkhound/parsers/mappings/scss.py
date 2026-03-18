@@ -67,11 +67,15 @@ class ScssMapping(BaseMapping):
         """Extract mixin/function name from a mixin or function statement node."""
         if node is None:
             return ""
-        # Use preprocessed content so byte offsets from the AST (built on the
-        # preprocessed source) stay aligned with the bytes we slice into.
-        preprocessed = self.preprocess_for_ast(source)
-        preprocessed_bytes = preprocessed.encode("utf-8", errors="replace")
-        return self._identifier_name(node, preprocessed_bytes)
+        # The AST was built from the preprocessed source, so byte offsets are
+        # aligned with the preprocessed bytes — not the original source.  Only
+        # run the regex when the source actually contains interpolations; for
+        # the common case (no #{...}) the original bytes are identical.
+        if "#{" in source:
+            source_bytes = self.preprocess_for_ast(source).encode("utf-8", errors="replace")
+        else:
+            source_bytes = source.encode("utf-8", errors="replace")
+        return self._identifier_name(node, source_bytes)
 
     def extract_class_name(self, node: Node | None, source: str) -> str:
         """SCSS has no class definitions; always returns empty string."""

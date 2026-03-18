@@ -168,7 +168,11 @@ class HtmlMapping(BaseMapping):
     def get_query_for_concept(self, concept: UniversalConcept) -> str | None:
         """Get tree-sitter query for a universal concept in HTML."""
         if concept == UniversalConcept.BLOCK:
-            # All elements captured; semantic/custom filtering in extract_content.
+            # Capture ALL element nodes and let extract_content filter to
+            # semantic/custom elements.  Tree-sitter query predicates cannot
+            # inspect attribute values (e.g. tag name), so the filtering must
+            # happen in Python.  The overhead is acceptable because HTML files
+            # are typically smaller than large source files.
             return """
                 (element) @definition
                 (script_element) @definition
