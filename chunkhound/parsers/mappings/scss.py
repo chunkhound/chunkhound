@@ -72,9 +72,9 @@ class ScssMapping(BaseMapping):
         # run the regex when the source actually contains interpolations; for
         # the common case (no #{...}) the original bytes are identical.
         if "#{" in source:
-            source_bytes = self.preprocess_for_ast(source).encode("utf-8", errors="replace")
+            source_bytes = self.preprocess_for_ast(source).encode("utf-8")
         else:
-            source_bytes = source.encode("utf-8", errors="replace")
+            source_bytes = source.encode("utf-8")
         return self._identifier_name(node, source_bytes)
 
     def extract_class_name(self, node: Node | None, source: str) -> str:

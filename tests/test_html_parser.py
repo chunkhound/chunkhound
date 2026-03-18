@@ -274,6 +274,11 @@ def test_jinja_language_produces_chunks():
     assert len(chunks) > 0, "Language.JINJA parser returned no chunks"
     block_chunks = [c for c in chunks if c.chunk_type == ChunkType.BLOCK]
     assert len(block_chunks) > 0, "No BLOCK chunks for Jinja template"
+    # All chunks must be labeled JINJA, not HTML
+    for chunk in chunks:
+        assert chunk.language == Language.JINJA, (
+            f"Chunk language should be JINJA, got {chunk.language}"
+        )
 
 
 def test_resolve_import_paths_html(tmp_path):
