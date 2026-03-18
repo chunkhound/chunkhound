@@ -304,13 +304,18 @@ class WatchmanCliSession:
                     if additional_scopes is None
                     else tuple(additional_scopes)
                 )
-                watch_project_response = await self.watch_project(target_path)
-                await self.watch_roots(
-                    [
-                        *resolved_nested_mount_roots,
-                        *(scope.watch_root for scope in resolved_additional_scopes),
-                    ]
-                )
+                startup_watch_roots = [
+                    *resolved_nested_mount_roots,
+                    *(scope.watch_root for scope in resolved_additional_scopes),
+                ]
+                if self.supports_prepared_session_startup():
+                    watch_project_response = await self.watch_project(target_path)
+                    await self.watch_roots(startup_watch_roots)
+                else:
+                    watch_project_response = await self.startup_watch_project_once(
+                        target_path
+                    )
+                    await self.startup_watch_roots_once(startup_watch_roots)
                 resolved_scope_plan = build_watchman_scope_plan(
                     target_path,
                     watch_project_response,

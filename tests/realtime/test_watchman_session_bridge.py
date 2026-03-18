@@ -299,6 +299,84 @@ def test_watchman_cli_session_prepared_startup_support_is_transport_aware(
 
 
 @pytest.mark.asyncio
+async def test_watchman_cli_session_start_uses_one_shot_scope_planning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script_path = _write_fake_watchman_cli(tmp_path)
+    watch_root = tmp_path / "workspace_root"
+    nested_mount = watch_root / "chunkhound_workspace"
+    watch_root.mkdir(parents=True)
+    nested_mount.mkdir(parents=True)
+    socket_path = tmp_path / "watchman.sock"
+    socket_path.write_text("socket ready\n", encoding="utf-8")
+    statefile_path = tmp_path / "watchman.state"
+    statefile_path.write_text("state ready\n", encoding="utf-8")
+    logfile_path = tmp_path / "watchman.log"
+    logfile_path.write_text("log ready\n", encoding="utf-8")
+    pidfile_path = tmp_path / "watchman.pid"
+    pidfile_path.write_text("123\n", encoding="utf-8")
+    operations: list[tuple[object, ...]] = []
+
+    class TrackingSession(WatchmanCliSession):
+        async def watch_project(self, target_path: Path) -> dict[str, object]:
+            raise AssertionError(
+                "unexpected persistent watch-project during fallback start: "
+                f"{target_path}"
+            )
+
+        async def watch_roots(self, roots) -> tuple[Path, ...]:
+            raise AssertionError(
+                f"unexpected persistent watch during fallback start: {roots!r}"
+            )
+
+        async def startup_watch_project_once(
+            self, target_path: Path
+        ) -> dict[str, object]:
+            operations.append(
+                ("startup_watch_project_once", str(target_path.resolve()))
+            )
+            return await super().startup_watch_project_once(target_path)
+
+        async def startup_watch_roots_once(
+            self, roots
+        ) -> tuple[Path, ...]:
+            operations.append(
+                ("startup_watch_roots_once", tuple(str(root) for root in roots))
+            )
+            return await super().startup_watch_roots_once(roots)
+
+    monkeypatch.setenv("CHUNKHOUND_TEST_WATCHMAN_WATCH_ROOT", str(watch_root))
+    monkeypatch.setattr(
+        watchman_session_module,
+        "discover_nested_linux_mount_roots",
+        lambda target_path: (nested_mount.resolve(),),
+    )
+
+    session = TrackingSession(
+        binary_path=script_path,
+        socket_path=socket_path,
+        statefile_path=statefile_path,
+        logfile_path=logfile_path,
+        pidfile_path=pidfile_path,
+        project_root=tmp_path,
+        command_prefix=[sys.executable, str(script_path)],
+    )
+
+    setup = await session.start(target_path=watch_root)
+
+    assert operations == [
+        ("startup_watch_project_once", str(watch_root.resolve())),
+        ("startup_watch_roots_once", (str(nested_mount.resolve()),)),
+    ]
+    assert setup.subscription_names == (
+        "chunkhound-live-indexing",
+        "chunkhound-live-indexing--chunkhound-workspace",
+    )
+
+    await session.stop()
+
+
+@pytest.mark.asyncio
 async def test_watchman_cli_session_start_sets_scope_and_queues_pdus(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

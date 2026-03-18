@@ -71,6 +71,20 @@ async def _wait_for_logical_indexed(
     return False
 
 
+def _active_watchman_disconnect_process(adapter) -> object:
+    session = getattr(adapter, "_session", None)
+    process = getattr(session, "_process", None)
+    if process is not None:
+        return process
+
+    sidecar = getattr(adapter, "_sidecar", None)
+    sidecar_process = getattr(sidecar, "_process", None)
+    if sidecar_process is not None:
+        return sidecar_process
+
+    raise AssertionError("No active Watchman process available to disconnect")
+
+
 def _configured_mount_regression_paths() -> tuple[Path, Path] | None:
     mount_parent = os.environ.get("CHUNKHOUND_TEST_WATCHMAN_MOUNT_PARENT")
     nested_mount = os.environ.get("CHUNKHOUND_TEST_WATCHMAN_MOUNT_CHILD")
@@ -1722,11 +1736,9 @@ class TestRealtimeFunctional:
         try:
             await service.start(watch_dir)
             adapter = service._monitor_adapter
-            session = getattr(adapter, "_session", None)
-            process = getattr(session, "_process", None)
-            assert process is not None
+            disconnect_process = _active_watchman_disconnect_process(adapter)
 
-            process.terminate()
+            disconnect_process.terminate()
 
             await asyncio.wait_for(callback_event.wait(), timeout=5.0)
             restored_stats = await _wait_for_realtime_condition(
