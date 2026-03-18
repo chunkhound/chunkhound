@@ -179,7 +179,16 @@ class HtmlMapping(BaseMapping):
         elif concept == UniversalConcept.STRUCTURE:
             return "(doctype) @definition"
         elif concept == UniversalConcept.IMPORT:
-            return "(element) @definition"
+            # Restrict to <link> elements; rel="stylesheet" filtering is handled
+            # in extract_content.
+            return r"""
+                (element
+                  (start_tag
+                    (tag_name) @tag_name
+                  )
+                ) @definition
+                (#eq? @tag_name "link")
+            """
         elif concept == UniversalConcept.DEFINITION:
             return ""
         return None
