@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -150,6 +151,30 @@ def _write_json_atomically(
             os.chmod(path, 0o600)
         except OSError:
             pass
+
+
+def _parse_startup_log_timestamp(line: str) -> datetime | None:
+    if not line.startswith("["):
+        return None
+    closing = line.find("]")
+    if closing <= 1:
+        return None
+    raw_timestamp = line[1:closing]
+    normalized = (
+        raw_timestamp.replace("Z", "+00:00")
+        if raw_timestamp.endswith("Z")
+        else raw_timestamp
+    )
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+
+def _startup_elapsed_seconds(started_at: datetime) -> float:
+    if started_at.tzinfo is None:
+        return max((datetime.now() - started_at).total_seconds(), 0.0)
+    return max((datetime.now(started_at.tzinfo) - started_at).total_seconds(), 0.0)
 
 
 @dataclass(slots=True)
@@ -288,6 +313,80 @@ class DaemonDiscovery:
             return None
         return "\n".join(text.splitlines()[-max_lines:])
 
+    def _startup_failure_context(
+        self, log_path: Path | None = None
+    ) -> dict[str, object] | None:
+        """Extract phase/error context from daemon startup breadcrumbs."""
+        log_tail = self._tail_daemon_log(log_path, max_lines=50)
+        if not log_tail:
+            return None
+
+        startup_started_at: datetime | None = None
+        last_phase: str | None = None
+        last_error: str | None = None
+        total_duration_seconds: float | None = None
+
+        for raw_line in log_tail.splitlines():
+            if "[startup]" not in raw_line:
+                continue
+            _, _, message = raw_line.partition("[startup]")
+            message = message.strip()
+            timestamp = _parse_startup_log_timestamp(raw_line)
+            if message.startswith("startup tracking began"):
+                startup_started_at = timestamp
+                continue
+            if message.startswith("phase started: "):
+                phase_name = message.removeprefix("phase started: ").strip()
+                last_phase = phase_name or last_phase
+                continue
+            if message.startswith("phase completed: "):
+                phase_name, _, _ = message.removeprefix("phase completed: ").partition(
+                    " duration="
+                )
+                last_phase = phase_name.strip() or last_phase
+                continue
+            if message.startswith("phase failed: "):
+                details = message.removeprefix("phase failed: ")
+                phase_name, _, remainder = details.partition(" duration=")
+                last_phase = phase_name.strip() or last_phase
+                if " error=" in remainder:
+                    error_text = remainder.split(" error=", 1)[1].strip()
+                    if error_text:
+                        last_error = error_text
+                continue
+            if message.startswith("startup failed"):
+                if " duration=" in message:
+                    duration_fragment = message.split(" duration=", 1)[1].split(
+                        "s", 1
+                    )[0]
+                    try:
+                        total_duration_seconds = float(duration_fragment)
+                    except ValueError:
+                        total_duration_seconds = None
+                if " error=" in message:
+                    error_text = message.split(" error=", 1)[1].strip()
+                    if error_text:
+                        last_error = error_text
+                continue
+
+        if (
+            last_phase is None
+            and last_error is None
+            and total_duration_seconds is None
+            and startup_started_at is None
+        ):
+            return None
+
+        elapsed_seconds = total_duration_seconds
+        if elapsed_seconds is None and startup_started_at is not None:
+            elapsed_seconds = _startup_elapsed_seconds(startup_started_at)
+
+        return {
+            "last_phase": last_phase,
+            "elapsed_seconds": elapsed_seconds,
+            "last_error": last_error,
+        }
+
     def _format_startup_failure(
         self,
         *,
@@ -299,6 +398,22 @@ class DaemonDiscovery:
         message = prefix
         if returncode is not None:
             message = f"{message} (exit code {returncode})"
+        startup_context = self._startup_failure_context(log_path)
+        if startup_context is not None:
+            context_lines: list[str] = []
+            last_phase = startup_context.get("last_phase")
+            if isinstance(last_phase, str) and last_phase:
+                context_lines.append(f"Last known startup phase: {last_phase}")
+            elapsed_seconds = startup_context.get("elapsed_seconds")
+            if isinstance(elapsed_seconds, float):
+                context_lines.append(
+                    f"Elapsed startup duration so far: {elapsed_seconds:.3f}s"
+                )
+            last_error = startup_context.get("last_error")
+            if isinstance(last_error, str) and last_error:
+                context_lines.append(f"Last startup error: {last_error}")
+            if context_lines:
+                message = f"{message}\n" + "\n".join(context_lines)
         log_tail = self._tail_daemon_log(log_path)
         if log_tail:
             return f"{message}\nRecent daemon log output:\n{log_tail}"

@@ -1034,40 +1034,35 @@ class WatchmanRealtimeAdapter:
         self._service.watchman_scope_plan = None
         self._service.watchman_subscription_queue = None
 
-        planning_session = WatchmanCliSession(
-            binary_path=Path(metadata.binary_path),
-            socket_path=self._sidecar.paths.listener_path,
-            statefile_path=self._sidecar.paths.statefile_path,
-            logfile_path=self._sidecar.paths.logfile_path,
-            pidfile_path=self._sidecar.paths.pidfile_path,
-            project_root=self._sidecar.paths.project_root,
-            debug_sink=self._service._debug,
-            subscription_overflow_handler=self._handle_subscription_queue_overflow,
-        )
+        def _new_session() -> WatchmanCliSession:
+            return WatchmanCliSession(
+                binary_path=Path(metadata.binary_path),
+                socket_path=self._sidecar.paths.listener_path,
+                statefile_path=self._sidecar.paths.statefile_path,
+                logfile_path=self._sidecar.paths.logfile_path,
+                pidfile_path=self._sidecar.paths.pidfile_path,
+                project_root=self._sidecar.paths.project_root,
+                debug_sink=self._service._debug,
+                subscription_overflow_handler=self._handle_subscription_queue_overflow,
+            )
+
+        primary_session = _new_session()
         sessions: list[WatchmanCliSession] = []
         subscription_scope_map: dict[str, WatchmanSubscriptionScope] = {}
         try:
             self._service._start_startup_phase("watchman_watch_project")
-            watch_project_response = await planning_session._run_one_shot_command(
-                ["watch-project", str(watch_path.resolve())]
-            )
+            await primary_session.prepare()
+            watch_project_response = await primary_session.watch_project(watch_path)
             self._service._complete_startup_phase("watchman_watch_project")
             self._service._start_startup_phase("watchman_scope_discovery")
             nested_mount_roots = discover_nested_linux_mount_roots(watch_path)
             additional_scopes = discover_nested_windows_junction_scopes(watch_path)
-            watched_roots: set[Path] = set()
-            for mount_root in nested_mount_roots:
-                if mount_root in watched_roots:
-                    continue
-                watched_roots.add(mount_root)
-                await planning_session._run_one_shot_command(["watch", str(mount_root)])
-            for extra_scope in additional_scopes:
-                if extra_scope.watch_root in watched_roots:
-                    continue
-                watched_roots.add(extra_scope.watch_root)
-                await planning_session._run_one_shot_command(
-                    ["watch", str(extra_scope.watch_root)]
-                )
+            await primary_session.watch_roots(
+                [
+                    *nested_mount_roots,
+                    *(scope.watch_root for scope in additional_scopes),
+                ]
+            )
             scope_plan = build_watchman_scope_plan(
                 watch_path,
                 watch_project_response,
@@ -1081,18 +1076,21 @@ class WatchmanRealtimeAdapter:
                 maxsize=WatchmanCliSession._SUBSCRIPTION_QUEUE_MAXSIZE
             )
             self._subscription_scope_map = {}
+            if not scope_plan.scopes:
+                raise RuntimeError("Watchman scope plan did not contain any scopes")
 
-            for scope_index, scope in enumerate(scope_plan.scopes):
-                session = WatchmanCliSession(
-                    binary_path=Path(metadata.binary_path),
-                    socket_path=self._sidecar.paths.listener_path,
-                    statefile_path=self._sidecar.paths.statefile_path,
-                    logfile_path=self._sidecar.paths.logfile_path,
-                    pidfile_path=self._sidecar.paths.pidfile_path,
-                    project_root=self._sidecar.paths.project_root,
-                    debug_sink=self._service._debug,
-                    subscription_overflow_handler=self._handle_subscription_queue_overflow,
-                )
+            primary_scope = scope_plan.primary_scope
+            primary_setup = await primary_session.subscribe_scopes(
+                target_path=watch_path,
+                subscription_name=self._SUBSCRIPTION_NAME,
+                scope_plan=WatchmanScopePlan(scopes=(primary_scope,)),
+            )
+            sessions.append(primary_session)
+            for subscription_name in primary_setup.subscription_names:
+                subscription_scope_map[subscription_name] = primary_scope
+
+            for scope_index, scope in enumerate(scope_plan.scopes[1:], start=1):
+                session = _new_session()
                 scoped_subscription_name = self._subscription_name_for_scope(
                     base_name=self._SUBSCRIPTION_NAME,
                     target_path=watch_path,
@@ -1116,6 +1114,8 @@ class WatchmanRealtimeAdapter:
                 self._service._fail_startup_phase(current_phase, str(error))
             for session in sessions:
                 await session.stop()
+            if primary_session not in sessions:
+                await primary_session.stop()
             await self._sidecar.stop()
             self._service.watchman_scope_plan = None
             self._service.watchman_subscription_queue = None

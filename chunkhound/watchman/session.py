@@ -96,6 +96,8 @@ class WatchmanCliSession:
         self.subscription_queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(
             maxsize=self._SUBSCRIPTION_QUEUE_MAXSIZE
         )
+        self._stream_reader: asyncio.StreamReader | None = None
+        self._stream_writer: asyncio.StreamWriter | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
@@ -138,15 +140,7 @@ class WatchmanCliSession:
             return None
         return self._subscription_scopes.get(subscription_name)
 
-    async def start(
-        self,
-        *,
-        target_path: Path,
-        subscription_name: str | None = None,
-        scope_plan: WatchmanScopePlan | None = None,
-        nested_mount_roots: Sequence[Path] | None = None,
-        additional_scopes: Sequence[WatchmanSubscriptionScope] | None = None,
-    ) -> WatchmanSessionSetup:
+    async def prepare(self) -> dict[str, bool]:
         if self._process is not None and self._process.returncode is None:
             await self.stop()
 
@@ -154,45 +148,28 @@ class WatchmanCliSession:
         self._unexpected_exit_future = asyncio.get_running_loop().create_future()
 
         try:
+            if self._use_direct_socket_session():
+                self._debug(
+                    "starting direct Watchman socket session "
+                    f"socket={self._socket_path}"
+                )
+                reader, writer = await asyncio.open_unix_connection(
+                    path=self._socket_path
+                )
+                self._stream_reader = reader
+                self._stream_writer = writer
+                self._reader_task = asyncio.create_task(self._reader_loop())
+                version_response = await self._send_command(
+                    ["version", {"required": list(_REQUIRED_CAPABILITIES)}]
+                )
+                capabilities = self._require_capabilities(version_response)
+                self._capabilities = dict(capabilities)
+                return dict(capabilities)
+
             version_response = await self._run_one_shot_command(
                 ["version", {"required": list(_REQUIRED_CAPABILITIES)}]
             )
             capabilities = self._require_capabilities(version_response)
-            resolved_scope_plan = scope_plan
-            if resolved_scope_plan is None:
-                resolved_nested_mount_roots = (
-                    discover_nested_linux_mount_roots(target_path)
-                    if nested_mount_roots is None
-                    else tuple(nested_mount_roots)
-                )
-                resolved_additional_scopes = (
-                    discover_nested_windows_junction_scopes(target_path)
-                    if additional_scopes is None
-                    else tuple(additional_scopes)
-                )
-                watch_project_response = await self._run_one_shot_command(
-                    ["watch-project", str(target_path.resolve())]
-                )
-                watched_roots: set[Path] = set()
-                for mount_root in resolved_nested_mount_roots:
-                    if mount_root in watched_roots:
-                        continue
-                    watched_roots.add(mount_root)
-                    await self._run_one_shot_command(["watch", str(mount_root)])
-                for extra_scope in resolved_additional_scopes:
-                    if extra_scope.watch_root in watched_roots:
-                        continue
-                    watched_roots.add(extra_scope.watch_root)
-                    await self._run_one_shot_command(
-                        ["watch", str(extra_scope.watch_root)]
-                    )
-                resolved_scope_plan = build_watchman_scope_plan(
-                    target_path,
-                    watch_project_response,
-                    nested_mount_roots=resolved_nested_mount_roots,
-                    additional_scopes=resolved_additional_scopes,
-                )
-            resolved_subscription_name = subscription_name or _DEFAULT_SUBSCRIPTION_NAME
 
             command = self._build_command()
             self._debug(
@@ -210,45 +187,121 @@ class WatchmanCliSession:
             self._process_wait_task = asyncio.create_task(self._wait_for_process_exit())
             self._reader_task = asyncio.create_task(self._reader_loop())
             self._stderr_task = asyncio.create_task(self._stderr_loop())
-
-            resolved_subscription_names: list[str] = []
-            resolved_subscription_scopes: dict[str, WatchmanSubscriptionScope] = {}
-            for scope_index, scope in enumerate(resolved_scope_plan.scopes):
-                scoped_subscription_name = self._subscription_name_for_scope(
-                    base_name=resolved_subscription_name,
-                    target_path=resolved_scope_plan.primary_scope.requested_path,
-                    scope=scope,
-                    scope_index=scope_index,
-                )
-                subscribe_response = await self._send_command(
-                    self._build_subscribe_command(
-                        scope=scope,
-                        subscription_name=scoped_subscription_name,
-                    )
-                )
-                subscribed_name = subscribe_response.get("subscribe")
-                if subscribed_name != scoped_subscription_name:
-                    raise RuntimeError(
-                        "Watchman subscribe response did not confirm the expected "
-                        f"subscription name: {subscribed_name!r}"
-                    )
-                resolved_subscription_names.append(scoped_subscription_name)
-                resolved_subscription_scopes[scoped_subscription_name] = scope
+            self._capabilities = dict(capabilities)
+            return dict(capabilities)
         except Exception:
             await self.stop()
             raise
 
-        self._scope_plan = resolved_scope_plan
+    async def watch_project(self, target_path: Path) -> dict[str, object]:
+        self._ensure_process_running()
+        return await self._send_command(["watch-project", str(target_path.resolve())])
+
+    async def watch_roots(self, roots: Sequence[Path]) -> tuple[Path, ...]:
+        self._ensure_process_running()
+        watched_roots: list[Path] = []
+        seen_roots: set[Path] = set()
+        for root in roots:
+            if root in seen_roots:
+                continue
+            seen_roots.add(root)
+            await self._send_command(["watch", str(root)])
+            watched_roots.append(root)
+        return tuple(watched_roots)
+
+    async def subscribe_scopes(
+        self,
+        *,
+        target_path: Path,
+        scope_plan: WatchmanScopePlan,
+        subscription_name: str | None = None,
+    ) -> WatchmanSessionSetup:
+        self._ensure_process_running()
+        if self._subscription_names:
+            raise RuntimeError("Watchman session already has active subscriptions")
+
+        resolved_subscription_name = subscription_name or _DEFAULT_SUBSCRIPTION_NAME
+        resolved_subscription_names: list[str] = []
+        resolved_subscription_scopes: dict[str, WatchmanSubscriptionScope] = {}
+        target_root = target_path.resolve()
+        for scope_index, scope in enumerate(scope_plan.scopes):
+            scoped_subscription_name = self._subscription_name_for_scope(
+                base_name=resolved_subscription_name,
+                target_path=target_root,
+                scope=scope,
+                scope_index=scope_index,
+            )
+            subscribe_response = await self._send_command(
+                self._build_subscribe_command(
+                    scope=scope,
+                    subscription_name=scoped_subscription_name,
+                )
+            )
+            subscribed_name = subscribe_response.get("subscribe")
+            if subscribed_name != scoped_subscription_name:
+                raise RuntimeError(
+                    "Watchman subscribe response did not confirm the expected "
+                    f"subscription name: {subscribed_name!r}"
+                )
+            resolved_subscription_names.append(scoped_subscription_name)
+            resolved_subscription_scopes[scoped_subscription_name] = scope
+
+        self._scope_plan = scope_plan
         self._subscription_name = resolved_subscription_name
         self._subscription_names = tuple(resolved_subscription_names)
         self._subscription_scopes = dict(resolved_subscription_scopes)
-        self._capabilities = capabilities
         return WatchmanSessionSetup(
-            scope_plan=resolved_scope_plan,
+            scope_plan=scope_plan,
             subscription_name=resolved_subscription_name,
             subscription_names=tuple(resolved_subscription_names),
-            capabilities=dict(capabilities),
+            capabilities=dict(self._capabilities),
         )
+
+    async def start(
+        self,
+        *,
+        target_path: Path,
+        subscription_name: str | None = None,
+        scope_plan: WatchmanScopePlan | None = None,
+        nested_mount_roots: Sequence[Path] | None = None,
+        additional_scopes: Sequence[WatchmanSubscriptionScope] | None = None,
+    ) -> WatchmanSessionSetup:
+        await self.prepare()
+        try:
+            resolved_scope_plan = scope_plan
+            if resolved_scope_plan is None:
+                resolved_nested_mount_roots = (
+                    discover_nested_linux_mount_roots(target_path)
+                    if nested_mount_roots is None
+                    else tuple(nested_mount_roots)
+                )
+                resolved_additional_scopes = (
+                    discover_nested_windows_junction_scopes(target_path)
+                    if additional_scopes is None
+                    else tuple(additional_scopes)
+                )
+                watch_project_response = await self.watch_project(target_path)
+                await self.watch_roots(
+                    [
+                        *resolved_nested_mount_roots,
+                        *(scope.watch_root for scope in resolved_additional_scopes),
+                    ]
+                )
+                resolved_scope_plan = build_watchman_scope_plan(
+                    target_path,
+                    watch_project_response,
+                    nested_mount_roots=resolved_nested_mount_roots,
+                    additional_scopes=resolved_additional_scopes,
+                )
+
+            return await self.subscribe_scopes(
+                target_path=resolved_scope_plan.primary_scope.requested_path,
+                scope_plan=resolved_scope_plan,
+                subscription_name=subscription_name,
+            )
+        except Exception:
+            await self.stop()
+            raise
 
     async def stop(self) -> None:
         self._stop_requested = True
@@ -261,6 +314,7 @@ class WatchmanCliSession:
         self._fail_pending_reply(RuntimeError("Watchman session stopped"))
         self._resolve_unexpected_exit(None)
 
+        writer = self._stream_writer
         process = self._process
         reader_task = self._reader_task
         stderr_task = self._stderr_task
@@ -268,6 +322,13 @@ class WatchmanCliSession:
         cleanup_complete = False
 
         try:
+            if writer is not None:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
             if process is not None and process.stdin is not None:
                 try:
                     process.stdin.close()
@@ -296,6 +357,10 @@ class WatchmanCliSession:
             # session object so a follow-up stop() call can still terminate the
             # same process and await the same tasks safely.
             if cleanup_complete:
+                if self._stream_reader is not None:
+                    self._stream_reader = None
+                if self._stream_writer is writer:
+                    self._stream_writer = None
                 if self._process is process:
                     self._process = None
                 if self._reader_task is reader_task:
@@ -313,6 +378,10 @@ class WatchmanCliSession:
 
     def get_health(self) -> dict[str, Any]:
         process_alive = self._process is not None and self._process.returncode is None
+        direct_session_alive = (
+            self._stream_writer is not None and not self._stop_requested
+        )
+        session_alive = process_alive or direct_session_alive
         primary_scope = self._scope_plan.primary_scope if self._scope_plan else None
         watchman_scopes: list[dict[str, object]] = []
         for subscription_name in self._subscription_names:
@@ -329,7 +398,7 @@ class WatchmanCliSession:
                 }
             )
         return {
-            "watchman_session_alive": process_alive,
+            "watchman_session_alive": session_alive,
             "watchman_session_pid": self._process.pid if self._process else None,
             "watchman_session_last_warning": self._last_warning,
             "watchman_session_last_warning_at": self._last_warning_at,
@@ -397,19 +466,31 @@ class WatchmanCliSession:
             payload["relative_root"] = scope.relative_root
         return ["subscribe", str(scope.watch_root), subscription_name, payload]
 
-    async def _send_command(self, command: list[object]) -> dict[str, object]:
+    def _ensure_process_running(self) -> None:
+        if self._stream_writer is not None and not self._stop_requested:
+            return
         process = self._process
-        if process is None or process.stdin is None:
+        if process is None or process.returncode is not None or process.stdin is None:
             raise RuntimeError("Watchman session process is not running")
 
+    async def _send_command(self, command: list[object]) -> dict[str, object]:
+        self._ensure_process_running()
         payload = json.dumps(command, separators=(",", ":")).encode("utf-8") + b"\n"
         async with self._command_lock:
             loop = asyncio.get_running_loop()
             future: asyncio.Future[dict[str, object]] = loop.create_future()
             self._pending_reply = future
             try:
-                process.stdin.write(payload)
-                await process.stdin.drain()
+                writer = self._stream_writer
+                if writer is not None:
+                    writer.write(payload)
+                    await writer.drain()
+                else:
+                    process = self._process
+                    assert process is not None
+                    assert process.stdin is not None
+                    process.stdin.write(payload)
+                    await process.stdin.drain()
                 response = await asyncio.wait_for(
                     asyncio.shield(future), timeout=self._COMMAND_TIMEOUT_SECONDS
                 )
@@ -503,13 +584,18 @@ class WatchmanCliSession:
                     )
 
     async def _reader_loop(self) -> None:
-        process = self._process
-        if process is None or process.stdout is None:
+        reader = self._stream_reader
+        if reader is None:
+            process = self._process
+            if process is None or process.stdout is None:
+                return
+            reader = process.stdout
+        if reader is None:
             return
 
         try:
             while True:
-                raw_line = await process.stdout.readline()
+                raw_line = await reader.readline()
                 if not raw_line:
                     break
                 line = raw_line.decode("utf-8", errors="replace").strip()
@@ -551,6 +637,12 @@ class WatchmanCliSession:
         except Exception as error:
             self._record_error(f"Watchman stdout reader failed: {error}")
             self._fail_pending_reply(error)
+        else:
+            if self._stream_writer is not None and not self._stop_requested:
+                message = "Watchman session connection closed unexpectedly"
+                self._record_error(message)
+                self._fail_pending_reply(RuntimeError(message))
+                self._resolve_unexpected_exit(message)
 
     async def _stderr_loop(self) -> None:
         process = self._process
@@ -630,6 +722,8 @@ class WatchmanCliSession:
 
     def _reset_state(self) -> None:
         self._stop_requested = False
+        self._stream_reader = None
+        self._stream_writer = None
         self._scope_plan = None
         self._subscription_name = None
         self._subscription_names = ()
@@ -676,6 +770,9 @@ class WatchmanCliSession:
         future = self._unexpected_exit_future
         if future is not None and not future.done():
             future.set_result(message)
+
+    def _use_direct_socket_session(self) -> bool:
+        return self._command_prefix is None and os.name != "nt"
 
     async def _wait_for_process_exit(self) -> None:
         process = self._process

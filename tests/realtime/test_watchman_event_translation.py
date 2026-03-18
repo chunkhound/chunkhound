@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,7 +11,8 @@ import chunkhound.services.realtime_indexing_service as realtime_service_module
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
-from chunkhound.watchman import WatchmanSubscriptionScope
+from chunkhound.watchman import WatchmanCliSession, WatchmanSubscriptionScope
+from tests.realtime.test_watchman_session_bridge import _write_fake_watchman_cli
 from tests.utils.windows_compat import wait_for_indexed
 
 pytestmark = pytest.mark.requires_native_watchman
@@ -93,6 +95,189 @@ async def _start_isolated_watchman_translation(
     service.event_consumer_task = asyncio.create_task(service._consume_events())
     service.process_task = asyncio.create_task(service._process_loop())
     return adapter
+
+
+@pytest.mark.asyncio
+async def test_watchman_mount_aware_startup_reuses_primary_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script_path = _write_fake_watchman_cli(tmp_path)
+    target_dir = tmp_path / "workspace_root"
+    nested_mount = (target_dir / "chunkhound_workspace").resolve()
+    target_dir.mkdir(parents=True)
+    nested_mount.mkdir(parents=True)
+    socket_path = tmp_path / "watchman.sock"
+    socket_path.write_text("socket ready\n", encoding="utf-8")
+    statefile_path = tmp_path / "watchman.state"
+    statefile_path.write_text("state ready\n", encoding="utf-8")
+    logfile_path = tmp_path / "watchman.log"
+    logfile_path.write_text("log ready\n", encoding="utf-8")
+    pidfile_path = tmp_path / "watchman.pid"
+    pidfile_path.write_text("123\n", encoding="utf-8")
+    service, services = _build_watchman_service(target_dir)
+    prepare_delay = 1.0
+    prepare_calls: list[int] = []
+    operations: list[tuple[object, ...]] = []
+
+    class FakeSidecar:
+        def __init__(self) -> None:
+            self.paths = SimpleNamespace(
+                listener_path=str(tmp_path / "watchman.sock"),
+                statefile_path=tmp_path / "watchman.state",
+                logfile_path=tmp_path / "watchman.log",
+                pidfile_path=tmp_path / "watchman.pid",
+                project_root=target_dir,
+            )
+
+        async def start(self) -> SimpleNamespace:
+            return SimpleNamespace(binary_path=str(tmp_path / "watchman"))
+
+        async def stop(self) -> None:
+            operations.append(("sidecar_stop",))
+
+        def get_health(self) -> dict[str, object]:
+            return {"watchman_alive": True}
+
+    class TrackingSession(WatchmanCliSession):
+        _created_sessions: list[TrackingSession] = []
+
+        def __init__(self, **kwargs: object) -> None:
+            kwargs.setdefault("command_prefix", [sys.executable, str(script_path)])
+            super().__init__(**kwargs)
+            self.session_id = len(self._created_sessions)
+            self._created_sessions.append(self)
+
+        async def prepare(self) -> dict[str, bool]:
+            prepare_calls.append(self.session_id)
+            await asyncio.sleep(prepare_delay)
+            return await super().prepare()
+
+        async def watch_project(self, target_path: Path) -> dict[str, object]:
+            operations.append(
+                ("watch_project", self.session_id, str(target_path.resolve()))
+            )
+            return await super().watch_project(target_path)
+
+        async def watch_roots(self, roots: list[Path]) -> tuple[Path, ...]:
+            operations.append(
+                (
+                    "watch_roots",
+                    self.session_id,
+                    tuple(str(root) for root in roots),
+                )
+            )
+            return await super().watch_roots(roots)
+
+        async def subscribe_scopes(
+            self,
+            *,
+            target_path: Path,
+            scope_plan: object,
+            subscription_name: str | None = None,
+        ) -> object:
+            resolved_subscription_name = subscription_name or "chunkhound-live-indexing"
+            operations.append(
+                (
+                    "subscribe_scopes",
+                    self.session_id,
+                    resolved_subscription_name,
+                    tuple(item.scope_kind for item in scope_plan.scopes),
+                )
+            )
+            return await super().subscribe_scopes(
+                target_path=target_path,
+                scope_plan=scope_plan,
+                subscription_name=subscription_name,
+            )
+
+        async def _run_one_shot_command(
+            self, command: list[object]
+        ) -> dict[str, object]:
+            if command[0] != "version":
+                raise AssertionError(
+                    f"unexpected one-shot command during startup: {command[0]!r}"
+                )
+            return await super()._run_one_shot_command(command)
+
+    monkeypatch.setattr(
+        realtime_service_module,
+        "discover_nested_linux_mount_roots",
+        lambda target_path: (nested_mount,),
+    )
+    monkeypatch.setattr(
+        realtime_service_module,
+        "discover_nested_windows_junction_scopes",
+        lambda target_path: (),
+    )
+    monkeypatch.setenv(
+        "CHUNKHOUND_TEST_WATCHMAN_WATCH_ROOT",
+        str(target_dir.resolve()),
+    )
+    monkeypatch.setattr(
+        realtime_service_module,
+        "WatchmanCliSession",
+        TrackingSession,
+    )
+
+    adapter = realtime_service_module.WatchmanRealtimeAdapter(service)
+    adapter._sidecar = FakeSidecar()
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+    try:
+        await adapter.start(target_dir, loop)
+        elapsed = loop.time() - started_at
+
+        assert prepare_calls == [0, 1]
+        assert len(TrackingSession._created_sessions) == 2
+        assert operations == [
+            ("watch_project", 0, str(target_dir.resolve())),
+            ("watch_roots", 0, (str(nested_mount),)),
+            ("subscribe_scopes", 0, "chunkhound-live-indexing", ("primary",)),
+            (
+                "subscribe_scopes",
+                1,
+                "chunkhound-live-indexing--chunkhound-workspace",
+                ("nested_mount",),
+            ),
+        ]
+        assert elapsed < 3.7
+        assert service.monitoring_ready.is_set()
+        assert service.watchman_scope_plan is not None
+        assert [scope.scope_kind for scope in service.watchman_scope_plan.scopes] == [
+            "primary",
+            "nested_mount",
+        ]
+        assert adapter._session is TrackingSession._created_sessions[0]
+        assert adapter._sessions == TrackingSession._created_sessions
+
+        startup_snapshot = service._startup_tracker.snapshot()
+        assert set(startup_snapshot["phases"]) == {
+            "initialize",
+            "db_connect",
+            "realtime_start",
+            "startup_barrier",
+            "daemon_publish",
+            "watchman_sidecar_start",
+            "watchman_watch_project",
+            "watchman_scope_discovery",
+            "watchman_subscription_setup",
+            "watchdog_setup",
+            "polling_setup",
+        }
+        assert (
+            startup_snapshot["phases"]["watchman_watch_project"]["state"] == "completed"
+        )
+        assert (
+            startup_snapshot["phases"]["watchman_scope_discovery"]["state"]
+            == "completed"
+        )
+        assert (
+            startup_snapshot["phases"]["watchman_subscription_setup"]["state"]
+            == "completed"
+        )
+    finally:
+        await adapter.stop()
+        services.provider.disconnect()
 
 
 @pytest.mark.asyncio
