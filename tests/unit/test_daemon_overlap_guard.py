@@ -136,7 +136,7 @@ def test_registry_validation_reports_live_overlapping_root(
     assert conflict is not None
     assert conflict["project_dir"] == str(parent.resolve())
     assert conflict["pid"] == os.getpid()
-    assert Path(conflict["lock_path"]) == parent / ".chunkhound" / "daemon.lock"
+    assert Path(conflict["lock_path"]) == discovery.get_lock_path()
 
 
 def test_registry_validation_removes_entry_with_unexpected_lock_path(
@@ -195,7 +195,7 @@ def test_registry_validation_removes_entry_with_mismatched_lock_project_dir(
     wrong_root.mkdir()
 
     discovery = DaemonDiscovery(project_dir)
-    lock_path = project_dir / ".chunkhound" / "daemon.lock"
+    lock_path = discovery.get_lock_path()
     discovery.write_registry_entry(os.getpid(), "tcp:127.0.0.1:54321")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.write_text(

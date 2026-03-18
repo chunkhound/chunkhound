@@ -1,7 +1,7 @@
 """Daemon discovery via lock file and IPC transport.
 
 Handles:
-- Lock file creation/reading in <project>/.chunkhound/daemon.lock
+- Runtime-scoped lock file creation/reading for a canonical project root
 - IPC address derivation from project directory hash (platform-specific)
 - Daemon liveness checking (PID + connectivity)
 - Starting a new daemon subprocess when none is running
@@ -24,10 +24,10 @@ from typing import Any
 
 from .process import pid_alive
 
-# Lock file relative to project directory
-_LOCK_FILE_REL = ".chunkhound/daemon.lock"
-# Starter lock — prevents two proxies from both spawning a daemon simultaneously
-_STARTER_LOCK_REL = ".chunkhound/daemon.starter.lock"
+# Runtime-scoped lock files keyed by canonical project root hash
+_LOCKS_DIR_NAME = "daemon-locks"
+# Runtime-scoped starter locks — prevent duplicate spawns within one environment
+_STARTER_LOCKS_DIR_NAME = "daemon-starter-locks"
 # User-scoped runtime directory override (used by tests and debugging)
 _RUNTIME_DIR_ENV = "CHUNKHOUND_DAEMON_RUNTIME_DIR"
 # User-scoped registry of running daemons, keyed by canonical project root hash
@@ -59,6 +59,13 @@ def _normalized_project_dir(project_dir: Path) -> Path:
 def _project_dir_identity(project_dir: Path) -> str:
     """Return the stable string identity used for hashing and comparisons."""
     return str(_normalized_project_dir(project_dir))
+
+
+def _project_dir_hash(project_dir: Path, *, length: int) -> str:
+    """Return a stable hash of the canonical project identity."""
+    return hashlib.sha256(_project_dir_identity(project_dir).encode()).hexdigest()[
+        :length
+    ]
 
 
 def _runtime_owner_tag() -> str:
@@ -165,11 +172,15 @@ class DaemonDiscovery:
 
     def get_lock_path(self) -> Path:
         """Return the absolute path of the lock file."""
-        return self._project_dir / _LOCK_FILE_REL
+        return self.get_runtime_dir() / _LOCKS_DIR_NAME / (
+            f"{_project_dir_hash(self._project_dir, length=16)}.json"
+        )
 
     def get_starter_lock_path(self) -> Path:
         """Return the absolute path of the starter lock file."""
-        return self._project_dir / _STARTER_LOCK_REL
+        return self.get_runtime_dir() / _STARTER_LOCKS_DIR_NAME / (
+            f"{_project_dir_hash(self._project_dir, length=16)}.json"
+        )
 
     def get_runtime_dir(self) -> Path:
         """Return the user-scoped runtime directory for daemon metadata."""
@@ -185,10 +196,9 @@ class DaemonDiscovery:
 
     def get_registry_entry_path(self) -> Path:
         """Return the registry entry path for this canonical project root."""
-        digest = hashlib.sha256(
-            _project_dir_identity(self._project_dir).encode()
-        ).hexdigest()[:16]
-        return self.get_registry_dir() / f"{digest}.json"
+        return self.get_registry_dir() / (
+            f"{_project_dir_hash(self._project_dir, length=16)}.json"
+        )
 
     def get_ipc_address(self) -> str:
         """Derive a unique IPC address from the project directory.
@@ -196,7 +206,7 @@ class DaemonDiscovery:
         Linux/macOS: Unix socket path in /tmp.
         Windows: TCP loopback address with port 0 (OS-assigned at bind time).
         """
-        digest = hashlib.sha256(str(self._project_dir).encode()).hexdigest()[:8]
+        digest = _project_dir_hash(self._project_dir, length=8)
         if sys.platform == "win32":
             return "tcp:127.0.0.1:0"
         return os.path.join(_SOCKET_DIR, f"chunkhound-{digest}.sock")
@@ -358,7 +368,7 @@ class DaemonDiscovery:
             return None
 
         root = _canonical_project_dir(Path(project_dir_raw))
-        expected_lock_path = root / _LOCK_FILE_REL
+        expected_lock_path = DaemonDiscovery(root).get_lock_path()
         if (
             not isinstance(lock_path_raw, str)
             or Path(lock_path_raw) != expected_lock_path
