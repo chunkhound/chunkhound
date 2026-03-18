@@ -31,7 +31,7 @@ def selector_text(node: Node, content: bytes) -> str:
         if child.type == "selectors":
             raw = node_text(child, content).strip()
             if len(raw) > _MAX_SELECTOR_LEN:
-                raw = raw[:_MAX_SELECTOR_LEN] + "…"
+                raw = raw[:_MAX_SELECTOR_LEN] + "..."
             return raw
     return f"rule_line{node.start_point[0] + 1}"
 

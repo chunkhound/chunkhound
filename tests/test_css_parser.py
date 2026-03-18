@@ -156,8 +156,8 @@ def test_selector_truncated_at_60_chars(css_parser):
     block_chunks = [c for c in chunks if c.chunk_type == ChunkType.BLOCK]
     assert len(block_chunks) > 0
     symbol = block_chunks[0].symbol
-    assert symbol.endswith("…"), f"Expected truncation with '…', got: {symbol}"
-    assert len(symbol) <= 61, f"Symbol too long: {symbol}"
+    assert symbol.endswith("..."), f"Expected truncation with '...', got: {symbol}"
+    assert len(symbol) <= 63, f"Symbol too long: {symbol}"
 
 
 def test_rule_set_not_in_structure_when_no_vars(css_parser):
