@@ -1068,8 +1068,10 @@ class WatchmanRealtimeAdapter:
             def _elapsed_seconds(started_at: float) -> float:
                 return round(max(time.monotonic() - started_at, 0.0), 3)
 
-            def _render_paths(paths: list[Path]) -> list[str]:
-                return [str(path) for path in paths]
+            def _render_paths(paths: list[Path]) -> str:
+                if not paths:
+                    return "[]"
+                return "[" + ", ".join(str(path) for path in paths) + "]"
 
             scope_discovery_started_at = time.monotonic()
 
