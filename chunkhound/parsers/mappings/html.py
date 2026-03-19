@@ -160,13 +160,23 @@ class HtmlMapping(BaseMapping):
     def get_query_for_concept(self, concept: UniversalConcept) -> str | None:
         """Get tree-sitter query for a universal concept in HTML."""
         if concept == UniversalConcept.BLOCK:
-            # Capture ALL element nodes and let extract_content filter to
-            # semantic/custom elements.  Tree-sitter query predicates cannot
-            # inspect attribute values (e.g. tag name), so the filtering must
-            # happen in Python.  The overhead is acceptable because HTML files
-            # are typically smaller than large source files.
-            return """
-                (element) @definition
+            # Use #match? predicates to filter at the tree-sitter C layer so
+            # Python only sees semantic landmarks and custom elements (those
+            # containing '-').  extract_content still acts as a correctness
+            # guard but won't be hit in practice for generic elements.
+            return r"""
+                (element
+                  (start_tag
+                    (tag_name) @tag_name
+                    (#match? @tag_name "^(section|article|main|header|footer|nav|aside|form|table|details|dialog|figure|fieldset)$")
+                  )
+                ) @definition
+                (element
+                  (start_tag
+                    (tag_name) @tag_name
+                    (#match? @tag_name "-")
+                  )
+                ) @definition
                 (script_element) @definition
                 (style_element) @definition
             """
@@ -175,15 +185,17 @@ class HtmlMapping(BaseMapping):
         elif concept == UniversalConcept.STRUCTURE:
             return "(doctype) @definition"
         elif concept == UniversalConcept.IMPORT:
-            # Restrict to <link> elements; rel="stylesheet" filtering is handled
-            # in extract_content.
+            # #eq? predicate is placed inside the pattern so tree-sitter
+            # applies it as a filter at the C layer — only <link> elements
+            # are returned; rel="stylesheet" filtering is handled in
+            # extract_content.
             return r"""
                 (element
                   (start_tag
                     (tag_name) @tag_name
+                    (#eq? @tag_name "link")
                   )
                 ) @definition
-                (#eq? @tag_name "link")
             """
         elif concept == UniversalConcept.DEFINITION:
             return ""
