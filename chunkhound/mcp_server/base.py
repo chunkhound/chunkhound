@@ -14,6 +14,7 @@ import asyncio
 import copy
 import os
 import sys
+import time
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
@@ -82,6 +83,7 @@ class MCPServerBase(ABC):
             mode=self._realtime_startup_mode(),
             debug_sink=self._startup_log,
         )
+        self._reset_warm_ready_tracking()
 
         # Scan progress tracking
         self._scan_complete = False
@@ -131,6 +133,105 @@ class MCPServerBase(ABC):
     def _realtime_startup_mode(self) -> str:
         """Return the status mode for startup timing surfaces."""
         return "stdio"
+
+    def _reset_warm_ready_tracking(self) -> None:
+        self._warm_ready_started_monotonic: float | None = None
+        self._warm_ready_summary_emitted = False
+        self._warm_ready_initial_scan_total_seconds: float | None = None
+        self._warm_ready_initial_scan_completed_monotonic: float | None = None
+        self._warm_ready_fresh_instance_resync_requested = False
+        self._warm_ready_fresh_instance_resync_total_seconds: float | None = None
+        self._warm_ready_fresh_instance_resync_completed_monotonic: float | None = (
+            None
+        )
+        self._warm_ready_double_work_logged = False
+
+    @staticmethod
+    def _duration_seconds(
+        start_monotonic: float | None,
+        end_monotonic: float | None,
+    ) -> float | None:
+        if start_monotonic is None or end_monotonic is None:
+            return None
+        return round(max(end_monotonic - start_monotonic, 0.0), 3)
+
+    @staticmethod
+    def _format_duration(duration_seconds: float | None) -> str:
+        if duration_seconds is None:
+            return "n/a"
+        return f"{duration_seconds:.3f}s"
+
+    @staticmethod
+    def _is_fresh_instance_resync(
+        reason: str,
+        details: dict[str, Any] | None,
+    ) -> bool:
+        return (
+            reason == "realtime_loss_of_sync"
+            and isinstance(details, dict)
+            and details.get("loss_of_sync_reason") == "fresh_instance"
+        )
+
+    def _warm_ready_window_active(self) -> bool:
+        return (
+            self._warm_ready_started_monotonic is not None
+            and not self._warm_ready_summary_emitted
+        )
+
+    def _timing_log(self, message: str, *, daemon_visible: bool = False) -> None:
+        formatted = f"warm-ready: {message}"
+        if daemon_visible:
+            self._startup_log(formatted)
+            return
+        self.debug_log(formatted)
+
+    def _emit_warm_ready_summary_if_ready(self) -> None:
+        if self._warm_ready_summary_emitted:
+            return
+        if self._warm_ready_started_monotonic is None:
+            return
+        if self._warm_ready_initial_scan_completed_monotonic is None:
+            return
+        if (
+            self._warm_ready_fresh_instance_resync_requested
+            and self._warm_ready_fresh_instance_resync_completed_monotonic is None
+        ):
+            return
+
+        startup_snapshot = self._startup_tracker.snapshot()
+        blocking_startup = startup_snapshot.get("total_duration_seconds")
+        if not isinstance(blocking_startup, (int, float)):
+            return
+
+        last_adjacent_completed = self._warm_ready_initial_scan_completed_monotonic
+        if self._warm_ready_fresh_instance_resync_completed_monotonic is not None:
+            last_adjacent_completed = max(
+                last_adjacent_completed,
+                self._warm_ready_fresh_instance_resync_completed_monotonic,
+            )
+        warm_ready_total = self._duration_seconds(
+            self._warm_ready_started_monotonic,
+            last_adjacent_completed,
+        )
+        summary_parts = [
+            f"blocking_startup={self._format_duration(float(blocking_startup))}",
+            f"warm_ready={self._format_duration(warm_ready_total)}",
+        ]
+        if self._warm_ready_fresh_instance_resync_total_seconds is not None:
+            summary_parts.append(
+                "fresh_instance_resync="
+                f"{self._format_duration(self._warm_ready_fresh_instance_resync_total_seconds)}"
+            )
+        if self._warm_ready_initial_scan_total_seconds is not None:
+            summary_parts.append(
+                "initial_scan="
+                f"{self._format_duration(self._warm_ready_initial_scan_total_seconds)}"
+            )
+        self._timing_log(
+            "summary " + " ".join(summary_parts),
+            daemon_visible=self._realtime_startup_mode() == "daemon",
+        )
+        self._warm_ready_summary_emitted = True
 
     def _default_realtime_scan_status(self) -> dict[str, Any]:
         return RealtimeIndexingService.health_snapshot_for_config(
@@ -182,6 +283,8 @@ class MCPServerBase(ABC):
             self.debug_log("Starting service initialization")
             self._startup_failure_message = None
             self._startup_tracker.reset(self._realtime_startup_mode())
+            self._reset_warm_ready_tracking()
+            self._warm_ready_started_monotonic = time.monotonic()
             self._scan_progress["realtime"] = self._default_realtime_scan_status()
             if self._realtime_startup_mode() == "daemon":
                 self._startup_publish_complete.clear()
@@ -423,6 +526,9 @@ class MCPServerBase(ABC):
             )
 
             if ready_task in done:
+                daemon_visible = self._realtime_startup_mode() == "daemon"
+                monitoring_ready_monotonic = time.monotonic()
+                publish_wait_started_monotonic = monitoring_ready_monotonic
                 if self._realtime_startup_mode() == "daemon":
                     if not self._startup_publish_complete.is_set():
                         self.debug_log(
@@ -435,10 +541,54 @@ class MCPServerBase(ABC):
                             "Daemon publish never completed; skipping initial scan"
                         )
                         return
+                publish_wait_duration = self._duration_seconds(
+                    publish_wait_started_monotonic,
+                    time.monotonic(),
+                )
+                self._timing_log(
+                    "initial scan coordination "
+                    f"monitoring_ready_to_publish={self._format_duration(publish_wait_duration)}",
+                    daemon_visible=daemon_visible,
+                )
                 self.debug_log("Monitoring confirmed ready, starting initial scan")
                 # Add small delay to ensure any startup files are captured
                 # by monitoring.
+                self._timing_log(
+                    "initial scan coordination settle_sleep=1.000s",
+                    daemon_visible=daemon_visible,
+                )
+                settle_sleep_started_monotonic = time.monotonic()
                 await asyncio.sleep(1.0)
+                settle_sleep_duration = self._duration_seconds(
+                    settle_sleep_started_monotonic,
+                    time.monotonic(),
+                )
+                self._timing_log(
+                    "initial scan coordination "
+                    f"settle_sleep_completed={self._format_duration(settle_sleep_duration)}",
+                    daemon_visible=daemon_visible,
+                )
+                if (
+                    self._warm_ready_fresh_instance_resync_total_seconds is not None
+                    and not self._warm_ready_double_work_logged
+                ):
+                    self._timing_log(
+                        "startup paid both fresh-instance resync and initial scan "
+                        "back-to-back",
+                        daemon_visible=daemon_visible,
+                    )
+                    self._warm_ready_double_work_logged = True
+                initial_scan_started_monotonic = time.monotonic()
+                monitoring_ready_to_scan_start = self._duration_seconds(
+                    monitoring_ready_monotonic,
+                    initial_scan_started_monotonic,
+                )
+                self._timing_log(
+                    "initial scan starting "
+                    "monitoring_ready_to_scan_start="
+                    f"{self._format_duration(monitoring_ready_to_scan_start)}",
+                    daemon_visible=daemon_visible,
+                )
             elif monitoring_task in done:
                 try:
                     monitoring_task.result()
@@ -467,6 +617,24 @@ class MCPServerBase(ABC):
                         task.cancel()
 
             await self._run_directory_scan(target_path, trigger="initial")
+            if ready_task in done:
+                initial_scan_completed_monotonic = time.monotonic()
+                initial_scan_total_duration = self._duration_seconds(
+                    monitoring_ready_monotonic,
+                    initial_scan_completed_monotonic,
+                )
+                self._timing_log(
+                    "initial scan completed "
+                    f"total={self._format_duration(initial_scan_total_duration)}",
+                    daemon_visible=daemon_visible,
+                )
+                self._warm_ready_initial_scan_total_seconds = (
+                    initial_scan_total_duration
+                )
+                self._warm_ready_initial_scan_completed_monotonic = (
+                    initial_scan_completed_monotonic
+                )
+                self._emit_warm_ready_summary_if_ready()
         finally:
             if not ready_task.done():
                 ready_task.cancel()
@@ -526,42 +694,123 @@ class MCPServerBase(ABC):
         if not self._scan_target_path:
             raise RuntimeError("Realtime resync requested before target path resolved")
 
+        resync_started_monotonic = time.monotonic()
+        loss_of_sync_reason = (
+            details.get("loss_of_sync_reason")
+            if isinstance(details, dict)
+            else None
+        )
+        is_fresh_instance = self._is_fresh_instance_resync(reason, details)
+        daemon_visible = self._realtime_startup_mode() == "daemon" and (
+            self._warm_ready_window_active()
+        )
+        if is_fresh_instance and daemon_visible:
+            self._warm_ready_fresh_instance_resync_requested = True
         detail_suffix = f" details={details}" if details else ""
         self.debug_log(f"Realtime resync requested: reason={reason}{detail_suffix}")
-        await self._run_directory_scan(
-            self._scan_target_path,
-            trigger="realtime_resync",
-            reason=reason,
-            no_embeddings=True,
+        self._timing_log(
+            "realtime resync requested "
+            f"reason={reason} loss_of_sync_reason={loss_of_sync_reason or 'none'} "
+            f"fresh_instance={is_fresh_instance}",
+            daemon_visible=daemon_visible,
         )
-        if self.services is None:
-            return None
-        embeddings_disabled = getattr(self.config, "embeddings_disabled", False)
-        if not isinstance(embeddings_disabled, bool):
-            embeddings_disabled = False
-        if embeddings_disabled:
-            self.debug_log(
-                "Realtime resync embedding follow-up skipped: "
-                "embeddings explicitly disabled"
+        resync_outcome = "scan_only"
+        try:
+            rescan_started_monotonic = time.monotonic()
+            self._timing_log(
+                "realtime resync directory scan starting "
+                f"reason={reason} loss_of_sync_reason={loss_of_sync_reason or 'none'}",
+                daemon_visible=daemon_visible,
             )
-            return {
-                "status": "complete",
-                "generated": 0,
-                "message": "Embeddings explicitly disabled",
-            }
+            await self._run_directory_scan(
+                self._scan_target_path,
+                trigger="realtime_resync",
+                reason=reason,
+                no_embeddings=True,
+            )
+            rescan_duration = self._duration_seconds(
+                rescan_started_monotonic,
+                time.monotonic(),
+            )
+            self._timing_log(
+                "realtime resync directory scan completed "
+                f"reason={reason} duration={self._format_duration(rescan_duration)}",
+                daemon_visible=daemon_visible,
+            )
+            if self.services is None:
+                return None
+            embeddings_disabled = getattr(self.config, "embeddings_disabled", False)
+            if not isinstance(embeddings_disabled, bool):
+                embeddings_disabled = False
+            if embeddings_disabled:
+                resync_outcome = "embeddings_disabled"
+                self._timing_log(
+                    "realtime resync embedding follow-up skipped "
+                    "reason=embeddings_disabled",
+                    daemon_visible=daemon_visible,
+                )
+                self.debug_log(
+                    "Realtime resync embedding follow-up skipped: "
+                    "embeddings explicitly disabled"
+                )
+                return {
+                    "status": "complete",
+                    "generated": 0,
+                    "message": "Embeddings explicitly disabled",
+                }
 
-        exclude_patterns = list(getattr(self.config.indexing, "exclude", []) or [])
-        embed_result = await (
-            self.services.indexing_coordinator.generate_missing_embeddings(
-                exclude_patterns=exclude_patterns
+            exclude_patterns = list(getattr(self.config.indexing, "exclude", []) or [])
+            embed_started_monotonic = time.monotonic()
+            self._timing_log(
+                "realtime resync embedding follow-up starting "
+                f"reason={reason} loss_of_sync_reason={loss_of_sync_reason or 'none'}",
+                daemon_visible=daemon_visible,
             )
-        )
-        generated = embed_result.get("generated", 0)
-        self.debug_log(
-            "Realtime resync embedding follow-up completed: "
-            f"status={embed_result.get('status')} generated={generated}"
-        )
-        return embed_result
+            embed_result = await (
+                self.services.indexing_coordinator.generate_missing_embeddings(
+                    exclude_patterns=exclude_patterns
+                )
+            )
+            generated = embed_result.get("generated", 0)
+            resync_outcome = str(embed_result.get("status") or "unknown")
+            embed_duration = self._duration_seconds(
+                embed_started_monotonic,
+                time.monotonic(),
+            )
+            self._timing_log(
+                "realtime resync embedding follow-up completed "
+                "duration="
+                f"{self._format_duration(embed_duration)} "
+                f"status={embed_result.get('status')} generated={generated}",
+                daemon_visible=daemon_visible,
+            )
+            self.debug_log(
+                "Realtime resync embedding follow-up completed: "
+                f"status={embed_result.get('status')} generated={generated}"
+            )
+            return embed_result
+        except Exception:
+            resync_outcome = "error"
+            raise
+        finally:
+            resync_completed_monotonic = time.monotonic()
+            total_duration = self._duration_seconds(
+                resync_started_monotonic,
+                resync_completed_monotonic,
+            )
+            self._timing_log(
+                "realtime resync completed "
+                f"reason={reason} loss_of_sync_reason={loss_of_sync_reason or 'none'} "
+                f"fresh_instance={is_fresh_instance} outcome={resync_outcome} "
+                f"total={self._format_duration(total_duration)}",
+                daemon_visible=daemon_visible,
+            )
+            if is_fresh_instance and daemon_visible:
+                self._warm_ready_fresh_instance_resync_total_seconds = total_duration
+                self._warm_ready_fresh_instance_resync_completed_monotonic = (
+                    resync_completed_monotonic
+                )
+                self._emit_warm_ready_summary_if_ready()
 
     async def _run_directory_scan(
         self,
@@ -571,7 +820,22 @@ class MCPServerBase(ABC):
         no_embeddings: bool = False,
     ) -> None:
         """Perform an initial or reconciliation scan without overlapping other scans."""
+        scan_lock_wait_started_monotonic = time.monotonic()
+        daemon_visible = self._realtime_startup_mode() == "daemon" and (
+            trigger == "initial" or self._warm_ready_window_active()
+        )
         async with self._scan_lock:
+            execution_started_monotonic = time.monotonic()
+            lock_wait_duration = self._duration_seconds(
+                scan_lock_wait_started_monotonic,
+                execution_started_monotonic,
+            )
+            self._timing_log(
+                "directory scan lock acquired "
+                f"trigger={trigger} reason={reason or 'none'} "
+                f"wait={self._format_duration(lock_wait_duration)}",
+                daemon_visible=daemon_visible,
+            )
             try:
                 self._scan_progress["is_scanning"] = True
                 self._scan_progress["scan_started_at"] = datetime.now().isoformat()
@@ -623,11 +887,33 @@ class MCPServerBase(ABC):
                     f"{trigger} scan completed: "
                     f"{stats.files_processed} files, {stats.chunks_created} chunks"
                 )
+                execution_duration = self._duration_seconds(
+                    execution_started_monotonic,
+                    time.monotonic(),
+                )
+                self._timing_log(
+                    "directory scan completed "
+                    f"trigger={trigger} reason={reason or 'none'} "
+                    f"duration={self._format_duration(execution_duration)} "
+                    f"files={stats.files_processed} chunks={stats.chunks_created}",
+                    daemon_visible=daemon_visible,
+                )
 
             except Exception as e:
                 self.debug_log(f"{trigger} scan failed: {e}")
                 self._scan_progress["is_scanning"] = False
                 self._scan_progress["scan_error"] = str(e)
+                execution_duration = self._duration_seconds(
+                    execution_started_monotonic,
+                    time.monotonic(),
+                )
+                self._timing_log(
+                    "directory scan failed "
+                    f"trigger={trigger} reason={reason or 'none'} "
+                    f"duration={self._format_duration(execution_duration)} "
+                    f"error={e}",
+                    daemon_visible=daemon_visible,
+                )
                 raise
 
     async def cleanup(self) -> None:

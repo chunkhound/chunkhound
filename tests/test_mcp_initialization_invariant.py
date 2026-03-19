@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import os
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -30,6 +33,26 @@ class DaemonModeMCPServer(ConcreteMCPServer):
 
     def _realtime_startup_mode(self) -> str:
         return "daemon"
+
+
+def _collect_startup_breadcrumbs(server: MCPServerBase) -> list[str]:
+    breadcrumbs: list[str] = []
+
+    def record(message: str) -> None:
+        breadcrumbs.append(message)
+
+    server._startup_log = record  # type: ignore[method-assign]
+    server._startup_tracker.set_debug_sink(server._startup_log)
+    return breadcrumbs
+
+
+def _prime_completed_daemon_startup(server: MCPServerBase) -> None:
+    server._warm_ready_started_monotonic = time.monotonic()
+    server._start_startup_phase("initialize")
+    server._complete_startup_phase("initialize")
+    server._mark_startup_exposure_ready()
+    server._complete_startup()
+    server._startup_publish_complete.set()
 
 
 class TestNonBlockingInitialization:
@@ -670,3 +693,211 @@ class TestNonBlockingInitialization:
         assert realtime["resync"]["last_error"] is None
         assert realtime["last_error"] is None
         server.services.indexing_coordinator.generate_missing_embeddings.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_startup_window_fresh_instance_logs_double_work_and_summary(
+        self, tmp_path: Path
+    ) -> None:
+        """Startup-window fresh-instance recovery should log both passes and summary."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.embeddings_disabled = False
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.realtime_backend = "watchman"
+        config.indexing.exclude = []
+
+        server = DaemonModeMCPServer(config=config)
+        breadcrumbs = _collect_startup_breadcrumbs(server)
+        _prime_completed_daemon_startup(server)
+        server._scan_target_path = tmp_path
+        server.services = MagicMock()
+        server.services.indexing_coordinator.generate_missing_embeddings = AsyncMock(
+            return_value={"status": "complete", "generated": 2}
+        )
+        server.realtime_indexing = MagicMock()
+        server.realtime_indexing.monitoring_ready = asyncio.Event()
+        server.realtime_indexing.monitoring_ready.set()
+        server.realtime_indexing._MONITORING_READY_TIMEOUT_SECONDS = 0.01
+
+        async def never_finishes() -> None:
+            await asyncio.Event().wait()
+
+        monitoring_task = asyncio.create_task(never_finishes())
+        with patch(
+            "chunkhound.mcp_server.base.DirectoryIndexingService.process_directory",
+            AsyncMock(
+                side_effect=[
+                    SimpleNamespace(files_processed=3, chunks_created=9),
+                    SimpleNamespace(files_processed=4, chunks_created=12),
+                ]
+            ),
+        ), patch(
+            "chunkhound.mcp_server.base.asyncio.sleep",
+            AsyncMock(return_value=None),
+        ):
+            await server._request_realtime_resync(
+                "realtime_loss_of_sync",
+                {"backend": "watchman", "loss_of_sync_reason": "fresh_instance"},
+            )
+            await asyncio.wait_for(
+                server._coordinated_initial_scan(tmp_path, monitoring_task),
+                timeout=1.0,
+            )
+
+        monitoring_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await monitoring_task
+
+        assert any(
+            "warm-ready: realtime resync requested "
+            "reason=realtime_loss_of_sync" in message
+            for message in breadcrumbs
+        )
+        assert any(
+            "warm-ready: realtime resync directory scan starting" in message
+            for message in breadcrumbs
+        )
+        assert any(
+            "warm-ready: realtime resync embedding follow-up starting" in message
+            for message in breadcrumbs
+        )
+        assert any(
+            "warm-ready: initial scan coordination monitoring_ready_to_publish="
+            in message
+            for message in breadcrumbs
+        )
+        assert any(
+            "warm-ready: initial scan completed total=" in message
+            for message in breadcrumbs
+        )
+        assert any(
+            "warm-ready: startup paid both fresh-instance resync and initial scan "
+            "back-to-back" in message
+            for message in breadcrumbs
+        )
+        assert any(
+            "warm-ready: summary " in message
+            and "blocking_startup=" in message
+            and "fresh_instance_resync=" in message
+            and "initial_scan=" in message
+            and "warm_ready=" in message
+            for message in breadcrumbs
+        )
+
+    @pytest.mark.asyncio
+    async def test_startup_warm_ready_summary_emits_without_resync(
+        self, tmp_path: Path
+    ) -> None:
+        """Warm-ready summary should still appear when startup skips resync."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.realtime_backend = "watchman"
+        config.indexing.exclude = []
+
+        server = DaemonModeMCPServer(config=config)
+        breadcrumbs = _collect_startup_breadcrumbs(server)
+        _prime_completed_daemon_startup(server)
+        server.services = MagicMock()
+        server.realtime_indexing = MagicMock()
+        server.realtime_indexing.monitoring_ready = asyncio.Event()
+        server.realtime_indexing.monitoring_ready.set()
+        server.realtime_indexing._MONITORING_READY_TIMEOUT_SECONDS = 0.01
+
+        async def never_finishes() -> None:
+            await asyncio.Event().wait()
+
+        monitoring_task = asyncio.create_task(never_finishes())
+        with patch(
+            "chunkhound.mcp_server.base.DirectoryIndexingService.process_directory",
+            AsyncMock(
+                return_value=SimpleNamespace(files_processed=5, chunks_created=15)
+            ),
+        ), patch(
+            "chunkhound.mcp_server.base.asyncio.sleep",
+            AsyncMock(return_value=None),
+        ):
+            await asyncio.wait_for(
+                server._coordinated_initial_scan(tmp_path, monitoring_task),
+                timeout=1.0,
+            )
+
+        monitoring_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await monitoring_task
+
+        assert any(
+            "warm-ready: initial scan coordination monitoring_ready_to_publish="
+            in message
+            for message in breadcrumbs
+        )
+        assert any("warm-ready: summary " in message for message in breadcrumbs)
+        assert not any(
+            "startup paid both fresh-instance resync and initial scan back-to-back"
+            in message
+            for message in breadcrumbs
+        )
+
+    @pytest.mark.asyncio
+    async def test_startup_timing_breadcrumbs_do_not_mutate_public_startup_status(
+        self, tmp_path: Path
+    ) -> None:
+        """Warm-ready breadcrumbs must not change the public startup payload."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.embeddings_disabled = False
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.realtime_backend = "watchman"
+        config.indexing.exclude = []
+
+        server = DaemonModeMCPServer(config=config)
+        _collect_startup_breadcrumbs(server)
+        _prime_completed_daemon_startup(server)
+        server._scan_target_path = tmp_path
+        server.services = MagicMock()
+        server.services.indexing_coordinator.generate_missing_embeddings = AsyncMock(
+            return_value={"status": "complete", "generated": 1}
+        )
+        server.realtime_indexing = MagicMock()
+        server.realtime_indexing.monitoring_ready = asyncio.Event()
+        server.realtime_indexing.monitoring_ready.set()
+        server.realtime_indexing._MONITORING_READY_TIMEOUT_SECONDS = 0.01
+
+        startup_before = copy.deepcopy(server._scan_progress["realtime"]["startup"])
+
+        async def never_finishes() -> None:
+            await asyncio.Event().wait()
+
+        monitoring_task = asyncio.create_task(never_finishes())
+        with patch(
+            "chunkhound.mcp_server.base.DirectoryIndexingService.process_directory",
+            AsyncMock(
+                side_effect=[
+                    SimpleNamespace(files_processed=2, chunks_created=6),
+                    SimpleNamespace(files_processed=2, chunks_created=6),
+                ]
+            ),
+        ), patch(
+            "chunkhound.mcp_server.base.asyncio.sleep",
+            AsyncMock(return_value=None),
+        ):
+            await server._request_realtime_resync(
+                "realtime_loss_of_sync",
+                {"backend": "watchman", "loss_of_sync_reason": "fresh_instance"},
+            )
+            await asyncio.wait_for(
+                server._coordinated_initial_scan(tmp_path, monitoring_task),
+                timeout=1.0,
+            )
+
+        monitoring_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await monitoring_task
+
+        assert server._scan_progress["realtime"]["startup"] == startup_before
