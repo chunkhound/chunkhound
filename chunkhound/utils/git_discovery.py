@@ -65,6 +65,8 @@ def _run_git_ls_files(
     repo_root: Path, pathspecs: list[str] | None = None
 ) -> tuple[list[str], int, int]:
     """Return repo-relative paths from git ls-files (tracked + untracked non-ignored)."""
+    from loguru import logger
+
     repo_root = repo_root.resolve()
     # Tracked files
     tracked = []
@@ -74,10 +76,14 @@ def _run_git_ls_files(
             args += ["--", *pathspecs]
         res = run_git(args, cwd=repo_root, timeout_s=None)
         if res.returncode != 0:
+            logger.debug(
+                f"git ls-files failed (rc={res.returncode}): {res.stderr.strip()}"
+            )
             tracked = []
         else:
             tracked = [p for p in (res.stdout or "").split("\x00") if p]
-    except GitCommandError:
+    except GitCommandError as e:
+        logger.debug(f"git ls-files tracked error: {e}")
         tracked = []
     # Untracked, non-ignored (exclude-standard honors .gitignore + core excludes)
     others = []
@@ -94,10 +100,14 @@ def _run_git_ls_files(
             args += ["--", *pathspecs]
         res = run_git(args, cwd=repo_root, timeout_s=None)
         if res.returncode != 0:
+            logger.debug(
+                f"git ls-files others failed (rc={res.returncode}): {res.stderr.strip()}"
+            )
             others = []
         else:
             others = [p for p in (res.stdout or "").split("\x00") if p]
-    except GitCommandError:
+    except GitCommandError as e:
+        logger.debug(f"git ls-files others error: {e}")
         others = []
     # Deduplicate while preserving order (tracked typically first)
     seen = set()
