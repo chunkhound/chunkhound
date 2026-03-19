@@ -376,10 +376,7 @@ class GapDetectionService:
                     "items": {
                         "type": "object",
                         "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "A new targeted search query to find the missing component or information",
-                            },
+                            "query": {"type": "string"},
                             "rationale": {"type": "string"},
                             "confidence": {
                                 "type": "number",

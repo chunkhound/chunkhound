@@ -5,8 +5,6 @@ from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Protocol, TypeVar
 
-from .shared_utils import mean_pool_embeddings
-
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
@@ -28,8 +26,7 @@ async def handle_token_limit_error(
         token_limit: Maximum tokens allowed (should include safety margin)
         embed_function: Function to embed a batch of texts
         chunk_text_function: Function to chunk a single text by tokens
-        single_text_fallback: Whether to mean-pool all chunk embeddings into one vector
-            (True) or return one embedding per chunk (False)
+        single_text_fallback: Whether to use first chunk as fallback for oversized text
 
     Returns:
         List of embeddings for all texts
@@ -82,9 +79,9 @@ async def handle_token_limit_error(
             )
 
         if single_text_fallback:
-            # Embed all chunks and mean-pool into a single representative vector
-            chunk_embeddings = await embed_function(chunks)
-            return [mean_pool_embeddings(chunk_embeddings)]
+            # Return embedding of first chunk as representative
+            chunk_embeddings = await embed_function([chunks[0]])
+            return chunk_embeddings
         else:
             # Return embeddings for all chunks
             chunk_embeddings = await embed_function(chunks)
@@ -163,7 +160,7 @@ def with_token_limit_handling(
     Args:
         error_check_func: Function to check if exception indicates token limit exceeded
         safety_margin: Safety margin to subtract from token limit
-        single_text_fallback: Whether to mean-pool all chunk embeddings into one vector
+        single_text_fallback: Whether to use first chunk as fallback for oversized single text
 
     Returns:
         Decorator function
