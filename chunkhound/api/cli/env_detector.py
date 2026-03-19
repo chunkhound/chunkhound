@@ -3,7 +3,7 @@
 import os
 from typing import Any
 
-from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
+from chunkhound.core.constants import OPENAI_DEFAULT_MODEL, VOYAGE_DEFAULT_MODEL
 
 try:
     import httpx
@@ -59,7 +59,7 @@ def _detect_openai() -> dict[str, Any] | None:
         config = {
             "provider": "openai",
             "api_key": api_key,
-            "model": os.getenv("OPENAI_MODEL", "text-embedding-3-small"),
+            "model": os.getenv("OPENAI_MODEL", OPENAI_DEFAULT_MODEL),
         }
 
         # Add base URL if specified

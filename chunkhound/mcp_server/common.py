@@ -60,12 +60,6 @@ class EmbeddingTimeoutError(MCPError):
     pass
 
 
-class EmbeddingProviderError(MCPError):
-    """Raised when embedding provider is not available."""
-
-    pass
-
-
 async def with_timeout(
     coro: Coroutine[Any, Any, T],
     timeout_seconds: float,
@@ -323,7 +317,7 @@ def add_common_mcp_arguments(parser: Any) -> None:
     # Embedding arguments
     parser.add_argument(
         "--provider",
-        choices=["openai"],
+        choices=["openai", "voyageai", "openai_compatible"],
         help="Embedding provider",
     )
     parser.add_argument("--model", type=str, help="Embedding model")

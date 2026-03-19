@@ -10,7 +10,11 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERANK_MODEL
+from chunkhound.core.constants import (
+    OPENAI_DEFAULT_MODEL,
+    VOYAGE_DEFAULT_MODEL,
+    VOYAGE_DEFAULT_RERANK_MODEL,
+)
 
 from .embedding_config import EmbeddingConfig
 
@@ -57,7 +61,7 @@ class EmbeddingProviderFactory:
         provider_config = config.get_provider_config()
 
         # Create provider based on type
-        if config.provider == "openai":
+        if config.provider in ("openai", "openai_compatible"):
             return EmbeddingProviderFactory._create_openai_provider(provider_config)
         elif config.provider == "voyageai":
             return EmbeddingProviderFactory._create_voyageai_provider(provider_config)
@@ -83,6 +87,12 @@ class EmbeddingProviderFactory:
         rerank_url = config.get("rerank_url", "/rerank")
         rerank_format = config.get("rerank_format", "auto")
         rerank_batch_size = config.get("rerank_batch_size")
+        output_dims = config.get("output_dims")
+        client_side_truncation = config.get("client_side_truncation", False)
+        verify_ssl = config.get("verify_ssl", True)
+        batch_size = config.get("batch_size", 100)
+        timeout = config.get("timeout", 30)
+        retry_attempts = config.get("max_retries", 3)
 
         # Azure OpenAI parameters
         api_version = config.get("api_version")
@@ -101,14 +111,18 @@ class EmbeddingProviderFactory:
                 f"azure_deployment={azure_deployment}, "
                 f"api_key={'***' if api_key else None}, "
                 f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
-                f"rerank_batch_size={rerank_batch_size}"
+                f"rerank_batch_size={rerank_batch_size}, output_dims={output_dims}, "
+                f"client_side_truncation={client_side_truncation}, "
+                f"verify_ssl={verify_ssl}"
             )
         else:
             logger.debug(
                 f"Creating OpenAI provider: model={model}, "
                 f"base_url={base_url}, api_key={'***' if api_key else None}, "
                 f"rerank_model={rerank_model}, rerank_format={rerank_format}, "
-                f"rerank_batch_size={rerank_batch_size}"
+                f"rerank_batch_size={rerank_batch_size}, output_dims={output_dims}, "
+                f"client_side_truncation={client_side_truncation}, "
+                f"verify_ssl={verify_ssl}"
             )
 
         try:
@@ -120,9 +134,15 @@ class EmbeddingProviderFactory:
                 rerank_url=rerank_url,
                 rerank_format=rerank_format,
                 rerank_batch_size=rerank_batch_size,
+                output_dims=output_dims,
+                client_side_truncation=client_side_truncation,
                 api_version=api_version,
                 azure_endpoint=azure_endpoint,
                 azure_deployment=azure_deployment,
+                batch_size=batch_size,
+                timeout=timeout,
+                retry_attempts=retry_attempts,
+                verify_ssl=verify_ssl,
             )
         except Exception as e:
             raise ValueError(f"Failed to create OpenAI provider: {e}") from e
@@ -146,6 +166,7 @@ class EmbeddingProviderFactory:
         model = config.get("model")
         rerank_model = config.get("rerank_model")
         rerank_batch_size = config.get("rerank_batch_size")
+        output_dims = config.get("output_dims")
         rerank_url = config.get("rerank_url")
         rerank_format = config.get("rerank_format", "auto")
         max_concurrent_batches = config.get("max_concurrent_batches")
@@ -158,7 +179,8 @@ class EmbeddingProviderFactory:
             f"Creating VoyageAI provider: model={model}, "
             f"base_url={base_url}, api_key={'***' if api_key else None}, "
             f"rerank_model={rerank_model}, rerank_url={rerank_url}, "
-            f"rerank_format={rerank_format}, rerank_batch_size={rerank_batch_size}"
+            f"rerank_format={rerank_format}, rerank_batch_size={rerank_batch_size}, "
+            f"output_dims={output_dims}"
         )
 
         try:
@@ -177,6 +199,8 @@ class EmbeddingProviderFactory:
                 kwargs["rerank_model"] = rerank_model
             if rerank_batch_size is not None:
                 kwargs["rerank_batch_size"] = rerank_batch_size
+            if output_dims is not None:
+                kwargs["output_dims"] = output_dims
             # rerank_url: resolve relative paths against base_url, then forward absolute URLs only
             if (
                 rerank_url
@@ -222,7 +246,7 @@ class EmbeddingProviderFactory:
 
         # Try to import the required create function
         try:
-            if provider == "openai":
+            if provider in ("openai", "openai_compatible"):
                 from chunkhound.embeddings import create_openai_provider  # noqa: F401
             elif provider == "voyageai":
                 from chunkhound.providers.embeddings.voyageai_provider import (  # noqa: F401
@@ -318,62 +342,51 @@ class EmbeddingProviderFactory:
 
         # Provider-specific information
         if provider == "openai":
+            from chunkhound.providers.embeddings.openai_provider import (
+                OPENAI_MODEL_CONFIG,
+                get_openai_display_models,
+            )
+
             info.update(
                 {
                     "description": "OpenAI text embedding API",
                     "requires": ["api_key"],
                     "optional": ["base_url", "model"],
-                    "default_model": "text-embedding-3-large",
-                    "supported_models": [
-                        "text-embedding-3-small",
-                        "text-embedding-3-large",
-                        "text-embedding-ada-002",
-                    ],
+                    "supported_models": list(OPENAI_MODEL_CONFIG.keys()),
                     # UI-specific metadata for setup wizard
                     "display_name": "OpenAI",
                     "base_url": "https://api.openai.com",
                     "requires_api_key": True,
                     "supports_model_listing": False,
-                    "supports_reranking": False,
-                    "default_models": [
-                        ("text-embedding-3-large", "Higher quality"),
-                        ("text-embedding-3-small", "Fast & efficient"),
-                    ],
+                    "supports_reranking": True,
+                    "default_models": get_openai_display_models(),
                     "default_rerankers": [],
-                    "default_selection": "text-embedding-3-large",
+                    "default_selection": OPENAI_DEFAULT_MODEL,
                     "default_reranker": None,
                 }
             )
         elif provider == "voyageai":
+            from chunkhound.providers.embeddings.voyageai_provider import (
+                VOYAGE_MODEL_CONFIG,
+                get_voyage_display_models,
+                get_voyage_display_rerankers,
+            )
+
+            display_models = get_voyage_display_models()
             info.update(
                 {
                     "description": "VoyageAI specialized embedding API",
                     "requires": ["api_key"],
                     "optional": ["model", "rerank_model"],
-                    "default_model": VOYAGE_DEFAULT_MODEL,
-                    "supported_models": [
-                        "voyage-3.5",
-                        "voyage-code-3",
-                        "voyage-3.5-lite",
-                        "voyage-3-large",
-                    ],
+                    "supported_models": list(VOYAGE_MODEL_CONFIG.keys()),
                     # UI-specific metadata for setup wizard
                     "display_name": "VoyageAI",
                     "base_url": None,  # Uses SDK, no direct endpoint
                     "requires_api_key": False,  # Only required for official api.voyageai.com
                     "supports_model_listing": False,
                     "supports_reranking": True,
-                    "default_models": [
-                        ("voyage-3.5", "Latest general-purpose, (recommended)"),
-                        ("voyage-3.5-lite", "Cost-optimized with good accuracy"),
-                        ("voyage-3-large", "Previous gen, proven performance"),
-                        ("voyage-code-3", "Previous gen, code optimized"),
-                    ],
-                    "default_rerankers": [
-                        ("rerank-2.5", "Latest reranker, best accuracy"),
-                        ("rerank-2.5-lite", "Lighter, cost-effective"),
-                        ("rerank-2", "Previous gen, great for code"),
-                    ],
+                    "default_models": display_models,
+                    "default_rerankers": get_voyage_display_rerankers(),
                     "default_selection": VOYAGE_DEFAULT_MODEL,
                     "default_reranker": VOYAGE_DEFAULT_RERANK_MODEL,
                 }
@@ -382,9 +395,8 @@ class EmbeddingProviderFactory:
             info.update(
                 {
                     "description": "OpenAI-compatible API server",
-                    "requires": [],  # May or may not need API key
-                    "optional": ["api_key", "base_url", "model"],
-                    "default_model": None,
+                    "requires": ["base_url"],
+                    "optional": ["api_key", "model"],
                     "supported_models": [],  # Discovered dynamically
                     # UI-specific metadata for setup wizard
                     "display_name": "OpenAI-Compatible",

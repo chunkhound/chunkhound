@@ -120,7 +120,7 @@ class EmbeddingError(ChunkHoundError):
 
         Args:
             provider: Embedding provider name (e.g., "openai")
-            model: Model name (e.g., "text-embedding-3-small")
+            model: Model name (e.g., "text-embedding-3-large")
             operation: Operation that failed (e.g., "generate", "store", "retrieve")
             reason: Description of what went wrong
             context: Optional additional context

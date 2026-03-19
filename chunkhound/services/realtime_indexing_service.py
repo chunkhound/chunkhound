@@ -365,10 +365,15 @@ class RealtimeIndexingService:
         for task in self._debounce_tasks.copy():
             task.cancel()
 
-        # Wait for debounce tasks to finish cancelling
+        # Wait for debounce tasks to finish cancelling (done_callbacks discard each task)
         if self._debounce_tasks:
             await asyncio.gather(*self._debounce_tasks, return_exceptions=True)
-            self._debounce_tasks.clear()
+
+        # Defensive: clear all deduplication state (debounce + scan-tracked files).
+        # pending_files tracks both change-debounced and scan-priority files; stop() is
+        # the only place that purges scan entries.
+        self._pending_debounce.clear()
+        self.pending_files.clear()
 
     async def _setup_watchdog(
         self, watch_path: Path, loop: asyncio.AbstractEventLoop
@@ -544,7 +549,12 @@ class RealtimeIndexingService:
 
     async def add_file(self, file_path: Path, priority: str = "change") -> None:
         """Add file to processing queue with deduplication and debouncing."""
-        if file_path not in self.pending_files:
+        # "change" events always enter so they can refresh the debounce timestamp,
+        # even if the file is already tracked in pending_files.
+        # Trade-off: a file already scan-queued can receive a second change-debounce
+        # entry, causing two processing passes. That is intentional — processing is
+        # idempotent and the alternative (dropping the change) would lose user edits.
+        if file_path not in self.pending_files or priority == "change":
             self.pending_files.add(file_path)
 
             # Simple debouncing for change events
@@ -571,19 +581,37 @@ class RealtimeIndexingService:
                 self._debug(f"queued {file_path} priority={priority}")
 
     async def _debounced_add_file(self, file_path: Path, priority: str) -> None:
-        """Process file after debounce delay."""
-        await asyncio.sleep(self._debounce_delay)
+        """Process file after debounce delay.
 
+        Loops until the debounce window has been quiet for at least _debounce_delay.
+        Worst-case flush latency is 2 × _debounce_delay from the final change event
+        (one sleep that finds a recent update, plus one more full sleep).
+        """
         file_str = str(file_path)
-        if file_str in self._pending_debounce:
-            last_update = self._pending_debounce[file_str]
+        try:
+            while True:
+                await asyncio.sleep(self._debounce_delay)
 
-            # Check if no recent updates during delay
-            if time.monotonic() - last_update >= self._debounce_delay:
-                del self._pending_debounce[file_str]
-                await self.file_queue.put((priority, file_path))
-                logger.debug(f"Processing debounced file: {file_path}")
-                self._debug(f"processing debounced file: {file_path}")
+                if file_str not in self._pending_debounce:
+                    self.pending_files.discard(file_path)
+                    return  # Cleaned up externally
+
+                last_update = self._pending_debounce[file_str]
+                if time.monotonic() - last_update >= self._debounce_delay:
+                    break
+        except asyncio.CancelledError:
+            self._pending_debounce.pop(file_str, None)
+            self.pending_files.discard(file_path)
+            raise
+
+        del self._pending_debounce[file_str]
+        # pending_files is intentionally NOT cleared here — the file is now in
+        # file_queue and deduplication must hold until the queue processor handles it.
+        # Contrast with the early-return path above which discards from pending_files
+        # because no queue entry exists in that case.
+        await self.file_queue.put((priority, file_path))
+        logger.debug(f"Processing debounced file: {file_path}")
+        self._debug(f"processing debounced file: {file_path}")
 
     async def _consume_events(self) -> None:
         """Simple event consumer - pure asyncio queue."""
