@@ -18,8 +18,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from chunkhound.utils.windows_constants import IS_WINDOWS
-
 
 @dataclass(frozen=True)
 class WatchmanSubscriptionScope:
@@ -108,7 +106,7 @@ def discover_nested_windows_junction_scopes(
 ) -> tuple[WatchmanSubscriptionScope, ...]:
     """Return logical junction-backed scopes that resolve outside the target."""
 
-    if not IS_WINDOWS:
+    if not sys.platform.startswith("win"):
         return ()
 
     requested_path = target_dir.expanduser().resolve()
