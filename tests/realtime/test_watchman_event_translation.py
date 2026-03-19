@@ -104,6 +104,8 @@ async def test_watchman_mount_aware_startup_reuses_primary_session(
     target_dir.mkdir(parents=True)
     nested_mount.mkdir(parents=True)
     service, services = _build_watchman_service(target_dir)
+    debug_messages: list[str] = []
+    service._debug_sink = debug_messages.append
     prepare_delay = 1.0
     prepare_calls: list[int] = []
     operations: list[tuple[object, ...]] = []
@@ -373,6 +375,31 @@ async def test_watchman_mount_aware_startup_reuses_primary_session(
             startup_snapshot["phases"]["watchman_subscription_setup"]["state"]
             == "completed"
         )
+        assert any(
+            "RT: watchman scope discovery: linux nested mounts count=1" in message
+            and str(nested_mount) in message
+            for message in debug_messages
+        )
+        assert any(
+            "RT: watchman scope discovery: windows junction scopes count=0"
+            in message
+            for message in debug_messages
+        )
+        assert any(
+            "RT: watchman scope discovery: watch roots mode=prepared_session "
+            "count=1" in message
+            and str(nested_mount) in message
+            for message in debug_messages
+        )
+        assert any(
+            "RT: watchman scope discovery: scope plan built count=2" in message
+            and "['primary', 'nested_mount']" in message
+            for message in debug_messages
+        )
+        assert any(
+            "RT: watchman scope discovery: phase total duration=" in message
+            for message in debug_messages
+        )
     finally:
         await adapter.stop()
         services.provider.disconnect()
@@ -387,6 +414,8 @@ async def test_watchman_mount_aware_startup_uses_fallback_planning(
     target_dir.mkdir(parents=True)
     nested_mount.mkdir(parents=True)
     service, services = _build_watchman_service(target_dir)
+    debug_messages: list[str] = []
+    service._debug_sink = debug_messages.append
     prepare_calls: list[int] = []
     operations: list[tuple[object, ...]] = []
 
@@ -633,6 +662,12 @@ async def test_watchman_mount_aware_startup_uses_fallback_planning(
         ]
         assert adapter._session is TrackingSession._created_sessions[0]
         assert adapter._sessions == TrackingSession._created_sessions
+        assert any(
+            "RT: watchman scope discovery: watch roots mode=one_shot count=1"
+            in message
+            and str(nested_mount) in message
+            for message in debug_messages
+        )
     finally:
         await adapter.stop()
         services.provider.disconnect()

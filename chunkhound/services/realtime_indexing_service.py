@@ -1061,21 +1061,70 @@ class WatchmanRealtimeAdapter:
                 )
             self._service._complete_startup_phase("watchman_watch_project")
             self._service._start_startup_phase("watchman_scope_discovery")
+
+            def _log_scope_discovery(message: str) -> None:
+                self._service._debug(f"watchman scope discovery: {message}")
+
+            def _elapsed_seconds(started_at: float) -> float:
+                return round(max(time.monotonic() - started_at, 0.0), 3)
+
+            def _render_paths(paths: list[Path]) -> list[str]:
+                return [str(path) for path in paths]
+
+            scope_discovery_started_at = time.monotonic()
+
+            nested_mount_discovery_started_at = time.monotonic()
             nested_mount_roots = discover_nested_linux_mount_roots(watch_path)
+            _log_scope_discovery(
+                "linux nested mounts "
+                f"count={len(nested_mount_roots)} "
+                f"duration={_elapsed_seconds(nested_mount_discovery_started_at)}s "
+                f"roots={_render_paths(list(nested_mount_roots))}"
+            )
+
+            junction_discovery_started_at = time.monotonic()
             additional_scopes = discover_nested_windows_junction_scopes(watch_path)
+            _log_scope_discovery(
+                "windows junction scopes "
+                f"count={len(additional_scopes)} "
+                f"duration={_elapsed_seconds(junction_discovery_started_at)}s "
+                "roots="
+                f"{_render_paths([scope.watch_root for scope in additional_scopes])}"
+            )
+
             startup_watch_roots = [
                 *nested_mount_roots,
                 *(scope.watch_root for scope in additional_scopes),
             ]
+            watch_roots_started_at = time.monotonic()
             if use_prepared_startup:
                 await primary_session.watch_roots(startup_watch_roots)
             else:
                 await primary_session.startup_watch_roots_once(startup_watch_roots)
+            _log_scope_discovery(
+                "watch roots "
+                f"mode={'prepared_session' if use_prepared_startup else 'one_shot'} "
+                f"count={len(startup_watch_roots)} "
+                f"duration={_elapsed_seconds(watch_roots_started_at)}s "
+                f"roots={_render_paths(list(startup_watch_roots))}"
+            )
+
+            scope_plan_started_at = time.monotonic()
             scope_plan = build_watchman_scope_plan(
                 watch_path,
                 watch_project_response,
                 nested_mount_roots=nested_mount_roots,
                 additional_scopes=additional_scopes,
+            )
+            _log_scope_discovery(
+                "scope plan built "
+                f"count={len(scope_plan.scopes)} "
+                f"duration={_elapsed_seconds(scope_plan_started_at)}s "
+                f"scopes={[scope.scope_kind for scope in scope_plan.scopes]}"
+            )
+            _log_scope_discovery(
+                "phase total "
+                f"duration={_elapsed_seconds(scope_discovery_started_at)}s"
             )
             self._service._complete_startup_phase("watchman_scope_discovery")
 
