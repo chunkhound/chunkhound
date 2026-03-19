@@ -358,36 +358,39 @@ def limit_response_size(
 # Tool Descriptions (optimized for LLM consumption)
 # =============================================================================
 
-SEARCH_DESCRIPTION = """Targeted code lookup by exact pattern (regex) or meaning (semantic).
-
-WORKFLOW POSITION: Use after building understanding with code_research to
-find specific locations, references, and patterns. Default to code_research first.
+SEARCH_DESCRIPTION = """Search code by exact pattern (regex) or meaning (semantic).
 
 TYPE SELECTION:
-- regex: Exact pattern matching — function names, imports, known strings.
-  Examples: "def authenticate", "import.*pandas", "TODO:.*fix"
-- semantic: Meaning-based search — describe functionality conceptually.
-  Examples: "authentication logic", "error handling for database"
+- regex: Exact pattern matching. Use for function names, variable names,
+  import statements, or known string patterns.
+  Example queries: "def authenticate", "import.*pandas", "TODO:.*fix"
+
+- semantic: Meaning-based search. Use when describing functionality
+  conceptually or unsure of exact keywords.
+  Example queries: "authentication logic", "error handling for database"
+
+WHEN TO USE: Quick lookup, finding references, exploring unfamiliar code.
+DO NOT USE: Multi-file architecture questions (use code_research instead).
 
 OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}
-Fast and cheap — use liberally for targeted lookups."""
+COST: Fast, cheap - use liberally."""
 
-CODE_RESEARCH_DESCRIPTION = """Default first step: deep architecture analysis of any codebase.
+CODE_RESEARCH_DESCRIPTION = """Deep analysis for architecture and cross-file code.
 
-WORKFLOW: Always start here before coding or investigating unfamiliar code.
-1. Call code_research to understand the architecture and relevant components
-2. Follow up with 1-2 more calls to build deeper understanding — ask about
-   specific subsystems, data flows, or patterns discovered in the first call
-3. Refine with search (regex/semantic) for specific symbol locations and references
-4. Read files directly once you know where to look
+USE FOR:
+- Understanding how systems/features are implemented across files
+- Discovering component relationships and dependencies
+- Getting architectural explanations with code citations
 
-WHAT IT DOES: Analyzes cross-file relationships, architecture patterns,
-and component dependencies. Returns markdown with code citations.
+DO NOT USE:
+- Looking for specific code locations (use search instead)
+- Simple pattern matching (use search with type="regex")
+- You already know where the code is (read files directly)
 
-One call typically replaces tens of manual searches and is much more token efficient.
+OUTPUT: Comprehensive markdown with architecture overview, key locations, relationships.
+COST: Expensive (LLM synthesis). 10-60s latency. One call often replaces 5-10 searches.
 
-TIPS: Use the path parameter to scope to a subdirectory for faster, focused results.
-If the response is incomplete, narrow your query or scope."""
+ERROR RECOVERY: If incomplete, try narrower query or use path parameter to scope."""
 
 
 # =============================================================================

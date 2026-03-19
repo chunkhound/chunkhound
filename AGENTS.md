@@ -34,16 +34,6 @@ mcp_stdio: uv run chunkhound mcp
 mcp_http:  uv run chunkhound mcp http --port 5173
 ```
 
-## CODING_WORKFLOW
-When working on this codebase using MCP tools, build understanding incrementally:
-1. **code_research** — Start here. Understand architecture before touching code.
-2. **code_research** (1-2 follow-ups) — Deepen understanding of specific subsystems,
-   data flows, or patterns discovered in the first call.
-3. **search** — Refine with regex/semantic to find exact symbol locations and references.
-4. **Read files / native tools** — Read and edit once you know where to look.
-
-Default to code_research for any new task. Skip only when you already know the exact file and line.
-
 ## VERSION_MANAGEMENT
 Dynamic versioning via hatch-vcs - version derived from git tags.
 
