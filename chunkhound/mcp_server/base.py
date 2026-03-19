@@ -139,11 +139,14 @@ class MCPServerBase(ABC):
         self._warm_ready_summary_emitted = False
         self._warm_ready_initial_scan_total_seconds: float | None = None
         self._warm_ready_initial_scan_completed_monotonic: float | None = None
+        self._warm_ready_initial_scan_skipped_monotonic: float | None = None
         self._warm_ready_fresh_instance_resync_requested = False
         self._warm_ready_fresh_instance_resync_total_seconds: float | None = None
         self._warm_ready_fresh_instance_resync_completed_monotonic: float | None = (
             None
         )
+        self._warm_ready_fresh_instance_resync_outcome: str | None = None
+        self._warm_ready_fresh_instance_resync_authoritative = False
         self._warm_ready_double_work_logged = False
 
     @staticmethod
@@ -178,6 +181,16 @@ class MCPServerBase(ABC):
             and not self._warm_ready_summary_emitted
         )
 
+    @staticmethod
+    def _is_authoritative_fresh_instance_resync_outcome(outcome: str | None) -> bool:
+        return outcome in {"success", "complete", "up_to_date", "embeddings_disabled"}
+
+    def _should_skip_initial_scan_for_startup_fresh_instance(self) -> bool:
+        return (
+            self._warm_ready_fresh_instance_resync_authoritative
+            and self._warm_ready_fresh_instance_resync_completed_monotonic is not None
+        )
+
     def _timing_log(self, message: str, *, daemon_visible: bool = False) -> None:
         formatted = f"warm-ready: {message}"
         if daemon_visible:
@@ -190,7 +203,10 @@ class MCPServerBase(ABC):
             return
         if self._warm_ready_started_monotonic is None:
             return
-        if self._warm_ready_initial_scan_completed_monotonic is None:
+        if (
+            self._warm_ready_initial_scan_completed_monotonic is None
+            and self._warm_ready_initial_scan_skipped_monotonic is None
+        ):
             return
         if (
             self._warm_ready_fresh_instance_resync_requested
@@ -204,11 +220,28 @@ class MCPServerBase(ABC):
             return
 
         last_adjacent_completed = self._warm_ready_initial_scan_completed_monotonic
+        if self._warm_ready_initial_scan_skipped_monotonic is not None:
+            if last_adjacent_completed is None:
+                last_adjacent_completed = (
+                    self._warm_ready_initial_scan_skipped_monotonic
+                )
+            else:
+                last_adjacent_completed = max(
+                    last_adjacent_completed,
+                    self._warm_ready_initial_scan_skipped_monotonic,
+                )
         if self._warm_ready_fresh_instance_resync_completed_monotonic is not None:
-            last_adjacent_completed = max(
-                last_adjacent_completed,
-                self._warm_ready_fresh_instance_resync_completed_monotonic,
-            )
+            if last_adjacent_completed is None:
+                last_adjacent_completed = (
+                    self._warm_ready_fresh_instance_resync_completed_monotonic
+                )
+            else:
+                last_adjacent_completed = max(
+                    last_adjacent_completed,
+                    self._warm_ready_fresh_instance_resync_completed_monotonic,
+                )
+        if last_adjacent_completed is None:
+            return
         warm_ready_total = self._duration_seconds(
             self._warm_ready_started_monotonic,
             last_adjacent_completed,
@@ -550,7 +583,7 @@ class MCPServerBase(ABC):
                     f"monitoring_ready_to_publish={self._format_duration(publish_wait_duration)}",
                     daemon_visible=daemon_visible,
                 )
-                self.debug_log("Monitoring confirmed ready, starting initial scan")
+                self.debug_log("Monitoring confirmed ready, coordinating initial scan")
                 # Add small delay to ensure any startup files are captured
                 # by monitoring.
                 self._timing_log(
@@ -568,6 +601,15 @@ class MCPServerBase(ABC):
                     f"settle_sleep_completed={self._format_duration(settle_sleep_duration)}",
                     daemon_visible=daemon_visible,
                 )
+                if self._should_skip_initial_scan_for_startup_fresh_instance():
+                    self._warm_ready_initial_scan_skipped_monotonic = time.monotonic()
+                    self._timing_log(
+                        "startup reused successful fresh-instance reconciliation "
+                        "and skipped the deferred initial scan",
+                        daemon_visible=daemon_visible,
+                    )
+                    self._emit_warm_ready_summary_if_ready()
+                    return
                 if (
                     self._warm_ready_fresh_instance_resync_total_seconds is not None
                     and not self._warm_ready_double_work_logged
@@ -578,6 +620,7 @@ class MCPServerBase(ABC):
                         daemon_visible=daemon_visible,
                     )
                     self._warm_ready_double_work_logged = True
+                self.debug_log("Monitoring confirmed ready, starting initial scan")
                 initial_scan_started_monotonic = time.monotonic()
                 monitoring_ready_to_scan_start = self._duration_seconds(
                     monitoring_ready_monotonic,
@@ -809,6 +852,12 @@ class MCPServerBase(ABC):
                 self._warm_ready_fresh_instance_resync_total_seconds = total_duration
                 self._warm_ready_fresh_instance_resync_completed_monotonic = (
                     resync_completed_monotonic
+                )
+                self._warm_ready_fresh_instance_resync_outcome = resync_outcome
+                self._warm_ready_fresh_instance_resync_authoritative = (
+                    self._is_authoritative_fresh_instance_resync_outcome(
+                        resync_outcome
+                    )
                 )
                 self._emit_warm_ready_summary_if_ready()
 
