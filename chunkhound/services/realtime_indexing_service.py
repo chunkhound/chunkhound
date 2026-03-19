@@ -26,6 +26,7 @@ from typing import Any, Protocol
 from loguru import logger
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
+from watchdog.observers.api import BaseObserver
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.utils.path_utils import normalize_realtime_path
@@ -1722,7 +1723,7 @@ class RealtimeIndexingService:
         self.scan_complete = False
 
         # Filesystem monitoring
-        self.observer: Any | None = None
+        self.observer: BaseObserver | None = None
         self.event_handler: SimpleEventHandler | None = None
         self.watch_path: Path | None = None
 
@@ -1732,7 +1733,7 @@ class RealtimeIndexingService:
         self._polling_task: asyncio.Task | None = None
         self._watchdog_setup_task: asyncio.Task | None = None
         self._watchdog_bootstrap_future: (
-            asyncio.Future[tuple[Observer, SimpleEventHandler] | None] | None
+            asyncio.Future[tuple[BaseObserver, SimpleEventHandler] | None] | None
         ) = None
         self._watchdog_bootstrap_abort = threading.Event()
         self._resync_dispatch_task: asyncio.Task | None = None
@@ -3329,7 +3330,7 @@ class RealtimeIndexingService:
                 self._watchdog_bootstrap_future = None
 
     def _handle_watchdog_bootstrap_done(
-        self, future: asyncio.Future[tuple[Observer, SimpleEventHandler] | None]
+        self, future: asyncio.Future[tuple[BaseObserver, SimpleEventHandler] | None]
     ) -> None:
         """Drain watchdog bootstrap exceptions and reflect unexpected failures."""
         if self._watchdog_bootstrap_future is future:
@@ -3380,7 +3381,7 @@ class RealtimeIndexingService:
 
     def _adopt_watchdog_monitor(
         self,
-        observer: Observer,
+        observer: BaseObserver,
         event_handler: SimpleEventHandler,
         watch_path: Path,
     ) -> None:
@@ -3406,7 +3407,7 @@ class RealtimeIndexingService:
         self._emit_status_update()
 
     @staticmethod
-    def _stop_bootstrap_observer(observer: Observer) -> None:
+    def _stop_bootstrap_observer(observer: BaseObserver) -> None:
         """Stop a watchdog observer created during a bootstrap race."""
         try:
             observer.stop()
@@ -3422,7 +3423,7 @@ class RealtimeIndexingService:
         watch_path: Path,
         loop: asyncio.AbstractEventLoop,
         abort_event: threading.Event,
-    ) -> tuple[Observer, SimpleEventHandler] | None:
+    ) -> tuple[BaseObserver, SimpleEventHandler] | None:
         """Create and start a watchdog observer without mutating shared state."""
         event_handler = SimpleEventHandler(
             self.event_queue,
@@ -3618,12 +3619,14 @@ class RealtimeIndexingService:
                         logger.debug(f"Polling detected deleted file: {file_path}")
                         self._record_source_event("deleted", file_path)
                         self._record_accepted_event("deleted", file_path)
-                        source_generation = self._current_source_generation(file_path)
+                        delete_source_generation: int | None = (
+                            self._current_source_generation(file_path)
+                        )
                         await self._enqueue_mutation(
                             self._build_mutation(
                                 "delete",
                                 file_path,
-                                source_generation=source_generation,
+                                source_generation=delete_source_generation,
                             )
                         )
                         self._debug(f"polling detected deleted file: {file_path}")

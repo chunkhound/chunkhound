@@ -18,12 +18,13 @@ import time
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from chunkhound.core.config import EmbeddingProviderFactory
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices, create_services
 from chunkhound.embeddings import EmbeddingManager
+from chunkhound.interfaces.embedding_provider import EmbeddingProvider as EmbeddingProviderProtocol
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.realtime_indexing_service import (
@@ -87,7 +88,7 @@ class MCPServerBase(ABC):
 
         # Scan progress tracking
         self._scan_complete = False
-        self._scan_progress = {
+        self._scan_progress: dict[str, Any] = {
             "files_processed": 0,
             "chunks_created": 0,
             "is_scanning": False,
@@ -299,6 +300,9 @@ class MCPServerBase(ABC):
         self._startup_tracker.mark_exposure_ready()
         self._sync_startup_snapshot()
 
+    def _current_startup_failure_message(self) -> str | None:
+        return self._startup_failure_message
+
     async def initialize(self) -> None:
         """Initialize services and database connection.
 
@@ -339,8 +343,11 @@ class MCPServerBase(ABC):
                 # Setup embedding provider (optional - continue if it fails)
                 try:
                     if self.config.embedding:
-                        provider = EmbeddingProviderFactory.create_provider(
-                            self.config.embedding
+                        provider = cast(
+                            EmbeddingProviderProtocol,
+                            EmbeddingProviderFactory.create_provider(
+                                self.config.embedding
+                            ),
                         )
                         self.embedding_manager.register_provider(
                             provider,
@@ -525,12 +532,13 @@ class MCPServerBase(ABC):
             self._set_startup_failure(message, phase_name="startup_barrier")
             raise RuntimeError(message) from error
 
-        if self._startup_failure_message is not None:
+        startup_failure_message = self._current_startup_failure_message()
+        if startup_failure_message is not None:
             self._set_startup_failure(
-                self._startup_failure_message,
+                startup_failure_message,
                 phase_name="startup_barrier",
             )
-            raise RuntimeError(self._startup_failure_message)
+            raise RuntimeError(startup_failure_message)
 
         if (
             self.realtime_indexing is None
@@ -542,16 +550,18 @@ class MCPServerBase(ABC):
         self._complete_startup_phase("startup_barrier")
 
     async def _coordinated_initial_scan(
-        self, target_path: Path, monitoring_task: asyncio.Task
+        self, target_path: Path, monitoring_task: asyncio.Task[Any]
     ) -> None:
         """Perform initial scan after monitoring is confirmed ready."""
-        ready_task = asyncio.create_task(self.realtime_indexing.monitoring_ready.wait())
-        try:
-            timeout = (
-                self.realtime_indexing._MONITORING_READY_TIMEOUT_SECONDS
-                if self.realtime_indexing
-                else 10.0
+        realtime_indexing = self.realtime_indexing
+        if realtime_indexing is None:
+            raise RuntimeError(
+                "Initial scan requested before realtime indexing was initialized"
             )
+
+        ready_task = asyncio.create_task(realtime_indexing.monitoring_ready.wait())
+        try:
+            timeout = realtime_indexing._MONITORING_READY_TIMEOUT_SECONDS
             done, pending = await asyncio.wait(
                 {ready_task, monitoring_task},
                 timeout=timeout,
@@ -895,7 +905,7 @@ class MCPServerBase(ABC):
                 )
 
                 # Progress callback to update scan state
-                def progress_callback(message: str):
+                def progress_callback(message: str) -> None:
                     # Parse progress messages to update counters
                     if "files processed" in message:
                         # Extract numbers from progress messages
@@ -910,8 +920,11 @@ class MCPServerBase(ABC):
                     self.debug_log(message)
 
                 # Create indexing service for background scan
+                services = self.services
+                if services is None:
+                    raise RuntimeError("Services were not initialized before scanning")
                 indexing_service = DirectoryIndexingService(
-                    indexing_coordinator=self.services.indexing_coordinator,
+                    indexing_coordinator=services.indexing_coordinator,
                     config=self.config,
                     progress_callback=progress_callback,
                 )

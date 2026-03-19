@@ -6,7 +6,7 @@ batch processing, and pattern matching.
 
 import argparse
 import os
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -65,7 +65,10 @@ class IndexingConfig(BaseModel):
     # File parsing safety
     per_file_timeout_seconds: float = Field(
         default=3.0,
-        description="Maximum seconds to spend parsing a single file (0 disables timeout)",
+        description=(
+            "Maximum seconds to spend parsing a single file "
+            "(0 disables timeout)"
+        ),
     )
     per_file_timeout_min_size_kb: int = Field(
         default=128,
@@ -379,7 +382,7 @@ class IndexingConfig(BaseModel):
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
         """Load indexing config from environment variables."""
-        config = {}
+        config: dict[str, Any] = {}
 
         if force_reindex := os.getenv("CHUNKHOUND_INDEXING__FORCE_REINDEX"):
             config["force_reindex"] = force_reindex.lower() in ("true", "1", "yes")
@@ -441,7 +444,10 @@ class IndexingConfig(BaseModel):
         if rback := os.getenv("CHUNKHOUND_INDEXING__REALTIME_BACKEND"):
             val = rback.strip().lower()
             if val in ("watchman", "watchdog", "polling"):
-                config["realtime_backend"] = val
+                config["realtime_backend"] = cast(
+                    Literal["watchman", "watchdog", "polling"],
+                    val,
+                )
 
         # Exclude mode (combined | config_only | gitignore_only)
         if em := os.getenv("CHUNKHOUND_INDEXING__EXCLUDE_MODE"):

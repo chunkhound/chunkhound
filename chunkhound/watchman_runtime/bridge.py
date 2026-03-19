@@ -136,7 +136,7 @@ class _RuntimeEventHandler(FileSystemEventHandler):
         if event.is_directory:
             return
         self._subscription.emit_file_event(
-            absolute_path=Path(event.src_path),
+            absolute_path=Path(os.fsdecode(event.src_path)),
             exists=True,
             is_new=True,
         )
@@ -145,7 +145,7 @@ class _RuntimeEventHandler(FileSystemEventHandler):
         if event.is_directory:
             return
         self._subscription.emit_file_event(
-            absolute_path=Path(event.src_path),
+            absolute_path=Path(os.fsdecode(event.src_path)),
             exists=True,
             is_new=False,
         )
@@ -154,7 +154,7 @@ class _RuntimeEventHandler(FileSystemEventHandler):
         if event.is_directory:
             return
         self._subscription.emit_file_event(
-            absolute_path=Path(event.src_path),
+            absolute_path=Path(os.fsdecode(event.src_path)),
             exists=False,
             is_new=False,
         )
@@ -163,12 +163,12 @@ class _RuntimeEventHandler(FileSystemEventHandler):
         if event.is_directory:
             return
         self._subscription.emit_file_event(
-            absolute_path=Path(event.src_path),
+            absolute_path=Path(os.fsdecode(event.src_path)),
             exists=False,
             is_new=False,
         )
         self._subscription.emit_file_event(
-            absolute_path=Path(event.dest_path),
+            absolute_path=Path(os.fsdecode(event.dest_path)),
             exists=True,
             is_new=True,
         )

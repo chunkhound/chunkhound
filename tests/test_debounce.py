@@ -61,7 +61,7 @@ class TestDebounce:
         assert items[0][2].path == _expected_mutation_path(path)
 
     async def test_debounce_timestamp_refresh(self, service):
-        """A second add_file during the delay resets the clock; file not queued early."""
+        """A second add_file during the delay resets the clock."""
         path = Path("/tmp/refresh.py")
         delay = service._debounce_delay
 
@@ -70,7 +70,7 @@ class TestDebounce:
         await asyncio.sleep(delay * 0.6)
         await service.add_file(path, priority="change")
         # Sleep another 0.3×delay: 0.9×delay has elapsed from the first call but only
-        # 0.3×delay from the second — well inside the debounce window, so no queue entry yet.
+        # 0.3×delay from the second, so no queue entry should exist yet.
         await asyncio.sleep(delay * 0.3)
         assert service.file_queue.empty(), "File queued before debounce window expired"
 

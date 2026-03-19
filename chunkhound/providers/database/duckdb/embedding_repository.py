@@ -23,14 +23,14 @@ class DuckDBEmbeddingRepository:
         """
         self.connection_manager = connection_manager
         self._provider = provider
-        self._provider_instance = None  # Will be set by provider
+        self._provider_instance: Any | None = None  # Will be set by provider
 
     @property
     def connection(self) -> Any | None:
         """Get database connection from connection manager."""
         return self.connection_manager.connection
 
-    def set_provider_instance(self, provider_instance):
+    def set_provider_instance(self, provider_instance: Any) -> None:
         """Set the provider instance for index management operations."""
         self._provider_instance = provider_instance
 
@@ -58,7 +58,8 @@ class DuckDBEmbeddingRepository:
             return
 
         raise RuntimeError(
-            f"Cannot drop HNSW index without identity information: {index_info['index_name']}"
+            "Cannot drop HNSW index without identity information: "
+            f"{index_info['index_name']}"
         )
 
     def _recreate_existing_index(self, conn: Any, index_info: dict[str, Any]) -> None:
@@ -82,7 +83,8 @@ class DuckDBEmbeddingRepository:
             return
 
         raise RuntimeError(
-            f"Cannot recreate HNSW index without SQL or identity: {index_info['index_name']}"
+            "Cannot recreate HNSW index without SQL or identity: "
+            f"{index_info['index_name']}"
         )
 
     def insert_embedding(self, embedding: Embedding) -> int:

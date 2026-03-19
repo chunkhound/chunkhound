@@ -1,11 +1,11 @@
 import os
 
+import pytest
 from loguru import logger
 
-logger.remove()
-import pytest
-
 from chunkhound.watchman_runtime.loader import is_packaged_watchman_runtime_available
+
+logger.remove()
 
 _WATCHMAN_RUNTIME_VALIDATION_ENV = "CHUNKHOUND_RUN_WATCHMAN_RUNTIME_VALIDATION"
 

@@ -619,8 +619,6 @@ class WatchmanCliSession:
             if process is None or process.stdout is None:
                 return
             reader = process.stdout
-        if reader is None:
-            return
 
         try:
             while True:

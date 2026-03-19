@@ -131,14 +131,15 @@ class WatchmanSidecarMetadata:
 
     @classmethod
     def from_payload(cls, payload: dict[str, object]) -> WatchmanSidecarMetadata:
+        def require_payload_string(key: str) -> str:
+            value = payload.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"metadata field {key!r} must be a non-empty string")
+            return value
+
         pid = payload.get("pid")
         started_at = payload.get("started_at")
         process_start_time_epoch_payload = payload.get("process_start_time_epoch")
-        runtime_version = payload.get("runtime_version")
-        socket_path = payload.get("socket_path")
-        statefile_path = payload.get("statefile_path")
-        logfile_path = payload.get("logfile_path")
-        binary_path = payload.get("binary_path")
 
         if not isinstance(pid, int) or pid <= 0:
             raise ValueError("metadata pid must be a positive integer")
@@ -159,16 +160,11 @@ class WatchmanSidecarMetadata:
                 "metadata field 'process_start_time_epoch' must be numeric when present"
             )
 
-        values = {
-            "runtime_version": runtime_version,
-            "socket_path": socket_path,
-            "statefile_path": statefile_path,
-            "logfile_path": logfile_path,
-            "binary_path": binary_path,
-        }
-        for key, value in values.items():
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"metadata field {key!r} must be a non-empty string")
+        runtime_version = require_payload_string("runtime_version")
+        socket_path = require_payload_string("socket_path")
+        statefile_path = require_payload_string("statefile_path")
+        logfile_path = require_payload_string("logfile_path")
+        binary_path = require_payload_string("binary_path")
 
         return cls(
             pid=pid,

@@ -10,22 +10,23 @@ These tests are designed to catch crashes that occur during:
 They run quickly and should be part of every test run.
 """
 
-import subprocess
-import importlib
-import pkgutil
-import sys
-import os
 import asyncio
-import pytest
+import importlib
+import os
+import pkgutil
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
+
 # Import Windows-safe subprocess utilities
+from tests.utils import SubprocessJsonRpcClient
+from tests.utils.windows_compat import get_fs_event_timeout, windows_safe_tempdir
 from tests.utils.windows_subprocess import (
     create_subprocess_exec_safe,
     get_safe_subprocess_env,
 )
-from tests.utils.windows_compat import windows_safe_tempdir, get_fs_event_timeout
-from tests.utils import SubprocessJsonRpcClient
 
 # Add parent directory to path to import chunkhound
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -71,14 +72,14 @@ class TestModuleImports:
 
     def test_v3_research_imports(self):
         """Test v3 parallel research services can be imported."""
-        from chunkhound.services.research.shared.exploration import (
-            ExplorationStrategy,
-            BFSExplorationStrategy,
-            WideCoverageStrategy,
-            ParallelExplorationStrategy,
-        )
         from chunkhound.services.research.factory import ResearchServiceFactory
         from chunkhound.services.research.protocol import ResearchServiceProtocol
+        from chunkhound.services.research.shared.exploration import (
+            BFSExplorationStrategy,
+            ExplorationStrategy,
+            ParallelExplorationStrategy,
+            WideCoverageStrategy,
+        )
 
         assert ExplorationStrategy is not None
         assert BFSExplorationStrategy is not None

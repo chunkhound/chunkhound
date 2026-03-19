@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import importlib.abc
 import importlib.resources
 import io
 import json
@@ -16,7 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from platform import machine as current_machine
@@ -186,7 +187,7 @@ def _normalize_platform_key(
     return normalized_system, normalized_machine
 
 
-def _resource(relative_path: PurePosixPath):
+def _resource(relative_path: PurePosixPath) -> importlib.abc.Traversable:
     return importlib.resources.files(_RUNTIME_PACKAGE).joinpath(*relative_path.parts)
 
 
@@ -198,13 +199,11 @@ def _packaged_resource_exists(relative_path: PurePosixPath) -> bool:
 
 
 def _read_packaged_bytes(relative_path: PurePosixPath) -> bytes:
-    with _resource(relative_path).open("rb") as handle:
-        return handle.read()
+    return _resource(relative_path).read_bytes()
 
 
 def _read_packaged_text(relative_path: PurePosixPath) -> str:
-    with _resource(relative_path).open("r", encoding="utf-8") as handle:
-        return handle.read()
+    return _resource(relative_path).read_text(encoding="utf-8")
 
 
 def _read_packaged_json(relative_path: PurePosixPath) -> dict[str, object]:
@@ -738,7 +737,7 @@ def default_realtime_backend_for_platform(
     return "watchdog"
 
 
-def default_realtime_backend_for_current_install() -> str:
+def default_realtime_backend_for_current_install() -> Literal["watchman", "watchdog"]:
     if is_packaged_watchman_runtime_available():
         return "watchman"
     return "watchdog"
@@ -937,7 +936,7 @@ def _ensure_downloaded_source_archive(source: WatchmanRuntimeSource) -> Path:
     return archive_path
 
 
-def _iter_ar_members(archive_path: Path) -> tuple[str, bytes]:
+def _iter_ar_members(archive_path: Path) -> Generator[tuple[str, bytes], None, None]:
     payload = archive_path.read_bytes()
     if not payload.startswith(_AR_GLOBAL_HEADER):
         raise RuntimeError(f"Unsupported ar archive header: {archive_path}")

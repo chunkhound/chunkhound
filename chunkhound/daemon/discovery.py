@@ -44,6 +44,10 @@ _WINDOWS_REPLACE_RETRIES = 20
 _WINDOWS_REPLACE_RETRY_DELAY = 0.01
 
 
+def _is_windows_platform() -> bool:
+    return sys.platform == "win32"
+
+
 def _canonical_project_dir(project_dir: Path) -> Path:
     """Return the canonical project root used for daemon identity."""
     return project_dir.resolve()
@@ -135,7 +139,7 @@ def _write_json_atomically(
                 tmp_path.replace(path)
                 break
             except PermissionError:
-                if sys.platform != "win32" or attempt >= _WINDOWS_REPLACE_RETRIES - 1:
+                if not _is_windows_platform() or attempt >= _WINDOWS_REPLACE_RETRIES - 1:
                     raise
                 time.sleep(_WINDOWS_REPLACE_RETRY_DELAY)
     except Exception:
