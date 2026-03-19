@@ -165,6 +165,8 @@ class IndexingCoordinator(BaseService):
     # TRANSACTION_SAFETY: All DB operations wrapped in transactions
     """
 
+    _ORPHAN_CLEANUP_BATCH_SIZE = 128
+
     def __init__(
         self,
         database_provider: DatabaseProvider,
@@ -2903,29 +2905,50 @@ class IndexingCoordinator(BaseService):
                         info="",
                     )
 
-                for file_path, cleanup_reason in orphaned_files:
-                    try:
-                        deleted = self._db.delete_file_completely(file_path)
-                    except Exception as e:
-                        raise RuntimeError(
-                            "orphan/excluded cleanup delete failed "
-                            f"for {file_path} "
-                            f"(reason={cleanup_reason}): {e}"
-                        ) from e
+                cleanup_reason_order = (
+                    "missing_on_disk",
+                    "excluded_by_current_policy",
+                )
+                for cleanup_reason in cleanup_reason_order:
+                    reason_paths = [
+                        file_path
+                        for file_path, file_reason in orphaned_files
+                        if file_reason == cleanup_reason
+                    ]
+                    for batch_start in range(
+                        0, len(reason_paths), self._ORPHAN_CLEANUP_BATCH_SIZE
+                    ):
+                        batch_paths = reason_paths[
+                            batch_start : batch_start + self._ORPHAN_CLEANUP_BATCH_SIZE
+                        ]
+                        if not batch_paths:
+                            continue
 
-                    if not deleted:
-                        raise RuntimeError(
-                            "orphan/excluded cleanup delete returned false "
-                            f"for {file_path} "
-                            f"(reason={cleanup_reason})"
-                        )
+                        try:
+                            deleted_count = self._db.delete_files_batch(batch_paths)
+                        except Exception as e:
+                            raise RuntimeError(
+                                "orphan/excluded cleanup delete failed "
+                                f"for {batch_paths[0]} "
+                                f"(reason={cleanup_reason}, "
+                                f"batch_count={len(batch_paths)}): {e}"
+                            ) from e
 
-                    orphaned_count += 1
-                    # Clean up the file lock for orphaned file
-                    self._cleanup_file_lock(Path(file_path))
+                        if deleted_count != len(batch_paths):
+                            raise RuntimeError(
+                                "orphan/excluded cleanup delete returned false "
+                                f"for {batch_paths[0]} "
+                                f"(reason={cleanup_reason}, "
+                                f"deleted_count={deleted_count}, "
+                                f"batch_count={len(batch_paths)})"
+                            )
 
-                    if cleanup_task is not None and self.progress:
-                        self.progress.advance(cleanup_task, 1)
+                        orphaned_count += len(batch_paths)
+                        for file_path in batch_paths:
+                            self._cleanup_file_lock(Path(file_path))
+
+                        if cleanup_task is not None and self.progress:
+                            self.progress.advance(cleanup_task, len(batch_paths))
 
                 # Complete the cleanup progress bar
                 if cleanup_task is not None and self.progress:

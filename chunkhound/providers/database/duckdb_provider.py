@@ -988,22 +988,40 @@ class DuckDBProvider(SerialDatabaseProvider):
                 chunk_ids,
             )
 
-    def _executor_snapshot_file_delete_target(
-        self, conn: Any, state: dict[str, Any], file_id: int
+    def _executor_snapshot_file_delete_targets(
+        self, conn: Any, state: dict[str, Any], file_ids: list[int]
     ) -> dict[str, Any]:
-        """Capture the rows needed to restore a file delete if mutation fails."""
+        """Capture the rows needed to restore a batch file delete if mutation fails."""
+        unique_file_ids = sorted({int(file_id) for file_id in file_ids})
+        if not unique_file_ids:
+            return {
+                "file_rows": [],
+                "file_ids": [],
+                "chunk_rows": [],
+                "chunk_ids": [],
+                "embedding_rows_by_table": {},
+            }
+
+        placeholders = ", ".join(["?"] * len(unique_file_ids))
         file_rows = self._executor_fetch_rows_as_dicts(
-            conn, "SELECT * FROM files WHERE id = ?", [file_id]
+            conn,
+            f"""
+            SELECT *
+            FROM files
+            WHERE id IN ({placeholders})
+            ORDER BY id
+            """,
+            unique_file_ids,
         )
         chunk_rows = self._executor_fetch_rows_as_dicts(
             conn,
             """
             SELECT *
             FROM chunks
-            WHERE file_id = ?
+            WHERE file_id IN ({placeholders})
             ORDER BY id
-            """,
-            [file_id],
+            """.format(placeholders=placeholders),
+            unique_file_ids,
         )
         chunk_ids = [int(row["id"]) for row in chunk_rows]
 
@@ -1025,20 +1043,21 @@ class DuckDBProvider(SerialDatabaseProvider):
                     embedding_rows_by_table[table_name] = rows
 
         return {
-            "file_row": file_rows[0] if file_rows else None,
+            "file_rows": file_rows,
+            "file_ids": [int(row["id"]) for row in file_rows],
             "chunk_rows": chunk_rows,
             "chunk_ids": chunk_ids,
             "embedding_rows_by_table": embedding_rows_by_table,
         }
 
-    def _executor_restore_file_delete_snapshot(
+    def _executor_restore_file_delete_targets(
         self,
         conn: Any,
         state: dict[str, Any],
         snapshot: dict[str, Any],
         original_indexes: list[dict[str, Any]],
     ) -> None:
-        """Restore a file delete target and its HNSW indexes after a failed mutation."""
+        """Restore file delete targets and HNSW indexes after a failed mutation."""
         current_indexes = self._executor_get_existing_vector_indexes(conn, state)
         for index_info in current_indexes:
             self._executor_drop_vector_index_by_name(conn, index_info["index_name"])
@@ -1049,9 +1068,12 @@ class DuckDBProvider(SerialDatabaseProvider):
             placeholders = ", ".join(["?"] * len(chunk_ids))
             conn.execute(f"DELETE FROM chunks WHERE id IN ({placeholders})", chunk_ids)
 
-        file_row = snapshot["file_row"]
-        if file_row is not None:
-            conn.execute("DELETE FROM files WHERE id = ?", [file_row["id"]])
+        file_ids = snapshot["file_ids"]
+        if file_ids:
+            placeholders = ", ".join(["?"] * len(file_ids))
+            conn.execute(f"DELETE FROM files WHERE id IN ({placeholders})", file_ids)
+
+        for file_row in snapshot["file_rows"]:
             self._executor_insert_row_dict(conn, "files", file_row)
 
         for chunk_row in snapshot["chunk_rows"]:
@@ -1385,46 +1407,90 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], file_path: str
     ) -> bool:
         """Executor method for delete_file_completely - runs in DB thread."""
-        # Get file ID first
-        # Normalize path to handle both absolute and relative paths
+        return self._executor_delete_files_batch(conn, state, [file_path]) > 0
+
+    def _executor_delete_files_batch(
+        self, conn: Any, state: dict[str, Any], file_paths: list[str]
+    ) -> int:
+        """Executor method for delete_files_batch - runs in DB thread."""
+        if not file_paths:
+            return 0
+
         base_dir = state.get("base_directory")
-        normalized_path = normalize_path_for_lookup(file_path, base_dir)
-        result = conn.execute(
-            "SELECT id FROM files WHERE path = ?", [normalized_path]
-        ).fetchone()
+        normalized_paths: list[str] = []
+        seen_paths: set[str] = set()
+        for file_path in file_paths:
+            normalized_path = normalize_path_for_lookup(file_path, base_dir)
+            if normalized_path in seen_paths:
+                continue
+            normalized_paths.append(normalized_path)
+            seen_paths.add(normalized_path)
 
-        if not result:
-            return False
+        if not normalized_paths:
+            return 0
 
-        file_id = result[0]
-        snapshot = self._executor_snapshot_file_delete_target(conn, state, file_id)
+        placeholders = ", ".join(["?"] * len(normalized_paths))
+        existing_rows = self._executor_fetch_rows_as_dicts(
+            conn,
+            f"""
+            SELECT id, path
+            FROM files
+            WHERE path IN ({placeholders})
+            ORDER BY id
+            """,
+            normalized_paths,
+        )
+        if not existing_rows:
+            return 0
+
+        path_to_file_id = {
+            str(row["path"]): int(row["id"]) for row in existing_rows if row.get("path")
+        }
+        existing_paths = [
+            normalized_path
+            for normalized_path in normalized_paths
+            if normalized_path in path_to_file_id
+        ]
+        file_ids = [path_to_file_id[path] for path in existing_paths]
+        snapshot = self._executor_snapshot_file_delete_targets(conn, state, file_ids)
         chunk_ids = snapshot["chunk_ids"]
 
-        def delete_records() -> bool:
-            # Delete in correct order due to foreign key constraints.
+        def delete_records() -> int:
             self._executor_delete_embeddings_for_chunk_ids(conn, state, chunk_ids)
-            conn.execute("DELETE FROM chunks WHERE file_id = ?", [file_id])
-            conn.execute("DELETE FROM files WHERE id = ?", [file_id])
-            return True
+            if chunk_ids:
+                chunk_placeholders = ", ".join(["?"] * len(chunk_ids))
+                conn.execute(
+                    f"DELETE FROM chunks WHERE id IN ({chunk_placeholders})",
+                    chunk_ids,
+                )
+            if file_ids:
+                file_placeholders = ", ".join(["?"] * len(file_ids))
+                conn.execute(
+                    f"DELETE FROM files WHERE id IN ({file_placeholders})",
+                    file_ids,
+                )
+            return len(file_ids)
 
         def rollback_delete(original_indexes: list[dict[str, Any]]) -> None:
-            self._executor_restore_file_delete_snapshot(
+            self._executor_restore_file_delete_targets(
                 conn, state, snapshot, original_indexes
             )
 
-        self._executor_run_hnsw_guarded_mutation(
+        deleted_count = self._executor_run_hnsw_guarded_mutation(
             conn,
             state,
-            f"delete_file_completely({normalized_path})",
+            f"delete_files_batch(count={len(file_ids)}, sample={existing_paths[0]})",
             delete_records,
+            optimize_for_bulk=len(file_ids) > 1,
             # DuckDB currently rejects parent-row deletes inside the same explicit
             # transaction after child-row deletes on FK-linked tables.
             transactional=False,
             rollback_func=rollback_delete,
         )
-
-        logger.debug(f"File {file_path} and all associated data deleted")
-        return True
+        logger.debug(
+            f"Deleted {deleted_count} files and associated data in one HNSW-safe batch"
+        )
+        return int(deleted_count)
 
     def insert_chunk(self, chunk: Chunk) -> int:
         """Insert chunk record and return chunk ID - delegate to chunk repository."""

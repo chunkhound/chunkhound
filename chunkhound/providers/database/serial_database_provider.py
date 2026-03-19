@@ -289,6 +289,19 @@ class SerialDatabaseProvider(ABC):
         """Async variant of delete_file_completely."""
         return await self._execute_in_db_thread("delete_file_completely", file_path)
 
+    async def delete_files_batch_async(self, file_paths: list[str]) -> int:
+        """Async variant of delete_files_batch."""
+        if not file_paths:
+            return 0
+        if hasattr(self, "_executor_delete_files_batch"):
+            return await self._execute_in_db_thread("delete_files_batch", file_paths)
+
+        deleted_count = 0
+        for file_path in file_paths:
+            if await self.delete_file_completely_async(file_path):
+                deleted_count += 1
+        return deleted_count
+
     async def begin_transaction_async(self) -> None:
         """Async variant of begin_transaction."""
         if not hasattr(self, "_executor_begin_transaction"):
@@ -406,6 +419,19 @@ class SerialDatabaseProvider(ABC):
             logger.debug("delete_chunks_batch not supported by this provider")
             return
         self._execute_in_db_thread_sync("delete_chunks_batch", chunk_ids)
+
+    def delete_files_batch(self, file_paths: list[str]) -> int:
+        """Delete multiple files and their associated chunks/embeddings."""
+        if not file_paths:
+            return 0
+        if hasattr(self, "_executor_delete_files_batch"):
+            return self._execute_in_db_thread_sync("delete_files_batch", file_paths)
+
+        deleted_count = 0
+        for file_path in file_paths:
+            if self.delete_file_completely(file_path):
+                deleted_count += 1
+        return deleted_count
 
     # File processing integration
 

@@ -1392,6 +1392,158 @@ class TestRealtimeFunctional:
         }
 
     @pytest.mark.asyncio
+    async def test_ready_delete_mutations_are_coalesced_into_one_batch(
+        self, realtime_setup, monkeypatch
+    ):
+        """Adjacent queued deletes should execute through one provider batch."""
+        service, watch_dir, _, _ = realtime_setup
+        first_delete = watch_dir / "batched_one.py"
+        second_delete = watch_dir / "batched_two.py"
+        change_file = watch_dir / "after_delete_change.py"
+        change_file.write_text("value = 1\n")
+        batch_calls: list[list[str]] = []
+        change_processed = asyncio.Event()
+
+        async def record_delete_batch(file_paths: list[str]) -> int:
+            batch_calls.append(list(file_paths))
+            return len(file_paths)
+
+        async def fail_if_single_delete_used(_file_path: str) -> bool:
+            raise AssertionError(
+                "batched deletes should not use single-file delete path"
+            )
+
+        async def wrapped_process_file(
+            file_path: Path, skip_embeddings: bool = False
+        ) -> dict[str, object]:
+            assert file_path == change_file
+            assert skip_embeddings is True
+            change_processed.set()
+            return {"status": "processed", "chunks": 1, "embeddings": 0}
+
+        monkeypatch.setattr(
+            service.services.provider,
+            "delete_files_batch_async",
+            record_delete_batch,
+        )
+        monkeypatch.setattr(
+            service.services.provider,
+            "delete_file_completely_async",
+            fail_if_single_delete_used,
+        )
+        monkeypatch.setattr(
+            service.services.indexing_coordinator,
+            "process_file",
+            wrapped_process_file,
+        )
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+
+        await service._enqueue_mutation(service._build_mutation("delete", first_delete))
+        await service._enqueue_mutation(
+            service._build_mutation("delete", second_delete)
+        )
+        await service._enqueue_mutation(service._build_mutation("change", change_file))
+
+        process_task = asyncio.create_task(service._process_loop())
+        service.process_task = process_task
+
+        try:
+            await asyncio.wait_for(change_processed.wait(), timeout=2.0)
+            stats = await _wait_for_realtime_condition(
+                service,
+                lambda snapshot: snapshot["queue_size"] == 0
+                and snapshot["pending_files"] == 0,
+                timeout=2.0,
+            )
+            assert batch_calls == [
+                [str(first_delete.resolve()), str(second_delete.resolve())]
+            ]
+            assert stats["last_error"] is None
+            assert stats["pipeline"]["processing_error_count"] == 0
+        finally:
+            await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_delete_batch_conflict_retries_and_recovers(
+        self, realtime_setup, monkeypatch
+    ):
+        """A conflicting delete batch should retry per path and recover cleanly."""
+        service, watch_dir, _, _ = realtime_setup
+        first_delete = watch_dir / "retry_batch_one.py"
+        second_delete = watch_dir / "retry_batch_two.py"
+        batch_attempts = 0
+        batch_completed = asyncio.Event()
+
+        async def flaky_delete_batch(file_paths: list[str]) -> int:
+            nonlocal batch_attempts
+            assert file_paths == [
+                str(first_delete.resolve()),
+                str(second_delete.resolve()),
+            ]
+            batch_attempts += 1
+            if batch_attempts == 1:
+                raise DuckDBTransactionConflictError(
+                    "delete_files_batch(count=2) cannot run while another DuckDB transaction is active"
+                )
+            batch_completed.set()
+            return len(file_paths)
+
+        async def fail_if_single_delete_used(_file_path: str) -> bool:
+            raise AssertionError(
+                "batched deletes should not fall back to single-file delete"
+            )
+
+        monkeypatch.setattr(
+            service.services.provider,
+            "delete_files_batch_async",
+            flaky_delete_batch,
+        )
+        monkeypatch.setattr(
+            service.services.provider,
+            "delete_file_completely_async",
+            fail_if_single_delete_used,
+        )
+        monkeypatch.setattr(
+            service,
+            "_DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS",
+            0.01,
+            raising=False,
+        )
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+
+        await service._enqueue_mutation(service._build_mutation("delete", first_delete))
+        await service._enqueue_mutation(
+            service._build_mutation("delete", second_delete)
+        )
+
+        process_task = asyncio.create_task(service._process_loop())
+        service.process_task = process_task
+
+        try:
+            await asyncio.wait_for(batch_completed.wait(), timeout=2.0)
+            stats = await _wait_for_realtime_condition(
+                service,
+                lambda snapshot: snapshot["queue_size"] == 0
+                and snapshot["pending_files"] == 0,
+                timeout=2.0,
+            )
+            assert batch_attempts == 2
+            assert stats["service_state"] == "running"
+            assert stats["last_error"] is None
+            assert stats["pipeline"]["processing_error_count"] == 0
+            assert stats["live_indexing_state"] == "idle"
+        finally:
+            await service.stop()
+
+    @pytest.mark.asyncio
     async def test_request_resync_is_debounced(self, realtime_setup):
         """Manual resync requests should coalesce into a single scan callback."""
         service, watch_dir, _, _ = realtime_setup

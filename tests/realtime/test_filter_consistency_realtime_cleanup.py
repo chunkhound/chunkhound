@@ -253,19 +253,19 @@ async def test_discovery_realtime_and_cleanup_agree_on_gitignored_worktree_path(
 
         deleted_paths: list[str] = []
 
-        def fake_delete_file_completely(file_path: str) -> bool:
-            deleted_paths.append(file_path)
-            return True
+        def fake_delete_files_batch(file_paths: list[str]) -> int:
+            deleted_paths.extend(file_paths)
+            return len(file_paths)
 
         monkeypatch.setattr(
             provider,
-            "delete_file_completely",
-            fake_delete_file_completely,
+            "delete_files_batch",
+            fake_delete_files_batch,
         )
 
         cleaned = coordinator._cleanup_orphaned_files(root, discovered, ["**/*.py"], [])
 
         assert cleaned == 2
-        assert deleted_paths == [ignored_rel, missing_rel]
+        assert deleted_paths == [missing_rel, ignored_rel]
     finally:
         provider.disconnect()

@@ -1123,8 +1123,7 @@ class WatchmanRealtimeAdapter:
                 f"scopes={[scope.scope_kind for scope in scope_plan.scopes]}"
             )
             _log_scope_discovery(
-                "phase total "
-                f"duration={_elapsed_seconds(scope_discovery_started_at)}s"
+                f"phase total duration={_elapsed_seconds(scope_discovery_started_at)}s"
             )
             self._service._complete_startup_phase("watchman_scope_discovery")
 
@@ -1607,6 +1606,7 @@ class RealtimeIndexingService:
     _POLLING_STARTUP_SETTLE_SECONDS = 0.5
     _DELETE_CONFLICT_MAX_RETRIES = 5
     _DELETE_CONFLICT_BASE_RETRY_DELAY_SECONDS = 0.1
+    _DELETE_BATCH_SIZE = 64
     _MUTATION_PRIORITIES = {
         "delete": 0,
         "dir_delete": 0,
@@ -2236,10 +2236,7 @@ class RealtimeIndexingService:
         cutoff = now_monotonic - self._EVENT_PRESSURE_WINDOW_SECONDS
         while entry.event_timestamps and entry.event_timestamps[0] < cutoff:
             entry.event_timestamps.popleft()
-        while (
-            entry.coalesced_timestamps
-            and entry.coalesced_timestamps[0] < cutoff
-        ):
+        while entry.coalesced_timestamps and entry.coalesced_timestamps[0] < cutoff:
             entry.coalesced_timestamps.popleft()
         return len(entry.event_timestamps), len(entry.coalesced_timestamps)
 
@@ -2840,6 +2837,43 @@ class RealtimeIndexingService:
         )
         self._emit_status_update()
         return True
+
+    def _prepare_dequeued_mutation(
+        self, mutation: RealtimeMutation
+    ) -> tuple[RealtimeMutation, bool]:
+        mutation = self._mutation_for_processing(mutation)
+        owned_when_dequeued = self._owns_pending_mutation(mutation)
+        self._release_pending_mutation(mutation)
+        return mutation, owned_when_dequeued
+
+    def _collect_delete_batch(
+        self,
+        mutation: RealtimeMutation,
+        *,
+        owned_when_dequeued: bool,
+    ) -> tuple[
+        list[tuple[RealtimeMutation, bool]],
+        tuple[RealtimeMutation, bool] | None,
+    ]:
+        batch = [(mutation, owned_when_dequeued)]
+        buffered_mutation: tuple[RealtimeMutation, bool] | None = None
+
+        while len(batch) < self._DELETE_BATCH_SIZE:
+            try:
+                _, _, queued_mutation = self.file_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+            prepared_mutation, prepared_owned = self._prepare_dequeued_mutation(
+                queued_mutation
+            )
+            if prepared_mutation.operation != "delete":
+                buffered_mutation = (prepared_mutation, prepared_owned)
+                break
+
+            batch.append((prepared_mutation, prepared_owned))
+
+        return batch, buffered_mutation
 
     async def _queue_follow_up_change(
         self,
@@ -3937,6 +3971,104 @@ class RealtimeIndexingService:
         finally:
             self._record_processing_finished(mutation.path, completed=completed)
 
+    async def _process_delete_batch(
+        self, mutations: list[tuple[RealtimeMutation, bool]]
+    ) -> None:
+        """Apply a bounded batch of queued deletes with per-path retry handling."""
+        active_mutations: list[RealtimeMutation] = []
+        finished_mutation_ids: set[int] = set()
+
+        for mutation, owned_when_dequeued in mutations:
+            if not owned_when_dequeued and not self._delete_mutation_is_stale(mutation):
+                self._debug(
+                    "skipped superseded delete "
+                    f"path={mutation.path} source_generation="
+                    f"{mutation.source_generation}"
+                )
+                continue
+
+            self._record_processing_started(mutation.path)
+            active_mutations.append(mutation)
+
+            if self._delete_mutation_is_stale(mutation):
+                self._debug(
+                    "skipped stale delete "
+                    f"path={mutation.path} source_generation="
+                    f"{mutation.source_generation}"
+                )
+                self._record_processing_finished(mutation.path, completed=True)
+                finished_mutation_ids.add(mutation.mutation_id)
+
+        executable_mutations = [
+            mutation
+            for mutation in active_mutations
+            if mutation.mutation_id not in finished_mutation_ids
+        ]
+        if not executable_mutations:
+            return
+
+        sample_paths = ", ".join(
+            str(mutation.path) for mutation in executable_mutations[:3]
+        )
+        try:
+            await self.services.provider.delete_files_batch_async(
+                [str(mutation.path) for mutation in executable_mutations]
+            )
+            for mutation in executable_mutations:
+                self._record_processing_finished(mutation.path, completed=True)
+                finished_mutation_ids.add(mutation.mutation_id)
+        except DuckDBTransactionConflictError as error:
+            surviving_mutations: list[RealtimeMutation] = []
+            exhausted_mutations: list[RealtimeMutation] = []
+
+            for mutation in executable_mutations:
+                if self._delete_mutation_is_stale(mutation):
+                    self._debug(
+                        "ignored stale delete conflict "
+                        f"path={mutation.path} source_generation="
+                        f"{mutation.source_generation}"
+                    )
+                    self._record_processing_finished(mutation.path, completed=True)
+                    finished_mutation_ids.add(mutation.mutation_id)
+                    continue
+
+                if self._schedule_delete_retry(mutation):
+                    surviving_mutations.append(mutation)
+                    continue
+
+                exhausted_mutations.append(mutation)
+
+            if surviving_mutations:
+                logger.info(
+                    "Retrying realtime delete batch for "
+                    f"{len(surviving_mutations)} files after transaction conflict"
+                )
+                self._debug(
+                    "retrying delete batch after transaction conflict "
+                    f"sample_paths={sample_paths}"
+                )
+
+            if exhausted_mutations:
+                exhausted_paths = ", ".join(
+                    str(mutation.path) for mutation in exhausted_mutations[:3]
+                )
+                logger.error(f"Error removing files {exhausted_paths}: {error}")
+                for mutation in exhausted_mutations:
+                    self.failed_files.add(str(mutation.path))
+                self._record_processing_error()
+                self._set_error(f"Error removing files {exhausted_paths}: {error}")
+        except Exception as error:
+            logger.error(f"Error removing files {sample_paths}: {error}")
+            for mutation in executable_mutations:
+                self.failed_files.add(str(mutation.path))
+            self._record_processing_error()
+            self._set_error(f"Error removing files {sample_paths}: {error}")
+        finally:
+            for mutation in active_mutations:
+                if mutation.mutation_id in finished_mutation_ids:
+                    continue
+                self._record_processing_finished(mutation.path, completed=False)
+
     async def _process_deleted_directory_mutation(
         self, mutation: RealtimeMutation
     ) -> None:
@@ -3991,20 +4123,25 @@ class RealtimeIndexingService:
     async def _process_loop(self) -> None:
         """Main processing loop - simple and robust."""
         logger.debug("Starting processing loop")
+        buffered_mutation: tuple[RealtimeMutation, bool] | None = None
 
         while True:
             try:
-                # Wait for next mutation (blocks if queue is empty)
-                _, _, mutation = await self.file_queue.get()
-                mutation = self._mutation_for_processing(mutation)
-                owned_when_dequeued = self._owns_pending_mutation(mutation)
+                if buffered_mutation is None:
+                    _, _, queued_mutation = await self.file_queue.get()
+                    mutation, owned_when_dequeued = self._prepare_dequeued_mutation(
+                        queued_mutation
+                    )
+                else:
+                    mutation, owned_when_dequeued = buffered_mutation
+                    buffered_mutation = None
+
                 active_change_path: str | None = None
                 if mutation.operation in {"change", "scan"}:
                     active_change_path = str(mutation.path)
                     self._active_change_generations[active_change_path] = (
                         mutation.source_generation
                     )
-                self._release_pending_mutation(mutation)
 
                 # Fast path for embedding generation without re-parsing the file.
                 if mutation.operation == "embed":
@@ -4031,10 +4168,17 @@ class RealtimeIndexingService:
                     continue
 
                 if mutation.operation == "delete":
-                    await self._process_delete_mutation(
+                    delete_batch, buffered_mutation = self._collect_delete_batch(
                         mutation,
                         owned_when_dequeued=owned_when_dequeued,
                     )
+                    if len(delete_batch) == 1:
+                        await self._process_delete_mutation(
+                            mutation,
+                            owned_when_dequeued=owned_when_dequeued,
+                        )
+                    else:
+                        await self._process_delete_batch(delete_batch)
                     continue
 
                 if mutation.operation == "dir_delete":
