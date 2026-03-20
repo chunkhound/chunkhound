@@ -57,7 +57,11 @@ class LuaMapping(BaseMapping):
             return self.get_fallback_name(node, "function")
 
         # Try to find the function name from various child types
-        for child_type in ["identifier", "dot_index_expression", "method_index_expression"]:
+        for child_type in [
+            "identifier",
+            "dot_index_expression",
+            "method_index_expression",
+        ]:
             name_node = self.find_child_by_type(node, child_type)
             if name_node:
                 return self.get_node_text(name_node, source).strip()
@@ -178,7 +182,9 @@ class LuaMapping(BaseMapping):
                                 if subchild.type == "variable_list":
                                     for var in subchild.children:
                                         if var.type == "identifier":
-                                            return self.get_node_text(var, source).strip()
+                                            return self.get_node_text(
+                                                var, source
+                                            ).strip()
 
             return "unnamed_definition"
 
@@ -215,7 +221,9 @@ class LuaMapping(BaseMapping):
                     return f"require_{module_name}"
 
                 # Try dofile/loadfile
-                match = re.search(r'(?:dofile|loadfile)\s*[\(\s]*["\']([^"\']+)["\']', def_text)
+                match = re.search(
+                    r'(?:dofile|loadfile)\s*[\(\s]*["\']([^"\']+)["\']', def_text
+                )
                 if match:
                     file_name = match.group(1)
                     if "/" in file_name:
@@ -314,10 +322,14 @@ class LuaMapping(BaseMapping):
                     metadata["module"] = match.group(1)
                     metadata["import_type"] = "require"
                 else:
-                    match = re.search(r'(?:dofile|loadfile)\s*[\(\s]*["\']([^"\']+)["\']', import_text)
+                    match = re.search(
+                        r'(?:dofile|loadfile)\s*[\(\s]*["\']([^"\']+)["\']', import_text
+                    )
                     if match:
                         metadata["file"] = match.group(1)
-                        metadata["import_type"] = "dofile" if "dofile" in import_text else "loadfile"
+                        metadata["import_type"] = (
+                            "dofile" if "dofile" in import_text else "loadfile"
+                        )
 
         elif concept == UniversalConcept.COMMENT:
             if "definition" in captures:
@@ -344,7 +356,14 @@ class LuaMapping(BaseMapping):
                         is_doc = True
                     elif len(clean_text) > 50 and any(
                         word in clean_text.lower()
-                        for word in ["function", "parameter", "return", "usage", "@param", "@return"]
+                        for word in [
+                            "function",
+                            "parameter",
+                            "return",
+                            "usage",
+                            "@param",
+                            "@return",
+                        ]
                     ):
                         comment_type = "documentation"
                         is_doc = True
@@ -414,7 +433,9 @@ class LuaMapping(BaseMapping):
                 return [full_path]
 
         # dofile/loadfile with direct path
-        match = re.search(r'(?:dofile|loadfile)\s*[\(\s]*["\']([^"\']+)["\']', import_text)
+        match = re.search(
+            r'(?:dofile|loadfile)\s*[\(\s]*["\']([^"\']+)["\']', import_text
+        )
         if match:
             path = match.group(1)
 
@@ -471,7 +492,9 @@ class LuaMapping(BaseMapping):
                             if name and re.match(r"^_?[A-Z][A-Z0-9_]*$", name):
                                 value = ""
                                 if expr_list:
-                                    value = self.get_node_text(expr_list, source).strip()
+                                    value = self.get_node_text(
+                                        expr_list, source
+                                    ).strip()
                                     if len(value) > MAX_CONSTANT_VALUE_LENGTH:
                                         value = value[:MAX_CONSTANT_VALUE_LENGTH]
                                 return [{"name": name, "value": value}]

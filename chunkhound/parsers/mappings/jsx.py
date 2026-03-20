@@ -7,6 +7,9 @@ components, hooks, and JSX expressions.
 
 import re
 from pathlib import Path
+
+from tree_sitter import Node as TSNode
+
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings._shared.js_query_patterns import (
     COMMONJS_EXPORTS_SHORTHAND,
@@ -17,7 +20,6 @@ from chunkhound.parsers.mappings._shared.js_query_patterns import (
 )
 from chunkhound.parsers.mappings.javascript import JavaScriptMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-from tree_sitter import Node as TSNode
 
 
 class JSXMapping(JavaScriptMapping):
@@ -174,8 +176,9 @@ class JSXMapping(JavaScriptMapping):
     # Universal Concept integration: override to TSX-friendly patterns
     def get_query_for_concept(self, concept: "UniversalConcept") -> str | None:  # type: ignore[override]
         if concept == UniversalConcept.DEFINITION:
-            return ("\n".join([
-                """
+            return "\n".join(
+                [
+                    """
                 ; Functions and classes (TSX class name uses type_identifier)
                 (function_declaration
                     name: (identifier) @name
@@ -188,10 +191,10 @@ class JSXMapping(JavaScriptMapping):
                 ; Exports
                 (export_statement) @definition
                 """,
-                LEXICAL_DECLARATION_CONFIG,
-                VAR_DECLARATION_CONFIG,
-                # Top-level const/let function/arrow
-                """
+                    LEXICAL_DECLARATION_CONFIG,
+                    VAR_DECLARATION_CONFIG,
+                    # Top-level const/let function/arrow
+                    """
                 (program
                     (lexical_declaration
                         (variable_declarator
@@ -209,10 +212,11 @@ class JSXMapping(JavaScriptMapping):
                     )
                 )
                 """,
-                COMMONJS_MODULE_EXPORTS,
-                COMMONJS_NESTED_EXPORTS,
-                COMMONJS_EXPORTS_SHORTHAND,
-            ]))
+                    COMMONJS_MODULE_EXPORTS,
+                    COMMONJS_NESTED_EXPORTS,
+                    COMMONJS_EXPORTS_SHORTHAND,
+                ]
+            )
         elif concept == UniversalConcept.COMMENT:
             return """
             (comment) @definition
@@ -420,7 +424,9 @@ class JSXMapping(JavaScriptMapping):
         # Use base JavaScript cleaning
         return self.clean_comment_text(text)
 
-    def resolve_import_paths(self, import_text: str, base_dir: Path, source_file: Path) -> list[Path]:
+    def resolve_import_paths(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> list[Path]:
         """Resolve relative import path to absolute file path.
 
         Args:
@@ -431,21 +437,24 @@ class JSXMapping(JavaScriptMapping):
         Returns:
             Resolved absolute path (empty list if not resolvable)
         """
-        match = re.search(r'''(?:from\s+['"](.+?)['"]|require\s*\(\s*['"](.+?)['"]\s*\))''', import_text)
+        match = re.search(
+            r"""(?:from\s+['"](.+?)['"]|require\s*\(\s*['"](.+?)['"]\s*\))""",
+            import_text,
+        )
         if not match:
             return []
         import_path = match.group(1) or match.group(2)
-        if not import_path or not import_path.startswith('.'):
+        if not import_path or not import_path.startswith("."):
             return []
         source_dir = self._resolve_source_dir(source_file, base_dir)
         resolved = (source_dir / import_path).resolve()
         if resolved.exists() and resolved.is_file():
             return [resolved]
-        for ext in ['.js', '.jsx', '.ts', '.tsx']:
+        for ext in [".js", ".jsx", ".ts", ".tsx"]:
             with_ext = resolved.with_suffix(ext)
             if with_ext.exists():
                 return [with_ext]
-        for index in ['index.js', 'index.jsx', 'index.ts', 'index.tsx']:
+        for index in ["index.js", "index.jsx", "index.ts", "index.tsx"]:
             index_path = resolved / index
             if index_path.exists():
                 return [index_path]

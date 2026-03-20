@@ -1,8 +1,8 @@
 """New modular CLI entry point for ChunkHound."""
 
 import argparse
-import logging as _pylogging
 import asyncio
+import logging as _pylogging
 import multiprocessing
 import sys
 from pathlib import Path
@@ -55,12 +55,12 @@ def create_parser() -> argparse.ArgumentParser:
     """
     # Import parsers dynamically to avoid early loading
     from .parsers import create_main_parser, setup_subparsers
+    from .parsers.autodoc_parser import add_autodoc_subparser
     from .parsers.calibrate_parser import add_calibrate_subparser
+    from .parsers.code_mapper_parser import add_map_subparser
     from .parsers.daemon_parser import add_daemon_subparser
     from .parsers.mcp_parser import add_mcp_subparser
     from .parsers.research_parser import add_research_subparser
-    from .parsers.autodoc_parser import add_autodoc_subparser
-    from .parsers.code_mapper_parser import add_map_subparser
     from .parsers.run_parser import add_run_subparser
     from .parsers.search_parser import add_search_subparser
 
@@ -105,6 +105,7 @@ async def async_main() -> None:
     # Config.__init__ resolves the correct project root and config file.
     if args.command == "_daemon" and hasattr(args, "project_dir"):
         from pathlib import Path as _Path
+
         args.path = _Path(args.project_dir).resolve()
 
     config, validation_errors = create_validated_config(args, args.command)
@@ -191,6 +192,7 @@ async def async_main() -> None:
         # 'diagnose' command retired; use: chunkhound index --check-ignores --vs git
         else:
             logger.error(f"Unknown command: {args.command}")
+            logger.info("Run 'chunkhound --help' for available commands.")
             sys.exit(1)
 
     except KeyboardInterrupt:
@@ -211,6 +213,10 @@ def main() -> None:
     except ImportError as e:
         # More specific handling for import errors
         logger.error(f"Import error: {e}")
+        logger.info(
+            "This usually means a dependency is missing. "
+            "Try: uv tool install chunkhound"
+        )
         import traceback
 
         traceback.print_exc()
@@ -224,7 +230,7 @@ def main() -> None:
         ):
             logger.error(
                 "Embedding provider must be specified. "
-                "Choose from: openai\n"
+                "Choose from: openai, voyageai, or use an OpenAI-compatible endpoint.\n"
                 "Set via --provider, CHUNKHOUND_EMBEDDING__PROVIDER environment "
                 "variable, or in config file."
             )

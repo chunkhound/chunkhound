@@ -285,10 +285,7 @@ class JsonMapping(BaseMapping):
             return 1
 
     def resolve_import_paths(
-        self,
-        import_text: str,
-        base_dir: Path,
-        source_file: Path
+        self, import_text: str, base_dir: Path, source_file: Path
     ) -> list[Path]:
         """Data formats don't have imports."""
         return []
@@ -334,10 +331,7 @@ class JsonMapping(BaseMapping):
                     if len(value_str) > MAX_CONSTANT_VALUE_LENGTH:
                         value_str = value_str[:MAX_CONSTANT_VALUE_LENGTH]
 
-                    constants.append({
-                        "name": key,
-                        "value": value_str
-                    })
+                    constants.append({"name": key, "value": value_str})
 
             return constants if constants else None
 

@@ -63,8 +63,7 @@ class ClientProxy:
             stdout_task = asyncio.create_task(self._forward_socket_to_stdout(reader))
 
             done, pending = await asyncio.wait(
-                {stdin_task, stdout_task},
-                return_when=asyncio.FIRST_COMPLETED
+                {stdin_task, stdout_task}, return_when=asyncio.FIRST_COMPLETED
             )
 
             # Retrieve exceptions from completed tasks to prevent
@@ -148,7 +147,11 @@ class ClientProxy:
         while True:
             try:
                 msg = await ipc.read_frame(reader)
-            except (asyncio.IncompleteReadError, Exception):
+            except asyncio.IncompleteReadError:
+                break
+            except Exception as e:
+                sys.stderr.write(f"[chunkhound] IPC read error: {e!r}\n")
+                sys.stderr.flush()
                 break
             line = json.dumps(msg) + "\n"
             sys.stdout.buffer.write(line.encode())

@@ -138,7 +138,9 @@ def build_file_hierarchy_tree(file_paths: list[str]) -> list[tuple[str, int, boo
     # Flatten tree to list with depth and is_last markers
     result: list[tuple[str, int, bool]] = []
 
-    def traverse(node: dict, depth: int, name: str = "", is_last_child: bool = False) -> None:
+    def traverse(
+        node: dict, depth: int, name: str = "", is_last_child: bool = False
+    ) -> None:
         """Recursively traverse tree and build flat list with depth markers."""
         if not node:
             # Leaf node (file)

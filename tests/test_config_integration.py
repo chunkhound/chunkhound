@@ -247,3 +247,37 @@ def test_embedding_config_new_env_vars_take_precedence(monkeypatch, clean_enviro
 
     assert config["api_key"] == "canonical-key"
     assert config["model"] == "canonical-model"
+
+
+def test_azure_api_version_rejects_malformed() -> None:
+    """Malformed api_version like 'latest' must fail at config validation time."""
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        EmbeddingConfig(
+            azure_endpoint="https://myresource.openai.azure.com",
+            api_key="sk-test",
+            api_version="latest",
+        )
+
+
+def test_azure_api_version_accepts_valid_formats() -> None:
+    """Standard and preview api_version formats must pass validation."""
+    cfg = EmbeddingConfig(
+        azure_endpoint="https://myresource.openai.azure.com",
+        api_key="sk-test",
+        api_version="2024-02-01",
+    )
+    assert cfg.api_version == "2024-02-01"
+
+    cfg2 = EmbeddingConfig(
+        azure_endpoint="https://myresource.openai.azure.com",
+        api_key="sk-test",
+        api_version="2024-02-01-preview",
+    )
+    assert cfg2.api_version == "2024-02-01-preview"
+
+    cfg3 = EmbeddingConfig(
+        azure_endpoint="https://myresource.openai.azure.com",
+        api_key="sk-test",
+        api_version="2024-10-01-preview2",
+    )
+    assert cfg3.api_version == "2024-10-01-preview2"

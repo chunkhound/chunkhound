@@ -211,6 +211,11 @@ class ResearchServiceFactory:
         algorithm = config.research.algorithm
         creator = STRATEGY_REGISTRY.get(algorithm, STRATEGY_REGISTRY["v1"])
         return creator(
-            config, db_services, embedding_manager, llm_manager,
-            tool_name, progress, path_filter
+            config,
+            db_services,
+            embedding_manager,
+            llm_manager,
+            tool_name,
+            progress,
+            path_filter,
         )

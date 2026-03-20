@@ -377,9 +377,7 @@ class GroovyMapping(BaseMapping):
 
         return ""
 
-    def extract_closure_parameters(
-        self, node: TSNode | None, source: str
-    ) -> list[str]:
+    def extract_closure_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter names from a Groovy closure.
 
         Args:
@@ -544,9 +542,7 @@ class GroovyMapping(BaseMapping):
             logger.error(f"Failed to get Groovy qualified name: {e}")
             return self.get_fallback_name(node, "symbol")
 
-    def extract_field_declarations(
-        self, node: TSNode | None, source: str
-    ) -> list[str]:
+    def extract_field_declarations(self, node: TSNode | None, source: str) -> list[str]:
         """Extract field declaration names from a Groovy class.
 
         Args:

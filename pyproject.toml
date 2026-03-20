@@ -5,8 +5,16 @@ build-backend = "hatchling.build"
 [project]
 name = "chunkhound"
 dynamic = ["version"]
-description = "Local-first semantic code search with vector and regex capabilities for AI assistants via MCP"
+description = "Local-first codebase intelligence for AI assistants via MCP"
 readme = "README.md"
+keywords = [
+    "code search",
+    "semantic search",
+    "MCP",
+    "AI agents",
+    "CAST algorithm",
+    "vector search",
+]
 requires-python = ">=3.10,<3.14"
 authors = [
     {name = "Ofri Wolfus"},
@@ -47,6 +55,7 @@ dependencies = [
     "tiktoken>=0.9.0",
     "tree-sitter-groovy>=0.1.2",
     "tree-sitter-kotlin>=1.1.0",
+    "tree-sitter-elixir>=0.3.4",
     "tree-sitter-lua>=0.4.0",
     "tree-sitter-make>=0.1.0",
     "watchdog>=4.0.0",

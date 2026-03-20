@@ -11,10 +11,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from tree_sitter import Node as TSNode
+
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-from tree_sitter import Node as TSNode
 
 
 class HaskellMapping(BaseMapping):
@@ -457,8 +458,17 @@ class HaskellMapping(BaseMapping):
         # Accept: literal, list, variable, record, tuple, string
         # Reject: lambda, case, let, where, do, function application with complex args
         simple_value_types = {
-            "literal", "list", "variable", "record", "tuple", "string",
-            "quoted_name", "con_unit", "integer", "float", "char",
+            "literal",
+            "list",
+            "variable",
+            "record",
+            "tuple",
+            "string",
+            "quoted_name",
+            "con_unit",
+            "integer",
+            "float",
+            "char",
         }
 
         # Reject complex expressions
