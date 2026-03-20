@@ -1,24 +1,8 @@
 """EmbeddingProvider protocol for ChunkHound - abstract interface for embedding implementations."""
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Protocol
-
-# Import and re-export exceptions for convenience
-from chunkhound.core.exceptions.embedding import (
-    EmbeddingConfigurationError,
-    EmbeddingDimensionError,
-    EmbeddingProviderError,
-)
-
-__all__ = [
-    "EmbeddingConfig",
-    "EmbeddingConfigurationError",
-    "EmbeddingDimensionError",
-    "EmbeddingProvider",
-    "EmbeddingProviderError",
-    "RerankResult",
-]
 
 
 @dataclass
@@ -60,40 +44,12 @@ class EmbeddingProvider(Protocol):
 
     @property
     def model(self) -> str:
-        """Model name (e.g., 'text-embedding-3-large', 'sentence-transformers/all-MiniLM-L6-v2')."""
+        """Model name (e.g., 'text-embedding-3-small', 'sentence-transformers/all-MiniLM-L6-v2')."""
         ...
 
     @property
     def dims(self) -> int:
-        """Actual output dimension (reflects matryoshka config if set)."""
-        ...
-
-    @property
-    def native_dims(self) -> int:
-        """Model's full/native embedding dimension."""
-        ...
-
-    @property
-    def supported_dimensions(self) -> Sequence[int]:
-        """Valid output dimensions for this model.
-
-        Returns single-element list [native_dims] for non-matryoshka models.
-        May return a range for continuous-dimension models.
-        """
-        ...
-
-    def supports_matryoshka(self) -> bool:
-        """True if model supports variable output dimensions."""
-        ...
-
-    @property
-    def output_dims(self) -> int | None:
-        """Configured output dimension override, or None for native."""
-        ...
-
-    @property
-    def client_side_truncation(self) -> bool:
-        """Whether client-side truncation is enabled."""
+        """Embedding dimensions."""
         ...
 
     @property
