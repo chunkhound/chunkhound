@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -23,7 +24,7 @@ def _git_init_and_commit(repo: Path) -> None:
     _git(repo, "commit", "-m", "init")
 
 
-@pytest.mark.skipif(subprocess.run(["which","git"], stdout=subprocess.DEVNULL).returncode != 0, reason="git required")
+@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 def test_realtime_nested_subrepo_boundary_respected(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     sub = root / "subrepo"
@@ -51,7 +52,7 @@ def test_realtime_nested_subrepo_boundary_respected(tmp_path: Path) -> None:
     assert handler._should_index(p) is True
 
 
-@pytest.mark.skipif(subprocess.run(["which","git"], stdout=subprocess.DEVNULL).returncode != 0, reason="git required")
+@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 def test_realtime_nonrepo_workspace_gitignore_overlay(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
     # Workspace-level .gitignore (not a repo) excludes datasets/

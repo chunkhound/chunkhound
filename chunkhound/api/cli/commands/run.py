@@ -1,8 +1,10 @@
 """Run command module - handles directory indexing operations."""
 
 import argparse
+import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +79,13 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
         # Configure registry with the Config object
         configure_registry(config)
 
+        # Initialize metrics collector if diagnostics enabled
+        metrics_collector = None
+        if getattr(args, "perf_diagnostics", False):
+            from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector
+
+            metrics_collector = BatchMetricsCollector()
+
         formatter.success(f"Service layer initialized: {args.db}")
 
         # Create progress manager for modern UI
@@ -111,12 +120,39 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
                 config=config,
                 progress_callback=progress_callback,
                 progress=progress_instance,
+                metrics_collector=metrics_collector,
             )
 
             # Process directory - service layers will add subtasks to progress_instance
             stats = await indexing_service.process_directory(
                 Path(args.path), no_embeddings=args.no_embeddings
             )
+
+        # Performance diagnostics analysis
+        if metrics_collector and metrics_collector.batches:
+            from chunkhound.core.diagnostics.perf_analyzer import PerfAnalyzer
+
+            analyzer = PerfAnalyzer()
+            diagnostics = analyzer.analyze(metrics_collector)
+
+            # Determine output path
+            perf_output = getattr(args, "perf_output", None)
+            if perf_output:
+                output_path = perf_output
+            else:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                output_path = db_path.parent / f"perf_diagnostics_{timestamp}.json"
+
+            # Write JSON file
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(
+                json.dumps(diagnostics.to_dict(), indent=2), encoding="utf-8"
+            )
+            formatter.info(f"Performance diagnostics written to: {output_path}")
+
+            # Display warnings
+            for warning in diagnostics.warnings:
+                formatter.warning(warning)
 
         # Display results
         _print_completion_summary(stats, formatter)
@@ -242,7 +278,8 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
                         import json
 
                         local_config_path.write_text(
-                            json.dumps(data, indent=2, sort_keys=False) + "\n"
+                            json.dumps(data, indent=2, sort_keys=False) + "\n",
+                            encoding="utf-8",
                         )
                         formatter.success(
                             f"Added {added} file(s) to indexing.exclude in {local_config_path}"
@@ -489,8 +526,10 @@ async def _simulate_index(args: argparse.Namespace, config: Config) -> None:
         sources = config.indexing.resolve_ignore_sources()
         if "gitignore" in (sources or []):
             from chunkhound.utils.ignore_engine import (
-                detect_repo_roots as _detect_roots,
                 build_ignore_engine as _build_root_engine,
+            )
+            from chunkhound.utils.ignore_engine import (
+                detect_repo_roots as _detect_roots,
             )
 
             roots = _detect_roots(
@@ -627,16 +666,10 @@ async def _check_ignores(args: argparse.Namespace, config: Config) -> None:
 
     def _git_ignored(repo_root: Path, rel_path: str) -> bool:
         try:
-            from chunkhound.utils.git_safe import run_git
-
-            proc = run_git(
-                ["check-ignore", "-q", "--no-index", rel_path],
-                cwd=repo_root,
-                timeout_s=5.0,
-            )
-            return proc.returncode == 0
-        except Exception:
+            from chunkhound.utils.git_safe import git_check_ignored
+        except ImportError:
             return False
+        return git_check_ignored(repo_root=repo_root, rel_path=rel_path, timeout_s=5.0)
 
     def _ch_ignored(root: Path, file_path: Path) -> bool:
         try:

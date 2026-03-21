@@ -218,6 +218,7 @@ class RichOutputFormatter:
         """Print a table header - use Rich Table instead."""
         # This is a legacy method - recommend using Rich Table directly
         from rich.table import Table
+
         table = Table(show_header=True)
         for header in headers:
             table.add_column(header)
@@ -321,7 +322,7 @@ class RichOutputFormatter:
 
                 # Truncate value if max_width is specified and exceeded
                 if self.max_width and len(value) > self.max_width:
-                    value = value[:self.max_width - 3] + "..."
+                    value = value[: self.max_width - 3] + "..."
 
                 return Text(value, style=self.style)
 
@@ -357,11 +358,13 @@ class RichOutputFormatter:
         )
         if stats.get("skipped_unchanged", 0) > 0:
             summary_table.add_row(
-                "  └─ Unchanged:", f"[yellow]{stats.get('skipped_unchanged', 0)}[/yellow] files"
+                "  └─ Unchanged:",
+                f"[yellow]{stats.get('skipped_unchanged', 0)}[/yellow] files",
             )
         if stats.get("skipped_filtered", 0) > 0:
             summary_table.add_row(
-                "  └─ Filtered:", f"[yellow]{stats.get('skipped_filtered', 0)}[/yellow] files"
+                "  └─ Filtered:",
+                f"[yellow]{stats.get('skipped_filtered', 0)}[/yellow] files",
             )
         summary_table.add_row(
             "Errors:", f"[red]{stats.get('files_errors', 0)}[/red] files"
@@ -455,21 +458,11 @@ class ProgressManager:
         self.console = console
         self._tasks: dict[str, TaskID] = {}
         self._live: Live | None = None
-        self._original_handlers: list = []
+        self._temp_handler_id: int | None = None
 
     def __enter__(self) -> "ProgressManager":
-        # Store current logger handlers before modification
-        self._original_handlers = logger._core.handlers.copy()
-
-        # Only suppress INFO and DEBUG levels, keep WARNING/ERROR/CRITICAL
         logger.remove()
-        logger.add(
-            lambda message: None
-            if message.record["level"].no < 30
-            else sys.stderr.write(str(message)),
-            level="WARNING",
-        )
-
+        self._temp_handler_id = logger.add(sys.stderr, level="WARNING")
         self._live = Live(self.progress, console=self.console, refresh_per_second=10)
         self._live.start()
         return self
@@ -479,18 +472,9 @@ class ProgressManager:
             if self._live:
                 self._live.stop()
         finally:
-            # Always restore logger configuration, even if Live fails
-            logger.remove()
-
-            # Restore original handlers if we have them
-            if self._original_handlers:
-                for handler_id, handler in self._original_handlers.items():
-                    logger._core.handlers[handler_id] = handler
-            else:
-                # Fallback to default CLI logging if no handlers stored
-                import sys
-
-                logger.add(sys.stderr, level="WARNING")
+            if self._temp_handler_id is not None:
+                logger.remove(self._temp_handler_id)
+            logger.add(sys.stderr, level="WARNING")
 
     def add_task(
         self,
@@ -600,11 +584,13 @@ class _NoRichProgressManager:
         class _Shim:
             def __init__(self) -> None:
                 self._next_id = 1
-                # Minimal task object with .total and .completed attributes
+
+                # Minimal task object mimicking Rich Progress Task attributes
                 class _Task:
                     def __init__(self, total: int | None = None) -> None:
                         self.total = total
                         self.completed = 0
+                        self.elapsed: float | None = None  # shim for Rich compatibility
 
                 self._Task = _Task
                 self.tasks: dict[int, _Task] = {}

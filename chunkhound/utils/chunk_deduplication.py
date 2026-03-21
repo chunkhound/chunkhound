@@ -7,9 +7,9 @@ Implements two-stage deduplication:
 Preserves language-specific exemptions for Vue and Haskell.
 """
 
-from typing import Sequence
-
 from collections import defaultdict
+from collections.abc import Sequence
+
 import xxhash
 
 from chunkhound.core.models.chunk import Chunk
@@ -191,7 +191,17 @@ _CONCEPT_SPECIFICITY = {
     "STRUCT": 4,
     "ENUM": 4,
     "TYPE_ALIAS": 3,
+    "CONSTRUCTOR": 3,
+    "VARIABLE": 3,
+    "FIELD": 3,
+    "PROPERTY": 3,
+    "TYPE": 3,
+    "MACRO": 3,
+    "NAMESPACE": 3,
+    "TRAIT": 3,
     "KEY_VALUE": 2,  # YAML key-value pairs
+    "TABLE": 2,
+    "OBJECT": 2,
     "ARRAY": 1,
     "BLOCK": 1,
 }

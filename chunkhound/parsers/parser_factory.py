@@ -5,7 +5,6 @@ This module provides the ParserFactory class that:
 2. Maps languages to their appropriate tree-sitter modules and mappings
 3. Creates UniversalParser instances with the correct language configuration
 4. Provides a clean interface for the rest of the system
-5. Handles cases where tree-sitter modules aren't available gracefully
 
 All tree-sitter language modules are imported explicitly to avoid dynamic import
 complexity and ensure better error handling during startup.
@@ -16,16 +15,42 @@ import os
 from pathlib import Path
 from typing import Any
 
+# All tree-sitter languages are required deps (crash on startup if missing).
+# Language-pack languages provided by tree-sitter-language-pack>=0.7.3.
+import tree_sitter_bash as ts_bash
+import tree_sitter_c as ts_c
+import tree_sitter_c_sharp as ts_csharp
+import tree_sitter_cpp as ts_cpp
+import tree_sitter_elixir as ts_elixir
+import tree_sitter_go as ts_go
+import tree_sitter_groovy as ts_groovy
+import tree_sitter_haskell as ts_haskell
+import tree_sitter_java as ts_java
+import tree_sitter_javascript as ts_javascript
+import tree_sitter_json as ts_json
+import tree_sitter_kotlin as ts_kotlin
+import tree_sitter_lua as ts_lua
+import tree_sitter_make as ts_make
+import tree_sitter_markdown as ts_markdown
+import tree_sitter_php as ts_php
+import tree_sitter_python as ts_python
+import tree_sitter_rust as ts_rust
+import tree_sitter_sql as ts_sql
+import tree_sitter_toml as ts_toml
+import tree_sitter_typescript as ts_typescript
+import tree_sitter_zig as ts_zig
+from tree_sitter_language_pack import get_language as _get_lang
+
 from chunkhound.core.types.common import Language
 from chunkhound.interfaces.language_parser import LanguageParser
-
-# Import all language mappings
+from chunkhound.parsers.concept_extractor import LanguageMapping
 from chunkhound.parsers.mappings import (
     BashMapping,
     CMapping,
     CppMapping,
     CSharpMapping,
     DartMapping,
+    ElixirMapping,
     GoMapping,
     GroovyMapping,
     HaskellMapping,
@@ -44,6 +69,7 @@ from chunkhound.parsers.mappings import (
     PHPMapping,
     PythonMapping,
     RustMapping,
+    SqlMapping,
     SvelteMapping,
     SwiftMapping,
     TextMapping,
@@ -54,309 +80,36 @@ from chunkhound.parsers.mappings import (
     YamlMapping,
     ZigMapping,
 )
-from chunkhound.parsers.concept_extractor import LanguageMapping
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import SetupError, TreeSitterEngine
 from chunkhound.parsers.universal_parser import CASTConfig, UniversalParser
 
+_matlab_lang = _get_lang("matlab")
+_objc_lang = _get_lang("objc")
+_swift_lang = _get_lang("swift")
+_yaml_lang = _get_lang("yaml")
+_hcl_lang = _get_lang("hcl")
+_dart_lang = _get_lang("dart")
+
+
+class _LanguagePackWrapper:
+    """Wraps a tree-sitter-language-pack Language into a ts_*-compatible module."""
+
+    def __init__(self, lang):
+        self._lang = lang
+
+    def language(self):
+        return self._lang
+
+
+ts_matlab = _LanguagePackWrapper(_matlab_lang)
+ts_objc = _LanguagePackWrapper(_objc_lang)
+ts_swift = _LanguagePackWrapper(_swift_lang)
+ts_yaml = _LanguagePackWrapper(_yaml_lang)
+ts_hcl = _LanguagePackWrapper(_hcl_lang)
+ts_dart = _LanguagePackWrapper(_dart_lang)
+
 logger = logging.getLogger(__name__)
-
-# Explicit tree-sitter language imports
-# Import all available tree-sitter languages explicitly to avoid
-# dynamic import complexity
-
-# Core language support
-try:
-    import tree_sitter_python as ts_python
-
-    PYTHON_AVAILABLE = True
-except ImportError:
-    ts_python = None
-    PYTHON_AVAILABLE = False
-
-try:
-    import tree_sitter_javascript as ts_javascript
-
-    JAVASCRIPT_AVAILABLE = True
-except ImportError:
-    ts_javascript = None
-    JAVASCRIPT_AVAILABLE = False
-
-try:
-    import tree_sitter_typescript as ts_typescript
-
-    TYPESCRIPT_AVAILABLE = True
-except ImportError:
-    ts_typescript = None
-    TYPESCRIPT_AVAILABLE = False
-
-try:
-    import tree_sitter_java as ts_java
-
-    JAVA_AVAILABLE = True
-except ImportError:
-    ts_java = None
-    JAVA_AVAILABLE = False
-
-try:
-    import tree_sitter_c as ts_c
-
-    C_AVAILABLE = True
-except ImportError:
-    ts_c = None
-    C_AVAILABLE = False
-
-try:
-    import tree_sitter_cpp as ts_cpp
-
-    CPP_AVAILABLE = True
-except ImportError:
-    ts_cpp = None
-    CPP_AVAILABLE = False
-
-try:
-    import tree_sitter_c_sharp as ts_csharp
-
-    CSHARP_AVAILABLE = True
-except ImportError:
-    ts_csharp = None
-    CSHARP_AVAILABLE = False
-
-try:
-    import tree_sitter_go as ts_go
-
-    GO_AVAILABLE = True
-except ImportError:
-    ts_go = None
-    GO_AVAILABLE = False
-
-try:
-    import tree_sitter_haskell as ts_haskell
-
-    HASKELL_AVAILABLE = True
-except ImportError:
-    ts_haskell = None
-    HASKELL_AVAILABLE = False
-
-try:
-    import tree_sitter_rust as ts_rust
-
-    RUST_AVAILABLE = True
-except ImportError:
-    ts_rust = None
-    RUST_AVAILABLE = False
-
-try:
-    import tree_sitter_bash as ts_bash
-
-    BASH_AVAILABLE = True
-except ImportError:
-    ts_bash = None
-    BASH_AVAILABLE = False
-
-try:
-    import tree_sitter_kotlin as ts_kotlin
-
-    KOTLIN_AVAILABLE = True
-except ImportError:
-    ts_kotlin = None
-    KOTLIN_AVAILABLE = False
-
-try:
-    import tree_sitter_lua as ts_lua
-
-    LUA_AVAILABLE = True
-except ImportError:
-    ts_lua = None
-    LUA_AVAILABLE = False
-
-try:
-    import tree_sitter_groovy as ts_groovy
-
-    GROOVY_AVAILABLE = True
-except ImportError:
-    ts_groovy = None
-    GROOVY_AVAILABLE = False
-
-try:
-    from tree_sitter_language_pack import get_language
-
-    _matlab_lang = get_language("matlab")
-    if _matlab_lang:
-        # Create a module-like wrapper for compatibility with LanguageConfig
-        class _MatlabLanguageWrapper:
-            def language(self):
-                return _matlab_lang
-
-        ts_matlab = _MatlabLanguageWrapper()
-        MATLAB_AVAILABLE = True
-    else:
-        ts_matlab = None
-        MATLAB_AVAILABLE = False
-except ImportError:
-    ts_matlab = None
-    MATLAB_AVAILABLE = False
-
-try:
-    from tree_sitter_language_pack import get_language as _get_language_objc
-
-    _objc_lang = _get_language_objc("objc")
-    if _objc_lang:
-        # Create a module-like wrapper for compatibility with LanguageConfig
-        class _ObjCLanguageWrapper:
-            def language(self):
-                return _objc_lang
-
-        ts_objc = _ObjCLanguageWrapper()
-        OBJC_AVAILABLE = True
-    else:
-        ts_objc = None
-        OBJC_AVAILABLE = False
-except ImportError:
-    ts_objc = None
-    OBJC_AVAILABLE = False
-
-try:
-    import tree_sitter_php as ts_php
-
-    PHP_AVAILABLE = True
-except ImportError:
-    ts_php = None
-    PHP_AVAILABLE = False
-
-try:
-    from tree_sitter_language_pack import get_language as _get_language_swift
-
-    _swift_lang = _get_language_swift("swift")
-    if _swift_lang:
-        # Create a module-like wrapper for compatibility with LanguageConfig
-        class _SwiftLanguageWrapper:
-            def language(self):
-                return _swift_lang
-
-        ts_swift = _SwiftLanguageWrapper()
-        SWIFT_AVAILABLE = True
-    else:
-        ts_swift = None
-        SWIFT_AVAILABLE = False
-except ImportError:
-    ts_swift = None
-    SWIFT_AVAILABLE = False
-
-if not HASKELL_AVAILABLE:
-    try:
-        from tree_sitter_language_pack import get_language as _get_language_haskell
-
-        _haskell_lang = _get_language_haskell("haskell")
-        if _haskell_lang:
-
-            class _HaskellLanguageWrapper:
-                def language(self):
-                    return _haskell_lang
-
-            ts_haskell = _HaskellLanguageWrapper()
-            HASKELL_AVAILABLE = True
-    except ImportError:
-        pass
-
-# Markup and config languages
-try:
-    import tree_sitter_json as ts_json
-
-    JSON_AVAILABLE = True
-except ImportError:
-    ts_json = None
-    JSON_AVAILABLE = False
-
-try:
-    import tree_sitter_yaml as ts_yaml
-
-    YAML_AVAILABLE = True
-except ImportError:
-    ts_yaml = None
-    YAML_AVAILABLE = False
-
-try:
-    import tree_sitter_toml as ts_toml
-
-    TOML_AVAILABLE = True
-except ImportError:
-    ts_toml = None
-    TOML_AVAILABLE = False
-
-# HCL (Terraform) language
-try:
-    import tree_sitter_hcl as ts_hcl
-
-    HCL_AVAILABLE = True
-except ImportError:
-    ts_hcl = None
-    HCL_AVAILABLE = False
-
-if not HCL_AVAILABLE:
-    try:
-        from tree_sitter_language_pack import get_language as _get_language_hcl
-
-        _hcl_lang = _get_language_hcl("hcl")
-        if _hcl_lang:
-
-            class _HclLanguageWrapper:
-                def language(self):
-                    return _hcl_lang
-
-            ts_hcl = _HclLanguageWrapper()
-            HCL_AVAILABLE = True
-    except ImportError:
-        pass
-
-try:
-    import tree_sitter_markdown as ts_markdown
-
-    MARKDOWN_AVAILABLE = True
-except ImportError:
-    ts_markdown = None
-    MARKDOWN_AVAILABLE = False
-
-# Build system languages
-try:
-    import tree_sitter_make as ts_make
-
-    MAKEFILE_AVAILABLE = True
-except ImportError:
-    ts_make = None
-    MAKEFILE_AVAILABLE = False
-
-try:
-    import tree_sitter_zig as ts_zig
-
-    ZIG_AVAILABLE = True
-except ImportError:
-    ts_zig = None
-    ZIG_AVAILABLE = False
-
-try:
-    from tree_sitter_language_pack import get_language
-
-    _dart_lang = get_language("dart")
-    if _dart_lang:
-        # Create a module-like wrapper for compatibility with LanguageConfig
-        class _DartLanguageWrapper:
-            def language(self):
-                return _dart_lang
-
-        ts_dart = _DartLanguageWrapper()
-        DART_AVAILABLE = True
-    else:
-        ts_dart = None
-        DART_AVAILABLE = False
-except ImportError:
-    ts_dart = None
-    DART_AVAILABLE = False
-
-
-# Additional language extensions (these might use the same parser as base language)
-JSX_AVAILABLE = JAVASCRIPT_AVAILABLE  # JSX uses JavaScript parser
-TSX_AVAILABLE = TYPESCRIPT_AVAILABLE  # TSX uses TypeScript parser
 
 
 class LanguageConfig:
@@ -375,48 +128,12 @@ class LanguageConfig:
         self.language_name = language_name
 
     def _handle_language_result(self, result):
-        """Handle language module result, supporting both old and new APIs."""
+        """Handle language module result."""
         from tree_sitter import Language
 
-        # If result is already a Language object, return as-is
         if isinstance(result, Language):
             return result
-        else:
-            # In tree-sitter 0.25.x, language modules should return
-            # Language objects directly
-            # If we get an integer (old API), try to handle it but warn
-            # about compatibility
-            if isinstance(result, int):
-                import warnings
-
-                warnings.warn(
-                    f"tree-sitter-{self.language_name.lower()} is using "
-                    f"deprecated API (returned integer {result}). "
-                    f"Consider upgrading to a version compatible with "
-                    f"tree-sitter 0.25+",
-                    DeprecationWarning,
-                    stacklevel=3,
-                )
-                # Try to create Language object from integer
-                # (deprecated but still supported in some versions)
-                try:
-                    return Language(result)
-                except Exception as e:
-                    raise SetupError(
-                        parser=self.language_name,
-                        missing_dependency=(
-                            f"Compatible tree-sitter-{self.language_name.lower()} "
-                            f"for tree-sitter 0.25.x"
-                        ),
-                        install_command=(
-                            f"pip install --upgrade "
-                            f"tree-sitter-{self.language_name.lower()}"
-                        ),
-                        original_error=(
-                            f"Cannot create Language from integer {result}: {e}"
-                        ),
-                    ) from e
-            return Language(result)
+        return Language(result)
 
     def get_tree_sitter_language(self):
         """Get the tree-sitter Language object from the module."""
@@ -467,64 +184,55 @@ class LanguageConfig:
 
 # Language configuration mapping
 LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
-    Language.PYTHON: LanguageConfig(
-        ts_python, PythonMapping, PYTHON_AVAILABLE, "python"
-    ),
+    # Direct imports (always available - required dependencies)
+    Language.PYTHON: LanguageConfig(ts_python, PythonMapping, True, "python"),
     Language.JAVASCRIPT: LanguageConfig(
-        ts_javascript, JavaScriptMapping, JAVASCRIPT_AVAILABLE, "javascript"
+        ts_javascript, JavaScriptMapping, True, "javascript"
     ),
     Language.TYPESCRIPT: LanguageConfig(
-        ts_typescript, TypeScriptMapping, TYPESCRIPT_AVAILABLE, "typescript"
+        ts_typescript, TypeScriptMapping, True, "typescript"
     ),
-    Language.JAVA: LanguageConfig(ts_java, JavaMapping, JAVA_AVAILABLE, "java"),
-    Language.C: LanguageConfig(ts_c, CMapping, C_AVAILABLE, "c"),
-    Language.CPP: LanguageConfig(ts_cpp, CppMapping, CPP_AVAILABLE, "cpp"),
-    Language.CSHARP: LanguageConfig(
-        ts_csharp, CSharpMapping, CSHARP_AVAILABLE, "csharp"
-    ),
-    Language.GO: LanguageConfig(ts_go, GoMapping, GO_AVAILABLE, "go"),
-    Language.HASKELL: LanguageConfig(
-        ts_haskell, HaskellMapping, HASKELL_AVAILABLE, "haskell"
-    ),
-    Language.RUST: LanguageConfig(ts_rust, RustMapping, RUST_AVAILABLE, "rust"),
-    Language.ZIG: LanguageConfig(ts_zig, ZigMapping, ZIG_AVAILABLE, "zig"),
-    Language.BASH: LanguageConfig(ts_bash, BashMapping, BASH_AVAILABLE, "bash"),
-    Language.KOTLIN: LanguageConfig(
-        ts_kotlin, KotlinMapping, KOTLIN_AVAILABLE, "kotlin"
-    ),
-    Language.LUA: LanguageConfig(ts_lua, LuaMapping, LUA_AVAILABLE, "lua"),
-    Language.GROOVY: LanguageConfig(
-        ts_groovy, GroovyMapping, GROOVY_AVAILABLE, "groovy"
-    ),
-    Language.MATLAB: LanguageConfig(
-        ts_matlab, MatlabMapping, MATLAB_AVAILABLE, "matlab"
-    ),
-    Language.DART: LanguageConfig(ts_dart, DartMapping, DART_AVAILABLE, "dart"),
-    Language.OBJC: LanguageConfig(ts_objc, ObjCMapping, OBJC_AVAILABLE, "objc"),
-    Language.PHP: LanguageConfig(ts_php, PHPMapping, PHP_AVAILABLE, "php"),
-    Language.SWIFT: LanguageConfig(ts_swift, SwiftMapping, SWIFT_AVAILABLE, "swift"),
+    Language.JAVA: LanguageConfig(ts_java, JavaMapping, True, "java"),
+    Language.C: LanguageConfig(ts_c, CMapping, True, "c"),
+    Language.CPP: LanguageConfig(ts_cpp, CppMapping, True, "cpp"),
+    Language.CSHARP: LanguageConfig(ts_csharp, CSharpMapping, True, "csharp"),
+    Language.GO: LanguageConfig(ts_go, GoMapping, True, "go"),
+    Language.RUST: LanguageConfig(ts_rust, RustMapping, True, "rust"),
+    Language.ZIG: LanguageConfig(ts_zig, ZigMapping, True, "zig"),
+    Language.BASH: LanguageConfig(ts_bash, BashMapping, True, "bash"),
+    Language.KOTLIN: LanguageConfig(ts_kotlin, KotlinMapping, True, "kotlin"),
+    Language.LUA: LanguageConfig(ts_lua, LuaMapping, True, "lua"),
+    Language.GROOVY: LanguageConfig(ts_groovy, GroovyMapping, True, "groovy"),
+    Language.PHP: LanguageConfig(ts_php, PHPMapping, True, "php"),
+    Language.JSON: LanguageConfig(ts_json, JsonMapping, True, "json"),
+    Language.TOML: LanguageConfig(ts_toml, TomlMapping, True, "toml"),
+    Language.MARKDOWN: LanguageConfig(ts_markdown, MarkdownMapping, True, "markdown"),
+    Language.MAKEFILE: LanguageConfig(ts_make, MakefileMapping, True, "makefile"),
+    # Haskell (required dependency in pyproject.toml)
+    Language.ELIXIR: LanguageConfig(ts_elixir, ElixirMapping, True, "elixir"),
+    Language.HASKELL: LanguageConfig(ts_haskell, HaskellMapping, True, "haskell"),
+    Language.HCL: LanguageConfig(ts_hcl, HclMapping, True, "hcl"),
+    # Language pack languages (required via tree-sitter-language-pack)
+    Language.YAML: LanguageConfig(ts_yaml, YamlMapping, True, "yaml"),
+    Language.MATLAB: LanguageConfig(ts_matlab, MatlabMapping, True, "matlab"),
+    Language.DART: LanguageConfig(ts_dart, DartMapping, True, "dart"),
+    Language.OBJC: LanguageConfig(ts_objc, ObjCMapping, True, "objc"),
+    Language.SQL: LanguageConfig(ts_sql, SqlMapping, True, "sql"),
+    Language.SWIFT: LanguageConfig(ts_swift, SwiftMapping, True, "swift"),
+    # Languages that use TypeScript parser
     Language.VUE: LanguageConfig(
-        ts_typescript, VueMapping, TYPESCRIPT_AVAILABLE, "vue"
+        ts_typescript, VueMapping, True, "vue"
     ),  # Vue uses TypeScript parser for script sections
     Language.SVELTE: LanguageConfig(
-        ts_typescript, SvelteMapping, TYPESCRIPT_AVAILABLE, "svelte"
+        ts_typescript, SvelteMapping, True, "svelte"
     ),  # Svelte uses TypeScript parser for script sections
-    Language.JSON: LanguageConfig(ts_json, JsonMapping, JSON_AVAILABLE, "json"),
-    Language.YAML: LanguageConfig(ts_yaml, YamlMapping, YAML_AVAILABLE, "yaml"),
-    Language.TOML: LanguageConfig(ts_toml, TomlMapping, TOML_AVAILABLE, "toml"),
-    Language.HCL: LanguageConfig(ts_hcl, HclMapping, HCL_AVAILABLE, "hcl"),
-    Language.MARKDOWN: LanguageConfig(
-        ts_markdown, MarkdownMapping, MARKDOWN_AVAILABLE, "markdown"
-    ),
-    Language.MAKEFILE: LanguageConfig(
-        ts_make, MakefileMapping, MAKEFILE_AVAILABLE, "makefile"
-    ),
     Language.JSX: LanguageConfig(
-        ts_typescript, JSXMapping, JSX_AVAILABLE, "jsx"
+        ts_typescript, JSXMapping, True, "jsx"
     ),  # JSX uses TSX grammar
     Language.TSX: LanguageConfig(
-        ts_typescript, TSXMapping, TSX_AVAILABLE, "tsx"
+        ts_typescript, TSXMapping, True, "tsx"
     ),  # TSX uses TS parser with tsx language
+    # Non-tree-sitter languages
     Language.TEXT: LanguageConfig(
         None, TextMapping, True, "text"
     ),  # Text doesn't need tree-sitter
@@ -586,6 +294,9 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     # Note: .m is ambiguous, content detection used in File.from_path()
     ".m": Language.MATLAB,
     ".dart": Language.DART,
+    # Elixir
+    ".ex": Language.ELIXIR,
+    ".exs": Language.ELIXIR,
     ".mm": Language.OBJC,
     # PHP
     ".php": Language.PHP,
@@ -594,6 +305,8 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     ".php4": Language.PHP,
     ".php5": Language.PHP,
     ".phps": Language.PHP,
+    # SQL
+    ".sql": Language.SQL,
     # Swift
     ".swift": Language.SWIFT,
     ".swiftinterface": Language.SWIFT,
@@ -619,13 +332,10 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     "GNUmakefile": Language.MAKEFILE,
     ".mk": Language.MAKEFILE,
     ".mak": Language.MAKEFILE,
+    ".make": Language.MAKEFILE,
     # Text files (fallback)
     ".txt": Language.TEXT,
     ".text": Language.TEXT,
-    ".log": Language.TEXT,
-    ".cfg": Language.TEXT,
-    ".conf": Language.TEXT,
-    ".ini": Language.TEXT,
     # PDF files
     ".pdf": Language.PDF,
 }
@@ -652,12 +362,14 @@ class ParserFactory:
         self,
         language: Language,
         cast_config: CASTConfig | None = None,
+        detect_embedded_sql: bool = True,
     ) -> LanguageParser:
         """Create a universal parser for the specified language.
 
         Args:
             language: Programming language to create parser for
             cast_config: Optional cAST configuration (uses default if not provided)
+            detect_embedded_sql: Whether to detect SQL in string literals.
 
         Returns:
             UniversalParser instance configured for the language
@@ -670,16 +382,22 @@ class ParserFactory:
         if language == Language.VUE:
             from chunkhound.parsers.vue_parser import VueParser
 
-            return VueParser(cast_config)
+            return VueParser(cast_config, detect_embedded_sql)
 
         # Special case: Svelte uses custom parser
         if language == Language.SVELTE:
             from chunkhound.parsers.svelte_parser import SvelteParser
 
-            return SvelteParser(cast_config)
+            return SvelteParser(cast_config, detect_embedded_sql)
+
+        # Special case: Makefile uses custom parser for size enforcement
+        if language == Language.MAKEFILE:
+            from chunkhound.parsers.makefile_parser import MakefileParser
+
+            return MakefileParser(cast_config, detect_embedded_sql)
 
         # Use cache to avoid recreating parsers
-        cache_key = self._cache_key(language)
+        cache_key = self._cache_key(language, detect_embedded_sql)
         if cache_key in self._parser_cache:
             return self._parser_cache[cache_key]
 
@@ -698,7 +416,6 @@ class ParserFactory:
                 max_chunk_size=cast_config.max_chunk_size,
                 min_chunk_size=cast_config.min_chunk_size,
                 merge_threshold=cast_config.merge_threshold,
-                preserve_structure=cast_config.preserve_structure,
                 greedy_merge=False,
                 safe_token_limit=cast_config.safe_token_limit,
             )
@@ -711,8 +428,8 @@ class ParserFactory:
         if language in (Language.TEXT, Language.PDF):
             # Text and PDF mappings don't need tree-sitter engine
             mapping = config.mapping_class()
-            parser = UniversalParser(None, mapping, cast_config)  # type: ignore[arg-type]
-            wrapped = self._maybe_wrap_yaml_parser(language, parser)
+            parser = UniversalParser(None, mapping, cast_config, detect_embedded_sql)  # type: ignore[arg-type]
+            wrapped = self._maybe_wrap_yaml_parser(language, parser, cast_config)
             self._parser_cache[cache_key] = wrapped
             return wrapped
 
@@ -739,9 +456,12 @@ class ParserFactory:
                 engine,
                 mapping,
                 cast_config,
+                detect_embedded_sql,
             )
 
-            parser = self._maybe_wrap_yaml_parser(language, universal_parser)
+            parser = self._maybe_wrap_yaml_parser(
+                language, universal_parser, cast_config
+            )
 
             # Cache for future use
             self._parser_cache[cache_key] = parser
@@ -759,13 +479,17 @@ class ParserFactory:
             ) from e
 
     def create_parser_for_file(
-        self, file_path: Path, cast_config: CASTConfig | None = None
+        self,
+        file_path: Path,
+        cast_config: CASTConfig | None = None,
+        detect_embedded_sql: bool = True,
     ) -> LanguageParser:
         """Create a parser appropriate for the given file.
 
         Args:
             file_path: Path to the file to parse
             cast_config: Optional cAST configuration
+            detect_embedded_sql: Whether to detect embedded SQL strings
 
         Returns:
             LanguageParser instance appropriate for the file
@@ -775,7 +499,7 @@ class ParserFactory:
             ValueError: If the file type is not supported
         """
         language = self.detect_language(file_path)
-        return self.create_parser(language, cast_config)
+        return self.create_parser(language, cast_config, detect_embedded_sql)
 
     def detect_language(self, file_path: Path) -> Language:
         """Detect the programming language of a file.
@@ -796,7 +520,10 @@ class ParserFactory:
         return detect_language(file_path)
 
     def _maybe_wrap_yaml_parser(
-        self, language: Language, parser: UniversalParser
+        self,
+        language: Language,
+        parser: UniversalParser,
+        cast_config: CASTConfig | None = None,
     ) -> LanguageParser:
         """Wrap YAML parser with RapidYAML implementation when available."""
         if language != Language.YAML:
@@ -805,14 +532,18 @@ class ParserFactory:
             from chunkhound.parsers.rapid_yaml_parser import RapidYamlParser
         except Exception:
             return parser
-        return RapidYamlParser(parser)
+        return RapidYamlParser(parser, cast_config)
 
-    def _cache_key(self, language: Language) -> tuple[Language, str]:
+    def _cache_key(
+        self, language: Language, detect_embedded_sql: bool = True
+    ) -> tuple[Language, str]:
         if language == Language.YAML:
             mode = os.environ.get("CHUNKHOUND_YAML_ENGINE", "").strip().lower()
-            token = mode or "rapid"
+            token = f"{mode or 'rapid'}{'_nosql' if not detect_embedded_sql else ''}"
             return (language, token)
-        return (language, "default")
+        if detect_embedded_sql:
+            return (language, "default")
+        return (language, "no_sql")
 
     def get_available_languages(self) -> dict[Language, bool]:
         """Get a dictionary of all languages and their availability status.
@@ -887,7 +618,7 @@ class ParserFactory:
         }
 
     def get_mapping_for_file(self, file_path: Path) -> LanguageMapping | None:
-        """Get the language mapping for a file to access resolve_import_path().
+        """Get the language mapping for a file to access resolve_import_paths().
 
         Returns None if no mapping exists for the file type.
 
@@ -927,32 +658,38 @@ def get_parser_factory(cast_config: CASTConfig | None = None) -> ParserFactory:
 
 
 def create_parser_for_file(
-    file_path: Path, cast_config: CASTConfig | None = None
+    file_path: Path,
+    cast_config: CASTConfig | None = None,
+    detect_embedded_sql: bool = True,
 ) -> LanguageParser:
     """Convenience function to create a parser for a file.
 
     Args:
         file_path: Path to the file to parse
         cast_config: Optional cAST configuration
+        detect_embedded_sql: Whether to detect embedded SQL strings
 
     Returns:
         LanguageParser instance appropriate for the file
     """
     factory = get_parser_factory(cast_config)
-    return factory.create_parser_for_file(file_path, cast_config)
+    return factory.create_parser_for_file(file_path, cast_config, detect_embedded_sql)
 
 
 def create_parser_for_language(
-    language: Language, cast_config: CASTConfig | None = None
+    language: Language,
+    cast_config: CASTConfig | None = None,
+    detect_embedded_sql: bool = True,
 ) -> LanguageParser:
     """Convenience function to create a parser for a language.
 
     Args:
         language: Programming language to create parser for
         cast_config: Optional cAST configuration
+        detect_embedded_sql: Whether to detect SQL in string literals
 
     Returns:
         LanguageParser instance configured for the language
     """
     factory = get_parser_factory(cast_config)
-    return factory.create_parser(language, cast_config)
+    return factory.create_parser(language, cast_config, detect_embedded_sql)

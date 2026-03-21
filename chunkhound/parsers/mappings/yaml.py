@@ -218,6 +218,7 @@ class YamlMapping(BaseMapping):
                     value_text = self.get_node_text(value_node, source).strip()
 
                     metadata["kind"] = "mapping_pair"
+                    metadata["chunk_type_hint"] = "key_value"
                     metadata["key"] = key_text
 
                     # Analyze value type
@@ -240,6 +241,7 @@ class YamlMapping(BaseMapping):
                 elif "item" in captures:
                     item_node = captures["item"]
                     metadata["kind"] = "sequence_item"
+                    metadata["chunk_type_hint"] = "array"
 
                     item_type = self._analyze_yaml_value_type(item_node, source)
                     metadata["item_type"] = item_type
@@ -394,14 +396,11 @@ class YamlMapping(BaseMapping):
 
         return max_depth
 
-    def resolve_import_path(
-        self,
-        import_text: str,
-        base_dir: Path,
-        source_file: Path
-    ) -> Path | None:
+    def resolve_import_paths(
+        self, import_text: str, base_dir: Path, source_file: Path
+    ) -> list[Path]:
         """Data formats don't have imports."""
-        return None
+        return []
 
     def extract_constants(
         self,
@@ -447,15 +446,13 @@ class YamlMapping(BaseMapping):
                         if len(value_str) > MAX_CONSTANT_VALUE_LENGTH:
                             value_str = value_str[:MAX_CONSTANT_VALUE_LENGTH]
 
-                        constants.append({
-                            "name": key,
-                            "value": value_str
-                        })
+                        constants.append({"name": key, "value": value_str})
 
             # Extract anchors from source text
             # Anchors are defined as &anchor_name
             import re
-            anchor_pattern = r'&([a-zA-Z_][a-zA-Z0-9_-]*)\s+(.*?)(?:\n|$)'
+
+            anchor_pattern = r"&([a-zA-Z_][a-zA-Z0-9_-]*)\s+(.*?)(?:\n|$)"
             for match in re.finditer(anchor_pattern, source):
                 anchor_name = match.group(1)
                 anchor_value = match.group(2).strip()
@@ -464,10 +461,7 @@ class YamlMapping(BaseMapping):
                 if len(anchor_value) > MAX_CONSTANT_VALUE_LENGTH:
                     anchor_value = anchor_value[:MAX_CONSTANT_VALUE_LENGTH]
 
-                constants.append({
-                    "name": f"&{anchor_name}",
-                    "value": anchor_value
-                })
+                constants.append({"name": f"&{anchor_name}", "value": anchor_value})
 
             return constants if constants else None
 

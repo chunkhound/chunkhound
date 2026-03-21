@@ -3,6 +3,7 @@
 import asyncio
 import concurrent.futures
 import contextvars
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -11,9 +12,6 @@ from typing import Any
 from loguru import logger
 
 from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
-
-# Task-local transaction state to ensure proper isolation in async contexts
-_transaction_context = contextvars.ContextVar("transaction_active", default=False)
 
 # Thread-local storage for executor thread state
 _executor_local = threading.local()
@@ -49,6 +47,11 @@ def get_thread_local_state() -> dict[str, Any]:
 
     This function should ONLY be called from within the executor thread.
 
+    Returns the actual dict reference (not a copy) intentionally: executor
+    methods mutate the state dict in-place (e.g. incrementing
+    ``operations_since_checkpoint``, toggling ``transaction_active``), and
+    those mutations must be visible on the next call.
+
     Returns:
         Thread-local state dictionary
     """
@@ -57,7 +60,7 @@ def get_thread_local_state() -> dict[str, Any]:
             "transaction_active": False,
             "last_activity_time": time.time(),  # Track last database activity
         }
-    return dict(_executor_local.state)  # Return a typed dict copy
+    return _executor_local.state
 
 
 class SerialDatabaseExecutor:
@@ -115,7 +118,6 @@ class SerialDatabaseExecutor:
 
         # Run in executor synchronously with timeout (env override)
         future = self._db_executor.submit(executor_operation)
-        import os
         try:
             timeout_s = float(os.getenv("CHUNKHOUND_DB_EXECUTE_TIMEOUT", "30"))
         except Exception:
@@ -145,7 +147,7 @@ class SerialDatabaseExecutor:
         Returns:
             The result of the operation, fully materialized
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def executor_operation():
             # Get thread-local connection (created on first access)
@@ -270,5 +272,5 @@ class SerialDatabaseExecutor:
         try:
             future = self._db_executor.submit(get_activity_time)
             return future.result(timeout=1.0)  # Quick operation, short timeout
-        except:
+        except Exception:
             return None

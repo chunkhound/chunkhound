@@ -47,6 +47,12 @@ class _FakeDB:
             "content_hash": rec.content_hash,
         }
 
+    async def get_file_by_path_async(self, path: str, as_model: bool = False):
+        return self.get_file_by_path(path, as_model)
+
+    def should_optimize(self, operation: str = "") -> bool:
+        return False
+
 
 class _Cfg:
     class _Indexing:

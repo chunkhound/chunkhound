@@ -20,22 +20,13 @@ logic for mapping Vue template AST nodes to semantic chunks.
 """
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
+
+from tree_sitter import Node as TSNode
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
-
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = Any  # type: ignore
 
 
 class VueTemplateMapping(BaseMapping):
@@ -76,7 +67,7 @@ class VueTemplateMapping(BaseMapping):
             (comment) @definition
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Not applicable for Vue templates.
 
         Args:
@@ -88,7 +79,7 @@ class VueTemplateMapping(BaseMapping):
         """
         return ""
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Not applicable for Vue templates.
 
         Args:
@@ -246,7 +237,7 @@ class VueTemplateMapping(BaseMapping):
         """
 
     def extract_name(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for this concept.
 
@@ -269,21 +260,27 @@ class VueTemplateMapping(BaseMapping):
                 # Handle different directive types
                 if directive in ("v-if", "v-else-if"):
                     if "condition_expr" in captures:
-                        expr_text = self.get_node_text(captures["condition_expr"], source).strip()
+                        expr_text = self.get_node_text(
+                            captures["condition_expr"], source
+                        ).strip()
                         expr = self.get_expression_preview(expr_text, max_length=20)
                     else:
                         expr = "expr"
                     return f"v-if_{expr}"
                 elif directive == "v-for":
                     if "loop_expr" in captures:
-                        expr_text = self.get_node_text(captures["loop_expr"], source).strip()
+                        expr_text = self.get_node_text(
+                            captures["loop_expr"], source
+                        ).strip()
                         expr = self.get_expression_preview(expr_text, max_length=20)
                     else:
                         expr = "expr"
                     return f"v-for_{expr}"
                 elif directive == "v-model":
                     if "model_expr" in captures:
-                        expr_text = self.get_node_text(captures["model_expr"], source).strip()
+                        expr_text = self.get_node_text(
+                            captures["model_expr"], source
+                        ).strip()
                         expr = self.get_expression_preview(expr_text, max_length=20)
                     else:
                         expr = "expr"
@@ -348,7 +345,7 @@ class VueTemplateMapping(BaseMapping):
         return "unnamed"
 
     def extract_content(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for this concept.
 
@@ -376,7 +373,7 @@ class VueTemplateMapping(BaseMapping):
         return ""
 
     def extract_metadata(
-        self, concept: UniversalConcept, captures: dict[str, "TSNode"], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract Vue template-specific metadata from captures.
 
@@ -492,12 +489,12 @@ class VueTemplateMapping(BaseMapping):
 
         return metadata
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self,
         import_text: str,
         base_dir: Path,
         source_file: Path,
-    ) -> Path | None:
+    ) -> list[Path]:
         """Vue templates don't have imports.
 
         Imports in Vue SFCs are in the <script> section,
@@ -509,6 +506,6 @@ class VueTemplateMapping(BaseMapping):
             source_file: File containing the import
 
         Returns:
-            None - templates don't have imports
+            Empty list - templates don't have imports
         """
-        return None
+        return []

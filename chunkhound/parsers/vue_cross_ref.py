@@ -28,6 +28,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from chunkhound.core.models.chunk import Chunk
+from chunkhound.utils.metadata import extract_parameter_names
 
 
 @dataclass
@@ -225,7 +226,11 @@ def build_symbol_table_from_chunks(script_chunks: list[Chunk]) -> VueSymbolTable
             continue
 
         # Get the chunk type as string (ChunkType enum has a value attribute)
-        chunk_type_str = chunk.chunk_type.value if hasattr(chunk.chunk_type, 'value') else str(chunk.chunk_type)
+        chunk_type_str = (
+            chunk.chunk_type.value
+            if hasattr(chunk.chunk_type, "value")
+            else str(chunk.chunk_type)
+        )
 
         # Determine symbol type from chunk type
         symbol_type = chunk_type_to_symbol_type.get(chunk_type_str.lower(), "variable")
@@ -258,7 +263,7 @@ def build_symbol_table_from_chunks(script_chunks: list[Chunk]) -> VueSymbolTable
             start_line=chunk.start_line,
             end_line=chunk.end_line,
             is_reactive=is_reactive,
-            metadata=chunk.metadata.copy() if chunk.metadata else {}
+            metadata=chunk.metadata.copy() if chunk.metadata else {},
         )
 
         # Add composable name to metadata if detected
@@ -270,27 +275,18 @@ def build_symbol_table_from_chunks(script_chunks: list[Chunk]) -> VueSymbolTable
         # Extract function parameters as symbols (for template access)
         if chunk.metadata and "parameters" in chunk.metadata:
             parameters = chunk.metadata["parameters"]
-            # Handle both list of dicts and list of strings
-            if isinstance(parameters, list):
-                for param in parameters:
-                    if isinstance(param, dict):
-                        param_name = param.get("name", "")
-                    elif isinstance(param, str):
-                        param_name = param
-                    else:
-                        continue
-
-                    if param_name and param_name not in JS_KEYWORDS:
-                        param_symbol = VueSymbol(
-                            name=param_name,
-                            type="parameter",
-                            chunk_symbol=chunk.symbol,
-                            start_line=chunk.start_line,
-                            end_line=chunk.end_line,
-                            is_reactive=False,
-                            metadata={"parent": chunk.symbol}
-                        )
-                        symbol_table.add_symbol(param_symbol)
+            for param_name in extract_parameter_names(parameters):
+                if param_name and param_name not in JS_KEYWORDS:
+                    param_symbol = VueSymbol(
+                        name=param_name,
+                        type="parameter",
+                        chunk_symbol=chunk.symbol,
+                        start_line=chunk.start_line,
+                        end_line=chunk.end_line,
+                        is_reactive=False,
+                        metadata={"parent": chunk.symbol},
+                    )
+                    symbol_table.add_symbol(param_symbol)
 
         # For composables with destructuring, extract destructured names
         if is_composable and "{" in chunk.code:
@@ -301,7 +297,9 @@ def build_symbol_table_from_chunks(script_chunks: list[Chunk]) -> VueSymbolTable
 
                 if destructured:
                     # Parse destructured variables
-                    var_names = [v.strip() for v in destructured.split(",") if v.strip()]
+                    var_names = [
+                        v.strip() for v in destructured.split(",") if v.strip()
+                    ]
                     for var_name in var_names:
                         # Remove any aliases (e.g., "user: userData" -> "user")
                         if ":" in var_name:
@@ -319,7 +317,10 @@ def build_symbol_table_from_chunks(script_chunks: list[Chunk]) -> VueSymbolTable
                             start_line=chunk.start_line,
                             end_line=chunk.end_line,
                             is_reactive=True,
-                            metadata={"composable": composable_name, "parent": chunk.symbol}
+                            metadata={
+                                "composable": composable_name,
+                                "parent": chunk.symbol,
+                            },
                         )
                         symbol_table.add_symbol(destructured_symbol)
 
@@ -357,7 +358,13 @@ def build_symbol_table(
                 # Real parsed chunks have the symbol name in the code
                 chunk.symbol in chunk.code
                 # Or have TypeScript parser metadata
-                or (chunk.metadata and any(k in chunk.metadata for k in ["parameters", "return_type", "decorators"]))
+                or (
+                    chunk.metadata
+                    and any(
+                        k in chunk.metadata
+                        for k in ["parameters", "return_type", "decorators"]
+                    )
+                )
                 # Or are recognizable chunk types
                 or chunk.chunk_type.value in ["function", "method", "class"]
             )

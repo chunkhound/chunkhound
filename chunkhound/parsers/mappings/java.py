@@ -7,18 +7,15 @@ including classes, interfaces, methods, constructors, annotations, and Javadoc.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from loguru import logger
-from tree_sitter import Node
+from tree_sitter import Node as TSNode
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 from .base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
 
 
 class JavaMapping(BaseMapping):
@@ -71,7 +68,7 @@ class JavaMapping(BaseMapping):
         (block_comment) @comment
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract method name from a Java method definition node.
 
         Args:
@@ -101,7 +98,7 @@ class JavaMapping(BaseMapping):
 
         return self.get_fallback_name(node, "method")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract class name from a Java class definition node.
 
         Args:
@@ -130,7 +127,7 @@ class JavaMapping(BaseMapping):
 
         return self.get_fallback_name(node, "class")
 
-    def extract_method_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_method_name(self, node: TSNode | None, source: str) -> str:
         """Extract method name from a Java method definition node.
 
         Args:
@@ -143,7 +140,7 @@ class JavaMapping(BaseMapping):
         # Delegate to extract_function_name as Java methods are functions
         return self.extract_function_name(node, source)
 
-    def extract_parameters(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter names and types from a Java method node.
 
         Args:
@@ -198,7 +195,7 @@ class JavaMapping(BaseMapping):
 
         return parameters
 
-    def extract_package_name(self, root_node: "TSNode | None", source: str) -> str:
+    def extract_package_name(self, root_node: TSNode | None, source: str) -> str:
         """Extract package name from Java file.
 
         Args:
@@ -230,7 +227,7 @@ class JavaMapping(BaseMapping):
 
         return ""
 
-    def extract_annotations(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_annotations(self, node: TSNode | None, source: str) -> list[str]:
         """Extract Java annotations from a node.
 
         Args:
@@ -276,7 +273,7 @@ class JavaMapping(BaseMapping):
 
         return annotations
 
-    def extract_type_parameters(self, node: "TSNode | None", source: str) -> str:
+    def extract_type_parameters(self, node: TSNode | None, source: str) -> str:
         """Extract generic type parameters from a Java node.
 
         Args:
@@ -299,7 +296,7 @@ class JavaMapping(BaseMapping):
 
         return ""
 
-    def extract_return_type(self, node: "TSNode | None", source: str) -> str | None:
+    def extract_return_type(self, node: TSNode | None, source: str) -> str | None:
         """Extract return type from a Java method node.
 
         Args:
@@ -335,7 +332,7 @@ class JavaMapping(BaseMapping):
 
         return None
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a Java node should be included as a chunk.
 
         Args:
@@ -412,7 +409,7 @@ class JavaMapping(BaseMapping):
 
     def get_qualified_name(
         self,
-        node: "TSNode | None",
+        node: TSNode | None,
         source: str,
         package_name: str = "",
         parent_name: str = "",
@@ -463,12 +460,12 @@ class JavaMapping(BaseMapping):
             logger.error(f"Failed to get Java qualified name: {e}")
             return self.get_fallback_name(node, "symbol")
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self,
         import_text: str,
         base_dir: Path,
         source_file: Path,
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve Java import to file path.
 
         Args:
@@ -477,17 +474,17 @@ class JavaMapping(BaseMapping):
             source_file: Path to the file containing the import
 
         Returns:
-            Path to the imported file, or None if not found
+            Path to the imported file (empty list if not found)
         """
         # Extract class path: import com.example.Foo;
         # or import static com.example.Foo.bar;
         match = re.search(r"import\s+(?:static\s+)?([\w.]+);", import_text)
         if not match:
-            return None
+            return []
 
         class_path = match.group(1)
         if not class_path:
-            return None
+            return []
 
         # Convert to file path (last part is class name)
         rel_path = class_path.replace(".", "/") + ".java"
@@ -496,14 +493,14 @@ class JavaMapping(BaseMapping):
         for prefix in ["", "src/main/java/", "src/", "app/src/main/java/"]:
             full_path = base_dir / prefix / rel_path
             if full_path.exists():
-                return full_path
+                return [full_path]
 
-        return None
+        return []
 
     def extract_constants(
         self,
         concept: UniversalConcept,
-        captures: dict[str, Node],
+        captures: dict[str, TSNode],
         content: bytes,
     ) -> list[dict[str, str]] | None:
         """Extract constant definitions from Java code.
@@ -699,7 +696,7 @@ class JavaMapping(BaseMapping):
             return None
 
     def extract_name(
-        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for this concept."""
         source = content.decode("utf-8")
@@ -711,14 +708,21 @@ class JavaMapping(BaseMapping):
 
             # For field_declaration and local_variable_declaration, extract variable name
             def_node = captures.get("definition")
-            if def_node and def_node.type in ["field_declaration", "local_variable_declaration"]:
+            if def_node and def_node.type in [
+                "field_declaration",
+                "local_variable_declaration",
+            ]:
                 declarator = self.find_child_by_type(def_node, "variable_declarator")
                 if declarator:
                     var_name_node = self.find_child_by_type(declarator, "identifier")
                     if var_name_node:
                         return self.get_node_text(var_name_node, source).strip()
                 line = def_node.start_point[0] + 1
-                node_type = "local" if def_node.type == "local_variable_declaration" else "field"
+                node_type = (
+                    "local"
+                    if def_node.type == "local_variable_declaration"
+                    else "field"
+                )
                 return f"{node_type}_line_{line}"
 
             return "unnamed_definition"
@@ -764,7 +768,7 @@ class JavaMapping(BaseMapping):
         return "unnamed"
 
     def extract_content(
-        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for this concept."""
         source = content.decode("utf-8")
@@ -779,7 +783,7 @@ class JavaMapping(BaseMapping):
         return ""
 
     def extract_metadata(
-        self, concept: UniversalConcept, captures: dict[str, Node], content: bytes
+        self, concept: UniversalConcept, captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract Java-specific metadata."""
         source = content.decode("utf-8")
@@ -821,8 +825,13 @@ class JavaMapping(BaseMapping):
                     # Other modifiers
                     modifiers = []
                     modifier_keywords = [
-                        "static", "final", "abstract", "synchronized",
-                        "native", "volatile", "transient",
+                        "static",
+                        "final",
+                        "abstract",
+                        "synchronized",
+                        "native",
+                        "volatile",
+                        "transient",
                     ]
                     for mod in modifier_keywords:
                         if mod in modifiers_text:

@@ -170,14 +170,26 @@ class TomlMapping(BaseMapping):
     ) -> dict[str, Any]:
         """Extract TOML-specific metadata."""
 
-        source = content.decode("utf-8")
         metadata = {}
+
+        def_node = captures.get("definition") or (
+            list(captures.values())[0] if captures else None
+        )
+        if def_node is not None:
+            metadata["node_type"] = getattr(def_node, "type", "")
+            if def_node.type == "pair":
+                metadata["kind"] = "mapping_pair"
+                metadata["chunk_type_hint"] = "key_value"
+            elif def_node.type == "table":
+                metadata["kind"] = "table"
+                metadata["chunk_type_hint"] = "table"
 
         if not HAS_TOMLLIB:
             metadata["parser_unavailable"] = True
             metadata["parser_note"] = "tomllib/tomli not available"
             return metadata
 
+        source = content.decode("utf-8")
         try:
             data = tomllib.loads(source)
             # Store parsed data in metadata for structured access if needed
@@ -322,11 +334,11 @@ class TomlMapping(BaseMapping):
 
         return comments
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Data formats don't have imports."""
-        return None
+        return []
 
     def extract_constants(
         self,

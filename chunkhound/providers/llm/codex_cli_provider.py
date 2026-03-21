@@ -29,9 +29,6 @@ class CodexCLIProvider(BaseCLIProvider):
     - Never writes to stdout; only returns captured content to caller.
     """
 
-    # Token estimate (chars per token) — align with CLI providers
-    TOKEN_CHARS_RATIO = 4
-
     # Timeouts used in health checks (seconds)
     VERSION_CHECK_TIMEOUT = 5
     HEALTH_CHECK_TIMEOUT = 30
@@ -97,7 +94,9 @@ class CodexCLIProvider(BaseCLIProvider):
         return effort
 
     @classmethod
-    def describe_reasoning_effort_resolution(cls, requested: str | None) -> tuple[str, str]:
+    def describe_reasoning_effort_resolution(
+        cls, requested: str | None
+    ) -> tuple[str, str]:
         """Return (resolved_effort, source) for Codex CLI reasoning effort selection."""
         env_override = os.getenv("CHUNKHOUND_CODEX_REASONING_EFFORT")
         candidate = requested or env_override
@@ -126,7 +125,8 @@ class CodexCLIProvider(BaseCLIProvider):
         allowed = {"read-only", "workspace-write", "danger-full-access"}
         if candidate not in allowed:
             logger.warning(
-                "Unknown Codex sandbox mode '%s'; falling back to 'read-only'", candidate
+                "Unknown Codex sandbox mode '%s'; falling back to 'read-only'",
+                candidate,
             )
             return "read-only"
         return candidate
@@ -151,7 +151,9 @@ class CodexCLIProvider(BaseCLIProvider):
         # avoid ambiguity across CLI versions.
         return '"' + value.replace('"', '\\"') + '"'
 
-    def _extract_agent_message_from_jsonl(self, stdout_text: str) -> tuple[str | None, dict[str, Any] | None]:
+    def _extract_agent_message_from_jsonl(
+        self, stdout_text: str
+    ) -> tuple[str | None, dict[str, Any] | None]:
         """Extract final agent message text and usage from `codex exec --json` output."""
         import json
 
@@ -303,14 +305,22 @@ class CodexCLIProvider(BaseCLIProvider):
                 if v is not None:
                     env[k] = v
 
-        auth_keys = [s.strip() for s in os.getenv(
-            "CHUNKHOUND_CODEX_AUTH_ENV",
-            "OPENAI_API_KEY,CODEX_API_KEY,ANTHROPIC_API_KEY,BEARER_TOKEN",
-        ).split(",") if s.strip()]
-        passthrough_keys = [s.strip() for s in os.getenv(
-            "CHUNKHOUND_CODEX_PASSTHROUGH_ENV",
-            "",
-        ).split(",") if s.strip()]
+        auth_keys = [
+            s.strip()
+            for s in os.getenv(
+                "CHUNKHOUND_CODEX_AUTH_ENV",
+                "OPENAI_API_KEY,CODEX_API_KEY,ANTHROPIC_API_KEY,BEARER_TOKEN",
+            ).split(",")
+            if s.strip()
+        ]
+        passthrough_keys = [
+            s.strip()
+            for s in os.getenv(
+                "CHUNKHOUND_CODEX_PASSTHROUGH_ENV",
+                "",
+            ).split(",")
+            if s.strip()
+        ]
 
         overlay_home = self._build_overlay_home(effective_model)
         env["CODEX_HOME"] = overlay_home
@@ -340,7 +350,9 @@ class CodexCLIProvider(BaseCLIProvider):
         # prevent long "think+write" runs when the prompt requests overly-large outputs.
         extra_args += ["-c", f"model_max_output_tokens={int(max_tokens)}"]
 
-        override_mode = os.getenv("CHUNKHOUND_CODEX_CONFIG_OVERRIDE", "env").strip().lower()
+        override_mode = (
+            os.getenv("CHUNKHOUND_CODEX_CONFIG_OVERRIDE", "env").strip().lower()
+        )
         if config_file_path:
             if override_mode == "flag":
                 flag = os.getenv("CHUNKHOUND_CODEX_CONFIG_FLAG", "--config")
@@ -397,9 +409,9 @@ class CodexCLIProvider(BaseCLIProvider):
                             binary,
                             "exec",
                             "-",
-                            *( ["--json"] if json_mode else [] ),
+                            *(["--json"] if json_mode else []),
                             *extra_args,
-                            *( ["--skip-git-repo-check"] if add_skip_git else [] ),
+                            *(["--skip-git-repo-check"] if add_skip_git else []),
                             cwd=cwd,
                             stdin=asyncio.subprocess.PIPE,
                             stdout=asyncio.subprocess.PIPE,
@@ -425,9 +437,9 @@ class CodexCLIProvider(BaseCLIProvider):
                             binary,
                             "exec",
                             content,
-                            *( ["--json"] if json_mode else [] ),
+                            *(["--json"] if json_mode else []),
                             *extra_args,
-                            *( ["--skip-git-repo-check"] if add_skip_git else [] ),
+                            *(["--skip-git-repo-check"] if add_skip_git else []),
                             cwd=cwd,
                             stdout=asyncio.subprocess.PIPE,
                             stderr=asyncio.subprocess.PIPE,
@@ -458,14 +470,20 @@ class CodexCLIProvider(BaseCLIProvider):
                         # Skip-git repo check negotiation for newer Codex builds
                         if "skip-git-repo-check" in err and not add_skip_git:
                             add_skip_git = True
-                            logger.warning("codex exec requires --skip-git-repo-check; retrying with flag")
+                            logger.warning(
+                                "codex exec requires --skip-git-repo-check; retrying with flag"
+                            )
                             continue
                         # Some older Codex builds may reject the flag; fall back by removing it.
-                        if add_skip_git and "skip-git-repo-check" in err_lower and (
-                            "unknown option" in err_lower
-                            or "unrecognized option" in err_lower
-                            or "unknown flag" in err_lower
-                            or "unexpected argument" in err_lower
+                        if (
+                            add_skip_git
+                            and "skip-git-repo-check" in err_lower
+                            and (
+                                "unknown option" in err_lower
+                                or "unrecognized option" in err_lower
+                                or "unknown flag" in err_lower
+                                or "unexpected argument" in err_lower
+                            )
                         ):
                             add_skip_git = False
                             logger.warning(
@@ -474,9 +492,13 @@ class CodexCLIProvider(BaseCLIProvider):
                             continue
 
                         # If stdin failed (e.g., BrokenPipe or codex not reading stdin), fall back to argv with truncation.
-                        if use_stdin and ("broken pipe" in err_lower or "stdin" in err_lower):
+                        if use_stdin and (
+                            "broken pipe" in err_lower or "stdin" in err_lower
+                        ):
                             use_stdin = False
-                            logger.warning("codex exec stdin not supported; retrying with argv mode")
+                            logger.warning(
+                                "codex exec stdin not supported; retrying with argv mode"
+                            )
                             continue
                         last_error = RuntimeError(
                             f"codex exec failed (exit {proc.returncode}): {err}"
@@ -490,7 +512,9 @@ class CodexCLIProvider(BaseCLIProvider):
 
                     stdout_text = stdout.decode("utf-8", errors="ignore").strip()
                     if json_mode:
-                        message, usage = self._extract_agent_message_from_jsonl(stdout_text)
+                        message, usage = self._extract_agent_message_from_jsonl(
+                            stdout_text
+                        )
                         if debug_codex and usage:
                             logger.debug("Codex CLI usage: %s", usage)
                         if message and message.strip():
@@ -545,7 +569,9 @@ class CodexCLIProvider(BaseCLIProvider):
                                     "Codex CLI argv too long on attempt %d; switching to stdin",
                                     attempt + 1,
                                 )
-                            logger.warning("codex exec argv too long; retrying with stdin mode")
+                            logger.warning(
+                                "codex exec argv too long; retrying with stdin mode"
+                            )
                             continue
                     raise
                 # Let unexpected exceptions propagate; overlay cleanup happens in the outer finally
@@ -605,7 +631,9 @@ class CodexCLIProvider(BaseCLIProvider):
         timeout: int | None = None,
     ) -> str:
         text = self._merge_prompts(prompt, system)
-        max_tokens = max_completion_tokens if max_completion_tokens is not None else 4096
+        max_tokens = (
+            max_completion_tokens if max_completion_tokens is not None else 4096
+        )
         return await self._run_exec(
             text,
             cwd=None,
@@ -616,9 +644,15 @@ class CodexCLIProvider(BaseCLIProvider):
 
     async def health_check(self) -> dict[str, Any]:
         if not self._codex_available():
-            return {"status": "unhealthy", "provider": self.name, "error": "codex not found"}
+            return {
+                "status": "unhealthy",
+                "provider": self.name,
+                "error": "codex not found",
+            }
         try:
-            sample = await self.complete("Say 'OK'", max_completion_tokens=10, timeout=self.HEALTH_CHECK_TIMEOUT)
+            sample = await self.complete(
+                "Say 'OK'", max_completion_tokens=10, timeout=self.HEALTH_CHECK_TIMEOUT
+            )
             return {
                 "status": "healthy",
                 "provider": self.name,

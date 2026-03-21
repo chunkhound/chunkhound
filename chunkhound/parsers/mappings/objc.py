@@ -22,13 +22,7 @@ from .base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
 if TYPE_CHECKING:
     from chunkhound.parsers.universal_engine import UniversalConcept
 
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TREE_SITTER_AVAILABLE = False
-    TSNode = Any  # type: ignore
+from tree_sitter import Node as TSNode
 
 
 class ObjCMapping(BaseMapping):
@@ -86,7 +80,7 @@ class ObjCMapping(BaseMapping):
         (property_declaration) @property_def
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract method name from an Objective-C method definition node.
 
         Handles both instance methods (-) and class methods (+).
@@ -135,7 +129,7 @@ class ObjCMapping(BaseMapping):
 
         return self.get_fallback_name(node, "method")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract class name from an Objective-C class definition node.
 
         Handles @interface, @implementation, categories, and protocols.
@@ -182,7 +176,7 @@ class ObjCMapping(BaseMapping):
 
         return self.get_fallback_name(node, "class")
 
-    def extract_parameters(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter names from an Objective-C method node.
 
         Args:
@@ -218,7 +212,7 @@ class ObjCMapping(BaseMapping):
         return parameters
 
     def extract_property_attributes(
-        self, node: "TSNode | None", source: str
+        self, node: TSNode | None, source: str
     ) -> list[str]:
         """Extract property attributes from an @property declaration.
 
@@ -252,7 +246,7 @@ class ObjCMapping(BaseMapping):
 
         return attributes
 
-    def extract_superclass(self, node: "TSNode | None", source: str) -> str | None:
+    def extract_superclass(self, node: TSNode | None, source: str) -> str | None:
         """Extract superclass name from an Objective-C class interface.
 
         Args:
@@ -279,7 +273,7 @@ class ObjCMapping(BaseMapping):
 
         return None
 
-    def extract_protocols(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_protocols(self, node: TSNode | None, source: str) -> list[str]:
         """Extract protocol names that a class conforms to.
 
         Args:
@@ -311,7 +305,7 @@ class ObjCMapping(BaseMapping):
 
         return protocols
 
-    def is_class_method(self, node: "TSNode | None", source: str) -> bool:
+    def is_class_method(self, node: TSNode | None, source: str) -> bool:
         """Check if a method is a class method (+ prefix) vs instance method (- prefix).
 
         Args:
@@ -335,7 +329,7 @@ class ObjCMapping(BaseMapping):
 
         return False
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if an Objective-C node should be included as a chunk.
 
         Filters out very small nodes and empty definitions.
@@ -419,7 +413,7 @@ class ObjCMapping(BaseMapping):
         return None
 
     def extract_name(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for this concept.
 
@@ -481,7 +475,7 @@ class ObjCMapping(BaseMapping):
         return "unnamed"
 
     def extract_content(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for this concept.
 
@@ -506,7 +500,7 @@ class ObjCMapping(BaseMapping):
         return ""
 
     def extract_metadata(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract Objective-C-specific metadata.
 
@@ -612,7 +606,7 @@ class ObjCMapping(BaseMapping):
         return metadata
 
     def extract_constants(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> list[dict[str, str]] | None:
         """Extract constant definitions from Objective-C code.
 
@@ -645,7 +639,7 @@ class ObjCMapping(BaseMapping):
         if def_node.type == "preproc_def":
             # Extract #define NAME VALUE
             node_text = self.get_node_text(def_node, source).strip()
-            match = re.match(r'#define\s+([A-Za-z_][A-Za-z0-9_]*)\s+(.+)', node_text)
+            match = re.match(r"#define\s+([A-Za-z_][A-Za-z0-9_]*)\s+(.+)", node_text)
             if not match:
                 return None
 
@@ -697,9 +691,9 @@ class ObjCMapping(BaseMapping):
 
         return None
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve Objective-C include to file path.
 
         Args:
@@ -708,7 +702,7 @@ class ObjCMapping(BaseMapping):
             source_file: Path to the file containing the import
 
         Returns:
-            Resolved absolute path if found, None otherwise (system includes)
+            Resolved absolute path (empty list for system includes or not found)
         """
         # Local includes: #include "file.h" or #import "file.h"
         local_match = re.search(r'#(?:include|import)\s*"(.+?)"', import_text)
@@ -718,13 +712,13 @@ class ObjCMapping(BaseMapping):
             # Try relative to source file
             resolved = (source_file.parent / include_path).resolve()
             if resolved.exists():
-                return resolved
+                return [resolved]
 
             # Try relative to base_dir and common include paths
             for prefix in ["", "include/", "src/", "inc/"]:
                 full_path = base_dir / prefix / include_path
                 if full_path.exists():
-                    return full_path
+                    return [full_path]
 
-        # System includes (#include <...> or #import <...>) - external, return None
-        return None
+        # System includes (#include <...> or #import <...>) - external, return empty list
+        return []

@@ -4,25 +4,27 @@ Vue SFCs require special handling because they contain multiple language
 sections (template, script, style) that need to be parsed separately.
 """
 
+from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from chunkhound.core.models.chunk import Chunk
 from chunkhound.core.types.common import (
-    ChunkType,
     FileId,
-    FilePath,
     Language,
     LineNumber,
+)
+from chunkhound.parsers.chunk_splitter import (
+    CASTConfig,
+    ChunkSplitter,
+    compute_end_line,
+    universal_to_chunk,
 )
 from chunkhound.parsers.mappings.vue import VueMapping
 from chunkhound.parsers.mappings.vue_template import VueTemplateMapping
 from chunkhound.parsers.parser_factory import create_parser_for_language
-from chunkhound.parsers.universal_parser import CASTConfig, UniversalParser
+from chunkhound.parsers.universal_engine import UniversalChunk, UniversalConcept
+from chunkhound.parsers.universal_parser import UniversalParser
 from chunkhound.parsers.vue_cross_ref import add_cross_references
-
-if TYPE_CHECKING:
-    pass
 
 
 class VueParser:
@@ -71,18 +73,26 @@ class VueParser:
     See: vue_cross_ref.py for reference linking implementation
     """
 
-    def __init__(self, cast_config: CASTConfig | None = None):
+    def __init__(
+        self,
+        cast_config: CASTConfig | None = None,
+        detect_embedded_sql: bool = True,
+    ):
         """Initialize Vue parser.
 
         Args:
             cast_config: Configuration for cAST chunking algorithm
-        """
+            detect_embedded_sql: Whether to detect SQL in string literals (script sections only)
+        """  # noqa: E501
         self.vue_mapping = VueMapping()
         self.vue_template_mapping = VueTemplateMapping()
         self.cast_config = cast_config or CASTConfig()
+        self.chunk_splitter = ChunkSplitter(self.cast_config)
 
         # Create TypeScript parser for script sections
-        self.ts_parser = create_parser_for_language(Language.TYPESCRIPT, cast_config)
+        self.ts_parser = create_parser_for_language(
+            Language.TYPESCRIPT, cast_config, detect_embedded_sql
+        )
 
         # Create template parser using tree-sitter-vue
         self.template_parser = self._create_template_parser()
@@ -104,8 +114,13 @@ class VueParser:
             # Create TreeSitterEngine for Vue templates
             engine = TreeSitterEngine("vue", vue_lang)
 
-            # Create UniversalParser with VueTemplateMapping
-            return UniversalParser(engine, self.vue_template_mapping, self.cast_config)
+            # Create UniversalParser with VueTemplateMapping (no SQL in templates)
+            return UniversalParser(
+                engine,
+                self.vue_template_mapping,
+                self.cast_config,
+                detect_embedded_sql=False,
+            )
 
         except ImportError:
             # tree-sitter-language-pack not available
@@ -186,8 +201,6 @@ class VueParser:
 
                 # Create new chunk with adjusted line numbers and metadata
                 # Chunks are frozen dataclasses, so we need to create a new one
-                from dataclasses import replace
-
                 adjusted_chunk = replace(
                     chunk,
                     start_line=LineNumber(chunk.start_line + start_line),
@@ -211,43 +224,48 @@ class VueParser:
                     template_chunks.extend(parsed_template_chunks)
                 else:
                     # Fallback: create simple text block for template
-                    end_line = start_line + template_content.count("\n")
+                    end_line = compute_end_line(template_content, start_line)
 
-                    template_chunk = Chunk(
-                        symbol="vue_template",
-                        start_line=LineNumber(start_line),
-                        end_line=LineNumber(end_line),
-                        code=template_content,
-                        chunk_type=ChunkType.BLOCK,
-                        file_id=file_id or FileId(0),
-                        language=Language.VUE,
-                        file_path=FilePath(str(file_path)) if file_path else None,
+                    uchunk = UniversalChunk(
+                        concept=UniversalConcept.BLOCK,
+                        name="vue_template",
+                        content=template_content,
+                        start_line=start_line,
+                        end_line=end_line,
                         metadata={"vue_section": "template", "is_vue_sfc": True},
+                        language_node_type="vue_template",
                     )
-                    template_chunks.append(template_chunk)
+
+                    # Split if needed and convert to Chunks
+                    for uc in self.chunk_splitter.validate_and_split(uchunk):
+                        chunk = universal_to_chunk(uc, file_path, file_id, Language.VUE)
+                        template_chunks.append(chunk)
 
         # Create chunks for style sections (optional, as text blocks)
         for attrs, style_content, start_line in sections["style"]:
             if style_content.strip():
-                end_line = start_line + style_content.count("\n")
+                end_line = compute_end_line(style_content, start_line)
                 is_scoped = "scoped" in attrs.lower()
 
-                style_chunk = Chunk(
-                    symbol="vue_style",
-                    start_line=LineNumber(start_line),
-                    end_line=LineNumber(end_line),
-                    code=style_content,
-                    chunk_type=ChunkType.BLOCK,
-                    file_id=file_id or FileId(0),
-                    language=Language.VUE,
-                    file_path=FilePath(str(file_path)) if file_path else None,
+                uchunk = UniversalChunk(
+                    concept=UniversalConcept.BLOCK,
+                    name="vue_style",
+                    content=style_content,
+                    start_line=start_line,
+                    end_line=end_line,
                     metadata={
                         "vue_section": "style",
                         "vue_style_scoped": is_scoped,
                         "is_vue_sfc": True,
                     },
+                    language_node_type="vue_style",
                 )
-                chunks.append(style_chunk)
+
+                # Split if needed and convert to Chunks
+                for uc in self.chunk_splitter.validate_and_split(uchunk):
+                    chunks.append(
+                        universal_to_chunk(uc, file_path, file_id, Language.VUE)
+                    )
 
         # Perform cross-reference analysis (Phase 2.3)
         # Link template references to script symbols
@@ -301,8 +319,6 @@ class VueParser:
             # Adjust line numbers to account for:
             # 1. The <template> wrapper line (subtract 1)
             # 2. Template section position in file (add start_line)
-            from dataclasses import replace
-
             adjusted_chunks = []
             for chunk in template_chunks:
                 adjusted_chunk = replace(

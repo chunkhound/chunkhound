@@ -14,8 +14,7 @@ recursive approach to create chunks that:
 - Ensure plug-and-play compatibility with existing systems
 """
 
-import re
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -30,60 +29,33 @@ from chunkhound.core.types.common import (
     Language,
     LineNumber,
 )
-from chunkhound.core.utils import estimate_tokens
+from chunkhound.core.utils import estimate_tokens_chunking
 from chunkhound.interfaces.language_parser import ParseResult
-from chunkhound.utils.chunk_deduplication import deduplicate_chunks, get_chunk_specificity
+from chunkhound.utils.chunk_deduplication import (
+    deduplicate_chunks,
+    get_chunk_specificity,
+)
 from chunkhound.utils.normalization import normalize_content
 
+from .chunk_splitter import CASTConfig, ChunkMetrics, ChunkSplitter
 from .concept_extractor import ConceptExtractor
 from .mapping_adapter import MappingAdapter
 from .mappings.base import BaseMapping
 from .universal_engine import TreeSitterEngine, UniversalChunk, UniversalConcept
 
-
-@dataclass
-class CASTConfig:
-    """Configuration for cAST algorithm.
-
-    Based on research paper: "cAST: Enhancing Code Retrieval-Augmented Generation
-    with Structural Chunking via Abstract Syntax Tree"
-    """
-
-    max_chunk_size: int = 1200  # Reduced from 2000 (non-whitespace chars)
-    min_chunk_size: int = 50  # Minimum chunk size to avoid tiny fragments
-    merge_threshold: float = (
-        0.8  # Merge siblings if combined size < threshold * max_size
-    )
-    preserve_structure: bool = True  # Prioritize syntactic boundaries
-    greedy_merge: bool = True  # Greedily merge adjacent sibling nodes
-    safe_token_limit: int = 6000  # Conservative token limit (well under 8191 API limit)
-
-
-@dataclass
-class ChunkMetrics:
-    """Metrics for measuring chunk quality and size."""
-
-    non_whitespace_chars: int
-    total_chars: int
-    lines: int
-    ast_depth: int
-
-    @classmethod
-    def from_content(cls, content: str, ast_depth: int = 0) -> "ChunkMetrics":
-        """Calculate metrics from content string."""
-        non_ws = len(re.sub(r"\s", "", content))
-        total = len(content)
-        lines = len(content.split("\n"))
-        return cls(non_ws, total, lines, ast_depth)
-
-    def estimated_tokens(self, ratio: float = 3.5) -> int:
-        """Estimate token count using character-based ratio.
-
-        Args:
-            ratio: Chars-to-tokens ratio (conservative default 3.5)
-        """
-        # Fallback to conservative ratio-based estimation
-        return int(self.non_whitespace_chars / ratio)
+# Concept pairs that can be safely merged across concept boundaries.
+# Used in both _can_merge_chunks and _greedy_merge_pass.
+_ConceptPair = tuple[UniversalConcept, UniversalConcept]
+_COMPATIBLE_CONCEPT_PAIRS: frozenset[_ConceptPair] = frozenset(
+    {
+        (UniversalConcept.COMMENT, UniversalConcept.DEFINITION),
+        (UniversalConcept.DEFINITION, UniversalConcept.COMMENT),
+        (UniversalConcept.BLOCK, UniversalConcept.COMMENT),
+        (UniversalConcept.COMMENT, UniversalConcept.BLOCK),
+        (UniversalConcept.DEFINITION, UniversalConcept.STRUCTURE),
+        (UniversalConcept.STRUCTURE, UniversalConcept.DEFINITION),
+    }
+)
 
 
 class UniversalParser:
@@ -98,9 +70,10 @@ class UniversalParser:
 
     def __init__(
         self,
-        engine: TreeSitterEngine,
+        engine: TreeSitterEngine | None,
         mapping: BaseMapping,
         cast_config: CASTConfig | None = None,
+        detect_embedded_sql: bool = True,
     ):
         """Initialize universal parser.
 
@@ -108,6 +81,7 @@ class UniversalParser:
             engine: TreeSitterEngine for this language
             mapping: BaseMapping for this language (adapted if needed)
             cast_config: Configuration for cAST algorithm
+            detect_embedded_sql: Whether to detect SQL in string literals
         """
         self.engine = engine
         self.base_mapping = mapping
@@ -123,16 +97,28 @@ class UniversalParser:
             adapted_mapping = mapping  # type: ignore
 
         self.mapping = adapted_mapping
-        self.extractor = ConceptExtractor(engine, adapted_mapping)
+        self.extractor = ConceptExtractor(engine, adapted_mapping) if engine else None
         self.cast_config = cast_config or CASTConfig()
+        self.detect_embedded_sql = detect_embedded_sql
+
+        # Initialize embedded SQL detector if enabled
+        self.sql_detector = None
+        if (
+            detect_embedded_sql
+            and self.base_mapping
+            and self.base_mapping.language is not Language.SQL
+            and self.engine is not None
+        ):
+            from .embedded_sql_detector import EmbeddedSqlDetector
+
+            self.sql_detector = EmbeddedSqlDetector(self.base_mapping.language)
+
+        # Initialize chunk splitter for enforcing size limits
+        self.chunk_splitter = ChunkSplitter(self.cast_config)
 
         # Statistics
         self._total_files_parsed = 0
         self._total_chunks_created = 0
-
-    def _estimate_tokens(self, content: str) -> int:
-        """Helper method to estimate tokens using centralized utility."""
-        return estimate_tokens(content)
 
     @property
     def language_name(self) -> str:
@@ -250,6 +236,8 @@ class UniversalParser:
         content_bytes = content.encode("utf-8")
 
         # Extract universal concepts using ConceptExtractor
+        if self.extractor is None:
+            raise RuntimeError("extractor must not be None when engine is set")
         universal_chunks = self.extractor.extract_all_concepts(
             ast_tree.root_node, content_bytes
         )
@@ -271,6 +259,13 @@ class UniversalParser:
 
         # Convert to standard Chunk format
         chunks = self._convert_to_chunks(optimized_chunks, content, file_path, file_id)
+
+        # Detect embedded SQL if enabled
+        if self.sql_detector and ast_tree:
+            embedded_sql_chunks = self._detect_embedded_sql(
+                ast_tree, content, file_path, file_id
+            )
+            chunks.extend(embedded_sql_chunks)
 
         # Update statistics
         self._total_files_parsed += 1
@@ -314,9 +309,7 @@ class UniversalParser:
                         "merge_threshold": self.cast_config.merge_threshold,
                     },
                     "language_mapping": self.mapping.__class__.__name__,
-                    "file_size": len(file_path.read_text(encoding="utf-8"))
-                    if file_path.exists()
-                    else 0,
+                    "file_size": file_path.stat().st_size if file_path.exists() else 0,
                 },
             )
 
@@ -374,28 +367,24 @@ class UniversalParser:
         for concept, concept_chunks in chunks_by_concept.items():
             if concept == UniversalConcept.DEFINITION:
                 # Definitions (functions, classes) should remain intact when possible
-                optimized_chunks.extend(
-                    self._chunk_definitions(concept_chunks, content)
-                )
+                optimized_chunks.extend(self._chunk_definitions(concept_chunks))
             elif concept == UniversalConcept.BLOCK:
                 # Blocks can be merged more aggressively
-                optimized_chunks.extend(self._chunk_blocks(concept_chunks, content))
+                optimized_chunks.extend(self._chunk_blocks(concept_chunks))
             elif concept == UniversalConcept.COMMENT:
                 # Comments can be merged with nearby code
-                optimized_chunks.extend(self._chunk_comments(concept_chunks, content))
+                optimized_chunks.extend(self._chunk_comments(concept_chunks))
             else:
                 # Other concepts use default chunking
-                optimized_chunks.extend(self._chunk_generic(concept_chunks, content))
+                optimized_chunks.extend(self._chunk_blocks(concept_chunks))
 
         # Final pass: merge adjacent chunks that are below threshold
         if self.cast_config.greedy_merge:
-            optimized_chunks = self._greedy_merge_pass(optimized_chunks, content)
+            optimized_chunks = self._greedy_merge_pass(optimized_chunks)
 
         return optimized_chunks
 
-    def _chunk_definitions(
-        self, chunks: list[UniversalChunk], content: str
-    ) -> list[UniversalChunk]:
+    def _chunk_definitions(self, chunks: list[UniversalChunk]) -> list[UniversalChunk]:
         """Apply cAST chunking to definition chunks (functions, classes, etc.).
 
         Definitions remain intact as complete semantic units.
@@ -404,147 +393,13 @@ class UniversalParser:
         result = []
 
         for chunk in chunks:
-            # Always validate and split if needed
-            split_chunks = self._validate_and_split_chunk(chunk, content)
+            # Always validate and split if needed (delegate to ChunkSplitter)
+            split_chunks = self.chunk_splitter.validate_and_split(chunk)
             result.extend(split_chunks)
 
         return result
 
-    def _validate_and_split_chunk(
-        self, chunk: UniversalChunk, content: str
-    ) -> list[UniversalChunk]:
-        """Validate chunk size and split if necessary."""
-        metrics = ChunkMetrics.from_content(chunk.content)
-        estimated_tokens = self._estimate_tokens(chunk.content)
-
-        if (
-            metrics.non_whitespace_chars <= self.cast_config.max_chunk_size
-            and estimated_tokens <= self.cast_config.safe_token_limit
-        ):
-            # Chunk fits within both limits
-            return [chunk]
-        else:
-            # Don't split Makefile rules unless they're excessively large
-            # Splitting would break the target/recipe relationship, but extremely
-            # large rules (>1.2x limit) need to be split to avoid token limit issues
-            if chunk.metadata.get("kind") == "rule":
-                # Allow up to 1.2x the limit (matching cAST algorithm tolerance)
-                # before forcing a split to maintain consistency with other chunks
-                tolerance = 1.2
-                if (
-                    metrics.non_whitespace_chars
-                    <= self.cast_config.max_chunk_size * tolerance
-                ):
-                    # Keep moderately large rules intact for semantic coherence
-                    return [chunk]
-                # For very large rules, use Makefile-specific splitting
-                # that preserves semantic coherence (target + recipe relationship)
-                return self._split_makefile_rule(chunk, content)
-
-            # Too large, apply recursive splitting
-            return self._recursive_split_chunk(chunk, content)
-
-    def _split_makefile_rule(
-        self, chunk: UniversalChunk, content: str
-    ) -> list[UniversalChunk]:
-        """Split a Makefile rule while preserving semantic coherence.
-
-        Each split chunk will contain:
-        - The target line (e.g., "install: all")
-        - A subset of recipe lines that fit within the size limit
-
-        This ensures that each chunk is semantically valid - recipe lines
-        always have their associated target.
-
-        Args:
-            chunk: The Makefile rule chunk to split
-            content: Original source content
-
-        Returns:
-            List of split chunks, each with target + recipe subset
-        """
-        lines = chunk.content.split("\n")
-
-        # Find the target line (contains ':' and not a comment)
-        target_line_idx = -1
-        target_line = ""
-        for i, line in enumerate(lines):
-            if ":" in line and not line.strip().startswith("#"):
-                target_line_idx = i
-                target_line = line
-                break
-
-        if target_line_idx == -1:
-            # No target found - fall back to regular splitting
-            return self._recursive_split_chunk(chunk, content)
-
-        # Extract recipe lines (lines after target)
-        recipe_lines = lines[target_line_idx + 1 :]
-
-        if not recipe_lines:
-            # No recipe - just return the target
-            return [chunk]
-
-        # Split recipe lines into groups that fit within size limit
-        # Each group gets the target line prepended
-        result_chunks = []
-        current_recipe_group = []
-        part_num = 1
-
-        for recipe_line in recipe_lines:
-            # Calculate size with target + current group + this line
-            test_lines = [target_line] + current_recipe_group + [recipe_line]
-            test_content = "\n".join(test_lines)
-            test_metrics = ChunkMetrics.from_content(test_content)
-
-            if test_metrics.non_whitespace_chars <= self.cast_config.max_chunk_size:
-                # Fits - add to current group
-                current_recipe_group.append(recipe_line)
-            else:
-                # Doesn't fit - finalize current group and start new one
-                if current_recipe_group:
-                    # Create chunk with target + current group
-                    chunk_content = "\n".join([target_line] + current_recipe_group)
-                    chunk_lines = len(current_recipe_group) + 1
-
-                    result_chunks.append(
-                        UniversalChunk(
-                            concept=chunk.concept,
-                            name=f"{chunk.name}_part{part_num}",
-                            content=chunk_content,
-                            start_line=chunk.start_line,
-                            end_line=chunk.start_line + chunk_lines - 1,
-                            metadata=chunk.metadata.copy(),
-                            language_node_type=chunk.language_node_type,
-                        )
-                    )
-                    part_num += 1
-
-                # Start new group with this line
-                current_recipe_group = [recipe_line]
-
-        # Don't forget the last group
-        if current_recipe_group:
-            chunk_content = "\n".join([target_line] + current_recipe_group)
-            chunk_lines = len(current_recipe_group) + 1
-
-            result_chunks.append(
-                UniversalChunk(
-                    concept=chunk.concept,
-                    name=f"{chunk.name}_part{part_num}",
-                    content=chunk_content,
-                    start_line=chunk.start_line,
-                    end_line=chunk.start_line + chunk_lines - 1,
-                    metadata=chunk.metadata.copy(),
-                    language_node_type=chunk.language_node_type,
-                )
-            )
-
-        return result_chunks if result_chunks else [chunk]
-
-    def _chunk_blocks(
-        self, chunks: list[UniversalChunk], content: str
-    ) -> list[UniversalChunk]:
+    def _chunk_blocks(self, chunks: list[UniversalChunk]) -> list[UniversalChunk]:
         """Apply cAST chunking to block chunks.
 
         Blocks are more flexible and can be merged aggressively with siblings.
@@ -559,29 +414,27 @@ class UniversalParser:
 
         for chunk in sorted_chunks[1:]:
             # Check if we can merge with current group
-            if self._can_merge_chunks(current_group, chunk, content):
+            if self._can_merge_chunks(current_group, chunk):
                 current_group.append(chunk)
             else:
                 # Finalize current group and start new one
-                merged = self._merge_chunk_group(current_group, content)
+                merged = self._merge_chunk_group(current_group)
                 result.extend(merged)
                 current_group = [chunk]
 
         # Don't forget the last group
         if current_group:
-            merged = self._merge_chunk_group(current_group, content)
+            merged = self._merge_chunk_group(current_group)
             result.extend(merged)
 
         # Final validation: ensure all chunks meet size constraints
         validated_result = []
         for chunk in result:
-            validated_result.extend(self._validate_and_split_chunk(chunk, content))
+            validated_result.extend(self.chunk_splitter.validate_and_split(chunk))
 
         return validated_result
 
-    def _chunk_comments(
-        self, chunks: list[UniversalChunk], content: str
-    ) -> list[UniversalChunk]:
+    def _chunk_comments(self, chunks: list[UniversalChunk]) -> list[UniversalChunk]:
         """Apply cAST chunking to comment chunks.
 
         Comments are merged conservatively - only consecutive comments (gap <= 1)
@@ -606,312 +459,26 @@ class UniversalParser:
                 current_group.append(chunk)
             else:
                 # Gap is too large - finalize current group and start new one
-                merged = self._merge_chunk_group(current_group, content)
+                merged = self._merge_chunk_group(current_group)
                 result.extend(merged)
                 current_group = [chunk]
 
         # Don't forget the last group
         if current_group:
-            merged = self._merge_chunk_group(current_group, content)
+            merged = self._merge_chunk_group(current_group)
             result.extend(merged)
 
         # Final validation: ensure all chunks meet size constraints
         validated_result = []
         for chunk in result:
-            validated_result.extend(self._validate_and_split_chunk(chunk, content))
+            validated_result.extend(self.chunk_splitter.validate_and_split(chunk))
 
         return validated_result
-
-    def _chunk_generic(
-        self, chunks: list[UniversalChunk], content: str
-    ) -> list[UniversalChunk]:
-        """Apply generic cAST chunking to other chunk types."""
-        return self._chunk_blocks(chunks, content)  # Use block strategy as default
-
-    def _analyze_lines(self, lines: list[str]) -> tuple[bool, bool]:
-        """Analyze line length statistics to choose optimal splitting strategy.
-
-        Returns:
-            (has_very_long_lines, is_regular_code)
-        """
-        if not lines:
-            return False, False
-
-        lengths = [len(line) for line in lines]
-        max_length = max(lengths)
-        avg_length = sum(lengths) / len(lengths)
-
-        # 20% of chunk size threshold for detecting minified/concatenated code
-        long_line_threshold = self.cast_config.max_chunk_size * 0.2
-        has_very_long_lines = max_length > long_line_threshold
-
-        # Regular code heuristics:
-        # - >10 lines: meaningful code block, not snippet
-        # - <200 chars: typical editor width
-        # - <100 avg: normal code density
-        is_regular_code = len(lines) > 10 and max_length < 200 and avg_length < 100.0
-
-        return has_very_long_lines, is_regular_code
-
-    def _recursive_split_chunk(
-        self, chunk: UniversalChunk, content: str
-    ) -> list[UniversalChunk]:
-        """Smart content-aware splitting that chooses the optimal strategy.
-
-        This implements the "split" part of the split-then-merge algorithm with
-        content analysis to choose between line-based and character-based splitting.
-        """
-        # First: Check if we even need to split
-        metrics = ChunkMetrics.from_content(chunk.content)
-        estimated_tokens = self._estimate_tokens(chunk.content)
-
-        if (
-            metrics.non_whitespace_chars <= self.cast_config.max_chunk_size
-            and estimated_tokens <= self.cast_config.safe_token_limit
-        ):
-            return [chunk]  # No splitting needed
-
-        # Second: Analyze the content structure
-        lines = chunk.content.split("\n")
-        has_very_long_lines, is_regular_code = self._analyze_lines(lines)
-
-        # Third: Choose splitting strategy based on content analysis
-        if len(lines) <= 2 or has_very_long_lines:
-            # Case 1: Single/few lines OR any line is very long
-            # Use character-based emergency splitting
-            return self._emergency_split_code(chunk, content)
-
-        elif is_regular_code:
-            # Case 2: Many short lines (normal code)
-            # Use simple line-based splitting
-            return self._split_by_lines_simple(chunk, lines)
-
-        else:
-            # Case 3: Mixed content - try line-based with emergency fallback
-            return self._split_by_lines_with_fallback(chunk, lines, content)
-
-    def _split_by_lines_simple(
-        self, chunk: UniversalChunk, lines: list[str]
-    ) -> list[UniversalChunk]:
-        """Split chunk by lines for regular code with short lines."""
-        if len(lines) <= 2:
-            return [chunk]
-
-        mid_point = len(lines) // 2
-
-        # Create two sub-chunks
-        chunk1_content = "\n".join(lines[:mid_point])
-        chunk2_content = "\n".join(lines[mid_point:])
-
-        # Simple line distribution based on content split
-        chunk1_lines = len(lines[:mid_point])
-        chunk1_end_line = chunk.start_line + chunk1_lines - 1
-        chunk2_start_line = chunk1_end_line + 1
-
-        # Ensure valid bounds
-        chunk1_end_line = max(chunk.start_line, min(chunk1_end_line, chunk.end_line))
-        chunk2_start_line = max(
-            chunk.start_line, min(chunk2_start_line, chunk.end_line)
-        )
-
-        chunk1 = UniversalChunk(
-            concept=chunk.concept,
-            name=f"{chunk.name}_part1",
-            content=chunk1_content,
-            start_line=chunk.start_line,
-            end_line=chunk1_end_line,
-            metadata=chunk.metadata.copy(),
-            language_node_type=chunk.language_node_type,
-        )
-
-        chunk2 = UniversalChunk(
-            concept=chunk.concept,
-            name=f"{chunk.name}_part2",
-            content=chunk2_content,
-            start_line=chunk2_start_line,
-            end_line=chunk.end_line,
-            metadata=chunk.metadata.copy(),
-            language_node_type=chunk.language_node_type,
-        )
-
-        # Recursively check if sub-chunks still need splitting
-        result = []
-        for sub_chunk in [chunk1, chunk2]:
-            sub_metrics = ChunkMetrics.from_content(sub_chunk.content)
-            sub_tokens = self._estimate_tokens(sub_chunk.content)
-
-            if (
-                sub_metrics.non_whitespace_chars > self.cast_config.max_chunk_size
-                or sub_tokens > self.cast_config.safe_token_limit
-            ):
-                result.extend(self._recursive_split_chunk(sub_chunk, sub_chunk.content))
-            else:
-                result.append(sub_chunk)
-
-        return result
-
-    def _split_by_lines_with_fallback(
-        self, chunk: UniversalChunk, lines: list[str], content: str
-    ) -> list[UniversalChunk]:
-        """Split by lines but fall back to emergency split if needed."""
-        # Try line-based splitting first
-        line_split_result = self._split_by_lines_simple(chunk, lines)
-
-        # Check if any chunks still exceed limits
-        validated_result = []
-        for sub_chunk in line_split_result:
-            sub_metrics = ChunkMetrics.from_content(sub_chunk.content)
-            sub_tokens = self._estimate_tokens(sub_chunk.content)
-
-            # If still over limit, use emergency split
-            if (
-                sub_metrics.non_whitespace_chars > self.cast_config.max_chunk_size
-                or sub_tokens > self.cast_config.safe_token_limit
-            ):
-                validated_result.extend(
-                    self._emergency_split_code(sub_chunk, sub_chunk.content)
-                )
-            else:
-                validated_result.append(sub_chunk)
-
-        return validated_result
-
-    def _emergency_split_code(
-        self, chunk: UniversalChunk, content: str
-    ) -> list[UniversalChunk]:
-        """Smart code splitting for minified/large single-line files."""
-        # Use the stricter limit: character limit or token-based limit
-        # Calculate max chars based on token limit using provider-specific estimation
-        estimated_tokens = self._estimate_tokens(chunk.content)
-        if estimated_tokens > 0:
-            # Calculate actual chars-to-token ratio for this content
-            actual_ratio = len(chunk.content) / estimated_tokens
-            max_chars_from_tokens = int(
-                self.cast_config.safe_token_limit * actual_ratio * 0.8
-            )
-        else:
-            # Fallback to conservative estimation
-            max_chars_from_tokens = int(self.cast_config.safe_token_limit * 3.5 * 0.8)
-        max_chars = min(self.cast_config.max_chunk_size, max_chars_from_tokens)
-
-        metrics = ChunkMetrics.from_content(chunk.content)
-        if (
-            metrics.non_whitespace_chars <= self.cast_config.max_chunk_size
-            and len(chunk.content) <= max_chars_from_tokens
-        ):
-            return [chunk]
-
-        # Smart split points for code (in order of preference)
-        split_chars = [";", "}", "{", ",", " "]
-
-        chunks = []
-        remaining = chunk.content
-        part_num = 1
-        total_content_length = len(chunk.content)
-        current_pos = (
-            0  # Track position in original content for line number calculation
-        )
-
-        while remaining:
-            remaining_metrics = ChunkMetrics.from_content(remaining)
-            if (
-                remaining_metrics.non_whitespace_chars
-                <= self.cast_config.max_chunk_size
-            ):
-                chunks.append(
-                    self._create_split_chunk(
-                        chunk, remaining, part_num, current_pos, total_content_length
-                    )
-                )
-                break
-
-            # Find best split point within size limit
-            best_split = 0
-            for split_char in split_chars:
-                # Search within character limit
-                search_end = min(max_chars, len(remaining))
-                pos = remaining.rfind(split_char, 0, search_end)
-
-                if pos > best_split:
-                    # Check if this split point gives us valid chunk size
-                    test_content = remaining[: pos + 1]
-                    test_metrics = ChunkMetrics.from_content(test_content)
-                    if (
-                        test_metrics.non_whitespace_chars
-                        <= self.cast_config.max_chunk_size
-                    ):
-                        best_split = pos + 1  # Include the split character
-                        break
-
-            # If no good split found, force split at character limit
-            if best_split == 0:
-                best_split = max_chars
-
-            chunks.append(
-                self._create_split_chunk(
-                    chunk,
-                    remaining[:best_split],
-                    part_num,
-                    current_pos,
-                    total_content_length,
-                )
-            )
-            remaining = remaining[best_split:]
-            current_pos += (
-                best_split  # Update position tracker for next chunk's line calculation
-            )
-            part_num += 1
-
-        return chunks
-
-    def _create_split_chunk(
-        self,
-        original: UniversalChunk,
-        content: str,
-        part_num: int,
-        content_start_pos: int = 0,
-        total_content_length: int = 0,
-    ) -> UniversalChunk:
-        """Create a split chunk from emergency splitting with proportional lines."""
-
-        # Simple proportional line calculation based on content position
-        original_line_span = original.end_line - original.start_line + 1
-
-        if total_content_length > 0 and content_start_pos >= 0:
-            # Calculate proportional position and length
-            position_ratio = content_start_pos / total_content_length
-            content_ratio = len(content) / total_content_length
-
-            # Distribute lines proportionally
-            line_offset = int(position_ratio * original_line_span)
-            line_span = max(1, int(content_ratio * original_line_span))
-
-            start_line = original.start_line + line_offset
-            end_line = min(original.end_line, start_line + line_span - 1)
-
-            # Ensure valid bounds
-            start_line = min(start_line, original.end_line)
-            end_line = max(end_line, start_line)
-        else:
-            # Fallback to original bounds
-            start_line = original.start_line
-            end_line = original.end_line
-
-        return UniversalChunk(
-            concept=original.concept,
-            name=f"{original.name}_part{part_num}",
-            content=content,
-            start_line=start_line,
-            end_line=end_line,
-            metadata=original.metadata.copy(),
-            language_node_type=original.language_node_type,
-        )
 
     def _can_merge_chunks(
         self,
         current_group: list[UniversalChunk],
         candidate: UniversalChunk,
-        content: str,
     ) -> bool:
         """Check if a chunk can be merged with the current group.
 
@@ -929,8 +496,8 @@ class UniversalParser:
         metrics = ChunkMetrics.from_content(total_content)
 
         # Check BOTH character and token constraints
-        estimated_tokens = self._estimate_tokens(total_content)
-        safe_token_limit = 6000
+        estimated_tokens = estimate_tokens_chunking(total_content)
+        safe_token_limit = self.cast_config.safe_token_limit
 
         if (
             metrics.non_whitespace_chars
@@ -949,22 +516,12 @@ class UniversalParser:
         # Check concept compatibility
         if last_chunk.concept != candidate.concept:
             # Only merge compatible concepts
-            compatible_pairs = {
-                (UniversalConcept.COMMENT, UniversalConcept.DEFINITION),
-                (UniversalConcept.DEFINITION, UniversalConcept.COMMENT),
-                (UniversalConcept.BLOCK, UniversalConcept.COMMENT),
-                (UniversalConcept.COMMENT, UniversalConcept.BLOCK),
-                (UniversalConcept.DEFINITION, UniversalConcept.STRUCTURE),
-                (UniversalConcept.STRUCTURE, UniversalConcept.DEFINITION),
-            }
-            if (last_chunk.concept, candidate.concept) not in compatible_pairs:
+            if (last_chunk.concept, candidate.concept) not in _COMPATIBLE_CONCEPT_PAIRS:
                 return False
 
         return True
 
-    def _merge_chunk_group(
-        self, group: list[UniversalChunk], content: str
-    ) -> list[UniversalChunk]:
+    def _merge_chunk_group(self, group: list[UniversalChunk]) -> list[UniversalChunk]:
         """Merge a group of chunks into optimized chunks.
 
         This implements the "merge" part of the split-then-merge algorithm.
@@ -983,7 +540,7 @@ class UniversalParser:
                 combined_content += "\n" + chunk.content
 
         metrics = ChunkMetrics.from_content(combined_content)
-        estimated_tokens = self._estimate_tokens(combined_content)
+        estimated_tokens = estimate_tokens_chunking(combined_content)
 
         # If combined chunk is too large, return original chunks
         if (
@@ -1019,9 +576,7 @@ class UniversalParser:
 
         return [merged_chunk]
 
-    def _greedy_merge_pass(
-        self, chunks: list[UniversalChunk], content: str
-    ) -> list[UniversalChunk]:
+    def _greedy_merge_pass(self, chunks: list[UniversalChunk]) -> list[UniversalChunk]:
         """Final greedy merge pass to maximize information density.
 
         This is the final optimization step of the cAST algorithm.
@@ -1039,22 +594,9 @@ class UniversalParser:
             # Only merge chunks with compatible concept types to preserve
             # semantic boundaries
             if current_chunk.concept != next_chunk.concept:
-                # Define compatible concept pairs that can be safely merged
-                # These pairs preserve semantic meaning when combined:
-                # - COMMENT + DEFINITION: Docstrings with functions/classes
-                # - BLOCK + COMMENT: Comments within code blocks
-                # - DEFINITION + STRUCTURE: Definitions with file structure
-                compatible_pairs = {
-                    (UniversalConcept.COMMENT, UniversalConcept.DEFINITION),
-                    (UniversalConcept.DEFINITION, UniversalConcept.COMMENT),
-                    (UniversalConcept.BLOCK, UniversalConcept.COMMENT),
-                    (UniversalConcept.COMMENT, UniversalConcept.BLOCK),
-                    (UniversalConcept.DEFINITION, UniversalConcept.STRUCTURE),
-                    (UniversalConcept.STRUCTURE, UniversalConcept.DEFINITION),
-                }
-
                 # If concepts are not compatible, don't merge
-                if (current_chunk.concept, next_chunk.concept) not in compatible_pairs:
+                pair = (current_chunk.concept, next_chunk.concept)
+                if pair not in _COMPATIBLE_CONCEPT_PAIRS:
                     result.append(current_chunk)
                     current_chunk = next_chunk
                     continue
@@ -1072,27 +614,29 @@ class UniversalParser:
                 current_chunk = next_chunk
                 continue
 
-            # Don't merge if either chunk explicitly prevents merging
-            # This respects language-specific metadata that marks chunks as semantically
-            # independent (e.g., HCL attributes and blocks that should remain separate)
-            current_prevents_merge = current_chunk.metadata.get("prevent_merge_across_concepts", False)
-            next_prevents_merge = next_chunk.metadata.get("prevent_merge_across_concepts", False)
+            # Don't merge if either chunk explicitly prevents merging.
+            # This respects language-specific metadata that marks chunks as
+            # semantically independent (e.g., HCL attributes and blocks).
+            prevent_key = "prevent_merge_across_concepts"
+            current_prevents_merge = current_chunk.metadata.get(prevent_key, False)
+            next_prevents_merge = next_chunk.metadata.get(prevent_key, False)
             if current_prevents_merge or next_prevents_merge:
                 result.append(current_chunk)
                 current_chunk = next_chunk
                 continue
 
             # Simple merge logic: only if content is different and fits size limit
-            if next_chunk.content.strip() not in current_chunk.content:
+            is_new_content = next_chunk.content.strip() not in current_chunk.content
+            if is_new_content:
                 combined_content = current_chunk.content + "\n" + next_chunk.content
             else:
                 combined_content = current_chunk.content  # Skip duplicate content
 
             metrics = ChunkMetrics.from_content(combined_content)
-            estimated_tokens = self._estimate_tokens(combined_content)
+            estimated_tokens = estimate_tokens_chunking(combined_content)
 
-            # Check for semantic incompatibility within same concept type
-            # For example, Makefile variables and rules are both DEFINITION but shouldn't merge
+            # Check for semantic incompatibility within same concept type.
+            # E.g., Makefile variables and rules are both DEFINITION but differ.
             semantic_mismatch = False
             if (
                 current_chunk.concept
@@ -1107,14 +651,14 @@ class UniversalParser:
                 if current_kind and next_kind and current_kind != next_kind:
                     semantic_mismatch = True
 
-                # Don't merge rules with each other - each rule is a discrete semantic unit
-                # (but variables can merge with each other)
+                # Don't merge rules with each other - each is a discrete semantic unit
+                # (but variables can merge with each other).
                 if current_kind == "rule" and next_kind == "rule":
                     semantic_mismatch = True
 
-            # Determine maximum allowed gap based on chunk types
-            # For cross-concept merges involving COMMENT, require strict adjacency (gap <= 1)
-            # to preserve standalone comments while allowing immediate docstrings to merge
+            # Determine maximum allowed gap based on chunk types.
+            # For cross-concept merges involving COMMENT, require strict adjacency
+            # (gap <= 1) to preserve standalone comments while allowing docstrings.
             max_gap = 5  # Default: allow reasonable gaps for related code
             if current_chunk.concept != next_chunk.concept:
                 # Cross-concept merge - check if either is COMMENT
@@ -1133,8 +677,8 @@ class UniversalParser:
             )
 
             if can_merge:
-                # When merging chunks with different concepts, prefer the more specific one
-                # (e.g., DEFINITION over COMMENT) for name and concept
+                # When merging chunks with different concepts, prefer the more
+                # specific one (e.g., DEFINITION over COMMENT) for name and concept.
                 if current_chunk.concept != next_chunk.concept:
                     # Determine which chunk is more specific
                     current_spec = get_chunk_specificity(current_chunk)
@@ -1165,7 +709,9 @@ class UniversalParser:
                     name=merged_name,
                     content=combined_content,
                     start_line=current_chunk.start_line,
-                    end_line=next_chunk.end_line,
+                    end_line=next_chunk.end_line
+                    if is_new_content
+                    else current_chunk.end_line,
                     metadata=merged_metadata,
                     language_node_type=merged_language_node_type,
                 )
@@ -1178,6 +724,44 @@ class UniversalParser:
         result.append(current_chunk)
 
         return result
+
+    def _detect_embedded_sql(
+        self,
+        ast_tree: Tree,
+        content: str,
+        file_path: Path | None,
+        file_id: FileId | None,
+    ) -> list[Chunk]:
+        """Detect and extract embedded SQL from string literals.
+
+        Args:
+            ast_tree: Parsed AST tree
+            content: Source code as string
+            file_path: Optional file path
+            file_id: Optional file ID
+
+        Returns:
+            List of chunks representing embedded SQL
+        """
+        sql_matches = self.sql_detector.detect_in_tree(ast_tree.root_node)
+
+        if not sql_matches:
+            return []
+
+        # Convert matches to UniversalChunk objects
+        universal_chunks = self.sql_detector.create_embedded_sql_chunks(sql_matches)
+
+        # Apply dedup and size validation (but not merging, since each
+        # embedded SQL string is a distinct semantic unit)
+        universal_chunks = deduplicate_chunks(universal_chunks, self.language_name)
+        validated_chunks = []
+        for chunk in universal_chunks:
+            validated_chunks.extend(self.chunk_splitter.validate_and_split(chunk))
+
+        # Convert to standard Chunk format
+        chunks = self._convert_to_chunks(validated_chunks, content, file_path, file_id)
+
+        return chunks
 
     def _convert_to_chunks(
         self,
@@ -1259,6 +843,8 @@ class UniversalParser:
                 "block": ChunkType.BLOCK,
                 "comment": ChunkType.COMMENT,
                 "namespace": ChunkType.NAMESPACE,
+                "embedded_sql": ChunkType.EMBEDDED_SQL,
+                "import": ChunkType.IMPORT,
             }
             if chunk_type_hint in hint_map:
                 return hint_map[chunk_type_hint]
@@ -1270,13 +856,20 @@ class UniversalParser:
             kind = metadata.get("kind", "").lower()
             node_type = metadata.get("node_type", "").lower()
 
-            # Check kind first (more specific semantic information)
-            if kind == "function" or "function" in node_type:
+            # SQL DDL kinds first — prevent substring checks below from false-matching
+            # (e.g. "function" in "drop_function" would hit the function branch)
+            if kind in {"table", "alter_table", "view", "drop_table", "drop_view"}:
+                return ChunkType.TABLE
+            elif kind in {"trigger", "index", "drop_index", "drop_function"}:
+                return ChunkType.BLOCK
+            elif kind == "function" or "function" in node_type:
                 return ChunkType.FUNCTION
             elif kind == "class" or "class" in node_type:
                 return ChunkType.CLASS
             elif kind == "method" or "method" in node_type:
                 return ChunkType.METHOD
+            elif kind in {"constructor", "initializer"} or "constructor" in node_type:
+                return ChunkType.CONSTRUCTOR
             elif kind == "struct" or "struct" in node_type:
                 # Structs map to CLASS in languages like Zig, Rust, Go
                 return ChunkType.CLASS
@@ -1286,6 +879,29 @@ class UniversalParser:
                 return ChunkType.INTERFACE
             elif kind == "trait" or "trait" in node_type:
                 return ChunkType.TRAIT
+            elif kind == "namespace" or "namespace" in node_type:
+                return ChunkType.NAMESPACE
+            elif kind == "property" or "property" in node_type:
+                return ChunkType.PROPERTY
+            elif kind == "field" or "field" in node_type:
+                return ChunkType.FIELD
+            elif (
+                kind in {"variable", "loop_variable", "constant", "const", "define"}
+                or "variable" in node_type
+            ):
+                return ChunkType.VARIABLE
+            elif kind in {"type_alias", "typedef"} or "type_alias" in node_type:
+                return ChunkType.TYPE_ALIAS
+            elif kind == "type" or node_type == "type":
+                # Intentionally exact-match node_type here: substring matching on
+                # "type" would be too broad (e.g., it would hit "type_alias").
+                return ChunkType.TYPE
+            elif kind == "macro" or "macro" in node_type:
+                return ChunkType.MACRO
+            elif kind == "mapping_pair":
+                return ChunkType.KEY_VALUE
+            elif kind == "sequence_item":
+                return ChunkType.ARRAY
             else:
                 return ChunkType.FUNCTION  # Default for definitions
 
@@ -1296,7 +912,7 @@ class UniversalParser:
             return ChunkType.COMMENT
 
         elif concept == UniversalConcept.IMPORT:
-            return ChunkType.UNKNOWN  # No direct mapping for imports
+            return ChunkType.IMPORT
 
         elif concept == UniversalConcept.STRUCTURE:
             return ChunkType.NAMESPACE
@@ -1339,17 +955,17 @@ class UniversalParser:
                     # Only create chunk if it meets minimum size
                     metrics = ChunkMetrics.from_content(paragraph_content)
                     if metrics.non_whitespace_chars >= self.cast_config.min_chunk_size:
-                        chunk = Chunk(
-                            symbol=f"paragraph_{current_start_line}",
-                            start_line=LineNumber(current_start_line),
-                            end_line=LineNumber(line_num - 1),
-                            code=paragraph_content,
-                            chunk_type=ChunkType.PARAGRAPH,
-                            file_id=file_id or FileId(0),
-                            language=Language.TEXT,
-                            file_path=FilePath(str(file_path)) if file_path else None,
+                        chunks.extend(
+                            self.chunk_splitter.validate_and_convert_text(
+                                content=paragraph_content,
+                                name=f"paragraph_{current_start_line}",
+                                start_line=current_start_line,
+                                end_line=line_num - 1,
+                                file_path=file_path,
+                                file_id=file_id,
+                                language=Language.TEXT,
+                            )
                         )
-                        chunks.append(chunk)
 
                     current_paragraph = []
 
@@ -1360,17 +976,17 @@ class UniversalParser:
             paragraph_content = "\n".join(current_paragraph)
             metrics = ChunkMetrics.from_content(paragraph_content)
             if metrics.non_whitespace_chars >= self.cast_config.min_chunk_size:
-                chunk = Chunk(
-                    symbol=f"paragraph_{current_start_line}",
-                    start_line=LineNumber(current_start_line),
-                    end_line=LineNumber(line_num - 1),
-                    code=paragraph_content,
-                    chunk_type=ChunkType.PARAGRAPH,
-                    file_id=file_id or FileId(0),
-                    language=Language.TEXT,
-                    file_path=FilePath(str(file_path)) if file_path else None,
+                chunks.extend(
+                    self.chunk_splitter.validate_and_convert_text(
+                        content=paragraph_content,
+                        name=f"paragraph_{current_start_line}",
+                        start_line=current_start_line,
+                        end_line=line_num - 1,
+                        file_path=file_path,
+                        file_id=file_id,
+                        language=Language.TEXT,
+                    )
                 )
-                chunks.append(chunk)
 
         # Update statistics
         self._total_files_parsed += 1
@@ -1392,7 +1008,6 @@ class UniversalParser:
                 "max_chunk_size": self.cast_config.max_chunk_size,
                 "min_chunk_size": self.cast_config.min_chunk_size,
                 "merge_threshold": self.cast_config.merge_threshold,
-                "preserve_structure": self.cast_config.preserve_structure,
                 "greedy_merge": self.cast_config.greedy_merge,
             },
         }

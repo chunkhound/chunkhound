@@ -505,9 +505,9 @@ class GoMapping(BaseMapping):
 
         return constants if constants else None
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve Go import to file path.
 
         Args:
@@ -516,20 +516,20 @@ class GoMapping(BaseMapping):
             source_file: Path to the file containing the import
 
         Returns:
-            Path to the imported file, or None if not found
+            Path to the imported file (empty list if not found)
         """
         # Extract package path from: import "path/to/pkg" or "pkg"
-        match = re.search(r'''import\s+(?:\w+\s+)?["'](.+?)["']''', import_text)
+        match = re.search(r"""import\s+(?:\w+\s+)?["'](.+?)["']""", import_text)
         if not match:
             # Try block import format
-            match = re.search(r'''["'](.+?)["']''', import_text)
+            match = re.search(r"""["'](.+?)["']""", import_text)
 
         if not match:
-            return None
+            return []
 
         pkg_path = match.group(1)
         if not pkg_path:
-            return None
+            return []
 
         # Skip standard library (no dots typically) and external packages
         # Local packages typically start with the module name
@@ -544,8 +544,8 @@ class GoMapping(BaseMapping):
                 # Prefer non-test file
                 for f in go_files:
                     if not f.name.endswith("_test.go"):
-                        return f
-                return go_files[0]
+                        return [f]
+                return [go_files[0]]
 
         # Try internal/ or pkg/ directories
         for prefix in ["internal/", "pkg/", "cmd/"]:
@@ -553,6 +553,6 @@ class GoMapping(BaseMapping):
             if pkg_dir.is_dir():
                 go_files = list(pkg_dir.glob("*.go"))
                 if go_files:
-                    return go_files[0]
+                    return [go_files[0]]
 
-        return None
+        return []

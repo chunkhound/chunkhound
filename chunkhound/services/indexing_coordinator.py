@@ -26,18 +26,22 @@ from loguru import logger
 from rich.progress import Progress, TaskID
 
 from chunkhound.core.detection import detect_language
+from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector
 from chunkhound.core.exceptions import DiskUsageLimitExceededError
 from chunkhound.core.models import Chunk, File
 from chunkhound.core.types.common import FilePath, Language
+from chunkhound.core.utils import estimate_tokens_chunking
 from chunkhound.core.utils.path_utils import get_relative_path_safe
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
+from chunkhound.parsers.chunk_splitter import (
+    CASTConfig,
+    ChunkMetrics,
+    ChunkSplitter,
+    chunk_to_universal,
+    universal_to_chunk,
+)
 from chunkhound.parsers.universal_parser import UniversalParser
-from chunkhound.utils.hashing import compute_file_hash
-
-from .base_service import BaseService
-from .batch_processor import ParsedFileResult, process_file_batch
-from .chunk_cache_service import ChunkCacheService
 
 # File pattern utilities for directory discovery
 from chunkhound.utils.file_patterns import (
@@ -46,28 +50,70 @@ from chunkhound.utils.file_patterns import (
     walk_directory_tree,
     walk_subtree_worker,
 )
+from chunkhound.utils.hashing import compute_file_hash
+
+from .base_service import BaseService
+from .batch_processor import ParsedFileResult, process_file_batch
+from .chunk_cache_service import ChunkCacheService
+
+# Lazy multiprocessing start-method guard — applied once before pool creation.
+# RATIONALE: Linux defaults to 'fork' which is unsafe with asyncio event loops.
+# 'spawn' starts a fresh Python interpreter, avoiding fork-related segfaults.
+# Windows/macOS already use 'spawn'; Python 3.14 will make it the default everywhere.
+_mp_configured = False
 
 
-# CRITICAL FIX: Force spawn multiprocessing start method to prevent fork + asyncio issues
-# RATIONALE: Linux defaults to 'fork' which is unsafe with asyncio event loops
-# - Forking an active asyncio event loop causes segfaults (background threads/locks copied)
-# - 'spawn' starts fresh Python interpreter, avoiding fork-related issues
-# - Windows/macOS already use 'spawn' by default
-# - Python 3.14 will make 'spawn' the default on all platforms
-# - See: https://github.com/chunkhound/chunkhound/pull/47
-desired_mp_method = os.getenv("CHUNKHOUND_MP_START_METHOD", "spawn")
-current_mp_method = multiprocessing.get_start_method(allow_none=True)
-if current_mp_method != desired_mp_method:
+def _ensure_mp_start_method() -> None:
+    """Set the multiprocessing start method once, lazily, before pool creation."""
+    global _mp_configured
+    if _mp_configured:
+        return
+    desired = os.getenv("CHUNKHOUND_MP_START_METHOD", "spawn")
+    current = multiprocessing.get_start_method(allow_none=True)
+    if current != desired:
+        try:
+            multiprocessing.set_start_method(desired, force=True)
+            logger.debug(
+                f"Set multiprocessing start method to '{desired}' (was {current})"
+            )
+        except RuntimeError:
+            logger.debug(
+                f"Multiprocessing start method remains"
+                f" '{multiprocessing.get_start_method()}'; desired '{desired}'"
+            )
+    _mp_configured = True
+
+
+def _progress_info(stored: int, skipped: int, errs: int, chunks: int) -> str:
+    return f"stored {stored} | skipped {skipped} | err {errs} | {chunks} chunks"
+
+
+class _StatResult:
+    """Lightweight stat-like object used in _store_parsed_results."""
+
+    def __init__(self, size: int, mtime: float) -> None:
+        self.st_size = size
+        self.st_mtime = mtime
+
+
+def _mem_available_bytes() -> int:
+    """Return available memory in bytes, or 0 if unavailable."""
     try:
-        multiprocessing.set_start_method(desired_mp_method, force=True)
-        logger.debug(
-            f"Set multiprocessing start method to '{desired_mp_method}' (was {current_mp_method})"
-        )
-    except RuntimeError:
-        # Start method may already be set elsewhere; log and continue
-        logger.debug(
-            f"Multiprocessing start method remains '{multiprocessing.get_start_method()}'; desired '{desired_mp_method}'"
-        )
+        import psutil  # type: ignore
+
+        return int(getattr(psutil.virtual_memory(), "available", 0)) or 0
+    except Exception:
+        pass
+    try:
+        with open("/proc/meminfo", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1]) * 1024  # kB → B
+    except Exception:
+        pass
+    return 0
 
 
 # Performance tuning constants for parallel operations
@@ -148,6 +194,10 @@ class IndexingCoordinator(BaseService):
 
         # Chunk cache service for content-based comparison
         self._chunk_cache = ChunkCacheService()
+
+        # Chunk size validation (cached for performance)
+        self._chunk_validation_config = CASTConfig()
+        self._chunk_validation_splitter = ChunkSplitter(self._chunk_validation_config)
 
         # Per-run cache for repo-aware ignore engines to avoid repeated tree scans
         # Key: (root, tuple(sources), chignore_file, tuple(cfg_excludes))
@@ -233,7 +283,9 @@ class IndexingCoordinator(BaseService):
         or default locations) and extends the provided list.
         """
         try:
-            from chunkhound.utils.ignore_engine import _collect_global_gitignore_patterns
+            from chunkhound.utils.ignore_engine import (
+                _collect_global_gitignore_patterns,
+            )
 
             global_pats = _collect_global_gitignore_patterns()
             if global_pats:
@@ -322,26 +374,6 @@ class IndexingCoordinator(BaseService):
         # - Budget 10% of available RAM (min 64MB, max 512MB)
         # - Estimate average bytes per chunk from a sample (code length dominates)
         # - Constrain final batch size to [1000, 20000]
-        def _mem_available_bytes() -> int:
-            # Try psutil first
-            try:
-                import psutil  # type: ignore
-
-                return int(getattr(psutil.virtual_memory(), "available", 0)) or 0
-            except Exception:
-                pass
-            # Linux /proc/meminfo
-            try:
-                with open("/proc/meminfo", "r", encoding="utf-8", errors="ignore") as f:
-                    for line in f:
-                        if line.startswith("MemAvailable:"):
-                            parts = line.split()
-                            if len(parts) >= 2:
-                                return int(parts[1]) * 1024  # kB → B
-            except Exception:
-                pass
-            return 0
-
         avail = _mem_available_bytes()
         if avail <= 0:
             # Fallback when unknown: adopt a conservative default
@@ -447,15 +479,8 @@ class IndexingCoordinator(BaseService):
                 return {"status": "skipped", "reason": result.error, "chunks": 0}
 
             # Store the single file result
-            store_result = await self._store_parsed_results([result], file_task=None)
-
-            # Handle tuple return for single-file case
-            if isinstance(store_result, tuple):
-                stats, file_id = store_result
-            else:
-                # Should not happen for single file, but handle gracefully
-                stats = store_result
-                file_id = None
+            stats = await self._store_parsed_results([result], file_task=None)
+            file_id = stats.get("file_id")
 
             # Check for disk limit exceeded error and raise it immediately
             for error in stats.get("errors", []):
@@ -560,6 +585,15 @@ class IndexingCoordinator(BaseService):
         except Exception:
             timeout_s_probe = 0.0
 
+        min_timeout_kb = 128
+        try:
+            if self.config and getattr(self.config, "indexing", None):
+                min_timeout_kb = int(
+                    getattr(self.config.indexing, "per_file_timeout_min_size_kb", 128)
+                )
+        except Exception:
+            min_timeout_kb = 128
+
         # Inspect explicit concurrency override
         max_concurrent = 0
         try:
@@ -569,6 +603,10 @@ class IndexingCoordinator(BaseService):
                 )
         except Exception:
             max_concurrent = 0
+
+        detect_embedded_sql = getattr(
+            getattr(self.config, "indexing", None), "detect_embedded_sql", True
+        )
 
         # Default behavior:
         # - If timeouts are enabled and no explicit max_concurrent given,
@@ -591,26 +629,7 @@ class IndexingCoordinator(BaseService):
         # and removes overhead when there is nothing to parallelize.
         if file_count == 1:
             # Build the same config dict as the parallel branch uses
-            try:
-                timeout_s = 0.0
-                if self.config and getattr(self.config, "indexing", None):
-                    timeout_s = float(
-                        getattr(self.config.indexing, "per_file_timeout_seconds", 0.0)
-                        or 0.0
-                    )
-            except Exception:
-                timeout_s = 0.0
-
-            try:
-                min_timeout_kb = 128
-                if self.config and getattr(self.config, "indexing", None):
-                    min_timeout_kb = int(
-                        getattr(
-                            self.config.indexing, "per_file_timeout_min_size_kb", 128
-                        )
-                    )
-            except Exception:
-                min_timeout_kb = 128
+            timeout_s = timeout_s_probe
 
             config_dict = {
                 "config_file_size_threshold_kb": config_file_size_threshold_kb,
@@ -618,6 +637,7 @@ class IndexingCoordinator(BaseService):
                 "per_file_timeout_min_size_kb": min_timeout_kb,
                 # Cap concurrent timeout children to avoid resource exhaustion
                 "max_concurrent_timeouts": min(max(1, num_workers) * 2, 32),
+                "detect_embedded_sql": detect_embedded_sql,
             }
 
             # Normalize to the batch-processor input format
@@ -670,39 +690,19 @@ class IndexingCoordinator(BaseService):
         ]
 
         # Process batches in parallel using ProcessPoolExecutor
+        _ensure_mp_start_method()
         loop = asyncio.get_running_loop()
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
             # Submit all batches for concurrent processing
             # Pass config for structured file size filtering (JSON/YAML/TOML)
-            # Include optional per-file timeout (seconds) if configured
-            timeout_s = 0.0
-            try:
-                if self.config and getattr(self.config, "indexing", None):
-                    timeout_s = float(
-                        getattr(self.config.indexing, "per_file_timeout_seconds", 0.0)
-                        or 0.0
-                    )
-            except Exception:
-                timeout_s = 0.0
-
-            min_timeout_kb = 128
-            try:
-                if self.config and getattr(self.config, "indexing", None):
-                    # Respect explicit 0 so users can apply timeout to all file sizes.
-                    min_timeout_kb = int(
-                        getattr(
-                            self.config.indexing, "per_file_timeout_min_size_kb", 128
-                        )
-                    )
-            except Exception:
-                min_timeout_kb = 128
-
+            timeout_s = timeout_s_probe
             config_dict = {
                 "config_file_size_threshold_kb": config_file_size_threshold_kb,
                 "per_file_timeout_seconds": timeout_s,
                 "per_file_timeout_min_size_kb": min_timeout_kb,
                 # Cap concurrent timeout children to avoid resource exhaustion
                 "max_concurrent_timeouts": min(num_workers * 2, 32),
+                "detect_embedded_sql": detect_embedded_sql,
             }
             futures = [
                 loop.run_in_executor(executor, process_file_batch, batch, config_dict)
@@ -728,7 +728,7 @@ class IndexingCoordinator(BaseService):
                             await on_batch(batch_result)
                         else:
                             on_batch(batch_result)
-                    except Exception as e:
+                    except Exception:
                         # Re-raise all exceptions from on_batch to propagate disk limit errors
                         raise
 
@@ -791,7 +791,7 @@ class IndexingCoordinator(BaseService):
         """
         total_size = 0
         try:
-            for file_path in directory.rglob('*'):
+            for file_path in directory.rglob("*"):
                 if file_path.is_file():
                     total_size += file_path.stat().st_size
         except Exception:
@@ -799,12 +799,73 @@ class IndexingCoordinator(BaseService):
             return 0.0
         return total_size / (1024**2)
 
+    def _validate_chunk_sizes(self, chunks: list[Chunk]) -> list[Chunk]:
+        """Validate and split any oversized chunks before persistence.
+
+        Central guard that catches any parser bypasses. Uses the standard
+        ChunkSplitter infrastructure to ensure chunks meet size constraints.
+
+        Args:
+            chunks: List of chunks to validate
+
+        Returns:
+            List of validated chunks (may include splits of oversized chunks)
+        """
+        config = self._chunk_validation_config
+        splitter = self._chunk_validation_splitter
+
+        result = []
+        split_count = 0
+        for chunk in chunks:
+            metrics = ChunkMetrics.from_content(chunk.code or "")
+            estimated_tokens = estimate_tokens_chunking(chunk.code or "")
+
+            # Dual constraint: check BOTH character AND token limits
+            chars_exceeded = metrics.non_whitespace_chars > config.max_chunk_size
+            tokens_exceeded = estimated_tokens > config.safe_token_limit
+
+            if chars_exceeded or tokens_exceeded:
+                # Log individual oversized chunk with debugging context
+                preview = (chunk.code or "")[:100].replace("\n", " ").strip()
+                if len(chunk.code or "") > 100:
+                    preview += "..."
+                logger.warning(
+                    f"Oversized chunk: {chunk.file_path}"
+                    f":{chunk.start_line}-{chunk.end_line} "
+                    f"[{chunk.language.value}:{chunk.chunk_type.value}] "
+                    f"symbol={chunk.symbol!r} "
+                    f"chars={metrics.non_whitespace_chars}/{config.max_chunk_size} "
+                    f"tokens={estimated_tokens}/{config.safe_token_limit} "
+                    f"preview={preview!r}"
+                )
+                # Convert to UniversalChunk, validate/split, convert back
+                uchunk = chunk_to_universal(chunk)
+                split_uchunks = splitter.validate_and_split(uchunk)
+                for uc in split_uchunks:
+                    result.append(
+                        universal_to_chunk(
+                            uc,
+                            file_path=chunk.file_path,
+                            file_id=chunk.file_id,
+                            language=chunk.language,
+                        )
+                    )
+                split_count += len(split_uchunks) - 1
+            else:
+                result.append(chunk)
+
+        if split_count > 0:
+            logger.warning(
+                f"Emergency split {split_count} oversized chunks before persistence"
+            )
+        return result
+
     async def _store_parsed_results(
         self,
         results: list[ParsedFileResult],
         file_task: TaskID | None = None,
         cumulative_counters: dict[str, int] | None = None,
-    ) -> dict[str, Any] | tuple[dict[str, Any], int]:
+    ) -> dict[str, Any]:
         """Store all parsed results in database (single-threaded).
 
         Args:
@@ -812,8 +873,8 @@ class IndexingCoordinator(BaseService):
             file_task: Optional progress task ID for tracking
 
         Returns:
-            For multiple files: Dictionary with processing statistics
-            For single file: Tuple of (statistics dict, file_id)
+            Dictionary with processing statistics. For single-file callers,
+            ``stats["file_id"]`` is set when the file was successfully stored.
         """
         stats = {
             "total_files": 0,
@@ -826,13 +887,15 @@ class IndexingCoordinator(BaseService):
         disk_limit_error = self._check_disk_usage_limit()
         if disk_limit_error:
             # Add disk limit error to stats for consistent error handling
-            stats["errors"].append({
-                "file": None,  # Global error, not file-specific
-                "error": str(disk_limit_error),
-                "disk_limit_exceeded": True,
-                "current_size_mb": disk_limit_error.current_size_mb,
-                "limit_mb": disk_limit_error.limit_mb,
-            })
+            stats["errors"].append(
+                {
+                    "file": None,  # Global error, not file-specific
+                    "error": str(disk_limit_error),
+                    "disk_limit_exceeded": True,
+                    "current_size_mb": disk_limit_error.current_size_mb,
+                    "limit_mb": disk_limit_error.limit_mb,
+                }
+            )
             # Return early - don't process any files if disk limit exceeded
             return stats
 
@@ -858,7 +921,7 @@ class IndexingCoordinator(BaseService):
                         chunks_so_far = cumulative_counters.get("chunks", 0)
                         self.progress.update(
                             file_task,
-                            info=f"stored {stored} | skipped {skipped} | err {errs} | {chunks_so_far} chunks",
+                            info=_progress_info(stored, skipped, errs, chunks_so_far),
                         )
                 continue
 
@@ -879,7 +942,7 @@ class IndexingCoordinator(BaseService):
                         chunks_so_far = cumulative_counters.get("chunks", 0)
                         self.progress.update(
                             file_task,
-                            info=f"stored {stored} | skipped {skipped} | err {errs} | {chunks_so_far} chunks",
+                            info=_progress_info(stored, skipped, errs, chunks_so_far),
                         )
                 continue
 
@@ -887,44 +950,18 @@ class IndexingCoordinator(BaseService):
             language = result.language
 
             # Per-file transaction boundaries
-            self._db.begin_transaction()
             try:
-                # Store file metadata
-                file_stat_dict = {
-                    "st_size": result.file_size,
-                    "st_mtime": result.file_mtime,
-                }
-
-                # Create mock stat object for _store_file_record
-                class StatResult:
-                    def __init__(self, size: int, mtime: float):
-                        self.st_size = size
-                        self.st_mtime = mtime
-
-                file_stat = StatResult(result.file_size, result.file_mtime)
+                await self._db.begin_transaction_async()
+                # Create stat object for _store_file_record
+                file_stat = _StatResult(result.file_size, result.file_mtime)
                 # Extract content hash if available (from parsing result or precomputed)
                 content_hash = getattr(result, "content_hash", None)
-                file_id = self._store_file_record(
+                file_id, is_existing = await self._store_file_record(
                     result.file_path, file_stat, language, content_hash
                 )
 
                 # Track file_id for single-file case
                 file_ids.append(file_id)
-
-                if file_id is None:
-                    self._db.rollback_transaction()
-                    stats["errors"].append(
-                        {
-                            "file": str(result.file_path),
-                            "error": "Failed to store file record",
-                        }
-                    )
-                    if file_task is not None and self.progress:
-                        self.progress.advance(file_task, 1)
-                    continue
-                # Check for existing chunks to enable smart diffing
-                relative_path = self._get_relative_path(result.file_path)
-                existing_file = self._db.get_file_by_path(relative_path.as_posix())
 
                 # Convert result chunks to Chunk models using from_dict()
                 new_chunk_models = [
@@ -932,56 +969,52 @@ class IndexingCoordinator(BaseService):
                     for chunk_data in result.chunks
                 ]
 
-                if existing_file:
-                    # Get existing chunks for diffing
-                    existing_chunks = self._db.get_chunks_by_file_id(
+                if is_existing:
+                    existing_chunks = await self._db.get_chunks_by_file_id_async(
                         file_id, as_model=True
                     )
-
-                    if existing_chunks:
-                        # Smart diff to preserve embeddings
-                        chunk_diff = self._chunk_cache.diff_chunks(
-                            new_chunk_models, existing_chunks
-                        )
-
-                        # Delete modified/removed chunks
-                        chunks_to_delete = chunk_diff.deleted + chunk_diff.modified
-                        if chunks_to_delete:
-                            chunk_ids_to_delete = [
-                                chunk.id
-                                for chunk in chunks_to_delete
-                                if chunk.id is not None
-                            ]
-                            if chunk_ids_to_delete:
-                                self._db.delete_chunks_batch(chunk_ids_to_delete)
-
-                        # Store new/modified chunks (pass models directly)
-                        chunks_to_store = chunk_diff.added + chunk_diff.modified
-                        ids = (
-                            self._db.insert_chunks_batch(chunks_to_store)
-                            if chunks_to_store
-                            else []
-                        )
-                    else:
-                        # No existing chunks - store all as new
-                        ids = self._db.insert_chunks_batch(new_chunk_models)
                 else:
-                    # New file - store all
-                    ids = self._db.insert_chunks_batch(new_chunk_models)
+                    existing_chunks = []
 
+                if existing_chunks:
+                    # Smart diff to preserve embeddings
+                    chunk_diff = self._chunk_cache.diff_chunks(
+                        new_chunk_models, existing_chunks
+                    )
+
+                    # Delete modified/removed chunks
+                    chunks_to_delete = chunk_diff.deleted + chunk_diff.modified
+                    if chunks_to_delete:
+                        chunk_ids_to_delete = [
+                            chunk.id
+                            for chunk in chunks_to_delete
+                            if chunk.id is not None
+                        ]
+                        if chunk_ids_to_delete:
+                            await self._db.delete_chunks_batch_async(
+                                chunk_ids_to_delete
+                            )
+
+                    # Store new/modified chunks (pass models directly)
+                    chunks_to_store = chunk_diff.added + chunk_diff.modified
+                    chunks_to_store = self._validate_chunk_sizes(chunks_to_store)
+                    ids = (
+                        await self._db.insert_chunks_batch_async(chunks_to_store)
+                        if chunks_to_store
+                        else []
+                    )
+                else:
+                    # New file or existing file with no chunks — store all
+                    new_chunk_models = self._validate_chunk_sizes(new_chunk_models)
+                    ids = await self._db.insert_chunks_batch_async(new_chunk_models)
+                logger.debug(f"Batch inserted {len(ids)} chunks for file_id {file_id}")
                 stats["chunk_ids_needing_embeddings"].extend(ids)
                 stats["total_chunks"] += len(ids)
                 # Count this file as processed successfully (stored or updated)
                 stats["total_files"] += 1
 
-                # Commit per-file
-                try:
-                    self._db.commit_transaction()
-                except TypeError:
-                    try:
-                        self._db.commit_transaction(force_checkpoint=True)
-                    except Exception:
-                        pass
+                # Commit per-file; threshold-based checkpointing manages WAL compaction
+                await self._db.commit_transaction_async(force_checkpoint=False)
 
                 # Update progress
                 if file_task is not None and self.progress:
@@ -997,14 +1030,26 @@ class IndexingCoordinator(BaseService):
                         errs = cumulative_counters.get("errors", 0)
                         self.progress.update(
                             file_task,
-                            info=f"stored {stored} | skipped {skipped} | err {errs} | {display_chunks} chunks",
+                            info=_progress_info(stored, skipped, errs, display_chunks),
                         )
 
             except Exception as e:
-                self._db.rollback_transaction()
+                await self._db.rollback_transaction_async()
                 stats["errors"].append({"file": str(result.file_path), "error": str(e)})
                 if file_task is not None and self.progress:
                     self.progress.advance(file_task, 1)
+                    if cumulative_counters is not None:
+                        cumulative_counters["errors"] = (
+                            cumulative_counters.get("errors", 0) + 1
+                        )
+                        stored = cumulative_counters.get("stored", 0)
+                        skipped = cumulative_counters.get("skipped", 0)
+                        errs = cumulative_counters.get("errors", 0)
+                        chunks_so_far = cumulative_counters.get("chunks", 0)
+                        self.progress.update(
+                            file_task,
+                            info=_progress_info(stored, skipped, errs, chunks_so_far),
+                        )
                 continue
 
         # Update external cumulative counters
@@ -1016,9 +1061,9 @@ class IndexingCoordinator(BaseService):
                 cumulative_counters.get("files", 0) + stats["total_files"]
             )
 
-        # Return file_id for single-file case
+        # Expose file_id for single-file callers via the stats dict
         if len(results) == 1 and file_ids and file_ids[0] is not None:
-            return stats, file_ids[0]
+            stats["file_id"] = file_ids[0]
         return stats
 
     async def process_directory(
@@ -1043,6 +1088,7 @@ class IndexingCoordinator(BaseService):
             import time as _t
 
             _t0 = _t.perf_counter() if getattr(self, "profile_startup", False) else None
+            _t2 = _t3 = _t4 = _t5 = None
             # Phase 1: Discovery - Discover files in directory (now parallelized)
             files = await self._discover_files(directory, patterns, exclude_patterns)
             _t1 = _t.perf_counter() if _t0 is not None else None
@@ -1149,7 +1195,9 @@ class IndexingCoordinator(BaseService):
                         if db_tuple is None:
                             # Fallback for providers without execute_query() (e.g., fake or limited providers)
                             try:
-                                rec = self._db.get_file_by_path(rel, as_model=False)
+                                rec = await self._db.get_file_by_path_async(
+                                    rel, as_model=False
+                                )
                                 if rec:
                                     sz = (
                                         rec.get("size")
@@ -1180,6 +1228,11 @@ class IndexingCoordinator(BaseService):
                                         ch,
                                     )
                             except Exception:
+                                logger.debug(
+                                    "change-detection fallback failed for %s",
+                                    rel,
+                                    exc_info=True,
+                                )
                                 db_tuple = None
                         st = f.stat()
                         if db_tuple is not None:
@@ -1289,9 +1342,6 @@ class IndexingCoordinator(BaseService):
                 stats_part = await self._store_parsed_results(
                     batch, store_task, cumulative_counters=store_progress_counters
                 )
-                if isinstance(stats_part, tuple):
-                    stats_part = stats_part[0]
-
 
                 agg_total_files += stats_part.get("total_files", 0)
                 agg_total_chunks += stats_part.get("total_chunks", 0)
@@ -1299,7 +1349,8 @@ class IndexingCoordinator(BaseService):
 
             # Parse files (streaming progress as batches complete and store concurrently)
             # Pass files_to_process directly - preserves hash for each file
-            parsed_results = await self._process_files_in_batches(
+            # Results flow to storage via on_batch=_on_batch_store; return value unused.
+            await self._process_files_in_batches(
                 files_to_process,
                 config_file_size_threshold_kb,
                 parse_task,
@@ -1312,13 +1363,12 @@ class IndexingCoordinator(BaseService):
                 if task.total:
                     self.progress.update(parse_task, completed=task.total)
 
-            # Optimize tables after parsing/chunking if fragmentation high
-            if agg_total_chunks > 0 and hasattr(self._db, "optimize_tables"):
-                if hasattr(self._db, "should_optimize") and self._db.should_optimize(
-                    "post-chunking"
-                ):
-                    logger.debug("Optimizing database after chunking phase...")
-                    self._db.optimize_tables()
+            # Optimize tables after parsing/chunking (only if fragmentation warrants it)
+            if agg_total_chunks > 0 and self._db.should_optimize(
+                operation="post-chunking"
+            ):
+                logger.debug("Optimizing database after chunking phase...")
+                self._db.optimize_tables()
 
             # Record startup profile if enabled (before heavy parse+store dominates totals)
             if _t0 is not None:
@@ -1330,7 +1380,7 @@ class IndexingCoordinator(BaseService):
                         "cleanup_ms": round(
                             (
                                 (_t3 - _t2)
-                                if (locals().get("_t3") and locals().get("_t2"))
+                                if (_t3 is not None and _t2 is not None)
                                 else 0.0
                             )
                             * 1000.0,
@@ -1339,7 +1389,7 @@ class IndexingCoordinator(BaseService):
                         "change_scan_ms": round(
                             (
                                 (_t5 - _t4)
-                                if (locals().get("_t5") and locals().get("_t4"))
+                                if (_t5 is not None and _t4 is not None)
                                 else 0.0
                             )
                             * 1000.0,
@@ -1384,20 +1434,10 @@ class IndexingCoordinator(BaseService):
             # Note: Embedding generation is handled separately via generate_missing_embeddings()
             # to provide a unified progress experience
 
-            # Optimize tables after bulk operations (provider-specific)
-            if total_chunks > 0 and hasattr(self._db, "optimize_tables"):
-                if hasattr(self._db, "should_optimize") and self._db.should_optimize(
-                    "post-bulk"
-                ):
-                    logger.debug("Optimizing database tables after bulk operations...")
-                    self._db.optimize_tables()
-
-            # FINAL PASS: Always optimize at end of indexing for consistent UX
-            # Even if fragments are below threshold (e.g., 90 → 20), users expect
-            # the database to be in optimal state after indexing completes.
-            # This ensures predictable search performance regardless of threshold tuning.
-            if hasattr(self._db, "optimize_tables"):
-                logger.debug("Final optimization pass at end of indexing...")
+            # FINAL: Unified optimization (CHECKPOINT + HNSW compact + full compaction)
+            # Only run if fragmentation warrants it
+            if self._db.should_optimize(operation="post-indexing"):
+                logger.info("Running final database optimization...")
                 self._db.optimize_tables()
 
             # Check for disk limit exceeded errors
@@ -1420,8 +1460,6 @@ class IndexingCoordinator(BaseService):
                 "skipped_filtered": skipped_filtered,
             }
 
-
-
         except Exception as e:
             import traceback
 
@@ -1437,6 +1475,12 @@ class IndexingCoordinator(BaseService):
                 }
             else:
                 return {"status": "error", "error": str(e)}
+
+    def finalize_optimization(self) -> None:
+        """Run post-embedding optimization if warranted."""
+        if self._db.should_optimize(operation="post-embedding"):
+            logger.info("Running post-embedding database optimization...")
+            self._db.optimize_tables()
 
     def _extract_file_id(self, file_record: dict[str, Any] | File) -> int | None:
         """Safely extract file ID from either dict or File model."""
@@ -1458,19 +1502,24 @@ class IndexingCoordinator(BaseService):
         """
         try:
             return compute_file_hash(file_path)
-        except (OSError, IOError) as e:
+        except OSError as e:
             rel_path = self._get_relative_path(file_path).as_posix()
             logger.warning(f"Failed to compute hash for {rel_path}: {e}")
             return None
 
-    def _store_file_record(
+    async def _store_file_record(
         self,
         file_path: Path,
         file_stat: Any,
         language: Language,
         content_hash: str | None = None,
-    ) -> int:
+    ) -> tuple[int, bool]:
         """Store or update file record in database.
+
+        Executes DB reads (get_file_by_path_async) inside the caller's open
+        transaction.  This is safe under DuckDB MVCC — reads see a consistent
+        snapshot of the data at transaction-start.  The caller is responsible
+        for the surrounding begin_transaction_async / commit_transaction_async.
 
         Args:
             file_path: Path to the file
@@ -1479,28 +1528,22 @@ class IndexingCoordinator(BaseService):
             content_hash: Optional content hash for change detection
 
         Returns:
-            File ID
+            Tuple of (file_id, is_existing) where is_existing indicates
+            whether the file already existed in the database.
         """
-        # Check if file already exists
-        # Use consistent symlink-safe path resolution
         relative_path = self._get_relative_path(file_path)
-        existing_file = self._db.get_file_by_path(relative_path.as_posix())
+        existing_file = await self._db.get_file_by_path_async(relative_path.as_posix())
 
         if existing_file:
-            # Update existing file with new metadata
-            if isinstance(existing_file, dict) and "id" in existing_file:
-                file_id = existing_file["id"]
-                self._db.update_file(
-                    file_id,
-                    size_bytes=file_stat.st_size,
-                    mtime=file_stat.st_mtime,
-                    content_hash=content_hash,
-                )
-                return file_id
+            file_id = existing_file["id"]
+            await self._db.update_file_async(
+                file_id,
+                size_bytes=file_stat.st_size,
+                mtime=file_stat.st_mtime,
+                content_hash=content_hash,
+            )
+            return file_id, True
 
-        # Create new File model instance with relative path
-        # Use consistent symlink-safe path resolution
-        relative_path = self._get_relative_path(file_path)
         file_model = File(
             path=FilePath(relative_path.as_posix()),
             size_bytes=file_stat.st_size,
@@ -1508,31 +1551,7 @@ class IndexingCoordinator(BaseService):
             language=language,
             content_hash=content_hash,
         )
-        return self._db.insert_file(file_model)
-
-    def _store_chunks(
-        self, file_id: int, chunk_models: list[Chunk], language: Language
-    ) -> list[int]:
-        """Store chunks in database and return chunk IDs.
-
-        Args:
-            file_id: File ID for the chunks
-            chunk_models: List of Chunk model instances to store
-            language: Language (for compatibility, already set in models)
-
-        Returns:
-            List of chunk IDs from database insertion
-        """
-        if not chunk_models:
-            return []
-
-        # Use batch insertion for optimal performance
-        chunk_ids = self._db.insert_chunks_batch(chunk_models)
-
-        # Log batch operation
-        logger.debug(f"Batch inserted {len(chunk_ids)} chunks for file_id {file_id}")
-
-        return chunk_ids
+        return await self._db.insert_file_async(file_model), False
 
     async def get_stats(self) -> dict[str, Any]:
         """Get database statistics.
@@ -1540,7 +1559,7 @@ class IndexingCoordinator(BaseService):
         Returns:
             Dictionary with file, chunk, and embedding counts
         """
-        return self._db.get_stats()
+        return await self._db.get_stats_async()
 
     async def remove_file(self, file_path: str) -> int:
         """Remove a file and all its chunks from the database.
@@ -1554,14 +1573,10 @@ class IndexingCoordinator(BaseService):
         try:
             # Convert path to relative format for database lookup
             file_path_obj = Path(file_path)
-            if file_path_obj.is_absolute():
-                base_dir = self._base_directory
-                relative_path = file_path_obj.relative_to(base_dir).as_posix()
-            else:
-                relative_path = file_path_obj.as_posix()
+            relative_path = self._get_relative_path(file_path_obj).as_posix()
 
             # Get file record to get chunk count before deletion
-            file_record = self._db.get_file_by_path(relative_path)
+            file_record = await self._db.get_file_by_path_async(relative_path)
             if not file_record:
                 return 0
 
@@ -1571,11 +1586,11 @@ class IndexingCoordinator(BaseService):
                 return 0
 
             # Count chunks before deletion
-            chunks = self._db.get_chunks_by_file_id(file_id)
+            chunks = await self._db.get_chunks_by_file_id_async(file_id)
             chunk_count = len(chunks) if chunks else 0
 
             # Delete the file completely (this will also delete chunks and embeddings)
-            success = self._db.delete_file_completely(relative_path)
+            success = await self._db.delete_file_completely_async(relative_path)
 
             # Clean up the file lock since the file no longer exists
             if success:
@@ -1588,7 +1603,9 @@ class IndexingCoordinator(BaseService):
             return 0
 
     async def generate_missing_embeddings(
-        self, exclude_patterns: list[str] | None = None
+        self,
+        exclude_patterns: list[str] | None = None,
+        metrics_collector: BatchMetricsCollector | None = None,
     ) -> dict[str, Any]:
         """Generate embeddings for chunks that don't have them.
 
@@ -1609,23 +1626,18 @@ class IndexingCoordinator(BaseService):
             # Use EmbeddingService for embedding generation
             from .embedding_service import EmbeddingService
 
-            # Get optimization frequency from config or use default
-            optimization_batch_frequency = 1000
-            if hasattr(self._db, "_config") and self._db._config:
-                optimization_batch_frequency = getattr(
-                    self._db._config.embedding, "optimization_batch_frequency", 1000
-                )
-
             embedding_service = EmbeddingService(
                 database_provider=self._db,
                 embedding_provider=self._embedding_provider,
-                optimization_batch_frequency=optimization_batch_frequency,
                 progress=self.progress,
+                metrics_collector=metrics_collector,
             )
 
-            return await embedding_service.generate_missing_embeddings(
+            result = await embedding_service.generate_missing_embeddings(
                 exclude_patterns=exclude_patterns
             )
+            self.finalize_optimization()
+            return result
 
         except Exception as e:
             logger.error(
@@ -1663,11 +1675,13 @@ class IndexingCoordinator(BaseService):
                     # Extract constants from metadata if available
                     metadata = chunk.get("metadata") or {}
                     constants = metadata.get("constants")
+                    rule_target = metadata.get("rule_target")
                     text = format_chunk_for_embedding(
                         code=code,
                         file_path=chunk.get("file_path"),
                         language=chunk.get("language"),
                         constants=constants,
+                        rule_target=rule_target,
                     )
                     valid_chunk_data.append((chunk_id, chunk, text))
                 else:
@@ -1717,8 +1731,8 @@ class IndexingCoordinator(BaseService):
             except Exception as e:
                 if "transaction is aborted" in str(e).lower():
                     logger.warning(
-                        f"[IndexCoord] Transaction aborted during embedding insertion, "
-                        f"attempting recovery and retry"
+                        "[IndexCoord] Transaction aborted during embedding insertion, "
+                        "attempting recovery and retry"
                     )
                     # Try to clean up the aborted transaction
                     try:
@@ -1792,11 +1806,9 @@ class IndexingCoordinator(BaseService):
         top_level_items = []
         # Use effective config excludes (includes defaults even when sentinel is set)
         effective_excludes = list(
-            (
-                self.config.indexing.get_effective_config_excludes()
-                if self.config and getattr(self.config, "indexing", None)
-                else []
-            )
+            self.config.indexing.get_effective_config_excludes()
+            if self.config and getattr(self.config, "indexing", None)
+            else []
         )
         # Add global gitignore patterns to effective excludes
         self._extend_with_global_gitignore(effective_excludes)
@@ -1871,10 +1883,25 @@ class IndexingCoordinator(BaseService):
         precomputed_roots = []
         try:
             from chunkhound.utils.ignore_engine import detect_repo_roots  # type: ignore
+        except ImportError:
+            detect_repo_roots = None  # type: ignore[assignment]
 
-            precomputed_roots = detect_repo_roots(directory, effective_excludes)
-        except Exception:
-            precomputed_roots = []
+        if detect_repo_roots is not None:
+            prune_gitfile_roots = (
+                self.config is not None
+                and "gitignore" in self.config.indexing.resolve_ignore_sources()
+            )
+            try:
+                precomputed_roots = detect_repo_roots(
+                    directory,
+                    effective_excludes,
+                    prune_ignored_gitfile_roots=prune_gitfile_roots,
+                )
+            except Exception as e:
+                logger.debug(
+                    "Failed to precompute repo roots for parallel discovery: %s", e
+                )
+                precomputed_roots = []
 
         # Determine number of workers for directory discovery
         # Scale based on number of subtrees and available cores
@@ -2141,7 +2168,9 @@ class IndexingCoordinator(BaseService):
             # avoid re-detecting per process
             try:
                 roots = self._get_or_detect_repo_roots(
-                    directory.resolve(), list(cfg_excludes)
+                    directory.resolve(),
+                    list(cfg_excludes),
+                    prune_ignored_gitfile_roots=("gitignore" in (sources or [])),
                 )
                 if roots:
                     engine_args["roots"] = roots
@@ -2198,10 +2227,8 @@ class IndexingCoordinator(BaseService):
                 for item in directory.iterdir():
                     try:
                         if any(
-                            (
-                                item.resolve().is_relative_to(rr.resolve())
-                                for rr in repo_roots
-                            )
+                            item.resolve().is_relative_to(rr.resolve())
+                            for rr in repo_roots
                         ):
                             continue
                     except Exception:
@@ -2348,7 +2375,6 @@ class IndexingCoordinator(BaseService):
         of Git results. Non-repo portions of the directory are scanned using the
         Python walker while pruning repo subtrees.
         """
-        from fnmatch import fnmatch as _fnmatch
 
         try:
             # Quick probe: ensure git exists
@@ -2360,12 +2386,14 @@ class IndexingCoordinator(BaseService):
             return None
 
         try:
-            from chunkhound.utils.git_discovery import (
-                list_repo_files_via_git as _git_list,
+            from chunkhound.utils.file_patterns import (
+                load_gitignore_patterns as _load_gi,
             )
             from chunkhound.utils.file_patterns import (
                 walk_directory_tree as _walk,
-                load_gitignore_patterns as _load_gi,
+            )
+            from chunkhound.utils.git_discovery import (
+                list_repo_files_via_git as _git_list,
             )
         except Exception:
             return None
@@ -2417,9 +2445,21 @@ class IndexingCoordinator(BaseService):
         except Exception:
             pass
 
+        prune_gitfile_roots = False
+        try:
+            idx = getattr(getattr(self, "config", None), "indexing", None)
+            sources = idx.resolve_ignore_sources() if idx is not None else []
+            prune_gitfile_roots = "gitignore" in (sources or [])
+        except Exception:
+            prune_gitfile_roots = False
+
         # Detect repo roots under directory (pruned by effective_excludes) with cache reuse
         try:
-            repo_roots = self._get_or_detect_repo_roots(directory, effective_excludes)
+            repo_roots = self._get_or_detect_repo_roots(
+                directory,
+                effective_excludes,
+                prune_ignored_gitfile_roots=prune_gitfile_roots,
+            )
         except Exception:
             repo_roots = []
         # Expose whether any repos were detected for caller decisions
@@ -2624,40 +2664,45 @@ class IndexingCoordinator(BaseService):
 
     # --------------------------- Repo-roots caching ---------------------------
     def _repo_roots_cache_key(
-        self, root: Path, cfg_excludes: list[str] | tuple[str, ...]
-    ) -> tuple[str, tuple[str, ...]]:
+        self,
+        root: Path,
+        cfg_excludes: list[str] | tuple[str, ...],
+        *,
+        prune_ignored_gitfile_roots: bool = False,
+    ) -> tuple[str, tuple[str, ...], int]:
         try:
             base = str(root.resolve())
         except Exception:
             base = str(root)
         try:
-            items = tuple(
-                sorted(
-                    [
-                        str(x)
-                        for x in (
-                            list(cfg_excludes)
-                            if not isinstance(cfg_excludes, tuple)
-                            else list(cfg_excludes)
-                        )
-                    ]
-                )
-            )
+            items = tuple(sorted([str(x) for x in list(cfg_excludes)]))
         except Exception:
             items = tuple()
-        return (base, items)
+        return (base, items, 1 if prune_ignored_gitfile_roots else 0)
 
     def _get_or_detect_repo_roots(
-        self, root: Path, cfg_excludes: list[str] | tuple[str, ...]
+        self,
+        root: Path,
+        cfg_excludes: list[str] | tuple[str, ...],
+        *,
+        prune_ignored_gitfile_roots: bool = False,
     ) -> list[Path]:
-        key = self._repo_roots_cache_key(root, cfg_excludes)
+        key = self._repo_roots_cache_key(
+            root,
+            cfg_excludes,
+            prune_ignored_gitfile_roots=prune_ignored_gitfile_roots,
+        )
         cached = self._repo_roots_cache.get(key)
         if cached is not None:
             return cached
         try:
             from chunkhound.utils.ignore_engine import detect_repo_roots as _detect
 
-            roots = _detect(root, cfg_excludes)  # type: ignore[arg-type]
+            roots = _detect(
+                root,
+                cfg_excludes,  # type: ignore[arg-type]
+                prune_ignored_gitfile_roots=prune_ignored_gitfile_roots,
+            )
         except Exception:
             roots = []
         self._repo_roots_cache[key] = roots
@@ -2715,10 +2760,10 @@ class IndexingCoordinator(BaseService):
         if not files and getattr(ignore_engine_obj, "matches", None):
             try:
                 import os as _os
-                from chunkhound.utils.file_patterns import should_include_file as _inc
-                from chunkhound.utils.file_patterns import compile_pattern as _cp
-                from fnmatch import translate as _translate
                 from pathlib import Path as _Path
+
+                from chunkhound.utils.file_patterns import compile_pattern as _cp
+                from chunkhound.utils.file_patterns import should_include_file as _inc
 
                 # Pre-compile include patterns for a minimal filter
                 pat_cache = {}

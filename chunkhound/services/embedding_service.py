@@ -7,8 +7,9 @@ from typing import Any
 from loguru import logger
 from rich.progress import Progress, TaskID
 
+from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector, BatchTiming
 from chunkhound.core.types.common import ChunkId
-from chunkhound.core.utils import estimate_tokens
+from chunkhound.core.utils import DEFAULT_CHARS_PER_TOKEN, estimate_tokens
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
 
@@ -25,8 +26,8 @@ class EmbeddingService(BaseService):
         embedding_batch_size: int = 1000,
         db_batch_size: int = 5000,
         max_concurrent_batches: int | None = None,
-        optimization_batch_frequency: int = 1000,
         progress: Progress | None = None,
+        metrics_collector: BatchMetricsCollector | None = None,
     ):
         """Initialize embedding service.
 
@@ -36,13 +37,14 @@ class EmbeddingService(BaseService):
             embedding_batch_size: Number of texts per embedding API request
             db_batch_size: Number of records per database transaction
             max_concurrent_batches: Maximum concurrent batches (None = auto-detect from provider)
-            optimization_batch_frequency: Optimize DB every N batches (provider-aware)
             progress: Optional Rich Progress instance for hierarchical progress display
+            metrics_collector: Optional collector for per-batch timing metrics
         """
         super().__init__(database_provider)
         self._embedding_provider = embedding_provider
         self._embedding_batch_size = embedding_batch_size
         self._db_batch_size = db_batch_size
+        self._metrics_collector = metrics_collector
 
         # Auto-detect optimal concurrency from provider if not explicitly set
         if max_concurrent_batches is None:
@@ -125,6 +127,44 @@ class EmbeddingService(BaseService):
             provider: New embedding provider implementation
         """
         self._embedding_provider = provider
+
+    def _update_progress_with_speed(
+        self,
+        embed_task: TaskID,
+        batch_size: int,
+        processed_count: int,
+        batch_num: int,
+    ) -> None:
+        """Update progress bar with batch completion and speed calculation.
+
+        This method handles all progress-related updates including advancing
+        the progress bar and calculating/displaying the processing speed.
+        All errors are caught and logged at DEBUG level since progress display
+        is non-critical UI functionality.
+
+        Args:
+            embed_task: The Rich Progress task ID to update
+            batch_size: Number of items in the completed batch
+            processed_count: Total items processed so far
+            batch_num: Current batch number (for logging context)
+        """
+        progress = self.progress
+        if progress is None:
+            return
+        try:
+            progress.advance(embed_task, batch_size)
+            # Calculate and display speed
+            task_obj = progress.tasks[embed_task]
+            if task_obj.elapsed and task_obj.elapsed > 0:
+                speed = processed_count / task_obj.elapsed
+                progress.update(embed_task, speed=f"{speed:.1f} chunks/s")
+        except (AttributeError, IndexError, TypeError, KeyError) as e:
+            # Progress display is non-critical, but log for debugging
+            logger.opt(exception=e).debug(
+                "[EmbSvc] Progress update skipped: task={} batch={}",
+                embed_task,
+                batch_num,
+            )
 
     async def generate_embeddings_for_chunks(
         self,
@@ -257,12 +297,6 @@ class EmbeddingService(BaseService):
             generated_count = await self.generate_embeddings_for_chunks(
                 chunk_id_list, chunk_texts, show_progress=True
             )
-
-            # Optimize if fragmentation high after embedding generation
-            if generated_count > 0 and hasattr(self._db, "optimize_tables"):
-                if hasattr(self._db, "should_optimize") and self._db.should_optimize("post-embedding"):
-                    logger.debug("Optimizing database after embedding generation...")
-                    self._db.optimize_tables()
 
             return {
                 "status": "success",
@@ -502,21 +536,21 @@ class EmbeddingService(BaseService):
             f"Processing {len(batches)} token-aware batches (avg {avg_batch_size:.1f} chunks each)"
         )
 
-        # Track batch count for periodic optimization
-        completed_batch_count = 0
-        should_optimize = (
-            hasattr(self._db, "optimize_tables")
-            and self._optimization_batch_frequency > 0
-        )
-
         # Process batches with concurrency control
         semaphore = asyncio.Semaphore(self._max_concurrent_batches)
 
         async def process_batch(
-            batch: list[tuple[ChunkId, str]], batch_num: int, retry_depth: int = 0
+            batch: list[tuple[ChunkId, str]],
+            batch_num: int,
+            retry_depth: int = 0,
         ) -> int:
             """Process a single batch of embeddings."""
             async with semaphore:
+                # Timing is only created for top-level calls (retry_depth == 0);
+                # retries have timing=None and skip all instrumentation.
+                timing: BatchTiming | None = None
+                if self._metrics_collector and retry_depth == 0:
+                    timing = self._metrics_collector.start_batch(batch_num, len(batch))
                 try:
                     logger.debug(
                         f"Processing batch {batch_num + 1}/{len(batches)} with {len(batch)} chunks"
@@ -529,7 +563,11 @@ class EmbeddingService(BaseService):
                     # Generate embeddings
                     if not self._embedding_provider:
                         return 0
+                    if timing:
+                        timing.mark_embed_api_start()
                     embedding_results = await self._embedding_provider.embed(texts)
+                    if timing:
+                        timing.mark_embed_api_end()
 
                     if len(embedding_results) != len(chunk_ids):
                         logger.warning(
@@ -555,9 +593,13 @@ class EmbeddingService(BaseService):
                         )
 
                     # Store in database with configurable batch size
+                    if timing:
+                        timing.mark_db_insert_start()
                     stored_count = self._db.insert_embeddings_batch(
                         embeddings_data, self._db_batch_size
                     )
+                    if timing:
+                        timing.mark_db_insert_end()
                     logger.debug(
                         f"Batch {batch_num + 1} completed: {stored_count} embeddings stored"
                     )
@@ -616,6 +658,9 @@ class EmbeddingService(BaseService):
                         f"[EmbSvc-BatchProcess] Batch {batch_num + 1} failed (chunks: {len(batch)}, max_chars: {max_size}): {e}"
                     )
                     return 0
+                finally:
+                    if timing and self._metrics_collector:
+                        self._metrics_collector.end_batch(timing)
 
         # Create progress task for embedding generation if requested
         embed_task: TaskID | None = None
@@ -640,16 +685,10 @@ class EmbeddingService(BaseService):
             if show_progress:
                 with update_lock:
                     processed_count += len(batch)
-                    if embed_task and self.progress:
-                        self.progress.advance(embed_task, len(batch))
-
-                        # Calculate and display speed
-                        task_obj = self.progress.tasks[embed_task]
-                        if task_obj.elapsed and task_obj.elapsed > 0:
-                            speed = processed_count / task_obj.elapsed
-                            self.progress.update(
-                                embed_task, speed=f"{speed:.1f} chunks/s"
-                            )
+                    if embed_task is not None and self.progress:
+                        self._update_progress_with_speed(
+                            embed_task, len(batch), processed_count, batch_num
+                        )
 
             return result
 
@@ -808,7 +847,7 @@ class EmbeddingService(BaseService):
                 )
             else:
                 # Fallback for no provider (conservative default)
-                text_tokens = max(1, int(len(text) / 3.5))
+                text_tokens = max(1, int(len(text) / DEFAULT_CHARS_PER_TOKEN))
 
             # Check if adding this chunk would exceed token, document, or chunk limit
             if (

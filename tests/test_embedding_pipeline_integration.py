@@ -11,27 +11,21 @@ from pathlib import Path
 from chunkhound.database_factory import create_services
 from chunkhound.core.config.config import Config
 from chunkhound.services.embedding_service import EmbeddingService
-from .test_utils import get_api_key_for_tests
+from .test_utils import get_embedding_config_for_tests, build_embedding_config_from_dict
 
 
 @pytest.fixture
 async def pipeline_services(tmp_path):
     """Create database services for pipeline testing."""
     db_path = tmp_path / "pipeline_test.duckdb"
-    
-    # Standard API key discovery
-    api_key, provider = get_api_key_for_tests()
-    if not api_key:
+
+    # Get embedding config using centralized helper
+    config_dict = get_embedding_config_for_tests()
+    if not config_dict:
         pytest.skip("No embedding API key available for pipeline integration test")
-    
-    # Standard embedding config
-    model = "text-embedding-3-small" if provider == "openai" else "voyage-3.5"
-    embedding_config = {
-        "provider": provider,
-        "api_key": api_key,
-        "model": model
-    }
-    
+
+    embedding_config = build_embedding_config_from_dict(config_dict)
+
     # Standard config creation
     config = Config(
         database={"path": str(db_path), "provider": "duckdb"},
@@ -39,7 +33,7 @@ async def pipeline_services(tmp_path):
     )
     # Set target_dir after initialization since it's an excluded field
     config.target_dir = tmp_path
-    
+
     # Standard service creation
     services = create_services(db_path, config)
     yield services
@@ -90,7 +84,7 @@ async def async_pipeline_function():
     # Verify file processing succeeded
     assert result['status'] == 'success', f"Pipeline processing failed: {result.get('error')}"
     assert result['chunks'] > 0, "Should create chunks"
-    assert result.get('embeddings_skipped', True) == False, "Should not skip embeddings"
+    assert not result.get('embeddings_skipped', True), "Should not skip embeddings"
     
     # Wait for any async embedding processing
     await asyncio.sleep(3.0)

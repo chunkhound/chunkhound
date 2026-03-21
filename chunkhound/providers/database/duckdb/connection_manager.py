@@ -64,6 +64,11 @@ class DuckDBConnectionManager:
         return self._db_path
 
     @property
+    def is_memory_db(self) -> bool:
+        """Whether this is an in-memory database."""
+        return str(self._db_path) == ":memory:"
+
+    @property
     def is_connected(self) -> bool:
         """Check if database connection is active."""
         return self.connection is not None
@@ -160,7 +165,7 @@ class DuckDBConnectionManager:
         WAL files during connection, which can happen before proper error handling
         kicks in.
         """
-        if str(self.db_path) == ":memory:":
+        if self.is_memory_db:
             return  # No WAL files for in-memory databases
 
         db_path = Path(self.db_path)
@@ -275,7 +280,7 @@ class DuckDBConnectionManager:
         """
         if self.connection is not None:
             try:
-                if not skip_checkpoint:
+                if not skip_checkpoint and not self.is_memory_db:
                     # Force checkpoint before close to ensure durability
                     self.connection.execute("CHECKPOINT")
                     # Only log in non-MCP mode to avoid JSON-RPC interference
@@ -381,7 +386,7 @@ class DuckDBConnectionManager:
             "provider": "duckdb",
             "db_path": str(self.db_path),
             "connected": self.is_connected,
-            "memory_database": str(self.db_path) == ":memory:",
+            "memory_database": self.is_memory_db,
             "connection_type": (
                 type(self.connection).__name__ if self.connection else None
             ),

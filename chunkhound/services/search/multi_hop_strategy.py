@@ -89,13 +89,17 @@ class MultiHopStrategy:
 
         # Apply defaults - consult config if available
         effective_time_limit = (
-            time_limit if time_limit is not None
-            else self._config.get_effective_time_limit() if self._config
+            time_limit
+            if time_limit is not None
+            else self._config.get_effective_time_limit()
+            if self._config
             else 5.0
         )
         effective_result_limit = (
-            result_limit if result_limit is not None
-            else self._config.get_effective_result_limit() if self._config
+            result_limit
+            if result_limit is not None
+            else self._config.get_effective_result_limit()
+            if self._config
             else 500
         )
 
@@ -115,21 +119,6 @@ class MultiHopStrategy:
             model=model,
             path_filter=path_filter,
         )
-
-        if len(initial_results) <= 5:
-            # Not enough results for expansion, fall back to standard search
-            logger.debug(
-                "Not enough results for dynamic expansion, using standard search"
-            )
-            return await self._single_hop_search(
-                query=query,
-                page_size=page_size,
-                offset=offset,
-                threshold=threshold,
-                provider=provider,
-                model=model,
-                path_filter=path_filter,
-            )
 
         # Rerank initial results
         try:
@@ -186,8 +175,13 @@ class MultiHopStrategy:
                     f"Dynamic expansion terminated: {effective_time_limit:.1f} second time limit reached"
                 )
                 break
-            if effective_result_limit is not None and len(all_results) >= effective_result_limit:
-                logger.debug(f"Dynamic expansion terminated: {effective_result_limit} result limit reached")
+            if (
+                effective_result_limit is not None
+                and len(all_results) >= effective_result_limit
+            ):
+                logger.debug(
+                    f"Dynamic expansion terminated: {effective_result_limit} result limit reached"
+                )
                 break
 
             # Get top 5 candidates for expansion

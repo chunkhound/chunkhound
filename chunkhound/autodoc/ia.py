@@ -115,25 +115,15 @@ def _build_site_ia_prompt(*, context: list[dict[str, Any]], audience: str) -> st
     if normalized == "technical":
         audience_lines = [
             "Audience: technical (software engineers).",
-            (
-                _SITE_IA_TECH_PREFER_LINE
-            ),
-            (
-                _SITE_IA_TECH_STYLE_LINE
-            ),
+            (_SITE_IA_TECH_PREFER_LINE),
+            (_SITE_IA_TECH_STYLE_LINE),
         ]
     elif normalized == "end-user":
         audience_lines = [
             "Audience: end-user (less technical).",
-            (
-                _SITE_IA_END_USER_PREFER_LINE
-            ),
-            (
-                _SITE_IA_END_USER_CODE_IDS_LINE
-            ),
-            (
-                _SITE_IA_END_USER_DEEMPHASIZE_LINE
-            ),
+            (_SITE_IA_END_USER_PREFER_LINE),
+            (_SITE_IA_END_USER_CODE_IDS_LINE),
+            (_SITE_IA_END_USER_DEEMPHASIZE_LINE),
         ]
 
     parts = [
@@ -146,19 +136,13 @@ def _build_site_ia_prompt(*, context: list[dict[str, Any]], audience: str) -> st
         [
             "",
             "Produce:",
-            (
-                _SITE_IA_NAV_INTRO_LINE
-            ),
-            (
-                _SITE_IA_NAV_GROUP_COUNT_LINE
-            ),
+            (_SITE_IA_NAV_INTRO_LINE),
+            (_SITE_IA_NAV_GROUP_COUNT_LINE),
             "   - Each group has a title and an ordered list of page slugs.",
             "   - Each page slug should appear at most once across all groups.",
             "2) A glossary of 20–60 terms. Each term has:",
             "   - term",
-            (
-                _SITE_IA_GLOSSARY_DEF_LINE
-            ),
+            (_SITE_IA_GLOSSARY_DEF_LINE),
             "   - pages: list of slugs where it appears",
             "",
             "Output STRICT JSON with keys: nav, glossary.",
@@ -285,9 +269,7 @@ async def _synthesize_homepage_overview(
             "",
             audience_line,
             *goal_lines,
-            (
-                _HOMEPAGE_NO_INVENT_LINE
-            ),
+            (_HOMEPAGE_NO_INVENT_LINE),
             "Do NOT include YAML frontmatter. Do NOT include a level-1 heading.",
             "Do NOT include a '## Topics' section or list topic filenames/titles.",
             "",

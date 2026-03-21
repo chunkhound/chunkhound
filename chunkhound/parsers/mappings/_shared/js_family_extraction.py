@@ -9,16 +9,10 @@ methods, consolidated here to avoid duplication across mappings.
 
 from typing import Any
 
+from tree_sitter import Node as TSNode
+
 from chunkhound.parsers.mappings.base import MAX_CONSTANT_VALUE_LENGTH
 from chunkhound.parsers.universal_engine import UniversalConcept
-
-try:
-    from tree_sitter import Node as TSNode
-
-    TREE_SITTER_AVAILABLE = True
-except ImportError:
-    TSNode = Any  # type: ignore[misc,assignment]
-    TREE_SITTER_AVAILABLE = False
 
 
 class JSFamilyExtraction:
@@ -64,6 +58,7 @@ class JSFamilyExtraction:
 
         if concept == UniversalConcept.DEFINITION and "definition" in captures:
             node = captures["definition"]
+            meta["node_type"] = getattr(node, "type", "")
             init = captures.get("init")
             target = init or node
             try:
@@ -86,6 +81,15 @@ class JSFamilyExtraction:
             except Exception:
                 # Best-effort only; do not set hint on failure
                 pass
+            if "chunk_type_hint" not in meta and getattr(node, "type", "") in {
+                # Captured by LEXICAL_DECLARATION_CONFIG in `_shared/js_query_patterns.py`.
+                # `lexical_declaration` doesn't include "variable" in its node type, so we
+                # set `kind` to avoid falling back to the DEFINITION default (FUNCTION).
+                "lexical_declaration",
+                # Captured by VAR_DECLARATION_CONFIG in `_shared/js_query_patterns.py`.
+                "variable_declaration",
+            }:
+                meta["kind"] = "variable"
         return meta
 
     def extract_content(
@@ -119,9 +123,6 @@ class JSFamilyExtraction:
             List of constant dictionaries with 'name' and 'value' keys, or None
         """
         if concept != UniversalConcept.DEFINITION:
-            return None
-
-        if not TREE_SITTER_AVAILABLE:
             return None
 
         source = content.decode("utf-8", errors="replace")
@@ -191,7 +192,10 @@ class JSFamilyExtraction:
                 value = ""
                 for j in range(child.child_count):
                     value_child = child.child(j)
-                    if value_child and value_child.type not in ("property_identifier", "="):
+                    if value_child and value_child.type not in (
+                        "property_identifier",
+                        "=",
+                    ):
                         value = self.get_node_text(value_child, source).strip()  # type: ignore[attr-defined]
                         break
 
@@ -268,4 +272,3 @@ class JSFamilyExtraction:
             constants.append({"name": var_name, "value": value})
 
         return constants if constants else None
-

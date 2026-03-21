@@ -658,7 +658,11 @@ class RustMapping(BaseMapping):
 
         # Get the definition node
         def_node = captures.get("definition")
-        if not def_node or def_node.type not in ["const_item", "static_item", "let_declaration"]:
+        if not def_node or def_node.type not in [
+            "const_item",
+            "static_item",
+            "let_declaration",
+        ]:
             return None
 
         source = content.decode("utf-8")
@@ -719,9 +723,9 @@ class RustMapping(BaseMapping):
 
         return [result]
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve Rust use/mod statement to file path."""
 
         # Handle mod declarations: mod foo;
@@ -733,14 +737,14 @@ class RustMapping(BaseMapping):
             # Try mod_name.rs
             mod_file = source_dir / f"{mod_name}.rs"
             if mod_file.exists():
-                return mod_file
+                return [mod_file]
 
             # Try mod_name/mod.rs
             mod_file = source_dir / mod_name / "mod.rs"
             if mod_file.exists():
-                return mod_file
+                return [mod_file]
 
-            return None
+            return []
 
         # Handle use statements: use crate::foo::bar;
         use_match = re.search(
@@ -759,7 +763,7 @@ class RustMapping(BaseMapping):
             for part in path_parts[:-1]:
                 mod_file = search_dir / f"{part}.rs"
                 if mod_file.exists():
-                    return mod_file
+                    return [mod_file]
                 mod_dir = search_dir / part
                 if mod_dir.is_dir():
                     search_dir = mod_dir
@@ -768,9 +772,9 @@ class RustMapping(BaseMapping):
             last = path_parts[-1]
             mod_file = search_dir / f"{last}.rs"
             if mod_file.exists():
-                return mod_file
+                return [mod_file]
             mod_file = search_dir / last / "mod.rs"
             if mod_file.exists():
-                return mod_file
+                return [mod_file]
 
-        return None
+        return []

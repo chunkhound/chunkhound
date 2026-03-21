@@ -316,3 +316,21 @@ class TestExtensionCoverage:
                 assert language != Language.UNKNOWN, (
                     f"Extension {ext} maps to UNKNOWN language"
                 )
+
+    def test_from_file_extension_covers_all_parser_extensions(self):
+        """Every extension in EXTENSION_TO_LANGUAGE must resolve via from_file_extension().
+
+        Prevents silent file skipping: files discovered by the walker must not
+        return Language.UNKNOWN from the language detector.
+        """
+        missing = []
+        for ext in EXTENSION_TO_LANGUAGE:
+            if not ext.startswith("."):
+                continue
+            result = Language.from_file_extension(Path(f"test{ext}"))
+            if result == Language.UNKNOWN:
+                missing.append(ext)
+        assert not missing, (
+            f"from_file_extension() returns UNKNOWN for extensions in "
+            f"EXTENSION_TO_LANGUAGE: {sorted(missing)}"
+        )

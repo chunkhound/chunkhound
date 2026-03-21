@@ -8,17 +8,15 @@ properties, coroutines, and KDoc comments.
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from loguru import logger
+from tree_sitter import Node as TSNode
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 from .base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
 
 
 class KotlinMapping(BaseMapping):
@@ -105,7 +103,7 @@ class KotlinMapping(BaseMapping):
         (block_comment) @kdoc
         """
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract function name from a Kotlin function definition node.
 
         Args:
@@ -134,7 +132,7 @@ class KotlinMapping(BaseMapping):
 
         return self.get_fallback_name(node, "function")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract class name from a Kotlin class definition node.
 
         Args:
@@ -163,7 +161,7 @@ class KotlinMapping(BaseMapping):
 
         return self.get_fallback_name(node, "class")
 
-    def extract_method_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_method_name(self, node: TSNode | None, source: str) -> str:
         """Extract method name from a Kotlin method definition node.
 
         Args:
@@ -176,7 +174,7 @@ class KotlinMapping(BaseMapping):
         # In Kotlin, methods are functions, so delegate to function name extraction
         return self.extract_function_name(node, source)
 
-    def extract_parameters(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter names and types from a Kotlin function node.
 
         Args:
@@ -225,7 +223,7 @@ class KotlinMapping(BaseMapping):
 
         return parameters
 
-    def extract_package_name(self, root_node: "TSNode | None", source: str) -> str:
+    def extract_package_name(self, root_node: TSNode | None, source: str) -> str:
         """Extract package name from Kotlin file.
 
         Args:
@@ -257,7 +255,7 @@ class KotlinMapping(BaseMapping):
 
         return ""
 
-    def extract_annotations(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_annotations(self, node: TSNode | None, source: str) -> list[str]:
         """Extract Kotlin annotations from a node.
 
         Args:
@@ -295,7 +293,7 @@ class KotlinMapping(BaseMapping):
 
         return annotations
 
-    def extract_type_parameters(self, node: "TSNode | None", source: str) -> str:
+    def extract_type_parameters(self, node: TSNode | None, source: str) -> str:
         """Extract generic type parameters from a Kotlin node.
 
         Args:
@@ -318,7 +316,7 @@ class KotlinMapping(BaseMapping):
 
         return ""
 
-    def extract_return_type(self, node: "TSNode | None", source: str) -> str | None:
+    def extract_return_type(self, node: TSNode | None, source: str) -> str | None:
         """Extract return type from a Kotlin function node.
 
         Args:
@@ -347,7 +345,7 @@ class KotlinMapping(BaseMapping):
 
         return None
 
-    def is_suspend_function(self, node: "TSNode | None", source: str) -> bool:
+    def is_suspend_function(self, node: TSNode | None, source: str) -> bool:
         """Check if a Kotlin function is a suspend function (coroutine).
 
         Args:
@@ -372,7 +370,7 @@ class KotlinMapping(BaseMapping):
 
         return False
 
-    def is_extension_function(self, node: "TSNode | None", source: str) -> bool:
+    def is_extension_function(self, node: TSNode | None, source: str) -> bool:
         """Check if a Kotlin function is an extension function.
 
         Args:
@@ -396,7 +394,7 @@ class KotlinMapping(BaseMapping):
 
         return False
 
-    def extract_class_modifiers(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_class_modifiers(self, node: TSNode | None, source: str) -> list[str]:
         """Extract Kotlin class modifiers (data, sealed, abstract, etc.).
 
         Args:
@@ -435,7 +433,7 @@ class KotlinMapping(BaseMapping):
 
         return modifiers
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a Kotlin node should be included as a chunk.
 
         Args:
@@ -512,7 +510,7 @@ class KotlinMapping(BaseMapping):
 
     def get_qualified_name(
         self,
-        node: "TSNode | None",
+        node: TSNode | None,
         source: str,
         package_name: str = "",
         parent_name: str = "",
@@ -567,12 +565,12 @@ class KotlinMapping(BaseMapping):
             logger.error(f"Failed to get Kotlin qualified name: {e}")
             return self.get_fallback_name(node, "symbol")
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self,
         import_text: str,
         base_dir: Path,
         source_file: Path,
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve Kotlin import to file path.
 
         Args:
@@ -581,16 +579,16 @@ class KotlinMapping(BaseMapping):
             source_file: Path to the file containing the import
 
         Returns:
-            Path to the imported file, or None if not found
+            Path to the imported file (empty list if not found)
         """
         # Extract class path: import com.example.Foo or import com.example.Foo.bar
         match = re.search(r"import\s+([\w.]+)", import_text)
         if not match:
-            return None
+            return []
 
         class_path = match.group(1)
         if not class_path:
-            return None
+            return []
 
         # Convert to file path (last part is class name)
         rel_path = class_path.replace(".", "/") + ".kt"
@@ -599,14 +597,14 @@ class KotlinMapping(BaseMapping):
         for prefix in ["", "src/main/kotlin/", "src/", "app/src/main/kotlin/"]:
             full_path = base_dir / prefix / rel_path
             if full_path.exists():
-                return full_path
+                return [full_path]
 
-        return None
+        return []
 
     def extract_constants(
         self,
         concept: UniversalConcept,
-        captures: dict[str, "TSNode"],
+        captures: dict[str, TSNode],
         content: bytes,
     ) -> list[dict[str, str]] | None:
         """Extract constant definitions from Kotlin code.

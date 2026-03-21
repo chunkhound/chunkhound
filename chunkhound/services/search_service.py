@@ -168,7 +168,6 @@ class SearchService(BaseService):
             logger.error(f"Semantic search failed: {e}")
             raise
 
-
     def search_regex(
         self,
         pattern: str,
@@ -384,4 +383,3 @@ class SearchService(BaseService):
             enhanced_results.append(enhanced_result)
 
         return enhanced_results
-

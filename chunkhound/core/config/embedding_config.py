@@ -8,6 +8,7 @@ variables, config files, CLI arguments) across MCP server and indexing flows.
 
 import argparse
 import os
+import re
 from typing import Any, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -16,8 +17,8 @@ from typing_extensions import Self
 
 from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL
 
-from .openai_utils import is_official_openai_endpoint
-
+from .openai_utils import is_azure_openai_endpoint, is_official_openai_endpoint
+from .voyageai_utils import is_official_voyageai_endpoint
 
 # Error message constants for consistent messaging across config and provider
 RERANK_MODEL_REQUIRED_COHERE = (
@@ -34,7 +35,7 @@ def validate_rerank_configuration(
     provider: str,
     rerank_format: str,
     rerank_model: str | None,
-    rerank_url: str,
+    rerank_url: str | None,
     base_url: str | None,
 ) -> None:
     """Validate rerank configuration consistency.
@@ -51,8 +52,8 @@ def validate_rerank_configuration(
     Raises:
         ValueError: If configuration is invalid
     """
-    # VoyageAI uses SDK-based reranking, doesn't need URL configuration
-    if provider == "voyageai":
+    # VoyageAI uses SDK-based reranking when no rerank_url provided
+    if provider == "voyageai" and not rerank_url:
         return
 
     # For Cohere format, rerank_model is required
@@ -64,7 +65,11 @@ def validate_rerank_configuration(
 
     if is_using_reranking:
         # For relative URLs, we need base_url
-        if not rerank_url.startswith(("http://", "https://")) and not base_url:
+        if (
+            rerank_url
+            and not rerank_url.startswith(("http://", "https://"))
+            and not base_url
+        ):
             raise ValueError(RERANK_BASE_URL_REQUIRED)
 
 
@@ -74,14 +79,14 @@ class EmbeddingConfig(BaseSettings):
 
     Configuration Sources (in order of precedence):
     1. CLI arguments
-    2. Environment variables (CHUNKHOUND_EMBEDDING_*)
+    2. Environment variables (CHUNKHOUND_EMBEDDING__*)
     3. Config files
     4. Default values
 
     Environment Variables:
-        CHUNKHOUND_EMBEDDING_API_KEY=sk-...
-        CHUNKHOUND_EMBEDDING_MODEL=text-embedding-3-small
-        CHUNKHOUND_EMBEDDING_BASE_URL=https://api.openai.com/v1
+        CHUNKHOUND_EMBEDDING__API_KEY=sk-...
+        CHUNKHOUND_EMBEDDING__MODEL=text-embedding-3-small
+        CHUNKHOUND_EMBEDDING__BASE_URL=https://api.openai.com/v1
     """
 
     model_config = SettingsConfigDict(
@@ -111,39 +116,58 @@ class EmbeddingConfig(BaseSettings):
         default=None, description="Base URL for the embedding API"
     )
 
+    # Azure OpenAI Configuration
+    api_version: str | None = Field(
+        default=None, description="Azure OpenAI API version (e.g., '2024-02-01')"
+    )
+
+    azure_endpoint: str | None = Field(
+        default=None,
+        description="Azure OpenAI endpoint URL (e.g., 'https://myresource.openai.azure.com')",
+    )
+
+    azure_deployment: str | None = Field(
+        default=None, description="Azure OpenAI deployment name"
+    )
+
     rerank_model: str | None = Field(
         default=None,
         description="Reranking model name (enables multi-hop search if specified)",
     )
 
-    rerank_url: str = Field(
-        default="/rerank",
-        description="Rerank endpoint URL. Absolute URLs (http/https) used as-is for separate services. "
-        "Relative paths combined with base_url for same-server reranking.",
+    rerank_url: str | None = Field(
+        default=None,
+        description=(
+            "Rerank endpoint URL. Absolute URLs (http/https) used "
+            "as-is for separate services. Relative paths combined "
+            "with base_url for same-server reranking."
+        ),
     )
 
     rerank_format: Literal["cohere", "tei", "auto"] = Field(
         default="auto",
-        description="Reranking API format. 'cohere' for Cohere-compatible APIs (requires model in request), "
-        "'tei' for Hugging Face Text Embeddings Inference (model set at deployment), "
-        "'auto' for automatic format detection from response.",
+        description=(
+            "Reranking API format. 'cohere' for Cohere-compatible "
+            "APIs (requires model in request), 'tei' for Hugging "
+            "Face TEI (model set at deployment), 'auto' for "
+            "automatic format detection from response."
+        ),
     )
 
     # Internal settings - not exposed to users
     batch_size: int = Field(default=100, description="Internal batch size")
     rerank_batch_size: int | None = Field(
         default=None,
-        description="Max documents per rerank batch (overrides model defaults, bounded by model caps)",
+        description=(
+            "Max documents per rerank batch "
+            "(overrides model defaults, bounded by model caps)"
+        ),
     )
     timeout: int = Field(default=30, description="Internal timeout")
     max_retries: int = Field(default=3, description="Internal max retries")
     max_concurrent_batches: int | None = Field(
         default=None,
         description="Internal concurrency (auto-detected from provider if not set)",
-    )
-    optimization_batch_frequency: int = Field(
-        default=1000,
-        description="Internal optimization frequency (runs every N batches during indexing)",
     )
 
     @field_validator("rerank_batch_size")
@@ -185,6 +209,22 @@ class EmbeddingConfig(BaseSettings):
     @model_validator(mode="after")
     def validate_rerank_config(self) -> Self:
         """Validate rerank configuration using shared validation logic."""
+        # TEI format implies a relative /rerank endpoint when no explicit URL is given.
+        # Only auto-set when base_url is present so the factory can resolve it to an
+        # absolute URL; without base_url there is nothing to resolve against.
+        if (
+            self.rerank_format == "tei"
+            and self.rerank_url is None
+            and self.base_url is not None
+        ):
+            self.rerank_url = "/rerank"
+        elif (
+            self.rerank_format == "tei"
+            and self.rerank_url is None
+            and self.base_url is None
+            and self.provider != "voyageai"
+        ):
+            raise ValueError(RERANK_BASE_URL_REQUIRED)
         validate_rerank_configuration(
             provider=self.provider,
             rerank_format=self.rerank_format,
@@ -192,6 +232,46 @@ class EmbeddingConfig(BaseSettings):
             rerank_url=self.rerank_url,
             base_url=self.base_url,
         )
+        return self
+
+    @model_validator(mode="after")
+    def validate_azure_config(self) -> Self:
+        """Validate Azure OpenAI configuration."""
+        # If azure_endpoint is set, validate Azure-specific requirements
+        if self.azure_endpoint:
+            # Validate endpoint format
+            if not is_azure_openai_endpoint(self.azure_endpoint):
+                raise ValueError(
+                    "azure_endpoint must be a valid Azure OpenAI endpoint "
+                    "(e.g., 'https://myresource.openai.azure.com')"
+                )
+
+            # api_version is required for Azure
+            if not self.api_version:
+                raise ValueError(
+                    "api_version is required when using Azure OpenAI "
+                    "(e.g., '2024-02-01')"
+                )
+
+            # Validate api_version format (YYYY-MM-DD or YYYY-MM-DD-<suffix>)
+            if not re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}(-[a-zA-Z][a-zA-Z0-9]*)?", self.api_version
+            ):
+                raise ValueError(
+                    f"api_version must be YYYY-MM-DD or YYYY-MM-DD-<suffix> format "
+                    f"(e.g., '2024-02-01', '2024-02-01-preview'), "
+                    f"got '{self.api_version}'"
+                )
+
+            # azure_endpoint and base_url are mutually exclusive
+            if self.base_url:
+                raise ValueError(
+                    "azure_endpoint and base_url are mutually "
+                    "exclusive. Use azure_endpoint for Azure "
+                    "OpenAI, base_url for custom "
+                    "OpenAI-compatible endpoints."
+                )
+
         return self
 
     def get_provider_config(self) -> dict[str, Any]:
@@ -218,6 +298,14 @@ class EmbeddingConfig(BaseSettings):
         if self.base_url:
             base_config["base_url"] = self.base_url
 
+        # Add Azure OpenAI configuration if available
+        if self.api_version:
+            base_config["api_version"] = self.api_version
+        if self.azure_endpoint:
+            base_config["azure_endpoint"] = self.azure_endpoint
+        if self.azure_deployment:
+            base_config["azure_deployment"] = self.azure_deployment
+
         # Add rerank configuration if available
         if self.rerank_model:
             base_config["rerank_model"] = self.rerank_model
@@ -225,6 +313,8 @@ class EmbeddingConfig(BaseSettings):
         base_config["rerank_format"] = self.rerank_format
         if self.rerank_batch_size is not None:
             base_config["rerank_batch_size"] = self.rerank_batch_size
+        if self.max_concurrent_batches is not None:
+            base_config["max_concurrent_batches"] = self.max_concurrent_batches
 
         return base_config
 
@@ -252,6 +342,9 @@ class EmbeddingConfig(BaseSettings):
             True if provider is properly configured
         """
         if self.provider == "openai":
+            # Azure OpenAI always requires API key
+            if self.azure_endpoint:
+                return self.api_key is not None and self.api_version is not None
             # For OpenAI provider, only require API key for official endpoints
             if is_official_openai_endpoint(self.base_url):
                 return self.api_key is not None
@@ -259,8 +352,10 @@ class EmbeddingConfig(BaseSettings):
                 # Custom endpoints don't require API key
                 return True
         else:
-            # For other providers (voyageai, etc.), always require API key
-            return self.api_key is not None
+            # VoyageAI: only the official endpoint requires an API key
+            if is_official_voyageai_endpoint(self.base_url):
+                return self.api_key is not None
+            return True
 
     def get_missing_config(self) -> list[str]:
         """
@@ -272,19 +367,36 @@ class EmbeddingConfig(BaseSettings):
         missing = []
 
         if self.provider == "openai":
+            # Azure OpenAI always requires API key
+            if self.azure_endpoint:
+                if not self.api_key:
+                    missing.append("api_key (set CHUNKHOUND_EMBEDDING__API_KEY)")
+                if not self.api_version:
+                    missing.append(
+                        "api_version (set CHUNKHOUND_EMBEDDING__API_VERSION)"
+                    )
             # For OpenAI provider, only require API key for official endpoints
-            if is_official_openai_endpoint(self.base_url) and not self.api_key:
-                missing.append("api_key (set CHUNKHOUND_EMBEDDING_API_KEY)")
+            elif is_official_openai_endpoint(self.base_url) and not self.api_key:
+                missing.append("api_key (set CHUNKHOUND_EMBEDDING__API_KEY)")
         else:
-            # For other providers (voyageai, etc.), always require API key
-            if not self.api_key:
-                missing.append("api_key (set CHUNKHOUND_EMBEDDING_API_KEY)")
+            # For voyageai with a custom endpoint, API key is optional
+            if not self.api_key and not self.base_url:
+                missing.append(
+                    "api_key (set VOYAGE_API_KEY or CHUNKHOUND_EMBEDDING__API_KEY)"
+                )
 
         return missing
 
     @classmethod
     def add_cli_arguments(cls, parser: argparse.ArgumentParser) -> None:
         """Add embedding-related CLI arguments."""
+        parser.add_argument(
+            "--provider",
+            "--embedding-provider",
+            choices=["openai", "voyageai"],
+            help="Embedding provider (openai or voyageai)",
+        )
+
         parser.add_argument(
             "--model",
             "--embedding-model",
@@ -309,19 +421,78 @@ class EmbeddingConfig(BaseSettings):
             help="Skip embedding generation (index code only)",
         )
 
+        # Azure OpenAI arguments
+        parser.add_argument(
+            "--azure-endpoint",
+            "--embedding-azure-endpoint",
+            help="Azure OpenAI endpoint URL (e.g., 'https://myresource.openai.azure.com')",
+        )
+
+        parser.add_argument(
+            "--api-version",
+            "--embedding-api-version",
+            help="Azure OpenAI API version (e.g., '2024-02-01')",
+        )
+
+        parser.add_argument(
+            "--azure-deployment",
+            "--embedding-azure-deployment",
+            help="Azure OpenAI deployment name",
+        )
+
     @classmethod
     def load_from_env(cls) -> dict[str, Any]:
-        """Load embedding config from environment variables."""
+        """Load embedding config from environment variables.
+
+        Supports both the canonical double-underscore form (CHUNKHOUND_EMBEDDING__*)
+        and the legacy single-underscore form (CHUNKHOUND_EMBEDDING_*) for the four
+        common fields. The canonical form takes precedence when both are set.
+        """
+
+        def _first_env(*names: str) -> str | None:
+            for name in names:
+                val = os.getenv(name)
+                if val is not None:
+                    return val
+            return None
+
         config = {}
 
-        if api_key := os.getenv("CHUNKHOUND_EMBEDDING__API_KEY"):
+        if api_key := _first_env(
+            "CHUNKHOUND_EMBEDDING__API_KEY", "CHUNKHOUND_EMBEDDING_API_KEY"
+        ):
             config["api_key"] = api_key
-        if base_url := os.getenv("CHUNKHOUND_EMBEDDING__BASE_URL"):
+        if base_url := _first_env(
+            "CHUNKHOUND_EMBEDDING__BASE_URL", "CHUNKHOUND_EMBEDDING_BASE_URL"
+        ):
             config["base_url"] = base_url
-        if provider := os.getenv("CHUNKHOUND_EMBEDDING__PROVIDER"):
+        if provider := _first_env(
+            "CHUNKHOUND_EMBEDDING__PROVIDER", "CHUNKHOUND_EMBEDDING_PROVIDER"
+        ):
             config["provider"] = provider
-        if model := os.getenv("CHUNKHOUND_EMBEDDING__MODEL"):
+        if model := _first_env(
+            "CHUNKHOUND_EMBEDDING__MODEL", "CHUNKHOUND_EMBEDDING_MODEL"
+        ):
             config["model"] = model
+
+        # Azure OpenAI configuration
+        if api_version := os.getenv("CHUNKHOUND_EMBEDDING__API_VERSION"):
+            config["api_version"] = api_version
+        if azure_endpoint := os.getenv("CHUNKHOUND_EMBEDDING__AZURE_ENDPOINT"):
+            config["azure_endpoint"] = azure_endpoint
+        if azure_deployment := os.getenv("CHUNKHOUND_EMBEDDING__AZURE_DEPLOYMENT"):
+            config["azure_deployment"] = azure_deployment
+
+        # Fallback: provider-specific env vars (lower priority than CHUNKHOUND_EMBEDDING__ vars)
+        if "api_key" not in config:
+            provider_hint = (
+                config.get("provider")
+                or os.getenv("CHUNKHOUND_EMBEDDING__PROVIDER")
+                or os.getenv("CHUNKHOUND_EMBEDDING_PROVIDER")
+            )
+            if provider_hint == "voyageai":
+                if voyage_key := os.getenv("VOYAGE_API_KEY"):
+                    config["api_key"] = voyage_key
 
         # Reranking configuration
         if rerank_model := os.getenv("CHUNKHOUND_EMBEDDING__RERANK_MODEL"):
@@ -343,6 +514,10 @@ class EmbeddingConfig(BaseSettings):
         """Extract embedding config from CLI arguments."""
         overrides = {}
 
+        # Handle provider arguments (both variations)
+        if hasattr(args, "provider") and args.provider:
+            overrides["provider"] = args.provider
+
         # Handle model arguments (both variations)
         if hasattr(args, "model") and args.model:
             overrides["model"] = args.model
@@ -361,6 +536,25 @@ class EmbeddingConfig(BaseSettings):
         if hasattr(args, "embedding_base_url") and args.embedding_base_url:
             overrides["base_url"] = args.embedding_base_url
 
+        # Handle Azure OpenAI arguments
+        if hasattr(args, "azure_endpoint") and args.azure_endpoint:
+            overrides["azure_endpoint"] = args.azure_endpoint
+        if hasattr(args, "embedding_azure_endpoint") and args.embedding_azure_endpoint:
+            overrides["azure_endpoint"] = args.embedding_azure_endpoint
+
+        if hasattr(args, "api_version") and args.api_version:
+            overrides["api_version"] = args.api_version
+        if hasattr(args, "embedding_api_version") and args.embedding_api_version:
+            overrides["api_version"] = args.embedding_api_version
+
+        if hasattr(args, "azure_deployment") and args.azure_deployment:
+            overrides["azure_deployment"] = args.azure_deployment
+        if (
+            hasattr(args, "embedding_azure_deployment")
+            and args.embedding_azure_deployment
+        ):
+            overrides["azure_deployment"] = args.embedding_azure_deployment
+
         # Handle no-embeddings flag (special case - disables embeddings)
         if hasattr(args, "no_embeddings") and args.no_embeddings:
             return {"disabled": True}  # This will be handled specially in main Config
@@ -370,10 +564,16 @@ class EmbeddingConfig(BaseSettings):
     def __repr__(self) -> str:
         """String representation hiding sensitive information."""
         api_key_display = "***" if self.api_key else None
-        return (
-            f"EmbeddingConfig("
-            f"provider={self.provider}, "
-            f"model={self.get_default_model()}, "
-            f"api_key={api_key_display}, "
-            f"base_url={self.base_url})"
-        )
+        parts = [
+            f"provider={self.provider}",
+            f"model={self.get_default_model()}",
+            f"api_key={api_key_display}",
+        ]
+        if self.azure_endpoint:
+            parts.append(f"azure_endpoint={self.azure_endpoint}")
+            parts.append(f"api_version={self.api_version}")
+            if self.azure_deployment:
+                parts.append(f"azure_deployment={self.azure_deployment}")
+        elif self.base_url:
+            parts.append(f"base_url={self.base_url}")
+        return f"EmbeddingConfig({', '.join(parts)})"

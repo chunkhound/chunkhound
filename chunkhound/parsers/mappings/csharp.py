@@ -7,16 +7,14 @@ and XML documentation comments.
 """
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from loguru import logger
+from tree_sitter import Node as TSNode
 
 from chunkhound.core.types.common import Language
 
 from .base import MAX_CONSTANT_VALUE_LENGTH, BaseMapping
-
-if TYPE_CHECKING:
-    from tree_sitter import Node as TSNode
 
 
 class CSharpMapping(BaseMapping):
@@ -201,7 +199,7 @@ class CSharpMapping(BaseMapping):
             return None
 
     def extract_name(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract name from captures for this concept."""
         from chunkhound.parsers.universal_engine import UniversalConcept
@@ -254,7 +252,7 @@ class CSharpMapping(BaseMapping):
         return "unnamed"
 
     def extract_content(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> str:
         """Extract content from captures for this concept."""
         source = content.decode("utf-8")
@@ -269,7 +267,7 @@ class CSharpMapping(BaseMapping):
         return ""
 
     def extract_metadata(
-        self, concept: "UniversalConcept", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "UniversalConcept", captures: dict[str, TSNode], content: bytes
     ) -> dict[str, Any]:
         """Extract C#-specific metadata."""
         from chunkhound.parsers.universal_engine import UniversalConcept
@@ -305,7 +303,7 @@ class CSharpMapping(BaseMapping):
 
         return metadata
 
-    def extract_function_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_function_name(self, node: TSNode | None, source: str) -> str:
         """Extract method name from a C# method definition node.
 
         Args:
@@ -365,7 +363,7 @@ class CSharpMapping(BaseMapping):
 
         return self.get_fallback_name(node, "method")
 
-    def extract_class_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_class_name(self, node: TSNode | None, source: str) -> str:
         """Extract class name from a C# class definition node.
 
         Args:
@@ -394,7 +392,7 @@ class CSharpMapping(BaseMapping):
 
         return self.get_fallback_name(node, "class")
 
-    def extract_method_name(self, node: "TSNode | None", source: str) -> str:
+    def extract_method_name(self, node: TSNode | None, source: str) -> str:
         """Extract method name from a C# method definition node.
 
         Args:
@@ -407,7 +405,7 @@ class CSharpMapping(BaseMapping):
         # Delegate to extract_function_name as C# methods are functions
         return self.extract_function_name(node, source)
 
-    def extract_parameters(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_parameters(self, node: TSNode | None, source: str) -> list[str]:
         """Extract parameter names and types from a C# method node.
 
         Args:
@@ -438,7 +436,7 @@ class CSharpMapping(BaseMapping):
 
         return parameters
 
-    def extract_namespace_name(self, root_node: "TSNode | None", source: str) -> str:
+    def extract_namespace_name(self, root_node: TSNode | None, source: str) -> str:
         """Extract namespace name from C# file.
 
         Args:
@@ -484,7 +482,7 @@ class CSharpMapping(BaseMapping):
         return ""
 
     def extract_using_statements(
-        self, root_node: "TSNode | None", source: str
+        self, root_node: TSNode | None, source: str
     ) -> list[str]:
         """Extract using statements from C# file.
 
@@ -516,7 +514,7 @@ class CSharpMapping(BaseMapping):
 
         return using_statements
 
-    def extract_attributes(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_attributes(self, node: TSNode | None, source: str) -> list[str]:
         """Extract C# attributes from a node.
 
         Args:
@@ -548,7 +546,7 @@ class CSharpMapping(BaseMapping):
 
         return attributes
 
-    def extract_type_parameters(self, node: "TSNode | None", source: str) -> str:
+    def extract_type_parameters(self, node: TSNode | None, source: str) -> str:
         """Extract generic type parameters from a C# node.
 
         Args:
@@ -585,7 +583,7 @@ class CSharpMapping(BaseMapping):
 
         return ""
 
-    def extract_return_type(self, node: "TSNode | None", source: str) -> str | None:
+    def extract_return_type(self, node: TSNode | None, source: str) -> str | None:
         """Extract return type from a C# method node.
 
         Args:
@@ -621,7 +619,7 @@ class CSharpMapping(BaseMapping):
 
         return None
 
-    def extract_access_modifiers(self, node: "TSNode | None", source: str) -> list[str]:
+    def extract_access_modifiers(self, node: TSNode | None, source: str) -> list[str]:
         """Extract access modifiers from a C# declaration.
 
         Args:
@@ -667,7 +665,7 @@ class CSharpMapping(BaseMapping):
 
         return modifiers
 
-    def is_xml_doc_comment(self, node: "TSNode | None", source: str) -> bool:
+    def is_xml_doc_comment(self, node: TSNode | None, source: str) -> bool:
         """Check if a comment node is an XML documentation comment.
 
         Args:
@@ -729,7 +727,7 @@ class CSharpMapping(BaseMapping):
 
         return cleaned
 
-    def should_include_node(self, node: "TSNode | None", source: str) -> bool:
+    def should_include_node(self, node: TSNode | None, source: str) -> bool:
         """Determine if a C# node should be included as a chunk.
 
         Args:
@@ -772,7 +770,7 @@ class CSharpMapping(BaseMapping):
 
     def get_qualified_name(
         self,
-        node: "TSNode | None",
+        node: TSNode | None,
         source: str,
         namespace_name: str = "",
         parent_name: str = "",
@@ -834,7 +832,7 @@ class CSharpMapping(BaseMapping):
             return self.get_fallback_name(node, "symbol")
 
     def extract_constants(
-        self, concept: "Any", captures: dict[str, "TSNode"], content: bytes
+        self, concept: "Any", captures: dict[str, TSNode], content: bytes
     ) -> list[dict[str, str]] | None:
         """Extract constant definitions from C# code.
 
@@ -1001,9 +999,9 @@ class CSharpMapping(BaseMapping):
 
         return constants if constants else None
 
-    def resolve_import_path(
+    def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
-    ) -> Path | None:
+    ) -> list[Path]:
         """Resolve import path for C#.
 
         C# using directives map to assemblies, not files.
@@ -1014,7 +1012,7 @@ class CSharpMapping(BaseMapping):
             source_file: Path to the file containing the import
 
         Returns:
-            None (C# using directives are namespace-based, not file-based)
+            Empty list (C# using directives are namespace-based, not file-based)
         """
         # C# using directives map to assemblies, not files
-        return None
+        return []

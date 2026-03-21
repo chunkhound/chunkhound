@@ -5,20 +5,21 @@ import heapq
 import math
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from loguru import logger
 
 from chunkhound.core.config.embedding_config import (
     RERANK_BASE_URL_REQUIRED,
-    RERANK_MODEL_REQUIRED_COHERE,
     validate_rerank_configuration,
 )
+from chunkhound.core.config.openai_utils import is_azure_openai_endpoint
 from chunkhound.core.exceptions.core import ValidationError
+from chunkhound.core.utils import EMBEDDING_CHARS_PER_TOKEN
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
 
-from .batch_utils import handle_token_limit_error, with_openai_token_handling
+from .batch_utils import handle_token_limit_error
 
 try:
     import openai
@@ -203,6 +204,9 @@ class OpenAIEmbeddingProvider:
         retry_delay: float = 1.0,
         max_tokens: int | None = None,
         rerank_batch_size: int | None = None,
+        api_version: str | None = None,
+        azure_endpoint: str | None = None,
+        azure_deployment: str | None = None,
     ):
         """Initialize OpenAI embedding provider.
 
@@ -219,6 +223,9 @@ class OpenAIEmbeddingProvider:
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
             rerank_batch_size: Max documents per rerank batch (overrides model defaults, bounded by model caps)
+            api_version: Azure OpenAI API version (e.g., '2024-02-01')
+            azure_endpoint: Azure OpenAI endpoint URL
+            azure_deployment: Azure OpenAI deployment name
         """
         if not OPENAI_AVAILABLE:
             raise ImportError(
@@ -229,6 +236,11 @@ class OpenAIEmbeddingProvider:
         self._api_key = api_key
         self._base_url = base_url
         self._model = model
+
+        # Azure OpenAI configuration
+        self._api_version = api_version
+        self._azure_endpoint = azure_endpoint
+        self._azure_deployment = azure_deployment
         self._rerank_model = rerank_model
         self._rerank_url = rerank_url
         self._rerank_format = rerank_format
@@ -358,6 +370,11 @@ class OpenAIEmbeddingProvider:
                 "OpenAI library is not available. Install with: pip install openai"
             )
 
+        # Check if using Azure OpenAI
+        if is_azure_openai_endpoint(self._azure_endpoint):
+            await self._ensure_azure_client()
+            return
+
         # Only require API key for official OpenAI API
         from chunkhound.core.config.openai_utils import is_official_openai_endpoint
 
@@ -397,14 +414,62 @@ class OpenAIEmbeddingProvider:
         self._client = openai.AsyncOpenAI(**client_kwargs)
         self._client_initialized = True
 
+    async def _ensure_azure_client(self) -> None:
+        """Initialize Azure OpenAI client.
+
+        Azure OpenAI uses a different client class (AzureOpenAI) with specific
+        parameters for endpoint, API version, and deployment.
+        """
+        if not self._api_key:
+            raise ValueError("Azure OpenAI API key is required")
+
+        if not self._api_version:
+            raise ValueError("Azure OpenAI API version is required")
+
+        # azure_endpoint is validated by is_azure_openai_endpoint before this method is called
+        if not self._azure_endpoint:
+            raise ValueError("Azure endpoint is required for Azure OpenAI")
+
+        logger.debug(
+            f"Creating Azure OpenAI client: endpoint={self._azure_endpoint}, "
+            f"api_version={self._api_version}, deployment={self._azure_deployment}"
+        )
+
+        # AzureOpenAI client has different constructor parameters
+        self._client = openai.AsyncAzureOpenAI(
+            api_key=self._api_key,
+            api_version=self._api_version,
+            azure_endpoint=self._azure_endpoint,
+            timeout=self._timeout,
+        )
+        self._client_initialized = True
+
     @property
     def name(self) -> str:
         """Provider name."""
+        # Return azure_openai for Azure endpoints to distinguish in logs/metrics
+        if is_azure_openai_endpoint(self._azure_endpoint):
+            return "azure_openai"
         return "openai"
 
     @property
     def model(self) -> str:
         """Model name."""
+        return self._model
+
+    def _get_deployment_model(self) -> str:
+        """Get the model/deployment name for API requests.
+
+        For Azure OpenAI, this returns the deployment name if specified,
+        otherwise falls back to the model name (Azure deployments can use
+        model name as deployment name).
+
+        For standard OpenAI, this returns the model name.
+        """
+        if is_azure_openai_endpoint(self._azure_endpoint):
+            # Azure: prefer explicit deployment, fall back to model name
+            # (Azure allows using model name as deployment name)
+            return self._azure_deployment or self._model
         return self._model
 
     @property
@@ -487,6 +552,10 @@ class OpenAIEmbeddingProvider:
         """Check if the provider is available and properly configured."""
         if not OPENAI_AVAILABLE:
             return False
+
+        # Azure OpenAI always requires API key and api_version
+        if is_azure_openai_endpoint(self._azure_endpoint):
+            return self._api_key is not None and self._api_version is not None
 
         # Import the utility function (following existing pattern)
         from chunkhound.core.config.openai_utils import is_official_openai_endpoint
@@ -583,7 +652,7 @@ class OpenAIEmbeddingProvider:
                         f"[{datetime.now().isoformat()}] OPENAI-PROVIDER ERROR: texts={len(validated_texts)}, max_chars={max_chars}, error={e}\n"
                     )
                     f.flush()
-            except (IOError, OSError):
+            except OSError:
                 pass  # Debug logging is best-effort, OK to fail silently
 
             raise
@@ -661,13 +730,24 @@ class OpenAIEmbeddingProvider:
                 )
 
                 response = await self._client.embeddings.create(
-                    model=self.model, input=texts, timeout=self._timeout
+                    model=self._get_deployment_model(),
+                    input=texts,
+                    timeout=self._timeout,
                 )
 
-                # Extract embeddings from response
-                embeddings = []
+                # Extract embeddings from response, sorted by original input order
+                # OpenAI API does not guarantee response order - each data object
+                # has an 'index' field indicating its position in the input array
+                embeddings: list[list[float] | None] = [None] * len(texts)
                 for data in response.data:
-                    embeddings.append(data.embedding)
+                    embeddings[data.index] = data.embedding
+
+                # Validate all indices were filled (defensive check)
+                if None in embeddings:
+                    missing = [i for i, e in enumerate(embeddings) if e is None]
+                    raise RuntimeError(
+                        f"OpenAI API returned incomplete embeddings, missing indices: {missing}"
+                    )
 
                 # Update usage statistics
                 self._usage_stats["requests_made"] += 1
@@ -676,7 +756,7 @@ class OpenAIEmbeddingProvider:
                     self._usage_stats["tokens_used"] += response.usage.total_tokens
 
                 logger.debug(f"Successfully generated {len(embeddings)} embeddings")
-                return embeddings
+                return cast(list[list[float]], embeddings)
 
             except Exception as rate_error:
                 if (
@@ -762,35 +842,6 @@ class OpenAIEmbeddingProvider:
             f"Failed to generate embeddings after {self._retry_attempts} attempts"
         )
 
-    @with_openai_token_handling()
-    async def _embed_batch_simple(self, texts: list[str]) -> list[list[float]]:
-        """Simplified embedding method using the token limit decorator.
-
-        This demonstrates how future providers can use the decorator approach.
-        """
-        if not self._client:
-            raise RuntimeError("OpenAI client not initialized")
-
-        logger.debug(f"Generating embeddings for {len(texts)} texts")
-
-        response = await self._client.embeddings.create(
-            model=self.model, input=texts, timeout=self._timeout
-        )
-
-        # Extract embeddings from response
-        embeddings = []
-        for data in response.data:
-            embeddings.append(data.embedding)
-
-        # Update usage statistics
-        self._usage_stats["requests_made"] += 1
-        self._usage_stats["embeddings_generated"] += len(embeddings)
-        if hasattr(response, "usage") and response.usage:
-            self._usage_stats["tokens_used"] += response.usage.total_tokens
-
-        logger.debug(f"Successfully generated {len(embeddings)} embeddings")
-        return embeddings
-
     def validate_texts(self, texts: list[str]) -> list[str]:
         """Validate and preprocess texts before embedding."""
         if not texts:
@@ -816,10 +867,15 @@ class OpenAIEmbeddingProvider:
         return validated
 
     def estimate_tokens(self, text: str) -> int:
-        """Estimate token count for a text."""
-        # Conservative estimation: ~3 characters per token for code/technical text
-        # This accounts for more punctuation and shorter tokens in code
-        return max(1, len(text) // 3)
+        """Estimate token count for a text.
+
+        Uses the standard embedding ratio (3.0 chars/token) from the central
+        utility. Could be enhanced to use tiktoken for exact OpenAI token
+        counting if precision becomes important.
+        """
+        if not text:
+            return 0
+        return max(1, len(text) // EMBEDDING_CHARS_PER_TOKEN)
 
     def estimate_batch_tokens(self, texts: list[str]) -> int:
         """Estimate total token count for a batch of texts."""
@@ -841,8 +897,8 @@ class OpenAIEmbeddingProvider:
         # Use safety margin to ensure we stay well under token limits
         safety_margin = max(200, max_tokens // 5)  # 20% margin, minimum 200 tokens
         safe_max_tokens = max_tokens - safety_margin
-        # Use conservative 3 chars per token for code/technical text
-        max_chars = safe_max_tokens * 3
+        # Use embedding ratio constant for code/technical text
+        max_chars = safe_max_tokens * EMBEDDING_CHARS_PER_TOKEN
 
         if len(text) <= max_chars:
             return [text]
@@ -930,7 +986,7 @@ class OpenAIEmbeddingProvider:
         try:
             # Test with a minimal request
             response = await self._client.embeddings.create(
-                model=self.model, input=["test"], timeout=5
+                model=self._get_deployment_model(), input=["test"], timeout=5
             )
             return (
                 len(response.data) == 1 and len(response.data[0].embedding) == self.dims

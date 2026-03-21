@@ -43,6 +43,8 @@ LANGUAGE_SAMPLES = {
     Language.SWIFT: "class MyClass {\n    func hello() -> String {\n        return \"world\"\n    }\n}",
     Language.DART: "void main() { }",
     Language.LUA: "function hello() print('world') end",
+    Language.SQL: "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100));\nCREATE VIEW active_users AS SELECT * FROM users;\nCREATE FUNCTION get_user_count() RETURNS INT BEGIN RETURN 0; END;\nCREATE TRIGGER audit_insert AFTER INSERT ON users FOR EACH ROW BEGIN INSERT INTO audit_log VALUES (NEW.id); END;\nCREATE INDEX idx_users_name ON users (name);",
+    Language.ELIXIR: "defmodule Hello do\n  def world, do: :ok\nend",
 }
 
 
@@ -302,3 +304,23 @@ class TestParserValidation:
 
         except Exception as e:
             pytest.fail(f"Parser for {language.value} failed to parse large array content: {e}")
+
+
+class TestSqlMetadata:
+    """Test SQL parser metadata extraction for specific constructs."""
+
+    def test_sql_create_index_metadata(self):
+        """CREATE INDEX produces kind='index' and correct target_table."""
+        factory = get_parser_factory()
+        parser = factory.create_parser(Language.SQL)
+        assert parser is not None
+
+        sql = "CREATE INDEX idx_users_name ON users (name);"
+        chunks = parser.parse_content(sql, "test.sql", FileId(1))
+
+        index_chunks = [c for c in chunks if "idx_users_name" in (c.symbol or "")]
+        assert index_chunks, "No chunk found with index name idx_users_name"
+
+        chunk = index_chunks[0]
+        assert chunk.metadata.get("kind") == "index"
+        assert chunk.metadata.get("target_table") == "users"
