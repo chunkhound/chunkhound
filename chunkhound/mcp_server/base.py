@@ -331,7 +331,7 @@ class MCPServerBase(ABC):
         Uses a lock to prevent concurrent connect() calls which would
         leak a DuckDB connection handle.
         """
-        if not self.services or self.services.provider.is_connected:
+        if self.services.provider.is_connected:
             return
         async with self._connect_lock:
             if not self.services.provider.is_connected:
