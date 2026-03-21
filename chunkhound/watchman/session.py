@@ -26,6 +26,8 @@ from .scope import (
 
 _REQUIRED_CAPABILITIES: tuple[str, ...] = ("cmd-watch-project", "relative_root")
 _DEFAULT_SUBSCRIPTION_NAME = "chunkhound-live-indexing"
+_SUBSCRIPTION_NAME_MAX_LENGTH = 128
+_SUBSCRIPTION_NAME_HASH_LENGTH = 12
 
 
 def build_watchman_base_command(
@@ -53,6 +55,53 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def sanitize_watchman_subscription_suffix(value: str) -> str:
+    candidate = value.replace("\\", "/").strip("/")
+    if not candidate:
+        return ""
+    parts: list[str] = []
+    for chunk in PurePosixPath(candidate).parts:
+        normalized_chunk = "".join(
+            character.lower() if character.isalnum() else "-"
+            for character in chunk
+        ).strip("-")
+        if normalized_chunk:
+            parts.append(normalized_chunk)
+    return "-".join(parts)
+
+
+def bound_watchman_subscription_name(value: str) -> str:
+    if len(value) <= _SUBSCRIPTION_NAME_MAX_LENGTH:
+        return value
+    hash_suffix = hashlib.sha256(value.encode("utf-8")).hexdigest()[
+        :_SUBSCRIPTION_NAME_HASH_LENGTH
+    ]
+    prefix_limit = _SUBSCRIPTION_NAME_MAX_LENGTH - len(hash_suffix) - 1
+    prefix = value[:prefix_limit].rstrip("-")
+    if not prefix:
+        prefix = value[:prefix_limit]
+    return f"{prefix}-{hash_suffix}"
+
+
+def build_watchman_subscription_name_for_scope(
+    *,
+    base_name: str,
+    target_path: Path,
+    scope: WatchmanSubscriptionScope,
+    scope_index: int,
+) -> str:
+    if scope.scope_kind == "primary" or scope_index == 0:
+        return base_name
+    try:
+        suffix_source = scope.requested_path.relative_to(target_path).as_posix()
+    except ValueError:
+        suffix_source = scope.requested_path.as_posix()
+    suffix = sanitize_watchman_subscription_suffix(suffix_source)
+    if not suffix:
+        suffix = f"scope-{scope_index}"
+    return bound_watchman_subscription_name(f"{base_name}--{suffix}")
+
+
 @dataclass(frozen=True)
 class WatchmanSessionSetup:
     scope_plan: WatchmanScopePlan
@@ -66,8 +115,8 @@ class WatchmanCliSession:
 
     _COMMAND_TIMEOUT_SECONDS = 5.0
     _PROCESS_EXIT_TIMEOUT_SECONDS = 5.0
-    _SUBSCRIPTION_NAME_MAX_LENGTH = 128
-    _SUBSCRIPTION_NAME_HASH_LENGTH = 12
+    _SUBSCRIPTION_NAME_MAX_LENGTH = _SUBSCRIPTION_NAME_MAX_LENGTH
+    _SUBSCRIPTION_NAME_HASH_LENGTH = _SUBSCRIPTION_NAME_HASH_LENGTH
     _SUBSCRIPTION_QUEUE_MAXSIZE = 1000
 
     def __init__(
@@ -845,41 +894,17 @@ class WatchmanCliSession:
         scope: WatchmanSubscriptionScope,
         scope_index: int,
     ) -> str:
-        if scope.scope_kind == "primary" or scope_index == 0:
-            return base_name
-        try:
-            suffix_source = scope.requested_path.relative_to(target_path).as_posix()
-        except ValueError:
-            suffix_source = scope.requested_path.as_posix()
-        suffix = self._sanitize_subscription_suffix(suffix_source)
-        if not suffix:
-            suffix = f"scope-{scope_index}"
-        return self._bound_subscription_name(f"{base_name}--{suffix}")
+        return build_watchman_subscription_name_for_scope(
+            base_name=base_name,
+            target_path=target_path,
+            scope=scope,
+            scope_index=scope_index,
+        )
 
     @classmethod
     def _bound_subscription_name(cls, value: str) -> str:
-        if len(value) <= cls._SUBSCRIPTION_NAME_MAX_LENGTH:
-            return value
-        hash_suffix = hashlib.sha256(value.encode("utf-8")).hexdigest()[
-            : cls._SUBSCRIPTION_NAME_HASH_LENGTH
-        ]
-        prefix_limit = cls._SUBSCRIPTION_NAME_MAX_LENGTH - len(hash_suffix) - 1
-        prefix = value[:prefix_limit].rstrip("-")
-        if not prefix:
-            prefix = value[:prefix_limit]
-        return f"{prefix}-{hash_suffix}"
+        return bound_watchman_subscription_name(value)
 
     @staticmethod
     def _sanitize_subscription_suffix(value: str) -> str:
-        candidate = value.replace("\\", "/").strip("/")
-        if not candidate:
-            return ""
-        parts: list[str] = []
-        for chunk in PurePosixPath(candidate).parts:
-            normalized_chunk = "".join(
-                character.lower() if character.isalnum() else "-"
-                for character in chunk
-            ).strip("-")
-            if normalized_chunk:
-                parts.append(normalized_chunk)
-        return "-".join(parts)
+        return sanitize_watchman_subscription_suffix(value)

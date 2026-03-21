@@ -42,6 +42,7 @@ from chunkhound.watchman import (
     WatchmanScopePlan,
     WatchmanSubscriptionScope,
     build_watchman_scope_plan,
+    build_watchman_subscription_name_for_scope,
     discover_nested_linux_mount_roots,
     discover_nested_windows_junction_scopes,
 )
@@ -1569,16 +1570,12 @@ class WatchmanRealtimeAdapter:
         scope: WatchmanSubscriptionScope,
         scope_index: int,
     ) -> str:
-        if scope.scope_kind == "primary" or scope_index == 0:
-            return base_name
-        try:
-            suffix_source = scope.requested_path.relative_to(target_path).as_posix()
-        except ValueError:
-            suffix_source = scope.requested_path.as_posix()
-        suffix = WatchmanCliSession._sanitize_subscription_suffix(suffix_source)
-        if not suffix:
-            suffix = f"scope-{scope_index}"
-        return WatchmanCliSession._bound_subscription_name(f"{base_name}--{suffix}")
+        return build_watchman_subscription_name_for_scope(
+            base_name=base_name,
+            target_path=target_path,
+            scope=scope,
+            scope_index=scope_index,
+        )
 
 
 class RealtimeIndexingService:
