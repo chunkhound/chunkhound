@@ -292,6 +292,12 @@ class StdioMCPServer(MCPServerBase):
         except KeyboardInterrupt:
             self.debug_log("Server interrupted by user")
         except Exception as e:
+            # NOTE: This handler intentionally does NOT re-raise after calling
+            # _respond_with_startup_error.  main() has its own except block that
+            # also calls _respond_with_startup_error — if run() ever re-raises,
+            # two JSON-RPC error objects would be written to stdout, corrupting
+            # the protocol.  Keep this invariant: run() swallows, main() catches
+            # only __init__() / pre-run() failures.
             self.debug_log(f"Server error: {e}")
             if self.debug_mode:
                 import traceback
@@ -350,7 +356,10 @@ def _respond_with_startup_error(error: Exception, config: Any = None) -> None:
     # Attempt to respond to the pending initialize request so the MCP client
     # can surface a human-readable error message.
     try:
-        # Use select with a short timeout so we don't block if stdin is empty
+        # Use select with a short timeout so we don't block if stdin is empty.
+        # NOTE: On Windows, select.select() only accepts sockets, not file
+        # objects like sys.stdin — the call will fail and fall through to
+        # the outer except, which is acceptable (best-effort semantics).
         ready, _, _ = select.select([sys.stdin], [], [], 2.0)
         if ready:
             line = sys.stdin.readline()
@@ -405,7 +414,7 @@ async def main(args: Any = None) -> None:
     if validation_errors:
         msg = "; ".join(str(e) for e in validation_errors)
         _respond_with_startup_error(
-            Exception(f"Configuration errors: {msg}")
+            Exception(f"Configuration errors: {msg}"), config
         )
         sys.exit(1)
 
