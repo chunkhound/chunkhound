@@ -1130,7 +1130,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         rollback_func: Callable[[list[dict[str, Any]]], None] | None = None,
     ) -> Any:
         """Run a mutation behind one transactional HNSW drop/recreate guard."""
-        if state.get("transaction_active", False):
+        if state.get("transaction_active", False) and transactional:
             raise DuckDBTransactionConflictError(
                 f"{mutation_label} cannot run while another DuckDB transaction is active"
             )
@@ -1211,6 +1211,38 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             logger.error(f"{mutation_label} failed: {e}")
             raise
+
+    def _executor_delete_chunk_ids_with_hnsw_safety(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        chunk_ids: list[int],
+        mutation_label: str,
+    ) -> None:
+        """Delete chunk rows and dependent embeddings behind the HNSW guard."""
+        unique_chunk_ids = sorted({int(chunk_id) for chunk_id in chunk_ids})
+        if not unique_chunk_ids:
+            return
+
+        placeholders = ", ".join(["?"] * len(unique_chunk_ids))
+
+        def delete_records() -> None:
+            self._executor_delete_embeddings_for_chunk_ids(
+                conn, state, unique_chunk_ids
+            )
+            conn.execute(
+                f"DELETE FROM chunks WHERE id IN ({placeholders})",
+                unique_chunk_ids,
+            )
+
+        self._executor_run_hnsw_guarded_mutation(
+            conn,
+            state,
+            mutation_label,
+            delete_records,
+            optimize_for_bulk=len(unique_chunk_ids) > 1,
+            transactional=not state.get("transaction_active", False),
+        )
 
     def bulk_operation_with_index_management(
         self,
@@ -1715,52 +1747,36 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], file_id: int
     ) -> None:
         """Executor method for delete_file_chunks - runs in DB thread."""
-        # Track operation for checkpoint management
-        track_operation(state)
-
-        conn.execute("DELETE FROM chunks WHERE file_id = ?", [file_id])
+        chunk_rows = conn.execute(
+            "SELECT id FROM chunks WHERE file_id = ? ORDER BY id",
+            [file_id],
+        ).fetchall()
+        chunk_ids = [int(row[0]) for row in chunk_rows]
+        self._executor_delete_chunk_ids_with_hnsw_safety(
+            conn,
+            state,
+            chunk_ids,
+            f"delete_file_chunks(file_id={file_id}, count={len(chunk_ids)})",
+        )
 
     def _executor_delete_chunk(
         self, conn: Any, state: dict[str, Any], chunk_id: int
     ) -> None:
         """Executor method for delete_chunk - runs in DB thread."""
-        # Track operation
-        track_operation(state)
-
-        # Delete embeddings first to avoid foreign key constraint
-        # Get all embedding tables
-        result = conn.execute("""
-            SELECT table_name 
-            FROM information_schema.tables 
-            WHERE table_name LIKE 'embeddings_%'
-        """).fetchall()
-
-        for (table_name,) in result:
-            conn.execute(f"DELETE FROM {table_name} WHERE chunk_id = ?", [chunk_id])
-
-        # Then delete the chunk
-        conn.execute("DELETE FROM chunks WHERE id = ?", [chunk_id])
+        self._executor_delete_chunk_ids_with_hnsw_safety(
+            conn, state, [chunk_id], f"delete_chunk(id={chunk_id})"
+        )
 
     def _executor_delete_chunks_batch(
         self, conn: Any, state: dict[str, Any], chunk_ids: list[int]
     ) -> None:
         """Executor method for delete_chunks_batch - runs in DB thread."""
-        if not chunk_ids:
-            return
-        # Track operation for checkpoint management
-        track_operation(state)
-        placeholders = ",".join(["?"] * len(chunk_ids))
-        # Delete embeddings first across all embedding tables
-        tables = conn.execute(
-            "SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'embeddings_%'"
-        ).fetchall()
-        for (table_name,) in tables:
-            conn.execute(
-                f"DELETE FROM {table_name} WHERE chunk_id IN ({placeholders})",
-                chunk_ids,
-            )
-        # Delete chunks
-        conn.execute(f"DELETE FROM chunks WHERE id IN ({placeholders})", chunk_ids)
+        self._executor_delete_chunk_ids_with_hnsw_safety(
+            conn,
+            state,
+            chunk_ids,
+            f"delete_chunks_batch(count={len(chunk_ids)})",
+        )
 
     def delete_chunk(self, chunk_id: int) -> None:
         """Delete a single chunk by ID with proper foreign key handling."""
