@@ -10,7 +10,7 @@ Architecture:
 - Extract imports using ImportContextService (via tree-sitter parsers)
 - Resolve each import using LanguageMapping.resolve_import_paths()
 - Cache resolved imports to avoid redundant resolution
-- Handle external imports gracefully (returns None, skip from results)
+- Handle external imports gracefully (returns empty list, skipped from results)
 
 Usage:
     service = ImportResolverService(parser_factory)
@@ -135,7 +135,6 @@ class ImportResolverService:
                 )
                 # Cache empty list to avoid retrying failed resolutions
                 self._resolution_cache[(file_path, import_text)] = []
-                continue
 
         logger.debug(
             f"Resolved {len(resolved_paths)}/{len(import_statements)} imports "

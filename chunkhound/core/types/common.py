@@ -75,6 +75,9 @@ class ChunkType(Enum):
     # Dependency types
     IMPORT = "import"
 
+    # Embedded content types
+    EMBEDDED_SQL = "embedded_sql"
+
     # Generic types
     BLOCK = "block"
     UNKNOWN = "unknown"
@@ -106,11 +109,17 @@ class ChunkType(Enum):
             ChunkType.CLOSURE,
             ChunkType.TRAIT,
             ChunkType.SCRIPT,
+            ChunkType.TABLE,
+            ChunkType.OBJECT,
+            ChunkType.COMPANION_OBJECT,
+            ChunkType.DATA_CLASS,
+            ChunkType.EXTENSION_FUNCTION,
             ChunkType.BLOCK,
             ChunkType.VARIABLE,
             ChunkType.TYPE,
             ChunkType.MACRO,
             ChunkType.IMPORT,
+            ChunkType.EMBEDDED_SQL,
         }
 
     @property
@@ -196,15 +205,23 @@ class Language(Enum):
         extension = file_path.suffix.lower()
         extension_map = {
             ".py": cls.PYTHON,
+            ".pyi": cls.PYTHON,
+            ".pyw": cls.PYTHON,
             ".java": cls.JAVA,
             ".cs": cls.CSHARP,
+            ".csx": cls.CSHARP,
             ".ts": cls.TYPESCRIPT,
+            ".mts": cls.TYPESCRIPT,
+            ".cts": cls.TYPESCRIPT,
             ".js": cls.JAVASCRIPT,
+            ".mjs": cls.JAVASCRIPT,
+            ".cjs": cls.JAVASCRIPT,
             ".tsx": cls.TSX,
             ".jsx": cls.JSX,
             ".groovy": cls.GROOVY,
             ".gvy": cls.GROOVY,
             ".gy": cls.GROOVY,
+            ".gsh": cls.GROOVY,
             ".kt": cls.KOTLIN,
             ".kts": cls.KOTLIN,
             ".go": cls.GO,
@@ -216,10 +233,15 @@ class Language(Enum):
             ".sh": cls.BASH,
             ".bash": cls.BASH,
             ".zsh": cls.BASH,
+            ".fish": cls.BASH,
             ".mk": cls.MAKEFILE,
+            ".mak": cls.MAKEFILE,
             ".make": cls.MAKEFILE,
             ".md": cls.MARKDOWN,
             ".markdown": cls.MARKDOWN,
+            ".mdown": cls.MARKDOWN,
+            ".mkd": cls.MARKDOWN,
+            ".mdx": cls.MARKDOWN,
             ".dart": cls.DART,
             ".hcl": cls.HCL,
             ".tf": cls.HCL,
@@ -229,14 +251,17 @@ class Language(Enum):
             ".yml": cls.YAML,
             ".toml": cls.TOML,
             ".txt": cls.TEXT,
+            ".text": cls.TEXT,
             ".pdf": cls.PDF,
             ".c": cls.C,
             ".h": cls.C,
             ".cpp": cls.CPP,
             ".cxx": cls.CPP,
             ".cc": cls.CPP,
+            ".c++": cls.CPP,
             ".hpp": cls.CPP,
             ".hxx": cls.CPP,
+            ".hh": cls.CPP,
             ".h++": cls.CPP,
             ".rs": cls.RUST,
             ".zig": cls.ZIG,

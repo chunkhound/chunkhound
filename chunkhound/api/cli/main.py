@@ -192,6 +192,7 @@ async def async_main() -> None:
         # 'diagnose' command retired; use: chunkhound index --check-ignores --vs git
         else:
             logger.error(f"Unknown command: {args.command}")
+            logger.info("Run 'chunkhound --help' for available commands.")
             sys.exit(1)
 
     except KeyboardInterrupt:
@@ -212,6 +213,10 @@ def main() -> None:
     except ImportError as e:
         # More specific handling for import errors
         logger.error(f"Import error: {e}")
+        logger.info(
+            "This usually means a dependency is missing. "
+            "Try: uv tool install chunkhound"
+        )
         import traceback
 
         traceback.print_exc()
@@ -225,7 +230,7 @@ def main() -> None:
         ):
             logger.error(
                 "Embedding provider must be specified. "
-                "Choose from: openai\n"
+                "Choose from: openai, voyageai, or use an OpenAI-compatible endpoint.\n"
                 "Set via --provider, CHUNKHOUND_EMBEDDING__PROVIDER environment "
                 "variable, or in config file."
             )

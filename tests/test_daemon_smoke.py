@@ -474,8 +474,8 @@ async def test_daemon_lock_file_created(pre_indexed_project_dir: Path) -> None:
 
         # PID should belong to a live process (cross-platform check)
         try:
-            proc = psutil.Process(pid)
-            assert proc.is_running(), f"Lock file PID {pid} exists but is not running"
+            daemon_proc = psutil.Process(pid)
+            assert daemon_proc.is_running(), f"Lock file PID {pid} exists but is not running"
         except psutil.NoSuchProcess:
             pytest.fail(f"Lock file PID {pid} is not a live process")
 

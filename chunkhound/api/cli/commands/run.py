@@ -83,6 +83,7 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
         metrics_collector = None
         if getattr(args, "perf_diagnostics", False):
             from chunkhound.core.diagnostics.batch_metrics import BatchMetricsCollector
+
             metrics_collector = BatchMetricsCollector()
 
         formatter.success(f"Service layer initialized: {args.db}")
@@ -130,6 +131,7 @@ async def run_command(args: argparse.Namespace, config: Config) -> None:
         # Performance diagnostics analysis
         if metrics_collector and metrics_collector.batches:
             from chunkhound.core.diagnostics.perf_analyzer import PerfAnalyzer
+
             analyzer = PerfAnalyzer()
             diagnostics = analyzer.analyze(metrics_collector)
 

@@ -471,7 +471,7 @@ async def search_impl(
         )
     else:  # regex
         # Perform regex search
-        results, pagination = services.search_service.search_regex(
+        results, pagination = await services.search_service.search_regex_async(
             pattern=query,
             page_size=page_size,
             offset=offset,

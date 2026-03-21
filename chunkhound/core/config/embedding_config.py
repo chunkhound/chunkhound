@@ -8,6 +8,7 @@ variables, config files, CLI arguments) across MCP server and indexing flows.
 
 import argparse
 import os
+import re
 from typing import Any, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -252,6 +253,16 @@ class EmbeddingConfig(BaseSettings):
                     "(e.g., '2024-02-01')"
                 )
 
+            # Validate api_version format (YYYY-MM-DD or YYYY-MM-DD-<suffix>)
+            if not re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}(-[a-zA-Z][a-zA-Z0-9]*)?", self.api_version
+            ):
+                raise ValueError(
+                    f"api_version must be YYYY-MM-DD or YYYY-MM-DD-<suffix> format "
+                    f"(e.g., '2024-02-01', '2024-02-01-preview'), "
+                    f"got '{self.api_version}'"
+                )
+
             # azure_endpoint and base_url are mutually exclusive
             if self.base_url:
                 raise ValueError(
@@ -437,26 +448,30 @@ class EmbeddingConfig(BaseSettings):
         and the legacy single-underscore form (CHUNKHOUND_EMBEDDING_*) for the four
         common fields. The canonical form takes precedence when both are set.
         """
+
+        def _first_env(*names: str) -> str | None:
+            for name in names:
+                val = os.getenv(name)
+                if val is not None:
+                    return val
+            return None
+
         config = {}
 
-        if api_key := (
-            os.getenv("CHUNKHOUND_EMBEDDING__API_KEY")
-            or os.getenv("CHUNKHOUND_EMBEDDING_API_KEY")
+        if api_key := _first_env(
+            "CHUNKHOUND_EMBEDDING__API_KEY", "CHUNKHOUND_EMBEDDING_API_KEY"
         ):
             config["api_key"] = api_key
-        if base_url := (
-            os.getenv("CHUNKHOUND_EMBEDDING__BASE_URL")
-            or os.getenv("CHUNKHOUND_EMBEDDING_BASE_URL")
+        if base_url := _first_env(
+            "CHUNKHOUND_EMBEDDING__BASE_URL", "CHUNKHOUND_EMBEDDING_BASE_URL"
         ):
             config["base_url"] = base_url
-        if provider := (
-            os.getenv("CHUNKHOUND_EMBEDDING__PROVIDER")
-            or os.getenv("CHUNKHOUND_EMBEDDING_PROVIDER")
+        if provider := _first_env(
+            "CHUNKHOUND_EMBEDDING__PROVIDER", "CHUNKHOUND_EMBEDDING_PROVIDER"
         ):
             config["provider"] = provider
-        if model := (
-            os.getenv("CHUNKHOUND_EMBEDDING__MODEL")
-            or os.getenv("CHUNKHOUND_EMBEDDING_MODEL")
+        if model := _first_env(
+            "CHUNKHOUND_EMBEDDING__MODEL", "CHUNKHOUND_EMBEDDING_MODEL"
         ):
             config["model"] = model
 
