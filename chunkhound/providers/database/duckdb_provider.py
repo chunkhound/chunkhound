@@ -438,12 +438,11 @@ class DuckDBProvider(SerialDatabaseProvider):
             return True
 
     def optimize_tables(self) -> None:
-        """Optimize tables by checkpointing and compacting HNSW indexes.
+        """Optimize tables by checkpointing the WAL.
 
         Performs:
         1. Emit bulk-insert metrics for visibility
         2. CHECKPOINT - sync WAL to main database, reclaim deleted row space
-        3. PRAGMA hnsw_compact_index for each HNSW index - prune deleted items
         """
         # Emit metrics (no DB connection needed)
         if not os.environ.get("CHUNKHOUND_MCP_MODE"):
@@ -479,49 +478,17 @@ class DuckDBProvider(SerialDatabaseProvider):
     def _executor_optimize_tables(self, conn: Any, state: dict[str, Any]) -> None:
         """Executor method for optimize_tables - runs in DB thread."""
         try:
-            # Step 1: Checkpoint for WAL durability and space reclamation
+            # Checkpoint for WAL durability and space reclamation
+            # NOTE: HNSW compact (PRAGMA hnsw_compact_index) was removed here because the
+            # DuckDB VSS extension segfaults when compacting after bulk deletions on Linux.
+            # The DuckDB HNSW index is being replaced entirely by PR #146
+            # (https://github.com/chunkhound/chunkhound/pull/146).
             logger.debug("Running CHECKPOINT for optimization...")
             conn.execute("CHECKPOINT")
             logger.debug("CHECKPOINT completed")
 
-            # Step 2: Compact all HNSW indexes to prune deleted items
-            self._compact_hnsw_indexes(conn)
-
         except Exception as e:
             logger.warning(f"Optimization failed: {e}")
-
-    def _compact_hnsw_indexes(self, conn: Any) -> None:
-        """Compact all HNSW indexes by pruning deleted items.
-
-        Uses PRAGMA hnsw_compact_index('index_name') for each index.
-        Non-fatal: continues on individual index failures.
-        """
-        try:
-            # Get all existing HNSW indexes
-            results = conn.execute("""
-                SELECT index_name
-                FROM duckdb_indexes()
-                WHERE table_name LIKE 'embeddings_%'
-                AND (index_name LIKE 'hnsw_%' OR index_name LIKE 'idx_hnsw_%')
-            """).fetchall()
-
-            if not results:
-                logger.debug("No HNSW indexes to compact")
-                return
-
-            compacted = 0
-            for (index_name,) in results:
-                try:
-                    conn.execute(f"PRAGMA hnsw_compact_index('{index_name}')")
-                    compacted += 1
-                except Exception as e:
-                    logger.debug(f"Could not compact index {index_name}: {e}")
-
-            if compacted > 0:
-                logger.debug(f"Compacted {compacted} HNSW index(es)")
-
-        except Exception as e:
-            logger.debug(f"HNSW index compaction skipped: {e}")
 
     def get_storage_stats(self) -> dict[str, Any]:
         """Get DuckDB storage statistics including fragmentation.
@@ -3042,7 +3009,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         state["deferred_checkpoint"] = False
 
     def optimize(self) -> bool:
-        """Optimize DuckDB storage: CHECKPOINT, HNSW compact, and full compaction.
+        """Optimize DuckDB storage: CHECKPOINT and full compaction.
 
         Skips optimization only if database is in a PERFECT state (free_blocks == 0).
         We only check free_blocks because orphaned_blocks/fragmentation_ratio incorrectly

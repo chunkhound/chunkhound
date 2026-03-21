@@ -422,21 +422,10 @@ class DatabaseProvider(Protocol):
         ...
 
     # Health and Diagnostics
-    def should_optimize(self, operation: str = "") -> bool:
-        """Check if optimization/compaction is warranted.
-
-        Args:
-            operation: Optional context string for logging (e.g., 'post-chunking')
-
-        Returns:
-            True if optimization should be performed
-        """
-        ...
-
     def optimize_tables(self) -> None:
         """Optimize tables by compacting fragments and rebuilding indexes.
 
-        For DuckDB: CHECKPOINT + PRAGMA hnsw_compact_index for each index
+        For DuckDB: CHECKPOINT to sync WAL and reclaim space
         For LanceDB: Fragment compaction via table.optimize()
         """
         ...
