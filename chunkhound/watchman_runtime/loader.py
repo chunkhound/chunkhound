@@ -7,6 +7,7 @@ import importlib.resources
 import io
 import json
 import os
+import shutil
 import socket
 import stat
 import sys
@@ -18,11 +19,17 @@ import urllib.parse
 import urllib.request
 import zipfile
 from collections.abc import Generator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from platform import machine as current_machine
 from platform import system as current_system
 from typing import Literal, cast
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 _RUNTIME_PACKAGE = "chunkhound.watchman_runtime"
 _PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -229,6 +236,20 @@ def _require_optional_manifest_string(manifest: dict[str, object], key: str) -> 
     return value
 
 
+def _require_https_url(url: str, *, context: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme.lower() != "https" or not parsed.netloc:
+        raise ValueError(
+            f"{context} must be an https URL with a network location: {url!r}"
+        )
+    return url
+
+
+def _require_manifest_source_url(manifest: dict[str, object], key: str) -> str:
+    value = _require_manifest_string(manifest, key)
+    return _require_https_url(value, context=f"Manifest field {key!r}")
+
+
 def _require_manifest_args(manifest: dict[str, object], key: str) -> tuple[str, ...]:
     value = manifest.get(key)
     if not isinstance(value, list) or not value:
@@ -399,7 +420,7 @@ def _require_manifest_sources(
             raise ValueError(f"Manifest field {key!r} must contain objects")
         parsed.append(
             WatchmanRuntimeSource(
-                source_url=_require_manifest_string(item, "source_url"),
+                source_url=_require_manifest_source_url(item, "source_url"),
                 source_sha256=_require_manifest_source_sha256(item, "source_sha256"),
                 source_archive_format=_require_manifest_source_archive_format(
                     item,
@@ -418,7 +439,7 @@ def _require_manifest_source_descriptor(
     manifest: dict[str, object],
 ) -> _WatchmanRuntimeSourceDescriptor:
     return _WatchmanRuntimeSourceDescriptor(
-        source_url=_require_manifest_string(manifest, "source_url"),
+        source_url=_require_manifest_source_url(manifest, "source_url"),
         source_sha256=_require_manifest_source_sha256(manifest, "source_sha256"),
         source_archive_format=_require_manifest_source_archive_format(
             manifest, "source_archive_format"
@@ -888,6 +909,17 @@ def _download_source_archive_once(
         source.source_url,
         timeout=timeout_seconds,
     ) as response, temp_path.open("wb") as handle:
+        response_geturl = getattr(response, "geturl", None)
+        if callable(response_geturl):
+            final_url = response_geturl()
+            if isinstance(final_url, str) and final_url:
+                try:
+                    _require_https_url(
+                        final_url,
+                        context="Watchman runtime download final URL",
+                    )
+                except ValueError as error:
+                    raise RuntimeError(str(error)) from error
         while True:
             chunk = response.read(1024 * 1024)
             if not chunk:
@@ -1148,53 +1180,125 @@ def _expected_source_destinations(
     }
 
 
-def _hydrate_runtime_tree_from_sources(
+def _load_hydration_marker(marker_path: Path) -> dict[str, object] | None:
+    if not marker_path.is_file():
+        return None
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(marker, dict):
+        return None
+    return marker
+
+
+def _hydrated_root_matches(
+    *,
+    destination_root: Path,
+    manifest_fingerprint: str,
+    expected_destinations: set[PurePosixPath],
+) -> bool:
+    marker_path = destination_root / _HYDRATION_MARKER_NAME
+    marker = _load_hydration_marker(marker_path)
+    if marker is None or marker.get("manifest_fingerprint") != manifest_fingerprint:
+        return False
+    files = marker.get("files")
+    if not isinstance(files, dict):
+        return False
+    try:
+        actual_destinations = {
+            _validate_relative_path(path_key)
+            for path_key in files.keys()
+            if isinstance(path_key, str)
+        }
+    except ValueError:
+        return False
+    if actual_destinations != expected_destinations:
+        return False
+    expected_files = {
+        *expected_destinations,
+        PurePosixPath(_HYDRATION_MARKER_NAME),
+    }
+    expected_directories: set[PurePosixPath] = set()
+    for relative_path in expected_destinations:
+        for parent in relative_path.parents:
+            if parent == PurePosixPath("."):
+                break
+            expected_directories.add(parent)
+    for existing_path in destination_root.rglob("*"):
+        relative_existing_path = PurePosixPath(
+            existing_path.relative_to(destination_root).as_posix()
+        )
+        if existing_path.is_dir():
+            if relative_existing_path not in expected_directories:
+                return False
+            continue
+        if relative_existing_path not in expected_files:
+            return False
+    for relative_path in expected_destinations:
+        expected_digest = files.get(relative_path.as_posix())
+        if not isinstance(expected_digest, str):
+            return False
+        destination_path = destination_root / Path(*relative_path.parts)
+        if not destination_path.is_file():
+            return False
+        if _file_sha256(destination_path) != expected_digest:
+            return False
+    return True
+
+
+def _remove_runtime_tree(path: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+        return
+    shutil.rmtree(path)
+
+
+def _acquire_runtime_lock(handle: io.BufferedRandom) -> None:
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b"0")
+        handle.flush()
+    handle.seek(0)
+    if os.name == "nt":
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        return
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _release_runtime_lock(handle: io.BufferedRandom) -> None:
+    handle.seek(0)
+    if os.name == "nt":
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _locked_runtime_hydration_root(
+    destination_root: Path,
+) -> Generator[None, None, None]:
+    lock_path = destination_root.with_name(f"{destination_root.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        _acquire_runtime_lock(handle)
+        try:
+            yield
+        finally:
+            _release_runtime_lock(handle)
+
+
+def _stage_hydrated_runtime_tree(
     *,
     platform_tag: str,
     runtime_version: str,
     manifest_fingerprint: str,
     source_archives: tuple[WatchmanRuntimeSource, ...],
-    relative_binary_path: PurePosixPath,
-    relative_support_paths: tuple[PurePosixPath, ...],
+    expected_destinations: set[PurePosixPath],
     destination_root: Path,
-) -> Path:
-    if not source_archives:
-        raise RuntimeError(
-            "Watchman runtime hydration requires manifest source metadata for "
-            f"{platform_tag}"
-        )
-
-    destination_root = destination_root.expanduser().resolve()
-    expected_destinations = _expected_source_destinations(
-        relative_binary_path=relative_binary_path,
-        relative_support_paths=relative_support_paths,
-    )
-    marker_path = destination_root / _HYDRATION_MARKER_NAME
-    if marker_path.is_file():
-        try:
-            marker = json.loads(marker_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            marker = None
-        if (
-            isinstance(marker, dict)
-            and marker.get("manifest_fingerprint") == manifest_fingerprint
-        ):
-            files = marker.get("files")
-            if isinstance(files, dict):
-                actual_destinations = {
-                    _validate_relative_path(str(path_key))
-                    for path_key in files.keys()
-                    if isinstance(path_key, str)
-                }
-                if actual_destinations == expected_destinations:
-                    if all(
-                        (destination_root / Path(*relative_path.parts)).is_file()
-                        and _file_sha256(destination_root / Path(*relative_path.parts))
-                        == files[relative_path.as_posix()]
-                        for relative_path in expected_destinations
-                    ):
-                        return destination_root
-
+) -> None:
     staged_digests: dict[str, str] = {}
     seen_destinations: set[PurePosixPath] = set()
     for source in source_archives:
@@ -1236,7 +1340,7 @@ def _hydrate_runtime_tree_from_sources(
         )
 
     _write_json_atomic(
-        marker_path,
+        destination_root / _HYDRATION_MARKER_NAME,
         {
             "manifest_fingerprint": manifest_fingerprint,
             "platform_tag": platform_tag,
@@ -1244,6 +1348,58 @@ def _hydrate_runtime_tree_from_sources(
             "files": staged_digests,
         },
     )
+
+
+def _hydrate_runtime_tree_from_sources(
+    *,
+    platform_tag: str,
+    runtime_version: str,
+    manifest_fingerprint: str,
+    source_archives: tuple[WatchmanRuntimeSource, ...],
+    relative_binary_path: PurePosixPath,
+    relative_support_paths: tuple[PurePosixPath, ...],
+    destination_root: Path,
+) -> Path:
+    if not source_archives:
+        raise RuntimeError(
+            "Watchman runtime hydration requires manifest source metadata for "
+            f"{platform_tag}"
+        )
+
+    destination_root = destination_root.expanduser().resolve()
+    expected_destinations = _expected_source_destinations(
+        relative_binary_path=relative_binary_path,
+        relative_support_paths=relative_support_paths,
+    )
+    destination_root.parent.mkdir(parents=True, exist_ok=True)
+    with _locked_runtime_hydration_root(destination_root):
+        if _hydrated_root_matches(
+            destination_root=destination_root,
+            manifest_fingerprint=manifest_fingerprint,
+            expected_destinations=expected_destinations,
+        ):
+            return destination_root
+
+        _remove_runtime_tree(destination_root)
+        staging_root = Path(
+            tempfile.mkdtemp(
+                dir=destination_root.parent,
+                prefix=f"{destination_root.name}.tmp-",
+            )
+        )
+        try:
+            _stage_hydrated_runtime_tree(
+                platform_tag=platform_tag,
+                runtime_version=runtime_version,
+                manifest_fingerprint=manifest_fingerprint,
+                source_archives=source_archives,
+                expected_destinations=expected_destinations,
+                destination_root=staging_root,
+            )
+            os.replace(staging_root, destination_root)
+        except Exception:
+            _remove_runtime_tree(staging_root)
+            raise
     return destination_root
 
 

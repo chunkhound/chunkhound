@@ -594,6 +594,324 @@ def test_ensure_downloaded_source_archive_raises_after_retry_exhaustion(
     assert attempts["count"] == 2
 
 
+def test_manifest_sources_reject_non_https_source_url() -> None:
+    manifest = {
+        "sources": [
+            {
+                "source_url": "http://example.test/watchman.zip",
+                "source_sha256": "a" * 64,
+                "source_archive_format": "zip",
+                "source_files": {"bin/watchman": "bin/watchman"},
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="https URL with a network location"):
+        watchman_runtime_loader_module._require_manifest_sources(manifest, "sources")
+
+
+def test_manifest_source_descriptor_rejects_non_https_source_url() -> None:
+    manifest = {
+        "source_url": "http://example.test/watchman.zip",
+        "source_sha256": "a" * 64,
+        "source_archive_format": "zip",
+        "source_root_prefix": "runtime",
+    }
+
+    with pytest.raises(ValueError, match="https URL with a network location"):
+        watchman_runtime_loader_module._require_manifest_source_descriptor(manifest)
+
+
+def test_ensure_downloaded_source_archive_rejects_insecure_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    payload = b"native-watchman"
+    source = watchman_runtime_loader_module.WatchmanRuntimeSource(
+        source_url="https://example.test/watchman.tar.gz",
+        source_sha256=hashlib.sha256(payload).hexdigest(),
+        source_archive_format="zip",
+        source_root_prefix=None,
+        source_files=(),
+    )
+
+    class _Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+            self.close()
+
+        def geturl(self) -> str:
+            return "http://mirror.example.test/watchman.tar.gz"
+
+    monkeypatch.setattr(
+        watchman_runtime_loader_module,
+        "_download_cache_path",
+        lambda _source: tmp_path / "watchman.tar.gz",
+    )
+    monkeypatch.setattr(
+        watchman_runtime_loader_module.urllib.request,
+        "urlopen",
+        lambda url, *, timeout: _Response(payload),
+    )
+
+    with pytest.raises(RuntimeError, match="download final URL must be an https URL"):
+        watchman_runtime_loader_module._ensure_downloaded_source_archive(source)
+
+
+def test_hydrate_runtime_tree_from_sources_rebuilds_stale_partial_tree(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    destination_root = tmp_path / "hydrated-runtime"
+    marker_path = (
+        destination_root / watchman_runtime_loader_module._HYDRATION_MARKER_NAME
+    )
+    (destination_root / "bin").mkdir(parents=True)
+    (destination_root / "bin" / "watchman").write_bytes(b"stale")
+    (destination_root / "orphan.txt").write_text("orphan\n", encoding="utf-8")
+    marker_path.write_text("{", encoding="utf-8")
+
+    payloads = {
+        PurePosixPath("src/watchman"): b"watchman",
+        PurePosixPath("src/libsupport"): b"support",
+    }
+    source = watchman_runtime_loader_module.WatchmanRuntimeSource(
+        source_url="https://example.test/watchman.zip",
+        source_sha256="a" * 64,
+        source_archive_format="zip",
+        source_root_prefix=None,
+        source_files=(
+            watchman_runtime_loader_module.WatchmanRuntimeSourceFile(
+                destination_relative_path=PurePosixPath("bin/watchman"),
+                source_relative_path=PurePosixPath("src/watchman"),
+            ),
+            watchman_runtime_loader_module.WatchmanRuntimeSourceFile(
+                destination_relative_path=PurePosixPath("lib/support.so"),
+                source_relative_path=PurePosixPath("src/libsupport"),
+            ),
+        ),
+    )
+
+    monkeypatch.setattr(
+        watchman_runtime_loader_module,
+        "_ensure_downloaded_source_archive",
+        lambda _source: tmp_path / "watchman.zip",
+    )
+    monkeypatch.setattr(
+        watchman_runtime_loader_module,
+        "_read_source_member_bytes",
+        lambda archive_path, *, source, source_relative_path: payloads[
+            source_relative_path
+        ],
+    )
+
+    hydrated_root = watchman_runtime_loader_module._hydrate_runtime_tree_from_sources(
+        platform_tag="linux-x86_64",
+        runtime_version="20260301.0",
+        manifest_fingerprint="b" * 64,
+        source_archives=(source,),
+        relative_binary_path=PurePosixPath("bin/watchman"),
+        relative_support_paths=(PurePosixPath("lib/support.so"),),
+        destination_root=destination_root,
+    )
+
+    assert hydrated_root == destination_root
+    assert (destination_root / "bin" / "watchman").read_bytes() == b"watchman"
+    assert (destination_root / "lib" / "support.so").read_bytes() == b"support"
+    assert not (destination_root / "orphan.txt").exists()
+
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert marker["manifest_fingerprint"] == "b" * 64
+    assert marker["files"] == {
+        "bin/watchman": hashlib.sha256(b"watchman").hexdigest(),
+        "lib/support.so": hashlib.sha256(b"support").hexdigest(),
+    }
+
+
+def test_hydrate_runtime_tree_from_sources_rebuilds_valid_marker_with_extra_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    destination_root = tmp_path / "hydrated-runtime"
+    marker_path = (
+        destination_root / watchman_runtime_loader_module._HYDRATION_MARKER_NAME
+    )
+    payloads = {
+        PurePosixPath("src/watchman"): b"watchman",
+        PurePosixPath("src/libsupport"): b"support",
+    }
+    (destination_root / "bin").mkdir(parents=True)
+    (destination_root / "lib").mkdir(parents=True)
+    (destination_root / "bin" / "watchman").write_bytes(
+        payloads[PurePosixPath("src/watchman")]
+    )
+    (destination_root / "lib" / "support.so").write_bytes(
+        payloads[PurePosixPath("src/libsupport")]
+    )
+    (destination_root / "orphan.txt").write_text("orphan\n", encoding="utf-8")
+    marker_path.write_text(
+        json.dumps(
+            {
+                "manifest_fingerprint": "d" * 64,
+                "platform_tag": "linux-x86_64",
+                "runtime_version": "20260301.0",
+                "files": {
+                    "bin/watchman": hashlib.sha256(
+                        payloads[PurePosixPath("src/watchman")]
+                    ).hexdigest(),
+                    "lib/support.so": hashlib.sha256(
+                        payloads[PurePosixPath("src/libsupport")]
+                    ).hexdigest(),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    source = watchman_runtime_loader_module.WatchmanRuntimeSource(
+        source_url="https://example.test/watchman.zip",
+        source_sha256="a" * 64,
+        source_archive_format="zip",
+        source_root_prefix=None,
+        source_files=(
+            watchman_runtime_loader_module.WatchmanRuntimeSourceFile(
+                destination_relative_path=PurePosixPath("bin/watchman"),
+                source_relative_path=PurePosixPath("src/watchman"),
+            ),
+            watchman_runtime_loader_module.WatchmanRuntimeSourceFile(
+                destination_relative_path=PurePosixPath("lib/support.so"),
+                source_relative_path=PurePosixPath("src/libsupport"),
+            ),
+        ),
+    )
+    read_calls: list[PurePosixPath] = []
+
+    monkeypatch.setattr(
+        watchman_runtime_loader_module,
+        "_ensure_downloaded_source_archive",
+        lambda _source: tmp_path / "watchman.zip",
+    )
+
+    def _fake_read_source_member_bytes(
+        archive_path: Path,
+        *,
+        source: object,
+        source_relative_path: PurePosixPath,
+    ) -> bytes:
+        del archive_path, source
+        read_calls.append(source_relative_path)
+        return payloads[source_relative_path]
+
+    monkeypatch.setattr(
+        watchman_runtime_loader_module,
+        "_read_source_member_bytes",
+        _fake_read_source_member_bytes,
+    )
+
+    hydrated_root = watchman_runtime_loader_module._hydrate_runtime_tree_from_sources(
+        platform_tag="linux-x86_64",
+        runtime_version="20260301.0",
+        manifest_fingerprint="d" * 64,
+        source_archives=(source,),
+        relative_binary_path=PurePosixPath("bin/watchman"),
+        relative_support_paths=(PurePosixPath("lib/support.so"),),
+        destination_root=destination_root,
+    )
+
+    assert hydrated_root == destination_root
+    assert read_calls == [
+        PurePosixPath("src/watchman"),
+        PurePosixPath("src/libsupport"),
+    ]
+    assert not (destination_root / "orphan.txt").exists()
+
+
+def test_hydrate_runtime_tree_from_sources_serializes_concurrent_hydration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    destination_root = tmp_path / "hydrated-runtime"
+    source = watchman_runtime_loader_module.WatchmanRuntimeSource(
+        source_url="https://example.test/watchman.zip",
+        source_sha256="a" * 64,
+        source_archive_format="zip",
+        source_root_prefix=None,
+        source_files=(
+            watchman_runtime_loader_module.WatchmanRuntimeSourceFile(
+                destination_relative_path=PurePosixPath("bin/watchman"),
+                source_relative_path=PurePosixPath("src/watchman"),
+            ),
+        ),
+    )
+    first_read_started = threading.Event()
+    release_first_read = threading.Event()
+    read_threads: list[str] = []
+    read_lock = threading.Lock()
+    worker_errors: list[BaseException] = []
+
+    def _fake_read_source_member_bytes(
+        archive_path: Path,
+        *,
+        source: object,
+        source_relative_path: PurePosixPath,
+    ) -> bytes:
+        del archive_path, source, source_relative_path
+        with read_lock:
+            read_threads.append(threading.current_thread().name)
+            is_first_reader = len(read_threads) == 1
+        if is_first_reader:
+            first_read_started.set()
+            assert release_first_read.wait(timeout=5.0)
+        return b"watchman"
+
+    monkeypatch.setattr(
+        watchman_runtime_loader_module,
+        "_ensure_downloaded_source_archive",
+        lambda _source: tmp_path / "watchman.zip",
+    )
+    monkeypatch.setattr(
+        watchman_runtime_loader_module,
+        "_read_source_member_bytes",
+        _fake_read_source_member_bytes,
+    )
+
+    def _hydrate_worker() -> None:
+        try:
+            watchman_runtime_loader_module._hydrate_runtime_tree_from_sources(
+                platform_tag="linux-x86_64",
+                runtime_version="20260301.0",
+                manifest_fingerprint="c" * 64,
+                source_archives=(source,),
+                relative_binary_path=PurePosixPath("bin/watchman"),
+                relative_support_paths=(),
+                destination_root=destination_root,
+            )
+        except BaseException as error:
+            worker_errors.append(error)
+
+    first_worker = threading.Thread(target=_hydrate_worker, name="hydrator-1")
+    second_worker = threading.Thread(target=_hydrate_worker, name="hydrator-2")
+
+    first_worker.start()
+    assert first_read_started.wait(timeout=5.0)
+
+    second_worker.start()
+    time.sleep(0.2)
+    assert read_threads == ["hydrator-1"]
+
+    release_first_read.set()
+    first_worker.join(timeout=5.0)
+    second_worker.join(timeout=5.0)
+
+    assert not first_worker.is_alive()
+    assert not second_worker.is_alive()
+    assert worker_errors == []
+    assert read_threads == ["hydrator-1"]
+    assert (destination_root / "bin" / "watchman").read_bytes() == b"watchman"
+
+
 def test_materialize_watchman_binary_writes_windows_payload_tree(
     tmp_path: Path,
 ) -> None:

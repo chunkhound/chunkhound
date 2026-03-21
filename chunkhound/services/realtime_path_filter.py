@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from chunkhound.core.config.config import Config
 
 
@@ -60,6 +62,8 @@ class RealtimePathFilter:
         settings: RealtimePathFilterSettings | None = None,
     ) -> None:
         self._engine: Any | None = None
+        self._engine_initialized = False
+        self._engine_initialization_failed = False
         self._include_patterns: list[str] | None = None
         self._pattern_cache: dict[str, Any] = {}
         self._settings = settings or RealtimePathFilterSettings.from_config(config)
@@ -83,8 +87,8 @@ class RealtimePathFilter:
         if settings is None:
             return self._language_fallback(file_path)
 
-        try:
-            if self._engine is None:
+        if not self._engine_initialized and not self._engine_initialization_failed:
+            try:
                 from chunkhound.utils.ignore_engine import (
                     build_repo_aware_ignore_engine,
                 )
@@ -99,8 +103,14 @@ class RealtimePathFilter:
                         settings.workspace_root_only_gitignore
                     ),
                 )
-        except Exception:
-            self._engine = None
+                self._engine_initialized = True
+            except Exception as error:
+                self._engine_initialization_failed = True
+                self._engine = None
+                logger.warning(
+                    "RealtimePathFilter failed to build repo-aware ignore engine "
+                    f"for {self._root}: {error}"
+                )
 
         try:
             if self._engine is not None and self._engine.matches(

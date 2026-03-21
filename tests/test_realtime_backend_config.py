@@ -2,12 +2,15 @@
 
 import argparse
 from pathlib import Path
+from types import SimpleNamespace
 
 from chunkhound.api.cli.parsers.daemon_parser import add_daemon_subparser
 from chunkhound.api.cli.parsers.mcp_parser import add_mcp_subparser
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.daemon.discovery import DaemonDiscovery
+from chunkhound.database_factory import create_services
+from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 from chunkhound.watchman_runtime import loader as watchman_runtime_loader
 from chunkhound.watchman_runtime.loader import (
     default_realtime_backend_for_current_install,
@@ -103,3 +106,39 @@ def test_daemon_forwarding_includes_realtime_backend(tmp_path):
     forwarded = DaemonDiscovery(Path(tmp_path))._build_forwarded_args(args)
     assert "--realtime-backend" in forwarded
     assert "polling" in forwarded
+
+
+def test_realtime_service_logs_install_default_backend_resolution(
+    monkeypatch,
+    tmp_path,
+):
+    db_path = tmp_path / ".chunkhound" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    config = Config(
+        args=SimpleNamespace(path=tmp_path),
+        database={"path": str(db_path), "provider": "duckdb"},
+        indexing={"include": ["*.py"], "exclude": []},
+    )
+    config.indexing.realtime_backend = None
+    info_messages: list[str] = []
+
+    monkeypatch.setattr(
+        "chunkhound.services.realtime_indexing_service.default_realtime_backend_for_current_install",
+        lambda: "watchdog",
+    )
+    services = create_services(db_path, config)
+    monkeypatch.setattr(
+        "chunkhound.services.realtime_indexing_service.logger.info",
+        lambda message: info_messages.append(message),
+    )
+
+    service = RealtimeIndexingService(services, config)
+
+    assert service._configured_backend == "watchdog"
+    assert service._configured_backend_resolution == "install_default"
+    assert service._configured_backend_raw is None
+    assert info_messages == [
+        "Realtime backend resolved to install default 'watchdog' because no "
+        "explicit realtime backend is configured."
+    ]
+    assert service._last_warning is None

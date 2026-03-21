@@ -282,6 +282,62 @@ async def test_private_watchman_sidecar_replaces_owned_stale_live_process(
 
 
 @pytest.mark.asyncio
+async def test_private_watchman_sidecar_accepts_small_start_time_skew(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    sidecar = PrivateWatchmanSidecar(repo_root)
+
+    binary_path = materialize_watchman_binary(
+        destination_root=sidecar.paths.runtime_root
+    )
+    live_process = subprocess.Popen(
+        _host_sidecar_command(
+            binary_path=binary_path,
+            socket_path=sidecar.paths.listener_path,
+            pidfile_path=sidecar.paths.pidfile_path,
+            statefile_path=sidecar.paths.statefile_path,
+            logfile_path=sidecar.paths.logfile_path,
+        ),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        cwd=sidecar.paths.project_root,
+        env=_runtime_env(binary_path=binary_path),
+    )
+    try:
+        _wait_for_sidecar_files(
+            runtime=resolve_packaged_watchman_runtime(),
+            process=live_process,
+            socket_path=sidecar.paths.socket_path,
+            pidfile_path=sidecar.paths.pidfile_path,
+            logfile_path=sidecar.paths.logfile_path,
+        )
+        live_start_time = psutil.Process(live_process.pid).create_time()
+        sidecar._write_metadata(
+            WatchmanSidecarMetadata(
+                pid=live_process.pid,
+                started_at="2026-03-10T00:00:00+00:00",
+                process_start_time_epoch=live_start_time + 0.5,
+                runtime_version=resolve_packaged_watchman_runtime().runtime_version,
+                socket_path=sidecar.paths.listener_path,
+                statefile_path=str(sidecar.paths.statefile_path),
+                logfile_path=str(sidecar.paths.logfile_path),
+                binary_path=str(binary_path),
+            )
+        )
+
+        await sidecar.stop()
+
+        assert not pid_alive(live_process.pid)
+    finally:
+        if live_process.poll() is None:
+            _stop_process(live_process)
+        sidecar._remove_owned_artifacts(remove_log=True)
+
+
+@pytest.mark.asyncio
 async def test_private_watchman_sidecar_refuses_live_process_with_legacy_metadata(
     tmp_path: Path,
 ) -> None:

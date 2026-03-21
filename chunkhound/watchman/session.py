@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from collections.abc import Callable, Sequence
@@ -65,6 +66,8 @@ class WatchmanCliSession:
 
     _COMMAND_TIMEOUT_SECONDS = 5.0
     _PROCESS_EXIT_TIMEOUT_SECONDS = 5.0
+    _SUBSCRIPTION_NAME_MAX_LENGTH = 128
+    _SUBSCRIPTION_NAME_HASH_LENGTH = 12
     _SUBSCRIPTION_QUEUE_MAXSIZE = 1000
 
     def __init__(
@@ -851,7 +854,20 @@ class WatchmanCliSession:
         suffix = self._sanitize_subscription_suffix(suffix_source)
         if not suffix:
             suffix = f"scope-{scope_index}"
-        return f"{base_name}--{suffix}"
+        return self._bound_subscription_name(f"{base_name}--{suffix}")
+
+    @classmethod
+    def _bound_subscription_name(cls, value: str) -> str:
+        if len(value) <= cls._SUBSCRIPTION_NAME_MAX_LENGTH:
+            return value
+        hash_suffix = hashlib.sha256(value.encode("utf-8")).hexdigest()[
+            : cls._SUBSCRIPTION_NAME_HASH_LENGTH
+        ]
+        prefix_limit = cls._SUBSCRIPTION_NAME_MAX_LENGTH - len(hash_suffix) - 1
+        prefix = value[:prefix_limit].rstrip("-")
+        if not prefix:
+            prefix = value[:prefix_limit]
+        return f"{prefix}-{hash_suffix}"
 
     @staticmethod
     def _sanitize_subscription_suffix(value: str) -> str:

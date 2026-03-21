@@ -159,3 +159,52 @@ def test_realtime_path_filter_honors_libgit2_backend(tmp_path: Path) -> None:
     assert path_filter.should_index(ignored_file) is False
     assert handler._should_index(included_file) is True
     assert path_filter.should_index(included_file) is True
+
+
+def test_realtime_path_filter_logs_ignore_engine_failure_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir(parents=True, exist_ok=True)
+    target_file = root / "src" / "mod.py"
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text("print('ok')\n", encoding="utf-8")
+
+    cfg = Config(
+        **{
+            "database": {"provider": "duckdb", "path": str(tmp_path / "db.duckdb")},
+            "indexing": {
+                "include": ["**/*.py"],
+                "exclude": [],
+                "exclude_sentinel": ".gitignore",
+            },
+            "target_dir": root,
+        }
+    )
+
+    build_calls = {"count": 0}
+    warning_messages: list[str] = []
+
+    def _broken_ignore_engine(*args, **kwargs):
+        del args, kwargs
+        build_calls["count"] += 1
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        "chunkhound.utils.ignore_engine.build_repo_aware_ignore_engine",
+        _broken_ignore_engine,
+    )
+    monkeypatch.setattr(
+        "chunkhound.services.realtime_path_filter.logger.warning",
+        lambda message: warning_messages.append(message),
+    )
+
+    path_filter = RealtimePathFilter(config=cfg, root_path=root)
+
+    assert path_filter.should_index(target_file) is True
+    assert path_filter.should_index(target_file) is True
+    assert build_calls["count"] == 1
+    assert warning_messages == [
+        f"RealtimePathFilter failed to build repo-aware ignore engine for {root}: boom"
+    ]

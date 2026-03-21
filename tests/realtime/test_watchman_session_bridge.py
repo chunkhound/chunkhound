@@ -217,6 +217,60 @@ def test_watchman_cli_session_queue_overflow_reports_drop_and_calls_handler(
     ]
 
 
+def test_watchman_cli_session_bounds_long_secondary_subscription_names(
+    tmp_path: Path,
+) -> None:
+    session = WatchmanCliSession(
+        binary_path=tmp_path / "watchman",
+        socket_path=tmp_path / "watchman.sock",
+        statefile_path=tmp_path / "watchman.state",
+        logfile_path=tmp_path / "watchman.log",
+        pidfile_path=tmp_path / "watchman.pid",
+        project_root=tmp_path,
+    )
+    target_path = tmp_path / "workspace"
+    target_path.mkdir()
+
+    shared_parts = ["very-long-scope-name"] * 8
+    scope_a = WatchmanSubscriptionScope(
+        requested_path=target_path.joinpath(*shared_parts, "alpha"),
+        watch_root=target_path,
+        relative_root=None,
+        scope_kind="nested_mount",
+    )
+    scope_b = WatchmanSubscriptionScope(
+        requested_path=target_path.joinpath(*shared_parts, "beta"),
+        watch_root=target_path,
+        relative_root=None,
+        scope_kind="nested_mount",
+    )
+
+    bounded_a = session._subscription_name_for_scope(
+        base_name="chunkhound-live-indexing",
+        target_path=target_path,
+        scope=scope_a,
+        scope_index=1,
+    )
+    bounded_a_repeat = session._subscription_name_for_scope(
+        base_name="chunkhound-live-indexing",
+        target_path=target_path,
+        scope=scope_a,
+        scope_index=1,
+    )
+    bounded_b = session._subscription_name_for_scope(
+        base_name="chunkhound-live-indexing",
+        target_path=target_path,
+        scope=scope_b,
+        scope_index=1,
+    )
+
+    assert len(bounded_a) <= WatchmanCliSession._SUBSCRIPTION_NAME_MAX_LENGTH
+    assert len(bounded_b) <= WatchmanCliSession._SUBSCRIPTION_NAME_MAX_LENGTH
+    assert bounded_a == bounded_a_repeat
+    assert bounded_a != bounded_b
+    assert bounded_a.startswith("chunkhound-live-indexing--very-long-scope-name")
+
+
 @pytest.mark.asyncio
 async def test_watchman_cli_session_start_ignores_poisoned_python_path(
     tmp_path: Path,

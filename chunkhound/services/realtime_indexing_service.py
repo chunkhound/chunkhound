@@ -1578,7 +1578,7 @@ class WatchmanRealtimeAdapter:
         suffix = WatchmanCliSession._sanitize_subscription_suffix(suffix_source)
         if not suffix:
             suffix = f"scope-{scope_index}"
-        return f"{base_name}--{suffix}"
+        return WatchmanCliSession._bound_subscription_name(f"{base_name}--{suffix}")
 
 
 class RealtimeIndexingService:
@@ -1644,6 +1644,8 @@ class RealtimeIndexingService:
             debug_sink=resolved_startup_log_sink
         )
         self._startup_tracker.set_debug_sink(resolved_startup_log_sink)
+        self._configured_backend_raw: object | None = None
+        self._configured_backend_resolution = "explicit"
         self._configured_backend = self._resolve_configured_backend()
         self._effective_backend = "uninitialized"
         self._monitor_adapter: RealtimeMonitorAdapter | None = None
@@ -2039,9 +2041,21 @@ class RealtimeIndexingService:
 
     def _resolve_configured_backend(self) -> str:
         backend = getattr(self.config.indexing, "realtime_backend", None)
+        self._configured_backend_raw = backend
         if backend in {"watchman", "watchdog", "polling"}:
+            self._configured_backend_resolution = "explicit"
             return str(backend)
-        return default_realtime_backend_for_current_install()
+        self._configured_backend_resolution = "install_default"
+        resolved_backend = default_realtime_backend_for_current_install()
+        if backend is None:
+            reason = "no explicit realtime backend is configured"
+        else:
+            reason = f"configured realtime backend {backend!r} is invalid"
+        logger.info(
+            "Realtime backend resolved to install default "
+            f"{resolved_backend!r} because {reason}."
+        )
+        return resolved_backend
 
     def _set_effective_backend(self, backend: str) -> None:
         self._effective_backend = backend
