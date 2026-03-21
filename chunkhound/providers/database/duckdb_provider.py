@@ -1018,6 +1018,107 @@ class DuckDBProvider(SerialDatabaseProvider):
                 chunk_ids,
             )
 
+    def _executor_get_embedding_row_ids_by_chunk_ids(
+        self, conn: Any, state: dict[str, Any], chunk_ids: list[int]
+    ) -> dict[str, list[int]]:
+        """Resolve exact embedding row ids for the target chunk ids."""
+        if not chunk_ids:
+            return {}
+
+        placeholders = ", ".join(["?"] * len(chunk_ids))
+        row_ids_by_table: dict[str, list[int]] = {}
+        for table_name in self._executor_get_all_embedding_tables(conn, state):
+            rows = conn.execute(
+                f"""
+                SELECT id
+                FROM {table_name}
+                WHERE chunk_id IN ({placeholders})
+                ORDER BY id
+                """,
+                chunk_ids,
+            ).fetchall()
+            if rows:
+                row_ids_by_table[table_name] = [int(row[0]) for row in rows]
+
+        return row_ids_by_table
+
+    def _executor_delete_embeddings_by_row_ids(
+        self, conn: Any, table_name: str, row_ids: list[int]
+    ) -> None:
+        """Delete exact embedding rows by primary key from one embedding table."""
+        if not row_ids:
+            return
+
+        placeholders = ", ".join(["?"] * len(row_ids))
+        conn.execute(f"DELETE FROM {table_name} WHERE id IN ({placeholders})", row_ids)
+
+    def _executor_delete_chunk_ids_in_active_transaction(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        chunk_ids: list[int],
+        mutation_label: str,
+    ) -> None:
+        """Delete chunk replacements inside an existing outer transaction.
+
+        Step 38 reopens because routing modified-file chunk replacement through the
+        generic HNSW drop/recreate guard inside `process_file(...)`'s already-open
+        transaction can later crash DuckDB during follow-up embedding inserts.
+
+        For this specific in-transaction path, delete the exact embedding rows by
+        primary key and then remove the chunk rows, while keeping Step 37's guarded
+        HNSW path for non-transactional chunk/file cleanup.
+        """
+        unique_chunk_ids = sorted({int(chunk_id) for chunk_id in chunk_ids})
+        if not unique_chunk_ids:
+            return
+
+        track_operation(state)
+        chunk_placeholders = ", ".join(["?"] * len(unique_chunk_ids))
+        row_ids_by_table = self._executor_get_embedding_row_ids_by_chunk_ids(
+            conn, state, unique_chunk_ids
+        )
+
+        for table_name, row_ids in row_ids_by_table.items():
+            self._executor_delete_embeddings_by_row_ids(conn, table_name, row_ids)
+
+            remaining_embedding_count = conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM {table_name}
+                WHERE chunk_id IN ({chunk_placeholders})
+                """,
+                unique_chunk_ids,
+            ).fetchone()[0]
+            if remaining_embedding_count:
+                raise RuntimeError(
+                    f"{mutation_label} left {remaining_embedding_count} stale embedding rows "
+                    f"in {table_name}"
+                )
+
+        conn.execute(
+            f"DELETE FROM chunks WHERE id IN ({chunk_placeholders})",
+            unique_chunk_ids,
+        )
+
+        remaining_chunk_count = conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM chunks
+            WHERE id IN ({chunk_placeholders})
+            """,
+            unique_chunk_ids,
+        ).fetchone()[0]
+        if remaining_chunk_count:
+            raise RuntimeError(
+                f"{mutation_label} left {remaining_chunk_count} stale chunk rows"
+            )
+
+        logger.info(
+            f"{mutation_label} completed inside the active transaction "
+            "without the HNSW drop/recreate guard"
+        )
+
     def _executor_snapshot_file_delete_targets(
         self, conn: Any, state: dict[str, Any], file_ids: list[int]
     ) -> dict[str, Any]:
@@ -1224,6 +1325,15 @@ class DuckDBProvider(SerialDatabaseProvider):
         if not unique_chunk_ids:
             return
 
+        if state.get("transaction_active", False):
+            self._executor_delete_chunk_ids_in_active_transaction(
+                conn,
+                state,
+                unique_chunk_ids,
+                mutation_label,
+            )
+            return
+
         placeholders = ", ".join(["?"] * len(unique_chunk_ids))
 
         def delete_records() -> None:
@@ -1241,7 +1351,6 @@ class DuckDBProvider(SerialDatabaseProvider):
             mutation_label,
             delete_records,
             optimize_for_bulk=len(unique_chunk_ids) > 1,
-            transactional=not state.get("transaction_active", False),
         )
 
     def bulk_operation_with_index_management(
