@@ -297,17 +297,16 @@ class IndexingCoordinator(BaseService):
             if global_pats:
                 safe_pats = []
                 for pat in global_pats:
-                    stripped = pat.strip()
                     # Skip negation patterns (flat exclude list can't invert)
-                    if stripped.startswith("!"):
+                    if pat.startswith("!"):
                         continue
                     # Skip overly broad wildcards that would match everything
-                    if stripped in ("*", "**/*", "**/**", "**"):
+                    if pat in ("*", "**/*", "**/**", "**"):
                         logger.debug(
-                            f"Skipping overly broad global gitignore pattern: {stripped}"
+                            f"Skipping overly broad global gitignore pattern: {pat}"
                         )
                         continue
-                    safe_pats.append(stripped)
+                    safe_pats.append(pat)
                 if safe_pats:
                     effective_excludes.extend(safe_pats)
         except Exception as e:

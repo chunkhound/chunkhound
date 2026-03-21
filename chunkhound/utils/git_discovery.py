@@ -19,6 +19,8 @@ from chunkhound.utils.file_patterns import (
     should_exclude_path,
     should_include_file,
 )
+from loguru import logger
+
 from chunkhound.utils.git_safe import GitCommandError, run_git
 
 
@@ -65,8 +67,6 @@ def _run_git_ls_files(
     repo_root: Path, pathspecs: list[str] | None = None
 ) -> tuple[list[str], int, int]:
     """Return repo-relative paths from git ls-files (tracked + untracked non-ignored)."""
-    from loguru import logger
-
     repo_root = repo_root.resolve()
     # Tracked files
     tracked = []
