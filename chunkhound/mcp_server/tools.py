@@ -358,41 +358,39 @@ def limit_response_size(
 # Tool Descriptions (optimized for LLM consumption)
 # =============================================================================
 
-SEARCH_DESCRIPTION = """Use instead of Grep/Glob/Read when looking up code — returns complete function bodies and class definitions, not raw line fragments.
+SEARCH_DESCRIPTION = """Pinpoint specific code locations after building understanding with code_research. Returns complete function bodies and class definitions, not raw line fragments.
 
 TYPE — choose one:
-- regex: Match exact patterns against code content. Use when you know the identifier, import, or string literal.
+- **regex**: Match exact patterns against code content. Use for known identifiers, imports, or string literals.
   Examples: "def authenticate", "class.*Handler", "import.*pandas", "TODO:.*refactor"
-
-- semantic: Find code by meaning via embedding similarity. Use even when you cannot predict exact identifiers or when exploring unfamiliar code.
+- **semantic**: Find code by meaning via embedding similarity. Use for concepts or when exact identifiers are unknown.
   Examples: "authentication logic", "retry with exponential backoff", "database connection pooling"
 
-WHEN TO USE EACH:
-- Known symbol/pattern → regex (exact)
-- Concept or behavior → semantic (finds code you can't keyword-search)
-- Architecture question spanning multiple files → use code_research instead
+DECISION GUIDE:
+- Known symbol or pattern → regex
+- Concept or behavior → semantic
+- Cross-file architecture question → call code_research first
 
 OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}"""
 
-CODE_RESEARCH_DESCRIPTION = """Use instead of Explore/research agents or sequential Grep/Read/search workflows — performs cross-file architectural analysis in a single call and returns a cited markdown report.
+CODE_RESEARCH_DESCRIPTION = """Start here for any coding task. Call code_research first to understand the relevant code area before writing or modifying code.
 
-Answers questions that require tracing through multiple files:
-- "How does authentication work end-to-end?"
-- "What happens when a request hits the API?"
-- "How are errors handled across service boundaries?"
-- "Explain the data pipeline from ingestion to storage"
+WORKFLOW:
+1. **Understand** — call code_research to map architecture, components, and data flow
+2. **Deepen** — call again with focused queries on specific subsystems discovered in step 1
+3. **Pinpoint** — switch to search (regex/semantic) for exact file locations and symbol references
+4. **Inspect** — use Explore/grep/read for granular line-level follow-up
 
-WHEN TO USE:
-- Any "how does X work" or "explain the architecture of Y" question — reasons holistically, not file-by-file
-- Any question requiring cross-file reasoning, flow tracing, or component relationship analysis
-- When you would otherwise spawn an Explore agent or run multiple sequential searches
+WHAT IT RETURNS: Cited markdown report covering architecture overview, key code locations, component relationships, and cross-file data flows.
 
-WHEN NOT TO USE:
-- Looking up a specific function or symbol → use search instead
+EXAMPLES:
+- "How does authentication work?" — traces the full auth flow across files
+- "What happens when a request hits /api/users?" — maps the request lifecycle
+- "Explain error handling patterns" — identifies cross-cutting concerns
 
-TIP: Use the path parameter to scope analysis to a subdirectory when the question targets a specific area.
+SCOPE: Use the path parameter to restrict analysis to a subdirectory for faster, focused results.
 
-OUTPUT: Structured markdown with architecture overview, key code locations, and component relationships."""
+One call replaces 5-10 manual searches. Call it liberally — understanding first, coding second."""
 
 
 # =============================================================================
