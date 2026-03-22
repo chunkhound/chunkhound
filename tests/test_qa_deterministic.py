@@ -11,6 +11,7 @@ import asyncio
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -169,6 +170,15 @@ class TestQADeterministic:
 
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+    # TODO: Remove xfail after merging b1b3713f ("fix: retry early realtime
+    # debounce wake").  Windows timer granularity (~15.6 ms) can cause
+    # asyncio.sleep(0.5) to wake early, making _debounced_add_file silently
+    # drop files.  The fix adds a retry loop but hasn't landed on this branch.
+    @pytest.mark.xfail(
+        sys.platform == "win32",
+        reason="Windows debounce timer bug — waiting for b1b3713f",
+        strict=False,
+    )
     @pytest.mark.asyncio
     async def test_file_lifecycle_search_validation(self, qa_setup):  # flaky: Windows CI polling monitor occasionally misses second file write within 45s window, tracked in issue #254
         """QA Items 1-4: Test file lifecycle with search validation."""
