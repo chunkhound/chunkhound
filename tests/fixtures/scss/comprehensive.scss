@@ -1,0 +1,186 @@
+// SCSS Comprehensive Test Fixture
+
+// Import statements
+@import "variables";
+@use "sass:math";
+@use "sass:color" as color-utils;
+@forward "mixins";
+
+/* Block comment */
+
+// Variable declarations (STRUCTURE)
+$primary-color: #3498db;
+$secondary-color: #2ecc71;
+$font-size-base: 16px;
+$spacing-unit: 8px;
+$breakpoint-mobile: 768px;
+$breakpoint-tablet: 1024px;
+
+// Mixin definitions (DEFINITION)
+@mixin flex-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@mixin responsive($breakpoint) {
+  @if $breakpoint == mobile {
+    @media (max-width: $breakpoint-mobile) {
+      @content;
+    }
+  } @else if $breakpoint == tablet {
+    @media (max-width: $breakpoint-tablet) {
+      @content;
+    }
+  }
+}
+
+@mixin button-variant($bg-color, $text-color: white) {
+  background-color: $bg-color;
+  color: $text-color;
+  border: none;
+  padding: $spacing-unit $spacing-unit * 2;
+  border-radius: 4px;
+  cursor: pointer;
+
+  &:hover {
+    background-color: darken($bg-color, 10%);
+  }
+}
+
+// Function definitions (DEFINITION)
+@function rem($pixels) {
+  @return math.div($pixels, $font-size-base) * 1rem;
+}
+
+@function color-yiq($color) {
+  $r: color.red($color);
+  $g: color.green($color);
+  $b: color.blue($color);
+  $yiq: (($r * 299) + ($g * 587) + ($b * 114)) / 1000;
+  @if ($yiq >= 128) {
+    @return #000;
+  } @else {
+    @return #fff;
+  }
+}
+
+// Plain rule sets (DEFINITION)
+body {
+  margin: 0;
+  padding: 0;
+  font-family: sans-serif;
+  font-size: $font-size-base;
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+// Rule set with nesting (DEFINITION)
+.navbar {
+  background: $primary-color;
+  padding: $spacing-unit;
+
+  .nav-item {
+    display: inline-block;
+
+    a {
+      color: white;
+      text-decoration: none;
+
+      &:hover {
+        text-decoration: underline;
+      }
+    }
+  }
+}
+
+// Include statements (BLOCK)
+.centered-box {
+  @include flex-center;
+  width: 300px;
+  height: 200px;
+}
+
+.primary-btn {
+  @include button-variant($primary-color);
+}
+
+.secondary-btn {
+  @include button-variant($secondary-color, #333);
+}
+
+// Each loop (BLOCK)
+$colors: (
+  "primary": $primary-color,
+  "secondary": $secondary-color,
+);
+
+@each $name, $color in $colors {
+  .text-#{$name} {
+    color: $color;
+  }
+  .bg-#{$name} {
+    background-color: $color;
+  }
+}
+
+// For loop (BLOCK)
+@for $i from 1 through 5 {
+  .col-#{$i} {
+    width: 20% * $i;
+  }
+}
+
+// While loop (BLOCK)
+$j: 1;
+@while $j <= 3 {
+  .z-index-#{$j} {
+    z-index: $j * 10;
+  }
+  $j: $j + 1;
+}
+
+// If statements (BLOCK)
+@if $font-size-base > 14px {
+  .large-text {
+    line-height: 1.6;
+  }
+} @else {
+  .large-text {
+    line-height: 1.4;
+  }
+}
+
+// Media queries (BLOCK)
+@media (max-width: $breakpoint-mobile) {
+  .container {
+    padding: 0 1rem;
+  }
+  .hide-mobile {
+    display: none;
+  }
+}
+
+@media (min-width: $breakpoint-tablet) {
+  .container {
+    max-width: 960px;
+  }
+}
+
+// Keyframes (BLOCK)
+@keyframes slideIn {
+  from {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+// Single-line comment at end
+// End of comprehensive SCSS file
