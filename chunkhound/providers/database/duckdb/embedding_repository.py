@@ -23,16 +23,69 @@ class DuckDBEmbeddingRepository:
         """
         self.connection_manager = connection_manager
         self._provider = provider
-        self._provider_instance = None  # Will be set by provider
+        self._provider_instance: Any | None = None  # Will be set by provider
 
     @property
     def connection(self) -> Any | None:
         """Get database connection from connection manager."""
         return self.connection_manager.connection
 
-    def set_provider_instance(self, provider_instance):
+    def set_provider_instance(self, provider_instance: Any) -> None:
         """Set the provider instance for index management operations."""
         self._provider_instance = provider_instance
+
+    def _drop_existing_index(self, conn: Any, index_info: dict[str, Any]) -> None:
+        """Drop one discovered HNSW index by its exact current identity."""
+        if self._provider_instance and hasattr(
+            self._provider_instance, "_executor_drop_vector_index_by_name"
+        ):
+            self._provider_instance._executor_drop_vector_index_by_name(
+                conn, index_info["index_name"]
+            )
+            return
+
+        if (
+            self._provider_instance
+            and index_info.get("provider") is not None
+            and index_info.get("model") is not None
+        ):
+            self._provider_instance.drop_vector_index(
+                index_info["provider"],
+                index_info["model"],
+                index_info["dims"],
+                index_info["metric"],
+            )
+            return
+
+        raise RuntimeError(
+            "Cannot drop HNSW index without identity information: "
+            f"{index_info['index_name']}"
+        )
+
+    def _recreate_existing_index(self, conn: Any, index_info: dict[str, Any]) -> None:
+        """Recreate one discovered HNSW index with its original SQL when available."""
+        create_sql = index_info.get("create_sql")
+        if create_sql:
+            conn.execute(create_sql)
+            return
+
+        if (
+            self._provider_instance
+            and index_info.get("provider") is not None
+            and index_info.get("model") is not None
+        ):
+            self._provider_instance.create_vector_index(
+                index_info["provider"],
+                index_info["model"],
+                index_info["dims"],
+                index_info["metric"],
+            )
+            return
+
+        raise RuntimeError(
+            "Cannot recreate HNSW index without SQL or identity: "
+            f"{index_info['index_name']}"
+        )
 
     def insert_embedding(self, embedding: Embedding) -> int:
         """Insert embedding record and return embedding ID."""
@@ -213,12 +266,7 @@ class DuckDBEmbeddingRepository:
 
                     for index_info in existing_indexes:
                         try:
-                            self._provider_instance.drop_vector_index(
-                                index_info["provider"],
-                                index_info["model"],
-                                index_info["dims"],
-                                index_info["metric"],
-                            )
+                            self._drop_existing_index(conn, index_info)
                             dropped_indexes.append(index_info)
                             logger.debug(f"Dropped index: {index_info['index_name']}")
                         except Exception as e:
@@ -315,12 +363,7 @@ class DuckDBEmbeddingRepository:
                         index_start = time.time()
                         for index_info in dropped_indexes:
                             try:
-                                self._provider_instance.create_vector_index(
-                                    index_info["provider"],
-                                    index_info["model"],
-                                    index_info["dims"],
-                                    index_info["metric"],
-                                )
+                                self._recreate_existing_index(conn, index_info)
                                 logger.debug(
                                     f"Recreated HNSW index: {index_info['index_name']}"
                                 )

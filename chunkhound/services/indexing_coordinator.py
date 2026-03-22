@@ -18,9 +18,10 @@ import math
 import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor
+from datetime import datetime
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 from loguru import logger
 from rich.progress import Progress, TaskID
@@ -55,6 +56,7 @@ from chunkhound.utils.hashing import compute_file_hash
 from .base_service import BaseService
 from .batch_processor import ParsedFileResult, process_file_batch
 from .chunk_cache_service import ChunkCacheService
+from .realtime_path_filter import RealtimePathFilter, RealtimePathFilterSettings
 
 # Lazy multiprocessing start-method guard — applied once before pool creation.
 # RATIONALE: Linux defaults to 'fork' which is unsafe with asyncio event loops.
@@ -96,10 +98,15 @@ class _StatResult:
         self.st_mtime = mtime
 
 
+class _IgnoreMatcher(Protocol):
+    def matches(self, path: Path, is_dir: bool = False) -> bool:
+        ...
+
+
 def _mem_available_bytes() -> int:
     """Return available memory in bytes, or 0 if unavailable."""
     try:
-        import psutil  # type: ignore
+        import psutil
 
         return int(getattr(psutil.virtual_memory(), "available", 0)) or 0
     except Exception:
@@ -164,6 +171,8 @@ class IndexingCoordinator(BaseService):
     # TRANSACTION_SAFETY: All DB operations wrapped in transactions
     """
 
+    _ORPHAN_CLEANUP_BATCH_SIZE = 128
+
     def __init__(
         self,
         database_provider: DatabaseProvider,
@@ -202,7 +211,8 @@ class IndexingCoordinator(BaseService):
         # Per-run cache for repo-aware ignore engines to avoid repeated tree scans
         # Key: (root, tuple(sources), chignore_file, tuple(cfg_excludes))
         self._ignore_engine_cache: dict[
-            tuple[str, tuple[str, ...], str, tuple[str, ...]], object
+            tuple[str, tuple[str, ...], str, tuple[str, ...], str, int],
+            _IgnoreMatcher,
         ] = {}
 
         # Per-run cache for repo root detection to avoid repeated directory walks
@@ -322,7 +332,7 @@ class IndexingCoordinator(BaseService):
         cfg: list[str] | tuple[str, ...],
         backend: str = "python",
         overlay: bool | None = None,
-    ) -> object:
+    ) -> _IgnoreMatcher | None:
         key = self._engine_cache_key(root, sources, chf, cfg, backend, overlay)
         eng = self._ignore_engine_cache.get(key)
         if eng is not None:
@@ -332,18 +342,27 @@ class IndexingCoordinator(BaseService):
                 build_repo_aware_ignore_engine as _bre,
             )
 
-            eng = _bre(
-                root=root,
-                sources=sources,
-                chignore_file=chf,
-                config_exclude=list(cfg),
-                backend=backend,
-                workspace_root_only_gitignore=overlay,
+            eng = cast(
+                _IgnoreMatcher,
+                _bre(
+                    root=root,
+                    sources=sources,
+                    chignore_file=chf,
+                    config_exclude=list(cfg),
+                    backend=backend,
+                    workspace_root_only_gitignore=overlay,
+                ),
             )
             self._ignore_engine_cache[key] = eng
             return eng
         except Exception:
             return None
+
+    def _indexing_config_or_none(self) -> Any | None:
+        config = getattr(self, "config", None)
+        if config is None:
+            return None
+        return getattr(config, "indexing", None)
 
     def _determine_db_batch_size(self, pending_inserts: list[Chunk]) -> int:
         """Compute an insert batch size using env/config or dynamic memory heuristics.
@@ -641,15 +660,18 @@ class IndexingCoordinator(BaseService):
             }
 
             # Normalize to the batch-processor input format
-            norm: list[tuple[Path, str | None]] = []
+            single_batch_norm: list[tuple[Path, str | None]] = []
             for item in files:
                 if isinstance(item, tuple):
-                    norm.append(item)
+                    single_batch_norm.append(item)
                 else:
-                    norm.append((item, None))
+                    single_batch_norm.append((item, None))
 
-            # Execute synchronously in-process for the single file
-            results = process_file_batch(norm, config_dict)
+            # Keep the event loop responsive during realtime shutdown by
+            # offloading even single-file parse work off-thread.
+            results = await asyncio.to_thread(
+                process_file_batch, single_batch_norm, config_dict
+            )
 
             # Stream directly to storage to keep behavior consistent with the
             # parallel path where batches are stored as they complete.
@@ -679,14 +701,15 @@ class IndexingCoordinator(BaseService):
             per_file_cap = max(4, int(target_secs / max(0.001, timeout_s_probe)))
             batch_size = min(batch_size, per_file_cap)
         # Normalize input to list[tuple[Path, str|None]]
-        norm: list[tuple[Path, str | None]] = []
+        normalized_files: list[tuple[Path, str | None]] = []
         for item in files:
             if isinstance(item, tuple):
-                norm.append(item)
+                normalized_files.append(item)
             else:
-                norm.append((item, None))
+                normalized_files.append((item, None))
         file_batches = [
-            norm[i : i + batch_size] for i in range(0, len(norm), batch_size)
+            normalized_files[i : i + batch_size]
+            for i in range(0, len(normalized_files), batch_size)
         ]
 
         # Process batches in parallel using ProcessPoolExecutor
@@ -845,7 +868,11 @@ class IndexingCoordinator(BaseService):
                     result.append(
                         universal_to_chunk(
                             uc,
-                            file_path=chunk.file_path,
+                            file_path=(
+                                Path(chunk.file_path)
+                                if chunk.file_path is not None
+                                else None
+                            ),
                             file_id=chunk.file_id,
                             language=chunk.language,
                         )
@@ -876,7 +903,7 @@ class IndexingCoordinator(BaseService):
             Dictionary with processing statistics. For single-file callers,
             ``stats["file_id"]`` is set when the file was successfully stored.
         """
-        stats = {
+        stats: dict[str, Any] = {
             "total_files": 0,
             "total_chunks": 0,
             "errors": [],
@@ -900,7 +927,7 @@ class IndexingCoordinator(BaseService):
             return stats
 
         # Track file_ids for single-file case
-        file_ids = []
+        file_ids: list[int] = []
 
         # Process each file independently (per-file transaction)
         for result in results:
@@ -969,9 +996,13 @@ class IndexingCoordinator(BaseService):
                     for chunk_data in result.chunks
                 ]
 
+                existing_chunks: list[Chunk]
                 if is_existing:
-                    existing_chunks = await self._db.get_chunks_by_file_id_async(
-                        file_id, as_model=True
+                    existing_chunks = cast(
+                        list[Chunk],
+                        await self._db.get_chunks_by_file_id_async(
+                            file_id, as_model=True
+                        ),
                     )
                 else:
                     existing_chunks = []
@@ -986,7 +1017,7 @@ class IndexingCoordinator(BaseService):
                     chunks_to_delete = chunk_diff.deleted + chunk_diff.modified
                     if chunks_to_delete:
                         chunk_ids_to_delete = [
-                            chunk.id
+                            int(chunk.id)
                             for chunk in chunks_to_delete
                             if chunk.id is not None
                         ]
@@ -1098,20 +1129,17 @@ class IndexingCoordinator(BaseService):
 
             # Phase 2: Reconciliation - Ensure database consistency by removing orphaned files
             cleaned_files = 0
-            try:
-                do_cleanup = True
-                if self.config and getattr(self.config, "indexing", None) is not None:
-                    do_cleanup = bool(getattr(self.config.indexing, "cleanup", True))
-                if do_cleanup:
-                    _t2 = _t.perf_counter() if _t0 is not None else None
-                    cleaned_files = self._cleanup_orphaned_files(
-                        directory, files, exclude_patterns
-                    )
-                    _t3 = _t.perf_counter() if _t0 is not None else None
-                else:
-                    logger.debug("Skipping orphaned file cleanup (cleanup disabled)")
-            except Exception as e:
-                logger.warning(f"Cleanup phase skipped due to error: {e}")
+            do_cleanup = True
+            if self.config and getattr(self.config, "indexing", None) is not None:
+                do_cleanup = bool(getattr(self.config.indexing, "cleanup", True))
+            if do_cleanup:
+                _t2 = _t.perf_counter() if _t0 is not None else None
+                cleaned_files = self._cleanup_orphaned_files(
+                    directory, files, patterns, exclude_patterns
+                )
+                _t3 = _t.perf_counter() if _t0 is not None else None
+            else:
+                logger.debug("Skipping orphaned file cleanup (cleanup disabled)")
 
             logger.debug(
                 f"Directory consistency: {len(files)} files discovered, {cleaned_files} orphaned files cleaned"
@@ -1127,7 +1155,7 @@ class IndexingCoordinator(BaseService):
             except Exception:
                 force_reindex = False
 
-            files_to_process: list[Path] = files
+            files_to_process: list[Path] | list[tuple[Path, str | None]] = list(files)
             skipped_unchanged = 0
             if not force_reindex:
                 _t4 = _t.perf_counter() if _t0 is not None else None
@@ -1150,7 +1178,7 @@ class IndexingCoordinator(BaseService):
                 except Exception:
                     mtime_eps = 0.01
 
-                files_to_process = []
+                files_to_process_with_hashes: list[tuple[Path, str | None]] = []
                 # Batch-fetch DB metadata once to avoid per-file lookups
                 db_meta_map: dict[str, tuple[int | None, float | None, str | None]] = {}
                 try:
@@ -1172,11 +1200,12 @@ class IndexingCoordinator(BaseService):
                         sz = r.get("size") if isinstance(r, dict) else None
                         mt = r.get("modified_time") if isinstance(r, dict) else None
                         try:
-                            mtv = (
-                                float(mt.timestamp())
-                                if hasattr(mt, "timestamp")
-                                else float(mt)
-                            )
+                            if isinstance(mt, datetime):
+                                mtv = float(mt.timestamp())
+                            elif mt is not None:
+                                mtv = float(mt)
+                            else:
+                                mtv = None
                         except Exception:
                             mtv = None
                         ch = r.get("content_hash") if isinstance(r, dict) else None
@@ -1210,11 +1239,12 @@ class IndexingCoordinator(BaseService):
                                         else None
                                     )
                                     try:
-                                        mtv = (
-                                            float(mt.timestamp())
-                                            if hasattr(mt, "timestamp")
-                                            else float(mt)
-                                        )
+                                        if isinstance(mt, datetime):
+                                            mtv = float(mt.timestamp())
+                                        elif mt is not None:
+                                            mtv = float(mt)
+                                        else:
+                                            mtv = None
                                     except Exception:
                                         mtv = None
                                     ch = (
@@ -1260,7 +1290,7 @@ class IndexingCoordinator(BaseService):
                                 else:
                                     # Content actually changed (or hash unavailable) - reindex
                                     precomputed_hashes[str(f.resolve())] = cur_hash
-                                    files_to_process.append((f, cur_hash))
+                                    files_to_process_with_hashes.append((f, cur_hash))
                                     if not same_size:
                                         reasons["size"] += 1
                                     elif not same_mtime:
@@ -1271,13 +1301,13 @@ class IndexingCoordinator(BaseService):
                             # New file not in DB - compute hash for skip optimization on next run
                             cur_hash = self._compute_hash_with_fallback(f)
                             precomputed_hashes[str(f.resolve())] = cur_hash
-                            files_to_process.append((f, cur_hash))
+                            files_to_process_with_hashes.append((f, cur_hash))
                             if cur_hash is None:
                                 reasons["error"] += 1
                             else:
                                 reasons["not_found"] += 1
                     except Exception:
-                        files_to_process.append((f, None))
+                        files_to_process_with_hashes.append((f, None))
                         reasons["error"] += 1
                     finally:
                         if change_task is not None and self.progress:
@@ -1287,6 +1317,7 @@ class IndexingCoordinator(BaseService):
                     task = self.progress.tasks[change_task]
                     if task.total:
                         self.progress.update(change_task, completed=task.total)
+                files_to_process = files_to_process_with_hashes
                 _t5 = _t.perf_counter() if _t0 is not None else None
                 if debug_skip:
                     logger.warning(
@@ -1406,7 +1437,7 @@ class IndexingCoordinator(BaseService):
                     pass
 
             # At this point, all parsed results have been stored via _on_batch_store
-            stats = {
+            stats: dict[str, Any] = {
                 "total_files": agg_total_files,
                 "total_chunks": agg_total_chunks,
                 "errors": agg_errors,
@@ -1487,7 +1518,7 @@ class IndexingCoordinator(BaseService):
         if isinstance(file_record, File):
             return file_record.id
         elif isinstance(file_record, dict) and "id" in file_record:
-            return file_record["id"]
+            return cast(int | None, file_record["id"])
         else:
             return None
 
@@ -1532,7 +1563,10 @@ class IndexingCoordinator(BaseService):
             whether the file already existed in the database.
         """
         relative_path = self._get_relative_path(file_path)
-        existing_file = await self._db.get_file_by_path_async(relative_path.as_posix())
+        existing_file = cast(
+            dict[str, Any] | None,
+            await self._db.get_file_by_path_async(relative_path.as_posix()),
+        )
 
         if existing_file:
             file_id = existing_file["id"]
@@ -1646,7 +1680,10 @@ class IndexingCoordinator(BaseService):
             return {"status": "error", "error": str(e), "generated": 0}
 
     async def _generate_embeddings(
-        self, chunk_ids: list[int], chunks: list[dict[str, Any]], connection=None
+        self,
+        chunk_ids: list[int],
+        chunks: list[dict[str, Any]],
+        connection: Any = None,
     ) -> int:
         """Generate embeddings for chunks."""
         if not self._embedding_provider:
@@ -1960,11 +1997,10 @@ class IndexingCoordinator(BaseService):
                             ),
                             "chf": (
                                 getattr(
-                                    self.config.indexing, "chignore_file", ".chignore"
+                                    self._indexing_config_or_none(),
+                                    "chignore_file",
+                                    ".chignore",
                                 )
-                                if getattr(self, "config", None)
-                                and getattr(self.config, "indexing", None)
-                                else ".chignore"
                             ),  # deprecated; ignored
                             "cfg": list(effective_excludes),
                             "roots": roots_for_subtree,
@@ -2091,15 +2127,12 @@ class IndexingCoordinator(BaseService):
             exclude_patterns = []
 
         # Prepare IgnoreEngine parameters (defer heavy engine build unless sequential path is taken)
-        engine_args = None
-        ignore_engine_obj = None
-        if (
-            getattr(self, "config", None) is not None
-            and getattr(self.config, "indexing", None) is not None
-        ):
+        engine_args: dict[str, Any] | None = None
+        ignore_engine_obj: _IgnoreMatcher | None = None
+        indexing_config = self._indexing_config_or_none()
+        if indexing_config is not None:
             # Resolve ignore sources/config with backward-compatible fallbacks
-            _idx = getattr(self, "config", None)
-            _idx = getattr(_idx, "indexing", None)
+            _idx = indexing_config
             if _idx is not None and callable(
                 getattr(_idx, "resolve_ignore_sources", None)
             ):
@@ -2196,10 +2229,10 @@ class IndexingCoordinator(BaseService):
 
         # If configured, try Git-backed discovery first (fast path)
         try:
+            indexing_config = self._indexing_config_or_none()
             _disc_backend = (
-                getattr(self.config.indexing, "discovery_backend", "auto")
-                if getattr(self, "config", None)
-                and getattr(self.config, "indexing", None)
+                getattr(indexing_config, "discovery_backend", "auto")
+                if indexing_config is not None
                 else "auto"
             )
         except Exception:
@@ -2208,11 +2241,11 @@ class IndexingCoordinator(BaseService):
         # Resolve 'auto' to a concrete backend using a fast heuristic
         def _decide_backend() -> tuple[str, list[str]]:
             reasons: list[str] = []
+            indexing_config = self._indexing_config_or_none()
             try:
                 eff = (
-                    self.config.indexing.get_effective_config_excludes()
-                    if getattr(self, "config", None)
-                    and getattr(self.config, "indexing", None)
+                    indexing_config.get_effective_config_excludes()
+                    if indexing_config is not None
                     else []
                 )
                 repo_roots = self._get_or_detect_repo_roots(directory, eff)
@@ -2526,17 +2559,17 @@ class IndexingCoordinator(BaseService):
                 }
                 # Build a repo-aware engine so we can control whether the workspace (non-repo)
                 # side honors the CH root .gitignore (root-only) or ignores it entirely.
+                indexing_config = self._indexing_config_or_none()
                 try:
                     wr_only = (
                         bool(
                             getattr(
-                                self.config.indexing,
+                                indexing_config,
                                 "workspace_gitignore_nonrepo",
                                 False,
                             )
                         )
-                        if getattr(self, "config", None)
-                        and getattr(self.config, "indexing", None)
+                        if indexing_config is not None
                         else False
                     )
                 except Exception:
@@ -2564,22 +2597,19 @@ class IndexingCoordinator(BaseService):
                 local_engine = self._get_or_build_ignore_engine(
                     root=directory,
                     sources=(
-                        self.config.indexing.resolve_ignore_sources()
-                        if getattr(self, "config", None)
-                        and getattr(self.config, "indexing", None)
+                        indexing_config.resolve_ignore_sources()
+                        if indexing_config is not None
                         else ["config"]
                     ),
                     chf=(
-                        getattr(self.config.indexing, "chignore_file", ".chignore")
-                        if getattr(self, "config", None)
-                        and getattr(self.config, "indexing", None)
+                        getattr(indexing_config, "chignore_file", ".chignore")
+                        if indexing_config is not None
                         else ".chignore"
                     ),
                     cfg=list(effective_excludes),
                     backend=(
-                        getattr(self.config.indexing, "gitignore_backend", "python")
-                        if getattr(self, "config", None)
-                        and getattr(self.config, "indexing", None)
+                        getattr(indexing_config, "gitignore_backend", "python")
+                        if indexing_config is not None
                         else "python"
                     ),
                     overlay=wr_only,
@@ -2609,7 +2639,7 @@ class IndexingCoordinator(BaseService):
                         if not inside_repo:
                             # Overlay prefix shortcut (best-effort) for non-repo files
                             try:
-                                rel = (
+                                rel: str = (
                                     fp.resolve()
                                     .relative_to(directory.resolve())
                                     .as_posix()
@@ -2626,11 +2656,9 @@ class IndexingCoordinator(BaseService):
                                     continue
                             # Apply workspace overlay engine to non-repo files
                             try:
-                                if (
-                                    local_engine
-                                    and getattr(local_engine, "matches", None)
-                                    and local_engine.matches(fp, is_dir=False)
-                                ):  # type: ignore[attr-defined]
+                                if local_engine and local_engine.matches(
+                                    fp, is_dir=False
+                                ):
                                     continue
                             except Exception:
                                 pass
@@ -2714,8 +2742,8 @@ class IndexingCoordinator(BaseService):
         patterns: list[str],
         exclude_patterns: list[str],
         use_inode_ordering: bool = False,
-        ignore_engine_obj: object | None = None,
-        ignore_engine_args: tuple | None = None,
+        ignore_engine_obj: _IgnoreMatcher | None = None,
+        ignore_engine_args: dict[str, Any] | None = None,
     ) -> list[Path]:
         """Optimized directory walker using os.walk() with optional inode ordering.
 
@@ -2766,7 +2794,7 @@ class IndexingCoordinator(BaseService):
                 from chunkhound.utils.file_patterns import should_include_file as _inc
 
                 # Pre-compile include patterns for a minimal filter
-                pat_cache = {}
+                pat_cache: dict[str, Any] = {}
                 _ = [_cp(p, pat_cache) for p in (patterns or [])]
 
                 collected: list[Path] = []
@@ -2775,14 +2803,18 @@ class IndexingCoordinator(BaseService):
                     # Prune dirs by engine
                     pruned = []
                     for d in list(dn):
-                        if ignore_engine_obj.matches(cur / d, is_dir=True):  # type: ignore[attr-defined]
+                        if ignore_engine_obj is not None and ignore_engine_obj.matches(
+                            cur / d, is_dir=True
+                        ):
                             pruned.append(d)
                     for d in pruned:
                         dn.remove(d)
                     # Files
                     for name in fn:
                         fp = cur / name
-                        if ignore_engine_obj.matches(fp, is_dir=False):  # type: ignore[attr-defined]
+                        if ignore_engine_obj is not None and ignore_engine_obj.matches(
+                            fp, is_dir=False
+                        ):
                             continue
                         # Include filter
                         if _inc(fp, directory, patterns or [], pat_cache):
@@ -2793,10 +2825,53 @@ class IndexingCoordinator(BaseService):
 
         return files
 
+    def _build_cleanup_path_filter(
+        self,
+        include_patterns: list[str] | None,
+        exclude_patterns: list[str] | None,
+    ) -> RealtimePathFilter:
+        settings = RealtimePathFilterSettings.from_config(
+            self.config,
+            include_patterns=include_patterns,
+        )
+        if settings is None:
+            settings = RealtimePathFilterSettings(
+                include_patterns=(
+                    tuple(include_patterns) if include_patterns is not None else None
+                ),
+                ignore_sources=("config",) if exclude_patterns else (),
+                config_excludes=tuple(exclude_patterns or ()),
+            )
+
+        return RealtimePathFilter(
+            config=None,
+            root_path=self._base_directory,
+            settings=settings,
+        )
+
+    def _classify_cleanup_candidate(
+        self,
+        db_relative_path: str,
+        current_file_paths: set[str],
+        path_filter: RealtimePathFilter,
+    ) -> str | None:
+        if db_relative_path in current_file_paths:
+            return None
+
+        full_path = self._base_directory / Path(db_relative_path)
+        if not full_path.exists():
+            return "missing_on_disk"
+
+        if not path_filter.should_index(full_path):
+            return "excluded_by_current_policy"
+
+        return None
+
     def _cleanup_orphaned_files(
         self,
         directory: Path,
         current_files: list[Path],
+        include_patterns: list[str] | None,
         exclude_patterns: list[str] | None = None,
     ) -> int:
         """Remove database entries for files that no longer exist in the directory.
@@ -2804,6 +2879,7 @@ class IndexingCoordinator(BaseService):
         Args:
             directory: Directory being processed
             current_files: List of files currently in the directory
+            include_patterns: Active include patterns used during discovery
             exclude_patterns: Optional list of exclude patterns to check against
 
         Returns:
@@ -2824,45 +2900,29 @@ class IndexingCoordinator(BaseService):
             """
             db_files = self._db.execute_query(query, [])
 
-            # Find orphaned files (in DB but not on disk or excluded by patterns)
-            orphaned_files = []
-            if not exclude_patterns:
-                # Prefer the coordinator's current config; fall back to defaults
-                try:
-                    cfg = self.config if getattr(self, "config", None) else None
-                    if cfg is None:
-                        from chunkhound.core.config.config import Config as _Cfg
-
-                        cfg = _Cfg()
-                    patterns_to_check = cfg.indexing.get_effective_config_excludes()
-                except Exception:
-                    # Final fallback to static defaults
-                    from chunkhound.core.config.indexing_config import (
-                        IndexingConfig as _Idx,
-                    )
-
-                    patterns_to_check = _Idx._default_excludes()
-            else:
-                patterns_to_check = exclude_patterns
+            # Find DB entries that are now missing on disk or excluded by the
+            # same effective scope rules used by discovery/realtime admission.
+            orphaned_files: list[tuple[str, str]] = []
+            cleanup_reason_counts = {
+                "missing_on_disk": 0,
+                "excluded_by_current_policy": 0,
+            }
+            cleanup_filter = self._build_cleanup_path_filter(
+                include_patterns, exclude_patterns
+            )
 
             for db_file in db_files:
                 file_path = db_file["path"]
+                cleanup_reason = self._classify_cleanup_candidate(
+                    file_path,
+                    current_file_paths,
+                    cleanup_filter,
+                )
+                if cleanup_reason is None:
+                    continue
 
-                # Check if file should be excluded based on current patterns
-                should_exclude = False
-
-                # File path is already relative (stored as relative with forward slashes)
-                rel_path = Path(file_path)
-
-                for exclude_pattern in patterns_to_check:
-                    # Check relative path pattern
-                    if fnmatch(str(rel_path), exclude_pattern):
-                        should_exclude = True
-                        break
-
-                # Mark for removal if not in current files or should be excluded
-                if file_path not in current_file_paths or should_exclude:
-                    orphaned_files.append(file_path)
+                orphaned_files.append((file_path, cleanup_reason))
+                cleanup_reason_counts[cleanup_reason] += 1
 
             # Remove orphaned files with progress tracking
             orphaned_count = 0
@@ -2876,14 +2936,50 @@ class IndexingCoordinator(BaseService):
                         info="",
                     )
 
-                for file_path in orphaned_files:
-                    if self._db.delete_file_completely(file_path):
-                        orphaned_count += 1
-                        # Clean up the file lock for orphaned file
-                        self._cleanup_file_lock(Path(file_path))
+                cleanup_reason_order = (
+                    "missing_on_disk",
+                    "excluded_by_current_policy",
+                )
+                for cleanup_reason in cleanup_reason_order:
+                    reason_paths = [
+                        file_path
+                        for file_path, file_reason in orphaned_files
+                        if file_reason == cleanup_reason
+                    ]
+                    for batch_start in range(
+                        0, len(reason_paths), self._ORPHAN_CLEANUP_BATCH_SIZE
+                    ):
+                        batch_paths = reason_paths[
+                            batch_start : batch_start + self._ORPHAN_CLEANUP_BATCH_SIZE
+                        ]
+                        if not batch_paths:
+                            continue
 
-                    if cleanup_task is not None and self.progress:
-                        self.progress.advance(cleanup_task, 1)
+                        try:
+                            deleted_count = self._db.delete_files_batch(batch_paths)
+                        except Exception as e:
+                            raise RuntimeError(
+                                "orphan/excluded cleanup delete failed "
+                                f"for {batch_paths[0]} "
+                                f"(reason={cleanup_reason}, "
+                                f"batch_count={len(batch_paths)}): {e}"
+                            ) from e
+
+                        if deleted_count != len(batch_paths):
+                            raise RuntimeError(
+                                "orphan/excluded cleanup delete returned false "
+                                f"for {batch_paths[0]} "
+                                f"(reason={cleanup_reason}, "
+                                f"deleted_count={deleted_count}, "
+                                f"batch_count={len(batch_paths)})"
+                            )
+
+                        orphaned_count += len(batch_paths)
+                        for file_path in batch_paths:
+                            self._cleanup_file_lock(Path(file_path))
+
+                        if cleanup_task is not None and self.progress:
+                            self.progress.advance(cleanup_task, len(batch_paths))
 
                 # Complete the cleanup progress bar
                 if cleanup_task is not None and self.progress:
@@ -2891,10 +2987,21 @@ class IndexingCoordinator(BaseService):
                     if task.total:
                         self.progress.update(cleanup_task, completed=task.total)
 
-                logger.info(f"Cleaned up {orphaned_count} orphaned files from database")
+                logger.info(
+                    "Cleaned up "
+                    f"{orphaned_count} orphaned files from database "
+                    "("
+                    f"missing_on_disk={cleanup_reason_counts['missing_on_disk']}, "
+                    "excluded_by_current_policy="
+                    f"{cleanup_reason_counts['excluded_by_current_policy']}"
+                    ")"
+                )
 
             return orphaned_count
 
         except Exception as e:
-            logger.warning(f"Failed to cleanup orphaned files: {e}")
-            return 0
+            message = str(e)
+            if not message.startswith("Storage reconciliation cleanup failed:"):
+                message = f"Storage reconciliation cleanup failed: {message}"
+            logger.error(message)
+            raise RuntimeError(message) from e

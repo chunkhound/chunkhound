@@ -159,7 +159,7 @@ uv run scripts/update_version.py --bump minor b1 # Bump to next minor beta
    - Regenerates `requirements-lock.txt` with exact versions
    - Ensures all lock files are synchronized
    - Creates reproducible release artifacts
-4. **Test locally**: `pip install dist/chunkhound-X.Y.Z-py3-none-any.whl`
+4. **Test locally**: `pip install dist/chunkhound-X.Y.Z-<platform-tag>.whl`
 5. **Push tag**: `git push origin vX.Y.Z`
 6. **Publish**: `uv publish` (requires PYPI_TOKEN)
 
