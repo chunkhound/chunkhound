@@ -297,10 +297,18 @@ class DuckDBConnectionManager:
             self.connection.execute("LOAD vss")
             logger.info("VSS extension loaded successfully")
 
-            # Enable experimental HNSW persistence AFTER VSS extension is loaded
-            # This prevents segfaults when DuckDB tries to access vector functionality
-            self.connection.execute("SET hnsw_enable_experimental_persistence = true")
-            logger.debug("HNSW experimental persistence enabled")
+            # HNSW experimental persistence is opt-in (disabled by default).
+            # When disabled, DuckDB uses exact brute-force cosine (100% recall, no bloat).
+            # Enable via DatabaseConfig(enable_hnsw_persistence=True) for local-SSD DBs.
+            if getattr(self.config, "enable_hnsw_persistence", False):
+                self.connection.execute(
+                    "SET hnsw_enable_experimental_persistence = true"
+                )
+                logger.debug("HNSW experimental persistence enabled (opt-in)")
+            else:
+                logger.debug(
+                    "HNSW experimental persistence disabled (default) - using exact scan"
+                )
 
         except Exception as e:
             logger.error(f"Failed to load DuckDB extensions: {e}")

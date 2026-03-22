@@ -49,6 +49,18 @@ class DatabaseConfig(BaseModel):
         description="Maximum database size in MB before indexing is stopped (None = no limit)",
     )
 
+    # DuckDB HNSW persistence
+    enable_hnsw_persistence: bool = Field(
+        default=False,
+        description=(
+            "Enable DuckDB HNSW experimental persistence. "
+            "Disabled by default: causes multi-GB DB bloat on SMB/NFS shares "
+            "(observed: 1.6 GB -> 9.9 GB). When disabled, DuckDB uses exact "
+            "brute-force cosine: 100% recall, adequate for <200k vectors. "
+            "Enable only on local SSD when HNSW rebuild time matters."
+        ),
+    )
+
     @field_validator("path")
     def validate_path(cls, v: Path | None) -> Path | None:
         """Convert string paths to Path objects."""
