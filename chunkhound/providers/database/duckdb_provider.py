@@ -3188,29 +3188,12 @@ class DuckDBProvider(SerialDatabaseProvider):
             conn.close()
 
     def _enable_hnsw_persistence_on_conn(self, conn: Any) -> None:
-        """Enable HNSW index persistence with fallback for future versions."""
-        # Primary flag (current DuckDB versions)
+        """Enable HNSW index persistence."""
         try:
             conn.execute("SET hnsw_enable_experimental_persistence = true")
-            return
         except Exception:
-            pass
-
-        # Fallback alternatives for potential future API changes
-        alternatives = [
-            "SET hnsw_persistence = true",
-            "SET vss_persistence = true",
-        ]
-        for alt in alternatives:
-            try:
-                conn.execute(alt)
-                logger.debug(f"Used alternative HNSW persistence flag: {alt}")
-                return
-            except Exception:
-                continue
-
-        logger.warning(
-            "HNSW persistence flag not available. "
-            "Vector indexes will rebuild on first query after compaction."
-        )
+            logger.warning(
+                "HNSW persistence flag not available. "
+                "Vector indexes will rebuild on first query after compaction."
+            )
 
