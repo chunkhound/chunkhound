@@ -9,6 +9,19 @@ from enum import Enum
 from pathlib import Path
 from typing import NewType
 
+
+def _scss_grammar_available() -> bool:
+    """Return True if the SCSS tree-sitter grammar is loadable at runtime."""
+    try:
+        from tree_sitter_language_pack import get_language  # type: ignore[import]
+
+        return get_language("scss") is not None
+    except Exception:
+        return False
+
+
+_SCSS_AVAILABLE: bool = _scss_grammar_available()
+
 # String-based type aliases for better semantic clarity
 ProviderName = NewType("ProviderName", str)  # e.g., "openai"
 ModelName = NewType("ModelName", str)  # e.g., "text-embedding-3-small"
@@ -291,7 +304,9 @@ class Language(Enum):
             ".htm": cls.HTML,
             ".xhtml": cls.HTML,
             ".css": cls.CSS,
-            ".scss": cls.SCSS,
+            # .scss falls back to TEXT when the SCSS grammar is unavailable,
+            # matching the behaviour documented in the PR and mirroring .sass.
+            ".scss": cls.SCSS if _SCSS_AVAILABLE else cls.TEXT,
             # .sass uses indented syntax (no braces/semicolons) which is
             # structurally incompatible with the tree-sitter SCSS grammar.
             # Use text fallback parser instead of silently producing

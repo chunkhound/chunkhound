@@ -36,12 +36,6 @@ class CssMapping(BaseMapping):
 
     def __init__(self) -> None:
         super().__init__(Language.CSS)
-        # Cache _is_root_vars results keyed by (start_byte, end_byte).
-        # Each CssMapping instance lives for one file parse, so this doesn't
-        # leak across files.  Avoids the 3-level AST walk being repeated for
-        # both DEFINITION and STRUCTURE concepts (and extract_metadata) on the
-        # same rule_set node.
-        self._root_vars_cache: dict[tuple[int, int], bool] = {}
 
     def get_function_query(self) -> str:
         """Get tree-sitter query for function definitions.
@@ -74,19 +68,7 @@ class CssMapping(BaseMapping):
     # --- private helpers ---
 
     def _is_root_vars(self, node: Node, content: bytes) -> bool:
-        """Return True if rule_set is :root or * containing custom properties.
-
-        Results are memoised per (start_byte, end_byte) to avoid repeating the
-        3-level AST walk for the same node across DEFINITION, STRUCTURE, and
-        extract_metadata calls within a single file parse.
-        """
-        key = (node.start_byte, node.end_byte)
-        if key not in self._root_vars_cache:
-            self._root_vars_cache[key] = self._compute_is_root_vars(node, content)
-        return self._root_vars_cache[key]
-
-    def _compute_is_root_vars(self, node: Node, content: bytes) -> bool:
-        """Perform the actual :root/:* custom-property detection walk."""
+        """Return True if rule_set is :root or * containing custom properties."""
         sel = selector_text(node, content)
         if sel not in (":root", "*"):
             return False
