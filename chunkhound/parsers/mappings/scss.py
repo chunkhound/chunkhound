@@ -40,12 +40,22 @@ class ScssMapping(BaseMapping):
         """Replace SCSS interpolations with same-length placeholders.
 
         The tree-sitter SCSS grammar cannot parse ``--#{$var}name`` (interpolated
-        CSS custom property names). Replacing every ``#{...}`` with an equal-length
-        run of ``x`` characters keeps byte offsets intact while producing a
-        grammar-valid token, so AST positions remain aligned with the original
-        source for text extraction.
+        CSS custom property names). Each ``#{...}`` token is replaced character by
+        character: newlines are kept as-is (preserving AST line numbers) and every
+        other character is replaced with ``x`` bytes equal in count to the original
+        UTF-8 byte length of that character (preserving byte offsets).
         """
-        return _INTERP_RE.sub(lambda m: "x" * len(m.group().encode("utf-8")), content)
+
+        def _replace(m: re.Match) -> str:
+            parts = []
+            for ch in m.group():
+                if ch == "\n":
+                    parts.append("\n")
+                else:
+                    parts.append("x" * len(ch.encode("utf-8")))
+            return "".join(parts)
+
+        return _INTERP_RE.sub(_replace, content)
 
     def get_function_query(self) -> str:
         """Get tree-sitter query for SCSS mixin and function definitions."""

@@ -362,7 +362,9 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     ".ejs": Language.JINJA,
     ".erb": Language.JINJA,
     ".css": Language.CSS,
-    ".scss": Language.SCSS,
+    # .scss falls back to TEXT when the SCSS grammar is unavailable, matching
+    # the documented graceful-degradation behaviour and mirroring .sass.
+    ".scss": Language.SCSS if SCSS_AVAILABLE else Language.TEXT,
     # .sass uses indented syntax (no braces/semicolons) which is structurally
     # incompatible with the tree-sitter SCSS grammar — fall back to text parser.
     ".sass": Language.TEXT,
