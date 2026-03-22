@@ -515,7 +515,7 @@ requires-dist = [
     { name = "tree-sitter-javascript", specifier = ">=0.25.0" },
     { name = "tree-sitter-json", specifier = ">=0.24.8" },
     { name = "tree-sitter-kotlin", specifier = ">=1.1.0" },
-    { name = "tree-sitter-language-pack", specifier = ">=0.7.3" },
+    { name = "tree-sitter-language-pack", specifier = ">=0.7.3,<1.0.0" },
     { name = "tree-sitter-lua", specifier = ">=0.4.0" },
     { name = "tree-sitter-make", specifier = ">=0.1.0" },
     { name = "tree-sitter-markdown", specifier = ">=0.5.1" },
