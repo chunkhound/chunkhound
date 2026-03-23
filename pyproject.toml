@@ -210,6 +210,7 @@ dev = [
     "pyinstaller>=6.14.1",
     "pytest>=8.4.0",
     "pytest-asyncio>=1.0.0",
+    "pytest-rerunfailures>=13.0",
     "pytest-timeout>=2.1.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.11.12",
