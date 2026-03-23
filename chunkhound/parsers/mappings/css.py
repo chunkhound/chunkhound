@@ -135,6 +135,9 @@ class CssMapping(BaseMapping):
             raw = node_text(node, content).strip()
             # Strip '@import ' prefix and trailing semicolon
             raw = raw.removeprefix("@import").strip().rstrip(";").strip()
+            # Take only the first whitespace-delimited token — anything after
+            # a space is a media query (e.g. ``"reset.css" screen, print``).
+            raw = raw.split()[0] if raw else raw
             return raw[:60]
 
         elif concept == UniversalConcept.COMMENT:

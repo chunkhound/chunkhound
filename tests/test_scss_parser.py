@@ -184,6 +184,20 @@ def test_parses_forward_as_import(scss_parser):
     )
 
 
+def test_use_with_alias_symbol_is_path_only(scss_parser):
+    """@use with 'as' alias returns only the module path as symbol, not the alias."""
+    code = '@use "colors" as c;\n@use "typography" as t;\n@forward "mixins" as m-*;'
+    chunks = scss_parser.parse_content(code, "test.scss", file_id=1)
+    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
+    assert len(import_chunks) > 0, "No IMPORT chunks"
+    symbols = {c.symbol for c in import_chunks}
+    assert any("colors" in s for s in symbols), f"colors not in {symbols}"
+    assert any("typography" in s for s in symbols), f"typography not in {symbols}"
+    assert not any(" as " in s or 'as c' in s or '"' in s for s in symbols), (
+        f"Alias or quotes leaked into symbol: {symbols}"
+    )
+
+
 def test_parses_comments(scss_parser):
     """SCSS /* */ block comments are extracted as COMMENT chunks.
 
