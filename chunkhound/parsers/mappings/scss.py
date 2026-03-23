@@ -27,7 +27,9 @@ from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
 # Matches SCSS #{...} interpolations for preprocessing.
-_INTERP_RE = re.compile(r"#\{[^}]*\}")
+# Handles one level of nested braces (e.g. #{if($c, "a}", "b")}) so that
+# a } inside a string argument does not prematurely end the match.
+_INTERP_RE = re.compile(r"#\{(?:[^{}]|\{[^{}]*\})*\}")
 
 
 class ScssMapping(BaseMapping):

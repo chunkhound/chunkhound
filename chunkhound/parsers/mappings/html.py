@@ -234,7 +234,7 @@ class HtmlMapping(BaseMapping):
                 start_tag = self._get_start_tag(node)
                 if tag == "link" and start_tag is not None:
                     rel = self._get_attribute(start_tag, "rel", content)
-                    if rel == "stylesheet":
+                    if rel and "stylesheet" in rel.lower().split():
                         href = self._get_attribute(start_tag, "href", content)
                         return href or "link_stylesheet"
 
@@ -265,7 +265,7 @@ class HtmlMapping(BaseMapping):
             if tag != "link" or start_tag is None:
                 return ""
             rel = self._get_attribute(start_tag, "rel", content)
-            if rel != "stylesheet":
+            if not rel or "stylesheet" not in rel.lower().split():
                 return ""
 
         return node_text(node, content)
