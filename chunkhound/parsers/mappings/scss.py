@@ -10,7 +10,6 @@ Extends CSS parsing with SCSS-specific constructs:
 - comment                → COMMENT
 """
 
-import re
 from pathlib import Path
 from typing import Any
 
@@ -26,10 +25,62 @@ from chunkhound.parsers.mappings._shared.css_family_helpers import (
 from chunkhound.parsers.mappings.base import BaseMapping
 from chunkhound.parsers.universal_engine import UniversalConcept
 
-# Matches SCSS #{...} interpolations for preprocessing.
-# Handles one level of nested braces (e.g. #{if($c, "a}", "b")}) so that
-# a } inside a string argument does not prematurely end the match.
-_INTERP_RE = re.compile(r"#\{(?:[^{}]|\{[^{}]*\})*\}")
+def _preprocess_scss_interpolations(content: str) -> str:
+    """Replace SCSS ``#{...}`` interpolations with same-length placeholders.
+
+    The tree-sitter SCSS grammar cannot parse ``--#{$var}name`` (interpolated
+    CSS custom property names). This scanner walks the source character by
+    character and replaces each ``#{...}`` span with ``x`` placeholders,
+    preserving byte offsets (multi-byte characters → same number of ``x``
+    bytes) and newlines (preserving AST line numbers).
+
+    Unlike a regex approach, this handles:
+    - Arbitrary brace nesting depth (``#{fn(#{inner})}``)
+    - ``}`` inside single- or double-quoted strings within the interpolation
+      (``#{if($c, "a}", "b")}``)
+    """
+    result: list[str] = []
+    i = 0
+    n = len(content)
+    while i < n:
+        # Detect start of interpolation: #{ not preceded by another #
+        if content[i] == "#" and i + 1 < n and content[i + 1] == "{":
+            # Collect the full #{...} span using a brace counter,
+            # respecting single- and double-quoted strings inside.
+            span_start = i
+            i += 2  # skip '#{'
+            depth = 1
+            while i < n and depth > 0:
+                ch = content[i]
+                if ch in ('"', "'"):
+                    # Skip quoted string
+                    quote = ch
+                    i += 1
+                    while i < n:
+                        c2 = content[i]
+                        i += 1
+                        if c2 == "\\" and i < n:
+                            i += 1  # skip escaped char
+                        elif c2 == quote:
+                            break
+                elif ch == "{":
+                    depth += 1
+                    i += 1
+                elif ch == "}":
+                    depth -= 1
+                    i += 1
+                else:
+                    i += 1
+            # Replace every character in span with x-placeholders
+            for ch in content[span_start:i]:
+                if ch == "\n":
+                    result.append("\n")
+                else:
+                    result.append("x" * len(ch.encode("utf-8")))
+        else:
+            result.append(content[i])
+            i += 1
+    return "".join(result)
 
 
 class ScssMapping(BaseMapping):
@@ -41,23 +92,11 @@ class ScssMapping(BaseMapping):
     def preprocess_for_ast(self, content: str) -> str:
         """Replace SCSS interpolations with same-length placeholders.
 
-        The tree-sitter SCSS grammar cannot parse ``--#{$var}name`` (interpolated
-        CSS custom property names). Each ``#{...}`` token is replaced character by
-        character: newlines are kept as-is (preserving AST line numbers) and every
-        other character is replaced with ``x`` bytes equal in count to the original
-        UTF-8 byte length of that character (preserving byte offsets).
+        Delegates to the module-level ``_preprocess_scss_interpolations``
+        scanner which correctly handles arbitrary nesting depth and ``}``
+        characters inside quoted strings within interpolations.
         """
-
-        def _replace(m: re.Match) -> str:
-            parts = []
-            for ch in m.group():
-                if ch == "\n":
-                    parts.append("\n")
-                else:
-                    parts.append("x" * len(ch.encode("utf-8")))
-            return "".join(parts)
-
-        return _INTERP_RE.sub(_replace, content)
+        return _preprocess_scss_interpolations(content)
 
     def get_function_query(self) -> str:
         """Get tree-sitter query for SCSS mixin and function definitions."""
@@ -255,6 +294,11 @@ class ScssMapping(BaseMapping):
         # Take only the first token (rest may be "as <alias>" or "with (...)")
         text = text.split()[0] if text else text
         path = text.strip("\"'")
+        # Built-in Sass modules use the "sass:xxx" namespace (e.g. "sass:math").
+        # These are not filesystem paths — skip them early to avoid constructing
+        # invalid paths (colons are illegal in path components on some systems).
+        if path.startswith("sass:"):
+            return []
         # Try with and without leading underscore (SCSS partials)
         candidates = [base_dir / path]
         stem = Path(path).stem

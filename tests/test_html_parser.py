@@ -291,5 +291,39 @@ def test_resolve_import_paths_html(tmp_path):
     assert resolved[0] == tmp_path / "style.css"
 
 
+def test_resolve_import_paths_html_query_string(tmp_path):
+    """resolve_import_paths strips cache-busting query strings before resolving."""
+    from chunkhound.parsers.mappings.html import HtmlMapping
+    html = HtmlMapping()
+    (tmp_path / "style.css").write_text("body{}")
+    # href with cache-busting suffix — should still resolve to the bare file
+    link_tag = '<link rel="stylesheet" href="style.css?v=1.2.3">'
+    resolved = html.resolve_import_paths(link_tag, tmp_path, tmp_path / "index.html")
+    assert len(resolved) == 1, f"Expected 1 resolved path, got {resolved}"
+    assert resolved[0] == tmp_path / "style.css"
+
+
+def test_resolve_import_paths_html_fragment(tmp_path):
+    """resolve_import_paths strips URL fragments (#...) before resolving."""
+    from chunkhound.parsers.mappings.html import HtmlMapping
+    html = HtmlMapping()
+    (tmp_path / "style.css").write_text("body{}")
+    link_tag = '<link rel="stylesheet" href="style.css#section">'
+    resolved = html.resolve_import_paths(link_tag, tmp_path, tmp_path / "index.html")
+    assert len(resolved) == 1, f"Expected 1 resolved path, got {resolved}"
+    assert resolved[0] == tmp_path / "style.css"
+
+
+def test_stylesheet_import_name_strips_query_string(html_parser):
+    """IMPORT chunk name for <link rel=stylesheet> strips cache-busting query strings."""
+    code = '<link rel="stylesheet" href="main.css?v=2.0.0">'
+    chunks = html_parser.parse_content(code, "test.html", file_id=1)
+    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
+    assert len(import_chunks) > 0, "No IMPORT chunk for link[rel=stylesheet]"
+    assert all("?" not in c.symbol for c in import_chunks), (
+        f"Query string leaked into symbol: {[c.symbol for c in import_chunks]}"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -15,6 +15,7 @@ Both concepts use ``(rule_set) @definition`` as their tree-sitter query.
 produces exactly one chunk with no duplicates.
 """
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -195,12 +196,17 @@ class CssMapping(BaseMapping):
         """
         # Strip @import prefix and trailing semicolon
         text = import_text.removeprefix("@import").strip().rstrip(";").strip()
-        # Take only the first token (rest may be a media query)
-        text = text.split()[0] if text else text
-        # Strip quotes and url()
+        # Unwrap url(...) before splitting on whitespace so that
+        # ``url( path )`` with internal spaces is handled correctly.
+        url_m = re.match(r'^url\(\s*(["\']?)(.+?)\1\s*\)', text, re.IGNORECASE)
+        if url_m:
+            text = url_m.group(2)
+        else:
+            # Take only the first whitespace-delimited token (rest may be a
+            # media query, e.g. ``"reset.css" screen, print``).
+            text = text.split()[0] if text else text
+        # Strip surrounding quotes
         path = text.strip("\"'")
-        if path.startswith("url("):
-            path = path[4:].rstrip(")").strip("\"'")
         candidate = base_dir / path
         if candidate.exists():
             return [candidate]

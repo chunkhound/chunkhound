@@ -53,8 +53,9 @@ _COMPATIBLE_CONCEPT_PAIRS: frozenset[_ConceptPair] = frozenset(
         (UniversalConcept.DEFINITION, UniversalConcept.COMMENT),
         (UniversalConcept.BLOCK, UniversalConcept.COMMENT),
         (UniversalConcept.COMMENT, UniversalConcept.BLOCK),
-        (UniversalConcept.DEFINITION, UniversalConcept.STRUCTURE),
-        (UniversalConcept.STRUCTURE, UniversalConcept.DEFINITION),
+        # NOTE: DEFINITION↔STRUCTURE merging is intentionally excluded.
+        # :root/:* CSS var blocks are STRUCTURE chunks and must not be
+        # silently absorbed into adjacent DEFINITION rule-set chunks.
     }
 )
 

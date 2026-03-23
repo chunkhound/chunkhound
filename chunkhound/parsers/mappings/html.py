@@ -237,6 +237,9 @@ class HtmlMapping(BaseMapping):
                     rel = self._get_attribute(start_tag, "rel", content)
                     if rel and "stylesheet" in rel.lower().split():
                         href = self._get_attribute(start_tag, "href", content)
+                        if href:
+                            # Strip cache-busting query strings / fragments
+                            href = href.split("?")[0].split("#")[0]
                         return href or "link_stylesheet"
 
         return "unnamed"
@@ -302,6 +305,9 @@ class HtmlMapping(BaseMapping):
         # Extract href attribute value from the full <link> tag
         m = re.search(r'href=["\']([^"\']+)["\']', import_text)
         href = m.group(1) if m else import_text
+        # Strip cache-busting query strings (?v=1.2.3) and fragments (#section)
+        # before resolving to a filesystem path.
+        href = href.split("?")[0].split("#")[0]
         candidate = base_dir / href
         if candidate.exists():
             return [candidate]

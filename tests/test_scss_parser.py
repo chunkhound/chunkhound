@@ -336,5 +336,56 @@ def test_resolve_import_paths_direct(tmp_path):
     assert resolved[0] == tmp_path / "variables.scss"
 
 
+def test_resolve_import_paths_builtin_sass_module(tmp_path):
+    """resolve_import_paths returns [] for built-in Sass modules (sass:xxx)."""
+    from chunkhound.parsers.mappings.scss import ScssMapping
+    scss = ScssMapping()
+    # Built-in modules have no filesystem path — should return empty, not error
+    assert scss.resolve_import_paths('@use "sass:math"', tmp_path, tmp_path / "main.scss") == []
+    assert scss.resolve_import_paths('@use "sass:color"', tmp_path, tmp_path / "main.scss") == []
+    assert scss.resolve_import_paths('@use "sass:list"', tmp_path, tmp_path / "main.scss") == []
+
+
+def test_preprocess_scss_deep_nesting():
+    """Interpolation preprocessor handles arbitrarily nested braces."""
+    from chunkhound.parsers.mappings.scss import _preprocess_scss_interpolations
+    # Three levels of nesting
+    source = ".a { --#{fn(#{inner($x)})}name: red; }"
+    result = _preprocess_scss_interpolations(source)
+    # All interpolation characters replaced with 'x' (except newlines)
+    # Span is #{fn(#{inner($x)})} — starts at #{, ends after the outer }
+    # Verify the surrounding non-interpolation text is unchanged
+    assert result.startswith(".a { --")
+    assert result.endswith("name: red; }")
+    # No literal #{...} should remain in the output
+    assert "#{" not in result, f"Unprocessed interpolation in: {result}"
+
+
+def test_preprocess_scss_interpolation_with_quoted_brace():
+    """Preprocessor does not prematurely close on } inside a string argument."""
+    from chunkhound.parsers.mappings.scss import _preprocess_scss_interpolations
+    # The } inside "a}" is part of a string, not the interpolation close
+    source = '.a { --#{if($c, "a}", "b")}name: red; }'
+    result = _preprocess_scss_interpolations(source)
+    assert result.startswith(".a { --")
+    assert result.endswith("name: red; }")
+    assert "#{" not in result, f"Unprocessed interpolation in: {result}"
+
+
+def test_preprocess_scss_preserves_newlines():
+    """Preprocessor keeps newlines intact to preserve AST line numbers."""
+    from chunkhound.parsers.mappings.scss import _preprocess_scss_interpolations
+    source = ".a {\n  --#{$var\n}name: red;\n}"
+    result = _preprocess_scss_interpolations(source)
+    assert result.count("\n") == source.count("\n"), "Newline count changed"
+
+
+def test_preprocess_scss_no_interpolation_unchanged():
+    """Content without any #{...} passes through unchanged."""
+    from chunkhound.parsers.mappings.scss import _preprocess_scss_interpolations
+    source = ".a { color: red; }"
+    assert _preprocess_scss_interpolations(source) == source
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

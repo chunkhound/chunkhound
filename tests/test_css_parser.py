@@ -267,5 +267,52 @@ def test_resolve_import_paths_not_found(tmp_path):
     assert resolved == []
 
 
+def test_resolve_import_paths_url_with_spaces(tmp_path):
+    """resolve_import_paths handles url( path ) with internal spaces."""
+    from chunkhound.parsers.mappings.css import CssMapping
+    css = CssMapping()
+    (tmp_path / "reset.css").write_text("*{margin:0}")
+    # url() with spaces around the path — broken by naive split()[0]
+    resolved = css.resolve_import_paths(
+        '@import url( "reset.css" );', tmp_path, tmp_path / "style.css"
+    )
+    assert len(resolved) == 1, f"Expected 1 resolved path, got {resolved}"
+    assert resolved[0] == tmp_path / "reset.css"
+
+
+def test_root_vars_not_merged_with_adjacent_rule(css_parser):
+    """:root var block and adjacent rule set produce separate chunks.
+
+    Before the fix, (DEFINITION, STRUCTURE) was in _COMPATIBLE_CONCEPT_PAIRS
+    which caused the greedy merge pass to absorb :root var blocks into
+    neighbouring rule sets, losing the design-token NAMESPACE chunk.
+    """
+    from chunkhound.core.types.common import ChunkType
+    code = """:root {
+  --primary: #3498db;
+  --secondary: #2ecc71;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+}
+"""
+    chunks = css_parser.parse_content(code, "test.css", file_id=1)
+    chunk_types = {c.chunk_type for c in chunks}
+    # NAMESPACE (:root vars) and BLOCK (body rule) must both be present
+    assert ChunkType.NAMESPACE in chunk_types, (
+        f":root vars collapsed — no NAMESPACE chunk. Types: {chunk_types}"
+    )
+    assert ChunkType.BLOCK in chunk_types, (
+        f"body rule missing — no BLOCK chunk. Types: {chunk_types}"
+    )
+    # Verify they are separate chunks — not merged into one
+    ns_chunks = [c for c in chunks if c.chunk_type == ChunkType.NAMESPACE]
+    block_chunks = [c for c in chunks if c.chunk_type == ChunkType.BLOCK]
+    assert len(ns_chunks) >= 1, "Expected at least 1 NAMESPACE chunk for :root vars"
+    assert len(block_chunks) >= 1, "Expected at least 1 BLOCK chunk for body rule"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
