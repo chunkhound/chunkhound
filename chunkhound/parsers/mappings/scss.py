@@ -183,6 +183,10 @@ class ScssMapping(BaseMapping):
                 if raw.startswith(prefix):
                     raw = raw[len(prefix) :].strip().rstrip(";").strip()
                     break
+            # Take only the first whitespace-delimited token — anything after
+            # a space is a namespace alias (e.g. ``"colors" as c``) or
+            # a ``with (...)`` configuration block.
+            raw = raw.split()[0] if raw else raw
             return raw.strip("\"'")[:60]
 
         elif concept == UniversalConcept.COMMENT:

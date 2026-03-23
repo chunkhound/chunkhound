@@ -123,6 +123,20 @@ def test_parses_import_as_import(css_parser):
     assert any("variables" in s for s in symbols), f"variables.css not in {symbols}"
 
 
+def test_import_with_media_query_symbol_is_path_only(css_parser):
+    """@import with a media query returns only the path as symbol, not the media qualifier."""
+    code = '@import "reset.css" screen, print;\n@import url("base.css") all;'
+    chunks = css_parser.parse_content(code, "test.css", file_id=1)
+    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
+    assert len(import_chunks) > 0, "No IMPORT chunks"
+    # Chunks may be merged; join all symbols and verify media qualifiers are absent.
+    all_symbols = " ".join(c.symbol for c in import_chunks)
+    assert "screen" not in all_symbols, f"Media qualifier 'screen' leaked into symbol: {all_symbols}"
+    assert "print" not in all_symbols, f"Media qualifier 'print' leaked into symbol: {all_symbols}"
+    assert "all" not in all_symbols, f"Media qualifier 'all' leaked into symbol: {all_symbols}"
+    assert "reset" in all_symbols, f"Expected 'reset' in symbol, got: {all_symbols}"
+
+
 def test_parses_comments(css_parser, comprehensive_css):
     """CSS /* */ comments are extracted as COMMENT chunks.
 
