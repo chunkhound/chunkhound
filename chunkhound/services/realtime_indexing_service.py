@@ -502,12 +502,12 @@ class RealtimeIndexingService:
 
                     known_files = current_files
 
-                    # Adaptive poll interval: 0.5s for the first 30s, then 3s
+                    # Adaptive poll interval: 0.5s for the first 60s, then 3s
                     # Extended fast polling window ensures reliable detection during
                     # multi-file test sequences on Windows CI where setup + indexing
                     # can consume the initial fast-polling budget
                     elapsed = time.time() - polling_start
-                    interval = 0.5 if elapsed < 30.0 else 3.0
+                    interval = 0.5 if elapsed < 60.0 else 3.0
                     await asyncio.sleep(interval)
 
                 except Exception as e:
