@@ -86,10 +86,7 @@ class ImportContextService:
                 tree.root_node, content_bytes, UniversalConcept.IMPORT
             )
 
-            # Use chunk.name: each mapping's extract_name already strips the
-            # statement prefix (@import/@use, <link ...>) and returns only the
-            # path token that resolve_import_paths() expects.
-            import_lines = [chunk.name for chunk in import_chunks]
+            import_lines = [chunk.content for chunk in import_chunks]
 
             # Cache and return
             self._import_cache[file_path] = import_lines

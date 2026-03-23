@@ -10,6 +10,7 @@ language label to ``Language.JINJA``, ensuring chunks produced from ``.jinja``,
 ``.j2``, ``.njk``, ``.erb``, and ``.ejs`` files are tagged correctly.
 """
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -291,15 +292,17 @@ class HtmlMapping(BaseMapping):
         """Resolve a relative href or src to an absolute filesystem path.
 
         Args:
-            import_text: The href/src value extracted from the link/script element.
+            import_text: The full <link> element text.
             base_dir: Directory of the importing file.
             source_file: Path of the importing file (unused, for API compat).
 
         Returns:
             List with a single resolved Path if it exists, otherwise empty list.
         """
-        # Resolve relative hrefs/srcs to actual paths
-        candidate = base_dir / import_text
+        # Extract href attribute value from the full <link> tag
+        m = re.search(r'href=["\']([^"\']+)["\']', import_text)
+        href = m.group(1) if m else import_text
+        candidate = base_dir / href
         if candidate.exists():
             return [candidate]
         return []

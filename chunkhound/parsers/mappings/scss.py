@@ -239,14 +239,22 @@ class ScssMapping(BaseMapping):
         ``_colors.scss`` (underscore-prefixed partials).
 
         Args:
-            import_text: The import value extracted from the statement.
+            import_text: The full @import/@use/@forward statement text.
             base_dir: Directory of the importing file.
             source_file: Path of the importing file (unused, for API compat).
 
         Returns:
             List with a single resolved Path if it exists, otherwise empty list.
         """
-        path = import_text.strip("\"'")
+        # Strip @use/@forward/@import prefix and trailing semicolon
+        text = import_text
+        for prefix in ("@forward", "@use", "@import"):
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip().rstrip(";").strip()
+                break
+        # Take only the first token (rest may be "as <alias>" or "with (...)")
+        text = text.split()[0] if text else text
+        path = text.strip("\"'")
         # Try with and without leading underscore (SCSS partials)
         candidates = [base_dir / path]
         stem = Path(path).stem

@@ -186,15 +186,19 @@ class CssMapping(BaseMapping):
         Strips surrounding quotes and ``url(...)`` wrappers before resolving.
 
         Args:
-            import_text: The import value extracted from the @import statement.
+            import_text: The full @import statement text.
             base_dir: Directory of the importing file.
             source_file: Path of the importing file (unused, for API compat).
 
         Returns:
             List with a single resolved Path if it exists, otherwise empty list.
         """
+        # Strip @import prefix and trailing semicolon
+        text = import_text.removeprefix("@import").strip().rstrip(";").strip()
+        # Take only the first token (rest may be a media query)
+        text = text.split()[0] if text else text
         # Strip quotes and url()
-        path = import_text.strip("\"'")
+        path = text.strip("\"'")
         if path.startswith("url("):
             path = path[4:].rstrip(")").strip("\"'")
         candidate = base_dir / path

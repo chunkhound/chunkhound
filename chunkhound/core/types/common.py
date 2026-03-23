@@ -10,18 +10,6 @@ from pathlib import Path
 from typing import NewType
 
 
-def _scss_grammar_available() -> bool:
-    """Return True if the SCSS tree-sitter grammar is loadable at runtime."""
-    try:
-        from tree_sitter_language_pack import get_language  # type: ignore[import]
-
-        return get_language("scss") is not None
-    except Exception:
-        return False
-
-
-_SCSS_AVAILABLE: bool = _scss_grammar_available()
-
 # String-based type aliases for better semantic clarity
 ProviderName = NewType("ProviderName", str)  # e.g., "openai"
 ModelName = NewType("ModelName", str)  # e.g., "text-embedding-3-small"
@@ -207,6 +195,18 @@ class Language(Enum):
     @classmethod
     def from_file_extension(cls, file_path: str | Path) -> "Language":
         """Determine language from file extension and filename."""
+        # Resolve SCSS availability once per call via the authoritative flag in
+        # parser_factory.  The lazy import breaks the module-level circular
+        # dependency (parser_factory imports Language from this module).
+        def _scss_available() -> bool:
+            try:
+                from chunkhound.parsers.parser_factory import (  # noqa: PLC0415
+                    SCSS_AVAILABLE,
+                )
+
+                return SCSS_AVAILABLE
+            except Exception:
+                return False
         if isinstance(file_path, str):
             file_path = Path(file_path)
 
@@ -304,9 +304,10 @@ class Language(Enum):
             ".htm": cls.HTML,
             ".xhtml": cls.HTML,
             ".css": cls.CSS,
-            # .scss falls back to TEXT when the SCSS grammar is unavailable,
-            # matching the behaviour documented in the PR and mirroring .sass.
-            ".scss": cls.SCSS if _SCSS_AVAILABLE else cls.TEXT,
+            # .scss falls back to TEXT when the SCSS grammar is unavailable.
+            # Defer to parser_factory's authoritative SCSS_AVAILABLE flag so
+            # this map and EXTENSION_TO_LANGUAGE share a single source of truth.
+            ".scss": cls.SCSS if _scss_available() else cls.TEXT,
             # .sass uses indented syntax (no braces/semicolons) which is
             # structurally incompatible with the tree-sitter SCSS grammar.
             # Use text fallback parser instead of silently producing
