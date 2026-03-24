@@ -77,7 +77,7 @@ class DuckDBConnectionManager:
         """Establish database connection and initialize schema with WAL validation."""
         logger.info(f"Connecting to DuckDB database: {self.db_path}")
 
-        # Check for interrupted compaction
+        # Recover from interrupted compaction
         if isinstance(self.db_path, Path):
             lock_file = get_compaction_lock_path(self.db_path)
             if lock_file.exists():
@@ -86,6 +86,22 @@ class DuckDBConnectionManager:
                     "interrupted. Running WAL validation..."
                 )
                 lock_file.unlink(missing_ok=True)
+
+            # Recover from interrupted compaction swap
+            old_db = self.db_path.with_suffix(".duckdb.old")
+            compact_db = self.db_path.with_suffix(".compact.duckdb")
+            export_dir = self.db_path.parent / ".chunkhound_compaction_export"
+
+            if not self.db_path.exists() and old_db.exists():
+                logger.warning("Restoring database from pre-compaction state")
+                old_db.rename(self.db_path)
+
+            # Clean stale artifacts
+            for artifact in [compact_db, old_db]:
+                if artifact.exists() and self.db_path.exists():
+                    artifact.unlink()
+            if export_dir.exists():
+                shutil.rmtree(export_dir, ignore_errors=True)
 
         # Ensure parent directory exists for file-based databases
         if isinstance(self.db_path, Path):

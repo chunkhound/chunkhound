@@ -309,11 +309,11 @@ class MCPServerBase(ABC):
         if self._compaction_service is None:
             return
 
-        if not self.services or not hasattr(self.services.provider, "should_compact"):
+        if not self.services:
             return
 
         try:
-            # Cast is safe - we verified provider has should_compact (DuckDB only)
+            # Cast is safe - compaction service is only created for DuckDB providers
             db_provider = cast("DuckDBProvider", self.services.provider)
             started = await self._compaction_service.compact_background(
                 provider=db_provider,

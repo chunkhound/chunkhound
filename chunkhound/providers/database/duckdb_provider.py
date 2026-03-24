@@ -18,6 +18,7 @@ import shutil
 import threading
 import time
 from pathlib import Path
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import duckdb
@@ -49,6 +50,10 @@ from chunkhound.providers.database.serial_executor import (
 # Type hinting only
 if TYPE_CHECKING:
     from chunkhound.core.config.database_config import DatabaseConfig
+
+
+class CompactionError(RuntimeError):
+    """Raised when database compaction fails."""
 
 
 class DuckDBProvider(SerialDatabaseProvider):
@@ -3008,7 +3013,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         # it from firing on the next unrelated commit.
         state["deferred_checkpoint"] = False
 
-    def optimize(self) -> bool:
+    def optimize(
+        self, cancel_check: Callable[[], bool] | None = None
+    ) -> bool:
         """Optimize DuckDB storage: CHECKPOINT and full compaction.
 
         Skips optimization only if database is in a PERFECT state (free_blocks == 0).
@@ -3017,9 +3024,14 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         If in doubt (stats retrieval fails), errs on the side of optimization.
 
+        Args:
+            cancel_check: Optional callable returning True if compaction should be cancelled.
+
         Returns:
-            True if full compaction was performed (or skipped due to perfect state),
-            False if it failed.
+            True if compaction was performed, False if skipped (already optimal or cancelled).
+
+        Raises:
+            CompactionError: If compaction fails.
         """
         # Check if DB is in perfect state - only skip if no freed blocks pending reclamation
         # Note: We only check free_blocks because orphaned_blocks/fragmentation_ratio are
@@ -3033,29 +3045,42 @@ class DuckDBProvider(SerialDatabaseProvider):
                     "Database in perfect state (no free blocks pending reclamation) "
                     "- skipping optimization"
                 )
-                return True  # Success - nothing to do
+                return False  # Skipped - nothing to do
         except Exception as e:
             # If in doubt, optimize
             logger.debug(f"Could not check storage stats, proceeding with optimization: {e}")
+
+        if cancel_check and cancel_check():
+            return False
 
         # Step 1: Always run CHECKPOINT + HNSW compact (lightweight)
         self.optimize_tables()
 
         # Step 2: Run full compaction
         logger.info("Running full database compaction...")
-        return self._run_blocking_compaction()
+        return self._run_blocking_compaction(cancel_check=cancel_check)
 
-    def _run_blocking_compaction(self) -> bool:
+    def _run_blocking_compaction(
+        self, cancel_check: Callable[[], bool] | None = None
+    ) -> bool:
         """Run full EXPORT/IMPORT/SWAP compaction cycle.
 
+        DuckDB requires exclusive access for export (no mixing read-only and
+        read-write connections), so we soft_disconnect before the export step.
+
+        Args:
+            cancel_check: Optional callable returning True if cancelled.
+
         Returns:
-            True if compaction succeeded, False otherwise.
+            True if compaction succeeded, False if cancelled.
+
+        Raises:
+            CompactionError: If compaction fails.
         """
         db_path = Path(self._connection_manager._db_path)
 
         # Check disk space (need ~2.5x current DB size)
-        if not self._has_sufficient_disk_space(db_path, multiplier=2.5):
-            return False
+        self._has_sufficient_disk_space(db_path, multiplier=2.5)
 
         export_dir = db_path.parent / ".chunkhound_compaction_export"
         new_db_path = db_path.with_suffix(".compact.duckdb")
@@ -3067,18 +3092,28 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Create lock file to signal compaction in progress
             lock_file.touch()
 
-            # Soft disconnect BEFORE export to release file locks
-            # DuckDB doesn't allow mixing read-only and read-write connections
-            # Use soft_disconnect to keep executor alive for reconnection after swap
+            # Soft disconnect before export — DuckDB doesn't allow mixing
+            # read-only and read-write connections to the same file
             self.soft_disconnect(skip_checkpoint=False)
 
-            # 1. Export from original database (now safe - no active connections)
+            # 1. Export from original database (opens its own read-only connection)
             logger.info("Exporting database for compaction...")
             self._export_database_for_compaction(db_path, export_dir)
 
-            # 2. Import into fresh database
+            if cancel_check and cancel_check():
+                self.connect()  # Restore connection after soft_disconnect
+                return False
+
+            # 2. Import into fresh database (connects to new file)
             logger.info("Importing into compacted database...")
             self._import_database_for_compaction(export_dir, new_db_path)
+
+            if cancel_check and cancel_check():
+                # Clean up the compacted DB since we won't swap
+                if new_db_path.exists():
+                    new_db_path.unlink()
+                self.connect()  # Restore connection after soft_disconnect
+                return False
 
             # 3. Atomic swap
             logger.info("Performing atomic swap...")
@@ -3111,7 +3146,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             if old_db_path.exists() and not db_path.exists():
                 logger.warning("Restoring original database from backup...")
                 old_db_path.rename(db_path)
-            # Reconnect (we disconnected early, need to restore connection)
+            # Reconnect (we disconnected for export, need to restore connection)
             if not self.is_connected:
                 try:
                     self.connect()
@@ -3123,31 +3158,33 @@ class DuckDBProvider(SerialDatabaseProvider):
                     new_db_path.unlink()
                 except OSError:
                     pass
-            return False
+            raise CompactionError(f"Compaction failed: {e}") from e
         finally:
             # Always clean up export directory and lock file
             if export_dir.exists():
                 shutil.rmtree(export_dir, ignore_errors=True)
             lock_file.unlink(missing_ok=True)
 
-    def _has_sufficient_disk_space(self, db_path: Path, multiplier: float = 2.5) -> bool:
-        """Check if sufficient disk space exists for compaction."""
+    def _has_sufficient_disk_space(self, db_path: Path, multiplier: float = 2.5) -> None:
+        """Check if sufficient disk space exists for compaction.
+
+        Raises:
+            CompactionError: If insufficient disk space.
+        """
         try:
             db_size = db_path.stat().st_size
             required = int(db_size * multiplier)
             available = shutil.disk_usage(db_path.parent).free
 
             if available < required:
-                logger.warning(
+                raise CompactionError(
                     f"Insufficient disk space for compaction: "
                     f"need {required / 1024 / 1024:.1f}MB, "
                     f"have {available / 1024 / 1024:.1f}MB"
                 )
-                return False
-            return True
         except OSError as e:
             logger.warning(f"Could not check disk space: {e}")
-            return True  # Proceed anyway, let OS handle errors
+            # Proceed anyway, let OS handle errors
 
     def _export_database_for_compaction(self, db_path: Path, export_dir: Path) -> None:
         """Export database to Parquet files for compaction."""
