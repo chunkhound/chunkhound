@@ -66,6 +66,7 @@ class MCPServerBase(ABC):
         self._connect_lock = asyncio.Lock()
 
         # Background tasks
+        self._startup_task: asyncio.Task | None = None
         self._scan_task: asyncio.Task | None = None
 
         # Scan progress tracking
@@ -179,7 +180,9 @@ class MCPServerBase(ABC):
             self.debug_log("Service initialization complete")
 
             # Defer DB connect + realtime start to background so initialize is fast
-            asyncio.create_task(self._deferred_connect_and_start(target_path))
+            self._startup_task = asyncio.create_task(
+                self._deferred_connect_and_start(target_path)
+            )
 
     async def _deferred_connect_and_start(self, target_path: Path) -> None:
         """Connect DB and start realtime monitoring in background."""
@@ -287,6 +290,15 @@ class MCPServerBase(ABC):
 
         This method is idempotent - safe to call multiple times.
         """
+        # Cancel deferred startup task if still running
+        if self._startup_task is not None and not self._startup_task.done():
+            self.debug_log("Cancelling deferred startup task")
+            self._startup_task.cancel()
+            try:
+                await self._startup_task
+            except asyncio.CancelledError:
+                pass
+
         # Cancel background scan task if still running
         if self._scan_task is not None and not self._scan_task.done():
             self.debug_log("Cancelling background scan task")

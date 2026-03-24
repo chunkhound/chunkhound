@@ -358,7 +358,7 @@ def limit_response_size(
 # Tool Descriptions (optimized for LLM consumption)
 # =============================================================================
 
-SEARCH_DESCRIPTION = """Pinpoint specific code locations after building understanding with code_research. Returns complete function bodies and class definitions, not raw line fragments.
+SEARCH_DESCRIPTION = """Pinpoint specific code locations after building understanding with code_research. Returns structurally-parsed code chunks (functions, classes) — large definitions may span multiple results.
 
 TYPE — choose one:
 - **regex**: Match exact patterns against code content. Use for known identifiers, imports, or string literals.
