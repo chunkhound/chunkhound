@@ -194,3 +194,9 @@ class TestGeminiLLMProvider:
     def test_client_has_aio_attribute(self, provider):
         """Test that client has .aio attribute for async operations."""
         assert hasattr(provider._client, "aio")
+
+    def test_timeout_converted_to_milliseconds(self):
+        """Regression: google-genai SDK expects milliseconds, not seconds."""
+        provider = GeminiLLMProvider(api_key="test-key", timeout=120)
+        http_options = provider._client._api_client._http_options
+        assert http_options.timeout == 120_000
