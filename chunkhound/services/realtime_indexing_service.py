@@ -443,8 +443,10 @@ class RealtimeIndexingService:
         """Simple polling monitor for large directories."""
         logger.debug(f"Starting polling monitor for {watch_path}")
         self._debug(f"polling monitor active for {watch_path}")
-        # Track files with their mtime to detect modifications (not just new/deleted)
-        known_files: dict[Path, int] = {}
+        # Track files with (mtime_ns, size) to detect modifications reliably
+        # Using both fields avoids missed changes on NTFS where mtime granularity
+        # can hide rapid overwrites (aligned with PR #220's approach)
+        known_files: dict[Path, tuple[int, int]] = {}
 
         # Create a simple event handler for shouldIndex check once
         simple_handler = SimpleEventHandler(
@@ -458,7 +460,7 @@ class RealtimeIndexingService:
         try:
             while True:
                 try:
-                    current_files: dict[Path, int] = {}
+                    current_files: dict[Path, tuple[int, int]] = {}
                     files_checked = 0
 
                     # Walk directory tree but with limits to avoid hanging
@@ -520,24 +522,25 @@ class RealtimeIndexingService:
         self,
         file_path: Path,
         handler: SimpleEventHandler,
-        known_files: dict[Path, int],
-        current_files: dict[Path, int],
+        known_files: dict[Path, tuple[int, int]],
+        current_files: dict[Path, tuple[int, int]],
     ) -> None:
         """Check a single file for changes during polling."""
         if not handler._should_index(file_path):  # noqa: SLF001
             return
         try:
-            current_mtime = file_path.stat().st_mtime_ns
+            stat = file_path.stat()
+            file_state = (stat.st_mtime_ns, stat.st_size)
         except OSError:
             return
 
-        current_files[file_path] = current_mtime
+        current_files[file_path] = file_state
 
         if file_path not in known_files:
             logger.debug(f"Polling detected new file: {file_path}")
             self._debug(f"polling detected new file: {file_path}")
             await self.add_file(file_path, priority="change")
-        elif known_files[file_path] != current_mtime:
+        elif known_files[file_path] != file_state:
             logger.debug(f"Polling detected modified file: {file_path}")
             self._debug(f"polling detected modified file: {file_path}")
             await self.add_file(file_path, priority="change")
