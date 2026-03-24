@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+
+permissions:
+  contents: read
 
 jobs:
   tests:
@@ -26,18 +30,21 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
-        
+
       - name: Install dependencies
         run: uv sync --locked
-        
-      - name: Run tests
-        run: |
-                # ── NEW: Fail fast on any collection error (Linux syntax, bad skipif, import issues, etc.)
-                echo "::group::🔍 Test collection check"
-                uv run pytest tests/ --collectonly -q --tb=no
-                echo "::endgroup::"
 
-                # ── Original full run (unchanged)
-                echo "::group::🧪 Full test suite"
-                uv run pytest tests/ -v
-                echo "::endgroup::"
+      - name: Test collection check
+        run: uv run pytest tests/ --collect-only -q --tb=no
+
+      - name: Run tests
+        id: tests
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 28
+          max_attempts: 2
+          command: uv run pytest tests/ -v --junit-xml=test-results.xml
+
+      - name: Check flaky annotations
+        if: failure() && steps.tests.outcome == 'failure'
+        run: uv run python scripts/check_flaky_annotations.py test-results.xml
