@@ -70,7 +70,7 @@ class GeminiLLMProvider(LLMProvider):
         # Initialize Google Gen AI client with timeout and retry configuration
         # Note: Google SDK applies these at client level, not per-request
         http_options = types.HttpOptions(
-            timeout=timeout,
+            timeout=timeout * 1000,  # SDK expects milliseconds
             retry_options=types.HttpRetryOptions(attempts=max_retries)
             if max_retries is not None
             else None,
