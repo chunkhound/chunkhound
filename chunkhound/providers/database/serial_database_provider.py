@@ -1,6 +1,7 @@
 """Base class for database providers requiring single-threaded execution."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -664,12 +665,17 @@ class SerialDatabaseProvider(ABC):
         """
         return False
 
-    def optimize(self) -> bool:
+    def optimize(
+        self, cancel_check: Callable[[], bool] | None = None
+    ) -> bool:
         """Optimize database storage. Provider-specific implementation.
 
         This is the unified entry point for all database optimization:
         - Lightweight operations (CHECKPOINT, index maintenance)
         - Deep compaction when fragmentation exceeds threshold
+
+        Args:
+            cancel_check: If provided, called between steps; returns True to cancel.
 
         Returns:
             True if optimization was performed, False if skipped.

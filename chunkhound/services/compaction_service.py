@@ -73,7 +73,10 @@ class CompactionService:
         Use this in CLI mode where we want to pause all operations during compaction.
         No catch-up needed since no writes occur during blocking compaction.
 
-        Returns True if compaction succeeded, False otherwise.
+        Returns True if compaction was performed, False if skipped.
+
+        Raises:
+            CompactionError: If compaction fails (propagated from provider).
         """
         should, stats = self.check_should_compact(provider)
         if not should:
@@ -89,9 +92,6 @@ class CompactionService:
         try:
             await self._do_compaction(provider)
             return True
-        except Exception as e:
-            logger.error(f"Compaction failed: {e}")
-            return False
         finally:
             self._compaction_in_progress = False
 
@@ -156,7 +156,7 @@ class CompactionService:
         """Perform compaction by delegating to provider.optimize().
 
         The provider handles all mechanics: lock file, EXPORT/IMPORT/SWAP, recovery.
-        This service handles: shutdown coordination, async dispatch.
+        This service handles: shutdown coordination, async dispatch, cancel propagation.
         """
         # Check for shutdown request before starting
         if self._shutdown_requested:
@@ -165,7 +165,12 @@ class CompactionService:
 
         # Delegate actual compaction to provider (runs in thread pool)
         # Provider handles: lock file, EXPORT, IMPORT, atomic swap, recovery
-        await asyncio.to_thread(provider.optimize)
+        # Pass cancel_check so provider can abort between steps on shutdown.
+        # Lambda reads a bare bool — atomic under CPython's GIL.
+        await asyncio.to_thread(
+            provider.optimize,
+            cancel_check=lambda: self._shutdown_requested,
+        )
 
         logger.info("Compaction complete")
 
