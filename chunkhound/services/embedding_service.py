@@ -768,7 +768,6 @@ class EmbeddingService(BaseService):
         if (
             successful_batches > 0
             and self._completed_batches >= self._optimization_batch_frequency
-            and hasattr(self._db, "should_optimize")
         ):
             if self._db.should_optimize(operation="embedding-generation"):
                 # Capture batch count before reset for accurate logging
@@ -778,17 +777,16 @@ class EmbeddingService(BaseService):
                     f"Optimizing database after {batch_count} embedding batches..."
                 )
 
-                if hasattr(self._db, "optimize_tables"):
-                    try:
-                        self._db.optimize_tables()
-                        # Reset counter AFTER successful optimization
-                        self._completed_batches = 0
-                    except Exception as e:
-                        logger.warning(
-                            f"Database optimization failed after {batch_count} batches "
-                            f"(non-fatal): {e}"
-                        )
-                        # Counter NOT reset; will retry at next batch milestone
+                try:
+                    self._db.optimize_tables()
+                    # Reset counter AFTER successful optimization
+                    self._completed_batches = 0
+                except Exception as e:
+                    logger.warning(
+                        f"Database optimization failed after {batch_count} batches "
+                        f"(non-fatal): {e}"
+                    )
+                    # Counter NOT reset; will retry at next batch milestone
 
     def _create_token_aware_batches(
         self, chunk_data: list[tuple[ChunkId, str]]
