@@ -3018,38 +3018,18 @@ class DuckDBProvider(SerialDatabaseProvider):
     ) -> bool:
         """Optimize DuckDB storage: CHECKPOINT and full compaction.
 
-        Skips optimization only if database is in a PERFECT state (free_blocks == 0).
-        We only check free_blocks because orphaned_blocks/fragmentation_ratio incorrectly
-        count HNSW index storage + metadata blocks as "orphaned" when they're legitimate.
-
-        If in doubt (stats retrieval fails), errs on the side of optimization.
+        Always runs compaction when called. Callers are responsible for deciding
+        whether compaction is warranted before calling this method.
 
         Args:
             cancel_check: Optional callable returning True if compaction should be cancelled.
 
         Returns:
-            True if compaction was performed, False if skipped (already optimal or cancelled).
+            True if compaction was performed, False if cancelled.
 
         Raises:
             CompactionError: If compaction fails.
         """
-        # Check if DB is in perfect state - only skip if no freed blocks pending reclamation
-        # Note: We only check free_blocks because orphaned_blocks/fragmentation_ratio are
-        # unreliable - they count HNSW index blocks + metadata as "orphaned" when they're not
-        try:
-            stats = self.get_storage_stats()
-            free = stats.get("free_blocks", 1)  # Default to 1 = needs optimization
-
-            if free == 0:
-                logger.info(
-                    "Database in perfect state (no free blocks pending reclamation) "
-                    "- skipping optimization"
-                )
-                return False  # Skipped - nothing to do
-        except Exception as e:
-            # If in doubt, optimize
-            logger.debug(f"Could not check storage stats, proceeding with optimization: {e}")
-
         if cancel_check and cancel_check():
             return False
 
