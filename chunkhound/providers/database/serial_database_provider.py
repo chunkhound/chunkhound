@@ -1,5 +1,6 @@
 """Base class for database providers requiring single-threaded execution."""
 
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
@@ -66,6 +67,11 @@ class SerialDatabaseProvider(ABC):
 
         # Base directory for path normalization (immutable after initialization)
         self._base_directory: Path = base_directory
+
+        # Suspend flag: set during compaction to prevent auto-reconnect.
+        # Initially unset; subclasses (e.g., DuckDBProvider) set() it
+        # around file-swap operations.
+        self._connection_suspended = threading.Event()
 
     @abstractmethod
     def _create_connection(self) -> Any:

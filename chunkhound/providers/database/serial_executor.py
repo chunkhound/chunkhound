@@ -32,6 +32,15 @@ def get_thread_local_connection(provider: Any) -> Any:
         RuntimeError: If connection creation fails
     """
     if not hasattr(_executor_local, "connection"):
+        # Refuse to reconnect while compaction holds the file.
+        # Narrow TOCTOU: another thread could set _connection_suspended between
+        # is_set() and _create_connection(). In practice this is safe because
+        # the serial executor is single-threaded and CPython's GIL prevents
+        # interleaving here, but worth noting for future maintainers.
+        if provider._connection_suspended.is_set():
+            raise RuntimeError(
+                "Database connection suspended: compaction in progress"
+            )
         # Create new connection for this thread
         _executor_local.connection = provider._create_connection()
         if _executor_local.connection is None:
