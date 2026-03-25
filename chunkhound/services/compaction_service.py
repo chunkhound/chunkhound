@@ -90,8 +90,7 @@ class CompactionService:
 
         self._compaction_in_progress = True
         try:
-            await self._do_compaction(provider)
-            return True
+            return await self._do_compaction(provider)
         finally:
             self._compaction_in_progress = False
 
@@ -135,9 +134,9 @@ class CompactionService:
     ) -> None:
         """Wrapper that invokes callback after successful compaction."""
         try:
-            await self._do_compaction(provider)
+            result = await self._do_compaction(provider)
 
-            if on_complete is not None:
+            if result and on_complete is not None:
                 logger.info(
                     "Compaction complete, triggering post-compaction reindex..."
                 )
@@ -152,32 +151,44 @@ class CompactionService:
             self._compaction_in_progress = False
             self._compaction_task = None
 
-    async def _do_compaction(self, provider: "DuckDBProvider") -> None:
+    async def _do_compaction(self, provider: "DuckDBProvider") -> bool:
         """Perform compaction by delegating to provider.optimize().
 
         The provider handles all mechanics: lock file, EXPORT/IMPORT/SWAP, recovery.
         This service handles: shutdown coordination, async dispatch, cancel propagation.
+
+        Returns True if compaction completed, False if cancelled.
+
+        Raises:
+            CompactionError: If provider.optimize() fails (propagated to caller).
         """
         # Check for shutdown request before starting
         if self._shutdown_requested:
             logger.info("Compaction aborted due to shutdown request")
-            return
+            return False
 
         # Delegate actual compaction to provider (runs in thread pool)
         # Provider handles: lock file, EXPORT, IMPORT, atomic swap, recovery
         # Pass cancel_check so provider can abort between steps on shutdown.
         # Lambda reads a bare bool — atomic under CPython's GIL.
-        await asyncio.to_thread(
+        result = await asyncio.to_thread(
             provider.optimize,
             cancel_check=lambda: self._shutdown_requested,
         )
 
-        logger.info("Compaction complete")
+        if result:
+            logger.info("Compaction complete")
+        return result
 
     async def shutdown(self, timeout: float = 5.0) -> None:
         """Gracefully shutdown compaction service.
 
         Cancels any in-progress compaction and waits for cleanup.
+
+        Note: asyncio.to_thread cancellation does not interrupt a running EXPORT
+        or IMPORT operation — those are blocking calls inside the thread.
+        cancel_check only takes effect between steps (after EXPORT, before IMPORT,
+        or after IMPORT, before SWAP).
         """
         self._shutdown_requested = True
 

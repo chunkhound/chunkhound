@@ -199,6 +199,7 @@ class TestBlockingCompaction:
             compaction_started.set()
             await asyncio.sleep(0.05)  # Simulate work
             compaction_finished.set()
+            return True
 
         with patch.object(service, "_do_compaction", mock_do_compaction):
             result = await service.compact_blocking(mock_provider)
@@ -223,6 +224,23 @@ class TestBlockingCompaction:
         # This should be rejected immediately
         result = await service.compact_blocking(mock_provider)
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_blocking_compaction_returns_false_on_cancellation(
+        self, tmp_path: Path, config_with_compaction: Config, mock_provider: MagicMock
+    ):
+        """compact_blocking() propagates False when _do_compaction is cancelled."""
+        db_path = tmp_path / "test.duckdb"
+        db_path.write_bytes(b"x" * 1024)
+
+        service = CompactionService(db_path, config_with_compaction)
+
+        async def cancelled_compaction(provider):
+            return False  # Cancelled, not an error
+
+        with patch.object(service, "_do_compaction", cancelled_compaction):
+            result = await service.compact_blocking(mock_provider)
+            assert result is False
 
     @pytest.mark.asyncio
     async def test_blocking_compaction_returns_false_when_not_needed(
@@ -300,7 +318,7 @@ class TestBackgroundCompaction:
             callback_called.set()
 
         async def mock_do_compaction(provider):
-            pass  # Success
+            return True  # Success
 
         with patch.object(service, "_do_compaction", mock_do_compaction):
             await service.compact_background(mock_provider, on_complete=on_complete)
@@ -341,6 +359,33 @@ class TestBackgroundCompaction:
                     pass
 
             # Callback should NOT have been called
+            assert not callback_called.is_set()
+
+    @pytest.mark.asyncio
+    async def test_callback_not_invoked_on_cancellation(
+        self, tmp_path: Path, config_with_compaction: Config, mock_provider: MagicMock
+    ):
+        """on_complete callback NOT called if compaction is cancelled (returns False)."""
+        db_path = tmp_path / "test.duckdb"
+        db_path.write_bytes(b"x" * 1024)
+
+        service = CompactionService(db_path, config_with_compaction)
+
+        callback_called = asyncio.Event()
+
+        async def on_complete():
+            callback_called.set()
+
+        async def cancelled_compaction(provider):
+            return False  # Cancelled, not an error
+
+        with patch.object(service, "_do_compaction", cancelled_compaction):
+            await service.compact_background(mock_provider, on_complete=on_complete)
+
+            if service._compaction_task:
+                await service._compaction_task
+
+            # Callback should NOT have been called for a cancelled compaction
             assert not callback_called.is_set()
 
 
