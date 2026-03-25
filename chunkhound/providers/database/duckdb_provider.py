@@ -3092,6 +3092,10 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Create lock file to signal compaction in progress
             lock_file.touch()
 
+            # Suspend auto-reconnect before soft_disconnect so any concurrent
+            # MCP request gets a clear error instead of opening a stale connection
+            self._connection_suspended.set()
+
             # Soft disconnect before export — DuckDB doesn't allow mixing
             # read-only and read-write connections to the same file
             self.soft_disconnect(skip_checkpoint=False)
@@ -3101,6 +3105,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             self._export_database_for_compaction(db_path, export_dir)
 
             if cancel_check and cancel_check():
+                self._connection_suspended.clear()  # Allow reconnect before restoring
                 self.connect()  # Restore connection after soft_disconnect
                 return False
 
@@ -3112,6 +3117,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 # Clean up the compacted DB since we won't swap
                 if new_db_path.exists():
                     new_db_path.unlink()
+                self._connection_suspended.clear()  # Allow reconnect before restoring
                 self.connect()  # Restore connection after soft_disconnect
                 return False
 
@@ -3132,6 +3138,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             new_db_path.rename(db_path)
 
             # Reconnect to swapped database
+            self._connection_suspended.clear()  # Allow reconnect to new file
             self.connect()
 
             # Clean up old file
@@ -3148,6 +3155,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 old_db_path.rename(db_path)
             # Reconnect (we disconnected for export, need to restore connection)
             if not self.is_connected:
+                self._connection_suspended.clear()  # Allow reconnect for recovery
                 try:
                     self.connect()
                 except Exception as err:
@@ -3160,10 +3168,11 @@ class DuckDBProvider(SerialDatabaseProvider):
                     pass
             raise CompactionError(f"Compaction failed: {e}") from e
         finally:
-            # Always clean up export directory and lock file
+            # Always clean up export directory, lock file, and suspend flag
             if export_dir.exists():
                 shutil.rmtree(export_dir, ignore_errors=True)
             lock_file.unlink(missing_ok=True)
+            self._connection_suspended.clear()
 
     def _has_sufficient_disk_space(self, db_path: Path, multiplier: float = 2.5) -> None:
         """Check if sufficient disk space exists for compaction.
