@@ -117,9 +117,8 @@ class SerialDatabaseExecutor:
             # Update last activity time for ALL operations
             state["last_activity_time"] = time.time()
 
-            # Include base directory if provider has it
-            if hasattr(provider, "get_base_directory"):
-                state["base_directory"] = provider.get_base_directory()
+            # Include base directory for path normalization
+            state["base_directory"] = provider.get_base_directory()
 
             # Execute operation - look for method named _executor_{operation_name}
             op_func = getattr(provider, f"_executor_{operation_name}")
@@ -168,9 +167,8 @@ class SerialDatabaseExecutor:
             # Update last activity time for ALL operations
             state["last_activity_time"] = time.time()
 
-            # Include base directory if provider has it
-            if hasattr(provider, "get_base_directory"):
-                state["base_directory"] = provider.get_base_directory()
+            # Include base directory for path normalization
+            state["base_directory"] = provider.get_base_directory()
 
             # Execute operation - look for method named _executor_{operation_name}
             op_func = getattr(provider, f"_executor_{operation_name}")

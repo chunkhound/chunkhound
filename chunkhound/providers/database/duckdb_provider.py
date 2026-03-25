@@ -3177,8 +3177,6 @@ class DuckDBProvider(SerialDatabaseProvider):
 
     def _export_database_for_compaction(self, db_path: Path, export_dir: Path) -> None:
         """Export database to Parquet files for compaction."""
-        import duckdb
-
         # Clean up any leftover export directory
         if export_dir.exists():
             shutil.rmtree(export_dir)
@@ -3196,8 +3194,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, export_dir: Path, new_db_path: Path
     ) -> None:
         """Import Parquet files into fresh database."""
-        import duckdb
-
         if new_db_path.exists():
             new_db_path.unlink()
 
