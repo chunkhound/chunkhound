@@ -75,15 +75,16 @@ jobs:
 
           **Action required:** Upgrade to the latest stable release."
 
-          # Prepend the notice to the existing release body
+          # Prepend the notice to the existing release body.
+          # Write to a tempfile to avoid shell-injection via metacharacters in
+          # INPUT_REASON or the existing release body (quotes, backticks, $(...)).
           EXISTING_BODY=$(gh release view "$TAG" --repo "$REPOSITORY" --json body -q .body)
+          NOTES_FILE=$(mktemp)
+          printf '%s\n\n---\n\n%s' "$NOTICE" "$EXISTING_BODY" > "$NOTES_FILE"
           gh release edit "$TAG" \
             --repo "$REPOSITORY" \
-            --notes "${NOTICE}
-
-          ---
-
-          ${EXISTING_BODY}"
+            --notes-file "$NOTES_FILE"
+          rm -f "$NOTES_FILE"
 
       - name: Summary
         env:
