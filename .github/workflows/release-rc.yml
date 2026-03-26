@@ -3,7 +3,7 @@ name: RC Release
 on:
   push:
     tags:
-      - 'v*-rc.*'  # e.g. v1.2.0-rc.1 — tag push by maintainer is the human gate
+      - 'v*rc*'  # e.g. v1.2.0rc1 (PEP 440) — tag push by maintainer is the human gate
 
 permissions:
   id-token: write  # OIDC Trusted Publishing

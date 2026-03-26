@@ -47,8 +47,8 @@ Use this to validate a build on TestPyPI before cutting the real release.
 
 ```bash
 # Create and push a pre-release tag — this triggers the RC workflow automatically
-git tag v1.2.0-rc.1
-git push origin v1.2.0-rc.1
+uv run scripts/update_version.py 1.2.0rc1
+git push origin v1.2.0rc1
 ```
 
 The `release-rc.yml` workflow builds and publishes to TestPyPI via OIDC. No manual approval needed — the tag push itself is the human gate (only maintainers can push `v*` tags).

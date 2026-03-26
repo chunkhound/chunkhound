@@ -25,6 +25,10 @@ jobs:
 
     steps:
       - name: Yank version from PyPI
+        env:
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_REASON: ${{ github.event.inputs.reason }}
         run: |
           python - <<'EOF'
           import urllib.request
@@ -32,8 +36,8 @@ jobs:
           import os
           import sys
 
-          version = "${{ github.event.inputs.version }}"
-          reason = "${{ github.event.inputs.reason }}"
+          version = os.environ["INPUT_VERSION"]
+          reason = os.environ["INPUT_REASON"]
           token = os.environ["PYPI_API_TOKEN"]
 
           data = urllib.parse.urlencode({"yankreason": reason}).encode()
@@ -52,26 +56,28 @@ jobs:
               print(f"PyPI yank failed: HTTP {e.code} — {e.reason}", file=sys.stderr)
               sys.exit(1)
           EOF
-        env:
-          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
 
       - name: Add deprecation notice to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_REASON: ${{ github.event.inputs.reason }}
+          ACTOR: ${{ github.actor }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          TAG="v${{ github.event.inputs.version }}"
+          TAG="v${INPUT_VERSION}"
           NOTICE="## :warning: Deprecated
 
-          This release has been deprecated on $(date -u '+%Y-%m-%d %H:%M UTC') by @${{ github.actor }}.
+          This release has been deprecated on $(date -u '+%Y-%m-%d %H:%M UTC') by @${ACTOR}.
 
-          **Reason:** ${{ github.event.inputs.reason }}
+          **Reason:** ${INPUT_REASON}
 
           **Action required:** Upgrade to the latest stable release."
 
           # Prepend the notice to the existing release body
-          EXISTING_BODY=$(gh release view "$TAG" --repo "${{ github.repository }}" --json body -q .body)
+          EXISTING_BODY=$(gh release view "$TAG" --repo "$REPOSITORY" --json body -q .body)
           gh release edit "$TAG" \
-            --repo "${{ github.repository }}" \
+            --repo "$REPOSITORY" \
             --notes "${NOTICE}
 
           ---
@@ -79,13 +85,17 @@ jobs:
           ${EXISTING_BODY}"
 
       - name: Summary
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_REASON: ${{ github.event.inputs.reason }}
+          ACTOR: ${{ github.actor }}
         run: |
           echo "### Deprecation complete" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Version | \`${{ github.event.inputs.version }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Reason | ${{ github.event.inputs.reason }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Actor | @${{ github.actor }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Version | \`${INPUT_VERSION}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Reason | ${INPUT_REASON} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Actor | @${ACTOR} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| PyPI | Yanked |" >> "$GITHUB_STEP_SUMMARY"
           echo "| GitHub Release | Deprecation notice added |" >> "$GITHUB_STEP_SUMMARY"
