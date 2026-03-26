@@ -1,0 +1,91 @@
+name: Deprecate Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to deprecate (e.g. 1.2.3)'
+        required: true
+        type: string
+      reason:
+        description: 'Reason for deprecation (shown in PyPI yank message and GitHub Release)'
+        required: true
+        type: string
+
+# Usage: gh workflow run deprecate.yml -f version=1.2.3 -f reason="Critical security issue, upgrade to 1.2.4"
+
+permissions:
+  contents: write  # gh release edit to add deprecation notice
+
+jobs:
+  deprecate:
+    runs-on: ubuntu-latest
+    environment: maintainers  # requires approval from maintainer team before proceeding
+    timeout-minutes: 10
+
+    steps:
+      - name: Yank version from PyPI
+        run: |
+          python - <<'EOF'
+          import urllib.request
+          import urllib.parse
+          import os
+          import sys
+
+          version = "${{ github.event.inputs.version }}"
+          reason = "${{ github.event.inputs.reason }}"
+          token = os.environ["PYPI_API_TOKEN"]
+
+          data = urllib.parse.urlencode({"yankreason": reason}).encode()
+          req = urllib.request.Request(
+              f"https://pypi.org/manage/project/chunkhound/release/{version}/yank/",
+              data=data,
+              method="POST",
+          )
+          req.add_header("Authorization", f"token {token}")
+          req.add_header("Content-Type", "application/x-www-form-urlencoded")
+
+          try:
+              with urllib.request.urlopen(req) as resp:
+                  print(f"Yanked v{version} from PyPI (HTTP {resp.status})")
+          except urllib.error.HTTPError as e:
+              print(f"PyPI yank failed: HTTP {e.code} — {e.reason}", file=sys.stderr)
+              sys.exit(1)
+          EOF
+        env:
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+
+      - name: Add deprecation notice to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${{ github.event.inputs.version }}"
+          NOTICE="## :warning: Deprecated
+
+          This release has been deprecated on $(date -u '+%Y-%m-%d %H:%M UTC') by @${{ github.actor }}.
+
+          **Reason:** ${{ github.event.inputs.reason }}
+
+          **Action required:** Upgrade to the latest stable release."
+
+          # Prepend the notice to the existing release body
+          EXISTING_BODY=$(gh release view "$TAG" --repo "${{ github.repository }}" --json body -q .body)
+          gh release edit "$TAG" \
+            --repo "${{ github.repository }}" \
+            --notes "${NOTICE}
+
+          ---
+
+          ${EXISTING_BODY}"
+
+      - name: Summary
+        run: |
+          echo "### Deprecation complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Version | \`${{ github.event.inputs.version }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Reason | ${{ github.event.inputs.reason }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Actor | @${{ github.actor }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| PyPI | Yanked |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| GitHub Release | Deprecation notice added |" >> "$GITHUB_STEP_SUMMARY"

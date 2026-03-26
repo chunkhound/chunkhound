@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write  # gh release delete --cleanup-tag on failure
+  id-token: write  # OIDC Trusted Publishing
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # hatch-vcs requires full history for version derivation
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No token needed — OIDC Trusted Publishing configured on PyPI project
+
+      - name: Cleanup on failure (delete release and tag)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "${{ github.event.release.tag_name }}" \
+            --cleanup-tag \
+            --yes \
+            --repo "${{ github.repository }}"

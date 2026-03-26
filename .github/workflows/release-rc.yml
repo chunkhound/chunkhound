@@ -1,0 +1,33 @@
+name: RC Release
+
+on:
+  push:
+    tags:
+      - 'v*-rc.*'  # e.g. v1.2.0-rc.1 — tag push by maintainer is the human gate
+
+permissions:
+  id-token: write  # OIDC Trusted Publishing
+
+jobs:
+  build-and-publish-rc:
+    runs-on: ubuntu-latest
+    environment: testpypi
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # hatch-vcs requires full history for version derivation
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # No token needed — OIDC Trusted Publishing configured on TestPyPI project
