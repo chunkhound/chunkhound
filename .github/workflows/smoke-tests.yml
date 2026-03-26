@@ -39,11 +39,24 @@ jobs:
 
       - name: Run tests
         id: tests
+        # nick-fields/retry restarts the whole pytest process on CI-level failures
+        # (e.g. OOM, runner hiccup). pytest-rerunfailures (--reruns) handles
+        # within-process test-level flakes. The two layers serve different failure
+        # modes and are intentionally combined.
+        # timeout_minutes * max_attempts must stay below the job-level timeout (30m).
         uses: nick-fields/retry@v3
         with:
-          timeout_minutes: 28
+          timeout_minutes: 13
           max_attempts: 2
           command: uv run pytest tests/ -v --junit-xml=test-results.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}-py${{ matrix.python }}
+          path: test-results.xml
+          if-no-files-found: ignore
 
       - name: Check flaky annotations
         if: failure() && steps.tests.outcome == 'failure'

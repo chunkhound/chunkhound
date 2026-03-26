@@ -95,8 +95,12 @@ gh workflow run deprecate.yml \
 This triggers `deprecate.yml`, which:
 
 1. Waits for approval from the `maintainers` environment (approver is notified by GitHub)
-2. Yanks the version from PyPI (pip will no longer install it by default)
-3. Adds a deprecation notice to the corresponding GitHub Release
+2. Adds a deprecation notice to the corresponding GitHub Release
+
+> **Note:** PyPI yanking is not yet automated. The yank API is CSRF-protected and has
+> no stable machine-readable endpoint (see TODO in `deprecate.yml`). Until a supported
+> API is available, manually yank the release via the PyPI web UI:
+> **PyPI → Manage → chunkhound → Release → Yank**.
 
 The full audit trail (who, when, why) is recorded in the Actions run history.
 
