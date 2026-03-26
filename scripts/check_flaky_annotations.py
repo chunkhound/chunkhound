@@ -48,7 +48,9 @@ def has_flaky_annotation(source_file: Path, test_name: str, line_no: int) -> boo
     lines = source_file.read_text(encoding="utf-8").splitlines()
 
     # Strip parametrize suffix: test_foo[param1-param2] -> test_foo
-    base_name = re.sub(r"\[.*\]$", "", test_name)
+    # Use r"\[.*$" (not r"\[.*\]$") to correctly handle nested brackets
+    # and edge cases like test_foo[a]-extra by stripping from the first "[" onward.
+    base_name = re.sub(r"\[.*$", "", test_name)
 
     def_line_idx: int | None = None
     for i, line in enumerate(lines):

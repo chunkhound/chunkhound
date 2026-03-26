@@ -24,38 +24,39 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Yank version from PyPI
-        env:
-          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-          INPUT_VERSION: ${{ github.event.inputs.version }}
-          INPUT_REASON: ${{ github.event.inputs.reason }}
-        run: |
-          python - <<'EOF'
-          import urllib.request
-          import urllib.parse
-          import os
-          import sys
-
-          version = os.environ["INPUT_VERSION"]
-          reason = os.environ["INPUT_REASON"]
-          token = os.environ["PYPI_API_TOKEN"]
-
-          data = urllib.parse.urlencode({"yankreason": reason}).encode()
-          req = urllib.request.Request(
-              f"https://pypi.org/manage/project/chunkhound/release/{version}/yank/",
-              data=data,
-              method="POST",
-          )
-          req.add_header("Authorization", f"token {token}")
-          req.add_header("Content-Type", "application/x-www-form-urlencoded")
-
-          try:
-              with urllib.request.urlopen(req) as resp:
-                  print(f"Yanked v{version} from PyPI (HTTP {resp.status})")
-          except urllib.error.HTTPError as e:
-              print(f"PyPI yank failed: HTTP {e.code} — {e.reason}", file=sys.stderr)
-              sys.exit(1)
-          EOF
+      # TODO: Implement PyPI yank properly when next needed.
+      # The current approach POSTs to the PyPI web UI endpoint
+      # (https://pypi.org/manage/project/.../yank/), which is CSRF-protected
+      # and not a stable machine-readable API. It silently returns a redirect
+      # or 403 while reporting success, giving false confirmation during incidents.
+      # Options to evaluate: twine's removal API, PyPI's XMLRPC API, or waiting
+      # for a supported REST endpoint. Track in an issue before re-enabling.
+      #
+      # - name: Yank version from PyPI
+      #   env:
+      #     PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+      #     INPUT_VERSION: ${{ github.event.inputs.version }}
+      #     INPUT_REASON: ${{ github.event.inputs.reason }}
+      #   run: |
+      #     python - <<'EOF'
+      #     import urllib.request, urllib.parse, os, sys
+      #     version = os.environ["INPUT_VERSION"]
+      #     reason  = os.environ["INPUT_REASON"]
+      #     token   = os.environ["PYPI_API_TOKEN"]
+      #     data = urllib.parse.urlencode({"yankreason": reason}).encode()
+      #     req = urllib.request.Request(
+      #         f"https://pypi.org/manage/project/chunkhound/release/{version}/yank/",
+      #         data=data, method="POST",
+      #     )
+      #     req.add_header("Authorization", f"token {token}")
+      #     req.add_header("Content-Type", "application/x-www-form-urlencoded")
+      #     try:
+      #         with urllib.request.urlopen(req) as resp:
+      #             print(f"Yanked v{version} from PyPI (HTTP {resp.status})")
+      #     except urllib.error.HTTPError as e:
+      #         print(f"PyPI yank failed: HTTP {e.code} — {e.reason}", file=sys.stderr)
+      #         sys.exit(1)
+      #     EOF
 
       - name: Add deprecation notice to GitHub Release
         env:
@@ -95,7 +96,8 @@ jobs:
           echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
           echo "| Version | \`${INPUT_VERSION}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Reason | ${INPUT_REASON} |" >> "$GITHUB_STEP_SUMMARY"
+          SAFE_REASON="${INPUT_REASON//|/\\|}"
+          echo "| Reason | ${SAFE_REASON} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Actor | @${ACTOR} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| PyPI | Yanked |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| PyPI | Yank skipped — see TODO in workflow |" >> "$GITHUB_STEP_SUMMARY"
           echo "| GitHub Release | Deprecation notice added |" >> "$GITHUB_STEP_SUMMARY"
