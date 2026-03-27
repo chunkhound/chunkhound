@@ -827,7 +827,38 @@ class DuckDBProvider(SerialDatabaseProvider):
         1. Emit bulk-insert metrics for visibility
         2. CHECKPOINT - sync WAL to main database, reclaim deleted row space
         """
-        self._execute_in_db_thread_sync("optimize_tables")
+        # Emit metrics (no DB connection needed)
+        if not os.environ.get("CHUNKHOUND_MCP_MODE"):
+            try:
+                m = self._metrics.get("chunks", {})
+                files = int(m.get("files", 0))
+                rows = int(m.get("rows", 0))
+                batches = int(m.get("batches", 0))
+                t_temp = float(m.get("temp_create_s", 0.0))
+                t_clear = float(m.get("temp_clear_s", 0.0))
+                t_tins = float(m.get("temp_insert_s", 0.0))
+                t_main = float(m.get("main_insert_s", 0.0))
+                if files or rows:
+                    logger.info(
+                        "DuckDB chunks bulk metrics: files={} rows={} batches={} "
+                        "t_temp={:.2f}s t_temp_clear={:.2f}s t_temp_insert={:.2f}s t_main_insert={:.2f}s",
+                        files,
+                        rows,
+                        batches,
+                        t_temp,
+                        t_clear,
+                        t_tins,
+                        t_main,
+                    )
+            except Exception:
+                pass
+
+        try:
+            self._execute_in_db_thread_sync("optimize_tables")
+        except CompactionError:
+            raise
+        except Exception as e:
+            logger.warning(f"optimize_tables: checkpoint/compact skipped: {e}")
 
     def _executor_optimize_tables(self, conn: Any, state: dict[str, Any]) -> None:
         """Executor method for optimize_tables - runs in DB thread."""
