@@ -3183,7 +3183,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         try:
             conn.execute("INSTALL vss")
             conn.execute("LOAD vss")
-            conn.execute(f"EXPORT DATABASE '{export_dir}' (FORMAT PARQUET)")
+            safe_path = str(export_dir).replace("'", "''")
+            conn.execute(f"EXPORT DATABASE '{safe_path}' (FORMAT PARQUET)")
         finally:
             conn.close()
 
@@ -3199,7 +3200,8 @@ class DuckDBProvider(SerialDatabaseProvider):
             conn.execute("INSTALL vss")
             conn.execute("LOAD vss")
             self._enable_hnsw_persistence_on_conn(conn)
-            conn.execute(f"IMPORT DATABASE '{export_dir}'")
+            safe_path = str(export_dir).replace("'", "''")
+            conn.execute(f"IMPORT DATABASE '{safe_path}'")
             # CRITICAL: Checkpoint to persist imported data before closing
             # Without this, the imported data may not be written to disk
             conn.execute("CHECKPOINT")
