@@ -11,6 +11,7 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
 
 # Thread-local storage for executor thread state
@@ -38,7 +39,7 @@ def get_thread_local_connection(provider: Any) -> Any:
         # the serial executor is single-threaded and CPython's GIL prevents
         # interleaving here, but worth noting for future maintainers.
         if provider._connection_suspended.is_set():
-            raise RuntimeError(
+            raise CompactionError(
                 "Database connection suspended: compaction in progress"
             )
         # Create new connection for this thread

@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 import duckdb
 from loguru import logger
 
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.core.models import Chunk, Embedding, File
 from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.core.utils import normalize_path_for_lookup
@@ -50,10 +51,6 @@ from chunkhound.providers.database.serial_executor import (
 # Type hinting only
 if TYPE_CHECKING:
     from chunkhound.core.config.database_config import DatabaseConfig
-
-
-class CompactionError(RuntimeError):
-    """Raised when database compaction fails."""
 
 
 class DuckDBProvider(SerialDatabaseProvider):
