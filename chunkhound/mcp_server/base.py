@@ -393,18 +393,24 @@ class MCPServerBase(ABC):
                 continue
 
             tool_params = copy.deepcopy(tool.parameters)
+            description = tool.description
 
-            if tool_name == "search" and (
-                not self.embedding_manager
-                or not self.embedding_manager.list_providers()
-            ):
-                if "type" in tool_params.get("properties", {}):
-                    tool_params["properties"]["type"]["enum"] = ["regex"]
+            if tool_name == "search":
+                if (
+                    not self.embedding_manager
+                    or not self.embedding_manager.list_providers()
+                ):
+                    if "type" in tool_params.get("properties", {}):
+                        tool_params["properties"]["type"]["enum"] = ["regex"]
+                if not self.llm_manager:
+                    from .tools import SEARCH_DESCRIPTION_NO_RESEARCH
+
+                    description = SEARCH_DESCRIPTION_NO_RESEARCH
 
             tools.append(
                 {
                     "name": tool_name,
-                    "description": tool.description,
+                    "description": description,
                     "inputSchema": tool_params,
                 }
             )

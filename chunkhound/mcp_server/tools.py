@@ -373,6 +373,20 @@ DECISION GUIDE:
 
 OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}"""
 
+SEARCH_DESCRIPTION_NO_RESEARCH = """Pinpoint specific code locations — find exact symbols, patterns, or concepts in the indexed codebase. Returns structurally-parsed code chunks (functions, classes) — large definitions may span multiple results.
+
+TYPE — choose one:
+- **regex**: Match exact patterns against code content. Use for known identifiers, imports, or string literals.
+  Examples: "def authenticate", "class.*Handler", "import.*pandas", "TODO:.*refactor"
+- **semantic**: Find code by meaning via embedding similarity. Use for concepts or when exact identifiers are unknown.
+  Examples: "authentication logic", "retry with exponential backoff", "database connection pooling"
+
+DECISION GUIDE:
+- Known symbol or pattern → regex
+- Concept or behavior → semantic
+
+OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}"""
+
 CODE_RESEARCH_DESCRIPTION = """Start here for any coding task. Call code_research first to understand the relevant code area before writing or modifying code.
 
 WORKFLOW:
