@@ -30,10 +30,7 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
     # Verify database exists
     try:
         verify_database_exists(config)
-    except FileNotFoundError as e:
-        formatter.error(str(e))
-        sys.exit(1)
-    except ValueError as e:
+    except (FileNotFoundError, ValueError) as e:
         formatter.error(str(e))
         sys.exit(1)
 
