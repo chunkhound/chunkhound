@@ -378,7 +378,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             else:
                 # Indexes exist: create HNSW index immediately
                 conn.execute(f"""
-                    CREATE INDEX {hnsw_index_name} ON {table_name}
+                    CREATE INDEX "{hnsw_index_name}" ON "{table_name}"
                     USING HNSW (embedding)
                     WITH (metric = 'cosine')
                 """)
@@ -549,11 +549,11 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Sum unique blocks from each table
             # block_id is the unique block identifier, -1 means no block used
             for (table_name,) in tables:
-                result = conn.execute(f"""
+                result = conn.execute("""
                     SELECT COUNT(DISTINCT block_id)
-                    FROM pragma_storage_info('{table_name}')
+                    FROM pragma_storage_info(?)
                     WHERE block_id >= 0
-                """).fetchone()
+                """, [table_name]).fetchone()
                 if result and result[0]:
                     accounted_blocks += int(result[0])
         except Exception as e:
@@ -669,11 +669,11 @@ class DuckDBProvider(SerialDatabaseProvider):
                 hnsw_index_name = f"idx_hnsw_{dims}"
 
                 # Check if index already exists
-                existing = conn.execute(f"""
+                existing = conn.execute("""
                     SELECT index_name FROM duckdb_indexes()
-                    WHERE table_name = '{table_name}'
-                    AND index_name = '{hnsw_index_name}'
-                """).fetchone()
+                    WHERE table_name = ?
+                    AND index_name = ?
+                """, [table_name, hnsw_index_name]).fetchone()
 
                 if existing:
                     logger.debug(f"Index {hnsw_index_name} already exists, skipping")
@@ -681,7 +681,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
                 logger.info(f"Creating HNSW index {hnsw_index_name} on {table_name}")
                 conn.execute(f"""
-                    CREATE INDEX {hnsw_index_name} ON {table_name}
+                    CREATE INDEX "{hnsw_index_name}" ON "{table_name}"
                     USING HNSW (embedding)
                     WITH (metric = 'cosine')
                 """)
