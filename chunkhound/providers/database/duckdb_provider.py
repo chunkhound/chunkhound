@@ -3058,7 +3058,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         """
         db_path = Path(self._connection_manager._db_path)
 
-        # Check disk space (need ~2.5x current DB size)
+        # Check disk space — 2.5x covers: exported parquet (~1x) + new compact DB (~1x)
+        # + original DB retained until swap (~0.5x safety margin)
         self._has_sufficient_disk_space(db_path, multiplier=2.5)
 
         export_dir = db_path.parent / ".chunkhound_compaction_export"
