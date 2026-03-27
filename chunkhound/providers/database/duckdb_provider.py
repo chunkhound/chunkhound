@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, cast
 import duckdb
 from loguru import logger
 
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.core.models import Chunk, Embedding, File
 from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.core.utils import normalize_path_for_lookup
