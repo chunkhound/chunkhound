@@ -1,5 +1,6 @@
 """DatabaseProvider protocol for ChunkHound - abstract interface for database implementations."""
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -435,6 +436,29 @@ class DatabaseProvider(Protocol):
 
         Called at end of indexing to create HNSW indexes that were deferred
         during first-time indexing for performance.
+        """
+        ...
+
+    def optimize(self, cancel_check: Callable[[], bool] | None = None) -> bool:
+        """Optimize database storage via compaction.
+
+        Args:
+            cancel_check: Optional callable returning True to abort.
+
+        Returns:
+            True if optimization was performed.
+        """
+        ...
+
+    def get_storage_stats(self) -> dict[str, Any]:
+        """Get storage statistics for monitoring."""
+        ...
+
+    def should_compact(self, threshold: float = 0.5) -> tuple[bool, dict[str, Any]]:
+        """Check if compaction is needed based on free space ratio.
+
+        Returns:
+            Tuple of (should_compact, storage_stats).
         """
         ...
 
