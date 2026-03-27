@@ -494,7 +494,7 @@ async def search_impl(
 async def deep_research_impl(
     services: DatabaseServices,
     embedding_manager: EmbeddingManager,
-    llm_manager: LLMManager,
+    llm_manager: LLMManager | None,
     query: str,
     progress: Any = None,
     path: str | None = None,
@@ -517,6 +517,13 @@ async def deep_research_impl(
     Raises:
         Exception: If LLM or reranker not configured
     """
+    # Validate LLM is configured
+    if not llm_manager:
+        raise Exception(
+            "No LLM provider configured. Code research requires an LLM. "
+            "Configure an llm section in your chunkhound configuration."
+        )
+
     # Validate reranker is configured
     if not embedding_manager or not embedding_manager.list_providers():
         raise Exception(
