@@ -180,7 +180,7 @@ class CompactionService:
             logger.info("Compaction complete")
         return result
 
-    async def shutdown(self, timeout: float = 5.0) -> None:
+    async def shutdown(self, timeout: float = 30.0) -> None:
         """Gracefully shutdown compaction service.
 
         Cancels any in-progress compaction and waits for cleanup.
