@@ -3213,7 +3213,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Enable HNSW index persistence."""
         try:
             conn.execute("SET hnsw_enable_experimental_persistence = true")
-        except Exception:
+        except duckdb.Error:
             logger.warning(
                 "HNSW persistence flag not available. "
                 "Vector indexes will rebuild on first query after compaction."
