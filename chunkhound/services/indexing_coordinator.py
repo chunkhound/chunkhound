@@ -1482,8 +1482,7 @@ class IndexingCoordinator(BaseService):
             logger.info("Running post-embedding database optimization...")
             self._db.optimize_tables()
         # Create deferred HNSW indexes after bulk indexing completes
-        if hasattr(self._db, "create_deferred_indexes"):
-            self._db.create_deferred_indexes()
+        self._db.create_deferred_indexes()
 
     def _extract_file_id(self, file_record: dict[str, Any] | File) -> int | None:
         """Safely extract file ID from either dict or File model."""
