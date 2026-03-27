@@ -325,5 +325,5 @@ class DiskUsageLimitExceededError(ChunkHoundError):
         self.limit_mb = limit_mb
 
 
-class CompactionError(RuntimeError):
+class CompactionError(ChunkHoundError):
     """Raised when database compaction fails or is in progress."""
