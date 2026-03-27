@@ -7,6 +7,7 @@ import sys
 from loguru import logger
 
 from chunkhound.core.config.config import Config
+from chunkhound.core.exceptions import CompactionError
 
 from ..utils.database import verify_database_exists
 from ..utils.rich_output import RichOutputFormatter
@@ -131,6 +132,9 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
         else:
             formatter.info("No size change (database was already optimally packed)")
 
+    except CompactionError as e:
+        formatter.error(str(e))
+        sys.exit(1)
     except Exception as e:
         formatter.error(f"Repack failed: {e}")
         logger.exception("Full error details:")

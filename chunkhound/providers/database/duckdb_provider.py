@@ -474,6 +474,8 @@ class DuckDBProvider(SerialDatabaseProvider):
 
         try:
             self._execute_in_db_thread_sync("optimize_tables")
+        except CompactionError:
+            raise
         except Exception as e:
             logger.warning(f"optimize_tables: checkpoint/compact skipped: {e}")
 
