@@ -655,6 +655,10 @@ class SerialDatabaseProvider(ABC):
             f"{self.__class__.__name__} must implement get_connection_info"
         )
 
+    def create_deferred_indexes(self) -> None:
+        """Create any deferred vector indexes. No-op for providers without deferred indexes."""
+        pass
+
     def optimize_tables(self) -> None:
         """Optimize tables by compacting fragments and rebuilding indexes."""
         # Default no-op implementation
