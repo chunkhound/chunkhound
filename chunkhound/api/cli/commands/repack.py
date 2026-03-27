@@ -59,7 +59,7 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
     formatter.info(f"Current size: {_format_size(original_size)}")
 
     # Dry-run mode - just show stats
-    if getattr(args, "dry_run", False):
+    if args.dry_run:
         # Show storage stats if available
         from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 
@@ -88,7 +88,7 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
 
     # Handle backup before optimization (provider deletes original)
     backup_path = db_path.with_suffix(".duckdb.bak")
-    keep_backup = getattr(args, "backup", False)
+    keep_backup = args.backup
 
     if keep_backup:
         formatter.progress_indicator("Creating backup...")
