@@ -1364,7 +1364,7 @@ class IndexingCoordinator(BaseService):
                     self.progress.update(parse_task, completed=task.total)
 
             # Optimize tables after parsing/chunking (only if fragmentation warrants it)
-            if agg_total_chunks > 0 and self._db.should_optimize(
+            if agg_total_chunks > 0 and self._db.has_reclaimable_space(
                 operation="post-chunking"
             ):
                 logger.debug("Optimizing database after chunking phase...")
@@ -1436,7 +1436,7 @@ class IndexingCoordinator(BaseService):
 
             # FINAL: Unified optimization (CHECKPOINT + HNSW compact + full compaction)
             # Only run if fragmentation warrants it
-            if self._db.should_optimize(operation="post-indexing"):
+            if self._db.has_reclaimable_space(operation="post-indexing"):
                 logger.info("Running final database optimization...")
                 self._db.optimize_tables()
 
@@ -1478,7 +1478,7 @@ class IndexingCoordinator(BaseService):
 
     def finalize_optimization(self) -> None:
         """Run post-embedding optimization if warranted."""
-        if self._db.should_optimize(operation="post-embedding"):
+        if self._db.has_reclaimable_space(operation="post-embedding"):
             logger.info("Running post-embedding database optimization...")
             self._db.optimize_tables()
         # Create deferred HNSW indexes after bulk indexing completes

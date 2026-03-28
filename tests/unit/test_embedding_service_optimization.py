@@ -15,7 +15,7 @@ class TestEmbeddingServiceOptimization:
     def mock_db(self):
         """Create mock database provider with optimization support."""
         db = Mock()
-        db.should_optimize = Mock(return_value=True)
+        db.has_reclaimable_space = Mock(return_value=True)
         db.optimize_tables = Mock()
         return db
 
@@ -65,16 +65,16 @@ class TestEmbeddingServiceOptimization:
         )
 
     def test_optimization_skipped_if_not_needed(self, service, mock_db):
-        """Verify optimization skipped when should_optimize returns False."""
+        """Verify optimization skipped when has_reclaimable_space returns False."""
         service._optimization_batch_frequency = 5
         service._completed_batches = 5
-        mock_db.should_optimize.return_value = False  # No optimization needed
+        mock_db.has_reclaimable_space.return_value = False  # No optimization needed
 
         service._maybe_optimize_database(successful_batches=1)
 
         # Verify optimize_tables NOT called
         assert not mock_db.optimize_tables.called, (
-            "optimize_tables should not be called when should_optimize returns False"
+            "optimize_tables should not be called when has_reclaimable_space returns False"
         )
 
     def test_invalid_env_var_falls_back_to_default(self, mock_db, mock_provider):

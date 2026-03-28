@@ -409,7 +409,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             logger.error(f"Failed to create embedding table for {dims} dimensions: {e}")
             raise
 
-    def should_optimize(self, operation: str = "") -> bool:
+    def has_reclaimable_space(self, operation: str = "") -> bool:
         """Check if optimization/compaction is warranted.
 
         Returns True if there are free blocks pending reclamation (from DELETEs).
@@ -500,7 +500,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         Returns metrics for monitoring and logging. Note that `orphaned_blocks`
         and `fragmentation_ratio` may overcount due to HNSW index structures
         being counted as orphaned when they're legitimate. For optimization
-        trigger decisions, use `free_blocks` only (as should_optimize() does).
+        trigger decisions, use `free_blocks` only (as has_reclaimable_space() does).
 
         Returns:
             Dict with keys: total_blocks, used_blocks, free_blocks,

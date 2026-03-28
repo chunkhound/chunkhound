@@ -50,7 +50,7 @@ class _FakeDB:
     async def get_file_by_path_async(self, path: str, as_model: bool = False):
         return self.get_file_by_path(path, as_model)
 
-    def should_optimize(self, operation: str = "") -> bool:
+    def has_reclaimable_space(self, operation: str = "") -> bool:
         return False
 
 
