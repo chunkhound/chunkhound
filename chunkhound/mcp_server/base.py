@@ -19,9 +19,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from chunkhound.core.config import EmbeddingProviderFactory
-
-if TYPE_CHECKING:
-    from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices, create_services
 from chunkhound.embeddings import EmbeddingManager
@@ -29,6 +26,9 @@ from chunkhound.llm_manager import LLMManager
 from chunkhound.services.compaction_service import CompactionService
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+
+if TYPE_CHECKING:
+    from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 
 
 class MCPServerBase(ABC):
