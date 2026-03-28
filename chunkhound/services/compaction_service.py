@@ -49,7 +49,7 @@ class CompactionService:
         should, stats = provider.should_compact(threshold=threshold)
 
         if not should:
-            return False, stats
+            return False, {}
 
         # Check minimum size threshold (use free_blocks only - reliable metric)
         block_size = stats.get("block_size", 262144)
@@ -62,7 +62,7 @@ class CompactionService:
                 f"Reclaimable space {reclaimable_bytes / 1024 / 1024:.1f}MB "
                 f"below threshold {self._config.database.compaction_min_size_mb}MB"
             )
-            return False, stats
+            return False, {}
 
         # Disk space check delegated to provider.optimize()
         return True, stats
