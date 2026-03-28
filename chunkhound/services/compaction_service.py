@@ -198,7 +198,7 @@ class CompactionService:
 
             try:
                 await asyncio.wait_for(
-                    asyncio.shield(self._compaction_task),
+                    self._compaction_task,
                     timeout=timeout
                 )
             except asyncio.TimeoutError:
