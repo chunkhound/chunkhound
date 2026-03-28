@@ -155,6 +155,11 @@ class SerialDatabaseProvider(ABC):
         Use for temporary disconnections (e.g., compaction) where reconnection
         will happen soon. For final cleanup, use disconnect() instead.
 
+        Note: thread-local state (transaction_active, deferred_checkpoint, etc.)
+        persists across soft_disconnect/reconnect. The connection itself is
+        properly cleared by _executor_disconnect. This is safe for compaction
+        since no transaction is active at compaction time.
+
         Args:
             skip_checkpoint: If True, skip final checkpoint (faster but less safe)
         """
@@ -661,17 +666,6 @@ class SerialDatabaseProvider(ABC):
         # Default no-op implementation
         pass
 
-    def should_optimize(self, operation: str = "") -> bool:
-        """Check if optimization is warranted.
-
-        Default returns False: assumes database self-manages optimization
-        (e.g., DuckDB's WAL/MVCC automatic checkpointing).
-
-        Override in providers that require explicit optimization decisions
-        (e.g., LanceDB fragment compaction threshold).
-        """
-        return False
-
     def optimize(
         self, cancel_check: Callable[[], bool] | None = None
     ) -> bool:
@@ -705,3 +699,14 @@ class SerialDatabaseProvider(ABC):
     def should_compact(self, threshold: float = 0.5) -> tuple[bool, dict[str, Any]]:
         """Check if compaction is needed. Override in subclasses."""
         return False, self.get_storage_stats()
+
+    def has_reclaimable_space(self, operation: str = "") -> bool:
+        """Check if optimization is warranted.
+
+        Default returns False: assumes database self-manages optimization
+        (e.g., DuckDB's WAL/MVCC automatic checkpointing).
+
+        Override in providers that require explicit optimization decisions
+        (e.g., LanceDB fragment compaction threshold).
+        """
+        return False

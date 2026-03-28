@@ -496,7 +496,7 @@ class DatabaseProvider(Protocol):
         """
         ...
 
-    def should_optimize(self, operation: str = "") -> bool:
+    def has_reclaimable_space(self, operation: str = "") -> bool:
         """Check if optimization is warranted.
 
         Args:

@@ -759,7 +759,7 @@ class EmbeddingService(BaseService):
         Only runs if:
         1. At least one batch succeeded (avoid optimizing empty DB)
         2. Batch counter >= configured frequency
-        3. Database provider supports optimization (has should_optimize method)
+        3. Database provider supports optimization (has has_reclaimable_space method)
         4. Database actually needs optimization (has free blocks to reclaim)
 
         Args:
@@ -769,7 +769,7 @@ class EmbeddingService(BaseService):
             successful_batches > 0
             and self._completed_batches >= self._optimization_batch_frequency
         ):
-            if self._db.should_optimize(operation="embedding-generation"):
+            if self._db.has_reclaimable_space(operation="embedding-generation"):
                 # Capture batch count before reset for accurate logging
                 batch_count = self._completed_batches
 
