@@ -4111,6 +4111,8 @@ class DuckDBProvider(SerialDatabaseProvider):
             logger.info(f"Compaction complete: {db_path}")
             return True
 
+        except CompactionError:
+            raise
         except Exception as e:
             logger.error(f"Compaction failed: {e}")
             # Attempt recovery: restore original if possible
@@ -4156,8 +4158,10 @@ class DuckDBProvider(SerialDatabaseProvider):
                     f"have {available / 1024 / 1024:.1f}MB"
                 )
         except OSError as e:
-            logger.warning(f"Could not check disk space: {e}")
-            # Proceed anyway, let OS handle errors
+            raise CompactionError(
+                f"Cannot verify disk space for compaction: {e}. "
+                "Resolve the issue and retry."
+            ) from e
 
     def _export_database_for_compaction(self, db_path: Path, export_dir: Path) -> None:
         """Export database to Parquet files for compaction."""
