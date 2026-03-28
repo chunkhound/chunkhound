@@ -13,6 +13,9 @@ import pytest
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.database_config import DatabaseConfig
+from chunkhound.core.models import Chunk, File
+from chunkhound.core.types.common import ChunkType, Language
+from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.services.compaction_service import CompactionService
 
 
@@ -508,59 +511,55 @@ class TestIsCompacting:
             assert service.is_compacting is False
 
 
+@pytest.fixture
+def provider_with_fragmentation(tmp_path: Path):
+    """Create a DuckDB provider with data, then delete to create free blocks."""
+    db_path = tmp_path / "test.duckdb"
+    provider = DuckDBProvider(str(db_path), base_directory=tmp_path)
+    provider.connect()
+
+    # Insert multiple files and chunks to create meaningful data
+    file_ids = []
+    for i in range(10):
+        test_file = File(
+            path=f"test_{i}.py",
+            mtime=1234567890.0,
+            language=Language.PYTHON,
+            size_bytes=1000,
+        )
+        file_id = provider.insert_file(test_file)
+        file_ids.append(file_id)
+
+        for j in range(50):
+            chunk = Chunk(
+                file_id=file_id,
+                code=f"def func_{i}_{j}(): pass  # padding " + "x" * 500,
+                start_line=j * 10 + 1,
+                end_line=j * 10 + 6,
+                chunk_type=ChunkType.FUNCTION,
+                symbol=f"func_{i}_{j}",
+                language=Language.PYTHON,
+            )
+            provider.insert_chunk(chunk)
+
+    # Force checkpoint to ensure data is written to disk
+    provider.optimize_tables()
+
+    # Delete most files to create free blocks (keep last 2)
+    for i in range(len(file_ids) - 2):
+        provider.delete_file_completely(f"test_{i}.py")
+
+    # Checkpoint again to finalize deletions
+    provider.optimize_tables()
+
+    yield provider, db_path
+
+    if provider.is_connected:
+        provider.disconnect()
+
+
 class TestDuckDBProviderOptimize:
     """Test actual DuckDB compaction via DuckDBProvider.optimize()."""
-
-    @pytest.fixture
-    def provider_with_fragmentation(self, tmp_path: Path):
-        """Create a DuckDB provider with data, then delete to create free blocks."""
-        from chunkhound.core.models import Chunk, File
-        from chunkhound.core.types.common import ChunkType, Language
-        from chunkhound.providers.database.duckdb_provider import DuckDBProvider
-
-        db_path = tmp_path / "test.duckdb"
-        provider = DuckDBProvider(str(db_path), base_directory=tmp_path)
-        provider.connect()
-
-        # Insert multiple files and chunks to create meaningful data
-        file_ids = []
-        for i in range(10):
-            test_file = File(
-                path=f"test_{i}.py",
-                mtime=1234567890.0,
-                language=Language.PYTHON,
-                size_bytes=1000,
-            )
-            file_id = provider.insert_file(test_file)
-            file_ids.append(file_id)
-
-            # Insert multiple chunks per file
-            for j in range(50):
-                chunk = Chunk(
-                    file_id=file_id,
-                    code=f"def func_{i}_{j}(): pass  # padding " + "x" * 500,
-                    start_line=j * 10 + 1,  # 1-based line numbers
-                    end_line=j * 10 + 6,
-                    chunk_type=ChunkType.FUNCTION,
-                    symbol=f"func_{i}_{j}",
-                    language=Language.PYTHON,
-                )
-                provider.insert_chunk(chunk)
-
-        # Force checkpoint to ensure data is written to disk
-        provider.optimize_tables()
-
-        # Delete most files to create free blocks (keep last 2)
-        for i in range(len(file_ids) - 2):
-            provider.delete_file_completely(f"test_{i}.py")
-
-        # Checkpoint again to finalize deletions
-        provider.optimize_tables()
-
-        yield provider, db_path
-
-        if provider.is_connected:
-            provider.disconnect()
 
     def test_optimize_reduces_size_after_deletions(
         self, provider_with_fragmentation: tuple
@@ -634,3 +633,50 @@ class TestDuckDBProviderOptimize:
 
         # Lock file should not exist after completion
         assert not lock_path.exists(), f"Lock file not cleaned up: {lock_path}"
+
+
+class TestCompactionServiceEndToEnd:
+    """End-to-end: CompactionService.compact_blocking() -> provider.optimize()."""
+
+    @pytest.mark.asyncio
+    async def test_compact_blocking_end_to_end(
+        self, tmp_path: Path, provider_with_fragmentation: tuple
+    ):
+        """Full path through CompactionService to real provider.optimize()."""
+        provider, db_path = provider_with_fragmentation
+
+        config = Config(
+            database=DatabaseConfig(
+                path=tmp_path / ".chunkhound",
+                compaction_enabled=True,
+                compaction_threshold=0.01,  # Very low to ensure trigger
+                compaction_min_size_mb=0,  # No minimum for test DBs
+            ),
+            target_dir=tmp_path,
+        )
+        service = CompactionService(db_path=db_path, config=config)
+
+        # Capture pre-compaction state
+        chunks_before = provider.get_all_chunks_with_metadata()
+        size_before = db_path.stat().st_size
+
+        result = await service.compact_blocking(provider)
+        assert result is True
+
+        # Verify data integrity
+        chunks_after = provider.get_all_chunks_with_metadata()
+        assert len(chunks_after) == len(chunks_before), (
+            f"Chunk count mismatch: {len(chunks_before)} -> {len(chunks_after)}"
+        )
+
+        # Verify remaining files survived
+        file8 = provider.get_file_by_path("test_8.py")
+        file9 = provider.get_file_by_path("test_9.py")
+        assert file8 is not None, "test_8.py missing after compaction"
+        assert file9 is not None, "test_9.py missing after compaction"
+
+        # Verify size reduction
+        size_after = db_path.stat().st_size
+        assert size_after <= size_before, (
+            f"Database grew after compaction: {size_before} -> {size_after}"
+        )
