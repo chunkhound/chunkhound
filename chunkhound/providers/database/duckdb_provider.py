@@ -3061,13 +3061,13 @@ class DuckDBProvider(SerialDatabaseProvider):
         lock_file = get_compaction_lock_path(db_path)
 
         try:
-            # Guard against concurrent compaction (TOCTOU but defense-in-depth
-            # alongside _compaction_in_progress and _connection_suspended)
-            if lock_file.exists():
+            # Atomic lock acquisition (matches daemon PID lock pattern)
+            try:
+                open(lock_file, "x").close()
+            except FileExistsError:
                 raise CompactionError(
                     "Compaction already in progress (lock file exists)"
-                )
-            lock_file.touch()
+                ) from None
 
             # Suspend auto-reconnect before soft_disconnect so any concurrent
             # MCP request gets a clear error instead of opening a stale connection
@@ -3186,7 +3186,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         # soft-disconnected and DuckDB needs exclusive file access for compaction.
         conn = duckdb.connect(str(db_path), read_only=True)
         try:
-            conn.execute("INSTALL vss")
             conn.execute("LOAD vss")
             safe_path = str(export_dir).replace("'", "''")
             conn.execute(f"EXPORT DATABASE '{safe_path}' (FORMAT PARQUET)")
@@ -3204,7 +3203,6 @@ class DuckDBProvider(SerialDatabaseProvider):
         # soft-disconnected and DuckDB needs exclusive file access for compaction.
         conn = duckdb.connect(str(new_db_path))
         try:
-            conn.execute("INSTALL vss")
             conn.execute("LOAD vss")
             self._enable_hnsw_persistence_on_conn(conn)
             safe_path = str(export_dir).replace("'", "''")
