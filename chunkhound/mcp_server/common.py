@@ -11,6 +11,8 @@ import json
 from collections.abc import Coroutine
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from loguru import logger
+
 from chunkhound.core.exceptions import CompactionError
 
 if TYPE_CHECKING:  # type-checkers only; avoid runtime hard dep
@@ -227,6 +229,7 @@ async def handle_tool_call(
         return [types.TextContent(type="text", text=response_text)]
 
     except CompactionError:
+        logger.debug("Request rejected: database compaction in progress")
         return [types.TextContent(type="text", text=json.dumps(
             {"error": "Database maintenance in progress, please retry in a moment"}
         ))]
