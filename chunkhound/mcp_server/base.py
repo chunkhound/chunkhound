@@ -364,7 +364,9 @@ class MCPServerBase(ABC):
 
         This method is idempotent - safe to call multiple times.
         """
-        # Stop compaction service first (cancels any in-progress compaction)
+        # Stop compaction service first (cancels any in-progress compaction).
+        # shutdown() awaits with 30s timeout; compaction thread has either
+        # completed or been cancelled (cancel_check fires between steps).
         if self._compaction_service:
             self.debug_log("Stopping compaction service")
             await self._compaction_service.shutdown()
