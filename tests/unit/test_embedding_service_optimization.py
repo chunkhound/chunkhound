@@ -126,8 +126,8 @@ class TestEmbeddingServiceOptimization:
 
             assert service._optimization_batch_frequency == 500
 
-    def test_optimization_counter_not_reset_on_failure(self, service, mock_db):
-        """Verify counter NOT reset if optimization fails."""
+    def test_optimization_counter_resets_even_on_failure(self, service, mock_db):
+        """Counter always resets to avoid per-batch pragma_storage_info() overhead."""
         service._optimization_batch_frequency = 5
         service._completed_batches = 5
 
@@ -137,10 +137,10 @@ class TestEmbeddingServiceOptimization:
         # Trigger optimization attempt
         service._maybe_optimize_database(successful_batches=1)
 
-        # Verify counter NOT reset (still 5)
-        assert service._completed_batches == 5, (
-            "Counter should NOT reset if optimization fails, "
-            "allowing retry at next batch milestone"
+        # Counter resets regardless — prevents get_storage_stats() on every batch
+        assert service._completed_batches == 0, (
+            "Counter should always reset to avoid per-batch "
+            "pragma_storage_info() overhead"
         )
 
     def test_optimization_failure_is_non_fatal(self, service, mock_db):

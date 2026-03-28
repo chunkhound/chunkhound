@@ -779,14 +779,13 @@ class EmbeddingService(BaseService):
 
                 try:
                     self._db.optimize_tables()
-                    # Reset counter AFTER successful optimization
-                    self._completed_batches = 0
                 except Exception as e:
                     logger.warning(
                         f"Database optimization failed after {batch_count} batches "
                         f"(non-fatal): {e}"
                     )
-                    # Counter NOT reset; will retry at next batch milestone
+            # Always reset — avoid per-batch pragma_storage_info() overhead
+            self._completed_batches = 0
 
     def _create_token_aware_batches(
         self, chunk_data: list[tuple[ChunkId, str]]
