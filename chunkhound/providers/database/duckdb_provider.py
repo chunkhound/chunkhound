@@ -4169,7 +4169,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         if export_dir.exists():
             shutil.rmtree(export_dir)
 
-        # Export with read-only connection
+        # Direct connection (bypasses serial executor) because the provider is
+        # soft-disconnected and DuckDB needs exclusive file access for compaction.
         conn = duckdb.connect(str(db_path), read_only=True)
         try:
             conn.execute("INSTALL vss")
@@ -4186,6 +4187,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         if new_db_path.exists():
             new_db_path.unlink()
 
+        # Direct connection (bypasses serial executor) because the provider is
+        # soft-disconnected and DuckDB needs exclusive file access for compaction.
         conn = duckdb.connect(str(new_db_path))
         try:
             conn.execute("INSTALL vss")
