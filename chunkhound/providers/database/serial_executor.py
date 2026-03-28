@@ -183,30 +183,6 @@ class SerialDatabaseExecutor:
             self._db_executor, ctx.run, executor_operation
         )
 
-    def close_connection(self) -> None:
-        """Close thread-local DB connection without shutting down executor.
-
-        Use for temporary disconnections (e.g., compaction) where reconnection
-        will happen soon. The executor thread remains alive and can be reused.
-        """
-
-        def do_close():
-            try:
-                if hasattr(_executor_local, "connection"):
-                    conn = _executor_local.connection
-                    if conn and hasattr(conn, "close"):
-                        conn.close()
-                        logger.debug("Closed thread-local connection (executor still active)")
-                    delattr(_executor_local, "connection")
-            except Exception as e:
-                logger.error(f"Error closing connection: {e}")
-
-        try:
-            future = self._db_executor.submit(do_close)
-            future.result(timeout=5.0)
-        except Exception as e:
-            logger.error(f"Error during connection close: {e}")
-
     def shutdown(self, wait: bool = True) -> None:
         """Shutdown the executor with proper cleanup.
 
