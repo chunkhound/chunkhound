@@ -621,25 +621,17 @@ class DuckDBProvider(SerialDatabaseProvider):
         time_since_checkpoint = current_time - state.get(
             "last_checkpoint_time", current_time
         )
-        operations_since_checkpoint = state.get("operations_since_checkpoint", 0)
 
-        # Checkpoint if forced, operations threshold reached (default 100), or 5 minutes elapsed
-        threshold = state.get("checkpoint_threshold", 100)
-        should_checkpoint = (
-            force
-            or operations_since_checkpoint >= threshold
-            or time_since_checkpoint >= 300  # 5 minutes
-        )
+        # Checkpoint if forced or 5 minutes elapsed
+        should_checkpoint = force or time_since_checkpoint >= 300
 
         if should_checkpoint:
             try:
                 conn.execute("CHECKPOINT")
-                state["operations_since_checkpoint"] = 0
                 state["last_checkpoint_time"] = current_time
                 if not os.environ.get("CHUNKHOUND_MCP_MODE"):
                     logger.debug(
-                        f"Checkpoint completed (operations: {operations_since_checkpoint}, "
-                        f"time: {time_since_checkpoint:.1f}s)"
+                        f"Checkpoint completed (time: {time_since_checkpoint:.1f}s)"
                     )
             except Exception as e:
                 if not os.environ.get("CHUNKHOUND_MCP_MODE"):

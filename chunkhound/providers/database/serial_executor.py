@@ -58,9 +58,9 @@ def get_thread_local_state() -> dict[str, Any]:
     This function should ONLY be called from within the executor thread.
 
     Returns the actual dict reference (not a copy) intentionally: executor
-    methods mutate the state dict in-place (e.g. incrementing
-    ``operations_since_checkpoint``, toggling ``transaction_active``), and
-    those mutations must be visible on the next call.
+    methods mutate the state dict in-place (e.g. toggling
+    ``transaction_active``), and those mutations must be visible on the next
+    call.
 
     Returns:
         Thread-local state dictionary
