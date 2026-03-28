@@ -8,6 +8,7 @@ from loguru import logger
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.exceptions import CompactionError
+from chunkhound.registry import configure_registry, get_provider
 
 from ..utils.database import verify_database_exists
 from ..utils.rich_output import RichOutputFormatter
@@ -59,10 +60,8 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
     # Dry-run mode - just show stats
     if args.dry_run:
         # Show storage stats if available
-        from chunkhound.providers.database.duckdb_provider import DuckDBProvider
-
-        provider = DuckDBProvider(str(db_path), base_directory=db_path.parent)
-        provider.connect()
+        configure_registry(config)
+        provider = get_provider("database")
         try:
             stats = provider.get_storage_stats()
             free_blocks = stats.get("free_blocks", 0)
@@ -80,7 +79,9 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
                 )
             else:
                 formatter.info(
-                    f"Below auto-compaction threshold (free ratio < {threshold:.0%}; repack will still compact)"
+                    f"Below auto-compaction threshold "
+                    f"(free ratio < {threshold:.0%}). "
+                    f"Manual repack always runs regardless"
                 )
         finally:
             provider.disconnect()
@@ -101,14 +102,11 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
             formatter.error(f"Failed to create backup: {e}")
             sys.exit(1)
 
-    # Use provider for compaction (eliminates code duplication)
-    from chunkhound.providers.database.duckdb_provider import DuckDBProvider
-
-    provider = DuckDBProvider(str(db_path), base_directory=db_path.parent)
+    # Use registry-based provider (consistent with other CLI commands)
+    configure_registry(config)
+    provider = get_provider("database")
 
     try:
-        formatter.progress_indicator("Connecting to database...")
-        provider.connect()
 
         formatter.progress_indicator("Compacting database...")
         result = provider.optimize()
