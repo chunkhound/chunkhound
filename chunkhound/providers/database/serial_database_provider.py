@@ -158,10 +158,7 @@ class SerialDatabaseProvider(ABC):
         Args:
             skip_checkpoint: If True, skip final checkpoint (faster but less safe)
         """
-        try:
-            self._execute_in_db_thread_sync("disconnect", skip_checkpoint)
-        finally:
-            self._executor.close_connection()
+        self._execute_in_db_thread_sync("disconnect", skip_checkpoint)
 
     def _execute_in_db_thread_sync(self, operation_name: str, *args, **kwargs) -> Any:
         """Execute operation synchronously in DB thread."""
