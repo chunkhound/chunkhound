@@ -26,9 +26,6 @@ from typing import TYPE_CHECKING, Any, cast
 from loguru import logger
 
 from chunkhound.core.config import EmbeddingProviderFactory
-
-if TYPE_CHECKING:
-    from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 from chunkhound.core.config.config import Config
 from chunkhound.core.exceptions.core import ConfigurationError
 from chunkhound.database_factory import DatabaseServices, create_services
@@ -46,6 +43,9 @@ from chunkhound.watchman_runtime.loader import (
 )
 
 _DATABASE_CLOSE_TIMEOUT_SECONDS = 10.0
+
+if TYPE_CHECKING:
+    from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 
 
 class MCPServerBase(ABC):
