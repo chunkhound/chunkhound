@@ -701,14 +701,15 @@ class EmbeddingService(BaseService):
 
         # Count successful embeddings and track completed batches
         total_generated = 0
-        successful_batches = 0
         for i, result in enumerate(results):
             if isinstance(result, int):
                 total_generated += result
                 if result > 0:
-                    successful_batches += 1
                     # Track completed batches for periodic optimization
                     self._completed_batches += 1
+                    # Check inline so optimization fires every N batches,
+                    # not just once after all batches complete
+                    self._maybe_optimize_database()
             else:
                 # Find the failed batch and extract chunk details
                 failed_batch = batches[i] if i < len(batches) else []
@@ -745,30 +746,20 @@ class EmbeddingService(BaseService):
                     f"(chunks: {len(batch_sizes)}, total_chars: {total_chars:,}, max_chars: {max_chars:,}): {result}"
                 )
 
-        # Trigger periodic database optimization
-        self._maybe_optimize_database(successful_batches)
-
         return total_generated
 
-    def _maybe_optimize_database(self, successful_batches: int) -> None:
+    def _maybe_optimize_database(self) -> None:
         """Trigger periodic database optimization to prevent fragment accumulation.
 
         Optimization maintains query performance during long-running embedding
         generation by checkpointing and reclaiming deleted row space.
 
         Only runs if:
-        1. At least one batch succeeded (avoid optimizing empty DB)
-        2. Batch counter >= configured frequency
-        3. Database provider supports optimization (has has_reclaimable_space method)
-        4. Database actually needs optimization (has free blocks to reclaim)
-
-        Args:
-            successful_batches: Number of batches completed in current call
+        1. Batch counter >= configured frequency
+        2. Database provider supports optimization (has has_reclaimable_space method)
+        3. Database actually needs optimization (has free blocks to reclaim)
         """
-        if (
-            successful_batches > 0
-            and self._completed_batches >= self._optimization_batch_frequency
-        ):
+        if self._completed_batches >= self._optimization_batch_frequency:
             if self._db.has_reclaimable_space(operation="embedding-generation"):
                 # Capture batch count before reset for accurate logging
                 batch_count = self._completed_batches
