@@ -83,6 +83,14 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
                     f"(free ratio < {threshold:.0%}). "
                     f"Manual repack always runs regardless"
                 )
+            min_size_mb = config.database.compaction_min_size_mb
+            reclaimable_mb = reclaimable / (1024 * 1024)
+            if reclaimable_mb < min_size_mb:
+                formatter.info(
+                    f"Reclaimable {reclaimable_mb:.1f}MB below "
+                    f"min-size gate ({min_size_mb}MB) — "
+                    f"auto-compaction would skip"
+                )
         finally:
             provider.disconnect()
 
