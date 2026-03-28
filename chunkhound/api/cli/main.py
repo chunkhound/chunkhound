@@ -60,6 +60,7 @@ def create_parser() -> argparse.ArgumentParser:
     from .parsers.code_mapper_parser import add_map_subparser
     from .parsers.daemon_parser import add_daemon_subparser
     from .parsers.mcp_parser import add_mcp_subparser
+    from .parsers.repack_parser import add_repack_subparser
     from .parsers.research_parser import add_research_subparser
     from .parsers.run_parser import add_run_subparser
     from .parsers.search_parser import add_search_subparser
@@ -74,6 +75,7 @@ def create_parser() -> argparse.ArgumentParser:
     add_research_subparser(subparsers)
     add_autodoc_subparser(subparsers)
     add_map_subparser(subparsers)
+    add_repack_subparser(subparsers)
     # Diagnose command retired; functionality lives under: index --check-ignores
     add_calibrate_subparser(subparsers)
     # Internal daemon command (hidden from help)
@@ -184,6 +186,11 @@ async def async_main() -> None:
             from .commands.calibrate import calibrate_command
 
             await calibrate_command(args, config)
+        elif args.command == "repack":
+            # Dynamic import to avoid early chunkhound module loading
+            from .commands.repack import repack_command
+
+            await repack_command(args, config)
         elif args.command == "_daemon":
             # Internal: run the multi-client daemon process
             from .commands.daemon import daemon_command

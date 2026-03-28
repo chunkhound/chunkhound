@@ -33,6 +33,14 @@ import duckdb
 from loguru import logger
 
 
+def get_compaction_lock_path(db_path: Path) -> Path:
+    """Get the compaction lock file path for a database.
+
+    Single source of truth for lock file location.
+    """
+    return Path(str(db_path) + ".compaction.lock")
+
+
 class DuckDBConnectionManager:
     """Manages DuckDB connections, schema creation, and database operations."""
 
@@ -68,6 +76,32 @@ class DuckDBConnectionManager:
     def connect(self) -> None:
         """Establish database connection and initialize schema with WAL validation."""
         logger.info(f"Connecting to DuckDB database: {self.db_path}")
+
+        # Recover from interrupted compaction
+        if isinstance(self.db_path, Path):
+            lock_file = get_compaction_lock_path(self.db_path)
+            if lock_file.exists():
+                logger.warning(
+                    "Found compaction lock file - previous compaction may have been "
+                    "interrupted. Running WAL validation..."
+                )
+                lock_file.unlink(missing_ok=True)
+
+            # Recover from interrupted compaction swap
+            old_db = self.db_path.with_suffix(".duckdb.old")
+            compact_db = self.db_path.with_suffix(".compact.duckdb")
+            export_dir = self.db_path.parent / ".chunkhound_compaction_export"
+
+            if not self.db_path.exists() and old_db.exists():
+                logger.warning("Restoring database from pre-compaction state")
+                old_db.rename(self.db_path)
+
+            # Clean stale artifacts
+            for artifact in [compact_db, old_db]:
+                if artifact.exists() and self.db_path.exists():
+                    artifact.unlink()
+            if export_dir.exists():
+                shutil.rmtree(export_dir, ignore_errors=True)
 
         # Ensure parent directory exists for file-based databases
         if isinstance(self.db_path, Path):

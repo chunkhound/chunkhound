@@ -1,6 +1,7 @@
 """Embedding service for ChunkHound - manages embedding generation and caching."""
 
 import asyncio
+import os
 from typing import Any
 
 from loguru import logger
@@ -77,6 +78,47 @@ class EmbeddingService(BaseService):
                 )
 
         self.progress = progress
+
+        # Database optimization tracking for periodic maintenance.
+        # Counter tracks batches processed for periodic optimization trigger.
+        # No lock needed: asyncio event loop guarantees single-threaded execution.
+        # All counter updates happen sequentially in result processing loop (line 677).
+        self._optimization_batch_frequency = self._parse_optimization_frequency()
+        self._completed_batches = 0
+
+    def _parse_optimization_frequency(self) -> int:
+        """Parse optimization batch frequency from environment with validation.
+
+        Reads CHUNKHOUND_EMBEDDING_OPTIMIZATION_BATCH_FREQUENCY environment
+        variable. Ensures value is positive integer, falls back to default
+        on any error.
+
+        Returns:
+            Positive integer batch frequency (default: 1000)
+        """
+        default_frequency = 1000
+        env_var = "CHUNKHOUND_EMBEDDING_OPTIMIZATION_BATCH_FREQUENCY"
+
+        try:
+            value_str = os.getenv(env_var, str(default_frequency))
+            value = int(value_str)
+
+            if value <= 0:
+                logger.warning(
+                    f"{env_var}={value} is invalid (must be positive). "
+                    f"Using default: {default_frequency}"
+                )
+                return default_frequency
+
+            return value
+
+        except ValueError as e:
+            logger.warning(
+                f"{env_var}={os.getenv(env_var)!r} is invalid "
+                f"(must be integer). Using default: {default_frequency}. "
+                f"Error: {e}"
+            )
+            return default_frequency
 
     def set_embedding_provider(self, provider: EmbeddingProvider) -> None:
         """Set or update the embedding provider.
@@ -659,12 +701,15 @@ class EmbeddingService(BaseService):
 
         # Count successful embeddings and track completed batches
         total_generated = 0
-        successful_batches = 0
         for i, result in enumerate(results):
             if isinstance(result, int):
                 total_generated += result
                 if result > 0:
-                    successful_batches += 1
+                    # Track completed batches for periodic optimization
+                    self._completed_batches += 1
+                    # Check inline so optimization fires every N batches,
+                    # not just once after all batches complete
+                    self._maybe_optimize_database()
             else:
                 # Find the failed batch and extract chunk details
                 failed_batch = batches[i] if i < len(batches) else []
@@ -702,6 +747,36 @@ class EmbeddingService(BaseService):
                 )
 
         return total_generated
+
+    def _maybe_optimize_database(self) -> None:
+        """Trigger periodic database optimization to prevent fragment accumulation.
+
+        Optimization maintains query performance during long-running embedding
+        generation by checkpointing and reclaiming deleted row space.
+
+        Only runs if:
+        1. Batch counter >= configured frequency
+        2. Database provider supports optimization (has has_reclaimable_space method)
+        3. Database actually needs optimization (has free blocks to reclaim)
+        """
+        if self._completed_batches >= self._optimization_batch_frequency:
+            if self._db.has_reclaimable_space(operation="embedding-generation"):
+                # Capture batch count before reset for accurate logging
+                batch_count = self._completed_batches
+
+                logger.info(
+                    f"Optimizing database after {batch_count} embedding batches..."
+                )
+
+                try:
+                    self._db.optimize_tables()
+                except Exception as e:
+                    logger.warning(
+                        f"Database optimization failed after {batch_count} batches "
+                        f"(non-fatal): {e}"
+                    )
+            # Always reset — avoid per-batch pragma_storage_info() overhead
+            self._completed_batches = 0
 
     def _create_token_aware_batches(
         self, chunk_data: list[tuple[ChunkId, str]]

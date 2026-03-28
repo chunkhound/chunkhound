@@ -11,6 +11,7 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
 
 # Thread-local storage for executor thread state
@@ -32,6 +33,15 @@ def get_thread_local_connection(provider: Any) -> Any:
         RuntimeError: If connection creation fails
     """
     if not hasattr(_executor_local, "connection"):
+        # Refuse to reconnect while compaction holds the file.
+        # Narrow TOCTOU: another thread could set _connection_suspended between
+        # is_set() and _create_connection(). In practice this is safe because
+        # the serial executor is single-threaded and CPython's GIL prevents
+        # interleaving here, but worth noting for future maintainers.
+        if provider._connection_suspended.is_set():
+            raise CompactionError(
+                "Database connection suspended: compaction in progress"
+            )
         # Create new connection for this thread
         _executor_local.connection = provider._create_connection()
         if _executor_local.connection is None:
@@ -48,9 +58,9 @@ def get_thread_local_state() -> dict[str, Any]:
     This function should ONLY be called from within the executor thread.
 
     Returns the actual dict reference (not a copy) intentionally: executor
-    methods mutate the state dict in-place (e.g. incrementing
-    ``operations_since_checkpoint``, toggling ``transaction_active``), and
-    those mutations must be visible on the next call.
+    methods mutate the state dict in-place (e.g. toggling
+    ``transaction_active``), and those mutations must be visible on the next
+    call.
 
     Returns:
         Thread-local state dictionary
@@ -58,24 +68,9 @@ def get_thread_local_state() -> dict[str, Any]:
     if not hasattr(_executor_local, "state"):
         _executor_local.state = {
             "transaction_active": False,
-            "operations_since_checkpoint": 0,
-            "last_checkpoint_time": time.time(),
             "last_activity_time": time.time(),  # Track last database activity
-            "deferred_checkpoint": False,
-            "checkpoint_threshold": 100,  # Checkpoint every N operations
         }
     return _executor_local.state
-
-
-def track_operation(state: dict[str, Any]) -> None:
-    """Track a database operation for checkpoint management.
-
-    This function should ONLY be called from within the executor thread.
-
-    Args:
-        state: Thread-local state dictionary
-    """
-    state["operations_since_checkpoint"] += 1
 
 
 class SerialDatabaseExecutor:
@@ -123,9 +118,8 @@ class SerialDatabaseExecutor:
             # Update last activity time for ALL operations
             state["last_activity_time"] = time.time()
 
-            # Include base directory if provider has it
-            if hasattr(provider, "get_base_directory"):
-                state["base_directory"] = provider.get_base_directory()
+            # Include base directory for path normalization
+            state["base_directory"] = provider.get_base_directory()
 
             # Execute operation - look for method named _executor_{operation_name}
             op_func = getattr(provider, f"_executor_{operation_name}")
@@ -174,9 +168,8 @@ class SerialDatabaseExecutor:
             # Update last activity time for ALL operations
             state["last_activity_time"] = time.time()
 
-            # Include base directory if provider has it
-            if hasattr(provider, "get_base_directory"):
-                state["base_directory"] = provider.get_base_directory()
+            # Include base directory for path normalization
+            state["base_directory"] = provider.get_base_directory()
 
             # Execute operation - look for method named _executor_{operation_name}
             op_func = getattr(provider, f"_executor_{operation_name}")
@@ -197,9 +190,11 @@ class SerialDatabaseExecutor:
             wait: Whether to wait for pending operations to complete
         """
         try:
-            # Force close any thread-local connections first
             self._force_close_connections()
+        except RuntimeError:
+            pass  # executor already shutdown
 
+        try:
             # Shutdown the executor
             self._db_executor.shutdown(wait=wait)
 
@@ -220,6 +215,8 @@ class SerialDatabaseExecutor:
                     if conn and hasattr(conn, "close"):
                         conn.close()
                         logger.debug("Forced close of thread-local connection")
+                    # Also clean up the attribute to prevent stale references
+                    delattr(_executor_local, "connection")
             except Exception as e:
                 logger.error(f"Error force-closing connection: {e}")
 
@@ -227,8 +224,11 @@ class SerialDatabaseExecutor:
         try:
             future = self._db_executor.submit(close_connection)
             future.result(timeout=2.0)  # Short timeout for cleanup
+        except RuntimeError:
+            logger.debug("Executor already shutdown, skipping force close")
         except Exception as e:
-            logger.error(f"Error during force connection close: {e}")
+            # Downgrade to debug - this is expected during double-cleanup scenarios
+            logger.debug(f"Force connection close skipped: {e}")
 
     def clear_thread_local(self) -> None:
         """Clear thread-local storage (for cleanup).

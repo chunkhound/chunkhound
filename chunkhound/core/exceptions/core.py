@@ -323,3 +323,7 @@ class DiskUsageLimitExceededError(ChunkHoundError):
         super().__init__(message, context)
         self.current_size_mb = current_size_mb
         self.limit_mb = limit_mb
+
+
+class CompactionError(ChunkHoundError):
+    """Raised when database compaction fails or is in progress."""

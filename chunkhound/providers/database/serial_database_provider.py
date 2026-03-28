@@ -1,6 +1,8 @@
 """Base class for database providers requiring single-threaded execution."""
 
+import threading
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -65,6 +67,11 @@ class SerialDatabaseProvider(ABC):
 
         # Base directory for path normalization (immutable after initialization)
         self._base_directory: Path = base_directory
+
+        # Suspend flag: set during compaction to prevent auto-reconnect.
+        # Initially unset; subclasses (e.g., DuckDBProvider) set() it
+        # around file-swap operations.
+        self._connection_suspended = threading.Event()
 
     @abstractmethod
     def _create_connection(self) -> Any:
@@ -141,6 +148,22 @@ class SerialDatabaseProvider(ABC):
             self._executor.clear_thread_local()
             # Shutdown executor with Windows-specific handling
             self._executor.shutdown(wait=True)
+
+    def soft_disconnect(self, skip_checkpoint: bool = False) -> None:
+        """Close DB connection without shutting down executor.
+
+        Use for temporary disconnections (e.g., compaction) where reconnection
+        will happen soon. For final cleanup, use disconnect() instead.
+
+        Note: thread-local state (transaction_active, deferred_checkpoint, etc.)
+        persists across soft_disconnect/reconnect. The connection itself is
+        properly cleared by _executor_disconnect. This is safe for compaction
+        since no transaction is active at compaction time.
+
+        Args:
+            skip_checkpoint: If True, skip final checkpoint (faster but less safe)
+        """
+        self._execute_in_db_thread_sync("disconnect", skip_checkpoint)
 
     def _execute_in_db_thread_sync(self, operation_name: str, *args, **kwargs) -> Any:
         """Execute operation synchronously in DB thread."""
@@ -564,12 +587,50 @@ class SerialDatabaseProvider(ABC):
             f"{self.__class__.__name__} must implement get_connection_info"
         )
 
+    def create_deferred_indexes(self) -> None:
+        """Create any deferred vector indexes. No-op for providers without deferred indexes."""
+        pass
+
     def optimize_tables(self) -> None:
         """Optimize tables by compacting fragments and rebuilding indexes."""
         # Default no-op implementation
         pass
 
-    def should_optimize(self, operation: str = "") -> bool:
+    def optimize(
+        self, cancel_check: Callable[[], bool] | None = None
+    ) -> bool:
+        """Optimize database storage. Provider-specific implementation.
+
+        This is the unified entry point for all database optimization:
+        - Lightweight operations (CHECKPOINT, index maintenance)
+        - Deep compaction when fragmentation exceeds threshold
+
+        Args:
+            cancel_check: If provided, called between steps; returns True to cancel.
+
+        Returns:
+            True if optimization was performed, False if skipped.
+        """
+        return False  # Default: no-op for providers without optimization
+
+    def get_storage_stats(self) -> dict[str, Any]:
+        """Get storage statistics.
+
+        Override in subclasses for provider-specific metrics.
+        """
+        return {
+            "total_blocks": 0,
+            "used_blocks": 0,
+            "free_blocks": 0,
+            "block_size": 0,
+            "_raw_fragmentation_ratio": 0.0,
+        }
+
+    def should_compact(self, threshold: float = 0.5) -> tuple[bool, dict[str, Any]]:
+        """Check if compaction is needed. Override in subclasses."""
+        return False, self.get_storage_stats()
+
+    def has_reclaimable_space(self, operation: str = "") -> bool:
         """Check if optimization is warranted.
 
         Default returns False: assumes database self-manages optimization

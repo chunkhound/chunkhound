@@ -1,5 +1,6 @@
 """DatabaseProvider protocol for ChunkHound - abstract interface for database implementations."""
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -57,6 +58,17 @@ class DatabaseProvider(Protocol):
 
     def disconnect(self) -> None:
         """Close database connection and cleanup resources."""
+        ...
+
+    def soft_disconnect(self, skip_checkpoint: bool = False) -> None:
+        """Close connection temporarily without shutting down executor.
+
+        Use for temporary disconnections (e.g., compaction) where reconnection
+        will happen soon. For final cleanup, use disconnect() instead.
+
+        Args:
+            skip_checkpoint: If True, skip final checkpoint (faster but less safe)
+        """
         ...
 
     # Schema Management
@@ -412,10 +424,45 @@ class DatabaseProvider(Protocol):
 
     # Health and Diagnostics
     def optimize_tables(self) -> None:
-        """Optimize tables by compacting fragments and rebuilding indexes (provider-specific)."""
+        """Optimize tables by compacting fragments and rebuilding indexes.
+
+        For DuckDB: CHECKPOINT to sync WAL and reclaim space
+        For LanceDB: Fragment compaction via table.optimize()
+        """
         ...
 
-    def should_optimize(self, operation: str = "") -> bool:
+    def create_deferred_indexes(self) -> None:
+        """Create any deferred vector indexes.
+
+        Called at end of indexing to create HNSW indexes that were deferred
+        during first-time indexing for performance.
+        """
+        ...
+
+    def optimize(self, cancel_check: Callable[[], bool] | None = None) -> bool:
+        """Optimize database storage via compaction.
+
+        Args:
+            cancel_check: Optional callable returning True to abort.
+
+        Returns:
+            True if optimization was performed.
+        """
+        ...
+
+    def get_storage_stats(self) -> dict[str, Any]:
+        """Get storage statistics for monitoring."""
+        ...
+
+    def should_compact(self, threshold: float = 0.5) -> tuple[bool, dict[str, Any]]:
+        """Check if compaction is needed based on free space ratio.
+
+        Returns:
+            Tuple of (should_compact, storage_stats).
+        """
+        ...
+
+    def has_reclaimable_space(self, operation: str = "") -> bool:
         """Check if optimization is warranted.
 
         Args:

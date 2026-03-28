@@ -59,7 +59,7 @@ class _FakeDB:
     def delete_chunks_batch(self, chunk_ids):
         return None
 
-    def should_optimize(self, operation: str = "") -> bool:
+    def has_reclaimable_space(self, operation: str = "") -> bool:
         return False
 
     async def begin_transaction_async(self):
