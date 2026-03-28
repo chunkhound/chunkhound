@@ -498,13 +498,13 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Get DuckDB storage statistics including fragmentation.
 
         Returns metrics for monitoring and logging. Note that `orphaned_blocks`
-        and `fragmentation_ratio` may overcount due to HNSW index structures
+        and `_raw_fragmentation_ratio` may overcount due to HNSW index structures
         being counted as orphaned when they're legitimate. For optimization
         trigger decisions, use `free_blocks` only (as has_reclaimable_space() does).
 
         Returns:
             Dict with keys: total_blocks, used_blocks, free_blocks,
-            accounted_blocks, orphaned_blocks, block_size, fragmentation_ratio
+            accounted_blocks, orphaned_blocks, block_size, _raw_fragmentation_ratio
         """
         return self._execute_in_db_thread_sync("get_storage_stats")
 
@@ -581,13 +581,13 @@ class DuckDBProvider(SerialDatabaseProvider):
             "accounted_blocks": accounted_blocks,
             "orphaned_blocks": orphaned_blocks,
             "block_size": block_size,
-            "fragmentation_ratio": fragmentation,
+            "_raw_fragmentation_ratio": fragmentation,
         }
 
     def should_compact(self, threshold: float = 0.5) -> tuple[bool, dict[str, Any]]:
         """Check if compaction is warranted based on free blocks ratio.
 
-        Uses free_blocks/total_blocks ratio (reliable) rather than fragmentation_ratio
+        Uses free_blocks/total_blocks ratio (reliable) rather than _raw_fragmentation_ratio
         which incorrectly counts HNSW index blocks as orphaned.
 
         Returns:

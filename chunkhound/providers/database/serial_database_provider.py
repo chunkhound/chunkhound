@@ -623,7 +623,7 @@ class SerialDatabaseProvider(ABC):
             "used_blocks": 0,
             "free_blocks": 0,
             "block_size": 0,
-            "fragmentation_ratio": 0.0,
+            "_raw_fragmentation_ratio": 0.0,
         }
 
     def should_compact(self, threshold: float = 0.5) -> tuple[bool, dict[str, Any]]:
