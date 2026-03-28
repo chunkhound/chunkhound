@@ -3061,7 +3061,12 @@ class DuckDBProvider(SerialDatabaseProvider):
         lock_file = get_compaction_lock_path(db_path)
 
         try:
-            # Create lock file to signal compaction in progress
+            # Guard against concurrent compaction (TOCTOU but defense-in-depth
+            # alongside _compaction_in_progress and _connection_suspended)
+            if lock_file.exists():
+                raise CompactionError(
+                    "Compaction already in progress (lock file exists)"
+                )
             lock_file.touch()
 
             # Suspend auto-reconnect before soft_disconnect so any concurrent
