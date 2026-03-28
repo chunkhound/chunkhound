@@ -214,11 +214,11 @@ class SerialDatabaseExecutor:
             wait: Whether to wait for pending operations to complete
         """
         try:
-            # Only try to close connections if executor is not already shutdown
-            # This prevents "cannot schedule new futures after shutdown" errors
-            if not getattr(self._db_executor, '_shutdown', False):
-                self._force_close_connections()
+            self._force_close_connections()
+        except RuntimeError:
+            pass  # executor already shutdown
 
+        try:
             # Shutdown the executor
             self._db_executor.shutdown(wait=wait)
 
@@ -246,12 +246,10 @@ class SerialDatabaseExecutor:
 
         # Submit the close operation to the executor thread
         try:
-            # Check if executor is still accepting tasks before submitting
-            if getattr(self._db_executor, '_shutdown', False):
-                logger.debug("Executor already shutdown, skipping force close")
-                return
             future = self._db_executor.submit(close_connection)
             future.result(timeout=2.0)  # Short timeout for cleanup
+        except RuntimeError:
+            logger.debug("Executor already shutdown, skipping force close")
         except Exception as e:
             # Downgrade to debug - this is expected during double-cleanup scenarios
             logger.debug(f"Force connection close skipped: {e}")
