@@ -46,7 +46,7 @@ def mock_provider() -> MagicMock:
     provider.should_compact.return_value = (
         True,
         {
-            "fragmentation_ratio": 0.6,
+            "_raw_fragmentation_ratio": 0.6,
             "free_blocks": 1000,
             "block_size": 262144,  # ~256KB per block
             "total_blocks": 2000,
@@ -74,7 +74,7 @@ class TestStorageStats:
         mock_provider.should_compact.return_value = (
             True,
             {
-                "fragmentation_ratio": 0.6,
+                "_raw_fragmentation_ratio": 0.6,
                 "free_blocks": 1000,
                 "block_size": 262144,
                 "total_blocks": 2000,
@@ -84,7 +84,7 @@ class TestStorageStats:
 
         should, stats = service.check_should_compact(mock_provider)
         assert should is True
-        assert stats["fragmentation_ratio"] == 0.6
+        assert stats["_raw_fragmentation_ratio"] == 0.6
 
     def test_should_compact_false_below_threshold(
         self, tmp_path: Path, config_with_compaction: Config, mock_provider: MagicMock
@@ -99,7 +99,7 @@ class TestStorageStats:
         mock_provider.should_compact.return_value = (
             False,
             {
-                "fragmentation_ratio": 0.3,
+                "_raw_fragmentation_ratio": 0.3,
                 "free_blocks": 500,
                 "block_size": 262144,
                 "total_blocks": 2000,
@@ -133,7 +133,7 @@ class TestStorageStats:
         mock_provider.should_compact.return_value = (
             True,
             {
-                "fragmentation_ratio": 0.6,
+                "_raw_fragmentation_ratio": 0.6,
                 "free_blocks": 100,
                 "block_size": 262144,
                 "total_blocks": 200,
@@ -255,7 +255,7 @@ class TestBlockingCompaction:
         # Provider says no compaction needed
         mock_provider.should_compact.return_value = (
             False,
-            {"fragmentation_ratio": 0.1, "free_blocks": 10, "block_size": 262144},
+            {"_raw_fragmentation_ratio": 0.1, "free_blocks": 10, "block_size": 262144},
         )
 
         result = await service.compact_blocking(mock_provider)
