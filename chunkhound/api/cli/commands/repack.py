@@ -75,9 +75,13 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
             formatter.info(f"Reclaimable: {_format_size(reclaimable)}")
             threshold = config.database.compaction_threshold
             if free_ratio >= threshold:
-                formatter.info(f"Compaction recommended (free ratio >= {threshold:.0%})")
+                formatter.info(
+                    f"Above auto-compaction threshold (free ratio >= {threshold:.0%})"
+                )
             else:
-                formatter.info(f"Compaction not needed (free ratio < {threshold:.0%})")
+                formatter.info(
+                    f"Below auto-compaction threshold (free ratio < {threshold:.0%}; repack will still compact)"
+                )
         finally:
             provider.disconnect()
 
