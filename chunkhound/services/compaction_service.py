@@ -122,9 +122,13 @@ class CompactionService:
         )
 
         self._compaction_in_progress = True
-        self._compaction_task = asyncio.create_task(
-            self._do_compaction_with_callback(provider, on_complete)
-        )
+        try:
+            self._compaction_task = asyncio.create_task(
+                self._do_compaction_with_callback(provider, on_complete)
+            )
+        except Exception:
+            self._compaction_in_progress = False
+            raise
         return True
 
     async def _do_compaction_with_callback(
