@@ -53,25 +53,16 @@ uv run scripts/update_version.py --bump minor b1   # v4.0.1 → v4.1.0b1
 NEVER manually edit version strings - ALWAYS create git tags instead.
 
 ## PUBLISHING_PROCESS
-```bash
-# 1. Create version tag
-uv run scripts/update_version.py X.Y.Z
+Releases are now fully automated via GitHub Actions (OIDC Trusted Publishing).
+See **RELEASING.md** for the authoritative step-by-step guide.
 
-# 2. Run smoke tests (MANDATORY)
-uv run pytest tests/test_smoke.py -v -n auto
+Quick summary:
+1. Tag the version: `uv run scripts/update_version.py X.Y.Z`
+2. Run smoke tests: `uv run pytest tests/test_smoke.py -v -n auto` (MANDATORY)
+3. Create and publish a GitHub Release — `release.yml` handles the PyPI upload automatically.
 
-# 3. Prepare release
-./scripts/prepare_release.sh
-
-# 4. Test local install
-pip install dist/chunkhound-X.Y.Z-py3-none-any.whl
-
-# 5. Push tag
-git push origin vX.Y.Z
-
-# 6. Publish
-uv publish
-```
+Pre-releases (alpha/beta/RC) publish to TestPyPI via `release-rc.yml` on tag push.
+Do NOT use `uv publish` or `prepare_release.sh` manually — CI owns the publish step.
 
 ## DB_PATH_GOTCHAS
 - **Preferred: pass project directory as positional arg** — `chunkhound search "query" /path/to/project` — this reads `.chunkhound.json` and resolves the DB correctly
