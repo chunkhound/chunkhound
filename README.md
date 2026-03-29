@@ -22,6 +22,8 @@ Your AI assistant searches code but doesn't understand it. ChunkHound researches
 
 ## Features
 
+[![SafeSkill 80/100](https://img.shields.io/badge/SafeSkill-80%2F100_Passes%20with%20Notes-yellow)](https://safeskill.dev/scan/chunkhound-chunkhound)
+
 - **[cAST Algorithm](https://arxiv.org/pdf/2506.15655)** - Research-backed semantic code chunking
 - **[Multi-Hop Semantic Search](https://chunkhound.github.io/under-the-hood/#multi-hop-semantic-search)** - Discovers interconnected code relationships beyond direct matches
 - **Semantic search** - Natural language queries like "find authentication code"
