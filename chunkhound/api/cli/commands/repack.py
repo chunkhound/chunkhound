@@ -116,7 +116,10 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
 
     try:
         formatter.progress_indicator("Compacting database...")
-        provider.optimize()
+        compacted = provider.optimize()
+        if not compacted:
+            formatter.warning("Compaction did not complete")
+            return
 
         # Report results
         new_size = db_path.stat().st_size
