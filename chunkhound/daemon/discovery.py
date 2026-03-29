@@ -1,7 +1,7 @@
 """Daemon discovery via lock file and IPC transport.
 
 Handles:
-- Lock file creation/reading in <project>/.chunkhound/daemon.lock
+- Runtime-scoped lock file creation/reading for a canonical project root
 - IPC address derivation from project directory hash (platform-specific)
 - Daemon liveness checking (PID + connectivity)
 - Starting a new daemon subprocess when none is running
@@ -18,15 +18,17 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .process import pid_alive
 
-# Lock file relative to project directory
-_LOCK_FILE_REL = ".chunkhound/daemon.lock"
-# Starter lock — prevents two proxies from both spawning a daemon simultaneously
-_STARTER_LOCK_REL = ".chunkhound/daemon.starter.lock"
+# Runtime-scoped lock files keyed by canonical project root hash
+_LOCKS_DIR_NAME = "daemon-locks"
+# Runtime-scoped starter locks — prevent duplicate spawns within one environment
+_STARTER_LOCKS_DIR_NAME = "daemon-starter-locks"
 # User-scoped runtime directory override (used by tests and debugging)
 _RUNTIME_DIR_ENV = "CHUNKHOUND_DAEMON_RUNTIME_DIR"
 # User-scoped registry of running daemons, keyed by canonical project root hash
@@ -40,6 +42,10 @@ _STARTUP_POLL_INTERVAL = 0.1
 _STARTUP_TIMEOUT = 30.0
 _WINDOWS_REPLACE_RETRIES = 20
 _WINDOWS_REPLACE_RETRY_DELAY = 0.01
+
+
+def _is_windows_platform() -> bool:
+    return sys.platform == "win32"
 
 
 def _canonical_project_dir(project_dir: Path) -> Path:
@@ -58,6 +64,13 @@ def _normalized_project_dir(project_dir: Path) -> Path:
 def _project_dir_identity(project_dir: Path) -> str:
     """Return the stable string identity used for hashing and comparisons."""
     return str(_normalized_project_dir(project_dir))
+
+
+def _project_dir_hash(project_dir: Path, *, length: int) -> str:
+    """Return a stable hash of the canonical project identity."""
+    return hashlib.sha256(_project_dir_identity(project_dir).encode()).hexdigest()[
+        :length
+    ]
 
 
 def _runtime_owner_tag() -> str:
@@ -126,7 +139,7 @@ def _write_json_atomically(
                 tmp_path.replace(path)
                 break
             except PermissionError:
-                if sys.platform != "win32" or attempt >= _WINDOWS_REPLACE_RETRIES - 1:
+                if not _is_windows_platform() or attempt >= _WINDOWS_REPLACE_RETRIES - 1:
                     raise
                 time.sleep(_WINDOWS_REPLACE_RETRY_DELAY)
     except Exception:
@@ -144,6 +157,38 @@ def _write_json_atomically(
             pass
 
 
+def _parse_startup_log_timestamp(line: str) -> datetime | None:
+    if not line.startswith("["):
+        return None
+    closing = line.find("]")
+    if closing <= 1:
+        return None
+    raw_timestamp = line[1:closing]
+    normalized = (
+        raw_timestamp.replace("Z", "+00:00")
+        if raw_timestamp.endswith("Z")
+        else raw_timestamp
+    )
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+
+def _startup_elapsed_seconds(started_at: datetime) -> float:
+    if started_at.tzinfo is None:
+        return max((datetime.now() - started_at).total_seconds(), 0.0)
+    return max((datetime.now(started_at.tzinfo) - started_at).total_seconds(), 0.0)
+
+
+@dataclass(slots=True)
+class DaemonStartupHandle:
+    """Process handle and diagnostics surface for a daemon startup attempt."""
+
+    process: subprocess.Popen[Any]
+    log_path: Path
+
+
 class DaemonDiscovery:
     """Locate or start the daemon for a given project directory."""
 
@@ -156,11 +201,15 @@ class DaemonDiscovery:
 
     def get_lock_path(self) -> Path:
         """Return the absolute path of the lock file."""
-        return self._project_dir / _LOCK_FILE_REL
+        return self.get_runtime_dir() / _LOCKS_DIR_NAME / (
+            f"{_project_dir_hash(self._project_dir, length=16)}.json"
+        )
 
     def get_starter_lock_path(self) -> Path:
         """Return the absolute path of the starter lock file."""
-        return self._project_dir / _STARTER_LOCK_REL
+        return self.get_runtime_dir() / _STARTER_LOCKS_DIR_NAME / (
+            f"{_project_dir_hash(self._project_dir, length=16)}.json"
+        )
 
     def get_runtime_dir(self) -> Path:
         """Return the user-scoped runtime directory for daemon metadata."""
@@ -176,10 +225,9 @@ class DaemonDiscovery:
 
     def get_registry_entry_path(self) -> Path:
         """Return the registry entry path for this canonical project root."""
-        digest = hashlib.sha256(
-            _project_dir_identity(self._project_dir).encode()
-        ).hexdigest()[:16]
-        return self.get_registry_dir() / f"{digest}.json"
+        return self.get_registry_dir() / (
+            f"{_project_dir_hash(self._project_dir, length=16)}.json"
+        )
 
     def get_ipc_address(self) -> str:
         """Derive a unique IPC address from the project directory.
@@ -187,7 +235,7 @@ class DaemonDiscovery:
         Linux/macOS: Unix socket path in /tmp.
         Windows: TCP loopback address with port 0 (OS-assigned at bind time).
         """
-        digest = hashlib.sha256(str(self._project_dir).encode()).hexdigest()[:8]
+        digest = _project_dir_hash(self._project_dir, length=8)
         if sys.platform == "win32":
             return "tcp:127.0.0.1:0"
         return os.path.join(_SOCKET_DIR, f"chunkhound-{digest}.sock")
@@ -195,6 +243,20 @@ class DaemonDiscovery:
     def get_socket_path(self) -> str:
         """Compatibility alias for get_ipc_address()."""
         return self.get_ipc_address()
+
+    def get_daemon_log_path(self) -> Path:
+        """Return the daemon log path used for startup diagnostics."""
+        return self._project_dir / ".chunkhound" / "daemon.log"
+
+    def _read_json_file(self, path: Path) -> dict[str, Any] | None:
+        try:
+            with open(path) as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+                return None
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
 
     # ------------------------------------------------------------------
     # Lock file I/O
@@ -208,15 +270,11 @@ class DaemonDiscovery:
             ``auth_token``, ``project_dir``, or ``None`` if the file does
             not exist or is corrupt.
         """
-        lock_path = self.get_lock_path()
-        try:
-            with open(lock_path) as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    return data
-                return None
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return None
+        return self._read_json_file(self.get_lock_path())
+
+    def read_starter_lock(self) -> dict[str, Any] | None:
+        """Read and parse the starter lock file."""
+        return self._read_json_file(self.get_starter_lock_path())
 
     def write_lock(
         self, pid: int, socket_path: str, auth_token: str | None = None
@@ -245,6 +303,125 @@ class DaemonDiscovery:
             self.get_lock_path().unlink()
         except FileNotFoundError:
             pass
+
+    def _tail_daemon_log(
+        self, log_path: Path | None = None, *, max_lines: int = 20
+    ) -> str | None:
+        """Return the recent daemon log tail, if one is available."""
+        path = log_path or self.get_daemon_log_path()
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        if not text:
+            return None
+        return "\n".join(text.splitlines()[-max_lines:])
+
+    def _startup_failure_context(
+        self, log_path: Path | None = None
+    ) -> dict[str, object] | None:
+        """Extract phase/error context from daemon startup breadcrumbs."""
+        log_tail = self._tail_daemon_log(log_path, max_lines=50)
+        if not log_tail:
+            return None
+
+        startup_started_at: datetime | None = None
+        last_phase: str | None = None
+        last_error: str | None = None
+        total_duration_seconds: float | None = None
+
+        for raw_line in log_tail.splitlines():
+            if "[startup]" not in raw_line:
+                continue
+            _, _, message = raw_line.partition("[startup]")
+            message = message.strip()
+            timestamp = _parse_startup_log_timestamp(raw_line)
+            if message.startswith("startup tracking began"):
+                startup_started_at = timestamp
+                continue
+            if message.startswith("phase started: "):
+                phase_name = message.removeprefix("phase started: ").strip()
+                last_phase = phase_name or last_phase
+                continue
+            if message.startswith("phase completed: "):
+                phase_name, _, _ = message.removeprefix("phase completed: ").partition(
+                    " duration="
+                )
+                last_phase = phase_name.strip() or last_phase
+                continue
+            if message.startswith("phase failed: "):
+                details = message.removeprefix("phase failed: ")
+                phase_name, _, remainder = details.partition(" duration=")
+                last_phase = phase_name.strip() or last_phase
+                if " error=" in remainder:
+                    error_text = remainder.split(" error=", 1)[1].strip()
+                    if error_text:
+                        last_error = error_text
+                continue
+            if message.startswith("startup failed"):
+                if " duration=" in message:
+                    duration_fragment = message.split(" duration=", 1)[1].split(
+                        "s", 1
+                    )[0]
+                    try:
+                        total_duration_seconds = float(duration_fragment)
+                    except ValueError:
+                        total_duration_seconds = None
+                if " error=" in message:
+                    error_text = message.split(" error=", 1)[1].strip()
+                    if error_text:
+                        last_error = error_text
+                continue
+
+        if (
+            last_phase is None
+            and last_error is None
+            and total_duration_seconds is None
+            and startup_started_at is None
+        ):
+            return None
+
+        elapsed_seconds = total_duration_seconds
+        if elapsed_seconds is None and startup_started_at is not None:
+            elapsed_seconds = _startup_elapsed_seconds(startup_started_at)
+
+        return {
+            "last_phase": last_phase,
+            "elapsed_seconds": elapsed_seconds,
+            "last_error": last_error,
+        }
+
+    def _format_startup_failure(
+        self,
+        *,
+        prefix: str,
+        log_path: Path | None = None,
+        returncode: int | None = None,
+    ) -> str:
+        """Build a fast-fail startup error with optional daemon log context."""
+        message = prefix
+        if returncode is not None:
+            message = f"{message} (exit code {returncode})"
+        startup_context = self._startup_failure_context(log_path)
+        if startup_context is not None:
+            context_lines: list[str] = []
+            last_phase = startup_context.get("last_phase")
+            if isinstance(last_phase, str) and last_phase:
+                context_lines.append(f"Last known startup phase: {last_phase}")
+            elapsed_seconds = startup_context.get("elapsed_seconds")
+            if isinstance(elapsed_seconds, float):
+                context_lines.append(
+                    f"Elapsed startup duration so far: {elapsed_seconds:.3f}s"
+                )
+            last_error = startup_context.get("last_error")
+            if isinstance(last_error, str) and last_error:
+                context_lines.append(f"Last startup error: {last_error}")
+            if context_lines:
+                message = f"{message}\n" + "\n".join(context_lines)
+        log_tail = self._tail_daemon_log(log_path)
+        if log_tail:
+            return f"{message}\nRecent daemon log output:\n{log_tail}"
+        return message
 
     def write_registry_entry(self, pid: int, socket_path: str) -> None:
         """Publish this daemon in the user-scoped registry."""
@@ -310,7 +487,7 @@ class DaemonDiscovery:
             return None
 
         root = _canonical_project_dir(Path(project_dir_raw))
-        expected_lock_path = root / _LOCK_FILE_REL
+        expected_lock_path = DaemonDiscovery(root).get_lock_path()
         if (
             not isinstance(lock_path_raw, str)
             or Path(lock_path_raw) != expected_lock_path
@@ -487,11 +664,24 @@ class DaemonDiscovery:
             while time.monotonic() < deadline:
                 if await self._socket_connectable(actual_address):
                     return actual_address
+                if not pid_alive(pid):
+                    raise RuntimeError(
+                        self._format_startup_failure(
+                            prefix=(
+                                "ChunkHound daemon exited before it became reachable "
+                                f"(pid={pid}, address: {actual_address})"
+                            )
+                        )
+                    )
                 remaining = deadline - time.monotonic()
                 await asyncio.sleep(min(_STARTUP_POLL_INTERVAL, max(remaining, 0.0)))
             raise RuntimeError(
-                f"ChunkHound daemon (pid={pid}) did not become reachable "
-                f"within {timeout}s (address: {actual_address})"
+                self._format_startup_failure(
+                    prefix=(
+                        f"ChunkHound daemon (pid={pid}) did not become reachable "
+                        f"within {timeout}s (address: {actual_address})"
+                    )
+                )
             )
 
         self._remove_stale_lock_artifacts(initial_address)
@@ -559,7 +749,7 @@ class DaemonDiscovery:
 
         return forwarded
 
-    def _start_daemon_subprocess(self, args: Any) -> None:
+    def _start_daemon_subprocess(self, args: Any) -> DaemonStartupHandle:
         """Launch the daemon as a detached subprocess.
 
         The new process runs ``chunkhound _daemon`` with the same configuration
@@ -594,10 +784,10 @@ class DaemonDiscovery:
 
         # Route daemon stdout/stderr to a log file so startup failures are
         # diagnosable (especially on Windows where the IPC transport may fail).
-        log_path = self._project_dir / ".chunkhound" / "daemon.log"
+        log_path = self.get_daemon_log_path()
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "w") as log_file:
-            subprocess.Popen(
+            process = subprocess.Popen(
                 cmd,
                 start_new_session=True,
                 stdin=subprocess.DEVNULL,
@@ -606,6 +796,7 @@ class DaemonDiscovery:
                 env=env,
                 cwd=str(self._project_dir),
             )
+        return DaemonStartupHandle(process=process, log_path=log_path)
 
     async def find_or_start_daemon(self, args: Any) -> str:
         """Return the IPC address of the running daemon, starting one if needed.
@@ -692,9 +883,21 @@ class DaemonDiscovery:
                     )
 
                 try:
-                    self._start_daemon_subprocess(args)
+                    startup = self._start_daemon_subprocess(args)
                     poll_deadline = time.monotonic() + remaining
                     while time.monotonic() < poll_deadline:
+                        returncode = startup.process.poll()
+                        if returncode is not None:
+                            raise RuntimeError(
+                                self._format_startup_failure(
+                                    prefix=(
+                                        "ChunkHound daemon exited before it became "
+                                        "reachable"
+                                    ),
+                                    log_path=startup.log_path,
+                                    returncode=returncode,
+                                )
+                            )
                         lock = self.read_lock()
                         if lock is not None:
                             actual_address = str(
@@ -706,17 +909,26 @@ class DaemonDiscovery:
                         await asyncio.sleep(
                             min(_STARTUP_POLL_INTERVAL, max(sleep_for, 0.0))
                         )
+
+                    raise RuntimeError(
+                        self._format_startup_failure(
+                            prefix=(
+                                f"ChunkHound daemon did not start within "
+                                f"{_STARTUP_TIMEOUT}s (address: {initial_address})"
+                            ),
+                            log_path=startup.log_path,
+                        )
+                    )
                 finally:
                     self._release_starter_lock()
-
-                raise RuntimeError(
-                    f"ChunkHound daemon did not start within {_STARTUP_TIMEOUT}s "
-                    f"(address: {initial_address})"
-                )
             finally:
                 self._release_global_startup_lock()
 
         raise RuntimeError(
-            f"ChunkHound daemon did not become reachable within "
-            f"{_STARTUP_TIMEOUT}s (address: {initial_address})"
+            self._format_startup_failure(
+                prefix=(
+                    f"ChunkHound daemon did not become reachable within "
+                    f"{_STARTUP_TIMEOUT}s (address: {initial_address})"
+                )
+            )
         )

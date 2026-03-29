@@ -105,8 +105,16 @@ class DatabaseProvider(Protocol):
         """Delete a file and all its chunks/embeddings completely."""
         ...
 
+    def delete_files_batch(self, file_paths: list[str]) -> int:
+        """Delete multiple files and their chunks/embeddings completely."""
+        ...
+
     async def delete_file_completely_async(self, file_path: str) -> bool:
         """Delete a file and all its chunks/embeddings completely (asynchronous)."""
+        ...
+
+    async def delete_files_batch_async(self, file_paths: list[str]) -> int:
+        """Delete multiple files and their chunks/embeddings completely (asynchronous)."""
         ...
 
     async def insert_file_async(self, file: File) -> int:

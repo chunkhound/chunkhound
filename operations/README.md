@@ -7,6 +7,9 @@ documentation that are **not** part of the main ChunkHound library API.
 - ``database_concurrency.md`` – notes and conclusions from DuckDB/LanceDB
   concurrency probes, including the single-owner / SerialDatabaseProvider
   policy enforced by ChunkHound.
+- ``watchman_live_indexing.md`` – operator playbook for the private Watchman
+  sidecar, fail-fast startup behavior, `daemon_status` health fields, and the
+  rollout gate/default posture now that Watchman is the primary backend.
 - ``experiments/duckdb_concurrency_probe.py`` – standalone script that
   demonstrates DuckDB lock failures under multi-process access.
 - ``experiments/lancedb_concurrency_probe.py`` – standalone script that

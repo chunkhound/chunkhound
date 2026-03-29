@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -136,7 +137,7 @@ def test_registry_validation_reports_live_overlapping_root(
     assert conflict is not None
     assert conflict["project_dir"] == str(parent.resolve())
     assert conflict["pid"] == os.getpid()
-    assert Path(conflict["lock_path"]) == parent / ".chunkhound" / "daemon.lock"
+    assert Path(conflict["lock_path"]) == discovery.get_lock_path()
 
 
 def test_registry_validation_removes_entry_with_unexpected_lock_path(
@@ -195,7 +196,7 @@ def test_registry_validation_removes_entry_with_mismatched_lock_project_dir(
     wrong_root.mkdir()
 
     discovery = DaemonDiscovery(project_dir)
-    lock_path = project_dir / ".chunkhound" / "daemon.lock"
+    lock_path = discovery.get_lock_path()
     discovery.write_registry_entry(os.getpid(), "tcp:127.0.0.1:54321")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.write_text(
@@ -274,3 +275,38 @@ def test_write_json_atomically_retries_transient_windows_replace_error(
 
     assert attempts["count"] == 1
     assert json.loads(target_path.read_text()) == {"value": 1}
+
+
+def test_format_startup_failure_includes_phase_elapsed_and_error(
+    tmp_path: Path,
+) -> None:
+    """Startup timeout formatting should expose the latest breadcrumb context."""
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    discovery = DaemonDiscovery(project_dir)
+    log_path = project_dir / ".chunkhound" / "daemon.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    started_at = (datetime.now() - timedelta(seconds=9)).isoformat()
+    log_path.write_text(
+        "\n".join(
+            [
+                f"[{started_at}] [startup] startup tracking began mode=daemon",
+                f"[{started_at}] [startup] phase started: watchman_scope_discovery",
+                (
+                    f"[{started_at}] [startup] startup failed duration=9.5s "
+                    "error=watchman bootstrap exploded"
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    message = discovery._format_startup_failure(
+        prefix="ChunkHound daemon did not become reachable within 30.0s",
+        log_path=log_path,
+    )
+
+    assert "Last known startup phase: watchman_scope_discovery" in message
+    assert "Elapsed startup duration so far: 9.500s" in message
+    assert "Last startup error: watchman bootstrap exploded" in message
+    assert "Recent daemon log output" in message
