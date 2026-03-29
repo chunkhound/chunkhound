@@ -709,7 +709,7 @@ class EmbeddingService(BaseService):
                     self._completed_batches += 1
                     # Check inline so optimization fires every N batches,
                     # not just once after all batches complete
-                    self._maybe_optimize_database()
+                    await self._maybe_optimize_database()
             else:
                 # Find the failed batch and extract chunk details
                 failed_batch = batches[i] if i < len(batches) else []
@@ -748,7 +748,7 @@ class EmbeddingService(BaseService):
 
         return total_generated
 
-    def _maybe_optimize_database(self) -> None:
+    async def _maybe_optimize_database(self) -> None:
         """Trigger periodic database optimization to prevent fragment accumulation.
 
         Optimization maintains query performance during long-running embedding
@@ -760,7 +760,7 @@ class EmbeddingService(BaseService):
         3. Database actually needs optimization (has free blocks to reclaim)
         """
         if self._completed_batches >= self._optimization_batch_frequency:
-            if self._db.has_reclaimable_space(operation="embedding-generation"):
+            if await asyncio.to_thread(self._db.has_reclaimable_space, operation="embedding-generation"):
                 # Capture batch count before reset for accurate logging
                 batch_count = self._completed_batches
 
@@ -769,7 +769,7 @@ class EmbeddingService(BaseService):
                 )
 
                 try:
-                    self._db.optimize_tables()
+                    await asyncio.to_thread(self._db.optimize_tables)
                 except Exception as e:
                     logger.warning(
                         f"Database optimization failed after {batch_count} batches "

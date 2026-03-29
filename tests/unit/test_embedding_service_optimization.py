@@ -87,7 +87,8 @@ class TestEmbeddingServiceOptimization:
         if provider.is_connected:
             provider.disconnect()
 
-    def test_optimization_triggers_when_threshold_reached(
+    @pytest.mark.asyncio
+    async def test_optimization_triggers_when_threshold_reached(
         self, provider_with_reclaimable_space,
     ):
         """Verify optimization triggers when batch count reaches frequency."""
@@ -99,12 +100,13 @@ class TestEmbeddingServiceOptimization:
             provider_with_reclaimable_space, "optimize_tables",
             wraps=provider_with_reclaimable_space.optimize_tables,
         ) as spy:
-            service._maybe_optimize_database()
+            await service._maybe_optimize_database()
             assert spy.called, "optimize_tables should be called when reclaimable space exists"
 
         assert service._completed_batches == 0
 
-    def test_optimization_counter_resets_after_success(
+    @pytest.mark.asyncio
+    async def test_optimization_counter_resets_after_success(
         self, provider_with_reclaimable_space,
     ):
         """Verify counter resets to 0 after successful optimization."""
@@ -112,13 +114,14 @@ class TestEmbeddingServiceOptimization:
         service._optimization_batch_frequency = 5
         service._completed_batches = 5
 
-        service._maybe_optimize_database()
+        await service._maybe_optimize_database()
 
         assert service._completed_batches == 0, (
             "Counter should reset to 0 after successful optimization"
         )
 
-    def test_optimization_skipped_if_not_needed(self, clean_provider):
+    @pytest.mark.asyncio
+    async def test_optimization_skipped_if_not_needed(self, clean_provider):
         """Verify optimization skipped when no reclaimable space exists."""
         service = EmbeddingService(database_provider=clean_provider)
         service._optimization_batch_frequency = 5
@@ -128,13 +131,14 @@ class TestEmbeddingServiceOptimization:
             clean_provider, "optimize_tables",
             wraps=clean_provider.optimize_tables,
         ) as spy:
-            service._maybe_optimize_database()
+            await service._maybe_optimize_database()
             assert not spy.called, "optimize_tables should not be called without reclaimable space"
 
         # Counter still resets to avoid per-batch overhead
         assert service._completed_batches == 0
 
-    def test_optimization_counter_resets_even_on_failure(
+    @pytest.mark.asyncio
+    async def test_optimization_counter_resets_even_on_failure(
         self, provider_with_reclaimable_space,
     ):
         """Counter always resets to avoid per-batch pragma_storage_info() overhead."""
@@ -147,13 +151,14 @@ class TestEmbeddingServiceOptimization:
             provider_with_reclaimable_space, "optimize_tables",
             side_effect=Exception("Optimization failed"),
         ):
-            service._maybe_optimize_database()
+            await service._maybe_optimize_database()
 
         assert service._completed_batches == 0, (
             "Counter should always reset to avoid per-batch overhead"
         )
 
-    def test_optimization_failure_is_non_fatal(
+    @pytest.mark.asyncio
+    async def test_optimization_failure_is_non_fatal(
         self, provider_with_reclaimable_space,
     ):
         """Verify optimization failure doesn't halt embedding generation."""
@@ -166,7 +171,7 @@ class TestEmbeddingServiceOptimization:
             side_effect=Exception("Optimization failed"),
         ):
             # Should not raise
-            service._maybe_optimize_database()
+            await service._maybe_optimize_database()
 
 
 class TestOptimizationFrequencyParsing:
