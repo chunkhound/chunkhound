@@ -463,6 +463,7 @@ def test_process_directory_drops_nonstandard_hnsw_indexes_for_excluded_existing_
     assert [row["index_name"] for row in initial_indexes] == [
         "alt_live_idx",
         "idx_3_chunk_id",
+        "idx_3_chunk_provider_model_unique",
         "idx_3_provider_model",
     ]
 
@@ -575,6 +576,7 @@ def test_large_batch_insert_preserves_custom_hnsw_index_identity(tmp_path: Path)
     assert [row["index_name"] for row in initial_indexes] == [
         "hnsw_test_mini_3_cosine",
         "idx_3_chunk_id",
+        "idx_3_chunk_provider_model_unique",
         "idx_3_provider_model",
         "idx_hnsw_3",
     ]

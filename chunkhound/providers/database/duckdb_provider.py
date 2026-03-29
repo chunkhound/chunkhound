@@ -16,8 +16,9 @@ import os
 import re
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import duckdb
 from loguru import logger
@@ -310,6 +311,190 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Get table name for given embedding dimensions."""
         return f"embeddings_{dims}"
 
+    def _get_embedding_provider_model_index_name(self, dims: int) -> str:
+        """Return the standard provider/model lookup index name."""
+        return f"idx_{dims}_provider_model"
+
+    def _get_embedding_unique_index_name(self, dims: int) -> str:
+        """Return the schema-backed unique index name for embedding upserts."""
+        return f"idx_{dims}_chunk_provider_model_unique"
+
+    def _executor_index_exists(
+        self, conn: Any, table_name: str, index_name: str
+    ) -> bool:
+        """Return True when duckdb_indexes() reports the named index."""
+        result = conn.execute(
+            """
+            SELECT 1
+            FROM duckdb_indexes()
+            WHERE table_name = ? AND index_name = ?
+            LIMIT 1
+            """,
+            [table_name, index_name],
+        ).fetchone()
+        return result is not None
+
+    def _executor_create_embedding_provider_model_index(
+        self, conn: Any, table_name: str, dims: int
+    ) -> None:
+        """Ensure the provider/model lookup index exists for one embedding table."""
+        index_name = self._get_embedding_provider_model_index_name(dims)
+        if self._executor_index_exists(conn, table_name, index_name):
+            return
+
+        conn.execute(
+            f"CREATE INDEX {index_name} ON {table_name}(provider, model)"
+        )
+
+    def _executor_create_embedding_unique_index(
+        self, conn: Any, table_name: str, dims: int
+    ) -> None:
+        """Create the real upsert conflict target for one embedding table."""
+        index_name = self._get_embedding_unique_index_name(dims)
+        if self._executor_index_exists(conn, table_name, index_name):
+            return
+
+        conn.execute(
+            f"""
+            CREATE UNIQUE INDEX {index_name}
+            ON {table_name}(chunk_id, provider, model)
+            """
+        )
+
+    def _executor_get_embedding_duplicate_row_ids(
+        self, conn: Any, table_name: str
+    ) -> list[int]:
+        """Return duplicate row ids that must be removed before adding uniqueness."""
+        rows = conn.execute(
+            f"""
+            SELECT id
+            FROM (
+                SELECT
+                    id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY chunk_id, provider, model
+                        ORDER BY created_at DESC NULLS LAST, id DESC
+                    ) AS row_num
+                FROM {table_name}
+            )
+            WHERE row_num > 1
+            ORDER BY id
+            """
+        ).fetchall()
+        return [int(row[0]) for row in rows]
+
+    def _executor_get_vector_indexes_for_table(
+        self, conn: Any, state: dict[str, Any], table_name: str
+    ) -> list[dict[str, Any]]:
+        """Return only the HNSW indexes for the target embedding table."""
+        return [
+            index_info
+            for index_info in self._executor_get_existing_vector_indexes(conn, state)
+            if index_info["table_name"] == table_name
+        ]
+
+    def _executor_run_embedding_table_hnsw_guarded_mutation(
+        self,
+        conn: Any,
+        state: dict[str, Any],
+        table_name: str,
+        mutation_label: str,
+        mutation_func: Callable[[], Any],
+        *,
+        optimize_for_bulk: bool = False,
+        transactional: bool = True,
+    ) -> Any:
+        """Run one embedding-table mutation behind a strict exact-index restore guard."""
+        if state.get("transaction_active", False) and transactional:
+            raise DuckDBTransactionConflictError(
+                f"{mutation_label} cannot run while another DuckDB transaction is active"
+            )
+
+        track_operation(state)
+        existing_indexes = self._executor_get_vector_indexes_for_table(
+            conn, state, table_name
+        )
+
+        try:
+            if transactional:
+                self._executor_begin_transaction(conn, state)
+            if optimize_for_bulk:
+                conn.execute("SET preserve_insertion_order = false")
+
+            for index_info in existing_indexes:
+                self._executor_drop_vector_index_by_name(
+                    conn, index_info["index_name"]
+                )
+
+            result = mutation_func()
+
+            for index_info in existing_indexes:
+                self._executor_recreate_vector_index_from_info(
+                    conn, state, index_info
+                )
+
+            if transactional:
+                self._executor_commit_transaction(conn, state, True)
+            else:
+                self._executor_maybe_checkpoint(conn, state, True)
+            return result
+        except Exception as e:
+            if transactional:
+                try:
+                    self._executor_rollback_transaction(conn, state)
+                except Exception as rollback_error:
+                    raise RuntimeError(
+                        f"{mutation_label} failed: {e}; rollback failed: {rollback_error}"
+                    ) from rollback_error
+            else:
+                restore_failures: list[str] = []
+                for index_info in existing_indexes:
+                    try:
+                        self._executor_recreate_vector_index_from_info(
+                            conn, state, index_info
+                        )
+                    except Exception as recreate_error:
+                        restore_failures.append(
+                            f"{index_info['index_name']}: {recreate_error}"
+                        )
+                if restore_failures:
+                    joined_failures = "; ".join(restore_failures)
+                    raise RuntimeError(
+                        f"{mutation_label} failed and HNSW restore was incomplete: "
+                        f"{joined_failures}"
+                    ) from e
+
+            raise
+
+    def _executor_ensure_embedding_upsert_contract(
+        self, conn: Any, state: dict[str, Any], table_name: str, dims: int
+    ) -> None:
+        """Ensure one embedding table has the required unique upsert contract."""
+        self._executor_create_embedding_provider_model_index(conn, table_name, dims)
+
+        unique_index_name = self._get_embedding_unique_index_name(dims)
+        if self._executor_index_exists(conn, table_name, unique_index_name):
+            return
+
+        duplicate_row_ids = self._executor_get_embedding_duplicate_row_ids(
+            conn, table_name
+        )
+
+        def _apply_contract() -> None:
+            if duplicate_row_ids:
+                self._executor_delete_embeddings_by_row_ids(
+                    conn, table_name, duplicate_row_ids
+                )
+            self._executor_create_embedding_unique_index(conn, table_name, dims)
+
+        self._executor_run_embedding_table_hnsw_guarded_mutation(
+            conn,
+            state,
+            table_name,
+            f"ensure_embedding_upsert_contract({table_name})",
+            _apply_contract,
+        )
+
     def _ensure_embedding_table_exists(self, dims: int) -> str:
         """Ensure embedding table exists for given dimensions - delegate to connection manager."""
         return self._execute_in_db_thread_sync("ensure_embedding_table_exists", dims)
@@ -321,6 +506,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         table_name = f"embeddings_{dims}"
 
         if self._executor_table_exists(conn, state, table_name):
+            self._executor_ensure_embedding_upsert_contract(conn, state, table_name, dims)
             return table_name
 
         logger.info(f"Creating embedding table for {dims} dimensions: {table_name}")
@@ -356,6 +542,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 f"CREATE INDEX IF NOT EXISTS idx_{dims}_provider_model "
                 f"ON {table_name}(provider, model)"
             )
+            self._executor_create_embedding_unique_index(conn, table_name, dims)
 
             logger.info(
                 f"Created {table_name} with HNSW index {hnsw_index_name} "
@@ -510,6 +697,9 @@ class DuckDBProvider(SerialDatabaseProvider):
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_embeddings_1536_chunk_id ON embeddings_1536(chunk_id)
             """)
+            self._executor_create_embedding_provider_model_index(
+                conn, "embeddings_1536", 1536
+            )
 
             # Handle schema migrations for existing databases
             self._executor_migrate_schema(conn, state)
@@ -617,6 +807,25 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             # Add metadata column if it doesn't exist (for databases without size/signature migration)
             conn.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS metadata TEXT")
+
+            for (table_name,) in conn.execute(
+                """
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_name LIKE 'embeddings_%'
+                ORDER BY table_name
+                """
+            ).fetchall():
+                try:
+                    dims = int(table_name[11:])
+                except ValueError:
+                    logger.warning(
+                        f"Skipping embedding upsert migration for unexpected table {table_name}"
+                    )
+                    continue
+                self._executor_ensure_embedding_upsert_contract(
+                    conn, state, table_name, dims
+                )
 
         except Exception as e:
             logger.error(f"Failed to migrate schema: {e}")
@@ -2094,6 +2303,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         for dims, dim_embeddings in embeddings_by_dims.items():
             # Ensure table exists
             table_name = self._executor_ensure_embedding_table_exists(conn, state, dims)
+            upsert_sql = DuckDBEmbeddingRepository.build_embedding_upsert_sql(
+                table_name
+            )
 
             # Prepare batch data
             batch_data = []
@@ -2112,23 +2324,11 @@ class DuckDBProvider(SerialDatabaseProvider):
             if batch_size:
                 for i in range(0, len(batch_data), batch_size):
                     batch = batch_data[i : i + batch_size]
-                    conn.executemany(
-                        f"""
-                        INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims)
-                        VALUES (?, ?, ?, ?, ?)
-                    """,
-                        batch,
-                    )
+                    conn.executemany(upsert_sql, batch)
                     total_inserted += len(batch)
             else:
                 # Insert all at once
-                conn.executemany(
-                    f"""
-                    INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims)
-                    VALUES (?, ?, ?, ?, ?)
-                """,
-                    batch_data,
-                )
+                conn.executemany(upsert_sql, batch_data)
                 total_inserted += len(batch_data)
 
         return total_inserted
