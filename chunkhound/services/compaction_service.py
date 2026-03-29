@@ -51,7 +51,9 @@ class CompactionService:
         if not should:
             return False, {}
 
-        # Check minimum size threshold (use free_blocks only - reliable metric)
+        # Two gates: (1) ratio threshold above decides IF compaction is needed,
+        # (2) absolute size gate below avoids compacting tiny databases where
+        # the overhead isn't worth the reclaimed space.
         block_size = stats.get("block_size", 262144)
         free_blocks = stats.get("free_blocks", 0)
         reclaimable_bytes = free_blocks * block_size
