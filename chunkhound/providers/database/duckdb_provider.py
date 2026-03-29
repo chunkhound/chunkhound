@@ -374,7 +374,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 )
                 if "deferred_hnsw_indexes" not in state:
                     state["deferred_hnsw_indexes"] = set()
-                state["deferred_hnsw_indexes"].add(table_name)
+                state["deferred_hnsw_indexes"].add((table_name, dims))
             else:
                 # Indexes exist: create HNSW index immediately
                 conn.execute(f"""
@@ -656,10 +656,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         deferred_tables = state.get("deferred_hnsw_indexes", set())
         logger.info(f"Creating deferred HNSW indexes for {len(deferred_tables)} table(s)")
 
-        for table_name in deferred_tables:
+        for table_name, dims in deferred_tables:
             try:
-                # Extract dims from table name (embeddings_{dims})
-                dims = int(table_name.replace("embeddings_", ""))
                 hnsw_index_name = f"idx_hnsw_{dims}"
 
                 # Check if index already exists
