@@ -86,7 +86,6 @@ class ImportContextService:
                 tree.root_node, content_bytes, UniversalConcept.IMPORT
             )
 
-            # Extract content from chunks
             import_lines = [chunk.content for chunk in import_chunks]
 
             # Cache and return
