@@ -165,7 +165,7 @@ class TestQADeterministic:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     @pytest.mark.asyncio
-    async def test_file_lifecycle_search_validation(self, qa_setup):
+    async def test_file_lifecycle_search_validation(self, qa_setup):  # flaky: Windows CI polling monitor occasionally misses second file write within 45s window
         """QA Items 1-4: Test file lifecycle with search validation."""
         services, realtime_service, watch_dir, _ = qa_setup
 

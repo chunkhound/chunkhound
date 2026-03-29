@@ -29,7 +29,22 @@ def find_failed_tests(junit_xml: Path) -> list[tuple[str, str, int]]:
         if tc.find("failure") is not None or tc.find("error") is not None:
             file_attr = tc.get("file", "")
             name = tc.get("name", "")
-            line = int(tc.get("line", "0"))
+            line = int(tc.get("line", "0")) if tc.get("line", "").strip() else 0
+
+            # pytest-asyncio class-based tests may omit the file attribute.
+            # Fall back to deriving the path from classname (e.g.
+            # "tests.test_foo.TestBar" → "tests/test_foo.py").
+            if not file_attr:
+                classname = tc.get("classname", "")
+                parts = classname.split(".")
+                module_parts = []
+                for part in parts:
+                    if part and part[0].isupper():
+                        break
+                    module_parts.append(part)
+                if module_parts:
+                    file_attr = "/".join(module_parts) + ".py"
+
             failed.append((file_attr, name, line))
     return failed
 
@@ -42,7 +57,7 @@ def has_flaky_annotation(source_file: Path, test_name: str, line_no: int) -> boo
     - The def line and up to 5 lines before it (covers decorators and inline comments)
     - Falls back to the line number reported by pytest if the def cannot be located
     """
-    if not source_file.exists():
+    if not source_file.is_file():
         return False
 
     lines = source_file.read_text(encoding="utf-8").splitlines()
