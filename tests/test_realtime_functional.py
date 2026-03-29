@@ -2528,7 +2528,7 @@ class TestRealtimeFunctional:
         test_file.write_text("def hello_world(): pass")
 
         # Wait for filesystem event + debouncing + processing
-        found = await wait_for_indexed(services.provider, test_file)
+        found = await service.wait_for_file_indexed(test_file)
 
         # This tests the full pipeline: detection -> processing -> storage
         assert found, "File should be detected and processed by filesystem monitoring"

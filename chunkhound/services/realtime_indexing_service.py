@@ -1765,6 +1765,13 @@ class RealtimeIndexingService:
         self._last_resync_error: str | None = None
         self._last_resync_request_monotonic: float | None = None
 
+        # File indexing completion tracking (test-only infrastructure — production
+        # callers should not use wait_for_file_indexed / wait_for_file_removed)
+        self._file_condition = asyncio.Condition()
+        self._indexed_files: set[str] = set()
+        self._removed_files: set[str] = set()
+        self._stopping = False
+
     @staticmethod
     def _utc_now() -> str:
         """Return an ISO8601 UTC timestamp."""
@@ -3152,6 +3159,10 @@ class RealtimeIndexingService:
         watch_path = watch_path.resolve()
 
         try:
+            self._stopping = False
+            self._indexed_files.clear()
+            self._removed_files.clear()
+            self.failed_files.clear()
             logger.debug(f"Starting real-time indexing for {watch_path}")
             self._debug(f"start watch on {watch_path}")
             self._service_state = "starting"
@@ -3215,10 +3226,13 @@ class RealtimeIndexingService:
         logger.debug("Stopping real-time indexing service")
         self._debug("stopping service")
         self._start_generation += 1
+        self._stopping = True
         self._service_state = "stopping"
         self.monitoring_ready.clear()
         self._monitoring_ready_at = None
         self._emit_status_update()
+        async with self._file_condition:
+            self._file_condition.notify_all()
 
         active_start_task = self._active_start_task
         if (
@@ -3861,6 +3875,10 @@ class RealtimeIndexingService:
         logger.debug(f"Removing file from database: {file_path}")
         await self.services.provider.delete_file_completely_async(str(file_path))
         self._debug(f"removed file from database: {file_path}")
+        normalized = normalize_file_path(file_path)
+        async with self._file_condition:
+            self._removed_files.add(normalized)
+            self._file_condition.notify_all()
 
     async def _add_directory_watch(self, dir_path: str) -> None:
         """Add a new directory to monitoring with recursive watching."""
@@ -4212,6 +4230,9 @@ class RealtimeIndexingService:
                     if active_change_path is not None:
                         self._active_change_generations.pop(active_change_path, None)
                     logger.debug(f"Skipping {file_path} - file no longer exists")
+                    async with self._file_condition:
+                        self.failed_files.add(normalize_file_path(file_path))
+                        self._file_condition.notify_all()
                     continue
 
                 # Process the file
@@ -4234,6 +4255,11 @@ class RealtimeIndexingService:
                     # Ensure database transaction is flushed for immediate visibility
                     if hasattr(self.services.provider, "flush"):
                         await self.services.provider.flush()
+
+                    normalized = normalize_file_path(file_path)
+                    async with self._file_condition:
+                        self._indexed_files.add(normalized)
+                        self._file_condition.notify_all()
 
                     # Clear event dedup entry so future modifications aren't suppressed
                     self._recent_file_events.pop(str(file_path), None)
@@ -4289,9 +4315,11 @@ class RealtimeIndexingService:
                 )
                 logger.error(f"Error processing {mutation_path}: {error}")
                 # Track failed files for debugging and monitoring
-                self.failed_files.add(str(mutation_path))
                 self._record_processing_error()
                 self._set_error(f"Error processing {mutation_path}: {error}")
+                async with self._file_condition:
+                    self.failed_files.add(normalize_file_path(mutation_path))
+                    self._file_condition.notify_all()
                 # Continue processing other files
 
     async def get_health(self) -> dict[str, Any]:
@@ -4314,3 +4342,61 @@ class RealtimeIndexingService:
             logger.warning(f"Monitoring not ready after {timeout}s")
             self._set_warning(f"Monitoring not ready after {timeout}s")
             return False
+
+    async def wait_for_file_indexed(
+        self, path: Path | str, timeout: float = 10.0
+    ) -> bool:
+        """Wait for a file to be indexed.
+
+        Call reset_file_tracking(path) BEFORE triggering the file change
+        to ensure the wait observes the new event, not a stale record.
+        """
+        normalized = normalize_file_path(path)
+
+        async def _wait() -> None:
+            async with self._file_condition:
+                await self._file_condition.wait_for(
+                    lambda: normalized in self._indexed_files
+                    or normalized in self.failed_files
+                    or self._stopping
+                )
+
+        try:
+            await asyncio.wait_for(_wait(), timeout=timeout)
+            return normalized in self._indexed_files
+        except asyncio.TimeoutError:
+            return False
+
+    async def wait_for_file_removed(
+        self, path: Path | str, timeout: float = 10.0
+    ) -> bool:
+        """Wait for a file to be removed from the index.
+
+        Call reset_file_tracking(path) BEFORE triggering the file change.
+        """
+        normalized = normalize_file_path(path)
+
+        async def _wait() -> None:
+            async with self._file_condition:
+                await self._file_condition.wait_for(
+                    lambda: normalized in self._removed_files
+                    or normalized in self.failed_files
+                    or self._stopping
+                )
+
+        try:
+            await asyncio.wait_for(_wait(), timeout=timeout)
+            return normalized in self._removed_files
+        except asyncio.TimeoutError:
+            return False
+
+    def reset_file_tracking(self, path: Path | str) -> None:
+        """Clear indexing/removal records for a path so the next wait starts fresh.
+
+        Call before triggering the file change, not after.
+        """
+        # No lock needed: asyncio is single-threaded and there are no await points.
+        normalized = normalize_file_path(path)
+        self._indexed_files.discard(normalized)
+        self._removed_files.discard(normalized)
+        self.failed_files.discard(normalized)

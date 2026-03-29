@@ -179,6 +179,10 @@ select = [
 ]
 ignore = []
 
+[tool.ruff.lint.per-file-ignores]
+# Tool descriptions are LLM-facing strings — wrapping them breaks formatting
+"chunkhound/mcp_server/tools.py" = ["E501"]
+
 [tool.mypy]
 python_version = "3.10"
 warn_return_any = true

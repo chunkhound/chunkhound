@@ -19,7 +19,6 @@ from chunkhound.services.realtime_indexing_service import RealtimeIndexingServic
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
     realtime_backend_for_tests,
-    wait_for_regex_searchable,
 )
 
 from .test_utils import (
@@ -152,13 +151,14 @@ def unique_mcp_test_function():
         test_file = watch_dir / "modify_test.py"
         test_file.write_text("def initial_function(): pass")
 
-        # Wait for initial content to be searchable (handles Windows CI polling delay)
-        found = await wait_for_regex_searchable(
-            services, "initial_function", timeout=get_fs_event_timeout()
+        # Wait for file to be indexed
+        found = await realtime_service.wait_for_file_indexed(
+            test_file, timeout=get_fs_event_timeout()
         )
         assert found, "Initial content should be found"
 
         # Modify file with new unique content
+        realtime_service.reset_file_tracking(test_file)
         test_file.write_text("""
 def initial_function(): pass
 
@@ -167,9 +167,9 @@ def modified_unique_regex_pattern():
     return "modification_success"
 """)
 
-        # Wait for modified content to be searchable (handles Windows CI polling delay)
-        found = await wait_for_regex_searchable(
-            services, "modified_unique_regex_pattern", timeout=get_fs_event_timeout()
+        # Wait for modified file to be re-indexed
+        found = await realtime_service.wait_for_file_indexed(
+            test_file, timeout=get_fs_event_timeout()
         )
 
         assert found, "MCP regex search should find modified content"
@@ -228,6 +228,7 @@ class StatsTestClass_{i}:
 
         # Create file with unique content
         delete_file = watch_dir / "delete_test.py"
+        realtime_service.reset_file_tracking(delete_file)
         delete_file.write_text("""
 def delete_test_unique_function():
     '''This function will be deleted'''
@@ -235,7 +236,8 @@ def delete_test_unique_function():
 """)
 
         # Wait for processing
-        await asyncio.sleep(2.0)
+        found = await realtime_service.wait_for_file_indexed(delete_file, timeout=get_fs_event_timeout())
+        assert found, "File should be indexed"
 
         # Verify content is searchable
         before_delete = await execute_tool(
@@ -254,10 +256,12 @@ def delete_test_unique_function():
         )
 
         # Delete the file
+        realtime_service.reset_file_tracking(delete_file)
         delete_file.unlink()
 
         # Wait for deletion processing
-        await asyncio.sleep(2.0)
+        removed = await realtime_service.wait_for_file_removed(delete_file, timeout=get_fs_event_timeout())
+        assert removed, "File should be removed"
 
         # Verify content is no longer searchable
         after_delete = await execute_tool(
@@ -287,9 +291,9 @@ def delete_test_unique_function():
 """
         test_file.write_text(initial_content)
 
-        # Wait for initial content to be searchable (handles Windows CI polling delay)
-        found = await wait_for_regex_searchable(
-            services, "original_function", timeout=get_fs_event_timeout()
+        # Wait for file to be indexed
+        found = await realtime_service.wait_for_file_indexed(
+            test_file, timeout=get_fs_event_timeout()
         )
         assert found, "Initial content should be indexed"
 
@@ -321,6 +325,7 @@ class NewlyAddedClass:
     def new_method(self):
         return "class_method_added"
 """
+        realtime_service.reset_file_tracking(test_file)
         test_file.write_text(modified_content)
 
         # Touch file to ensure modification time changes
@@ -329,9 +334,9 @@ class NewlyAddedClass:
         time.sleep(0.1)
         test_file.touch()
 
-        # Wait for new content to be searchable (handles Windows CI polling delay)
-        found = await wait_for_regex_searchable(
-            services, "newly_added_function", timeout=get_fs_event_timeout()
+        # Wait for modified file to be re-indexed
+        found = await realtime_service.wait_for_file_indexed(
+            test_file, timeout=get_fs_event_timeout()
         )
         assert found, "Modified content should be searchable"
 
@@ -386,13 +391,14 @@ class NewlyAddedClass:
             f.flush()
             os.fsync(f.fileno())
 
-        # Wait for initial content to be searchable (handles Windows CI polling delay)
-        found = await wait_for_regex_searchable(
-            services, "func.*initial", timeout=get_fs_event_timeout()
+        # Wait for file to be indexed
+        found = await realtime_service.wait_for_file_indexed(
+            test_file, timeout=get_fs_event_timeout()
         )
         assert found, "Initial content should be indexed"
 
         # Modify with explicit operations and different content
+        realtime_service.reset_file_tracking(test_file)
         with open(test_file, "w") as f:
             f.write("def func(): return 'modified'\ndef new_func(): return 'added'")
             f.flush()
@@ -404,9 +410,9 @@ class NewlyAddedClass:
         current_time = time.time()
         os.utime(test_file, (current_time, current_time))
 
-        # Wait for modified content to be searchable (handles Windows CI polling delay)
-        found = await wait_for_regex_searchable(
-            services, "new_func.*added", timeout=get_fs_event_timeout()
+        # Wait for modified file to be re-indexed
+        found = await realtime_service.wait_for_file_indexed(
+            test_file, timeout=get_fs_event_timeout()
         )
         assert found, "Added content should be indexed"
 
