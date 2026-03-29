@@ -6,6 +6,7 @@ and runtime type checking capabilities.
 """
 
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 from typing import NewType
 
@@ -140,6 +141,21 @@ class ChunkType(Enum):
         }
 
 
+@lru_cache(maxsize=1)
+def _scss_available() -> bool:
+    """Return True if the SCSS tree-sitter grammar is available.
+
+    Uses a lazy import to avoid a circular dependency (parser_factory imports
+    Language from this module).  The result is cached so the import only runs once.
+    """
+    try:
+        from chunkhound.parsers.parser_factory import SCSS_AVAILABLE  # noqa: PLC0415
+
+        return SCSS_AVAILABLE
+    except Exception:
+        return False
+
+
 class Language(Enum):
     """Enumeration of programming languages and file types supported by ChunkHound."""
 
@@ -195,18 +211,6 @@ class Language(Enum):
     @classmethod
     def from_file_extension(cls, file_path: str | Path) -> "Language":
         """Determine language from file extension and filename."""
-        # Resolve SCSS availability once per call via the authoritative flag in
-        # parser_factory.  The lazy import breaks the module-level circular
-        # dependency (parser_factory imports Language from this module).
-        def _scss_available() -> bool:
-            try:
-                from chunkhound.parsers.parser_factory import (  # noqa: PLC0415
-                    SCSS_AVAILABLE,
-                )
-
-                return SCSS_AVAILABLE
-            except Exception:
-                return False
         if isinstance(file_path, str):
             file_path = Path(file_path)
 

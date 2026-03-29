@@ -49,8 +49,8 @@ SEMANTIC_TAGS = frozenset(
 class HtmlMapping(BaseMapping):
     """HTML-specific mapping for universal concepts."""
 
-    def __init__(self) -> None:
-        super().__init__(Language.HTML)
+    def __init__(self, language: Language = Language.HTML) -> None:
+        super().__init__(language)
 
     def get_function_query(self) -> str:
         """Get tree-sitter query for function definitions.
@@ -315,7 +315,7 @@ class HtmlMapping(BaseMapping):
 
     def extract_constants(
         self,
-        concept: Any,
+        concept: UniversalConcept,
         captures: dict[str, Any],
         content: bytes,
     ) -> list[dict[str, str]] | None:
@@ -334,4 +334,4 @@ class JinjaMapping(HtmlMapping):
     """
 
     def __init__(self) -> None:
-        BaseMapping.__init__(self, Language.JINJA)
+        super().__init__(Language.JINJA)

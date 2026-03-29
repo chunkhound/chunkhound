@@ -177,6 +177,11 @@ class CssMapping(BaseMapping):
                 metadata["is_root_vars"] = is_root_vars
                 # :root/:* var blocks are STRUCTURE (namespace); plain rule sets are blocks.
                 metadata["chunk_type_hint"] = "namespace" if is_root_vars else "block"
+                if is_root_vars:
+                    # Prevent :root/:* var blocks from merging with adjacent rule-set chunks.
+                    # DEFINITION↔STRUCTURE is a valid pair for OOP languages (class+method);
+                    # CSS needs the per-chunk override instead of a global exclusion.
+                    metadata["prevent_merge_across_concepts"] = True
         return metadata
 
     def resolve_import_paths(
