@@ -455,6 +455,105 @@ class TestNonBlockingInitialization:
         assert startup["phases"]["daemon_publish"]["state"] == "completed"
         assert startup["phases"]["daemon_publish"]["completed_at"] is not None
 
+    @pytest.mark.asyncio
+    async def test_daemon_deduplicates_delayed_shutdown_task(
+        self, tmp_path: Path
+    ) -> None:
+        """Repeated last-client callbacks should not schedule duplicate tasks."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.realtime_backend = "watchdog"
+        args = MagicMock()
+        args.path = str(tmp_path)
+
+        daemon = ChunkHoundDaemon(
+            config=config,
+            args=args,
+            socket_path="tcp:127.0.0.1:0",
+            project_dir=tmp_path,
+        )
+        daemon._shutdown_delay = 60.0
+
+        daemon._on_all_clients_gone()
+        first_task = daemon._delayed_shutdown_task
+        assert first_task is not None
+        daemon._on_all_clients_gone()
+        assert daemon._delayed_shutdown_task is first_task
+        assert not first_task.done()
+
+        first_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first_task
+        assert daemon._delayed_shutdown_task is None
+
+    @pytest.mark.asyncio
+    async def test_daemon_clears_delayed_shutdown_task_after_completion(
+        self, tmp_path: Path
+    ) -> None:
+        """The tracked delayed-shutdown task should clear its slot on completion."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.realtime_backend = "watchdog"
+        args = MagicMock()
+        args.path = str(tmp_path)
+
+        daemon = ChunkHoundDaemon(
+            config=config,
+            args=args,
+            socket_path="tcp:127.0.0.1:0",
+            project_dir=tmp_path,
+        )
+        daemon._shutdown_delay = 0.0
+        daemon._client_manager.count = MagicMock(return_value=1)
+
+        daemon._on_all_clients_gone()
+        task = daemon._delayed_shutdown_task
+        assert task is not None
+
+        await task
+        assert daemon._delayed_shutdown_task is None
+        assert daemon._shutdown_event.is_set() is False
+
+    @pytest.mark.asyncio
+    async def test_daemon_graceful_shutdown_cancels_owned_delayed_shutdown_task(
+        self, tmp_path: Path
+    ) -> None:
+        """Graceful shutdown should own and drain the delayed shutdown task."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.realtime_backend = "watchdog"
+        args = MagicMock()
+        args.path = str(tmp_path)
+
+        daemon = ChunkHoundDaemon(
+            config=config,
+            args=args,
+            socket_path="tcp:127.0.0.1:0",
+            project_dir=tmp_path,
+        )
+        daemon._shutdown_delay = 60.0
+        daemon.cleanup = AsyncMock()
+
+        daemon._on_all_clients_gone()
+        task = daemon._delayed_shutdown_task
+        assert task is not None
+        assert not task.done()
+
+        await daemon._graceful_shutdown()
+
+        daemon.cleanup.assert_awaited_once()
+        assert task.cancelled()
+        assert daemon._delayed_shutdown_task is None
+
     def test_daemon_startup_phase_breadcrumbs_emit_to_stderr(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

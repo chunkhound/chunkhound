@@ -64,7 +64,11 @@ class RealtimePathFilter:
         self._engine: Any | None = None
         self._engine_initialized = False
         self._engine_initialization_failed = False
+        self._ignore_engine_degraded = False
+        self._ignore_engine_degraded_warned = False
         self._include_patterns: list[str] | None = None
+        self._include_degraded = False
+        self._include_degraded_warned = False
         self._pattern_cache: dict[str, Any] = {}
         self._settings = settings or RealtimePathFilterSettings.from_config(config)
         self._root = self._resolve_root(config=config, root_path=root_path)
@@ -112,13 +116,19 @@ class RealtimePathFilter:
                     f"for {self._root}: {error}"
                 )
 
-        try:
-            if self._engine is not None and self._engine.matches(
-                file_path, is_dir=False
-            ):
-                return False
-        except Exception:
-            pass
+        if not self._ignore_engine_degraded:
+            try:
+                if self._engine is not None and self._engine.matches(
+                    file_path, is_dir=False
+                ):
+                    return False
+            except Exception as error:
+                self._ignore_engine_degraded = True
+                self._engine = None
+                self._warn_ignore_engine_degraded_once(error)
+
+        if self._include_degraded:
+            return self._language_fallback(file_path)
 
         try:
             if self._include_patterns is None:
@@ -141,8 +151,30 @@ class RealtimePathFilter:
                 self._include_patterns,
                 self._pattern_cache,
             )
-        except Exception:
+        except Exception as error:
+            self._include_degraded = True
+            self._warn_include_degraded_once(error)
             return self._language_fallback(file_path)
+
+    def _warn_ignore_engine_degraded_once(self, error: Exception) -> None:
+        if self._ignore_engine_degraded_warned:
+            return
+        self._ignore_engine_degraded_warned = True
+        logger.warning(
+            "RealtimePathFilter ignore-engine evaluation failed "
+            f"for {self._root}: {error}; ignore-based exclusion could not be "
+            "applied, falling back to language admission"
+        )
+
+    def _warn_include_degraded_once(self, error: Exception) -> None:
+        if self._include_degraded_warned:
+            return
+        self._include_degraded_warned = True
+        logger.warning(
+            "RealtimePathFilter include-pattern evaluation failed "
+            f"for {self._root}: {error}; include filtering fell back to "
+            "language admission"
+        )
 
     @staticmethod
     def _language_fallback(file_path: Path) -> bool:

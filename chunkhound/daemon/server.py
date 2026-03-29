@@ -52,6 +52,7 @@ class ChunkHoundDaemon(MCPServerBase):
         self._shutdown_event = asyncio.Event()
         self._initialization_complete = asyncio.Event()
         self._pid_poll_task: asyncio.Task | None = None
+        self._delayed_shutdown_task: asyncio.Task[None] | None = None
         self._client_manager = ClientManager(on_empty=self._on_all_clients_gone)
         # True only after we successfully bound the socket and wrote the lock
         self._lock_written = False
@@ -188,8 +189,21 @@ class ChunkHoundDaemon(MCPServerBase):
 
     def _on_all_clients_gone(self) -> None:
         """Called by ClientManager when the last client disconnects."""
+        if (
+            self._delayed_shutdown_task is not None
+            and not self._delayed_shutdown_task.done()
+        ):
+            self.debug_log("Last client disconnected — shutdown already scheduled")
+            return
+
         self.debug_log("Last client disconnected — scheduling shutdown")
-        asyncio.create_task(self._delayed_shutdown())
+        task = asyncio.create_task(self._delayed_shutdown())
+        self._delayed_shutdown_task = task
+        task.add_done_callback(self._clear_delayed_shutdown_task)
+
+    def _clear_delayed_shutdown_task(self, task: asyncio.Task[None]) -> None:
+        if self._delayed_shutdown_task is task:
+            self._delayed_shutdown_task = None
 
     async def _delayed_shutdown(self) -> None:
         """Optionally wait shutdown_delay seconds before triggering shutdown."""
@@ -389,6 +403,18 @@ class ChunkHoundDaemon(MCPServerBase):
                 await self._pid_poll_task
             except asyncio.CancelledError:
                 pass
+
+        delayed_shutdown_task = self._delayed_shutdown_task
+        if delayed_shutdown_task is not None:
+            if not delayed_shutdown_task.done():
+                delayed_shutdown_task.cancel()
+            try:
+                await delayed_shutdown_task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                if self._delayed_shutdown_task is delayed_shutdown_task:
+                    self._delayed_shutdown_task = None
 
         try:
             await asyncio.wait_for(self.cleanup(), timeout=10.0)

@@ -208,3 +208,97 @@ def test_realtime_path_filter_logs_ignore_engine_failure_once(
     assert warning_messages == [
         f"RealtimePathFilter failed to build repo-aware ignore engine for {root}: boom"
     ]
+
+
+def test_realtime_path_filter_logs_ignore_match_failure_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir(parents=True, exist_ok=True)
+    target_file = root / "blocked" / "mod.py"
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text("print('ok')\n", encoding="utf-8")
+
+    cfg = Config(
+        **{
+            "database": {"provider": "duckdb", "path": str(tmp_path / "db.duckdb")},
+            "indexing": {
+                "include": ["allowed/**/*.py"],
+                "exclude": [],
+                "exclude_sentinel": ".gitignore",
+            },
+            "target_dir": root,
+        }
+    )
+
+    class _BrokenEngine:
+        def matches(self, file_path: Path, *, is_dir: bool) -> bool:
+            del file_path, is_dir
+            raise RuntimeError("match boom")
+
+    warning_messages: list[str] = []
+    monkeypatch.setattr(
+        "chunkhound.services.realtime_path_filter.logger.warning",
+        lambda message: warning_messages.append(message),
+    )
+
+    path_filter = RealtimePathFilter(config=cfg, root_path=root)
+    path_filter._engine = _BrokenEngine()
+    path_filter._engine_initialized = True
+
+    assert path_filter.should_index(target_file) is False
+    assert path_filter.should_index(target_file) is False
+    assert warning_messages == [
+        "RealtimePathFilter ignore-engine evaluation failed "
+        f"for {root}: match boom; ignore-based exclusion could not be applied, "
+        "falling back to language admission"
+    ]
+
+
+def test_realtime_path_filter_logs_include_failure_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir(parents=True, exist_ok=True)
+    target_file = root / "src" / "mod.py"
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text("print('ok')\n", encoding="utf-8")
+
+    cfg = Config(
+        **{
+            "database": {"provider": "duckdb", "path": str(tmp_path / "db.duckdb")},
+            "indexing": {
+                "include": ["**/*.py"],
+                "exclude": [],
+                "exclude_sentinel": ".gitignore",
+            },
+            "target_dir": root,
+        }
+    )
+
+    warning_messages: list[str] = []
+
+    def _broken_normalize(patterns: list[str]) -> list[str]:
+        del patterns
+        raise RuntimeError("include boom")
+
+    monkeypatch.setattr(
+        "chunkhound.utils.file_patterns.normalize_include_patterns",
+        _broken_normalize,
+    )
+    monkeypatch.setattr(
+        "chunkhound.services.realtime_path_filter.logger.warning",
+        lambda message: warning_messages.append(message),
+    )
+
+    path_filter = RealtimePathFilter(config=cfg, root_path=root)
+    path_filter._engine_initialized = True
+
+    assert path_filter.should_index(target_file) is True
+    assert path_filter.should_index(target_file) is True
+    assert warning_messages == [
+        "RealtimePathFilter include-pattern evaluation failed "
+        f"for {root}: include boom; include filtering fell back to language admission"
+    ]
