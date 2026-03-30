@@ -81,11 +81,39 @@ class DuckDBConnectionManager:
         if isinstance(self.db_path, Path):
             lock_file = get_compaction_lock_path(self.db_path)
             if lock_file.exists():
-                logger.warning(
-                    "Found compaction lock file - previous compaction may have been "
-                    "interrupted. Running WAL validation..."
-                )
-                lock_file.unlink(missing_ok=True)
+                # Check if lock is held by a live process before removing
+                lock_is_stale = True
+                try:
+                    pid_str = lock_file.read_text().strip()
+                    if pid_str.isdigit():
+                        pid = int(pid_str)
+                        try:
+                            os.kill(pid, 0)
+                            # Process alive — don't remove lock
+                            lock_is_stale = False
+                            logger.warning(
+                                f"Compaction lock held by live process (PID {pid}). "
+                                "Not removing lock file."
+                            )
+                        except ProcessLookupError:
+                            logger.warning(
+                                f"Removing stale compaction lock "
+                                f"(PID {pid} no longer running)"
+                            )
+                        except PermissionError:
+                            # Process alive but owned by different user
+                            lock_is_stale = False
+                            logger.warning(
+                                f"Compaction lock held by process PID {pid} "
+                                "(different user). Not removing lock file."
+                            )
+                except OSError:
+                    logger.warning(
+                        "Removing compaction lock (unreadable or legacy format)"
+                    )
+
+                if lock_is_stale:
+                    lock_file.unlink(missing_ok=True)
 
             # Recover from interrupted compaction swap
             old_db = self.db_path.with_suffix(".duckdb.old")
