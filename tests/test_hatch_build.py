@@ -75,12 +75,35 @@ def test_custom_build_hook_hydrates_runtime_for_host(
 
     build_data: dict[str, object] = {}
     hook = object.__new__(hatch_build.CustomBuildHook)
-    hook.initialize("editable", build_data)
+    hook.initialize("standard", build_data)
 
     assert calls == ["hydrated"]
     assert build_data["force_include"] == {"src": "dst"}
     assert build_data["pure_python"] is False
     assert isinstance(build_data["tag"], str)
+
+
+def test_custom_build_hook_skips_native_runtime_for_supported_editable_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        hatch_build,
+        "_host_watchman_platform",
+        lambda **_: "linux-x86_64",
+    )
+    monkeypatch.setattr(
+        hatch_build,
+        "_hydrate_runtime_for_build",
+        lambda: pytest.fail(
+            "editable builds should skip native runtime hydration on supported hosts"
+        ),
+    )
+
+    build_data: dict[str, object] = {"force_include": {"existing": "entry"}}
+    hook = object.__new__(hatch_build.CustomBuildHook)
+    hook.initialize("editable", build_data)
+
+    assert build_data == {"force_include": {"existing": "entry"}}
 
 
 def test_custom_build_hook_skips_native_runtime_for_unsupported_editable_build(

@@ -15,6 +15,9 @@ from typing import Any
 
 import psutil
 
+import hatch_build
+from chunkhound.daemon.discovery import DaemonDiscovery
+from scripts import verify_watchman_runtime_resources as runtime_verifier
 from scripts import watchman_verifier_cleanup
 
 _MCP_INIT_PARAMS = {
@@ -24,6 +27,9 @@ _MCP_INIT_PARAMS = {
 }
 _READY_TIMEOUT_SECONDS = 60.0
 _SEARCH_TIMEOUT_SECONDS = 30.0
+_SOURCE_FALLBACK_FAILURE_TIMEOUT_SECONDS = 20.0
+_DETERMINISTIC_FAILURE_URL_BASE = "https://127.0.0.1:9/chunkhound-watchman-fail"
+_SOURCE_FALLBACK_PRETEND_VERSION = "0.0.0"
 
 
 def _terminate_process_tree(pid: int) -> None:
@@ -217,6 +223,31 @@ def _mcp_command_args(project_dir: Path) -> tuple[str, ...]:
     return ("mcp", "--no-embeddings", str(project_dir))
 
 
+def _source_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _lock_path_for_runtime(project_dir: Path, runtime_dir: Path) -> Path:
+    previous = os.environ.get("CHUNKHOUND_DAEMON_RUNTIME_DIR")
+    os.environ["CHUNKHOUND_DAEMON_RUNTIME_DIR"] = str(runtime_dir)
+    try:
+        return DaemonDiscovery(project_dir).get_lock_path()
+    finally:
+        if previous is None:
+            os.environ.pop("CHUNKHOUND_DAEMON_RUNTIME_DIR", None)
+        else:
+            os.environ["CHUNKHOUND_DAEMON_RUNTIME_DIR"] = previous
+
+
+def _host_compatible_wheels(wheel_paths: list[Path]) -> list[Path]:
+    compatible: list[Path] = []
+    for wheel_path in wheel_paths:
+        runtime_platform = runtime_verifier._runtime_platform_for_wheel(wheel_path)
+        if runtime_verifier._should_verify_runtime_reads(runtime_platform):
+            compatible.append(wheel_path)
+    return compatible
+
+
 def _utf8_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(base_env or os.environ)
     if os.name == "nt":
@@ -310,6 +341,29 @@ def _mcp_env(venv_dir: Path) -> dict[str, str]:
         preferred_entry=venv_bin,
     )
     env["CHUNKHOUND_MCP_MODE"] = "1"
+    return env
+
+
+def _clean_room_env(
+    venv_dir: Path,
+    *,
+    runtime_dir: Path | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    env = _mcp_env(venv_dir)
+    if runtime_dir is not None:
+        env["CHUNKHOUND_DAEMON_RUNTIME_DIR"] = str(runtime_dir)
+    if extra_env:
+        env.update(extra_env)
+    return env
+
+
+def _editable_install_env() -> dict[str, str]:
+    env = _utf8_env()
+    env["SETUPTOOLS_SCM_PRETEND_VERSION"] = _SOURCE_FALLBACK_PRETEND_VERSION
+    env["SETUPTOOLS_SCM_PRETEND_VERSION_FOR_CHUNKHOUND"] = (
+        _SOURCE_FALLBACK_PRETEND_VERSION
+    )
     return env
 
 
@@ -462,6 +516,293 @@ async def _wait_for_search_hit(
     )
 
 
+async def _wait_for_daemon_status(
+    client: SubprocessJsonRpcClient,
+    *,
+    predicate,
+    description: str,
+    timeout: float = _READY_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    last_status: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        result = await client.send_request(
+            "tools/call",
+            {"name": "daemon_status", "arguments": {}},
+            timeout=15.0,
+        )
+        last_status = _parse_tool_json(result)
+        if predicate(last_status):
+            return last_status
+        await asyncio.sleep(0.5)
+
+    raise RuntimeError(
+        f"Timed out waiting for daemon status {description}: {last_status}"
+    )
+
+
+def _source_tree_copy_ignore(_root: str, names: list[str]) -> set[str]:
+    ignored = {
+        ".cache",
+        ".chunkhound",
+        ".git",
+        ".venv",
+        ".ruff_cache",
+        ".uv-cache",
+        ".uv_cache",
+        ".uvcache",
+        ".pytest_cache",
+        ".mypy_cache",
+        "__pycache__",
+        "dist",
+        "build",
+    }
+    return {name for name in names if name in ignored}
+
+
+def _rewrite_watchman_source_urls(source_root: Path) -> None:
+    manifests = [
+        source_root
+        / "chunkhound"
+        / "watchman_runtime"
+        / "platforms"
+        / platform_tag
+        / "manifest.json"
+        for platform_tag in sorted(hatch_build._load_supported_watchman_platforms())
+    ]
+    for manifest_path in manifests:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        platform_tag = manifest.get("platform", "unknown")
+        if isinstance(manifest.get("source_url"), str):
+            manifest["source_url"] = (
+                f"{_DETERMINISTIC_FAILURE_URL_BASE}/{platform_tag}/runtime"
+            )
+        support_sources = manifest.get("support_file_sources")
+        if isinstance(support_sources, dict):
+            for index, descriptor in enumerate(support_sources.values()):
+                if isinstance(descriptor, dict) and isinstance(
+                    descriptor.get("source_url"), str
+                ):
+                    descriptor["source_url"] = (
+                        f"{_DETERMINISTIC_FAILURE_URL_BASE}/"
+                        f"{platform_tag}/support-{index}"
+                    )
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+
+def _write_project_config(project_dir: Path, *, realtime_backend: str | None) -> None:
+    db_path = (project_dir / ".chunkhound" / "test.db").resolve()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    indexing: dict[str, object] = {"include": ["*.py"]}
+    if realtime_backend is not None:
+        indexing["realtime_backend"] = realtime_backend
+    config = {
+        "database": {"path": str(db_path), "provider": "duckdb"},
+        "indexing": indexing,
+    }
+    (project_dir / ".chunkhound.json").write_text(
+        json.dumps(config),
+        encoding="utf-8",
+    )
+    (project_dir / "seed.py").write_text(
+        "def seed_symbol_for_source_fallback():\n    return 1\n",
+        encoding="utf-8",
+    )
+
+
+async def _start_proxy_client(
+    *,
+    chunkhound_exe: Path,
+    project_dir: Path,
+    env: dict[str, str],
+) -> tuple[asyncio.subprocess.Process, SubprocessJsonRpcClient]:
+    proc = await _create_subprocess_exec_safe(
+        str(chunkhound_exe),
+        *_mcp_command_args(project_dir),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+        cwd=str(project_dir),
+    )
+    client = SubprocessJsonRpcClient(proc)
+    await client.start()
+    await client.send_request("initialize", _MCP_INIT_PARAMS, timeout=30.0)
+    await client.send_notification("notifications/initialized", {})
+    return proc, client
+
+
+async def _run_proxy_to_failure(
+    *,
+    chunkhound_exe: Path,
+    project_dir: Path,
+    env: dict[str, str],
+    timeout: float = _SOURCE_FALLBACK_FAILURE_TIMEOUT_SECONDS,
+) -> tuple[int, str, str]:
+    proc = await _create_subprocess_exec_safe(
+        str(chunkhound_exe),
+        *_mcp_command_args(project_dir),
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+        cwd=str(project_dir),
+    )
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    return proc.returncode or 0, stdout.decode(), stderr.decode()
+
+
+async def _verify_source_fallback(source_root: Path) -> None:
+    root = Path(tempfile.mkdtemp(prefix="chunkhound-watchman-source-verify-"))
+    try:
+        editable_source_root = root / "editable-source"
+        shutil.copytree(
+            source_root,
+            editable_source_root,
+            ignore=_source_tree_copy_ignore,
+        )
+        _rewrite_watchman_source_urls(editable_source_root)
+
+        venv_dir = root / "venv"
+        runtime_dir = root / "runtime"
+        cache_dir = root / "cache"
+        default_project_dir = root / "project-default"
+        watchman_project_dir = root / "project-watchman"
+        default_project_dir.mkdir(parents=True, exist_ok=True)
+        watchman_project_dir.mkdir(parents=True, exist_ok=True)
+        _write_project_config(default_project_dir, realtime_backend=None)
+        _write_project_config(watchman_project_dir, realtime_backend="watchman")
+
+        subprocess.run(
+            ["uv", "venv", str(venv_dir)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        python_path = _python_path(venv_dir)
+        subprocess.run(
+            [
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                str(python_path),
+                "-e",
+                str(editable_source_root),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=_editable_install_env(),
+        )
+        chunkhound_exe = _chunkhound_path(venv_dir)
+        if not chunkhound_exe.is_file():
+            raise FileNotFoundError(
+                f"Installed chunkhound executable not found: {chunkhound_exe}"
+            )
+
+        default_env = _clean_room_env(
+            venv_dir,
+            runtime_dir=runtime_dir / "default",
+            extra_env={
+                "CHUNKHOUND_WATCHMAN_RUNTIME_CACHE_DIR": str(cache_dir / "default"),
+            },
+        )
+        proc, client = await _start_proxy_client(
+            chunkhound_exe=chunkhound_exe,
+            project_dir=default_project_dir,
+            env=default_env,
+        )
+        default_stderr = ""
+        try:
+            status = await _wait_for_daemon_status(
+                client,
+                predicate=lambda payload: payload.get("status") == "ready"
+                and payload.get("scan_progress", {})
+                .get("realtime", {})
+                .get("configured_backend")
+                == "watchdog"
+                and payload.get("scan_progress", {})
+                .get("realtime", {})
+                .get("effective_backend")
+                == "watchdog",
+                description="watchdog fallback readiness",
+            )
+            realtime = status["scan_progress"]["realtime"]
+            if realtime.get("configured_backend") != "watchdog":
+                raise RuntimeError(
+                    f"Source fallback configured backend was not watchdog: {realtime}"
+                )
+            if realtime.get("effective_backend") != "watchdog":
+                raise RuntimeError(
+                    f"Source fallback effective backend was not watchdog: {realtime}"
+                )
+        finally:
+            await client.close()
+            if proc.stderr is not None:
+                default_stderr = (await proc.stderr.read()).decode(
+                    "utf-8",
+                    errors="replace",
+                )
+        if default_stderr.strip():
+            print(default_stderr, file=os.sys.stderr)
+
+        failure_runtime_dir = runtime_dir / "watchman"
+        failure_env = _clean_room_env(
+            venv_dir,
+            runtime_dir=failure_runtime_dir,
+            extra_env={
+                "CHUNKHOUND_WATCHMAN_RUNTIME_CACHE_DIR": str(cache_dir / "watchman"),
+                "CHUNKHOUND_WATCHMAN_RUNTIME_DOWNLOAD_TIMEOUT_SECONDS": "1",
+                "CHUNKHOUND_WATCHMAN_RUNTIME_DOWNLOAD_RETRIES": "1",
+            },
+        )
+        returncode, _stdout, stderr_text = await _run_proxy_to_failure(
+            chunkhound_exe=chunkhound_exe,
+            project_dir=watchman_project_dir,
+            env=failure_env,
+        )
+        if returncode == 0:
+            raise RuntimeError(
+                "Explicit source-install watchman startup unexpectedly succeeded"
+            )
+        if "Recent daemon log output" not in stderr_text:
+            raise RuntimeError(
+                "Explicit source-install watchman failure did not include "
+                f"daemon log context: {stderr_text}"
+            )
+
+        daemon_log_path = watchman_project_dir / ".chunkhound" / "daemon.log"
+        if not daemon_log_path.exists():
+            raise RuntimeError(
+                "Explicit source-install watchman failure did not write daemon.log"
+            )
+        daemon_log_text = daemon_log_path.read_text(
+            encoding="utf-8",
+            errors="replace",
+        )
+        if (
+            "Watchman runtime archive download failed" not in daemon_log_text
+            and "Watchman" not in daemon_log_text
+        ):
+            raise RuntimeError(
+                "Explicit source-install watchman failure did not surface "
+                f"Watchman startup evidence: {daemon_log_text}"
+            )
+
+        lock_path = _lock_path_for_runtime(watchman_project_dir, failure_runtime_dir)
+        if lock_path.exists():
+            raise RuntimeError(
+                "Explicit source-install watchman failure published a daemon lock"
+            )
+    finally:
+        _terminate_processes_using_root(root)
+        _remove_tree_with_retries(root)
+
+
 async def _verify_wheel(wheel_path: Path) -> None:
     root = Path(tempfile.mkdtemp(prefix="chunkhound-watchman-live-wheel-verify-"))
     try:
@@ -548,24 +889,61 @@ async def _verify_wheel(wheel_path: Path) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Install built wheel(s) into clean temporary environments and prove "
-            "that a Watchman-backed live mutation becomes searchable."
+            "Verify installed-wheel Watchman live indexing and the documented "
+            "source/editable fallback contract."
         )
     )
     parser.add_argument(
         "wheels",
-        nargs="+",
+        nargs="*",
         type=Path,
-        help="Path(s) to .whl file(s) to verify.",
+        help="Path(s) to .whl file(s) to verify for installed-wheel live indexing.",
+    )
+    parser.add_argument(
+        "--require-supported-matrix",
+        action="store_true",
+        help=(
+            "Require the supplied wheel set to contain exactly one wheel for "
+            "each supported packaged Watchman runtime platform."
+        ),
+    )
+    parser.add_argument(
+        "--verify-source-fallback",
+        action="store_true",
+        help=(
+            "Verify that a source/editable install defaults to watchdog and "
+            "fails fast when watchman is explicitly requested."
+        ),
+    )
+    parser.add_argument(
+        "--source-root",
+        type=Path,
+        default=_source_root(),
+        help=(
+            "Source tree root to use for the source/editable fallback proof "
+            "(defaults to this repository root)."
+        ),
     )
     args = parser.parse_args(argv)
 
-    for wheel_path in args.wheels:
+    if not args.wheels and not args.verify_source_fallback:
+        parser.error("Provide wheel paths and/or --verify-source-fallback.")
+
+    wheel_paths = list(args.wheels)
+    for wheel_path in wheel_paths:
         if not wheel_path.is_file() or wheel_path.suffix != ".whl":
             raise FileNotFoundError(f"Wheel not found: {wheel_path}")
 
-    for wheel_path in args.wheels:
+    if args.require_supported_matrix:
+        if not wheel_paths:
+            parser.error("--require-supported-matrix requires at least one wheel.")
+        runtime_verifier._verify_supported_wheel_matrix(wheel_paths)
+
+    for wheel_path in _host_compatible_wheels(wheel_paths):
         asyncio.run(_verify_wheel(wheel_path))
+
+    if args.verify_source_fallback:
+        asyncio.run(_verify_source_fallback(args.source_root))
 
     return 0
 

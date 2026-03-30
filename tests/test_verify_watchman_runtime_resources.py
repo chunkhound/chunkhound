@@ -33,6 +33,10 @@ def _host_runtime_wheel_name() -> str:
     return _wheel_name_for_runtime_platform(host_platform)
 
 
+def _supported_runtime_platforms() -> tuple[str, ...]:
+    return tuple(sorted(hatch_build._load_supported_watchman_platforms()))
+
+
 def _other_supported_wheel_name() -> str:
     host_platform = hatch_build._host_watchman_platform()
     if host_platform == "linux-x86_64":
@@ -152,6 +156,16 @@ def _build_synthetic_watchman_wheel(
     return wheel_path
 
 
+def _build_supported_matrix_wheels(tmp_path: Path) -> list[Path]:
+    return [
+        _build_synthetic_watchman_wheel(
+            tmp_path,
+            wheel_name=_wheel_name_for_runtime_platform(platform_tag),
+        )
+        for platform_tag in _supported_runtime_platforms()
+    ]
+
+
 def test_main_accepts_synthetic_platform_wheel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -170,6 +184,31 @@ def test_main_accepts_synthetic_platform_wheel(
     assert calls == [wheel_path]
 
 
+def test_main_accepts_full_supported_matrix_when_required(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel_paths = _build_supported_matrix_wheels(tmp_path)
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        watchman_verifier,
+        "_verify_runtime_reads",
+        lambda *, wheel_path, runtime_platform: calls.append(wheel_path),
+    )
+
+    assert (
+        watchman_verifier.main(
+            ["--require-supported-matrix", *(str(path) for path in wheel_paths)]
+        )
+        == 0
+    )
+    assert calls == [
+        path
+        for path in wheel_paths
+        if watchman_verifier._runtime_platform_for_wheel(path)
+        == hatch_build._host_watchman_platform()
+    ]
+
+
 def test_main_rejects_universal_wheel_tag(tmp_path: Path) -> None:
     wheel_path = _build_synthetic_watchman_wheel(
         tmp_path,
@@ -178,6 +217,36 @@ def test_main_rejects_universal_wheel_tag(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="py3-none-platform"):
         watchman_verifier.main([str(wheel_path)])
+
+
+def test_main_rejects_missing_supported_wheel_when_matrix_required(
+    tmp_path: Path,
+) -> None:
+    wheel_paths = _build_supported_matrix_wheels(tmp_path)
+
+    with pytest.raises(RuntimeError, match="Missing required supported"):
+        watchman_verifier.main(
+            ["--require-supported-matrix", *(str(path) for path in wheel_paths[:-1])]
+        )
+
+
+def test_main_rejects_duplicate_supported_platform_when_matrix_required(
+    tmp_path: Path,
+) -> None:
+    wheel_paths = _build_supported_matrix_wheels(tmp_path)
+    duplicate = _build_synthetic_watchman_wheel(
+        tmp_path,
+        wheel_name=f"duplicate-{_host_runtime_wheel_name()}",
+    )
+
+    with pytest.raises(RuntimeError, match="multiple wheels for the same"):
+        watchman_verifier.main(
+            [
+                "--require-supported-matrix",
+                *(str(path) for path in wheel_paths),
+                str(duplicate),
+            ]
+        )
 
 
 def test_main_rejects_missing_required_runtime_resource(tmp_path: Path) -> None:

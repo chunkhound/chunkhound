@@ -155,13 +155,17 @@ uv run scripts/update_version.py --bump minor b1 # Bump to next minor beta
 
 1. **Create version tag**: Use `update_version.py` (see above)
 2. **Run smoke tests**: `uv run pytest tests/test_smoke.py -v -n auto` (MANDATORY)
-3. **Prepare release**: `./scripts/prepare_release.sh`
+3. **Stage the supported Watchman wheels in `dist/`**
+   - Download or copy the Linux `x86_64` and Windows `x86_64` wheels produced by the CI matrix into `dist/`
+   - Treat those wheels as the release artifacts under verification; `prepare_release.sh` does not rebuild them locally
+4. **Prepare release**: `./scripts/prepare_release.sh`
    - Regenerates `requirements-lock.txt` with exact versions
-   - Ensures all lock files are synchronized
-   - Creates reproducible release artifacts
-4. **Test locally**: `pip install dist/chunkhound-X.Y.Z-<platform-tag>.whl`
-5. **Push tag**: `git push origin vX.Y.Z`
-6. **Publish**: `uv publish` (requires PYPI_TOKEN)
+   - Builds the source distribution without replacing the staged wheels
+   - Verifies the full supported Watchman wheel matrix plus the source/editable fallback contract
+   - Generates `SHA256SUMS` for the final staged artifacts
+5. **Test locally**: `pip install dist/chunkhound-X.Y.Z-<platform-tag>.whl`
+6. **Push tag**: `git push origin vX.Y.Z`
+7. **Publish**: `uv publish` (requires PYPI_TOKEN)
 
 This ensures that users can install ChunkHound with either:
 - **Library install**: `pip install chunkhound` (flexible dependencies)

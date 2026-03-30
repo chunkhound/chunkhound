@@ -147,12 +147,12 @@ class CustomBuildHook(BuildHookInterface):
     PLUGIN_NAME = "custom"
 
     def initialize(self, version: str, build_data: dict[str, object]) -> None:
+        if _should_skip_native_runtime_for_build_version(version):
+            return
         supported_platforms = _load_supported_watchman_platforms()
         try:
             _require_supported_build_host(supported_platforms)
         except RuntimeError:
-            if _should_skip_native_runtime_for_build_version(version):
-                return
             raise
         allowed_platform_tags = _allowed_wheel_platform_tags_for_build_host()
         force_include = build_data.setdefault("force_include", {})

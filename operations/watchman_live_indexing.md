@@ -198,8 +198,13 @@ The Linux and Windows native Watchman rollout is gated on all of the following:
 1. The `watchman-runtime-validation` job in
    `.github/workflows/smoke-tests.yml` is green on `ubuntu-latest` and
    `windows-latest`.
+   - Each host-native lane builds its own wheel, proves host-native runtime
+     resources, and proves installed-wheel live indexing for that host.
+   - The downstream aggregate rollout-gate lane downloads both wheel artifacts,
+     enforces the full supported wheel matrix, and proves the documented
+     source/editable fallback contract.
 2. Built wheel artifacts pass
-   `uv run python scripts/verify_watchman_runtime_resources.py <wheel>`.
+   `uv run python scripts/verify_watchman_runtime_resources.py --require-supported-matrix <wheel...>`.
 3. A Watchman-backed daemon smoke run reaches steady state with
    `daemon_status.status == "ready"`,
    `scan_progress.realtime.service_state == "running"`,
@@ -209,6 +214,10 @@ The Linux and Windows native Watchman rollout is gated on all of the following:
 4. A forced fresh-instance, recrawl, or disconnect path proves that
    `watchman_loss_of_sync.count` increments and the resync contract surfaces
    through `resync.last_reason == "realtime_loss_of_sync"`.
+5. A source checkout or editable install without packaged payloads proves that
+   `watchdog` remains the default fallback backend, while explicit
+   `backend=watchman` still fails fast with startup diagnostics instead of
+   silently downgrading.
 
 Current status:
 

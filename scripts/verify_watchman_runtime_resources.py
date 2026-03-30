@@ -129,6 +129,53 @@ def _runtime_platforms_in_wheel(
     return discovered
 
 
+def _runtime_platform_for_wheel(wheel_path: Path) -> str:
+    _verify_wheel_has_platform_only_tag(wheel_path)
+    with zipfile.ZipFile(wheel_path) as zf:
+        names = set(zf.namelist())
+    runtime_platforms = _runtime_platforms_in_wheel(wheel_path=wheel_path, names=names)
+    return runtime_platforms[0]
+
+
+def _verify_supported_wheel_matrix(wheel_paths: list[Path]) -> dict[str, Path]:
+    supported_platforms = set(_supported_runtime_platforms())
+    discovered: dict[str, Path] = {}
+
+    for wheel_path in wheel_paths:
+        runtime_platform = _runtime_platform_for_wheel(wheel_path)
+        previous = discovered.get(runtime_platform)
+        if previous is not None:
+            raise RuntimeError(
+                "Found multiple wheels for the same supported Watchman runtime "
+                f"platform {runtime_platform!r}: {previous} and {wheel_path}"
+            )
+        discovered[runtime_platform] = wheel_path
+
+    missing = sorted(supported_platforms - set(discovered))
+    if missing:
+        rendered = ", ".join(missing)
+        raise RuntimeError(
+            "Missing required supported Watchman runtime wheel(s): "
+            f"{rendered}. Supplied wheels: "
+            f"{', '.join(str(path) for path in wheel_paths)}"
+        )
+
+    extra = sorted(set(discovered) - supported_platforms)
+    if extra:
+        rendered = ", ".join(extra)
+        raise RuntimeError(
+            "Supplied wheel set contains unsupported Watchman runtime platform(s): "
+            f"{rendered}"
+        )
+
+    if len(discovered) != len(wheel_paths):
+        raise RuntimeError(
+            "Supplied wheel set contains duplicate or unexpected wheel artifacts."
+        )
+
+    return discovered
+
+
 def _terminate_process_tree(pid: int) -> None:
     watchman_verifier_cleanup.terminate_process_tree(pid, psutil_module=psutil)
 
@@ -529,6 +576,14 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="Path(s) to .whl file(s) to verify.",
     )
+    parser.add_argument(
+        "--require-supported-matrix",
+        action="store_true",
+        help=(
+            "Require the supplied wheel set to contain exactly one wheel for "
+            "each supported packaged Watchman runtime platform."
+        ),
+    )
     args = parser.parse_args(argv)
 
     wheel_paths: list[Path] = []
@@ -537,6 +592,9 @@ def main(argv: list[str] | None = None) -> int:
             wheel_paths.append(raw)
             continue
         raise FileNotFoundError(f"Wheel not found: {raw}")
+
+    if args.require_supported_matrix:
+        _verify_supported_wheel_matrix(wheel_paths)
 
     for wheel_path in wheel_paths:
         _verify_wheel_has_platform_only_tag(wheel_path)
