@@ -100,6 +100,7 @@ def _build_synthetic_watchman_wheel(
 ) -> Path:
     repo_root = _repo_root()
     wheel_path = tmp_path / wheel_name
+    host_runtime_platform = hatch_build._host_watchman_platform()
     selected_runtime_platform = runtime_platform or hatch_build._host_watchman_platform()
     excluded = excluded_paths or set()
     overrides = overridden_text_files or {}
@@ -146,7 +147,13 @@ def _build_synthetic_watchman_wheel(
                 payload = source_path.read_bytes()
                 info.external_attr = (source_path.stat().st_mode & 0xFFFF) << 16
             else:
-                raise FileNotFoundError(source_path)
+                if selected_runtime_platform != host_runtime_platform:
+                    payload = (
+                        f"synthetic non-host runtime payload for {relative_path}\n"
+                    ).encode("utf-8")
+                    info.external_attr = 0o644 << 16
+                else:
+                    raise FileNotFoundError(source_path)
             zf.writestr(
                 info,
                 payload,
@@ -208,6 +215,46 @@ def test_main_accepts_full_supported_matrix_when_required(
         if watchman_verifier._runtime_platform_for_wheel(path)
         == hatch_build._host_watchman_platform()
     ]
+
+
+def test_build_supported_matrix_wheel_synthesizes_missing_non_host_payloads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    non_host_platform = next(
+        platform
+        for platform in _supported_runtime_platforms()
+        if platform != hatch_build._host_watchman_platform()
+    )
+    missing_payload = (
+        _repo_root()
+        / "chunkhound"
+        / "watchman_runtime"
+        / "platforms"
+        / non_host_platform
+        / "bin"
+        / "watchman.exe"
+    )
+    original_exists = Path.exists
+
+    def fake_exists(path: Path) -> bool:
+        if path == missing_payload:
+            return False
+        return original_exists(path)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+
+    wheel_path = _build_synthetic_watchman_wheel(
+        tmp_path,
+        wheel_name=_wheel_name_for_runtime_platform(non_host_platform),
+        runtime_platform=non_host_platform,
+    )
+
+    with zipfile.ZipFile(wheel_path) as zf:
+        payload = zf.read(
+            f"chunkhound/watchman_runtime/platforms/{non_host_platform}/bin/watchman.exe"
+        )
+
+    assert payload.startswith(b"synthetic non-host runtime payload")
 
 
 def test_main_rejects_universal_wheel_tag(tmp_path: Path) -> None:
