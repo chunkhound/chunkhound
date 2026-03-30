@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
-import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -99,9 +98,7 @@ def test_unix_ipc_address_uses_runtime_scoped_socket_dir(
 
     socket_path = Path(discovery.get_ipc_address())
     assert socket_path.parent == discovery.get_socket_dir()
-    assert socket_path.parent.parent == (
-        Path(tempfile.gettempdir()) / "chunkhound-daemon-sockets"
-    )
+    assert socket_path.parent.parent == Path("/tmp") / "chunkhound-daemon-sockets"
     assert socket_path.name.startswith("chunkhound-")
     assert socket_path.suffix == ".sock"
 
@@ -127,6 +124,28 @@ def test_unix_ipc_address_changes_with_runtime_dir(
     address_b = DaemonDiscovery(project_dir).get_ipc_address()
 
     assert address_a != address_b
+
+
+def test_unix_ipc_address_ignores_long_platform_tempdir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Unix IPC should stay under a short fixed root even on long tempdirs."""
+    _set_runtime_dir_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(discovery_module.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        discovery_module.tempfile,
+        "gettempdir",
+        lambda: "/var/folders/zz/zyxvpxvq6csfxvn_n00000sm00006d/T",
+    )
+
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+
+    socket_path = Path(DaemonDiscovery(project_dir).get_ipc_address())
+
+    assert socket_path.parent.parent == Path("/tmp") / "chunkhound-daemon-sockets"
+    assert len(str(socket_path)) < 104
 
 
 def test_windows_ipc_address_is_deterministic_within_runtime(

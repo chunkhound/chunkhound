@@ -120,6 +120,11 @@ def _runtime_socket_scope_hash(runtime_dir: Path) -> str:
     return hashlib.sha256(_runtime_dir_identity(runtime_dir).encode()).hexdigest()[:12]
 
 
+def _unix_socket_root() -> Path:
+    """Return a fixed short POSIX root for daemon Unix sockets."""
+    return Path("/tmp") / _SOCKETS_DIR_NAME
+
+
 def _parse_tcp_address(address: str) -> tuple[str, int] | None:
     """Parse a TCP loopback address or return None for other transports."""
     if not address.startswith("tcp:"):
@@ -266,11 +271,7 @@ class DaemonDiscovery:
 
     def get_socket_dir(self) -> Path:
         """Return the runtime-scoped Unix socket directory."""
-        return (
-            Path(tempfile.gettempdir())
-            / _SOCKETS_DIR_NAME
-            / _runtime_socket_scope_hash(self.get_runtime_dir())
-        )
+        return _unix_socket_root() / _runtime_socket_scope_hash(self.get_runtime_dir())
 
     def _preferred_windows_ipc_address(self) -> str:
         """Return the preferred Windows loopback address for this runtime/root."""
