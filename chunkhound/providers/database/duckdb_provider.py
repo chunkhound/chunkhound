@@ -3121,7 +3121,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Atomic lock acquisition (matches daemon PID lock pattern)
             try:
                 with open(lock_file, "x") as f:
-                    f.write(str(os.getpid()))
+                    f.write(f"{os.getpid()}:{time.time():.0f}")
             except FileExistsError:
                 raise CompactionError(
                     "Compaction already in progress (lock file exists)"
