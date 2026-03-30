@@ -65,6 +65,10 @@ def _synthetic_wheel_files(runtime_platform: str) -> tuple[str, ...]:
 
 def _host_runtime_binary_path() -> str:
     platform_tag = hatch_build._host_watchman_platform()
+    return _runtime_binary_path(platform_tag)
+
+
+def _runtime_binary_path(platform_tag: str) -> str:
     manifest_path = (
         _repo_root()
         / "chunkhound"
@@ -225,15 +229,7 @@ def test_build_supported_matrix_wheel_synthesizes_missing_non_host_payloads(
         for platform in _supported_runtime_platforms()
         if platform != hatch_build._host_watchman_platform()
     )
-    missing_payload = (
-        _repo_root()
-        / "chunkhound"
-        / "watchman_runtime"
-        / "platforms"
-        / non_host_platform
-        / "bin"
-        / "watchman.exe"
-    )
+    missing_payload = _repo_root() / _runtime_binary_path(non_host_platform)
     original_exists = Path.exists
 
     def fake_exists(path: Path) -> bool:
@@ -250,9 +246,7 @@ def test_build_supported_matrix_wheel_synthesizes_missing_non_host_payloads(
     )
 
     with zipfile.ZipFile(wheel_path) as zf:
-        payload = zf.read(
-            f"chunkhound/watchman_runtime/platforms/{non_host_platform}/bin/watchman.exe"
-        )
+        payload = zf.read(_runtime_binary_path(non_host_platform))
 
     assert payload.startswith(b"synthetic non-host runtime payload")
 
