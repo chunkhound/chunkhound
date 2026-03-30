@@ -3242,8 +3242,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         DuckDB's EXPORT/IMPORT DATABASE don't support parameterized paths,
         so we must interpolate. This validates against injection characters.
         """
-        path_str = str(path)
-        dangerous = set(';$`"\x00')
+        path_str = path.as_posix()
+        dangerous = set(';$`"\\\x00')
         found = dangerous & set(path_str)
         if found:
             raise CompactionError(
