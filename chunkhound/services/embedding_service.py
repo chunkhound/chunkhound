@@ -760,7 +760,10 @@ class EmbeddingService(BaseService):
         3. Database actually needs optimization (has free blocks to reclaim)
         """
         if self._completed_batches >= self._optimization_batch_frequency:
-            if await asyncio.to_thread(self._db.has_reclaimable_space, operation="embedding-generation"):
+            has_reclaimable = await asyncio.to_thread(
+                self._db.has_reclaimable_space, operation="embedding-generation"
+            )
+            if has_reclaimable:
                 # Capture batch count before reset for accurate logging
                 batch_count = self._completed_batches
 
