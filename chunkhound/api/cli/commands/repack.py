@@ -72,9 +72,10 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
             formatter.info(f"Row-group waste: {row_waste:.1%}")
             formatter.info(f"Free blocks ratio: {free_ratio:.1%}")
             formatter.info(f"Effective waste: {effective_waste:.1%}")
+            reclaimable_bytes = estimate_reclaimable_bytes(stats)
             formatter.info(
                 f"Estimated reclaimable: "
-                f"~{_format_size(estimate_reclaimable_bytes(stats))}"
+                f"~{_format_size(reclaimable_bytes)}"
             )
             threshold = config.database.compaction_threshold
             if effective_waste >= threshold:
@@ -88,8 +89,7 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
                     f"Manual repack always runs regardless"
                 )
             min_size_mb = config.database.compaction_min_size_mb
-            effective_reclaimable = estimate_reclaimable_bytes(stats)
-            reclaimable_mb = effective_reclaimable / (1024 * 1024)
+            reclaimable_mb = reclaimable_bytes / (1024 * 1024)
             if reclaimable_mb < min_size_mb:
                 formatter.info(
                     f"Estimated reclaimable {reclaimable_mb:.1f}MB below "
