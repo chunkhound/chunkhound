@@ -4,6 +4,8 @@ Provides both blocking (CLI) and background (MCP) compaction modes.
 """
 
 import asyncio
+import threading
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -47,11 +49,22 @@ class CompactionService:
         self._compaction_in_progress = False
         self._compaction_task: asyncio.Task[None] | None = None
         self._shutdown_requested = False
+        # Tracks whether the blocking thread spawned by asyncio.to_thread has
+        # truly exited.  asyncio task cancellation does NOT interrupt threads —
+        # the thread runs to completion regardless.  Callers (e.g. cleanup())
+        # must wait on this event before tearing down the provider.
+        self._compaction_thread_done = threading.Event()
+        self._compaction_thread_done.set()  # No thread running initially
 
     @property
     def is_compacting(self) -> bool:
         """Check if compaction is currently in progress."""
         return self._compaction_in_progress
+
+    @property
+    def compaction_thread_done(self) -> threading.Event:
+        """Event that is set when the compaction thread has exited."""
+        return self._compaction_thread_done
 
     def check_should_compact(
         self, provider: "DuckDBProvider"
@@ -192,14 +205,24 @@ class CompactionService:
             logger.info("Compaction aborted due to shutdown request")
             return False
 
-        # Delegate actual compaction to provider (runs in thread pool)
-        # Provider handles: lock file, EXPORT, IMPORT, atomic swap, recovery
-        # Pass cancel_check so provider can abort between steps on shutdown.
-        # Lambda reads a bare bool — atomic under CPython's GIL.
-        result = await asyncio.to_thread(
-            provider.optimize,
-            cancel_check=lambda: self._shutdown_requested,
-        )
+        self._compaction_thread_done.clear()
+
+        def _run_in_thread() -> bool:
+            """Run provider.optimize() and signal completion via threading.Event.
+
+            asyncio.to_thread cancellation does NOT interrupt threads — the
+            EXPORT/IMPORT/SWAP operations run to completion.  The event is set
+            in ``finally`` so callers waiting on it are unblocked regardless of
+            success, failure, or asyncio-level cancellation.
+            """
+            try:
+                return provider.optimize(
+                    cancel_check=lambda: self._shutdown_requested,
+                )
+            finally:
+                self._compaction_thread_done.set()
+
+        result = await asyncio.to_thread(_run_in_thread)
 
         if result:
             logger.info("Compaction complete")
@@ -208,28 +231,42 @@ class CompactionService:
     async def shutdown(self, timeout: float = 30.0) -> None:
         """Gracefully shutdown compaction service.
 
-        Cancels any in-progress compaction and waits for cleanup.
-
-        Note: asyncio.to_thread cancellation does not interrupt a running EXPORT
-        or IMPORT operation — those are blocking calls inside the thread.
-        cancel_check only takes effect between steps (after EXPORT, before IMPORT,
-        or after IMPORT, before SWAP).
+        Cancels any in-progress compaction and waits for the underlying thread
+        to finish.  asyncio.to_thread cancellation does NOT interrupt a running
+        EXPORT or IMPORT — those are blocking calls inside the thread.
+        cancel_check only fires between steps.  We therefore also wait on
+        ``_compaction_thread_done`` (a threading.Event set by the thread's
+        ``finally`` block) to ensure the thread has truly exited before the
+        caller tears down the database provider.
         """
         self._shutdown_requested = True
+        deadline = time.monotonic() + timeout
 
         if self._compaction_task is not None and not self._compaction_task.done():
             logger.info("Cancelling in-progress compaction...")
             self._compaction_task.cancel()
 
+            remaining = max(0, deadline - time.monotonic())
             try:
-                await asyncio.wait_for(
-                    self._compaction_task,
-                    timeout=timeout
-                )
+                await asyncio.wait_for(self._compaction_task, timeout=remaining)
             except asyncio.TimeoutError:
                 logger.warning("Compaction did not stop within timeout")
             except asyncio.CancelledError:
                 pass
+
+        # Wait for the actual compaction thread to exit.  The asyncio task may
+        # be "done" (cancelled) while the thread is still running EXPORT/IMPORT.
+        # Use asyncio.to_thread to avoid blocking the event loop.
+        if not self._compaction_thread_done.is_set():
+            remaining = max(0, deadline - time.monotonic())
+            logger.info("Waiting for compaction thread to finish...")
+            done = await asyncio.to_thread(
+                self._compaction_thread_done.wait, timeout=remaining
+            )
+            if not done:
+                logger.warning(
+                    "Compaction thread still running after shutdown timeout"
+                )
 
         self._compaction_task = None
         self._compaction_in_progress = False

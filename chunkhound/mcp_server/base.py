@@ -365,11 +365,21 @@ class MCPServerBase(ABC):
         This method is idempotent - safe to call multiple times.
         """
         # Stop compaction service first (cancels any in-progress compaction).
-        # shutdown() awaits with 30s timeout; compaction thread has either
-        # completed or been cancelled (cancel_check fires between steps).
+        # shutdown() signals the thread and waits for it via threading.Event.
+        # We also do a secondary check here as defense-in-depth: the compaction
+        # thread bypasses the serial executor (direct duckdb.connect()), so we
+        # must not disconnect the provider while the thread is still alive.
         if self._compaction_service:
             self.debug_log("Stopping compaction service")
             await self._compaction_service.shutdown()
+            if not self._compaction_service.compaction_thread_done.is_set():
+                self.debug_log(
+                    "WARNING: compaction thread still alive after shutdown, waiting..."
+                )
+                await asyncio.to_thread(
+                    self._compaction_service.compaction_thread_done.wait,
+                    timeout=5.0,
+                )
             self._compaction_service = None
 
         # Cancel background scan task if still running

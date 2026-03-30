@@ -264,6 +264,13 @@ class DuckDBProvider(SerialDatabaseProvider):
         Use for temporary disconnections (e.g., compaction) where reconnection
         will happen soon. For final cleanup, use disconnect() instead.
 
+        Safety: super().soft_disconnect() routes through _execute_in_db_thread_sync,
+        which submits to the single-threaded serial executor (max_workers=1) and
+        blocks on future.result().  This implicitly drains any in-flight database
+        operation before executing the disconnect — concurrent MCP requests already
+        queued in the executor complete first.  Do NOT bypass the executor here;
+        the implicit drain is the serialization mechanism.
+
         Args:
             skip_checkpoint: If True, skip final checkpoint (faster but less safe)
         """
