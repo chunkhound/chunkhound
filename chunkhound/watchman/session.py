@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import os
@@ -115,6 +116,8 @@ class WatchmanCliSession:
 
     _COMMAND_TIMEOUT_SECONDS = 5.0
     _PROCESS_EXIT_TIMEOUT_SECONDS = 5.0
+    _DIRECT_SOCKET_CONNECT_TIMEOUT_SECONDS = 1.0
+    _DIRECT_SOCKET_CONNECT_RETRY_INTERVAL_SECONDS = 0.05
     _SUBSCRIPTION_NAME_MAX_LENGTH = _SUBSCRIPTION_NAME_MAX_LENGTH
     _SUBSCRIPTION_NAME_HASH_LENGTH = _SUBSCRIPTION_NAME_HASH_LENGTH
     _SUBSCRIPTION_QUEUE_MAXSIZE = 1000
@@ -211,18 +214,22 @@ class WatchmanCliSession:
                     "starting direct Watchman socket session "
                     f"socket={self._socket_path}"
                 )
-                reader, writer = await asyncio.open_unix_connection(
-                    path=self._socket_path
+                direct_streams = await self._connect_direct_socket_session()
+                if direct_streams is not None:
+                    reader, writer = direct_streams
+                    self._stream_reader = reader
+                    self._stream_writer = writer
+                    self._reader_task = asyncio.create_task(self._reader_loop())
+                    version_response = await self._send_command(
+                        ["version", {"required": list(_REQUIRED_CAPABILITIES)}]
+                    )
+                    capabilities = self._require_capabilities(version_response)
+                    self._capabilities = dict(capabilities)
+                    return dict(capabilities)
+                self._debug(
+                    "direct Watchman socket session was unavailable after retries; "
+                    "falling back to persistent CLI session"
                 )
-                self._stream_reader = reader
-                self._stream_writer = writer
-                self._reader_task = asyncio.create_task(self._reader_loop())
-                version_response = await self._send_command(
-                    ["version", {"required": list(_REQUIRED_CAPABILITIES)}]
-                )
-                capabilities = self._require_capabilities(version_response)
-                self._capabilities = dict(capabilities)
-                return dict(capabilities)
 
             version_response = await self._run_one_shot_command(
                 ["version", {"required": list(_REQUIRED_CAPABILITIES)}]
@@ -849,6 +856,40 @@ class WatchmanCliSession:
         future = self._unexpected_exit_future
         if future is not None and not future.done():
             future.set_result(message)
+
+    async def _connect_direct_socket_session(
+        self,
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._DIRECT_SOCKET_CONNECT_TIMEOUT_SECONDS
+        last_error: OSError | None = None
+
+        while True:
+            try:
+                return await asyncio.open_unix_connection(path=self._socket_path)
+            except FileNotFoundError as error:
+                last_error = error
+            except ConnectionRefusedError as error:
+                last_error = error
+            except OSError as error:
+                if error.errno not in {errno.ENOENT, errno.ECONNREFUSED}:
+                    raise
+                last_error = error
+
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(
+                min(self._DIRECT_SOCKET_CONNECT_RETRY_INTERVAL_SECONDS, remaining)
+            )
+
+        if last_error is not None:
+            self._debug(
+                "direct Watchman socket session did not become connectable "
+                f"within {self._DIRECT_SOCKET_CONNECT_TIMEOUT_SECONDS}s: "
+                f"{last_error}"
+            )
+        return None
 
     def _use_direct_socket_session(self) -> bool:
         return self.supports_prepared_session_startup()

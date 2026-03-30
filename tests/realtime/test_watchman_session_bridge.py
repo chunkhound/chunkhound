@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
 import stat
 import sys
@@ -426,6 +427,61 @@ async def test_watchman_cli_session_start_uses_one_shot_scope_planning(
         "chunkhound-live-indexing",
         "chunkhound-live-indexing--chunkhound-workspace",
     )
+
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_watchman_cli_session_falls_back_when_direct_socket_connect_races(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script_path = _write_fake_watchman_cli(tmp_path)
+    target_path = tmp_path / "repo"
+    target_path.mkdir()
+    socket_path = tmp_path / "watchman.sock"
+    socket_path.write_text("socket ready\n", encoding="utf-8")
+    statefile_path = tmp_path / "watchman.state"
+    statefile_path.write_text("state ready\n", encoding="utf-8")
+    logfile_path = tmp_path / "watchman.log"
+    logfile_path.write_text("log ready\n", encoding="utf-8")
+    pidfile_path = tmp_path / "watchman.pid"
+    pidfile_path.write_text("123\n", encoding="utf-8")
+
+    connect_attempts = 0
+
+    async def _missing_socket_connection(*, path: str):
+        nonlocal connect_attempts
+        connect_attempts += 1
+        raise FileNotFoundError(errno.ENOENT, "socket missing", path)
+
+    class DirectThenFallbackSession(WatchmanCliSession):
+        def _use_direct_socket_session(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        watchman_session_module.asyncio,
+        "open_unix_connection",
+        _missing_socket_connection,
+    )
+
+    session = DirectThenFallbackSession(
+        binary_path=script_path,
+        socket_path=socket_path,
+        statefile_path=statefile_path,
+        logfile_path=logfile_path,
+        pidfile_path=pidfile_path,
+        project_root=tmp_path,
+        command_prefix=[sys.executable, str(script_path)],
+    )
+
+    setup = await session.start(target_path=target_path)
+
+    assert connect_attempts >= 1
+    assert setup.capabilities == {
+        "cmd-watch-project": True,
+        "relative_root": True,
+    }
+    assert session.get_health()["watchman_session_alive"] is True
 
     await session.stop()
 
