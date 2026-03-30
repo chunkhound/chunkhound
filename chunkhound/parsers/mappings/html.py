@@ -14,6 +14,10 @@ import re
 from pathlib import Path
 from typing import Any
 
+# Matches Jinja/template expressions: {{ }}, {% %}, {# #}
+# Used to sanitize element attribute values before using them as chunk symbols.
+_JINJA_EXPR_RE = re.compile(r"\{\{.*?\}\}|\{%.*?%\}|\{#.*?#\}", re.DOTALL)
+
 from tree_sitter import Node
 
 from chunkhound.core.types.common import Language
@@ -135,21 +139,26 @@ class HtmlMapping(BaseMapping):
         return None
 
     def _extract_element_name(self, node: Node, content: bytes) -> str:
-        """Derive a human-readable name for an HTML element."""
+        """Derive a human-readable name for an HTML element.
+
+        Strips Jinja/template expressions (``{{ }}``, ``{% %}``, ``{# #}``)
+        from attribute values before using them as symbol names, so that
+        dynamic attributes like ``id="{{ item.id }}"`` don't produce noisy
+        symbols such as ``section#{{ item.id }}``.
+        """
         tag = self._get_tag_name(node, content)
         start_tag = self._get_start_tag(node)
         if start_tag is not None:
-            # Prefer id > class > aria-label
-            id_val = self._get_attribute(start_tag, "id", content)
+            # Prefer id > class > aria-label; strip template expressions first
+            id_val = _JINJA_EXPR_RE.sub("", self._get_attribute(start_tag, "id", content)).strip()
             if id_val:
                 return f"{tag}#{id_val}"
-            class_val = self._get_attribute(start_tag, "class", content)
+            class_val = _JINJA_EXPR_RE.sub("", self._get_attribute(start_tag, "class", content)).strip()
             if class_val:
-                class_parts = class_val.split()
-                first_class = class_parts[0] if class_parts else ""
+                first_class = class_val.split()[0]
                 if first_class:
                     return f"{tag}.{first_class}"
-            aria_val = self._get_attribute(start_tag, "aria-label", content)
+            aria_val = _JINJA_EXPR_RE.sub("", self._get_attribute(start_tag, "aria-label", content)).strip()
             if aria_val:
                 return f"{tag}[{aria_val[:30]}]"
         if tag:
@@ -188,8 +197,8 @@ class HtmlMapping(BaseMapping):
         elif concept == UniversalConcept.IMPORT:
             # #eq? predicate is placed inside the pattern so tree-sitter
             # applies it as a filter at the C layer — only <link> elements
-            # are returned; rel="stylesheet" filtering is handled in
-            # extract_content.
+            # and script_element nodes are returned.
+            # rel="stylesheet" / src attribute filtering is handled in extract_content.
             return r"""
                 (element
                   (start_tag
@@ -197,6 +206,7 @@ class HtmlMapping(BaseMapping):
                     (#eq? @tag_name "link")
                   )
                 ) @definition
+                (script_element) @definition
             """
         elif concept == UniversalConcept.DEFINITION:
             return ""
@@ -230,6 +240,13 @@ class HtmlMapping(BaseMapping):
             return "doctype"
 
         elif concept == UniversalConcept.IMPORT:
+            if node.type == "script_element":
+                start_tag = self._get_start_tag(node)
+                if start_tag is not None:
+                    src = self._get_attribute(start_tag, "src", content)
+                    if src:
+                        return src.split("?")[0].split("#")[0]
+                return "unnamed"
             if node.type == "element":
                 tag = self._get_tag_name(node, content)
                 start_tag = self._get_start_tag(node)
@@ -252,16 +269,24 @@ class HtmlMapping(BaseMapping):
         if node is None:
             return ""
 
-        # Filter BLOCK: only emit semantic/custom elements, script, style
+        # Filter BLOCK: only emit semantic/custom elements, inline scripts, style.
+        # External scripts (<script src="...">) become IMPORT chunks instead.
         if concept == UniversalConcept.BLOCK:
-            if node.type not in ("script_element", "style_element"):
+            if node.type == "script_element":
+                start_tag = self._get_start_tag(node)
+                if start_tag is not None and self._get_attribute(start_tag, "src", content):
+                    return ""  # external script → captured as IMPORT
+            elif node.type != "style_element":
                 if not self._is_semantic_element(node, content):
                     return ""
 
-        # Filter IMPORT: only emit link[rel=stylesheet].
-        # <script src=...> uses script_element (not element) in the grammar,
-        # so it is captured as BLOCK and never reaches this path.
+        # Filter IMPORT: emit link[rel=stylesheet] and script[src].
         if concept == UniversalConcept.IMPORT:
+            if node.type == "script_element":
+                start_tag = self._get_start_tag(node)
+                if start_tag is None:
+                    return ""
+                return node_text(node, content) if self._get_attribute(start_tag, "src", content) else ""
             if node.type != "element":
                 return ""
             tag = self._get_tag_name(node, content)
@@ -294,23 +319,41 @@ class HtmlMapping(BaseMapping):
     ) -> list[Path]:
         """Resolve a relative href or src to an absolute filesystem path.
 
+        Handles both ``<link rel="stylesheet" href="...">`` and
+        ``<script src="...">`` import forms.  Supports both quoted and
+        unquoted attribute values (e.g. ``href=style.css``).
+
         Args:
-            import_text: The full <link> element text.
-            base_dir: Directory of the importing file.
-            source_file: Path of the importing file (unused, for API compat).
+            import_text: The full element text (link or script_element).
+            base_dir: Project root directory.
+            source_file: Path of the importing file — used to resolve relative
+                paths from the importing file's directory.
 
         Returns:
             List with a single resolved Path if it exists, otherwise empty list.
         """
-        # Extract href attribute value from the full <link> tag
-        m = re.search(r'href=["\']([^"\']+)["\']', import_text)
-        href = m.group(1) if m else import_text
-        # Strip cache-busting query strings (?v=1.2.3) and fragments (#section)
-        # before resolving to a filesystem path.
-        href = href.split("?")[0].split("#")[0]
-        candidate = base_dir / href
-        if candidate.exists():
-            return [candidate]
+        # Resolve relative to the importing file's directory, not the project root.
+        resolve_dir = (
+            source_file.parent
+            if source_file.is_absolute()
+            else (base_dir / source_file).parent
+        )
+        # Try href (stylesheet link) — support both quoted and unquoted values.
+        m = re.search(r'href=(?:["\']([^"\']+)["\']|([^\s>/"\']+))', import_text)
+        if m:
+            raw = m.group(1) or m.group(2)
+            path = raw.split("?")[0].split("#")[0]
+            candidate = resolve_dir / path
+            if candidate.exists():
+                return [candidate.resolve()]
+        # Try src (external script) — same attribute format.
+        m = re.search(r'src=(?:["\']([^"\']+)["\']|([^\s>/"\']+))', import_text)
+        if m:
+            raw = m.group(1) or m.group(2)
+            path = raw.split("?")[0].split("#")[0]
+            candidate = resolve_dir / path
+            if candidate.exists():
+                return [candidate.resolve()]
         return []
 
     def extract_constants(

@@ -277,38 +277,57 @@ class ScssMapping(BaseMapping):
         Handles SCSS partial conventions: ``@import 'colors'`` also tries
         ``_colors.scss`` (underscore-prefixed partials).
 
+        ``@import`` supports comma-separated paths (``@import "a", "b";``);
+        all paths are resolved and returned.  ``@use``/``@forward`` are
+        single-path only so the comma-split is a no-op for them.
+
         Args:
             import_text: The full @import/@use/@forward statement text.
-            base_dir: Directory of the importing file.
-            source_file: Path of the importing file (unused, for API compat).
+            base_dir: Project root directory.
+            source_file: Path of the importing file — used to resolve relative
+                imports from the importing file's directory.
 
         Returns:
-            List with a single resolved Path if it exists, otherwise empty list.
+            List of resolved Paths that exist on disk (may be more than one for
+            comma-separated @import statements).
         """
+        # Resolve relative to the importing file's directory, not the project root.
+        resolve_dir = (
+            source_file.parent
+            if source_file.is_absolute()
+            else (base_dir / source_file).parent
+        )
         # Strip @use/@forward/@import prefix and trailing semicolon
         text = import_text
         for prefix in ("@forward", "@use", "@import"):
             if text.startswith(prefix):
                 text = text[len(prefix):].strip().rstrip(";").strip()
                 break
-        # Take only the first token (rest may be "as <alias>" or "with (...)")
-        text = text.split()[0] if text else text
-        path = text.strip("\"'")
-        # Built-in Sass modules use the "sass:xxx" namespace (e.g. "sass:math").
-        # These are not filesystem paths — skip them early to avoid constructing
-        # invalid paths (colons are illegal in path components on some systems).
-        if path.startswith("sass:"):
-            return []
-        # Try with and without leading underscore (SCSS partials)
-        candidates = [base_dir / path]
-        stem = Path(path).stem
-        parent = Path(path).parent
-        candidates.append(base_dir / parent / f"_{stem}.scss")
-        candidates.append(base_dir / f"{path}.scss")
-        for c in candidates:
-            if c.exists():
-                return [c]
-        return []
+        # @import supports comma-separated paths; @use/@forward do not.
+        # Splitting on "," is safe here: path tokens are quoted strings and
+        # the comma separator only appears between them, not inside quotes.
+        raw_tokens = [t.strip() for t in text.split(",")]
+        results: list[Path] = []
+        for token in raw_tokens:
+            # Strip "as <alias>" / "with (...)" suffix — keep first whitespace token
+            path_str = token.split()[0].strip("\"'") if token else ""
+            if not path_str:
+                continue
+            # Built-in Sass modules use the "sass:xxx" namespace (e.g. "sass:math").
+            if path_str.startswith("sass:"):
+                continue
+            # Try with and without leading underscore (SCSS partials)
+            stem = Path(path_str).stem
+            parent = Path(path_str).parent
+            for c in [
+                resolve_dir / path_str,
+                resolve_dir / parent / f"_{stem}.scss",
+                resolve_dir / f"{path_str}.scss",
+            ]:
+                if c.exists():
+                    results.append(c.resolve())
+                    break
+        return results
 
     def extract_constants(
         self,

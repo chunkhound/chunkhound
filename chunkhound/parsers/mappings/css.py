@@ -69,9 +69,14 @@ class CssMapping(BaseMapping):
     # --- private helpers ---
 
     def _is_root_vars(self, node: Node, content: bytes) -> bool:
-        """Return True if rule_set is :root or * containing custom properties."""
+        """Return True if rule_set is :root or * containing custom properties.
+
+        Handles comma-separated selector lists such as ``:root, [data-bs-theme=light]``
+        (Bootstrap theme tokens) by checking whether any selector part is ``:root`` or ``*``.
+        """
         sel = selector_text(node, content)
-        if sel not in (":root", "*"):
+        parts = [s.strip() for s in sel.split(",")]
+        if not any(p in (":root", "*") for p in parts):
             return False
         # Walk direct block children looking for a declaration whose property
         # name starts with '--'.  This is more precise than a substring match
@@ -193,12 +198,19 @@ class CssMapping(BaseMapping):
 
         Args:
             import_text: The full @import statement text.
-            base_dir: Directory of the importing file.
-            source_file: Path of the importing file (unused, for API compat).
+            base_dir: Project root directory.
+            source_file: Path of the importing file — used to resolve relative imports
+                from the importing file's directory rather than the project root.
 
         Returns:
             List with a single resolved Path if it exists, otherwise empty list.
         """
+        # Resolve relative to the importing file's directory, not the project root.
+        resolve_dir = (
+            source_file.parent
+            if source_file.is_absolute()
+            else (base_dir / source_file).parent
+        )
         # Strip @import prefix and trailing semicolon
         text = import_text.removeprefix("@import").strip().rstrip(";").strip()
         # Unwrap url(...) before splitting on whitespace so that
@@ -212,9 +224,9 @@ class CssMapping(BaseMapping):
             text = text.split()[0] if text else text
         # Strip surrounding quotes
         path = text.strip("\"'")
-        candidate = base_dir / path
+        candidate = resolve_dir / path
         if candidate.exists():
-            return [candidate]
+            return [candidate.resolve()]
         return []
 
     def extract_constants(

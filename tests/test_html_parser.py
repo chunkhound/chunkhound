@@ -80,23 +80,28 @@ def test_parses_link_stylesheet_as_import(html_parser):
     )
 
 
-def test_parses_script_src_as_block(html_parser):
-    """<script src='...'> elements are extracted as BLOCK chunks (not IMPORT).
+def test_parses_script_src_as_import(html_parser):
+    """<script src='...'> elements are extracted as IMPORT chunks.
 
-    Note: script_element is captured by the BLOCK query. The IMPORT query only
-    captures (element) nodes, but <script> maps to script_element in the grammar.
+    External scripts are dependency edges, not content blocks.  Inline scripts
+    (no src) remain BLOCK; only those with a src attribute become IMPORT.
+    Adjacent external scripts may be merged by the universal parser into a single
+    IMPORT chunk — so we check that both src paths appear in the combined symbols.
     """
     code = """<html><head>
   <script src="js/app.js"></script>
   <script src="vendor/lodash.min.js"></script>
 </head><body></body></html>"""
     chunks = html_parser.parse_content(code, "test.html", file_id=1)
+    import_chunks = [c for c in chunks if c.chunk_type == ChunkType.IMPORT]
+    assert len(import_chunks) >= 1, f"Expected IMPORT chunks for script[src], got {import_chunks}"
+    all_import_symbols = " ".join(c.symbol for c in import_chunks)
+    assert "app.js" in all_import_symbols, f"js/app.js not found in import symbols: {all_import_symbols!r}"
+    assert "lodash" in all_import_symbols, f"lodash not found in import symbols: {all_import_symbols!r}"
+    # External scripts must NOT appear as BLOCK chunks
     block_chunks = [c for c in chunks if c.chunk_type == ChunkType.BLOCK]
-    assert len(block_chunks) > 0, "No BLOCK chunks found for script[src]"
-    symbols = {c.symbol for c in block_chunks}
-    assert any("script" in s and "src=" in s for s in symbols), (
-        f"script[src=...] block not found in {symbols}"
-    )
+    block_symbols = " ".join(c.symbol for c in block_chunks)
+    assert "app.js" not in block_symbols, f"External script wrongly in BLOCK: {block_symbols!r}"
 
 
 def test_parses_inline_script_as_block(html_parser):
@@ -282,11 +287,12 @@ def test_jinja_language_produces_chunks():
 
 
 def test_resolve_import_paths_html(tmp_path):
-    """resolve_import_paths resolves a relative href to an absolute path."""
+    """resolve_import_paths resolves a relative href from a full link tag."""
     from chunkhound.parsers.mappings.html import HtmlMapping
     html = HtmlMapping()
     (tmp_path / "style.css").write_text("body{}")
-    resolved = html.resolve_import_paths("style.css", tmp_path, tmp_path / "index.html")
+    link_tag = '<link rel="stylesheet" href="style.css">'
+    resolved = html.resolve_import_paths(link_tag, tmp_path, tmp_path / "index.html")
     assert len(resolved) == 1
     assert resolved[0] == tmp_path / "style.css"
 
@@ -323,6 +329,65 @@ def test_stylesheet_import_name_strips_query_string(html_parser):
     assert all("?" not in c.symbol for c in import_chunks), (
         f"Query string leaked into symbol: {[c.symbol for c in import_chunks]}"
     )
+
+
+def test_jinja_dynamic_attr_symbol_no_template_expr(html_parser):
+    """Element symbols must not contain raw Jinja {{ }} expressions.
+
+    A section with id="{{ section.id }}" should yield a symbol like
+    ``section_line1`` (falling back to line number) rather than the noisy
+    ``section#{{ section.id }}``.
+    """
+    code = '<html><body><section id="{{ section.id }}" class="{{ cls }}">content</section></body></html>'
+    chunks = html_parser.parse_content(code, "test.html", file_id=1)
+    block_chunks = [c for c in chunks if c.chunk_type == ChunkType.BLOCK]
+    assert len(block_chunks) > 0, "No BLOCK chunks found"
+    for chunk in block_chunks:
+        assert "{{" not in chunk.symbol, f"Jinja expression leaked into symbol: {chunk.symbol!r}"
+        assert "}}" not in chunk.symbol, f"Jinja expression leaked into symbol: {chunk.symbol!r}"
+
+
+def test_resolve_import_paths_source_file_relative(tmp_path):
+    """resolve_import_paths resolves imports relative to the importing file's directory.
+
+    A stylesheet at ``static/css/main.css`` imported from ``views/index.html``
+    must be resolved from ``views/``, not from the project root.
+    """
+    from chunkhound.parsers.mappings.html import HtmlMapping
+    html = HtmlMapping()
+    # Create nested structure: views/index.html imports ../static/reset.css
+    views_dir = tmp_path / "views"
+    views_dir.mkdir()
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "reset.css").write_text("*{margin:0}")
+    link_tag = '<link rel="stylesheet" href="../static/reset.css">'
+    source = views_dir / "index.html"
+    resolved = html.resolve_import_paths(link_tag, tmp_path, source)
+    assert len(resolved) == 1, f"Expected 1 resolved path, got {resolved}"
+    assert resolved[0] == static_dir / "reset.css"
+
+
+def test_resolve_import_paths_script_src(tmp_path):
+    """resolve_import_paths resolves <script src=...> to the JS file."""
+    from chunkhound.parsers.mappings.html import HtmlMapping
+    html = HtmlMapping()
+    (tmp_path / "app.js").write_text("console.log('hi')")
+    script_tag = '<script src="app.js"></script>'
+    resolved = html.resolve_import_paths(script_tag, tmp_path, tmp_path / "index.html")
+    assert len(resolved) == 1, f"Expected 1 resolved path, got {resolved}"
+    assert resolved[0] == tmp_path / "app.js"
+
+
+def test_resolve_import_paths_unquoted_href(tmp_path):
+    """resolve_import_paths handles unquoted href attribute values."""
+    from chunkhound.parsers.mappings.html import HtmlMapping
+    html = HtmlMapping()
+    (tmp_path / "style.css").write_text("body{}")
+    link_tag = "<link rel=stylesheet href=style.css>"
+    resolved = html.resolve_import_paths(link_tag, tmp_path, tmp_path / "index.html")
+    assert len(resolved) == 1, f"Expected 1 resolved path for unquoted href, got {resolved}"
+    assert resolved[0] == tmp_path / "style.css"
 
 
 if __name__ == "__main__":

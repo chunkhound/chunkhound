@@ -387,5 +387,38 @@ def test_preprocess_scss_no_interpolation_unchanged():
     assert _preprocess_scss_interpolations(source) == source
 
 
+def test_resolve_import_paths_comma_separated(tmp_path):
+    """@import "a", "b"; resolves both paths."""
+    from chunkhound.parsers.mappings.scss import ScssMapping
+    scss = ScssMapping()
+    (tmp_path / "_variables.scss").write_text("$size: 16px;")
+    (tmp_path / "_mixins.scss").write_text("@mixin flex{display:flex}")
+    resolved = scss.resolve_import_paths(
+        '@import "variables", "mixins"', tmp_path, tmp_path / "main.scss"
+    )
+    assert len(resolved) == 2, f"Expected 2 resolved paths for comma import, got {resolved}"
+    names = {p.name for p in resolved}
+    assert "_variables.scss" in names
+    assert "_mixins.scss" in names
+
+
+def test_resolve_import_paths_source_file_relative(tmp_path):
+    """SCSS import resolution uses the importing file's directory, not the project root."""
+    from chunkhound.parsers.mappings.scss import ScssMapping
+    scss = ScssMapping()
+    # src/components/button.scss imports ../../tokens/colors (relative to src/components/)
+    comp_dir = tmp_path / "src" / "components"
+    comp_dir.mkdir(parents=True)
+    tokens_dir = tmp_path / "tokens"
+    tokens_dir.mkdir()
+    (tokens_dir / "_colors.scss").write_text("$blue: #00f;")
+    source = comp_dir / "button.scss"
+    resolved = scss.resolve_import_paths(
+        '@import "../../tokens/colors"', tmp_path, source
+    )
+    assert len(resolved) == 1, f"Expected 1 resolved path, got {resolved}"
+    assert resolved[0] == tokens_dir / "_colors.scss"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

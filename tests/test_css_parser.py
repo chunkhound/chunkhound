@@ -314,5 +314,44 @@ body {
     assert len(block_chunks) >= 1, "Expected at least 1 BLOCK chunk for body rule"
 
 
+def test_root_vars_comma_selector(css_parser):
+    """:root, [data-bs-theme=light] selector list is recognised as a design-token block.
+
+    Bootstrap 5.3+ uses a comma-selector for theming: the :root part means the block
+    should still be classified as STRUCTURE (namespace), not a plain DEFINITION.
+    """
+    code = """:root, [data-bs-theme=light] {
+  --bs-primary: #0d6efd;
+  --bs-secondary: #6c757d;
+}
+
+body { margin: 0; }
+"""
+    chunks = css_parser.parse_content(code, "bootstrap.css", file_id=1)
+    from chunkhound.core.types.common import ChunkType
+    ns_chunks = [c for c in chunks if c.chunk_type == ChunkType.NAMESPACE]
+    assert len(ns_chunks) >= 1, (
+        f"Expected NAMESPACE chunk for ':root, [data-bs-theme=light]', got {[c.symbol for c in chunks]}"
+    )
+
+
+def test_resolve_import_paths_source_file_relative(tmp_path):
+    """CSS import resolution uses the importing file's directory, not the project root."""
+    from chunkhound.parsers.mappings.css import CssMapping
+    css = CssMapping()
+    # src/styles/main.css imports ../tokens/colors.css (relative to src/styles/)
+    styles_dir = tmp_path / "src" / "styles"
+    styles_dir.mkdir(parents=True)
+    tokens_dir = tmp_path / "src" / "tokens"
+    tokens_dir.mkdir()
+    (tokens_dir / "colors.css").write_text(":root{--blue:#00f}")
+    source = styles_dir / "main.css"
+    resolved = css.resolve_import_paths(
+        '@import "../tokens/colors.css"', tmp_path, source
+    )
+    assert len(resolved) == 1, f"Expected 1 resolved path, got {resolved}"
+    assert resolved[0] == tokens_dir / "colors.css"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
