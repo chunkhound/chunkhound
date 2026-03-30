@@ -3228,6 +3228,22 @@ class DuckDBProvider(SerialDatabaseProvider):
                 "Resolve the issue and retry."
             ) from e
 
+    @staticmethod
+    def _safe_sql_path(path: Path) -> str:
+        """Validate and escape a path for use in DuckDB SQL statements.
+
+        DuckDB's EXPORT/IMPORT DATABASE don't support parameterized paths,
+        so we must interpolate. This validates against injection characters.
+        """
+        path_str = str(path)
+        dangerous = set(';$`"\x00')
+        found = dangerous & set(path_str)
+        if found:
+            raise CompactionError(
+                f"Database path contains unsafe characters for SQL: {found!r}"
+            )
+        return path_str.replace("'", "''")
+
     def _export_database_for_compaction(self, db_path: Path, export_dir: Path) -> None:
         """Export database to Parquet files for compaction."""
         # Clean up any leftover export directory
@@ -3239,7 +3255,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         conn = duckdb.connect(str(db_path), read_only=True)
         try:
             conn.execute("LOAD vss")
-            safe_path = str(export_dir).replace("'", "''")
+            safe_path = self._safe_sql_path(export_dir)
             conn.execute(f"EXPORT DATABASE '{safe_path}' (FORMAT PARQUET)")
         finally:
             conn.close()
@@ -3257,7 +3273,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         try:
             conn.execute("LOAD vss")
             self._enable_hnsw_persistence_on_conn(conn)
-            safe_path = str(export_dir).replace("'", "''")
+            safe_path = self._safe_sql_path(export_dir)
             conn.execute(f"IMPORT DATABASE '{safe_path}'")
             # CRITICAL: Checkpoint to persist imported data before closing
             # Without this, the imported data may not be written to disk
