@@ -15,6 +15,24 @@ if TYPE_CHECKING:
     from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 
 
+def estimate_reclaimable_bytes(stats: dict[str, Any]) -> int:
+    """Upper-bound estimate of reclaimable bytes from storage stats.
+
+    Takes the larger of free-block space and row-waste projection.
+    Overestimates slightly because used_blocks includes index/metadata
+    blocks — acceptable since this feeds a min-size gate where false
+    positives just trigger a compaction that finds little to reclaim.
+    """
+    block_size = stats.get("block_size", 262144)
+    free_blocks = stats.get("free_blocks", 0)
+    used_blocks = stats.get("used_blocks", 0)
+    row_waste = stats.get("row_waste_ratio", 0.0)
+    return max(
+        free_blocks * block_size,
+        int(row_waste * used_blocks * block_size),
+    )
+
+
 class CompactionService:
     """Performs database compaction via EXPORT/IMPORT cycle.
 
@@ -54,9 +72,7 @@ class CompactionService:
         # Two gates: (1) ratio threshold above decides IF compaction is needed,
         # (2) absolute size gate below avoids compacting tiny databases where
         # the overhead isn't worth the reclaimed space.
-        block_size = stats.get("block_size", 262144)
-        free_blocks = stats.get("free_blocks", 0)
-        reclaimable_bytes = free_blocks * block_size
+        reclaimable_bytes = estimate_reclaimable_bytes(stats)
         min_bytes = self._config.database.compaction_min_size_mb * 1024 * 1024
 
         if reclaimable_bytes < min_bytes:
@@ -68,6 +84,17 @@ class CompactionService:
 
         # Disk space check delegated to provider.optimize()
         return True, stats
+
+    def _log_compaction_trigger(
+        self, stats: dict[str, Any], *, background: bool = False
+    ) -> None:
+        mode = "background compaction" if background else "compaction"
+        logger.info(
+            f"Storage waste {stats.get('effective_waste', 0.0):.0%} exceeds threshold "
+            f"(row_waste={stats.get('row_waste_ratio', 0.0):.0%}, "
+            f"free_ratio={stats.get('free_ratio', 0.0):.0%}), "
+            f"starting {mode}..."
+        )
 
     async def compact_blocking(self, provider: "DuckDBProvider") -> bool:
         """Perform compaction synchronously. Blocks until complete.
@@ -84,11 +111,7 @@ class CompactionService:
         if not should:
             return False
 
-        free_ratio = stats.get("free_blocks", 0) / max(stats.get("total_blocks", 1), 1)
-        logger.info(
-            f"Free blocks ratio {free_ratio:.0%} exceeds threshold, "
-            f"starting compaction..."
-        )
+        self._log_compaction_trigger(stats)
 
         self._compaction_in_progress = True
         try:
@@ -117,11 +140,7 @@ class CompactionService:
         if not should:
             return False
 
-        free_ratio = stats.get("free_blocks", 0) / max(stats.get("total_blocks", 1), 1)
-        logger.info(
-            f"Free blocks ratio {free_ratio:.0%} exceeds threshold, "
-            f"starting background compaction..."
-        )
+        self._log_compaction_trigger(stats, background=True)
 
         self._compaction_in_progress = True
         try:
