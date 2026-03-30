@@ -6,6 +6,7 @@ only mocking external dependencies like disk operations.
 """
 
 import asyncio
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -465,6 +466,66 @@ class TestShutdown:
         await service.shutdown()
 
         assert not service.is_compacting
+
+    @pytest.mark.asyncio
+    async def test_shutdown_waits_for_thread_completion(
+        self, tmp_path: Path, config_with_compaction: Config, mock_provider: MagicMock
+    ):
+        """shutdown() waits for the actual compaction thread to finish,
+        not just the asyncio task cancellation."""
+        db_path = tmp_path / "test.duckdb"
+        db_path.write_bytes(b"x" * 1024)
+
+        service = CompactionService(db_path, config_with_compaction)
+
+        thread_started = threading.Event()
+        thread_can_finish = threading.Event()
+
+        def blocking_optimize(cancel_check=None):
+            thread_started.set()
+            thread_can_finish.wait(timeout=10.0)
+            return True
+
+        mock_provider.optimize = blocking_optimize
+
+        await service.compact_background(mock_provider)
+
+        # Yield to event loop so the background task starts running
+        await asyncio.sleep(0)
+
+        # Wait for the thread to actually start (blocks, but bounded)
+        assert thread_started.wait(timeout=5.0), "Thread did not start"
+
+        # Thread-done event should NOT be set (thread is blocked)
+        assert not service.compaction_thread_done.is_set()
+
+        # Allow thread to finish
+        thread_can_finish.set()
+
+        await service.shutdown(timeout=5.0)
+        assert service.compaction_thread_done.is_set()
+
+    @pytest.mark.asyncio
+    async def test_compaction_thread_done_set_on_normal_completion(
+        self, tmp_path: Path, config_with_compaction: Config, mock_provider: MagicMock
+    ):
+        """compaction_thread_done is set after successful compaction."""
+        db_path = tmp_path / "test.duckdb"
+        db_path.write_bytes(b"x" * 1024)
+
+        service = CompactionService(db_path, config_with_compaction)
+
+        # Initially set (no thread running)
+        assert service.compaction_thread_done.is_set()
+
+        mock_provider.optimize = MagicMock(return_value=True)
+
+        await service.compact_background(mock_provider)
+        if service._compaction_task:
+            await service._compaction_task
+
+        # Should be set again after completion
+        assert service.compaction_thread_done.is_set()
 
 
 class TestIsCompacting:
