@@ -54,6 +54,7 @@ def mock_provider() -> MagicMock:
             "block_size": 262144,  # ~256KB per block
             "total_blocks": 2000,
             "used_blocks": 1000,
+            "row_waste_ratio": 0.0,
         },
     )
     provider.disconnect = MagicMock()
@@ -633,6 +634,78 @@ class TestDuckDBProviderOptimize:
 
         # Lock file should not exist after completion
         assert not lock_path.exists(), f"Lock file not cleaned up: {lock_path}"
+
+
+class TestRowWasteRatio:
+    """Test row_waste_ratio computation and its role in compaction decisions."""
+
+    def test_row_waste_nonzero_after_deletions(
+        self, provider_with_fragmentation: tuple
+    ):
+        """Deleting 80% of rows should produce measurable row waste."""
+        provider, _db_path = provider_with_fragmentation
+        stats = provider.get_storage_stats()
+        assert stats["row_waste_ratio"] > 0, (
+            f"Expected row_waste_ratio > 0 after deleting 80% of data, "
+            f"got {stats['row_waste_ratio']}"
+        )
+
+    def test_row_waste_near_zero_on_clean_db(self, tmp_path: Path):
+        """A freshly-populated database should have negligible row waste."""
+        db_path = tmp_path / "clean.duckdb"
+        provider = DuckDBProvider(str(db_path), base_directory=tmp_path)
+        provider.connect()
+        try:
+            for i in range(5):
+                test_file = File(
+                    path=f"clean_{i}.py",
+                    mtime=1234567890.0,
+                    language=Language.PYTHON,
+                    size_bytes=1000,
+                )
+                file_id = provider.insert_file(test_file)
+                for j in range(20):
+                    chunk = Chunk(
+                        file_id=file_id,
+                        code=f"def f_{i}_{j}(): pass  # " + "x" * 200,
+                        start_line=j * 5 + 1,
+                        end_line=j * 5 + 4,
+                        chunk_type=ChunkType.FUNCTION,
+                        symbol=f"f_{i}_{j}",
+                        language=Language.PYTHON,
+                    )
+                    provider.insert_chunk(chunk)
+            provider.optimize_tables()
+
+            stats = provider.get_storage_stats()
+            assert stats["row_waste_ratio"] < 0.05, (
+                f"Expected near-zero row_waste_ratio on clean DB, "
+                f"got {stats['row_waste_ratio']}"
+            )
+        finally:
+            provider.disconnect()
+
+    def test_should_compact_triggered_by_row_waste_alone(
+        self, provider_with_fragmentation: tuple
+    ):
+        """should_compact should return True when row_waste exceeds threshold,
+        even if free_blocks ratio is low."""
+        provider, _db_path = provider_with_fragmentation
+
+        # After deletions + checkpoint, row_waste should be high (~0.8)
+        # while free_ratio is moderate (~0.37). Use a threshold between
+        # the two so only row_waste exceeds it.
+        threshold = 0.4
+        should, stats = provider.should_compact(threshold=threshold)
+        total = max(stats.get("total_blocks", 1), 1)
+        free_ratio = stats.get("free_blocks", 0) / total
+        assert free_ratio < threshold, (
+            f"Test precondition: free_ratio should be below threshold, got {free_ratio}"
+        )
+        assert should is True, (
+            f"Expected should_compact=True with row_waste={stats.get('row_waste_ratio')}, "
+            f"free_ratio={free_ratio}"
+        )
 
 
 class TestCompactionServiceEndToEnd:
