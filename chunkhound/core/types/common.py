@@ -6,8 +6,10 @@ and runtime type checking capabilities.
 """
 
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 from typing import NewType
+
 
 # String-based type aliases for better semantic clarity
 ProviderName = NewType("ProviderName", str)  # e.g., "openai"
@@ -139,6 +141,21 @@ class ChunkType(Enum):
         }
 
 
+@lru_cache(maxsize=1)
+def _scss_available() -> bool:
+    """Return True if the SCSS tree-sitter grammar is available.
+
+    Uses a lazy import to avoid a circular dependency (parser_factory imports
+    Language from this module).  The result is cached so the import only runs once.
+    """
+    try:
+        from chunkhound.parsers.parser_factory import SCSS_AVAILABLE  # noqa: PLC0415
+
+        return SCSS_AVAILABLE
+    except Exception:
+        return False
+
+
 class Language(Enum):
     """Enumeration of programming languages and file types supported by ChunkHound."""
 
@@ -171,6 +188,12 @@ class Language(Enum):
     DART = "dart"
     ELIXIR = "elixir"
     LUA = "lua"
+
+    # Web languages
+    HTML = "html"
+    CSS = "css"
+    SCSS = "scss"
+    JINJA = "jinja"  # .jinja, .j2, .njk, .erb, .ejs — parsed with HTML grammar
 
     # Documentation languages
     MARKDOWN = "markdown"
@@ -281,6 +304,24 @@ class Language(Enum):
             ".ex": cls.ELIXIR,
             ".exs": cls.ELIXIR,
             ".lua": cls.LUA,
+            ".html": cls.HTML,
+            ".htm": cls.HTML,
+            ".xhtml": cls.HTML,
+            ".css": cls.CSS,
+            # .scss falls back to TEXT when the SCSS grammar is unavailable.
+            # Defer to parser_factory's authoritative SCSS_AVAILABLE flag so
+            # this map and EXTENSION_TO_LANGUAGE share a single source of truth.
+            ".scss": cls.SCSS if _scss_available() else cls.TEXT,
+            # .sass uses indented syntax (no braces/semicolons) which is
+            # structurally incompatible with the tree-sitter SCSS grammar.
+            # Use text fallback parser instead of silently producing
+            # misaligned / empty chunks.
+            ".sass": cls.TEXT,
+            ".jinja": cls.JINJA,
+            ".j2": cls.JINJA,
+            ".njk": cls.JINJA,
+            ".erb": cls.JINJA,
+            ".ejs": cls.JINJA,
         }
 
         return extension_map.get(extension, cls.UNKNOWN)
