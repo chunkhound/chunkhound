@@ -103,7 +103,7 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
         return
 
     # Handle backup before optimization (provider deletes original)
-    backup_path = db_path.with_suffix(".duckdb.bak")
+    backup_path = db_path.with_suffix(db_path.suffix + ".bak")
     keep_backup = args.backup
 
     if keep_backup:

@@ -3160,9 +3160,10 @@ class DuckDBProvider(SerialDatabaseProvider):
             if old_db_path.exists():
                 old_db_path.unlink()
 
-            # Atomic swap via renames
-            db_path.rename(old_db_path)
-            new_db_path.rename(db_path)
+            # Atomic swap via os.replace (atomic on POSIX,
+            # handles existing targets on Windows)
+            os.replace(db_path, old_db_path)
+            os.replace(new_db_path, db_path)
 
             # Reconnect to swapped database
             self._connection_suspended.clear()  # Allow reconnect to new file
@@ -3181,7 +3182,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Attempt recovery: restore original if possible
             if old_db_path.exists() and not db_path.exists():
                 logger.warning("Restoring original database from backup...")
-                old_db_path.rename(db_path)
+                os.replace(old_db_path, db_path)
             # Reconnect (we disconnected for export, need to restore connection)
             if not self.is_connected:
                 self._connection_suspended.clear()  # Allow reconnect for recovery
