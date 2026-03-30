@@ -410,10 +410,12 @@ class DuckDBProvider(SerialDatabaseProvider):
             raise
 
     def has_reclaimable_space(self, operation: str = "") -> bool:
-        """Check if optimization/compaction is warranted.
+        """Check if a lightweight CHECKPOINT optimization is warranted.
 
-        Returns True if there are free blocks pending reclamation (from DELETEs).
-        This is consistent with optimize() which skips when free_blocks == 0.
+        Only checks free_blocks > 0 — intentionally ignores row_waste_ratio.
+        Used by IndexingCoordinator/EmbeddingService as a fast post-operation
+        gate. For the full compaction decision (EXPORT/IMPORT) that considers
+        row waste and min-size gates, see CompactionService.check_should_compact().
 
         Args:
             operation: Optional context string for logging (e.g., 'post-chunking')
@@ -497,31 +499,39 @@ class DuckDBProvider(SerialDatabaseProvider):
     def get_storage_stats(self) -> dict[str, Any]:
         """Get DuckDB storage statistics including fragmentation.
 
-        Returns metrics for monitoring and logging. Note that `orphaned_blocks`
-        and `_raw_fragmentation_ratio` may overcount due to HNSW index structures
-        being counted as orphaned when they're legitimate. For optimization
-        trigger decisions, use `free_blocks` only (as has_reclaimable_space() does).
+        Returns block-level metrics and row-group utilization. The key metric
+        for compaction decisions is ``effective_waste`` (max of ``free_ratio``
+        and ``row_waste_ratio``). ``row_waste_ratio`` detects partially-deleted
+        row groups that CHECKPOINT cannot reclaim but EXPORT/IMPORT will
+        rebuild. ``free_blocks`` only reflects blocks freed at the allocator
+        level (e.g. after DROP INDEX + CHECKPOINT).
 
         Returns:
             Dict with keys: total_blocks, used_blocks, free_blocks,
-            accounted_blocks, orphaned_blocks, block_size, _raw_fragmentation_ratio
+            accounted_blocks, orphaned_blocks, block_size, free_ratio,
+            row_waste_ratio, effective_waste, _raw_fragmentation_ratio
         """
         return self._execute_in_db_thread_sync("get_storage_stats")
 
     def _executor_get_storage_stats(
         self, conn: Any, state: dict[str, Any]
     ) -> dict[str, Any]:
-        """Executor: Calculate storage metrics including orphaned HNSW index blocks.
+        """Executor: Calculate storage metrics.
 
-        Problem: pragma_database_size()'s free_blocks only counts explicitly freed
-        blocks. Orphaned HNSW index blocks (from drop/recreate cycles) are still
-        counted as used_blocks, causing severe underestimation of fragmentation
-        (0.38% for a 96% bloated database).
+        Two complementary signals for compaction:
 
-        Solution: Query pragma_storage_info() to sum actual table data blocks,
-        compare to used_blocks to detect orphaned space.
+        1. ``free_blocks / total_blocks`` — captures block-level fragmentation
+           from DROP INDEX + CHECKPOINT cycles.
 
-        Fragmentation = 1 - (accounted_blocks / used_blocks)
+        2. ``row_waste_ratio`` (1 - live_rows / storage_rows) — captures
+           partially-deleted row groups. DuckDB's CHECKPOINT only frees
+           entirely-empty row groups; rows deleted within a row group still
+           occupy their blocks. EXPORT/IMPORT rebuilds tight row groups with
+           only live rows, reclaiming this space.
+
+        ``_raw_fragmentation_ratio`` (block-level orphan detection) is kept
+        for diagnostics but NOT used for trigger decisions because it cannot
+        distinguish active HNSW index blocks from genuinely orphaned ones.
         """
         # Get database-level metrics
         db_result = conn.execute("""
@@ -538,18 +548,15 @@ class DuckDBProvider(SerialDatabaseProvider):
         used_blocks = db_result[2]
         free_blocks = db_result[3]
 
-        # Get actual data blocks from all tables via pragma_storage_info()
-        # This reveals orphaned HNSW index blocks that pragma_database_size misses
+        # Get all user tables (reused for both block and row metrics)
+        tables = conn.execute("""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_schema = 'main' AND table_type = 'BASE TABLE'
+        """).fetchall()
+
+        # --- Block-level: accounted blocks via pragma_storage_info ---
         accounted_blocks = 0
         try:
-            # Get all user tables
-            tables = conn.execute("""
-                SELECT table_name FROM information_schema.tables
-                WHERE table_schema = 'main' AND table_type = 'BASE TABLE'
-            """).fetchall()
-
-            # Sum unique blocks from each table
-            # block_id is the unique block identifier, -1 means no block used
             for (table_name,) in tables:
                 result = conn.execute("""
                     SELECT COUNT(DISTINCT block_id)
@@ -559,20 +566,60 @@ class DuckDBProvider(SerialDatabaseProvider):
                 if result and result[0]:
                     accounted_blocks += int(result[0])
         except Exception as e:
-            # Fallback: assume all used blocks are accounted (old behavior)
             logger.debug(f"pragma_storage_info() failed, using fallback: {e}")
             accounted_blocks = used_blocks
 
-        # Calculate orphaned blocks (HNSW index bloat from drop/recreate cycles)
         orphaned_blocks = max(0, used_blocks - accounted_blocks)
 
-        # Calculate true fragmentation: orphaned + free blocks as fraction of total
         if used_blocks > 0:
-            # Fragmentation = 1 - (actual_data / used_space)
-            fragmentation = 1.0 - (accounted_blocks / used_blocks)
-            fragmentation = max(0.0, min(1.0, fragmentation))
+            fragmentation = max(0.0, min(1.0, 1.0 - (accounted_blocks / used_blocks)))
         else:
             fragmentation = 0.0
+
+        # --- Row-group utilization: live rows vs storage-level rows ---
+        # Compares SELECT COUNT(*) (live) to SUM(count) from
+        # pragma_storage_info on a scalar column (storage-allocated slots).
+        # Partially-deleted row groups still report their full slot count,
+        # making this the most reliable signal for deletion-based bloat.
+        total_live_rows = 0
+        total_storage_rows = 0
+        try:
+            for (table_name,) in tables:
+                live = conn.execute(
+                    f'SELECT COUNT(*) FROM "{table_name}"'
+                ).fetchone()[0]
+                total_live_rows += live
+
+                # Pick the first non-list column to avoid FLOAT[N] inflation
+                col = conn.execute("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = 'main' AND table_name = ?
+                    AND data_type NOT LIKE '%[%' AND data_type NOT LIKE 'LIST%'
+                    ORDER BY ordinal_position
+                    LIMIT 1
+                """, [table_name]).fetchone()
+
+                if col:
+                    storage = conn.execute(f"""
+                        SELECT COALESCE(SUM(count), 0)
+                        FROM pragma_storage_info(?)
+                        WHERE column_name = ?
+                          AND segment_type != 'VALIDITY'  -- exclude null bitmasks
+                    """, [table_name, col[0]]).fetchone()[0]
+                    total_storage_rows += max(int(storage), live)
+                else:
+                    total_storage_rows += live
+        except Exception as e:
+            logger.debug(f"Row utilization query failed: {e}")
+            total_storage_rows = total_live_rows  # Fallback: assume no waste
+
+        if total_storage_rows > 0:
+            row_waste = 1.0 - (total_live_rows / total_storage_rows)
+            row_waste = max(0.0, min(1.0, row_waste))
+        else:
+            row_waste = 0.0
+
+        free_ratio = free_blocks / total_blocks if total_blocks > 0 else 0.0
 
         return {
             "total_blocks": total_blocks,
@@ -581,23 +628,28 @@ class DuckDBProvider(SerialDatabaseProvider):
             "accounted_blocks": accounted_blocks,
             "orphaned_blocks": orphaned_blocks,
             "block_size": block_size,
+            "free_ratio": free_ratio,
+            "row_waste_ratio": row_waste,
+            "effective_waste": max(free_ratio, row_waste),
             "_raw_fragmentation_ratio": fragmentation,
         }
 
     def should_compact(self, threshold: float = 0.5) -> tuple[bool, dict[str, Any]]:
-        """Check if compaction is warranted based on free blocks ratio.
+        """Check if compaction is warranted.
 
-        Uses free_blocks/total_blocks ratio (reliable) rather than _raw_fragmentation_ratio
-        which incorrectly counts HNSW index blocks as orphaned.
+        Uses the stronger of two complementary signals:
+
+        - ``row_waste_ratio``: detects partially-deleted row groups that
+          CHECKPOINT cannot reclaim (the dominant bloat source after
+          re-indexing).
+        - ``free_blocks / total_blocks``: detects block-level fragmentation
+          from DROP INDEX + CHECKPOINT cycles.
 
         Returns:
             Tuple of (should_compact, storage_stats) to avoid duplicate queries.
         """
         stats = self.get_storage_stats()
-        total = stats.get("total_blocks", 1)
-        free = stats.get("free_blocks", 0)
-        free_ratio = free / total if total > 0 else 0.0
-        return free_ratio >= threshold, stats
+        return stats.get("effective_waste", 0.0) >= threshold, stats
 
     def _maybe_checkpoint(self, force: bool = False) -> None:
         """Perform checkpoint if needed - delegate to connection manager."""

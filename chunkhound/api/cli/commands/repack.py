@@ -9,6 +9,7 @@ from loguru import logger
 from chunkhound.core.config.config import Config
 from chunkhound.core.exceptions import CompactionError
 from chunkhound.registry import configure_registry, get_provider
+from chunkhound.services.compaction_service import estimate_reclaimable_bytes
 
 from ..utils.database import verify_database_exists
 from ..utils.rich_output import RichOutputFormatter
@@ -64,30 +65,34 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
         provider = get_provider("database")
         try:
             stats = provider.get_storage_stats()
-            free_blocks = stats.get("free_blocks", 0)
-            total_blocks = max(stats.get("total_blocks", 1), 1)
-            block_size = stats.get("block_size", 262144)
-            reclaimable = free_blocks * block_size
-            free_ratio = free_blocks / total_blocks
+            free_ratio = stats.get("free_ratio", 0.0)
+            row_waste = stats.get("row_waste_ratio", 0.0)
+            effective_waste = stats.get("effective_waste", 0.0)
 
-            formatter.info(f"Free space ratio: {free_ratio:.1%}")
-            formatter.info(f"Reclaimable: {_format_size(reclaimable)}")
+            formatter.info(f"Row-group waste: {row_waste:.1%}")
+            formatter.info(f"Free blocks ratio: {free_ratio:.1%}")
+            formatter.info(f"Effective waste: {effective_waste:.1%}")
+            formatter.info(
+                f"Estimated reclaimable: "
+                f"~{_format_size(estimate_reclaimable_bytes(stats))}"
+            )
             threshold = config.database.compaction_threshold
-            if free_ratio >= threshold:
+            if effective_waste >= threshold:
                 formatter.info(
-                    f"Above auto-compaction threshold (free ratio >= {threshold:.0%})"
+                    f"Above auto-compaction threshold (waste >= {threshold:.0%})"
                 )
             else:
                 formatter.info(
                     f"Below auto-compaction threshold "
-                    f"(free ratio < {threshold:.0%}). "
+                    f"(waste < {threshold:.0%}). "
                     f"Manual repack always runs regardless"
                 )
             min_size_mb = config.database.compaction_min_size_mb
-            reclaimable_mb = reclaimable / (1024 * 1024)
+            effective_reclaimable = estimate_reclaimable_bytes(stats)
+            reclaimable_mb = effective_reclaimable / (1024 * 1024)
             if reclaimable_mb < min_size_mb:
                 formatter.info(
-                    f"Reclaimable {reclaimable_mb:.1f}MB below "
+                    f"Estimated reclaimable {reclaimable_mb:.1f}MB below "
                     f"min-size gate ({min_size_mb}MB) — "
                     f"auto-compaction would skip"
                 )

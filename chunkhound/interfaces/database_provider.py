@@ -451,11 +451,19 @@ class DatabaseProvider(Protocol):
         ...
 
     def get_storage_stats(self) -> dict[str, Any]:
-        """Get storage statistics for monitoring."""
+        """Get storage statistics for monitoring and compaction decisions.
+
+        Returns dict with keys: total_blocks, used_blocks, free_blocks,
+        block_size, free_ratio, row_waste_ratio, effective_waste,
+        accounted_blocks, orphaned_blocks, _raw_fragmentation_ratio.
+        """
         ...
 
     def should_compact(self, threshold: float = 0.5) -> tuple[bool, dict[str, Any]]:
-        """Check if compaction is needed based on free space ratio.
+        """Check if compaction is needed based on storage waste.
+
+        Uses the stronger of row-group utilization (detects partially-deleted
+        row groups) and free-blocks ratio (detects block-level fragmentation).
 
         Returns:
             Tuple of (should_compact, storage_stats).

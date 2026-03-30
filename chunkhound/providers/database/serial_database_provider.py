@@ -623,6 +623,9 @@ class SerialDatabaseProvider(ABC):
             "used_blocks": 0,
             "free_blocks": 0,
             "block_size": 0,
+            "free_ratio": 0.0,
+            "row_waste_ratio": 0.0,
+            "effective_waste": 0.0,
             "_raw_fragmentation_ratio": 0.0,
         }
 
