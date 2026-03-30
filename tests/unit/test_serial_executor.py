@@ -22,12 +22,12 @@ def _clean_thread_local():
 
 
 class _StubProvider:
-    """Minimal provider with _connection_suspended and _create_connection."""
+    """Minimal provider with _connection_allowed and _create_connection."""
 
     def __init__(self, *, suspended: bool) -> None:
-        self._connection_suspended = threading.Event()
-        if suspended:
-            self._connection_suspended.set()
+        self._connection_allowed = threading.Event()
+        if not suspended:
+            self._connection_allowed.set()
 
     def _create_connection(self):
         return object()  # sentinel

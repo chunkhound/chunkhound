@@ -3206,11 +3206,11 @@ class DuckDBProvider(SerialDatabaseProvider):
                     pass
             raise CompactionError(f"Compaction failed: {e}") from e
         finally:
-            # Always clean up export directory, lock file, and suspend flag
+            # Always clean up export directory, lock file, and connection gate
             if export_dir.exists():
                 shutil.rmtree(export_dir, ignore_errors=True)
             lock_file.unlink(missing_ok=True)
-            self._connection_suspended.clear()
+            self._connection_allowed.set()
 
     def _has_sufficient_disk_space(self, db_path: Path, multiplier: float = 2.5) -> None:
         """Check if sufficient disk space exists for compaction.
