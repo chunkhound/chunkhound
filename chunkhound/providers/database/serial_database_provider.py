@@ -68,10 +68,11 @@ class SerialDatabaseProvider(ABC):
         # Base directory for path normalization (immutable after initialization)
         self._base_directory: Path = base_directory
 
-        # Suspend flag: set during compaction to prevent auto-reconnect.
-        # Initially unset; subclasses (e.g., DuckDBProvider) set() it
-        # around file-swap operations.
-        self._connection_suspended = threading.Event()
+        # Connection gate: set = connections allowed, clear = suspended
+        # during compaction. Initially set; subclasses clear() it around
+        # file-swap operations.
+        self._connection_allowed = threading.Event()
+        self._connection_allowed.set()
 
     @abstractmethod
     def _create_connection(self) -> Any:

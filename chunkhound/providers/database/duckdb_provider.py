@@ -3129,7 +3129,7 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             # Suspend auto-reconnect before soft_disconnect so any concurrent
             # MCP request gets a clear error instead of opening a stale connection
-            self._connection_suspended.set()
+            self._connection_allowed.clear()
 
             # Soft disconnect before export — DuckDB doesn't allow mixing
             # read-only and read-write connections to the same file
@@ -3140,7 +3140,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             self._export_database_for_compaction(db_path, export_dir)
 
             if cancel_check and cancel_check():
-                self._connection_suspended.clear()  # Allow reconnect before restoring
+                self._connection_allowed.set()  # Allow reconnect before restoring
                 self.connect()  # Restore connection after soft_disconnect
                 return False
 
@@ -3152,7 +3152,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 # Clean up the compacted DB since we won't swap
                 if new_db_path.exists():
                     new_db_path.unlink()
-                self._connection_suspended.clear()  # Allow reconnect before restoring
+                self._connection_allowed.set()  # Allow reconnect before restoring
                 self.connect()  # Restore connection after soft_disconnect
                 return False
 
@@ -3168,13 +3168,13 @@ class DuckDBProvider(SerialDatabaseProvider):
             if old_db_path.exists():
                 old_db_path.unlink()
 
-            # Atomic swap via os.replace (atomic on POSIX,
-            # handles existing targets on Windows)
+            # os.replace is atomic on POSIX; on Windows the two-step
+            # rename is NOT atomic — crash recovery in connect() handles this
             os.replace(db_path, old_db_path)
             os.replace(new_db_path, db_path)
 
             # Reconnect to swapped database
-            self._connection_suspended.clear()  # Allow reconnect to new file
+            self._connection_allowed.set()  # Allow reconnect to new file
             self.connect()
 
             # Clean up old file
@@ -3193,7 +3193,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 os.replace(old_db_path, db_path)
             # Reconnect (we disconnected for export, need to restore connection)
             if not self.is_connected:
-                self._connection_suspended.clear()  # Allow reconnect for recovery
+                self._connection_allowed.set()  # Allow reconnect for recovery
                 try:
                     self.connect()
                 except Exception as err:
