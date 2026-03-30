@@ -453,7 +453,8 @@ async def test_daemon_lock_file_created(pre_indexed_project_dir: Path) -> None:
     graceful shutdown, causing the lock file cleanup to be inconsistent.
     """
     project_dir = pre_indexed_project_dir
-    lock_path = DaemonDiscovery(project_dir).get_lock_path()
+    discovery = DaemonDiscovery(project_dir)
+    lock_path = discovery.get_lock_path()
 
     proc, client = await _start_proxy(project_dir)
     try:
@@ -491,13 +492,16 @@ async def test_daemon_lock_file_created(pre_indexed_project_dir: Path) -> None:
 
         # Socket path should exist (Unix) or be a valid TCP address (Windows)
         socket_path = lock_data["socket_path"]
+        expected_socket_path = DaemonDiscovery(project_dir).get_socket_path()
+        assert socket_path == expected_socket_path
         if socket_path.startswith("tcp:"):
-            # On Windows: verify it's a valid TCP address format
-            assert socket_path.startswith("tcp:127.0.0.1:"), (
-                f"Invalid TCP address format in lock file: {socket_path}"
+            assert socket_path.startswith("tcp:127.0.0.1:")
+            assert not socket_path.endswith(":0"), (
+                f"Windows lock published a bind-time port placeholder: {socket_path}"
             )
         else:
-            # On Unix: verify the socket file exists
+            # On Unix: verify the runtime-scoped socket file exists
+            assert Path(socket_path).parent == discovery.get_socket_dir()
             assert os.path.exists(socket_path), (
                 f"Socket file '{socket_path}' listed in lock file does not exist"
             )

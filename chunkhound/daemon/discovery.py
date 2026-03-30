@@ -2,7 +2,7 @@
 
 Handles:
 - Runtime-scoped lock file creation/reading for a canonical project root
-- IPC address derivation from project directory hash (platform-specific)
+- Runtime-scoped IPC address derivation from project directory hash
 - Daemon liveness checking (PID + connectivity)
 - Starting a new daemon subprocess when none is running
 """
@@ -35,8 +35,11 @@ _RUNTIME_DIR_ENV = "CHUNKHOUND_DAEMON_RUNTIME_DIR"
 _REGISTRY_DIR_NAME = "daemon-registry"
 # User-scoped startup lock — serializes overlap checks across project roots
 _GLOBAL_STARTUP_LOCK_NAME = "daemon.global.startup.lock"
-# Socket directory (Linux/macOS)
-_SOCKET_DIR = "/tmp"
+# Short runtime-scoped socket root (Linux/macOS) to stay within AF_UNIX limits
+_SOCKETS_DIR_NAME = "chunkhound-daemon-sockets"
+_WINDOWS_LOOPBACK_HOST = "127.0.0.1"
+_WINDOWS_PORT_BASE = 49_152
+_WINDOWS_PORT_SPAN = 16_384
 # Startup polling interval and timeout
 _STARTUP_POLL_INTERVAL = 0.1
 _STARTUP_TIMEOUT = 30.0
@@ -96,6 +99,38 @@ def _default_runtime_dir() -> Path:
             return Path(runtime_root) / suffix
 
     return Path(tempfile.gettempdir()) / suffix
+
+
+def _runtime_dir_identity(runtime_dir: Path) -> str:
+    """Return the comparison-safe runtime identity used for transport scoping."""
+    resolved = runtime_dir.expanduser().resolve()
+    if sys.platform == "win32":
+        return os.path.normcase(str(resolved))
+    return str(resolved)
+
+
+def _runtime_scoped_transport_hash(project_dir: Path, runtime_dir: Path) -> str:
+    """Return a stable transport hash scoped to the canonical root and runtime."""
+    identity = f"{_project_dir_identity(project_dir)}|{_runtime_dir_identity(runtime_dir)}"
+    return hashlib.sha256(identity.encode()).hexdigest()
+
+
+def _runtime_socket_scope_hash(runtime_dir: Path) -> str:
+    """Return a short stable hash for Unix socket directory scoping."""
+    return hashlib.sha256(_runtime_dir_identity(runtime_dir).encode()).hexdigest()[:12]
+
+
+def _parse_tcp_address(address: str) -> tuple[str, int] | None:
+    """Parse a TCP loopback address or return None for other transports."""
+    if not address.startswith("tcp:"):
+        return None
+    parts = address.split(":", 2)
+    if len(parts) != 3:
+        return None
+    try:
+        return parts[1], int(parts[2])
+    except ValueError:
+        return None
 
 
 def _roots_overlap(root_a: Path, root_b: Path) -> bool:
@@ -229,19 +264,96 @@ class DaemonDiscovery:
             f"{_project_dir_hash(self._project_dir, length=16)}.json"
         )
 
+    def get_socket_dir(self) -> Path:
+        """Return the runtime-scoped Unix socket directory."""
+        return (
+            Path(tempfile.gettempdir())
+            / _SOCKETS_DIR_NAME
+            / _runtime_socket_scope_hash(self.get_runtime_dir())
+        )
+
+    def _preferred_windows_ipc_address(self) -> str:
+        """Return the preferred Windows loopback address for this runtime/root."""
+        transport_hash = _runtime_scoped_transport_hash(
+            self._project_dir,
+            self.get_runtime_dir(),
+        )
+        port = _WINDOWS_PORT_BASE + (int(transport_hash[:8], 16) % _WINDOWS_PORT_SPAN)
+        return f"tcp:{_WINDOWS_LOOPBACK_HOST}:{port}"
+
+    def _live_runtime_windows_ports(self) -> set[int]:
+        """Return live loopback ports already claimed by runtime lock files."""
+        lock_dir = self.get_lock_path().parent
+        if not lock_dir.exists():
+            return set()
+
+        ports: set[int] = set()
+        for lock_path in lock_dir.glob("*.json"):
+            lock = self._read_json_file(lock_path)
+            if lock is None:
+                continue
+            pid = lock.get("pid")
+            if not isinstance(pid, int) or not pid_alive(pid):
+                try:
+                    lock_path.unlink()
+                except OSError:
+                    pass
+                continue
+            parsed = _parse_tcp_address(str(lock.get("socket_path", "")))
+            if parsed is None:
+                continue
+            host, port = parsed
+            if host == _WINDOWS_LOOPBACK_HOST:
+                ports.add(port)
+        return ports
+
+    def _select_startup_ipc_address(self) -> str:
+        """Return the IPC address to hand to a newly spawned daemon."""
+        if sys.platform != "win32":
+            return self.get_ipc_address()
+
+        preferred = self._preferred_windows_ipc_address()
+        parsed = _parse_tcp_address(preferred)
+        if parsed is None:
+            return preferred
+
+        _host, preferred_port = parsed
+        used_ports = self._live_runtime_windows_ports()
+        for offset in range(_WINDOWS_PORT_SPAN):
+            port = _WINDOWS_PORT_BASE + (
+                (preferred_port - _WINDOWS_PORT_BASE + offset) % _WINDOWS_PORT_SPAN
+            )
+            if port not in used_ports:
+                return f"tcp:{_WINDOWS_LOOPBACK_HOST}:{port}"
+
+        raise RuntimeError(
+            "No free Windows daemon IPC ports remain in the current runtime scope"
+        )
+
     def get_ipc_address(self) -> str:
         """Derive a unique IPC address from the project directory.
 
-        Linux/macOS: Unix socket path in /tmp.
-        Windows: TCP loopback address with port 0 (OS-assigned at bind time).
+        Linux/macOS: runtime-scoped Unix socket path.
+        Windows: preferred runtime-scoped TCP loopback port.
         """
-        digest = _project_dir_hash(self._project_dir, length=8)
         if sys.platform == "win32":
-            return "tcp:127.0.0.1:0"
-        return os.path.join(_SOCKET_DIR, f"chunkhound-{digest}.sock")
+            return self._preferred_windows_ipc_address()
+        transport_hash = _runtime_scoped_transport_hash(
+            self._project_dir,
+            self.get_runtime_dir(),
+        )
+        return os.path.join(
+            str(self.get_socket_dir()),
+            f"chunkhound-{transport_hash[:8]}.sock",
+        )
 
     def get_socket_path(self) -> str:
-        """Compatibility alias for get_ipc_address()."""
+        """Return the authoritative socket path when a lock is published."""
+        lock = self.read_lock()
+        if lock is not None:
+            socket_path = lock.get("socket_path")
+            if isinstance(socket_path, str) and socket_path:
+                return socket_path
         return self.get_ipc_address()
 
     def get_daemon_log_path(self) -> Path:
@@ -749,7 +861,12 @@ class DaemonDiscovery:
 
         return forwarded
 
-    def _start_daemon_subprocess(self, args: Any) -> DaemonStartupHandle:
+    def _start_daemon_subprocess(
+        self,
+        args: Any,
+        *,
+        socket_path: str | None = None,
+    ) -> DaemonStartupHandle:
         """Launch the daemon as a detached subprocess.
 
         The new process runs ``chunkhound _daemon`` with the same configuration
@@ -759,7 +876,7 @@ class DaemonDiscovery:
         Args:
             args: Original CLI ``argparse.Namespace`` from the proxy invocation.
         """
-        socket_path = self.get_ipc_address()
+        startup_socket_path = socket_path or self._select_startup_ipc_address()
 
         cmd = [
             sys.executable,
@@ -769,7 +886,7 @@ class DaemonDiscovery:
             "--project-dir",
             str(self._project_dir),
             "--socket-path",
-            socket_path,
+            startup_socket_path,
         ]
 
         # Forward all config flags by introspecting the daemon parser's own
@@ -809,9 +926,10 @@ class DaemonDiscovery:
         spawning duplicate daemons (TOCTOU race).  The proxy that acquires the
         lock is the sole daemon starter; others skip straight to polling.
 
-        On Windows the port is OS-assigned at bind time and stored in the lock
-        file, so we always read the lock file to obtain the actual address
-        rather than using the pre-computed address.
+        On Windows startup prefers a runtime-scoped hashed loopback port and
+        probes for a same-runtime free port under the global startup lock before
+        spawning. Once the daemon publishes its lock file, discovery always
+        pivots to that authoritative address.
 
         Args:
             args: CLI ``argparse.Namespace`` — forwarded to subprocess if daemon
@@ -883,7 +1001,11 @@ class DaemonDiscovery:
                     )
 
                 try:
-                    startup = self._start_daemon_subprocess(args)
+                    startup_address = self._select_startup_ipc_address()
+                    startup = self._start_daemon_subprocess(
+                        args,
+                        socket_path=startup_address,
+                    )
                     poll_deadline = time.monotonic() + remaining
                     while time.monotonic() < poll_deadline:
                         returncode = startup.process.poll()
@@ -892,7 +1014,7 @@ class DaemonDiscovery:
                                 self._format_startup_failure(
                                     prefix=(
                                         "ChunkHound daemon exited before it became "
-                                        "reachable"
+                                        f"reachable (address: {startup_address})"
                                     ),
                                     log_path=startup.log_path,
                                     returncode=returncode,
@@ -914,7 +1036,7 @@ class DaemonDiscovery:
                         self._format_startup_failure(
                             prefix=(
                                 f"ChunkHound daemon did not start within "
-                                f"{_STARTUP_TIMEOUT}s (address: {initial_address})"
+                                f"{_STARTUP_TIMEOUT}s (address: {startup_address})"
                             ),
                             log_path=startup.log_path,
                         )

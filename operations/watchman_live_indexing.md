@@ -64,7 +64,8 @@ The regular daemon log remains `<project>/.chunkhound/daemon.log`.
 - There is no implicit fallback from failed Watchman startup to `watchdog` or
   `polling`.
 - A Watchman startup failure should stop daemon publication before the
-  runtime-scoped daemon lock is written.
+  runtime-scoped daemon lock and authoritative daemon transport address are
+  published.
 - Proxy startup errors include recent daemon-log context; inspect both
   `.chunkhound/daemon.log` and `.chunkhound/watchman/watchman.log`.
 

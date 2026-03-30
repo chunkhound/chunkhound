@@ -84,6 +84,120 @@ def test_normalized_project_dir_resolves_symlink_to_same_root(tmp_path: Path) ->
     assert _roots_overlap(real_root, link_root)
 
 
+def test_unix_ipc_address_uses_runtime_scoped_socket_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Unix IPC should live under the active runtime-scoped socket directory."""
+    runtime_dir = _set_runtime_dir_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(discovery_module.sys, "platform", "linux")
+
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    discovery = DaemonDiscovery(project_dir)
+
+    socket_path = Path(discovery.get_ipc_address())
+    assert socket_path.parent == discovery.get_socket_dir()
+    assert str(socket_path.parent).startswith("/tmp/chunkhound-daemon-sockets/")
+    assert socket_path.name.startswith("chunkhound-")
+    assert socket_path.suffix == ".sock"
+
+
+def test_unix_ipc_address_changes_with_runtime_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The same project root should get a different Unix socket per runtime."""
+    monkeypatch.setattr(discovery_module.sys, "platform", "linux")
+
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    runtime_a = tmp_path / "runtime-a"
+    runtime_b = tmp_path / "runtime-b"
+    runtime_a.mkdir()
+    runtime_b.mkdir()
+
+    monkeypatch.setenv(_RUNTIME_DIR_ENV, str(runtime_a))
+    address_a = DaemonDiscovery(project_dir).get_ipc_address()
+
+    monkeypatch.setenv(_RUNTIME_DIR_ENV, str(runtime_b))
+    address_b = DaemonDiscovery(project_dir).get_ipc_address()
+
+    assert address_a != address_b
+
+
+def test_windows_ipc_address_is_deterministic_within_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Windows IPC should be stable for the same root within one runtime."""
+    _set_runtime_dir_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(discovery_module.sys, "platform", "win32")
+
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+
+    first = DaemonDiscovery(project_dir).get_ipc_address()
+    second = DaemonDiscovery(project_dir).get_ipc_address()
+
+    assert first == second
+    assert first.startswith("tcp:127.0.0.1:")
+    assert not first.endswith(":0")
+
+
+def test_windows_ipc_address_changes_with_runtime_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Different runtimes should not share the same Windows transport address."""
+    monkeypatch.setattr(discovery_module.sys, "platform", "win32")
+
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    runtime_a = tmp_path / "runtime-a"
+    runtime_b = tmp_path / "runtime-b"
+    runtime_a.mkdir()
+    runtime_b.mkdir()
+
+    monkeypatch.setenv(_RUNTIME_DIR_ENV, str(runtime_a))
+    address_a = DaemonDiscovery(project_dir).get_ipc_address()
+
+    monkeypatch.setenv(_RUNTIME_DIR_ENV, str(runtime_b))
+    address_b = DaemonDiscovery(project_dir).get_ipc_address()
+
+    assert address_a != address_b
+
+
+def test_windows_startup_ipc_address_avoids_live_sibling_port_collision_without_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sibling roots should avoid a live lock port even if registry publish failed."""
+    _set_runtime_dir_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(discovery_module.sys, "platform", "win32")
+
+    root_a = tmp_path / "repo-a"
+    root_b = tmp_path / "repo-b"
+    root_a.mkdir()
+    root_b.mkdir()
+
+    discovery_a = DaemonDiscovery(root_a)
+    discovery_b = DaemonDiscovery(root_b)
+    collided_address = "tcp:127.0.0.1:55000"
+
+    discovery_a.write_lock(os.getpid(), collided_address, auth_token="token")
+    monkeypatch.setattr(
+        discovery_b,
+        "_preferred_windows_ipc_address",
+        lambda: collided_address,
+    )
+
+    startup_address = discovery_b._select_startup_ipc_address()
+
+    assert startup_address != collided_address
+    assert startup_address.startswith("tcp:127.0.0.1:")
+
+
 def test_registry_validation_removes_dead_entry(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

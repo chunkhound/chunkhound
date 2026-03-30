@@ -113,8 +113,11 @@ class ChunkHoundDaemon(MCPServerBase):
                 auth_token = secrets.token_hex(32)
                 self._auth_token = auth_token
 
-                # Start IPC server; on Windows actual address differs
-                # (port 0 -> real port).
+                # Ensure the runtime-scoped Unix socket directory exists before bind.
+                if sys.platform != "win32" and not self._socket_path.startswith("tcp:"):
+                    Path(self._socket_path).parent.mkdir(parents=True, exist_ok=True)
+
+                # Start the IPC server using the authoritative transport address.
                 server, actual_address = await ipc.create_server(
                     self._socket_path, self._handle_client
                 )
@@ -125,9 +128,8 @@ class ChunkHoundDaemon(MCPServerBase):
                     os.getpid(), self._socket_path, auth_token=auth_token
                 )
 
-                # Post-write validation: on Windows two daemons can race to bind
-                # different OS-assigned ports and both write the lock. Verify our
-                # PID is the one recorded; if not, the other daemon won.
+                # Post-write validation: verify our PID is the one recorded; if
+                # not, another daemon won the startup race.
                 written_lock = self._discovery.read_lock()
                 if written_lock is None or written_lock.get("pid") != os.getpid():
                     message = (
