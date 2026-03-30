@@ -462,6 +462,7 @@ async def test_watchman_cli_session_falls_back_when_direct_socket_connect_races(
         watchman_session_module.asyncio,
         "open_unix_connection",
         _missing_socket_connection,
+        raising=False,
     )
 
     session = DirectThenFallbackSession(
