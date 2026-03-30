@@ -16,7 +16,7 @@ import os
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from chunkhound.core.config import EmbeddingProviderFactory
 from chunkhound.core.config.config import Config
@@ -313,8 +313,15 @@ class MCPServerBase(ABC):
             return
 
         try:
-            # Cast is safe - compaction service is only created for DuckDB providers
-            db_provider = cast("DuckDBProvider", self.services.provider)
+            from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+
+            if not isinstance(self.services.provider, DuckDBProvider):
+                self.debug_log(
+                    f"Expected DuckDBProvider, got "
+                    f"{type(self.services.provider).__name__}"
+                )
+                return
+            db_provider = self.services.provider
             started = await self._compaction_service.compact_background(
                 provider=db_provider,
                 on_complete=self._post_compaction_reindex,
