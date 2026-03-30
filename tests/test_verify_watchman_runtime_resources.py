@@ -55,13 +55,11 @@ def _unsupported_host_runtime_wheel_name() -> str:
     raise AssertionError(f"Unsupported native Watchman test host: {host_platform}")
 
 
-def _synthetic_wheel_files() -> tuple[str, ...]:
+def _synthetic_wheel_files(runtime_platform: str) -> tuple[str, ...]:
     return (
         "chunkhound/watchman_runtime/loader.py",
         "chunkhound/watchman_runtime/bridge.py",
-        *watchman_verifier._required_wheel_paths_for_platforms(
-            (hatch_build._host_watchman_platform(),)
-        ),
+        *watchman_verifier._required_wheel_paths_for_platforms((runtime_platform,)),
     )
 
 
@@ -95,12 +93,14 @@ def _build_synthetic_watchman_wheel(
     tmp_path: Path,
     *,
     wheel_name: str,
+    runtime_platform: str | None = None,
     excluded_paths: set[str] | None = None,
     overridden_text_files: dict[str, str] | None = None,
     extra_text_files: dict[str, str] | None = None,
 ) -> Path:
     repo_root = _repo_root()
     wheel_path = tmp_path / wheel_name
+    selected_runtime_platform = runtime_platform or hatch_build._host_watchman_platform()
     excluded = excluded_paths or set()
     overrides = overridden_text_files or {}
     extras = extra_text_files or {}
@@ -119,7 +119,7 @@ def _build_synthetic_watchman_wheel(
             info.external_attr = 0o644 << 16
             zf.writestr(info, content, compress_type=zipfile.ZIP_DEFLATED)
 
-        for relative_path in _synthetic_wheel_files():
+        for relative_path in _synthetic_wheel_files(selected_runtime_platform):
             if relative_path in excluded:
                 continue
             overridden_text = overrides.get(relative_path)
@@ -161,6 +161,7 @@ def _build_supported_matrix_wheels(tmp_path: Path) -> list[Path]:
         _build_synthetic_watchman_wheel(
             tmp_path,
             wheel_name=_wheel_name_for_runtime_platform(platform_tag),
+            runtime_platform=platform_tag,
         )
         for platform_tag in _supported_runtime_platforms()
     ]
