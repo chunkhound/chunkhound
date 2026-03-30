@@ -1,4 +1,4 @@
-"""Tests for the _connection_suspended guard in serial_executor."""
+"""Tests for the _connection_allowed guard in serial_executor."""
 
 import threading
 
