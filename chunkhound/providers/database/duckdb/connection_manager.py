@@ -94,7 +94,7 @@ class DuckDBConnectionManager:
 
             if not self.db_path.exists() and old_db.exists():
                 logger.warning("Restoring database from pre-compaction state")
-                old_db.rename(self.db_path)
+                os.replace(old_db, self.db_path)
 
             # Clean stale artifacts
             for artifact in [compact_db, old_db]:
