@@ -840,6 +840,118 @@ class TestRealtimeFunctional:
                 await process_task
 
     @pytest.mark.asyncio
+    async def test_processing_error_requeues_reserved_newer_generation(
+        self,
+        realtime_setup,
+        monkeypatch,
+    ):
+        """A parked newer generation must still run after the active attempt fails."""
+        service, watch_dir, _, services = realtime_setup
+        target_file = watch_dir / "follow_up_after_failure.py"
+        target_file.write_text("value = 1\n")
+        attempted_contents: list[str] = []
+        first_processing_started = asyncio.Event()
+        release_first_processing = asyncio.Event()
+        second_processing_completed = asyncio.Event()
+        original_process_file = service.services.indexing_coordinator.process_file
+        original_add_file = service.add_file
+
+        async def flaky_then_real_process_file(
+            file_path: Path, skip_embeddings: bool = False
+        ) -> dict[str, object]:
+            assert file_path == target_file
+            assert skip_embeddings is True
+            attempted_contents.append(file_path.read_text())
+            if len(attempted_contents) == 1:
+                first_processing_started.set()
+                await release_first_processing.wait()
+                raise RuntimeError("synthetic realtime processing failure")
+            result = await original_process_file(
+                file_path, skip_embeddings=skip_embeddings
+            )
+            second_processing_completed.set()
+            return result
+
+        async def skip_embed_follow_up(
+            file_path: Path, priority: str = "change"
+        ) -> bool:
+            if priority == "embed":
+                return True
+            return await original_add_file(file_path, priority)
+
+        monkeypatch.setattr(
+            service.services.indexing_coordinator,
+            "process_file",
+            flaky_then_real_process_file,
+        )
+        monkeypatch.setattr(service, "add_file", skip_embed_follow_up)
+
+        service._service_state = "running"
+        service._effective_backend = "watchdog"
+        service.monitoring_ready.set()
+        service._monitoring_ready_at = service._utc_now()
+
+        service._record_source_event("modified", target_file)
+        service._record_accepted_event("modified", target_file)
+        assert await service.add_file(target_file, priority="change") is True
+        if service._debounce_tasks:
+            await asyncio.wait_for(
+                asyncio.gather(*service._debounce_tasks.copy(), return_exceptions=True),
+                timeout=2.0,
+            )
+
+        process_task = asyncio.create_task(service._process_loop())
+        service.process_task = process_task
+
+        try:
+            await asyncio.wait_for(first_processing_started.wait(), timeout=1.0)
+
+            for version in range(2, 8):
+                target_file.write_text(f"value = {version}\n")
+                service._record_source_event("modified", target_file)
+                service._record_accepted_event("modified", target_file)
+                assert await service.add_file(target_file, priority="change") is False
+
+            pending_stats = await service.get_health()
+            assert pending_stats["queue_size"] == 0
+            assert pending_stats["pending_files"] == 0
+            assert (
+                service._reserved_follow_up_change_generations[str(target_file)]
+                == service._current_source_generation(target_file)
+            )
+
+            release_first_processing.set()
+            await asyncio.wait_for(second_processing_completed.wait(), timeout=2.0)
+            assert await _wait_for_logical_indexed(
+                services.provider,
+                target_file,
+                timeout=2.0,
+            )
+            final_stats = await _wait_for_realtime_condition(
+                service,
+                lambda snapshot: (
+                    snapshot["pending_files"] == 0
+                    and snapshot["queue_size"] == 0
+                    and snapshot["pending_mutations"]["total"] == 0
+                    and snapshot["pipeline"]["processing_error_count"] >= 1
+                    and snapshot["pipeline"]["last_processing_completed_path"]
+                    == str(target_file)
+                ),
+                timeout=2.0,
+            )
+
+            assert attempted_contents == ["value = 1\n", "value = 7\n"]
+            assert (
+                str(target_file)
+                not in service._reserved_follow_up_change_generations
+            )
+            assert services.provider.get_file_by_path(str(target_file)) is not None
+            assert final_stats["pipeline"]["processing_error_count"] == 1
+        finally:
+            release_first_processing.set()
+            await service.stop()
+
+    @pytest.mark.asyncio
     async def test_event_pressure_interoperates_with_event_queue_overflow(
         self, realtime_setup
     ):

@@ -2914,6 +2914,38 @@ class RealtimeIndexingService:
             return False
         return await self._enqueue_mutation(follow_up, register=False)
 
+    async def _drain_reserved_follow_up_change(
+        self,
+        file_path: Path | str,
+        *,
+        normalized_path: str | None,
+        processing_error: Exception | None = None,
+    ) -> None:
+        if normalized_path is None:
+            return
+
+        follow_up_generation = self._reserved_follow_up_change_generations.pop(
+            normalized_path,
+            None,
+        )
+        if follow_up_generation is None:
+            return
+
+        try:
+            await self._queue_follow_up_change(
+                file_path,
+                source_generation=follow_up_generation,
+            )
+        except Exception as error:
+            self._reserve_change_follow_up(file_path, follow_up_generation)
+            if processing_error is not None:
+                logger.error(
+                    "Failed to requeue reserved follow-up change for "
+                    f"{file_path} after processing error {processing_error}: {error}"
+                )
+                return
+            raise
+
     @staticmethod
     def _overflow_drop_label(drop_count: int) -> str:
         return "event" if drop_count == 1 else "events"
@@ -4247,6 +4279,7 @@ class RealtimeIndexingService:
                 # Use existing indexing coordinator
                 self._record_processing_started(file_path)
                 completed = False
+                processing_error: Exception | None = None
                 try:
                     result = await self.services.indexing_coordinator.process_file(
                         file_path, skip_embeddings=skip_embeddings
@@ -4288,23 +4321,19 @@ class RealtimeIndexingService:
                     except Exception:
                         pass
                     completed = True
+                except Exception as error:
+                    processing_error = error
                 finally:
                     self._record_processing_finished(file_path, completed=completed)
                     if active_change_path is not None:
                         self._active_change_generations.pop(active_change_path, None)
-
-                if active_change_path is not None:
-                    follow_up_generation = (
-                        self._reserved_follow_up_change_generations.pop(
-                            active_change_path,
-                            None,
-                        )
-                    )
-                    if follow_up_generation is not None:
-                        await self._queue_follow_up_change(
+                        await self._drain_reserved_follow_up_change(
                             file_path,
-                            source_generation=follow_up_generation,
+                            normalized_path=active_change_path,
+                            processing_error=processing_error,
                         )
+                if processing_error is not None:
+                    raise processing_error
 
             except asyncio.CancelledError:
                 logger.debug("Processing loop cancelled")
