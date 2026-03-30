@@ -7,6 +7,7 @@ and mid-swap states.
 
 import os
 import shutil
+import time
 from pathlib import Path
 
 import duckdb
@@ -109,8 +110,8 @@ class TestLockFileRecovery:
         lock_path = get_compaction_lock_path(db_path)
 
         _create_valid_duckdb(db_path)
-        # Use a PID that almost certainly doesn't exist
-        lock_path.write_text("999999999")
+        # Use a PID that almost certainly doesn't exist (new format with timestamp)
+        lock_path.write_text(f"999999999:{time.time():.0f}")
 
         mgr = DuckDBConnectionManager(db_path)
         mgr.connect()
@@ -125,8 +126,8 @@ class TestLockFileRecovery:
         lock_path = get_compaction_lock_path(db_path)
 
         _create_valid_duckdb(db_path)
-        # Write current process PID (guaranteed alive)
-        lock_path.write_text(str(os.getpid()))
+        # Write current process PID with recent timestamp (guaranteed alive)
+        lock_path.write_text(f"{os.getpid()}:{time.time():.0f}")
 
         mgr = DuckDBConnectionManager(db_path)
         mgr.connect()
@@ -135,6 +136,44 @@ class TestLockFileRecovery:
         finally:
             mgr.disconnect()
             # Clean up lock so it doesn't interfere with other tests
+            lock_path.unlink(missing_ok=True)
+
+    def test_removes_stale_lock_old_timestamp(self, tmp_path: Path):
+        """Lock with live PID but timestamp > 24h is treated as stale (PID reuse)."""
+        db_path = tmp_path / "chunks.duckdb"
+        lock_path = get_compaction_lock_path(db_path)
+
+        _create_valid_duckdb(db_path)
+        # Current PID (alive) but timestamp from 25 hours ago
+        old_timestamp = time.time() - 90000
+        lock_path.write_text(f"{os.getpid()}:{old_timestamp:.0f}")
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert not lock_path.exists(), (
+                "Lock with live PID but old timestamp should be removed"
+            )
+        finally:
+            mgr.disconnect()
+
+    def test_preserves_lock_legacy_pid_only(self, tmp_path: Path):
+        """Legacy lock file with only PID (no timestamp) and live PID is preserved."""
+        db_path = tmp_path / "chunks.duckdb"
+        lock_path = get_compaction_lock_path(db_path)
+
+        _create_valid_duckdb(db_path)
+        # Legacy format: PID only, no timestamp
+        lock_path.write_text(str(os.getpid()))
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert lock_path.exists(), (
+                "Legacy lock with live PID should be preserved"
+            )
+        finally:
+            mgr.disconnect()
             lock_path.unlink(missing_ok=True)
 
     def test_removes_empty_legacy_lock(self, tmp_path: Path):
