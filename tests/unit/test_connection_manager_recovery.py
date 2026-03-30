@@ -1,0 +1,153 @@
+"""Tests for DuckDBConnectionManager compaction crash recovery.
+
+Verifies that connection startup correctly handles leftover artifacts
+from interrupted compaction operations: lock files, stale temp databases,
+and mid-swap states.
+"""
+
+import os
+import shutil
+from pathlib import Path
+
+import duckdb
+import pytest
+from loguru import logger
+
+from chunkhound.providers.database.duckdb.connection_manager import (
+    DuckDBConnectionManager,
+    get_compaction_lock_path,
+)
+
+
+def _create_valid_duckdb(path: Path) -> None:
+    """Create a minimal valid DuckDB database file."""
+    conn = duckdb.connect(str(path))
+    conn.execute("CREATE TABLE _marker (id INTEGER)")
+    conn.execute("INSERT INTO _marker VALUES (1)")
+    conn.close()
+
+
+class TestCrashMidSwap:
+    """Test recovery when process crashed between rename operations."""
+
+    def test_restores_from_old_when_original_missing(self, tmp_path: Path):
+        """If db_path is gone but .duckdb.old exists, restore the old file."""
+        db_path = tmp_path / "chunks.duckdb"
+        old_path = db_path.with_suffix(".duckdb.old")
+
+        # Simulate crash: original renamed to .old, new never moved into place
+        _create_valid_duckdb(old_path)
+        assert not db_path.exists()
+        assert old_path.exists()
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert db_path.exists(), "Original should be restored from .old"
+            assert not old_path.exists(), ".old should be cleaned up"
+        finally:
+            mgr.disconnect()
+
+    def test_cleans_stale_old_when_both_exist(self, tmp_path: Path):
+        """If both db_path and .duckdb.old exist, remove the .old artifact."""
+        db_path = tmp_path / "chunks.duckdb"
+        old_path = db_path.with_suffix(".duckdb.old")
+
+        _create_valid_duckdb(db_path)
+        _create_valid_duckdb(old_path)
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert db_path.exists()
+            assert not old_path.exists(), "Stale .old should be cleaned up"
+        finally:
+            mgr.disconnect()
+
+
+class TestStaleArtifacts:
+    """Test cleanup of leftover compaction artifacts."""
+
+    def test_cleans_compact_db_artifact(self, tmp_path: Path):
+        """Leftover .compact.duckdb is cleaned up on connect."""
+        db_path = tmp_path / "chunks.duckdb"
+        compact_path = db_path.with_suffix(".compact.duckdb")
+
+        _create_valid_duckdb(db_path)
+        compact_path.write_bytes(b"stale")
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert not compact_path.exists(), ".compact.duckdb should be cleaned up"
+        finally:
+            mgr.disconnect()
+
+    def test_cleans_export_directory(self, tmp_path: Path):
+        """Leftover export directory is cleaned up on connect."""
+        db_path = tmp_path / "chunks.duckdb"
+        export_dir = tmp_path / ".chunkhound_compaction_export"
+
+        _create_valid_duckdb(db_path)
+        export_dir.mkdir()
+        (export_dir / "leftover.parquet").write_bytes(b"data")
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert not export_dir.exists(), "Export dir should be cleaned up"
+        finally:
+            mgr.disconnect()
+
+
+class TestLockFileRecovery:
+    """Test PID-aware lock file handling on startup."""
+
+    def test_removes_stale_lock_dead_pid(self, tmp_path: Path):
+        """Lock file with dead PID is removed on connect."""
+        db_path = tmp_path / "chunks.duckdb"
+        lock_path = get_compaction_lock_path(db_path)
+
+        _create_valid_duckdb(db_path)
+        # Use a PID that almost certainly doesn't exist
+        lock_path.write_text("999999999")
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert not lock_path.exists(), "Stale lock (dead PID) should be removed"
+        finally:
+            mgr.disconnect()
+
+    def test_preserves_lock_live_pid(self, tmp_path: Path):
+        """Lock file with live PID is NOT removed on connect."""
+        db_path = tmp_path / "chunks.duckdb"
+        lock_path = get_compaction_lock_path(db_path)
+
+        _create_valid_duckdb(db_path)
+        # Write current process PID (guaranteed alive)
+        lock_path.write_text(str(os.getpid()))
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert lock_path.exists(), "Lock held by live process should be preserved"
+        finally:
+            mgr.disconnect()
+            # Clean up lock so it doesn't interfere with other tests
+            lock_path.unlink(missing_ok=True)
+
+    def test_removes_empty_legacy_lock(self, tmp_path: Path):
+        """Empty lock file (legacy format) is treated as stale."""
+        db_path = tmp_path / "chunks.duckdb"
+        lock_path = get_compaction_lock_path(db_path)
+
+        _create_valid_duckdb(db_path)
+        lock_path.write_text("")
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert not lock_path.exists(), "Empty (legacy) lock should be removed"
+        finally:
+            mgr.disconnect()
