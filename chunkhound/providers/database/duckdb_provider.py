@@ -3105,7 +3105,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         Raises:
             CompactionError: If compaction fails.
         """
-        db_path = Path(self._connection_manager._db_path)
+        db_path = Path(self._connection_manager.db_path)
 
         # Check disk space — 2.5x covers: exported parquet (~1x) + new compact DB (~1x)
         # + original DB retained until swap (~0.5x safety margin)

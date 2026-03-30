@@ -83,31 +83,51 @@ class DuckDBConnectionManager:
             if lock_file.exists():
                 # Check if lock is held by a live process before removing
                 lock_is_stale = True
+                _STALE_LOCK_SECONDS = 86400  # 24 hours
                 try:
-                    pid_str = lock_file.read_text().strip()
+                    content = lock_file.read_text().strip()
+                    # Format: "PID:TIMESTAMP" (new) or "PID" (legacy)
+                    parts = content.split(":", 1)
+                    pid_str = parts[0]
+                    lock_time = (
+                        float(parts[1]) if len(parts) > 1 else None
+                    )
                     if pid_str.isdigit():
                         pid = int(pid_str)
-                        try:
-                            os.kill(pid, 0)
-                            # Process alive — don't remove lock
-                            lock_is_stale = False
-                            logger.warning(
-                                f"Compaction lock held by live process (PID {pid}). "
-                                "Not removing lock file."
-                            )
-                        except ProcessLookupError:
+                        # Age-based staleness: a lock older than 24h with a
+                        # "live" PID is almost certainly a reused PID after
+                        # reboot, not the original compaction process.
+                        if (
+                            lock_time is not None
+                            and time.time() - lock_time > _STALE_LOCK_SECONDS
+                        ):
                             logger.warning(
                                 f"Removing stale compaction lock "
-                                f"(PID {pid} no longer running)"
+                                f"(PID {pid}, age > 24h)"
                             )
-                        except PermissionError:
-                            # Process alive but owned by different user
-                            lock_is_stale = False
-                            logger.warning(
-                                f"Compaction lock held by process PID {pid} "
-                                "(different user). Not removing lock file."
-                            )
-                except OSError:
+                        else:
+                            try:
+                                os.kill(pid, 0)
+                                # Process alive — don't remove lock
+                                lock_is_stale = False
+                                logger.warning(
+                                    f"Compaction lock held by live process "
+                                    f"(PID {pid}). Not removing lock file."
+                                )
+                            except ProcessLookupError:
+                                logger.warning(
+                                    f"Removing stale compaction lock "
+                                    f"(PID {pid} no longer running)"
+                                )
+                            except PermissionError:
+                                # Process alive but owned by different user
+                                lock_is_stale = False
+                                logger.warning(
+                                    f"Compaction lock held by process PID "
+                                    f"{pid} (different user). "
+                                    "Not removing lock file."
+                                )
+                except (OSError, ValueError):
                     logger.warning(
                         "Removing compaction lock (unreadable or legacy format)"
                     )
