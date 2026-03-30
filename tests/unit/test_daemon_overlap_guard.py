@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -98,7 +99,9 @@ def test_unix_ipc_address_uses_runtime_scoped_socket_dir(
 
     socket_path = Path(discovery.get_ipc_address())
     assert socket_path.parent == discovery.get_socket_dir()
-    assert str(socket_path.parent).startswith("/tmp/chunkhound-daemon-sockets/")
+    assert socket_path.parent.parent == (
+        Path(tempfile.gettempdir()) / "chunkhound-daemon-sockets"
+    )
     assert socket_path.name.startswith("chunkhound-")
     assert socket_path.suffix == ".sock"
 
