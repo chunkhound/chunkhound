@@ -335,17 +335,33 @@ class VoyageAIEmbeddingProvider:
                     ]
                 )
 
+                # Rate limit / server errors from VoyageAI SDK (HTTP 429, 5xx)
+                is_rate_limit_error = any(
+                    [
+                        "RateLimitError" in error_type,
+                        "TryAgain" in error_type,
+                        "ServerError" in error_type,
+                        "ServiceUnavailableError" in error_type,
+                        "rate limit" in error_str.lower(),
+                    ]
+                )
+
                 # HTTP 408 (upstream request timeout) from Azure ML / proxies:
                 # treat as transient and retry with a longer initial backoff
                 is_upstream_timeout = "408" in error_str or (
                     "upstream request timeout" in error_str.lower()
                 )
 
-                if (
-                    is_network_error or is_upstream_timeout
-                ) and attempt < self._retry_attempts - 1:
-                    # Longer backoff for upstream timeouts — endpoint needs time to recover
-                    base_delay = 10.0 if is_upstream_timeout else self._retry_delay
+                is_retryable = is_network_error or is_rate_limit_error or is_upstream_timeout
+
+                if is_retryable and attempt < self._retry_attempts - 1:
+                    # Rate limits need longer backoff (TPM window is 60s)
+                    if is_rate_limit_error:
+                        base_delay = 30.0
+                    elif is_upstream_timeout:
+                        base_delay = 10.0
+                    else:
+                        base_delay = self._retry_delay
                     delay = base_delay * (2**attempt)
                     logger.warning(
                         f"VoyageAI embedding failed with {error_module}.{error_type} "
@@ -355,8 +371,8 @@ class VoyageAIEmbeddingProvider:
                     await asyncio.sleep(delay)
                     continue
                 else:
-                    # Non-retryable error or last attempt - log and raise
-                    if is_network_error or is_upstream_timeout:
+                    # Non-retryable error or last attempt
+                    if is_retryable:
                         logger.error(
                             f"VoyageAI embedding failed after {self._retry_attempts} attempts: {e}"
                         )
@@ -635,6 +651,7 @@ class VoyageAIEmbeddingProvider:
             except Exception as e:
                 error_type = type(e).__name__
                 error_module = type(e).__module__
+                error_str = str(e)
                 is_network_error = any(
                     [
                         "APIConnectionError" in error_type,
@@ -644,8 +661,22 @@ class VoyageAIEmbeddingProvider:
                         "TimeoutError" in error_type,
                     ]
                 )
-                if is_network_error and attempt < self._retry_attempts - 1:
-                    delay = self._retry_delay * (2**attempt)
+                is_rate_limit_error = any(
+                    [
+                        "RateLimitError" in error_type,
+                        "TryAgain" in error_type,
+                        "ServerError" in error_type,
+                        "ServiceUnavailableError" in error_type,
+                        "rate limit" in error_str.lower(),
+                    ]
+                )
+                is_retryable = is_network_error or is_rate_limit_error
+                if is_retryable and attempt < self._retry_attempts - 1:
+                    if is_rate_limit_error:
+                        base_delay = 30.0
+                    else:
+                        base_delay = self._retry_delay
+                    delay = base_delay * (2**attempt)
                     logger.warning(
                         f"VoyageAI reranking failed with {error_module}.{error_type} "
                         f"(attempt {attempt + 1}/{self._retry_attempts}): {e}. "
@@ -654,7 +685,7 @@ class VoyageAIEmbeddingProvider:
                     await asyncio.sleep(delay)
                     continue
                 else:
-                    if is_network_error:
+                    if is_retryable:
                         logger.error(
                             f"VoyageAI reranking failed after {self._retry_attempts} attempts: {e}"
                         )
