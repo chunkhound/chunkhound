@@ -24,7 +24,9 @@ from chunkhound.core.config import EmbeddingProviderFactory
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices, create_services
 from chunkhound.embeddings import EmbeddingManager
-from chunkhound.interfaces.embedding_provider import EmbeddingProvider as EmbeddingProviderProtocol
+from chunkhound.interfaces.embedding_provider import (
+    EmbeddingProvider as EmbeddingProviderProtocol,
+)
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.realtime_indexing_service import (
@@ -303,6 +305,10 @@ class MCPServerBase(ABC):
 
     def _current_startup_failure_message(self) -> str | None:
         return self._startup_failure_message
+
+    def _resolve_startup_publish_complete(self) -> None:
+        """Resolve the daemon publish barrier so waiters stop blocking."""
+        self._startup_publish_complete.set()
 
     async def initialize(self) -> None:
         """Initialize services and database connection.

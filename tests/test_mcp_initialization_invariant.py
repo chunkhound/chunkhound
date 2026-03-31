@@ -52,7 +52,7 @@ def _prime_completed_daemon_startup(server: MCPServerBase) -> None:
     server._complete_startup_phase("initialize")
     server._mark_startup_exposure_ready()
     server._complete_startup()
-    server._startup_publish_complete.set()
+    server._resolve_startup_publish_complete()
 
 
 class TestNonBlockingInitialization:
@@ -249,6 +249,55 @@ class TestNonBlockingInitialization:
             tmp_path,
             trigger="initial",
         )
+        monitoring_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await monitoring_task
+
+    @pytest.mark.asyncio
+    async def test_initial_scan_unblocks_when_daemon_publish_fails(
+        self, tmp_path: Path
+    ) -> None:
+        """Daemon-mode scans should stop waiting once publish failure is recorded."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.realtime_backend = "watchdog"
+
+        server = DaemonModeMCPServer(config=config)
+        server.realtime_indexing = MagicMock()
+        server.realtime_indexing.monitoring_ready = asyncio.Event()
+        server.realtime_indexing.monitoring_ready.set()
+        server.realtime_indexing._MONITORING_READY_TIMEOUT_SECONDS = 0.01
+        server._run_directory_scan = AsyncMock()  # type: ignore[method-assign]
+
+        async def never_finishes() -> None:
+            await asyncio.Event().wait()
+
+        monitoring_task = asyncio.create_task(never_finishes())
+        with patch(
+            "chunkhound.mcp_server.base.asyncio.sleep",
+            AsyncMock(return_value=None),
+        ):
+            scan_task = asyncio.create_task(
+                server._coordinated_initial_scan(tmp_path, monitoring_task)
+            )
+            await asyncio.sleep(0)
+            server._run_directory_scan.assert_not_awaited()  # type: ignore[attr-defined]
+
+            server._set_startup_failure(
+                "Daemon publish failed: bind exploded",
+                phase_name="daemon_publish",
+            )
+            server._resolve_startup_publish_complete()
+            await asyncio.wait_for(scan_task, timeout=1.0)
+
+        startup = server._scan_progress["realtime"]["startup"]
+        assert startup["state"] == "failed"
+        assert startup["phases"]["daemon_publish"]["state"] == "failed"
+        assert startup["last_error"] == "Daemon publish failed: bind exploded"
+        server._run_directory_scan.assert_not_awaited()  # type: ignore[attr-defined]
         monitoring_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await monitoring_task
@@ -454,6 +503,53 @@ class TestNonBlockingInitialization:
         assert startup["exposure_ready_at"] is not None
         assert startup["phases"]["daemon_publish"]["state"] == "completed"
         assert startup["phases"]["daemon_publish"]["completed_at"] is not None
+
+    @pytest.mark.asyncio
+    async def test_daemon_run_resolves_publish_barrier_on_publish_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """Daemon publish failures should resolve the barrier and keep diagnostics."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+        config.indexing.realtime_backend = "watchdog"
+        args = MagicMock()
+        args.path = str(tmp_path)
+
+        daemon = ChunkHoundDaemon(
+            config=config,
+            args=args,
+            socket_path="tcp:127.0.0.1:0",
+            project_dir=tmp_path,
+        )
+        daemon.initialize = AsyncMock()
+        daemon.await_startup_barrier = AsyncMock()
+        daemon.cleanup = AsyncMock()
+        daemon._client_manager.poll_pids = AsyncMock(return_value=None)
+        daemon._discovery.write_lock = MagicMock()
+        daemon._discovery.read_lock = MagicMock(return_value={"pid": os.getpid()})
+        daemon._discovery.write_registry_entry = MagicMock()
+
+        with patch(
+            "chunkhound.daemon.server.ipc.create_server",
+            AsyncMock(side_effect=RuntimeError("bind exploded")),
+        ):
+            with pytest.raises(RuntimeError, match="bind exploded"):
+                await daemon.run()
+
+        startup = daemon._scan_progress["realtime"]["startup"]
+        realtime = daemon._scan_progress["realtime"]
+        daemon_status = derive_daemon_status(daemon._scan_progress)
+
+        assert daemon._startup_publish_complete.is_set()
+        assert startup["state"] == "failed"
+        assert startup["phases"]["daemon_publish"]["state"] == "failed"
+        assert startup["last_error"] == "Daemon publish failed: bind exploded"
+        assert realtime["service_state"] == "degraded"
+        assert realtime["last_error"] == "Daemon publish failed: bind exploded"
+        assert daemon_status["status"] == "degraded"
 
     @pytest.mark.asyncio
     async def test_daemon_deduplicates_delayed_shutdown_task(

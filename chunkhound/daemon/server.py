@@ -143,6 +143,7 @@ class ChunkHoundDaemon(MCPServerBase):
                         message,
                         phase_name="daemon_publish",
                     )
+                    self._resolve_startup_publish_complete()
                     self._shutdown_event.set()
                     return
 
@@ -162,12 +163,13 @@ class ChunkHoundDaemon(MCPServerBase):
                 )
                 self._complete_startup_phase("daemon_publish")
                 self._complete_startup()
-                self._startup_publish_complete.set()
+                self._resolve_startup_publish_complete()
             except Exception as error:
                 self._set_startup_failure(
                     f"Daemon publish failed: {error}",
                     phase_name="daemon_publish",
                 )
+                self._resolve_startup_publish_complete()
                 raise
 
             # Start PID poll background task
