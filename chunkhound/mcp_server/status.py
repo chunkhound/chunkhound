@@ -29,16 +29,18 @@ def derive_daemon_status(scan_progress: dict[str, Any] | None) -> dict[str, Any]
     scan_error = progress.get("scan_error")
     realtime_error = realtime.get("last_error") or resync.get("last_error")
     realtime_state = realtime.get("service_state")
+    live_indexing_state = realtime.get("live_indexing_state")
     realtime_needs_resync = bool(resync.get("needs_resync"))
     is_scanning = bool(progress.get("is_scanning"))
-    query_ready = (
-        bool(progress.get("scan_completed_at")) and not is_scanning and not scan_error
-    )
+    # query_ready answers whether at least one successful index already exists.
+    # Later live-indexing degradation must not erase that searchability signal.
+    query_ready = bool(progress.get("scan_completed_at")) and not is_scanning
 
     degraded = (
         bool(scan_error)
         or bool(realtime_error)
         or realtime_state == "degraded"
+        or live_indexing_state == "stalled"
         or realtime_needs_resync
     )
     if degraded:

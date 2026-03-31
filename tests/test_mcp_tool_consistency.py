@@ -422,8 +422,8 @@ async def test_daemon_status_tool_exposes_startup_timing_breakdown():
 
 
 @pytest.mark.asyncio
-async def test_daemon_status_tool_keeps_stalled_pipeline_summary_ready():
-    """A stalled pipeline should not change the top-level daemon summary."""
+async def test_daemon_status_tool_degrades_stalled_pipeline_summary():
+    """A stalled pipeline should degrade the top-level daemon summary."""
     from chunkhound.mcp_server.tools import execute_tool
 
     scan_progress = {
@@ -474,9 +474,109 @@ async def test_daemon_status_tool_keeps_stalled_pipeline_summary_ready():
         scan_progress=scan_progress,
     )
 
-    assert result["status"] == "ready"
+    assert result["status"] == "degraded"
     assert result["query_ready"] is True
     assert result["scan_progress"]["realtime"]["live_indexing_state"] == "stalled"
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_keeps_query_ready_after_realtime_failure():
+    """Later realtime reconciliation failures should stay queryable."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "scan_error": (
+            "Storage reconciliation cleanup failed: "
+            "database invalidated during orphan cleanup"
+        ),
+        "realtime": {
+            "service_state": "degraded",
+            "last_error": (
+                "Realtime resync failed: "
+                "Storage reconciliation cleanup failed: "
+                "database invalidated during orphan cleanup"
+            ),
+            "resync": {
+                "needs_resync": True,
+                "in_progress": False,
+                "last_reason": "realtime_loss_of_sync",
+                "last_error": (
+                    "Storage reconciliation cleanup failed: "
+                    "database invalidated during orphan cleanup"
+                ),
+            },
+            "live_indexing_state": "degraded",
+            "live_indexing_hint": (
+                "Live indexing remains degraded after reconciliation failure; "
+                "inspect resync.last_error."
+            ),
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    assert result["status"] == "degraded"
+    assert result["query_ready"] is True
+    assert (
+        "Storage reconciliation cleanup failed"
+        in result["scan_progress"]["scan_error"]
+    )
+    assert (
+        "Storage reconciliation cleanup failed"
+        in result["scan_progress"]["realtime"]["resync"]["last_error"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_keeps_initial_scan_failure_unqueryable():
+    """Initial scan failure should still leave daemon_status unqueryable."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 0,
+        "chunks_created": 0,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": None,
+        "scan_error": "Initial directory scan failed: database unavailable",
+        "realtime": {
+            "service_state": "running",
+            "last_error": None,
+            "resync": {
+                "needs_resync": False,
+                "in_progress": False,
+                "last_reason": None,
+                "last_error": None,
+            },
+            "live_indexing_state": "idle",
+            "live_indexing_hint": "Live indexing is connected and idle.",
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    assert result["status"] == "degraded"
+    assert result["query_ready"] is False
+    assert result["scan_progress"]["scan_error"] == (
+        "Initial directory scan failed: database unavailable"
+    )
 
 
 @pytest.mark.asyncio

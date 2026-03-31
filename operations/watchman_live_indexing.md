@@ -156,6 +156,9 @@ Quick interpretation guide:
   advancing accepted backlog work.
 - `live_indexing_state == "stalled"`: accepted events exist, but downstream
   processing has not advanced for at least 30 seconds.
+- `live_indexing_state == "stalled"` now also degrades the top-level
+  `daemon_status.status`; operators should not see a stalled daemon summarized
+  as `ready`.
 - `event_pressure.sample_scope == "excluded"` with rising
   `event_pressure.events_in_window`: an excluded noisy path is dominating watch
   traffic, but it is still being filtered before queue admission; adjust your
@@ -167,9 +170,11 @@ Quick interpretation guide:
   generation instead of growing the queue without bound.
 - `status == "degraded"` or `service_state == "degraded"`: inspect
   `last_error`, `watchman_loss_of_sync`, and the daemon/Watchman log files.
-- Top-level `daemon_status.status` remains the coarse readiness summary.
-  Stall diagnosis lives under `scan_progress.realtime.live_indexing_state`
-  rather than automatically degrading the daemon summary.
+- `query_ready == true` means the daemon has already completed an initial index
+  successfully and remains searchable, even if later live-indexing freshness is
+  degraded by a stall or reconciliation failure.
+- `query_ready == false` still means the daemon has not yet completed a usable
+  initial index successfully.
 
 ## Loss of sync and resync
 

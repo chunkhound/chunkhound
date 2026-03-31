@@ -585,7 +585,7 @@ class TestNonBlockingInitialization:
     async def test_run_directory_scan_surfaces_reconciliation_cleanup_failures(
         self, tmp_path: Path
     ) -> None:
-        """Directory scans should record cleanup failures in daemon status."""
+        """Later reconciliation cleanup failures should keep queries available."""
         config = MagicMock()
         config.database.path = str(tmp_path / "test.db")
         config.embedding = None
@@ -596,6 +596,9 @@ class TestNonBlockingInitialization:
         config.indexing.config_file_size_threshold_kb = 20
 
         server = ConcreteMCPServer(config=config)
+        server._scan_progress["scan_completed_at"] = "2026-03-08T00:00:05"
+        server._scan_progress["files_processed"] = 3
+        server._scan_progress["chunks_created"] = 9
         server.services = MagicMock()
         server.services.indexing_coordinator.process_directory = AsyncMock(
             return_value={
@@ -622,10 +625,41 @@ class TestNonBlockingInitialization:
 
         daemon_status = derive_daemon_status(server._scan_progress)
         assert daemon_status["status"] == "degraded"
-        assert daemon_status["query_ready"] is False
+        assert daemon_status["query_ready"] is True
         assert (
             "Storage reconciliation cleanup failed"
             in daemon_status["scan_progress"]["scan_error"]
+        )
+
+    def test_derive_daemon_status_initial_scan_failure_stays_unqueryable(self) -> None:
+        """Initial scan failures should still clear query readiness."""
+        daemon_status = derive_daemon_status(
+            {
+                "files_processed": 0,
+                "chunks_created": 0,
+                "is_scanning": False,
+                "scan_started_at": "2026-03-08T00:00:00",
+                "scan_completed_at": None,
+                "scan_error": "Initial directory scan failed: database unavailable",
+                "realtime": {
+                    "service_state": "running",
+                    "last_error": None,
+                    "resync": {
+                        "needs_resync": False,
+                        "in_progress": False,
+                        "last_reason": None,
+                        "last_error": None,
+                    },
+                    "live_indexing_state": "idle",
+                    "live_indexing_hint": "Live indexing is connected and idle.",
+                },
+            }
+        )
+
+        assert daemon_status["status"] == "degraded"
+        assert daemon_status["query_ready"] is False
+        assert daemon_status["scan_progress"]["scan_error"] == (
+            "Initial directory scan failed: database unavailable"
         )
 
     @pytest.mark.asyncio
