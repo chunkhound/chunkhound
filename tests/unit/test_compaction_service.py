@@ -90,6 +90,8 @@ class TestStorageStats:
         should, stats = service.check_should_compact(mock_provider)
         assert should is True
         assert stats["_raw_fragmentation_ratio"] == 0.6
+        # Verify config threshold was passed to provider
+        mock_provider.should_compact.assert_called_once_with(threshold=0.5)
 
     def test_should_compact_false_below_threshold(
         self, tmp_path: Path, config_with_compaction: Config, mock_provider: MagicMock
@@ -114,6 +116,8 @@ class TestStorageStats:
 
         should, stats = service.check_should_compact(mock_provider)
         assert should is False
+        # Verify config threshold was passed to provider
+        mock_provider.should_compact.assert_called_once_with(threshold=0.5)
 
     def test_should_compact_respects_min_size(
         self, tmp_path: Path, mock_provider: MagicMock
