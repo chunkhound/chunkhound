@@ -3084,6 +3084,9 @@ class DuckDBProvider(SerialDatabaseProvider):
         # Step 1: Always run CHECKPOINT + HNSW compact (lightweight)
         self.optimize_tables()
 
+        if cancel_check and cancel_check():
+            return False
+
         # Step 2: Run full compaction
         logger.info("Running full database compaction...")
         return self._run_blocking_compaction(cancel_check=cancel_check)
