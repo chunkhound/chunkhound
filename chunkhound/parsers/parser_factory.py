@@ -412,7 +412,9 @@ class ParserFactory:
             from chunkhound.parsers.twincat.twincat_mapping import TwinCATMapping
 
             mapping = TwinCATMapping()
-            return UniversalParser(engine=None, mapping=mapping, cast_config=cast_config)
+            return UniversalParser(
+                engine=None, mapping=mapping, cast_config=cast_config
+            )
 
         # Use cache to avoid recreating parsers
         cache_key = self._cache_key(language, detect_embedded_sql)

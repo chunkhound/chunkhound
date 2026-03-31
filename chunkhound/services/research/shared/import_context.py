@@ -68,9 +68,8 @@ class ImportContextService:
         parser: Any = self._parser_factory.create_parser_for_file(Path(file_path))
 
         # Handle TwinCAT (Lark-based parser with engine=None)
-        if (
-            hasattr(parser, "base_mapping")
-            and hasattr(parser.base_mapping, "extract_imports")
+        if hasattr(parser, "base_mapping") and hasattr(
+            parser.base_mapping, "extract_imports"
         ):
             return self._extract_lark_imports(file_path, content, parser)
 

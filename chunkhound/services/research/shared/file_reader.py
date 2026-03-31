@@ -232,9 +232,17 @@ class FileReader:
 
         # If this chunk is marked as a complete function/class/method, use its exact boundaries
         if chunk_kind in (
-            "function", "method", "class", "interface", "struct", "enum",
+            "function",
+            "method",
+            "class",
+            "interface",
+            "struct",
+            "enum",
             # TwinCAT kinds (parser produces complete units)
-            "program", "function_block", "action", "property",
+            "program",
+            "function_block",
+            "action",
+            "property",
         ):
             # Chunk is already a complete unit - just add small padding for context
             padding = 3  # A few lines for docstrings/decorators/comments

@@ -2292,9 +2292,7 @@ class IndexingCoordinator(BaseService):
         except Exception:
             pass
 
-        logger.debug(
-            f"Discovery backend resolved: {_resolved} (reasons: {_reasons})"
-        )
+        logger.debug(f"Discovery backend resolved: {_resolved} (reasons: {_reasons})")
 
         use_git_backend = _resolved in ("git", "git_only")
         git_only_mode = _resolved == "git_only"
