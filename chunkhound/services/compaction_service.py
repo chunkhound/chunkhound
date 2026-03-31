@@ -55,6 +55,7 @@ class CompactionService:
         # must wait on this event before tearing down the provider.
         self._compaction_thread_done = threading.Event()
         self._compaction_thread_done.set()  # No thread running initially
+        self._last_error: Exception | None = None
 
     @property
     def is_compacting(self) -> bool:
@@ -175,15 +176,19 @@ class CompactionService:
             result = await self._do_compaction(provider)
 
             if result and on_complete is not None:
-                logger.info(
-                    "Compaction complete, triggering post-compaction reindex..."
-                )
-                await on_complete()
+                try:
+                    logger.info(
+                        "Compaction complete, triggering post-compaction reindex..."
+                    )
+                    await on_complete()
+                except Exception as cb_err:
+                    logger.error(f"Post-compaction callback failed: {cb_err}")
 
         except asyncio.CancelledError:
             logger.info("Background compaction cancelled")
             raise
         except Exception as e:
+            self._last_error = e
             logger.error(f"Background compaction failed: {e}")
         finally:
             self._compaction_in_progress = False
