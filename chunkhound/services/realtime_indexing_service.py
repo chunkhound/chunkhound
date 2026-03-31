@@ -688,6 +688,7 @@ class WatchmanRealtimeAdapter:
         self._last_loss_of_sync_reason: str | None = None
         self._last_loss_of_sync_at: str | None = None
         self._last_loss_of_sync_details: dict[str, object] | None = None
+        self._bridge_subscription_pdu_dropped = 0
         self._reconnect_state = "idle"
         self._reconnect_attempt_count = 0
         self._last_reconnect_started_at: str | None = None
@@ -700,6 +701,7 @@ class WatchmanRealtimeAdapter:
         self._loop = loop
         self._reset_loss_of_sync_state()
         self._reset_reconnect_state()
+        self._bridge_subscription_pdu_dropped = 0
         try:
             await self._establish_monitoring(watch_path, loop, phase="startup")
         except Exception as error:
@@ -771,13 +773,23 @@ class WatchmanRealtimeAdapter:
             try:
                 shared_queue.put_nowait(payload)
             except asyncio.QueueFull:
-                self._handle_subscription_queue_overflow(
-                    payload,
-                    shared_queue.qsize() + 1,
-                    shared_queue.maxsize,
+                self._record_bridge_subscription_queue_overflow(
+                    payload, shared_queue.maxsize
                 )
             finally:
                 session.subscription_queue.task_done()
+
+    def _record_bridge_subscription_queue_overflow(
+        self,
+        payload: dict[str, object],
+        queue_maxsize: int,
+    ) -> None:
+        self._bridge_subscription_pdu_dropped += 1
+        self._handle_subscription_queue_overflow(
+            payload,
+            dropped_count=1,
+            queue_maxsize=queue_maxsize,
+        )
 
     async def _monitor_unexpected_session_exits(self) -> None:
         sessions = tuple(self._sessions)
@@ -1428,6 +1440,10 @@ class WatchmanRealtimeAdapter:
         session_healths = [session.get_health() for session in self._sessions]
         if not session_healths and self._session is not None:
             session_healths = [self._session.get_health()]
+        session_subscription_pdu_dropped = sum(
+            int(item.get("watchman_subscription_pdu_dropped") or 0)
+            for item in session_healths
+        )
         if session_healths:
             primary_session_health = session_healths[0]
             warning, warning_at = self._latest_session_value(
@@ -1491,9 +1507,9 @@ class WatchmanRealtimeAdapter:
                         int(item.get("watchman_subscription_pdu_count") or 0)
                         for item in session_healths
                     ),
-                    "watchman_subscription_pdu_dropped": sum(
-                        int(item.get("watchman_subscription_pdu_dropped") or 0)
-                        for item in session_healths
+                    "watchman_subscription_pdu_dropped": (
+                        session_subscription_pdu_dropped
+                        + self._bridge_subscription_pdu_dropped
                     ),
                     "watchman_subscription_name": primary_session_health.get(
                         "watchman_subscription_name"
@@ -1521,6 +1537,10 @@ class WatchmanRealtimeAdapter:
                         or {}
                     ),
                 }
+            )
+        else:
+            health["watchman_subscription_pdu_dropped"] = (
+                self._bridge_subscription_pdu_dropped
             )
         sidecar_alive = bool(health.get("watchman_alive"))
         session_alive = bool(health.get("watchman_session_alive"))

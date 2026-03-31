@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
 import os
 import stat
@@ -12,6 +13,12 @@ from types import SimpleNamespace
 import pytest
 
 import chunkhound.watchman.session as watchman_session_module
+from chunkhound.core.config.config import Config
+from chunkhound.database_factory import create_services
+from chunkhound.services.realtime_indexing_service import (
+    RealtimeIndexingService,
+    WatchmanRealtimeAdapter,
+)
 from chunkhound.watchman import (
     PrivateWatchmanSidecar,
     WatchmanCliSession,
@@ -181,6 +188,19 @@ def _prepend_poisoned_python_shims(
     )
 
 
+def _build_watchman_service(target_dir: Path) -> tuple[RealtimeIndexingService, object]:
+    db_path = target_dir / ".chunkhound" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    config = Config(
+        args=SimpleNamespace(path=target_dir),
+        database={"path": str(db_path), "provider": "duckdb"},
+        indexing={"realtime_backend": "watchman"},
+    )
+    services = create_services(db_path, config)
+    services.provider.connect()
+    return RealtimeIndexingService(services, config), services
+
+
 def test_watchman_cli_session_queue_overflow_reports_drop_and_calls_handler(
     tmp_path: Path,
 ) -> None:
@@ -216,6 +236,102 @@ def test_watchman_cli_session_queue_overflow_reports_drop_and_calls_handler(
     assert overflow_calls == [
         (overflow_payload, 1, session.subscription_queue.maxsize)
     ]
+
+
+@pytest.mark.asyncio
+async def test_watchman_bridge_queue_overflow_reports_exact_drop_magnitude(
+    tmp_path: Path,
+) -> None:
+    watch_dir = tmp_path / "watchman_project"
+    watch_dir.mkdir(parents=True)
+    service, services = _build_watchman_service(watch_dir)
+    adapter = WatchmanRealtimeAdapter(service)
+    service._monitor_adapter = adapter
+    adapter._shared_subscription_queue = asyncio.Queue(maxsize=1)
+    adapter._shared_subscription_queue.put_nowait({"subscription": "baseline"})
+
+    session = WatchmanCliSession(
+        binary_path=tmp_path / "watchman",
+        socket_path=tmp_path / "watchman.sock",
+        statefile_path=tmp_path / "watchman.state",
+        logfile_path=tmp_path / "watchman.log",
+        pidfile_path=tmp_path / "watchman.pid",
+        project_root=watch_dir,
+    )
+    adapter._sessions = [session]
+
+    overflow_payload = {
+        "subscription": "chunkhound-live-indexing",
+        "clock": "c:1:1001",
+        "files": [],
+    }
+    session.subscription_queue.put_nowait(overflow_payload)
+
+    bridge_task = asyncio.create_task(adapter._bridge_session_subscription_pdus(session))
+    try:
+        await asyncio.wait_for(session.subscription_queue.join(), timeout=1.0)
+        health = await service.get_health()
+        assert health["watchman_subscription_pdu_dropped"] == 1
+        assert health["watchman_loss_of_sync"]["last_details"] == {
+            "backend": "watchman",
+            "loss_of_sync_reason": "subscription_pdu_dropped",
+            "subscription": "chunkhound-live-indexing",
+            "clock": "c:1:1001",
+            "watchman_subscription_pdu_dropped": 1,
+            "watchman_subscription_queue_maxsize": 1,
+        }
+    finally:
+        bridge_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await bridge_task
+        services.provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_watchman_bridge_queue_overflow_reports_exact_drop_count(
+    tmp_path: Path,
+) -> None:
+    watch_dir = tmp_path / "watchman_project"
+    watch_dir.mkdir(parents=True)
+    service, services = _build_watchman_service(watch_dir)
+    adapter = WatchmanRealtimeAdapter(service)
+    session = WatchmanCliSession(
+        binary_path=tmp_path / "watchman",
+        socket_path=tmp_path / "watchman.sock",
+        statefile_path=tmp_path / "watchman.state",
+        logfile_path=tmp_path / "watchman.log",
+        pidfile_path=tmp_path / "watchman.pid",
+        project_root=tmp_path,
+    )
+    overflow_payload = {
+        "subscription": "chunkhound-live-indexing",
+        "clock": "c:1:1002",
+        "files": [],
+    }
+    overflow_calls: list[tuple[dict[str, object], int, int]] = []
+
+    def _record_overflow(
+        payload: dict[str, object], dropped_count: int, queue_maxsize: int
+    ) -> None:
+        overflow_calls.append((payload, dropped_count, queue_maxsize))
+
+    adapter._shared_subscription_queue = asyncio.Queue(maxsize=1)
+    adapter._shared_subscription_queue.put_nowait({"subscription": "baseline"})
+    adapter._handle_subscription_queue_overflow = _record_overflow
+    session.subscription_queue.put_nowait(overflow_payload)
+
+    task = asyncio.create_task(adapter._bridge_session_subscription_pdus(session))
+    try:
+        while session.subscription_queue.qsize() != 0:
+            await asyncio.sleep(0)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        services.provider.disconnect()
+
+    assert adapter._bridge_subscription_pdu_dropped == 1
+    assert overflow_calls == [(overflow_payload, 1, 1)]
 
 
 def test_watchman_cli_session_bounds_long_secondary_subscription_names(

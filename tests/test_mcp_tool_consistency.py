@@ -211,6 +211,7 @@ async def test_daemon_status_tool_exposes_watchman_realtime_details():
             "watchman_relative_root": "packages/api",
             "watchman_subscription_names": ["chunkhound-live-indexing"],
             "watchman_subscription_count": 1,
+            "watchman_subscription_pdu_dropped": 3,
             "watchman_scopes": [
                 {
                     "subscription_name": "chunkhound-live-indexing",
@@ -283,6 +284,7 @@ async def test_daemon_status_tool_exposes_watchman_realtime_details():
     assert realtime["watchman_connection_state"] == "connected"
     assert realtime["watchman_subscription_count"] == 1
     assert realtime["watchman_subscription_names"] == ["chunkhound-live-indexing"]
+    assert realtime["watchman_subscription_pdu_dropped"] == 3
     assert realtime["live_indexing_state"] == "idle"
     assert realtime["live_indexing_hint"] == "Live indexing is connected and idle."
     assert realtime["watchman_watch_root"] == "/repo"

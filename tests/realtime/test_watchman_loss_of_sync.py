@@ -271,12 +271,11 @@ async def test_watchman_subscription_queue_overflow_requests_resync_and_degrades
         baseline_loss_of_sync = (await service.get_health())["watchman_loss_of_sync"]
         service._resync_callback = resync_callback
 
-        adapter._handle_subscription_queue_overflow(
+        adapter._record_bridge_subscription_queue_overflow(
             {
                 "subscription": "chunkhound-live-indexing",
                 "clock": "c:0:4",
             },
-            dropped_count=1,
             queue_maxsize=1000,
         )
 
@@ -292,12 +291,11 @@ async def test_watchman_subscription_queue_overflow_requests_resync_and_degrades
             }
         )
 
-        adapter._handle_subscription_queue_overflow(
+        adapter._record_bridge_subscription_queue_overflow(
             {
                 "subscription": "chunkhound-live-indexing",
                 "clock": "c:0:5",
             },
-            dropped_count=2,
             queue_maxsize=1000,
         )
 
@@ -326,6 +324,8 @@ async def test_watchman_subscription_queue_overflow_requests_resync_and_degrades
             and call[1].get("loss_of_sync_reason") == "subscription_pdu_dropped"
         ]
         assert overflow_callbacks == [("realtime_loss_of_sync", expected_details)]
+        assert pending_stats["watchman_subscription_pdu_dropped"] == 1
+        assert stats["watchman_subscription_pdu_dropped"] == 2
         assert (
             stats["watchman_loss_of_sync"]["count"]
             == baseline_loss_of_sync["count"] + 1
