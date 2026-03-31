@@ -103,6 +103,81 @@ def build_watchman_subscription_name_for_scope(
     return bound_watchman_subscription_name(f"{base_name}--{suffix}")
 
 
+def _subscription_suffix_for_scope(
+    *,
+    target_path: Path,
+    scope: WatchmanSubscriptionScope,
+    scope_index: int,
+) -> str:
+    try:
+        suffix_source = scope.requested_path.relative_to(target_path).as_posix()
+    except ValueError:
+        suffix_source = scope.requested_path.as_posix()
+    suffix = sanitize_watchman_subscription_suffix(suffix_source)
+    if not suffix:
+        suffix = f"scope-{scope_index}"
+    return suffix
+
+
+def _subscription_scope_identity(scope: WatchmanSubscriptionScope) -> str:
+    return "|".join(
+        (
+            scope.scope_kind,
+            str(scope.requested_path.resolve()),
+            str(scope.watch_root.resolve()),
+            scope.relative_root or "",
+        )
+    )
+
+
+def build_watchman_subscription_names_for_scope_plan(
+    *,
+    base_name: str,
+    target_path: Path,
+    scope_plan: WatchmanScopePlan,
+) -> tuple[str, ...]:
+    target_root = target_path.resolve()
+    resolved_names: list[str] = []
+    secondary_suffixes: list[str | None] = []
+    duplicate_counts: dict[str, int] = {}
+
+    for scope_index, scope in enumerate(scope_plan.scopes):
+        if scope.scope_kind == "primary" or scope_index == 0:
+            name = base_name
+            suffix = None
+        else:
+            suffix = _subscription_suffix_for_scope(
+                target_path=target_root,
+                scope=scope,
+                scope_index=scope_index,
+            )
+            name = bound_watchman_subscription_name(f"{base_name}--{suffix}")
+        duplicate_counts[name] = duplicate_counts.get(name, 0) + 1
+        resolved_names.append(name)
+        secondary_suffixes.append(suffix)
+
+    for scope_index, scope in enumerate(scope_plan.scopes):
+        suffix = secondary_suffixes[scope_index]
+        if suffix is None:
+            continue
+        current_name = resolved_names[scope_index]
+        if duplicate_counts.get(current_name, 0) < 2:
+            continue
+        scope_hash = hashlib.sha256(
+            _subscription_scope_identity(scope).encode("utf-8")
+        ).hexdigest()[:_SUBSCRIPTION_NAME_HASH_LENGTH]
+        resolved_names[scope_index] = bound_watchman_subscription_name(
+            f"{base_name}--{suffix}-{scope_hash}"
+        )
+
+    if len(set(resolved_names)) != len(resolved_names):
+        raise RuntimeError(
+            "Watchman scope plan produced duplicate subscription names after "
+            "collision resolution"
+        )
+    return tuple(resolved_names)
+
+
 @dataclass(frozen=True)
 class WatchmanSessionSetup:
     scope_plan: WatchmanScopePlan
@@ -304,16 +379,18 @@ class WatchmanCliSession:
             raise RuntimeError("Watchman session already has active subscriptions")
 
         resolved_subscription_name = subscription_name or _DEFAULT_SUBSCRIPTION_NAME
+        resolved_scope_names = build_watchman_subscription_names_for_scope_plan(
+            base_name=resolved_subscription_name,
+            target_path=target_path,
+            scope_plan=scope_plan,
+        )
         resolved_subscription_names: list[str] = []
         resolved_subscription_scopes: dict[str, WatchmanSubscriptionScope] = {}
-        target_root = target_path.resolve()
-        for scope_index, scope in enumerate(scope_plan.scopes):
-            scoped_subscription_name = self._subscription_name_for_scope(
-                base_name=resolved_subscription_name,
-                target_path=target_root,
-                scope=scope,
-                scope_index=scope_index,
-            )
+        for scope, scoped_subscription_name in zip(
+            scope_plan.scopes,
+            resolved_scope_names,
+            strict=True,
+        ):
             subscribe_response = await self._send_command(
                 self._build_subscribe_command(
                     scope=scope,

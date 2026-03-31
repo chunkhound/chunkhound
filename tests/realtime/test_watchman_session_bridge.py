@@ -22,7 +22,9 @@ from chunkhound.services.realtime_indexing_service import (
 from chunkhound.watchman import (
     PrivateWatchmanSidecar,
     WatchmanCliSession,
+    WatchmanScopePlan,
     WatchmanSubscriptionScope,
+    build_watchman_subscription_names_for_scope_plan,
 )
 
 pytestmark = pytest.mark.requires_native_watchman
@@ -162,6 +164,58 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
 """
+
+
+def test_scope_plan_subscription_names_resolve_colliding_secondary_suffixes(
+    tmp_path: Path,
+) -> None:
+    target_path = tmp_path / "workspace_root"
+    logical_a = target_path / "foo+bar"
+    logical_b = target_path / "foo_bar"
+    physical_a = tmp_path / "physical-a"
+    physical_b = tmp_path / "physical-b"
+    for path in (target_path, logical_a, logical_b, physical_a, physical_b):
+        path.mkdir(parents=True, exist_ok=True)
+
+    scope_plan = WatchmanScopePlan(
+        scopes=(
+            WatchmanSubscriptionScope(
+                requested_path=target_path.resolve(),
+                watch_root=target_path.resolve(),
+                relative_root=None,
+                scope_kind="primary",
+            ),
+            WatchmanSubscriptionScope(
+                requested_path=logical_a.resolve(),
+                watch_root=physical_a.resolve(),
+                relative_root=None,
+                scope_kind="nested_junction",
+            ),
+            WatchmanSubscriptionScope(
+                requested_path=logical_b.resolve(),
+                watch_root=physical_b.resolve(),
+                relative_root=None,
+                scope_kind="nested_junction",
+            ),
+        )
+    )
+
+    resolved_names = build_watchman_subscription_names_for_scope_plan(
+        base_name="chunkhound-live-indexing",
+        target_path=target_path,
+        scope_plan=scope_plan,
+    )
+
+    assert resolved_names[0] == "chunkhound-live-indexing"
+    assert len(resolved_names) == 3
+    assert len(set(resolved_names)) == 3
+    assert resolved_names[1].startswith("chunkhound-live-indexing--foo-bar")
+    assert resolved_names[2].startswith("chunkhound-live-indexing--foo-bar")
+    assert resolved_names == build_watchman_subscription_names_for_scope_plan(
+        base_name="chunkhound-live-indexing",
+        target_path=target_path,
+        scope_plan=scope_plan,
+    )
 
 
 def _prepend_poisoned_python_shims(

@@ -49,6 +49,80 @@ def test_prepare_release_enforces_supported_matrix_for_runtime_verifier() -> Non
     ) in script_text
 
 
+@pytest.mark.asyncio
+async def test_wait_for_ready_requires_nested_watchman_health(monkeypatch) -> None:
+    responses = [
+        {
+            "status": "ready",
+            "scan_progress": {
+                "realtime": {
+                    "watchman_connection_state": "connected",
+                    "watchman_subscription_count": 1,
+                }
+            },
+        },
+        {
+            "status": "ready",
+            "scan_progress": {
+                "realtime": {
+                    "watchman_connection_state": "connected",
+                    "watchman_subscription_count": 1,
+                    "watchman_subscription_names": ["chunkhound-live-indexing"],
+                    "watchman_scopes": [
+                        {
+                            "subscription_name": "chunkhound-live-indexing",
+                            "scope_kind": "primary",
+                            "requested_path": "/repo",
+                            "watch_root": "/repo",
+                            "relative_root": None,
+                        }
+                    ],
+                    "watchman_loss_of_sync": {
+                        "count": 0,
+                        "fresh_instance_count": 0,
+                        "recrawl_count": 0,
+                        "disconnect_count": 0,
+                        "last_reason": None,
+                        "last_at": None,
+                        "last_details": None,
+                    },
+                }
+            },
+        },
+    ]
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def send_request(
+            self, method: str, params: dict[str, object], timeout: float
+        ) -> dict[str, object]:
+            del method, params, timeout
+            response = responses[self.calls]
+            self.calls += 1
+            return {"content": [{"type": "text", "text": json.dumps(response)}]}
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(live_verifier.asyncio, "sleep", fake_sleep)
+
+    client = FakeClient()
+    status = await live_verifier._wait_for_ready(client)
+
+    assert client.calls == 2
+    assert status["scan_progress"]["realtime"]["watchman_scopes"] == [
+        {
+            "subscription_name": "chunkhound-live-indexing",
+            "scope_kind": "primary",
+            "requested_path": "/repo",
+            "watch_root": "/repo",
+            "relative_root": None,
+        }
+    ]
+
+
 def test_source_tree_copy_ignore_excludes_transient_repo_state() -> None:
     ignored = live_verifier._source_tree_copy_ignore(
         ".",

@@ -706,6 +706,9 @@ async def test_daemon_concurrent_parent_child_first_start_allows_only_one(
         assert "Overlapping daemon roots are not supported." in loser_stderr
         assert str(parent.resolve()) in loser_stderr
         assert str(child.resolve()) in loser_stderr
+        with runtime_dir_env(runtime_dir):
+            assert DaemonDiscovery(winner_root).get_lock_path().exists()
+            assert not DaemonDiscovery(loser_root).get_lock_path().exists()
         assert await wait_for_daemon_full_cleanup(
             loser_root,
             runtime_dir=runtime_dir,

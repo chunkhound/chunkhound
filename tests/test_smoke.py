@@ -344,6 +344,15 @@ sys.exit(asyncio.run(test()))
                 }
                 assert "scan_progress" in status_payload
                 assert "realtime" in status_payload["scan_progress"]
+                startup = status_payload["scan_progress"]["realtime"].get("startup")
+                assert isinstance(startup, dict)
+                assert isinstance(startup.get("phases"), dict)
+                assert "initialize" in startup["phases"]
+                assert startup["phases"]["initialize"]["state"] in {
+                    "completed",
+                    "in_progress",
+                    "uninitialized",
+                }
 
             except asyncio.TimeoutError:
                 pytest.fail("MCP stdio protocol handshake timed out")

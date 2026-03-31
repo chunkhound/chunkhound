@@ -284,23 +284,9 @@ class DaemonDiscovery:
 
     def _live_runtime_windows_ports(self) -> set[int]:
         """Return live loopback ports already claimed by runtime lock files."""
-        lock_dir = self.get_lock_path().parent
-        if not lock_dir.exists():
-            return set()
-
         ports: set[int] = set()
-        for lock_path in lock_dir.glob("*.json"):
-            lock = self._read_json_file(lock_path)
-            if lock is None:
-                continue
-            pid = lock.get("pid")
-            if not isinstance(pid, int) or not pid_alive(pid):
-                try:
-                    lock_path.unlink()
-                except OSError:
-                    pass
-                continue
-            parsed = _parse_tcp_address(str(lock.get("socket_path", "")))
+        for entry in self._iter_validated_lock_entries():
+            parsed = _parse_tcp_address(entry["socket_path"])
             if parsed is None:
                 continue
             host, port = parsed
@@ -416,6 +402,64 @@ class DaemonDiscovery:
             self.get_lock_path().unlink()
         except FileNotFoundError:
             pass
+
+    def _remove_lock_file(self, lock_path: Path) -> None:
+        """Best-effort removal for stale or invalid runtime lock files."""
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def _validated_lock_entry(self, lock_path: Path) -> dict[str, Any] | None:
+        """Return normalized live-daemon metadata from a runtime lock file."""
+        lock = self._read_json_file(lock_path)
+        if lock is None:
+            return None
+
+        project_dir_raw = lock.get("project_dir")
+        pid = lock.get("pid")
+        socket_path = lock.get("socket_path")
+        started_at = lock.get("started_at", 0.0)
+        if not isinstance(project_dir_raw, str) or not isinstance(pid, int):
+            self._remove_lock_file(lock_path)
+            return None
+        if not isinstance(socket_path, str) or not socket_path:
+            self._remove_lock_file(lock_path)
+            return None
+
+        root = _canonical_project_dir(Path(project_dir_raw))
+        expected_lock_path = DaemonDiscovery(root).get_lock_path()
+        if lock_path != expected_lock_path:
+            self._remove_lock_file(lock_path)
+            return None
+        if not pid_alive(pid):
+            self._remove_lock_file(lock_path)
+            return None
+
+        try:
+            normalized_started_at = float(started_at)
+        except (TypeError, ValueError):
+            normalized_started_at = 0.0
+
+        return {
+            "project_dir": str(root),
+            "pid": pid,
+            "socket_path": socket_path,
+            "lock_path": str(expected_lock_path),
+            "started_at": normalized_started_at,
+        }
+
+    def _iter_validated_lock_entries(self) -> list[dict[str, Any]]:
+        """Return the current runtime's validated live daemon lock entries."""
+        lock_dir = self.get_lock_path().parent
+        if not lock_dir.exists():
+            return []
+        entries: list[dict[str, Any]] = []
+        for lock_path in lock_dir.glob("*.json"):
+            entry = self._validated_lock_entry(lock_path)
+            if entry is not None:
+                entries.append(entry)
+        return entries
 
     def _tail_daemon_log(
         self, log_path: Path | None = None, *, max_lines: int = 20
@@ -639,6 +683,15 @@ class DaemonDiscovery:
 
     def find_conflicting_daemon(self) -> dict[str, Any] | None:
         """Return overlapping live-daemon metadata for a different root, if any."""
+        for entry in self._iter_validated_lock_entries():
+            other_root = _canonical_project_dir(Path(str(entry["project_dir"])))
+            if _normalized_project_dir(other_root) == _normalized_project_dir(
+                self._project_dir
+            ):
+                continue
+            if _roots_overlap(self._project_dir, other_root):
+                return entry
+
         registry_dir = self.get_registry_dir()
         if not registry_dir.exists():
             return None

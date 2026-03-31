@@ -42,6 +42,7 @@ from chunkhound.watchman import (
     WatchmanScopePlan,
     WatchmanSubscriptionScope,
     build_watchman_scope_plan,
+    build_watchman_subscription_names_for_scope_plan,
     build_watchman_subscription_name_for_scope,
     discover_nested_linux_mount_roots,
     discover_nested_windows_junction_scopes,
@@ -1150,19 +1151,25 @@ class WatchmanRealtimeAdapter:
             self._subscription_scope_map = {}
             if not scope_plan.scopes:
                 raise RuntimeError("Watchman scope plan did not contain any scopes")
+            resolved_scope_names = build_watchman_subscription_names_for_scope_plan(
+                base_name=self._SUBSCRIPTION_NAME,
+                target_path=watch_path,
+                scope_plan=scope_plan,
+            )
 
             primary_scope = scope_plan.primary_scope
             primary_scope_plan = WatchmanScopePlan(scopes=(primary_scope,))
+            primary_subscription_name = resolved_scope_names[0]
             if use_prepared_startup:
                 primary_setup = await primary_session.subscribe_scopes(
                     target_path=watch_path,
-                    subscription_name=self._SUBSCRIPTION_NAME,
+                    subscription_name=primary_subscription_name,
                     scope_plan=primary_scope_plan,
                 )
             else:
                 primary_setup = await primary_session.start(
                     target_path=watch_path,
-                    subscription_name=self._SUBSCRIPTION_NAME,
+                    subscription_name=primary_subscription_name,
                     scope_plan=primary_scope_plan,
                     nested_mount_roots=(),
                     additional_scopes=(),
@@ -1171,14 +1178,12 @@ class WatchmanRealtimeAdapter:
             for subscription_name in primary_setup.subscription_names:
                 subscription_scope_map[subscription_name] = primary_scope
 
-            for scope_index, scope in enumerate(scope_plan.scopes[1:], start=1):
+            for scope, scoped_subscription_name in zip(
+                scope_plan.scopes[1:],
+                resolved_scope_names[1:],
+                strict=True,
+            ):
                 session = _new_session()
-                scoped_subscription_name = self._subscription_name_for_scope(
-                    base_name=self._SUBSCRIPTION_NAME,
-                    target_path=watch_path,
-                    scope=scope,
-                    scope_index=scope_index,
-                )
                 single_scope_plan = WatchmanScopePlan(scopes=(scope,))
                 await session.start(
                     target_path=scope.requested_path,

@@ -473,6 +473,19 @@ def _flatten_tool_text(result: dict[str, Any]) -> str:
     return "\n".join(rendered)
 
 
+def _has_nested_watchman_health(realtime: dict[str, Any]) -> bool:
+    subscription_names = realtime.get("watchman_subscription_names")
+    watchman_scopes = realtime.get("watchman_scopes")
+    loss_of_sync = realtime.get("watchman_loss_of_sync")
+    return (
+        isinstance(subscription_names, list)
+        and len(subscription_names) >= 1
+        and isinstance(watchman_scopes, list)
+        and len(watchman_scopes) >= 1
+        and isinstance(loss_of_sync, dict)
+    )
+
+
 async def _wait_for_ready(client: SubprocessJsonRpcClient) -> dict[str, Any]:
     deadline = time.monotonic() + _READY_TIMEOUT_SECONDS
     last_status: dict[str, Any] | None = None
@@ -488,6 +501,7 @@ async def _wait_for_ready(client: SubprocessJsonRpcClient) -> dict[str, Any]:
             last_status.get("status") == "ready"
             and realtime.get("watchman_connection_state") == "connected"
             and realtime.get("watchman_subscription_count") == 1
+            and _has_nested_watchman_health(realtime)
         ):
             return last_status
         await asyncio.sleep(0.5)
@@ -850,6 +864,11 @@ async def _verify_wheel(wheel_path: Path) -> None:
             realtime = ready_status["scan_progress"]["realtime"]
             if realtime.get("watchman_sidecar_state") != "running":
                 raise RuntimeError(f"Unexpected Watchman sidecar state: {realtime}")
+            if not _has_nested_watchman_health(realtime):
+                raise RuntimeError(
+                    "Ready Watchman daemon_status payload was missing nested health "
+                    f"structure: {realtime}"
+                )
             _assert_sidecar_uses_installed_runtime(realtime, venv_dir=venv_dir)
 
             live_file.parent.mkdir(parents=True, exist_ok=True)
@@ -868,6 +887,11 @@ async def _verify_wheel(wheel_path: Path) -> None:
                 )
             )
             final_realtime = final_status["scan_progress"]["realtime"]
+            if not _has_nested_watchman_health(final_realtime):
+                raise RuntimeError(
+                    "Final Watchman daemon_status payload was missing nested health "
+                    f"structure: {final_realtime}"
+                )
             if int(final_realtime.get("watchman_subscription_pdu_count", 0)) < 1:
                 raise RuntimeError(
                     "Live mutation became searchable, but no subscription PDUs were "

@@ -886,6 +886,107 @@ async def test_watchman_multi_scope_translation_deduplicates_across_subscription
 
 
 @pytest.mark.asyncio
+async def test_watchman_multi_scope_translation_routes_colliding_subscription_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target_dir = tmp_path / "workspace_root"
+    logical_a = target_dir / "foo+bar"
+    logical_b = target_dir / "foo_bar"
+    physical_a = tmp_path / "physical-a"
+    physical_b = tmp_path / "physical-b"
+    for path in (target_dir, logical_a, logical_b, physical_a, physical_b):
+        path.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(
+        realtime_service_module,
+        "discover_nested_linux_mount_roots",
+        lambda target_path: (),
+    )
+    monkeypatch.setattr(
+        realtime_service_module,
+        "discover_nested_windows_junction_scopes",
+        lambda target_path: (
+            WatchmanSubscriptionScope(
+                requested_path=logical_a.resolve(),
+                watch_root=physical_a.resolve(),
+                relative_root=None,
+                scope_kind="nested_junction",
+            ),
+            WatchmanSubscriptionScope(
+                requested_path=logical_b.resolve(),
+                watch_root=physical_b.resolve(),
+                relative_root=None,
+                scope_kind="nested_junction",
+            ),
+        ),
+    )
+
+    service, services = _build_watchman_service(target_dir)
+
+    try:
+        await service.start(target_dir)
+        queue = service.watchman_subscription_queue
+        assert queue is not None
+
+        file_a = logical_a / "src" / "first.py"
+        file_b = logical_b / "src" / "second.py"
+        file_a.parent.mkdir(parents=True, exist_ok=True)
+        file_b.parent.mkdir(parents=True, exist_ok=True)
+        file_a.write_text("def first():\n    return 1\n", encoding="utf-8")
+        file_b.write_text("def second():\n    return 2\n", encoding="utf-8")
+
+        stats = await service.get_health()
+        assert stats["watchman_subscription_count"] == 3
+        assert len(stats["watchman_subscription_names"]) == 3
+        assert len(set(stats["watchman_subscription_names"])) == 3
+
+        scope_names = {
+            scope["requested_path"]: scope["subscription_name"]
+            for scope in stats["watchman_scopes"]
+        }
+        subscription_a = scope_names[str(logical_a.resolve())]
+        subscription_b = scope_names[str(logical_b.resolve())]
+        assert subscription_a != subscription_b
+        assert subscription_a.startswith("chunkhound-live-indexing--foo-bar")
+        assert subscription_b.startswith("chunkhound-live-indexing--foo-bar")
+
+        queue.put_nowait(
+            {
+                "subscription": subscription_a,
+                "clock": "c:0:7",
+                "files": [
+                    {
+                        "name": "src/first.py",
+                        "exists": True,
+                        "new": True,
+                        "type": "f",
+                    }
+                ],
+            }
+        )
+        queue.put_nowait(
+            {
+                "subscription": subscription_b,
+                "clock": "c:0:8",
+                "files": [
+                    {
+                        "name": "src/second.py",
+                        "exists": True,
+                        "new": True,
+                        "type": "f",
+                    }
+                ],
+            }
+        )
+
+        assert await _wait_for_logical_indexed(services.provider, file_a)
+        assert await _wait_for_logical_indexed(services.provider, file_b)
+    finally:
+        await service.stop()
+        services.provider.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_watchman_translation_errors_increment_pipeline_counter(
     tmp_path: Path,
 ) -> None:

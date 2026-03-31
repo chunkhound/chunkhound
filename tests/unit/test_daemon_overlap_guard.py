@@ -276,6 +276,28 @@ def test_registry_validation_reports_live_overlapping_root(
     assert Path(conflict["lock_path"]) == discovery.get_lock_path()
 
 
+def test_lock_validation_reports_live_overlapping_root_without_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Live runtime locks must block overlap even before registry publication."""
+    _set_runtime_dir_env(monkeypatch, tmp_path)
+
+    parent = tmp_path / "repo"
+    child = parent / "subdir"
+    child.mkdir(parents=True)
+
+    discovery = DaemonDiscovery(parent)
+    discovery.write_lock(os.getpid(), "tcp:127.0.0.1:54321", auth_token="token")
+
+    conflict = DaemonDiscovery(child).find_conflicting_daemon()
+    assert conflict is not None
+    assert conflict["project_dir"] == str(parent.resolve())
+    assert conflict["pid"] == os.getpid()
+    assert Path(conflict["lock_path"]) == discovery.get_lock_path()
+    assert not discovery.get_registry_entry_path().exists()
+
+
 def test_registry_validation_removes_entry_with_unexpected_lock_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
