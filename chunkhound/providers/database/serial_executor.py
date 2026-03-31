@@ -35,9 +35,10 @@ def get_thread_local_connection(provider: Any) -> Any:
     if not hasattr(_executor_local, "connection"):
         # Refuse to reconnect while compaction holds the file.
         # Narrow TOCTOU: another thread could clear _connection_allowed between
-        # is_set() and _create_connection(). In practice this is safe because
-        # the serial executor is single-threaded and CPython's GIL prevents
-        # interleaving here, but worth noting for future maintainers.
+        # is_set() and _create_connection(). Safe in practice because only the
+        # single executor thread calls this function, and compaction's
+        # soft_disconnect() is submitted through the same executor queue,
+        # guaranteeing ordering.
         if not provider._connection_allowed.is_set():
             raise CompactionError(
                 "Database connection suspended: compaction in progress"
