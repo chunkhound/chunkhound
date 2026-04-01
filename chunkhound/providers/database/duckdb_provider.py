@@ -3127,7 +3127,8 @@ class DuckDBProvider(SerialDatabaseProvider):
                     f.write(f"{os.getpid()}:{time.time():.0f}")
             except FileExistsError:
                 raise CompactionError(
-                    "Compaction already in progress (lock file exists)"
+                    "Compaction already in progress (lock file exists)",
+                    operation="lock",
                 ) from None
 
             # Suspend auto-reconnect before soft_disconnect so any concurrent
@@ -3200,14 +3201,20 @@ class DuckDBProvider(SerialDatabaseProvider):
                 try:
                     self.connect()
                 except Exception as err:
-                    logger.error(f"Reconnect after compaction failed: {err}")
+                    logger.error(
+                        f"Reconnect after compaction failed: {err}. "
+                        "The database may be in an inconsistent state. "
+                        "Restart the process to recover."
+                    )
             # Clean up temp database on failure
             if new_db_path.exists():
                 try:
                     new_db_path.unlink()
                 except OSError:
                     pass
-            raise CompactionError(f"Compaction failed: {e}") from e
+            raise CompactionError(
+                f"Compaction failed: {e}", operation="compaction"
+            ) from e
         finally:
             # Always clean up export directory and lock file
             if export_dir.exists():
@@ -3235,12 +3242,14 @@ class DuckDBProvider(SerialDatabaseProvider):
                 raise CompactionError(
                     f"Insufficient disk space for compaction: "
                     f"need {required / 1024 / 1024:.1f}MB, "
-                    f"have {available / 1024 / 1024:.1f}MB"
+                    f"have {available / 1024 / 1024:.1f}MB",
+                    operation="preflight",
                 )
         except OSError as e:
             raise CompactionError(
                 f"Cannot verify disk space for compaction: {e}. "
-                "Resolve the issue and retry."
+                "Resolve the issue and retry.",
+                operation="preflight",
             ) from e
 
     @staticmethod
@@ -3248,16 +3257,17 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Validate and escape a path for use in DuckDB SQL statements.
 
         DuckDB's EXPORT/IMPORT DATABASE don't support parameterized paths,
-        so we must interpolate. This validates against injection characters.
+        so we must interpolate. Only allow known-safe characters.
         """
         path_str = path.as_posix()
-        dangerous = set(';$`"\\\x00')
-        found = dangerous & set(path_str)
-        if found:
+        # Colon needed for Windows drive letters (C:); safe inside SQL string literals
+        if not re.fullmatch(r"[-a-zA-Z0-9/_. :+,=]+", path_str):
             raise CompactionError(
-                f"Database path contains unsafe characters for SQL: {found!r}"
+                f"Database path contains characters not allowed in SQL "
+                f"interpolation (path failed allowlist check: {path_str!r})",
+                operation="validation",
             )
-        return path_str.replace("'", "''")
+        return path_str
 
     def _export_database_for_compaction(self, db_path: Path, export_dir: Path) -> None:
         """Export database to Parquet files for compaction."""

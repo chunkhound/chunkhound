@@ -41,7 +41,8 @@ def get_thread_local_connection(provider: Any) -> Any:
         # guaranteeing ordering.
         if not provider._connection_allowed.is_set():
             raise CompactionError(
-                "Database connection suspended: compaction in progress"
+                "Database connection suspended: compaction in progress",
+                operation="connection",
             )
         # Create new connection for this thread
         _executor_local.connection = provider._create_connection()
