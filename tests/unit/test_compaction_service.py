@@ -338,6 +338,7 @@ class TestBackgroundCompaction:
 
             # Callback should have been called
             assert callback_called.is_set()
+            assert service.last_error is None
 
     @pytest.mark.asyncio
     async def test_callback_not_invoked_on_failure(
@@ -369,6 +370,7 @@ class TestBackgroundCompaction:
 
             # Callback should NOT have been called
             assert not callback_called.is_set()
+            assert isinstance(service.last_error, RuntimeError)
 
     @pytest.mark.asyncio
     async def test_callback_not_invoked_on_cancellation(

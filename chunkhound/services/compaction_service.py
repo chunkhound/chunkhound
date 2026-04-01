@@ -67,6 +67,11 @@ class CompactionService:
         """Event that is set when the compaction thread has exited."""
         return self._compaction_thread_done
 
+    @property
+    def last_error(self) -> Exception | None:
+        """Last error from a compaction attempt, or None if last attempt succeeded."""
+        return self._last_error
+
     def check_should_compact(
         self, provider: "DuckDBProvider"
     ) -> tuple[bool, dict[str, Any]]:
@@ -173,6 +178,7 @@ class CompactionService:
     ) -> None:
         """Wrapper that invokes callback after successful compaction."""
         try:
+            self._last_error = None
             result = await self._do_compaction(provider)
 
             if result and on_complete is not None:
