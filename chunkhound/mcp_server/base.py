@@ -1135,7 +1135,7 @@ class MCPServerBase(ABC):
             if started:
                 self.debug_log("Background compaction started")
         except Exception as e:
-            self.debug_log(f"Background compaction failed to start: {e}")
+            self.debug_log(f"Background compaction failed to start: {e}", always=True)
 
     async def _post_compaction_reindex(self) -> None:
         """Callback after compaction - triggers incremental reindex.
