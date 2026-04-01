@@ -136,7 +136,9 @@ def build_watchman_subscription_names_for_scope_plan(
     target_path: Path,
     scope_plan: WatchmanScopePlan,
 ) -> tuple[str, ...]:
-    target_root = target_path.resolve()
+    target_root = target_path.expanduser()
+    if not target_root.is_absolute():
+        target_root = Path(os.path.abspath(str(target_root)))
     resolved_names: list[str] = []
     secondary_suffixes: list[str | None] = []
     duplicate_counts: dict[str, int] = {}

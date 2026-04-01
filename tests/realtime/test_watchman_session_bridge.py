@@ -218,6 +218,54 @@ def test_scope_plan_subscription_names_resolve_colliding_secondary_suffixes(
     )
 
 
+def test_scope_plan_subscription_names_preserve_logical_root_when_target_resolves_elsewhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target_path = tmp_path / "logical_workspace"
+    logical_junction = target_path / "linked_workspace"
+    physical_root = tmp_path / "physical_workspace"
+    physical_junction = tmp_path / "physical_linked_workspace"
+    for path in (target_path, logical_junction, physical_root, physical_junction):
+        path.mkdir(parents=True, exist_ok=True)
+
+    original_resolve = Path.resolve
+
+    def fake_resolve(self: Path, strict: bool = False) -> Path:
+        if self == target_path:
+            return physical_root
+        if self == logical_junction:
+            return physical_junction
+        return original_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+
+    scope_plan = WatchmanScopePlan(
+        scopes=(
+            WatchmanSubscriptionScope(
+                requested_path=target_path.absolute(),
+                watch_root=physical_root,
+                relative_root=None,
+                scope_kind="primary",
+            ),
+            WatchmanSubscriptionScope(
+                requested_path=logical_junction.absolute(),
+                watch_root=physical_junction,
+                relative_root=None,
+                scope_kind="nested_junction",
+            ),
+        )
+    )
+
+    assert build_watchman_subscription_names_for_scope_plan(
+        base_name="chunkhound-live-indexing",
+        target_path=target_path,
+        scope_plan=scope_plan,
+    ) == (
+        "chunkhound-live-indexing",
+        "chunkhound-live-indexing--linked-workspace",
+    )
+
+
 def _prepend_poisoned_python_shims(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
