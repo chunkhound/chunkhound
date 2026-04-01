@@ -51,19 +51,22 @@ def build_watchman_scope_plan(
 ) -> WatchmanScopePlan:
     """Build the Watchman scope plan for a logical live-indexing target."""
 
-    requested_path = target_dir.expanduser().resolve()
+    logical_requested_path = _lexical_absolute_path(target_dir)
+    resolved_requested_path = target_dir.expanduser().resolve()
     primary_scope = _build_scope_from_watch_project(
-        requested_path, watch_project_result
+        logical_requested_path,
+        resolved_requested_path,
+        watch_project_result,
     )
     mount_roots = (
-        discover_nested_linux_mount_roots(requested_path)
+        discover_nested_linux_mount_roots(resolved_requested_path)
         if nested_mount_roots is None
-        else _normalize_nested_mount_roots(requested_path, nested_mount_roots)
+        else _normalize_nested_mount_roots(resolved_requested_path, nested_mount_roots)
     )
     normalized_additional_scopes = (
         ()
         if additional_scopes is None
-        else _normalize_additional_scopes(requested_path, additional_scopes)
+        else _normalize_additional_scopes(logical_requested_path, additional_scopes)
     )
 
     scopes = [primary_scope]
@@ -109,7 +112,7 @@ def discover_nested_windows_junction_scopes(
     if not sys.platform.startswith("win"):
         return ()
 
-    requested_path = target_dir.expanduser().resolve()
+    resolved_target_path = target_dir.expanduser().resolve()
     traversal_root = _lexical_absolute_path(target_dir)
     discovered_scopes: dict[
         tuple[str, str, str | None, str], WatchmanSubscriptionScope
@@ -138,10 +141,10 @@ def discover_nested_windows_junction_scopes(
                             watch_root = logical_path.resolve()
                         except OSError:
                             continue
-                        if watch_root == requested_path:
+                        if watch_root == resolved_target_path:
                             continue
                         try:
-                            watch_root.relative_to(requested_path)
+                            watch_root.relative_to(resolved_target_path)
                         except ValueError:
                             scope = WatchmanSubscriptionScope(
                                 requested_path=logical_path,
@@ -176,20 +179,22 @@ def discover_nested_windows_junction_scopes(
 
 
 def _build_scope_from_watch_project(
-    requested_path: Path, watch_project_result: Mapping[str, object]
+    logical_requested_path: Path,
+    resolved_requested_path: Path,
+    watch_project_result: Mapping[str, object],
 ) -> WatchmanSubscriptionScope:
     watch_root = _require_watch_root(watch_project_result)
     relative_root = _normalize_relative_root(watch_project_result.get("relative_path"))
     mapped_path = _resolve_mapped_path(watch_root, relative_root)
 
-    if mapped_path != requested_path:
+    if mapped_path != resolved_requested_path:
         raise ValueError(
             "watch-project result does not map back to the requested target_dir: "
-            f"target_dir={requested_path} mapped_path={mapped_path}"
+            f"target_dir={resolved_requested_path} mapped_path={mapped_path}"
         )
 
     return WatchmanSubscriptionScope(
-        requested_path=requested_path,
+        requested_path=logical_requested_path,
         watch_root=watch_root,
         relative_root=relative_root,
         scope_kind="primary",

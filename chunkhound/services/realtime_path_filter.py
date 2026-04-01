@@ -113,8 +113,13 @@ class RealtimePathFilter:
                 self._engine = None
                 logger.warning(
                     "RealtimePathFilter failed to build repo-aware ignore engine "
-                    f"for {self._root}: {error}"
+                    f"for {self._root}: {error}; rejecting realtime events because "
+                    "ignore policy could not be evaluated"
                 )
+                return False
+
+        if self._engine_initialization_failed:
+            return False
 
         if not self._ignore_engine_degraded:
             try:
@@ -126,9 +131,13 @@ class RealtimePathFilter:
                 self._ignore_engine_degraded = True
                 self._engine = None
                 self._warn_ignore_engine_degraded_once(error)
+                return False
+
+        if self._ignore_engine_degraded:
+            return False
 
         if self._include_degraded:
-            return self._language_fallback(file_path)
+            return False
 
         try:
             if self._include_patterns is None:
@@ -154,7 +163,7 @@ class RealtimePathFilter:
         except Exception as error:
             self._include_degraded = True
             self._warn_include_degraded_once(error)
-            return self._language_fallback(file_path)
+            return False
 
     def _warn_ignore_engine_degraded_once(self, error: Exception) -> None:
         if self._ignore_engine_degraded_warned:
@@ -163,7 +172,7 @@ class RealtimePathFilter:
         logger.warning(
             "RealtimePathFilter ignore-engine evaluation failed "
             f"for {self._root}: {error}; ignore-based exclusion could not be "
-            "applied, falling back to language admission"
+            "applied, rejecting affected realtime events"
         )
 
     def _warn_include_degraded_once(self, error: Exception) -> None:
@@ -172,8 +181,8 @@ class RealtimePathFilter:
         self._include_degraded_warned = True
         logger.warning(
             "RealtimePathFilter include-pattern evaluation failed "
-            f"for {self._root}: {error}; include filtering fell back to "
-            "language admission"
+            f"for {self._root}: {error}; include filtering could not be applied, "
+            "rejecting affected realtime events"
         )
 
     @staticmethod

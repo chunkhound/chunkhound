@@ -582,6 +582,83 @@ async def test_daemon_status_tool_keeps_initial_scan_failure_unqueryable():
 
 
 @pytest.mark.asyncio
+async def test_daemon_status_tool_keeps_query_ready_during_post_bootstrap_scan():
+    """Post-bootstrap scans should not clear query readiness."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": True,
+        "scan_started_at": "2026-04-01T00:00:10",
+        "scan_completed_at": "2026-04-01T00:00:05",
+        "scan_error": None,
+        "realtime": {
+            "service_state": "running",
+            "last_error": None,
+            "resync": {
+                "needs_resync": False,
+                "in_progress": True,
+                "last_reason": "realtime_loss_of_sync",
+                "last_error": None,
+            },
+            "live_indexing_state": "busy",
+            "live_indexing_hint": "Live indexing is applying a reconciliation scan.",
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    assert result["status"] == "ready"
+    assert result["query_ready"] is True
+    assert result["scan_progress"]["is_scanning"] is True
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_keeps_initial_scan_in_progress_unqueryable():
+    """Initial bootstrap scans should remain unqueryable until the first success."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 1,
+        "chunks_created": 2,
+        "is_scanning": True,
+        "scan_started_at": "2026-04-01T00:00:00",
+        "scan_completed_at": None,
+        "scan_error": None,
+        "realtime": {
+            "service_state": "running",
+            "last_error": None,
+            "resync": {
+                "needs_resync": False,
+                "in_progress": False,
+                "last_reason": None,
+                "last_error": None,
+            },
+            "live_indexing_state": "busy",
+            "live_indexing_hint": "Live indexing is applying the initial scan.",
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    assert result["status"] == "initializing"
+    assert result["query_ready"] is False
+
+
+@pytest.mark.asyncio
 async def test_daemon_status_tool_exposes_pending_mutation_backlog_details():
     """Pending mutation composition should be visible through daemon_status."""
     from chunkhound.mcp_server.tools import execute_tool

@@ -411,7 +411,9 @@ class MCPServerBase(ABC):
                     # Fallback to config resolution (shouldn't happen in normal usage)
                     target_path = self.config.target_dir or db_path.parent.parent
                     self.debug_log(f"Using fallback path resolution: {target_path}")
-                self._scan_target_path = target_path.resolve()
+                self._scan_target_path = self._normalize_requested_target_path(
+                    target_path
+                )
 
                 # Mark as initialized immediately (tools available)
                 self._initialized = True
@@ -440,6 +442,11 @@ class MCPServerBase(ABC):
         if backend in {"watchman", "watchdog", "polling"}:
             return str(backend)
         return None
+
+    @staticmethod
+    def _normalize_requested_target_path(path: Path) -> Path:
+        """Return an absolute target path without resolving junctions/symlinks."""
+        return path.expanduser().absolute()
 
     def requires_strict_startup_barrier(self) -> bool:
         """Return whether daemon startup must block on realtime readiness."""

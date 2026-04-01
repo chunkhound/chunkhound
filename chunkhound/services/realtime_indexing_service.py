@@ -42,8 +42,8 @@ from chunkhound.watchman import (
     WatchmanScopePlan,
     WatchmanSubscriptionScope,
     build_watchman_scope_plan,
-    build_watchman_subscription_names_for_scope_plan,
     build_watchman_subscription_name_for_scope,
+    build_watchman_subscription_names_for_scope_plan,
     discover_nested_linux_mount_roots,
     discover_nested_windows_junction_scopes,
 )
@@ -58,6 +58,12 @@ def normalize_file_path(path: Path | str) -> str:
 
 
 QueueResultCallback = Callable[[str, Path, bool, str | None], None]
+
+
+class _WatchmanTranslationError(RuntimeError):
+    def __init__(self, message: str, *, failure_kind: str) -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
 
 
 def _record_realtime_queue_result(
@@ -734,16 +740,21 @@ class WatchmanRealtimeAdapter:
                     continue
                 scope = self._scope_for_payload(payload)
                 if scope is None:
-                    self._warn_translation_issue(
-                        "Watchman subscription PDU did not map to a known scope"
+                    self._record_translation_loss_of_sync(
+                        "scope_mapping_failure",
+                        payload,
+                        "Watchman subscription PDU did not map to a known scope",
+                        failure_kind="unknown_scope",
                     )
                     continue
                 self._translate_subscription_pdu(payload, scope)
             except Exception as error:
-                message = f"Watchman event translation failed: {error}"
-                logger.warning(message)
-                self._service._record_translation_error()
-                self._service._set_warning(message)
+                self._record_translation_loss_of_sync(
+                    "translation_failure",
+                    payload,
+                    f"Watchman event translation failed: {error}",
+                    failure_kind="translation_exception",
+                )
             finally:
                 subscription_queue.task_done()
 
@@ -854,25 +865,43 @@ class WatchmanRealtimeAdapter:
     ) -> None:
         files = payload.get("files")
         if not isinstance(files, list):
-            self._warn_translation_issue(
-                "Watchman subscription PDU did not include a files list"
+            self._record_translation_loss_of_sync(
+                "translation_failure",
+                payload,
+                "Watchman subscription PDU did not include a files list",
+                failure_kind="missing_files_list",
             )
             return
 
         path_filter = self._path_filter
         if path_filter is None:
-            self._warn_translation_issue(
-                "Watchman event translation ran without an active path filter"
+            self._record_translation_loss_of_sync(
+                "translation_failure",
+                payload,
+                "Watchman event translation ran without an active path filter",
+                failure_kind="missing_path_filter",
             )
             return
 
         for entry in files:
             if not isinstance(entry, dict):
-                self._warn_translation_issue(
-                    "Watchman subscription entry was not an object"
+                self._record_translation_loss_of_sync(
+                    "translation_failure",
+                    payload,
+                    "Watchman subscription entry was not an object",
+                    failure_kind="invalid_entry_object",
                 )
-                continue
-            translated = self._translate_watchman_file_entry(entry, scope)
+                return
+            try:
+                translated = self._translate_watchman_file_entry(entry, scope)
+            except _WatchmanTranslationError as error:
+                self._record_translation_loss_of_sync(
+                    "translation_failure",
+                    payload,
+                    str(error),
+                    failure_kind=error.failure_kind,
+                )
+                return
             if translated is None:
                 continue
             event_type, file_path = translated
@@ -901,10 +930,10 @@ class WatchmanRealtimeAdapter:
 
         name = entry.get("name")
         if not isinstance(name, str) or not name.strip():
-            self._warn_translation_issue(
-                "Skipping Watchman subscription entry without a valid name"
+            raise _WatchmanTranslationError(
+                "Skipping Watchman subscription entry without a valid name",
+                failure_kind="invalid_entry_name",
             )
-            return None
 
         relative_name = PurePosixPath(name.strip().replace("\\", "/"))
         if (
@@ -912,10 +941,10 @@ class WatchmanRealtimeAdapter:
             or ".." in relative_name.parts
             or not relative_name.parts
         ):
-            self._warn_translation_issue(
-                f"Skipping unsafe Watchman subscription path {name!r}"
+            raise _WatchmanTranslationError(
+                f"Skipping unsafe Watchman subscription path {name!r}",
+                failure_kind="unsafe_path",
             )
-            return None
 
         # Preserve the logical handled path under config.target_dir even when
         # the Watchman watch root is a physical junction target outside it.
@@ -923,10 +952,10 @@ class WatchmanRealtimeAdapter:
         try:
             canonical_path.relative_to(scope.requested_path)
         except ValueError:
-            self._warn_translation_issue(
-                f"Skipping out-of-scope Watchman path {canonical_path}"
+            raise _WatchmanTranslationError(
+                f"Skipping out-of-scope Watchman path {canonical_path}",
+                failure_kind="out_of_scope_path",
             )
-            return None
 
         exists = entry.get("exists")
         is_new = entry.get("new")
@@ -943,6 +972,47 @@ class WatchmanRealtimeAdapter:
         logger.warning(warning)
         self._service._record_translation_error()
         self._service._set_warning(warning)
+
+    def _record_translation_issue(
+        self,
+        payload: dict[str, object] | None,
+        message: str,
+    ) -> None:
+        if payload is None:
+            self._warn_translation_issue(message)
+            return
+        self._record_translation_loss_of_sync(
+            "translation_failure",
+            payload,
+            message,
+            failure_kind="translation_issue",
+        )
+
+    def _record_translation_loss_of_sync(
+        self,
+        reason: str,
+        payload: dict[str, object],
+        message: str,
+        *,
+        failure_kind: str,
+    ) -> None:
+        warning = f"Watchman event translation warning: {message}"
+        logger.warning(warning)
+        self._service._record_translation_error()
+
+        details: dict[str, object] = {
+            "backend": "watchman",
+            "loss_of_sync_reason": reason,
+            "subscription": str(payload.get("subscription") or self._SUBSCRIPTION_NAME),
+            "translation_failure_kind": failure_kind,
+            "translation_failure_message": message,
+            "translation_warning": warning,
+        }
+        clock = payload.get("clock")
+        if isinstance(clock, str) and clock:
+            details["clock"] = clock
+
+        self._record_loss_of_sync(reason, message=warning, details=details)
 
     def _reset_loss_of_sync_state(self) -> None:
         self._loss_of_sync_count = 0
@@ -2103,6 +2173,11 @@ class RealtimeIndexingService:
             return PollingRealtimeAdapter(self)
         return WatchdogRealtimeAdapter(self)
 
+    @staticmethod
+    def _normalize_requested_watch_path(path: Path) -> Path:
+        """Return an absolute watch path without resolving junctions/symlinks."""
+        return path.expanduser().absolute()
+
     def _build_health_snapshot(self) -> dict[str, Any]:
         monitoring_active = False
         if self.observer and self.observer.is_alive():
@@ -3210,18 +3285,14 @@ class RealtimeIndexingService:
         start_generation = self._start_generation
         self._start_startup_phase("realtime_start")
 
-        # Resolve path to canonical form for Windows 8.3 short name handling
-        # This ensures polling monitor paths stay aligned with the coordinator's
-        # normalized base directory.
-        watch_path = watch_path.resolve()
-
         try:
+            requested_watch_path = self._normalize_requested_watch_path(watch_path)
             self._stopping = False
             self._indexed_files.clear()
             self._removed_files.clear()
             self.failed_files.clear()
-            logger.debug(f"Starting real-time indexing for {watch_path}")
-            self._debug(f"start watch on {watch_path}")
+            logger.debug(f"Starting real-time indexing for {requested_watch_path}")
+            self._debug(f"start watch on {requested_watch_path}")
             self._service_state = "starting"
             self._configured_backend = self._resolve_configured_backend()
             self._effective_backend = "uninitialized"
@@ -3229,8 +3300,14 @@ class RealtimeIndexingService:
             self.monitoring_ready.clear()
             self._monitoring_ready_at = None
 
+            effective_watch_path = requested_watch_path
+            if self._monitor_adapter.backend_name != "watchman":
+                # Polling/watchdog still use resolved monitor paths so observer and
+                # coordinator normalization stay aligned on Windows.
+                effective_watch_path = requested_watch_path.resolve()
+
             # Store the watch path
-            self.watch_path = watch_path
+            self.watch_path = effective_watch_path
             self._emit_status_update()
 
             loop = asyncio.get_event_loop()
@@ -3239,7 +3316,7 @@ class RealtimeIndexingService:
             self.event_consumer_task = asyncio.create_task(self._consume_events())
             self.process_task = asyncio.create_task(self._process_loop())
 
-            await self._monitor_adapter.start(watch_path, loop)
+            await self._monitor_adapter.start(effective_watch_path, loop)
             if not self._start_still_owned(start_generation):
                 return
 

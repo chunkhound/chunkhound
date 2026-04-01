@@ -202,11 +202,13 @@ def test_realtime_path_filter_logs_ignore_engine_failure_once(
 
     path_filter = RealtimePathFilter(config=cfg, root_path=root)
 
-    assert path_filter.should_index(target_file) is True
-    assert path_filter.should_index(target_file) is True
+    assert path_filter.should_index(target_file) is False
+    assert path_filter.should_index(target_file) is False
     assert build_calls["count"] == 1
     assert warning_messages == [
-        f"RealtimePathFilter failed to build repo-aware ignore engine for {root}: boom"
+        "RealtimePathFilter failed to build repo-aware ignore engine "
+        f"for {root}: boom; rejecting realtime events because ignore policy "
+        "could not be evaluated"
     ]
 
 
@@ -252,7 +254,7 @@ def test_realtime_path_filter_logs_ignore_match_failure_once(
     assert warning_messages == [
         "RealtimePathFilter ignore-engine evaluation failed "
         f"for {root}: match boom; ignore-based exclusion could not be applied, "
-        "falling back to language admission"
+        "rejecting affected realtime events"
     ]
 
 
@@ -296,9 +298,10 @@ def test_realtime_path_filter_logs_include_failure_once(
     path_filter = RealtimePathFilter(config=cfg, root_path=root)
     path_filter._engine_initialized = True
 
-    assert path_filter.should_index(target_file) is True
-    assert path_filter.should_index(target_file) is True
+    assert path_filter.should_index(target_file) is False
+    assert path_filter.should_index(target_file) is False
     assert warning_messages == [
         "RealtimePathFilter include-pattern evaluation failed "
-        f"for {root}: include boom; include filtering fell back to language admission"
+        f"for {root}: include boom; include filtering could not be applied, "
+        "rejecting affected realtime events"
     ]

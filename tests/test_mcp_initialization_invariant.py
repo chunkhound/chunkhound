@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import chunkhound.mcp_server.base as base_module
 from chunkhound.daemon.server import ChunkHoundDaemon
 from chunkhound.mcp_server.base import MCPServerBase
 from chunkhound.mcp_server.status import derive_daemon_status
@@ -122,6 +123,54 @@ class TestNonBlockingInitialization:
                 assert "realtime" in progress
                 assert "event_queue" in progress["realtime"]
                 assert "resync" in progress["realtime"]
+
+                await server.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_initialize_preserves_logical_watchman_target_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Deferred Watchman startup should keep the logical requested root."""
+        logical_root = tmp_path / "logical_workspace"
+        physical_root = tmp_path / "physical_workspace"
+        logical_root.mkdir(parents=True)
+        physical_root.mkdir(parents=True)
+
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = logical_root
+        config.indexing.realtime_backend = "watchman"
+        args = SimpleNamespace(path=str(logical_root))
+
+        original_resolve = base_module.Path.resolve
+
+        def fake_resolve(self: Path, strict: bool = False) -> Path:
+            if self == logical_root:
+                return physical_root
+            return original_resolve(self, strict=strict)
+
+        monkeypatch.setattr(base_module.Path, "resolve", fake_resolve)
+
+        with patch("chunkhound.mcp_server.base.create_services") as mock_create:
+            mock_services = MagicMock()
+            mock_services.provider.is_connected = False
+            mock_create.return_value = mock_services
+
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+                server = ConcreteMCPServer(config=config, args=args)
+                server._deferred_connect_and_start = AsyncMock(return_value=None)
+
+                await server.initialize()
+                deferred_start_task = server._deferred_start_task
+                assert deferred_start_task is not None
+                await deferred_start_task
+
+                assert server._scan_target_path == logical_root.absolute()
+                server._deferred_connect_and_start.assert_awaited_once_with(
+                    logical_root.absolute()
+                )
 
                 await server.cleanup()
 
@@ -426,7 +475,6 @@ class TestNonBlockingInitialization:
                     "last_error": None,
                     "last_result": None,
                 }
-
                 await server.cleanup()
 
     @pytest.mark.asyncio

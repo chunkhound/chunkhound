@@ -199,6 +199,56 @@ def test_build_watchman_scope_plan_adds_nested_junction_scopes(tmp_path: Path) -
     )
 
 
+def test_build_watchman_scope_plan_preserves_logical_root_when_target_resolves_elsewhere(  # noqa: E501
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target_dir = tmp_path / "logical_workspace"
+    logical_junction = target_dir / "linked_workspace"
+    physical_root = tmp_path / "physical_workspace"
+    physical_junction_root = tmp_path / "physical_linked_workspace"
+    target_dir.mkdir(parents=True)
+    logical_junction.mkdir(parents=True)
+    physical_root.mkdir(parents=True)
+    physical_junction_root.mkdir(parents=True)
+
+    original_resolve = watchman_scope_module.Path.resolve
+
+    def fake_resolve(self: Path, strict: bool = False) -> Path:
+        if self == target_dir:
+            return physical_root
+        if self == logical_junction:
+            return physical_junction_root
+        return original_resolve(self, strict=strict)
+
+    monkeypatch.setattr(watchman_scope_module.Path, "resolve", fake_resolve)
+
+    plan = build_watchman_scope_plan(
+        target_dir,
+        {"watch": str(physical_root)},
+        additional_scopes=(
+            WatchmanSubscriptionScope(
+                requested_path=logical_junction,
+                watch_root=physical_junction_root,
+                relative_root=None,
+                scope_kind="nested_junction",
+            ),
+        ),
+    )
+
+    assert plan.primary_scope == WatchmanSubscriptionScope(
+        requested_path=target_dir,
+        watch_root=physical_root,
+        relative_root=None,
+        scope_kind="primary",
+    )
+    assert plan.scopes[1] == WatchmanSubscriptionScope(
+        requested_path=logical_junction,
+        watch_root=physical_junction_root,
+        relative_root=None,
+        scope_kind="nested_junction",
+    )
+
+
 def test_discover_nested_windows_junction_scopes_detects_external_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
