@@ -179,6 +179,26 @@ class DatabaseConfig(BaseModel):
             except ValueError:
                 # Invalid value - silently ignore
                 pass
+        if compaction_enabled := os.getenv("CHUNKHOUND_DATABASE__COMPACTION_ENABLED"):
+            config["compaction_enabled"] = compaction_enabled.lower() in (
+                "true",
+                "1",
+                "yes",
+            )
+        if compaction_threshold := os.getenv(
+            "CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD"
+        ):
+            try:
+                config["compaction_threshold"] = float(compaction_threshold)
+            except ValueError:
+                pass
+        if compaction_min_size := os.getenv(
+            "CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB"
+        ):
+            try:
+                config["compaction_min_size_mb"] = int(compaction_min_size)
+            except ValueError:
+                pass
         return config
 
     @classmethod
