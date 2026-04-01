@@ -2,6 +2,8 @@ from pathlib import Path
 
 import pytest
 
+from chunkhound.core.models import Chunk, Embedding, File
+from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.providers.database.duckdb.connection_manager import (
     DuckDBConnectionManager,
 )
@@ -180,6 +182,64 @@ def test_provider_batch_insert_uses_true_upsert_contract(tmp_path: Path) -> None
 
         assert len(updated_rows) == 1
         assert updated_rows[0]["id"] == original_row[0]["id"]
+        assert list(updated_rows[0]["embedding"]) == [9.0, 8.0, 7.0]
+    finally:
+        provider.disconnect(skip_checkpoint=True)
+
+
+def test_single_row_insert_embedding_uses_true_upsert_contract(tmp_path: Path) -> None:
+    pytest.importorskip("duckdb")
+
+    provider = DuckDBProvider(db_path=tmp_path / "db.duckdb", base_directory=tmp_path)
+    provider.connect()
+    try:
+        file_id = provider.insert_file(
+            File(
+                path="example.py",
+                mtime=1.0,
+                language=Language.PYTHON,
+                size_bytes=1,
+            )
+        )
+        chunk_id = provider.insert_chunk(
+            Chunk(
+                symbol="example",
+                start_line=1,
+                end_line=1,
+                code="def example():\n    return 1",
+                chunk_type=ChunkType.FUNCTION,
+                file_id=file_id,
+                language=Language.PYTHON,
+            )
+        )
+
+        first_id = provider.insert_embedding(
+            Embedding(
+                chunk_id=chunk_id,
+                provider="test",
+                model="mini",
+                vector=[1.0, 2.0, 3.0],
+                dims=3,
+            )
+        )
+        original_row = _get_embedding_rows(provider, chunk_id, "test", "mini")
+        assert len(original_row) == 1
+        assert original_row[0]["id"] == first_id
+
+        second_id = provider.insert_embedding(
+            Embedding(
+                chunk_id=chunk_id,
+                provider="test",
+                model="mini",
+                vector=[9.0, 8.0, 7.0],
+                dims=3,
+            )
+        )
+        updated_rows = _get_embedding_rows(provider, chunk_id, "test", "mini")
+
+        assert second_id == first_id
+        assert len(updated_rows) == 1
+        assert updated_rows[0]["id"] == first_id
         assert list(updated_rows[0]["embedding"]) == [9.0, 8.0, 7.0]
     finally:
         provider.disconnect(skip_checkpoint=True)

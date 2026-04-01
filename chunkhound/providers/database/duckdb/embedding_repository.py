@@ -269,6 +269,30 @@ class DuckDBEmbeddingRepository:
         for offset in range(0, len(batch_rows), write_batch_size):
             conn.executemany(upsert_sql, batch_rows[offset : offset + write_batch_size])
 
+    def _get_embedding_row_id(
+        self,
+        conn: Any,
+        table_name: str,
+        chunk_id: int,
+        provider: str,
+        model: str,
+    ) -> int:
+        """Return the canonical row id for one embedding upsert key."""
+        result = conn.execute(
+            f"""
+            SELECT id
+            FROM {table_name}
+            WHERE chunk_id = ? AND provider = ? AND model = ?
+            """,
+            [chunk_id, provider, model],
+        ).fetchone()
+        if result is None:
+            raise RuntimeError(
+                "Embedding upsert completed without a stored row for "
+                f"{table_name} ({chunk_id}, {provider}, {model})"
+            )
+        return int(result[0])
+
     def insert_embedding(self, embedding: Embedding) -> int:
         """Insert embedding record and return embedding ID."""
         if self.connection is None:
@@ -285,12 +309,9 @@ class DuckDBEmbeddingRepository:
                     self.connection_manager.connection, embedding.dims
                 )
 
-            result = self.connection_manager.connection.execute(
-                f"""
-                INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims)
-                VALUES (?, ?, ?, ?, ?)
-                RETURNING id
-            """,
+            upsert_sql = self.build_embedding_upsert_sql(table_name)
+            self.connection_manager.connection.execute(
+                upsert_sql,
                 [
                     embedding.chunk_id,
                     embedding.provider,
@@ -299,10 +320,15 @@ class DuckDBEmbeddingRepository:
                     embedding.dims,
                 ],
             )
-
-            embedding_id = result.fetchone()[0]
+            embedding_id = self._get_embedding_row_id(
+                self.connection_manager.connection,
+                table_name,
+                embedding.chunk_id,
+                embedding.provider,
+                embedding.model,
+            )
             logger.debug(
-                f"Inserted embedding {embedding_id} for chunk {embedding.chunk_id}"
+                f"Upserted embedding {embedding_id} for chunk {embedding.chunk_id}"
             )
             return embedding_id
 
@@ -320,7 +346,7 @@ class DuckDBEmbeddingRepository:
 
         For large batches (>= batch_size threshold), uses the Context7-recommended optimization:
         1. Drop HNSW indexes to avoid insert slowdown (60s+ -> 5s for 300 items)
-        2. Use fast INSERT for new embeddings, INSERT OR REPLACE for updates
+        2. Use parameterized ON CONFLICT upserts for new and existing embeddings
         3. Recreate HNSW indexes after bulk operations
 
         Expected speedup: 10-20x faster for large batches (90s -> 5-10s).
