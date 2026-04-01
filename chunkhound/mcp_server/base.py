@@ -86,21 +86,22 @@ class MCPServerBase(ABC):
         # Set MCP mode to suppress stderr output that interferes with JSON-RPC
         os.environ["CHUNKHOUND_MCP_MODE"] = "1"
 
-    def debug_log(self, message: str) -> None:
-        """Log debug message to file if debug mode is enabled."""
-        if self.debug_mode:
-            # Write to debug file instead of stderr to preserve JSON-RPC protocol
-            debug_file = os.getenv(
-                "CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_mcp_debug.log"
-            )
-            try:
-                with open(debug_file, "a") as f:
-                    timestamp = datetime.now().isoformat()
-                    f.write(f"[{timestamp}] [MCP] {message}\n")
-                    f.flush()
-            except Exception:
-                # Silently fail if we can't write to debug file
-                pass
+    def debug_log(self, message: str, *, always: bool = False) -> None:
+        """Log message to file. Logged only in debug mode unless always=True."""
+        if not always and not self.debug_mode:
+            return
+        # Write to debug file instead of stderr to preserve JSON-RPC protocol
+        debug_file = os.getenv(
+            "CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_mcp_debug.log"
+        )
+        try:
+            with open(debug_file, "a") as f:
+                timestamp = datetime.now().isoformat()
+                f.write(f"[{timestamp}] [MCP] {message}\n")
+                f.flush()
+        except Exception:
+            # Silently fail if we can't write to debug file
+            pass
 
     async def initialize(self) -> None:
         """Initialize services and database connection.
@@ -329,7 +330,7 @@ class MCPServerBase(ABC):
             if started:
                 self.debug_log("Background compaction started")
         except Exception as e:
-            self.debug_log(f"Background compaction failed to start: {e}")
+            self.debug_log(f"Background compaction failed to start: {e}", always=True)
 
     async def _post_compaction_reindex(self) -> None:
         """Callback after compaction - triggers incremental reindex.
