@@ -32,7 +32,7 @@ def _get_embedding_rows(
 ) -> list[dict]:
     return provider.execute_query(
         """
-        SELECT id, chunk_id, provider, model, embedding
+        SELECT id, chunk_id, provider, model, embedding, dims
         FROM embeddings_3
         WHERE chunk_id = ? AND provider = ? AND model = ?
         ORDER BY id
@@ -187,7 +187,9 @@ def test_provider_batch_insert_uses_true_upsert_contract(tmp_path: Path) -> None
         provider.disconnect(skip_checkpoint=True)
 
 
-def test_single_row_insert_embedding_uses_true_upsert_contract(tmp_path: Path) -> None:
+def test_single_row_insert_embedding_uses_true_upsert_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     pytest.importorskip("duckdb")
 
     provider = DuckDBProvider(db_path=tmp_path / "db.duckdb", base_directory=tmp_path)
@@ -212,19 +214,38 @@ def test_single_row_insert_embedding_uses_true_upsert_contract(tmp_path: Path) -
                 language=Language.PYTHON,
             )
         )
+        provider._ensure_embedding_table_exists(3)
+        provider.create_vector_index("test", "mini", 3, "cosine")
+        initial_indexes = _get_hnsw_index_names(provider)
 
-        first_id = provider.insert_embedding(
-            Embedding(
-                chunk_id=chunk_id,
-                provider="test",
-                model="mini",
-                vector=[1.0, 2.0, 3.0],
-                dims=3,
-            )
-        )
+        first_payload = [
+            {
+                "chunk_id": chunk_id,
+                "provider": "test",
+                "model": "mini",
+                "embedding": [1.0, 2.0, 3.0],
+                "dims": 3,
+            }
+        ]
+        assert provider.insert_embeddings_batch(first_payload) == 1
         original_row = _get_embedding_rows(provider, chunk_id, "test", "mini")
+        first_id = original_row[0]["id"]
         assert len(original_row) == 1
         assert original_row[0]["id"] == first_id
+        assert original_row[0]["dims"] == 3
+
+        original_build_upsert_sql = DuckDBEmbeddingRepository.build_embedding_upsert_sql
+        build_upsert_calls: list[str] = []
+
+        def _record_build_upsert_sql(table_name: str) -> str:
+            build_upsert_calls.append(table_name)
+            return original_build_upsert_sql(table_name)
+
+        monkeypatch.setattr(
+            DuckDBEmbeddingRepository,
+            "build_embedding_upsert_sql",
+            staticmethod(_record_build_upsert_sql),
+        )
 
         second_id = provider.insert_embedding(
             Embedding(
@@ -237,10 +258,13 @@ def test_single_row_insert_embedding_uses_true_upsert_contract(tmp_path: Path) -
         )
         updated_rows = _get_embedding_rows(provider, chunk_id, "test", "mini")
 
+        assert build_upsert_calls == ["embeddings_3"]
         assert second_id == first_id
         assert len(updated_rows) == 1
         assert updated_rows[0]["id"] == first_id
         assert list(updated_rows[0]["embedding"]) == [9.0, 8.0, 7.0]
+        assert updated_rows[0]["dims"] == 3
+        assert _get_hnsw_index_names(provider) == initial_indexes
     finally:
         provider.disconnect(skip_checkpoint=True)
 

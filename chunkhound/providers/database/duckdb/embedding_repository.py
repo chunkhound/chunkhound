@@ -309,8 +309,9 @@ class DuckDBEmbeddingRepository:
                     self.connection_manager.connection, embedding.dims
                 )
 
+            conn = self.connection_manager.connection
             upsert_sql = self.build_embedding_upsert_sql(table_name)
-            self.connection_manager.connection.execute(
+            conn.execute(
                 upsert_sql,
                 [
                     embedding.chunk_id,
@@ -321,7 +322,7 @@ class DuckDBEmbeddingRepository:
                 ],
             )
             embedding_id = self._get_embedding_row_id(
-                self.connection_manager.connection,
+                conn,
                 table_name,
                 embedding.chunk_id,
                 embedding.provider,

@@ -2245,8 +2245,43 @@ class DuckDBProvider(SerialDatabaseProvider):
         return file_dict
 
     def insert_embedding(self, embedding: Embedding) -> int:
-        """Insert embedding record and return embedding ID - delegate to embedding repository."""
-        return self._embedding_repository.insert_embedding(embedding)
+        """Insert embedding record and return embedding ID."""
+        return self._execute_in_db_thread_sync("insert_embedding", embedding)
+
+    def _executor_insert_embedding(
+        self, conn: Any, state: dict[str, Any], embedding: Embedding
+    ) -> int:
+        """Executor method for insert_embedding - runs in the DB thread."""
+        track_operation(state)
+
+        table_name = self._executor_ensure_embedding_table_exists(
+            conn, state, embedding.dims
+        )
+        upsert_sql = DuckDBEmbeddingRepository.build_embedding_upsert_sql(table_name)
+        conn.execute(
+            upsert_sql,
+            [
+                embedding.chunk_id,
+                embedding.provider,
+                embedding.model,
+                embedding.vector,
+                embedding.dims,
+            ],
+        )
+        result = conn.execute(
+            f"""
+            SELECT id
+            FROM {table_name}
+            WHERE chunk_id = ? AND provider = ? AND model = ?
+            """,
+            [embedding.chunk_id, embedding.provider, embedding.model],
+        ).fetchone()
+        if result is None:
+            raise RuntimeError(
+                "Embedding upsert completed without a stored row for "
+                f"{table_name} ({embedding.chunk_id}, {embedding.provider}, {embedding.model})"
+            )
+        return int(result[0])
 
     def insert_embeddings_batch(
         self,
