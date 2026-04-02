@@ -3177,6 +3177,13 @@ class DuckDBProvider(SerialDatabaseProvider):
             os.replace(db_path, old_db_path)
             os.replace(new_db_path, db_path)
 
+            if cancel_check and cancel_check():
+                # Swap succeeded but shutdown requested — skip reconnect.
+                # cleanup() will handle provider teardown.
+                self._connection_allowed.set()
+                old_db_path.unlink(missing_ok=True)
+                return True
+
             # Reconnect to swapped database
             self._connection_allowed.set()  # Allow reconnect to new file
             self.connect()
