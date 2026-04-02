@@ -965,12 +965,78 @@ class TestConnectionGateDuringCompaction:
         assert result is not None
 
 
+class TestConcurrentAccessDuringCompaction:
+    """Test that concurrent reads are blocked while compaction is in progress."""
+
+    def test_reads_blocked_during_export_then_resume(
+        self, provider_with_fragmentation: tuple
+    ):
+        """Reads raise CompactionError during active compaction, then resume after."""
+        provider, db_path = provider_with_fragmentation
+
+        export_paused = threading.Event()
+        export_proceed = threading.Event()
+        read_result: dict = {}
+
+        original_export = provider._export_database_for_compaction
+
+        def pausing_export(db_p: Path, export_dir: Path) -> None:
+            # Signal that export phase has started (gate closed, disconnected)
+            export_paused.set()
+            # Wait for the test to attempt a read before continuing
+            export_proceed.wait(timeout=10)
+            original_export(db_p, export_dir)
+
+        def attempt_read() -> None:
+            try:
+                provider.get_file_by_path("test_8.py")
+                read_result["error"] = None
+            except CompactionError as e:
+                read_result["error"] = e
+
+        with patch.object(
+            provider, "_export_database_for_compaction", side_effect=pausing_export
+        ):
+            # Start compaction in a background thread
+            compact_thread = threading.Thread(
+                target=provider.optimize, kwargs={"cancel_check": None}
+            )
+            compact_thread.start()
+
+            # Wait until export phase is reached (gate is closed)
+            assert export_paused.wait(timeout=10), "Export phase never started"
+
+            # Attempt a read from a separate thread — should be blocked
+            read_thread = threading.Thread(target=attempt_read)
+            read_thread.start()
+            read_thread.join(timeout=5)
+
+            # Verify the read was rejected
+            assert "error" in read_result, "Read thread didn't complete"
+            assert isinstance(read_result["error"], CompactionError)
+            assert read_result["error"].operation == "connection"
+
+            # Let compaction finish
+            export_proceed.set()
+            compact_thread.join(timeout=30)
+
+        # After compaction, reads should work again
+        result = provider.get_file_by_path("test_8.py")
+        assert result is not None
+
+
 class TestEmbeddingVectorSurvival:
     """Test that embedding vectors survive EXPORT/IMPORT compaction.
 
     Tests the DuckDB EXPORT/IMPORT primitive directly rather than through
     DuckDBProvider.optimize() because CHECKPOINT with VSS-loaded tables
     is prohibitively slow (~60s) in small test databases.
+
+    The remaining optimize() logic (lock acquisition, soft_disconnect,
+    atomic swap, reconnect) is exercised by TestDuckDBProviderOptimize
+    without embeddings. Combined coverage is sufficient: this class
+    validates data fidelity of the EXPORT/IMPORT round-trip, while
+    TestDuckDBProviderOptimize validates the orchestration around it.
     """
 
     def test_optimize_preserves_embedding_vectors(self, tmp_path: Path):
