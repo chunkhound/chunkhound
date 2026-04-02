@@ -1,6 +1,7 @@
 """Tests for DuckDBProvider._safe_sql_path allowlist validation."""
 
-from pathlib import Path
+import sys
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -37,7 +38,6 @@ class TestSafeSqlPath:
             "/tmp/\u00e9",
             '/tmp/foo"bar',
             "/tmp/$HOME",
-            "/tmp/foo\\bar",
         ],
         ids=[
             "semicolon",
@@ -47,12 +47,20 @@ class TestSafeSqlPath:
             "unicode",
             "double-quote",
             "dollar-sign",
-            "backslash",
         ],
     )
     def test_rejected_paths_raise(self, path_str: str) -> None:
         with pytest.raises(CompactionError, match="not allowed in SQL"):
             DuckDBProvider._safe_sql_path(Path(path_str))
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Windows Path treats \\ as separator; backslash cannot reach as_posix()",
+    )
+    def test_backslash_rejected(self) -> None:
+        """On Unix, backslash is a valid filename char and must be rejected."""
+        with pytest.raises(CompactionError, match="not allowed in SQL"):
+            DuckDBProvider._safe_sql_path(PurePosixPath("/tmp/foo\\bar"))
 
     def test_rejected_error_has_operation(self) -> None:
         with pytest.raises(CompactionError) as exc_info:
