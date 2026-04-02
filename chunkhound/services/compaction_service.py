@@ -76,6 +76,9 @@ class CompactionService:
         self, provider: "DuckDBProvider"
     ) -> tuple[bool, dict[str, Any]]:
         """Check if compaction is warranted. Returns (should_compact, stats)."""
+        # check-then-set on _compaction_in_progress is safe: CLI uses
+        # compact_blocking (single caller) and MCP calls compact_background
+        # once from the post-index hook — no concurrent callers in practice.
         if self._compaction_in_progress:
             return False, {}
 
