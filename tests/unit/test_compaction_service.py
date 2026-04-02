@@ -6,6 +6,8 @@ only mocking external dependencies like disk operations.
 """
 
 import asyncio
+import os
+import shutil
 import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,6 +16,7 @@ import pytest
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.database_config import DatabaseConfig
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.core.models import Chunk, File
 from chunkhound.core.types.common import ChunkType, Language
 from chunkhound.providers.database.duckdb_provider import DuckDBProvider
@@ -56,6 +59,7 @@ def mock_provider() -> MagicMock:
             "total_blocks": 2000,
             "used_blocks": 1000,
             "row_waste_ratio": 0.0,
+            "effective_waste": 0.5,
         },
     )
     provider.disconnect = MagicMock()
@@ -820,3 +824,257 @@ class TestCompactionServiceEndToEnd:
         assert size_after <= size_before, (
             f"Database grew after compaction: {size_before} -> {size_after}"
         )
+
+
+class TestCompactionErrorRecovery:
+    """Test error recovery during compaction."""
+
+    def test_optimize_recovers_on_import_failure(
+        self, provider_with_fragmentation: tuple
+    ):
+        """Provider recovers when _import_database_for_compaction raises."""
+        provider, db_path = provider_with_fragmentation
+
+        chunks_before = provider.get_all_chunks_with_metadata()
+
+        with patch.object(
+            provider,
+            "_import_database_for_compaction",
+            side_effect=RuntimeError("import crashed"),
+        ):
+            with pytest.raises(CompactionError, match="import crashed") as exc_info:
+                provider.optimize()
+
+            assert exc_info.value.operation == "compaction"
+
+        # Provider should have reconnected
+        assert provider.is_connected is True
+
+        # Data should be intact
+        chunks_after = provider.get_all_chunks_with_metadata()
+        assert len(chunks_after) == len(chunks_before), (
+            f"Chunk count mismatch: {len(chunks_before)} -> {len(chunks_after)}"
+        )
+        assert provider.get_file_by_path("test_8.py") is not None
+        assert provider.get_file_by_path("test_9.py") is not None
+
+        # Temp files should be cleaned up
+        assert not db_path.with_suffix(".compact.duckdb").exists()
+
+    def test_optimize_rejects_insufficient_disk_space(
+        self, provider_with_fragmentation: tuple
+    ):
+        """CompactionError raised when disk space is insufficient."""
+        provider, db_path = provider_with_fragmentation
+
+        # Return very low free space (1 byte)
+        fake_usage = shutil.disk_usage(db_path.parent)._replace(free=1)
+        with patch(
+            "chunkhound.providers.database.duckdb_provider.shutil.disk_usage",
+            return_value=fake_usage,
+        ):
+            with pytest.raises(
+                CompactionError, match="Insufficient disk space"
+            ) as exc_info:
+                provider.optimize()
+
+            assert exc_info.value.operation == "preflight"
+
+        # Provider stays connected (preflight runs before soft_disconnect)
+        assert provider.is_connected is True
+
+    def test_optimize_handles_disk_stat_oserror(
+        self, provider_with_fragmentation: tuple
+    ):
+        """CompactionError raised when disk usage check fails with OSError."""
+        provider, _db_path = provider_with_fragmentation
+
+        with patch(
+            "chunkhound.providers.database.duckdb_provider.shutil.disk_usage",
+            side_effect=OSError("device error"),
+        ):
+            with pytest.raises(
+                CompactionError, match="Cannot verify disk space"
+            ) as exc_info:
+                provider.optimize()
+
+            assert exc_info.value.operation == "preflight"
+
+        assert provider.is_connected is True
+
+
+class TestPostSwapCancelCheck:
+    """Test the cancel_check branch after the atomic file swap."""
+
+    def test_optimize_skips_reconnect_on_post_swap_cancel(
+        self, provider_with_fragmentation: tuple
+    ):
+        """When shutdown fires after swap succeeds, reconnect is skipped
+        and the backup file is cleaned up."""
+        provider, db_path = provider_with_fragmentation
+        old_db_path = db_path.with_suffix(".duckdb.old")
+
+        # Track when the atomic swap completes so cancel fires at the right
+        # semantic point, not at a fragile hard-coded call count.
+        swap_complete = False
+        original_replace = os.replace
+
+        def tracking_replace(src, dst):
+            nonlocal swap_complete
+            result = original_replace(src, dst)
+            if str(src).endswith(".compact.duckdb"):
+                swap_complete = True
+            return result
+
+        with patch("os.replace", side_effect=tracking_replace):
+            result = provider.optimize(cancel_check=lambda: swap_complete)
+
+        assert result is True
+        assert not provider.is_connected, "reconnect should have been skipped"
+        assert not old_db_path.exists(), "backup should have been cleaned up"
+        assert provider._connection_allowed.is_set(), "gate should be restored"
+
+
+class TestConnectionGateDuringCompaction:
+    """Test that _connection_allowed gate blocks operations during compaction."""
+
+    def test_operations_blocked_when_gate_closed(
+        self, provider_with_fragmentation: tuple
+    ):
+        """Provider operations raise CompactionError when connection gate is closed."""
+        provider, _db_path = provider_with_fragmentation
+
+        # Clear cached executor connection so the gate check fires
+        provider.soft_disconnect()
+        provider._connection_allowed.clear()
+
+        try:
+            with pytest.raises(
+                CompactionError, match="compaction in progress"
+            ) as exc_info:
+                provider.get_file_by_path("test_8.py")
+
+            assert exc_info.value.operation == "connection"
+        finally:
+            # Restore gate and reconnect
+            provider._connection_allowed.set()
+            provider.connect()
+
+        # Verify operations resume after gate recovery
+        result = provider.get_file_by_path("test_8.py")
+        assert result is not None
+
+
+class TestEmbeddingVectorSurvival:
+    """Test that embedding vectors survive EXPORT/IMPORT compaction.
+
+    Tests the DuckDB EXPORT/IMPORT primitive directly rather than through
+    DuckDBProvider.optimize() because CHECKPOINT with VSS-loaded tables
+    is prohibitively slow (~60s) in small test databases.
+    """
+
+    def test_optimize_preserves_embedding_vectors(self, tmp_path: Path):
+        """Embedding vectors survive the EXPORT/IMPORT compaction round-trip.
+
+        Tests the EXPORT DATABASE / IMPORT DATABASE cycle directly because
+        DuckDB's CHECKPOINT with VSS-loaded embedding tables is prohibitively
+        slow in small test databases (>60s), making the full optimize() path
+        impractical for CI.
+        """
+        import random
+
+        import duckdb
+
+        db_path = tmp_path / "emb.duckdb"
+
+        # Create database with embeddings using direct DuckDB connection
+        conn = duckdb.connect(str(db_path))
+        conn.execute("LOAD vss")
+        try:
+            conn.execute("SET hnsw_enable_experimental_persistence = true")
+        except duckdb.Error:
+            pass  # Flag unavailable in DuckDB <0.10; embeddings still survive without it
+
+        conn.execute("""
+            CREATE TABLE files (
+                id INTEGER PRIMARY KEY,
+                path VARCHAR
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE chunks (
+                id INTEGER PRIMARY KEY,
+                file_id INTEGER,
+                code VARCHAR
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE embeddings_128 (
+                chunk_id INTEGER,
+                embedding FLOAT[128],
+                provider VARCHAR,
+                model VARCHAR
+            )
+        """)
+
+        conn.execute("INSERT INTO files VALUES (1, 'test.py')")
+        rng = random.Random(42)
+        test_vectors = {}
+        for i in range(1, 6):
+            conn.execute(
+                "INSERT INTO chunks VALUES (?, 1, ?)",
+                [i, f"def func_{i}(): pass"],
+            )
+            vec = [rng.uniform(-1, 1) for _ in range(128)]
+            test_vectors[i] = vec
+            conn.execute(
+                "INSERT INTO embeddings_128 VALUES (?, ?::FLOAT[128], 'prov', 'mod')",
+                [i, vec],
+            )
+        conn.execute("CHECKPOINT")
+        conn.close()
+
+        # Run EXPORT/IMPORT cycle (the core of compaction)
+        export_dir = tmp_path / "export"
+        new_db = tmp_path / "compact.duckdb"
+
+        # Export
+        conn = duckdb.connect(str(db_path), read_only=True)
+        conn.execute("LOAD vss")
+        conn.execute(f"EXPORT DATABASE '{export_dir.as_posix()}' (FORMAT PARQUET)")
+        conn.close()
+
+        # Import
+        conn = duckdb.connect(str(new_db))
+        conn.execute("LOAD vss")
+        try:
+            conn.execute("SET hnsw_enable_experimental_persistence = true")
+        except duckdb.Error:
+            pass  # Flag unavailable in DuckDB <0.10; embeddings still survive without it
+        conn.execute(f"IMPORT DATABASE '{export_dir.as_posix()}'")
+        conn.execute("CHECKPOINT")
+
+        # Verify embeddings survived
+        for chunk_id, expected_vec in test_vectors.items():
+            result = conn.execute(
+                "SELECT embedding FROM embeddings_128 WHERE chunk_id = ?",
+                [chunk_id],
+            ).fetchone()
+            assert result is not None, (
+                f"Embedding for chunk {chunk_id} missing after compaction"
+            )
+            actual_vec = list(result[0])
+            assert len(actual_vec) == 128
+            for j, (a, b) in enumerate(zip(expected_vec, actual_vec)):
+                assert abs(a - b) < 1e-6, (
+                    f"Vector mismatch at chunk {chunk_id}, dim {j}: "
+                    f"{a} vs {b}"
+                )
+
+        # Also verify non-embedding data survived
+        file_count = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        chunk_count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        assert file_count == 1
+        assert chunk_count == 5
+
+        conn.close()
