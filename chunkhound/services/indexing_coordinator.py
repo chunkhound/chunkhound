@@ -281,6 +281,12 @@ class IndexingCoordinator(BaseService):
 
         Reads patterns from the user's global gitignore file (core.excludesFile
         or default locations) and extends the provided list.
+
+        Only adds simple exclude patterns. Negation patterns (``!...``) and
+        overly broad wildcards like ``**/*`` or ``*`` are skipped because the
+        flat exclude list used by ``should_exclude_path`` does not support
+        gitignore negation semantics — adding ``**/*`` without its companion
+        negations would cause every file to be excluded.
         """
         try:
             from chunkhound.utils.ignore_engine import (
@@ -289,7 +295,20 @@ class IndexingCoordinator(BaseService):
 
             global_pats = _collect_global_gitignore_patterns()
             if global_pats:
-                effective_excludes.extend(global_pats)
+                safe_pats = []
+                for pat in global_pats:
+                    # Skip negation patterns (flat exclude list can't invert)
+                    if pat.startswith("!"):
+                        continue
+                    # Skip overly broad wildcards that would match everything
+                    if pat in ("*", "**/*", "**/**", "**"):
+                        logger.debug(
+                            f"Skipping overly broad global gitignore pattern: {pat}"
+                        )
+                        continue
+                    safe_pats.append(pat)
+                if safe_pats:
+                    effective_excludes.extend(safe_pats)
         except Exception as e:
             logger.debug(f"Global gitignore not loaded: {e}")
 
@@ -2275,6 +2294,10 @@ class IndexingCoordinator(BaseService):
         except Exception:
             pass
 
+        logger.debug(
+            f"Discovery backend resolved: {_resolved} (reasons: {_reasons})"
+        )
+
         use_git_backend = _resolved in ("git", "git_only")
         git_only_mode = _resolved == "git_only"
 
@@ -2285,12 +2308,14 @@ class IndexingCoordinator(BaseService):
                 exclude_patterns,
                 fallback_to_python=(not git_only_mode),
             )
-            # If Git enumeration succeeded and produced files, return them.
-            # If it returned an empty list in git_only mode (e.g., fake repos with only
-            # a .git directory but no initialized repo), fall back to Python traversal
-            # to honor repo-boundary ignore semantics used in tests, but only when repos
-            # were actually detected. When truly no repos exist, git_only should yield
-            # an empty result by design.
+            logger.debug(
+                f"Git discovery returned: {len(files_git) if files_git is not None else 'None'} files"
+            )
+            # If Git enumeration succeeded (not None), return the result.
+            # An empty list means git ran but no files matched after
+            # include/exclude filtering — that is a legitimate result.
+            # None means git was unavailable or no repos found; fall through
+            # to parallel/sequential discovery.
             if files_git is not None:
                 repo_detected = bool(getattr(self, "_git_repo_roots_detected", False))
                 if (
@@ -2349,6 +2374,7 @@ class IndexingCoordinator(BaseService):
             except Exception:
                 ignore_engine_obj = None
 
+        logger.debug("Falling through to sequential walker")
         discovered_files = self._walk_directory_with_excludes(
             directory,
             patterns,
@@ -2357,6 +2383,7 @@ class IndexingCoordinator(BaseService):
             ignore_engine_obj,
             engine_args,
         )
+        logger.debug(f"Sequential walker found {len(discovered_files)} files")
         try:
             setattr(self, "_profile_parallel_used", False)
         except Exception:
@@ -2462,8 +2489,10 @@ class IndexingCoordinator(BaseService):
                 effective_excludes,
                 prune_ignored_gitfile_roots=prune_gitfile_roots,
             )
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Repo root detection failed in git discovery: {e}")
             repo_roots = []
+        logger.debug(f"Git discovery repo roots: {repo_roots}")
         # Expose whether any repos were detected for caller decisions
         try:
             setattr(self, "_git_repo_roots_detected", bool(repo_roots))
@@ -2509,14 +2538,21 @@ class IndexingCoordinator(BaseService):
                     config_excludes=effective_excludes,
                     filter_root=directory,
                 )
+                logger.debug(
+                    f"Git repo {rr}: {len(repo_files)} files "
+                    f"(tracked={stats.get('git_rows_tracked', 0)}, "
+                    f"others={stats.get('git_rows_others', 0)}, "
+                    f"pathspecs={stats.get('git_pathspecs', 0)})"
+                )
                 tot_rows_tracked += int(stats.get("git_rows_tracked", 0))
                 tot_rows_others += int(stats.get("git_rows_others", 0))
                 tot_pathspecs += int(stats.get("git_pathspecs", 0))
                 if bool(stats.get("git_pathspecs_capped")):
                     tot_capped = True
                 results.extend(repo_files)
-            except Exception:
+            except Exception as e:
                 # If any repo fails, skip it (we'll still scan non-repo areas)
+                logger.debug(f"Git discovery failed for repo {rr}: {e}")
                 continue
 
         # Scan non-repo areas by pruning repo subtrees during walk

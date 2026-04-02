@@ -62,10 +62,13 @@ def get_global_excludes_file() -> Path | None:
     except Exception:
         pass
 
-    # Fallback: check default locations
+    # Fallback: check standard global-excludes locations.
+    # NOTE: ~/.gitignore is intentionally absent — .gitignore files are always
+    # repo-scoped.  Git itself never uses ~/.gitignore as global excludes;
+    # the standard locations are core.excludesFile (checked above) and
+    # $XDG_CONFIG_HOME/git/ignore.  ~/.gitignore_global is a common convention.
     for default in [
         Path.home() / ".gitignore_global",
-        Path.home() / ".gitignore",
         Path.home() / ".config" / "git" / "ignore",
     ]:
         if default.exists():

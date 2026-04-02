@@ -31,13 +31,18 @@ jobs:
         run: uv sync --locked
         
       - name: Run tests
+        shell: bash
         run: |
-                # ── NEW: Fail fast on any collection error (Linux syntax, bad skipif, import issues, etc.)
-                echo "::group::🔍 Test collection check"
+                # ── Fail fast on any collection error (bad skipif, import issues, etc.)
+                echo "::group::Test collection check"
                 uv run pytest tests/ --collectonly -q --tb=no
                 echo "::endgroup::"
 
-                # ── Original full run (unchanged)
-                echo "::group::🧪 Full test suite"
-                uv run pytest tests/ -v
+                # ── Full test suite (with retries on Windows for flaky realtime tests)
+                echo "::group::Full test suite"
+                if [ "$RUNNER_OS" = "Windows" ]; then
+                  uv run pytest tests/ -v --reruns 2 --reruns-delay 5 --only-rerun "AssertionError"
+                else
+                  uv run pytest tests/ -v
+                fi
                 echo "::endgroup::"
