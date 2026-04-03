@@ -681,8 +681,8 @@ class DuckDBProvider(SerialDatabaseProvider):
             "last_checkpoint_time", current_time
         )
 
-        # Checkpoint if forced or 5 minutes elapsed
-        should_checkpoint = force or time_since_checkpoint >= 300
+        # Checkpoint if forced or 60 seconds elapsed
+        should_checkpoint = force or time_since_checkpoint >= 60
 
         if should_checkpoint:
             try:
