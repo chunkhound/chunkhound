@@ -74,6 +74,11 @@ class SerialDatabaseProvider(ABC):
         self._connection_allowed = threading.Event()
         self._connection_allowed.set()
 
+    @property
+    def is_accepting_connections(self) -> bool:
+        """True when accepting connections, False during compaction."""
+        return self._connection_allowed.is_set()
+
     @abstractmethod
     def _create_connection(self) -> Any:
         """Create and return a database connection.

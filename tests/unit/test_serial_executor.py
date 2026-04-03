@@ -29,6 +29,10 @@ class _StubProvider:
         if not suspended:
             self._connection_allowed.set()
 
+    @property
+    def is_accepting_connections(self) -> bool:
+        return self._connection_allowed.is_set()
+
     def _create_connection(self):
         return object()  # sentinel
 
