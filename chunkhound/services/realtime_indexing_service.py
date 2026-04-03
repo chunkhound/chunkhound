@@ -331,6 +331,7 @@ class RealtimeIndexingService:
         """Stop the service gracefully."""
         logger.debug("Stopping real-time indexing service")
         self._debug("stopping service")
+        self._stopping = True
 
         # Cancel watchdog setup if still running
         if hasattr(self, "_watchdog_setup_task") and self._watchdog_setup_task:
@@ -352,24 +353,24 @@ class RealtimeIndexingService:
         if self.event_consumer_task:
             self.event_consumer_task.cancel()
             try:
-                await self.event_consumer_task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(self.event_consumer_task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
 
         # Cancel processing task
         if self.process_task:
             self.process_task.cancel()
             try:
-                await self.process_task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(self.process_task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
 
         # Cancel polling task if running
         if self._polling_task:
             self._polling_task.cancel()
             try:
-                await self._polling_task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(self._polling_task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
 
         # Cancel all active debounce tasks
@@ -381,7 +382,6 @@ class RealtimeIndexingService:
             await asyncio.gather(*self._debounce_tasks, return_exceptions=True)
             self._debounce_tasks.clear()
 
-        self._stopping = True
         async with self._file_condition:
             self._file_condition.notify_all()
 
@@ -605,7 +605,7 @@ class RealtimeIndexingService:
 
     async def _consume_events(self) -> None:
         """Simple event consumer - pure asyncio queue."""
-        while True:
+        while not self._stopping:
             try:
                 # Get event from async queue with timeout
                 try:
@@ -670,6 +670,8 @@ class RealtimeIndexingService:
 
                 self.event_queue.task_done()
 
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.error(f"Error consuming event: {e}")
                 await asyncio.sleep(0.1)  # Brief pause on error
