@@ -50,7 +50,7 @@ class TestCrashMidSwap:
             mgr.disconnect()
 
     def test_cleans_stale_old_when_both_exist(self, tmp_path: Path):
-        """If both db_path and .duckdb.old exist, remove the .old artifact."""
+        """If both db_path and .duckdb.old exist and db_path is valid, remove the .old artifact."""
         db_path = tmp_path / "chunks.duckdb"
         old_path = db_path.with_suffix(".duckdb.old")
 
@@ -64,6 +64,46 @@ class TestCrashMidSwap:
             assert not old_path.exists(), "Stale .old should be cleaned up"
         finally:
             mgr.disconnect()
+
+    def test_restores_backup_when_db_corrupted(self, tmp_path: Path):
+        """If db_path is corrupt but .duckdb.old is valid, restore from backup.
+
+        On Windows the two-step os.replace() swap is not atomic — a crash
+        between the two renames can leave a truncated/corrupt db_path
+        alongside the valid pre-compaction backup (.duckdb.old).  Recovery
+        must detect the corruption and prefer the backup.
+        """
+        db_path = tmp_path / "chunks.duckdb"
+        old_path = db_path.with_suffix(".duckdb.old")
+
+        # Create a valid backup and a corrupted primary
+        _create_valid_duckdb(old_path)
+        db_path.write_bytes(b"not a valid duckdb file")
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert db_path.exists(), "db_path should be restored from backup"
+            assert not old_path.exists(), ".old should be cleaned up after restore"
+            # Verify the restored file is actually usable
+            result = mgr.connection.execute(
+                "SELECT id FROM _marker"
+            ).fetchone()
+            assert result == (1,), "Restored data should be intact"
+        finally:
+            mgr.disconnect()
+
+    def test_connect_fails_when_both_db_and_backup_corrupt(self, tmp_path: Path):
+        """If both db_path and .duckdb.old are corrupt, connect raises."""
+        db_path = tmp_path / "chunks.duckdb"
+        old_path = db_path.with_suffix(".duckdb.old")
+
+        db_path.write_bytes(b"corrupt primary")
+        old_path.write_bytes(b"corrupt backup")
+
+        mgr = DuckDBConnectionManager(db_path)
+        with pytest.raises(Exception):
+            mgr.connect()
 
 
 class TestStaleArtifacts:
