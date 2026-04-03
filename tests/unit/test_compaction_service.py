@@ -939,6 +939,31 @@ class TestCompactionErrorRecovery:
         # Temp files should be cleaned up
         assert not db_path.with_suffix(".compact.duckdb").exists()
 
+    def test_optimize_opens_gate_when_import_and_reconnect_both_fail(
+        self, provider_with_fragmentation: tuple
+    ):
+        """Connection gate is opened even when both import and reconnect fail."""
+        provider, db_path = provider_with_fragmentation
+
+        with patch.object(
+            provider,
+            "_import_database_for_compaction",
+            side_effect=RuntimeError("import crashed"),
+        ), patch.object(
+            provider,
+            "connect",
+            side_effect=RuntimeError("reconnect failed"),
+        ):
+            with pytest.raises(CompactionError):
+                provider.optimize()
+
+        # Gate must be open so MCP requests don't hang permanently.
+        assert provider.is_accepting_connections, (
+            "connection gate must be open after double failure"
+        )
+        # Provider couldn't reconnect
+        assert provider.is_connected is False
+
     def test_optimize_rejects_insufficient_disk_space(
         self, provider_with_fragmentation: tuple
     ):
@@ -1010,7 +1035,7 @@ class TestPostSwapCancelCheck:
         assert result is True
         assert not provider.is_connected, "reconnect should have been skipped"
         assert not old_db_path.exists(), "backup should have been cleaned up"
-        assert provider._connection_allowed.is_set(), "gate should be restored"
+        assert provider.is_accepting_connections, "gate should be restored"
 
 
 class TestConnectionGateDuringCompaction:

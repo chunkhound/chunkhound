@@ -39,7 +39,7 @@ def get_thread_local_connection(provider: Any) -> Any:
         # single executor thread calls this function, and compaction's
         # soft_disconnect() is submitted through the same executor queue,
         # guaranteeing ordering.
-        if not provider._connection_allowed.is_set():
+        if not provider.is_accepting_connections:
             raise CompactionError(
                 "Database connection suspended: compaction in progress",
                 operation="connection",
