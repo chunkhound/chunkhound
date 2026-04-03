@@ -84,6 +84,39 @@ class TestMCPIntegration:
 
         shutil.rmtree(temp_dir, ignore_errors=True)
 
+    @pytest.mark.asyncio
+    async def test_mcp_rejects_during_compaction(self, mcp_setup):
+        """MCP tool calls return CompactionError JSON when compaction gate is closed."""
+        import json
+        from chunkhound.mcp_server.common import handle_tool_call
+
+        services, _, _, _, _ = mcp_setup
+
+        # Simulate active compaction: drop cached connection then close gate.
+        # Access _connection_allowed directly — no public API exists to
+        # close the compaction gate without running a real compaction cycle.
+        services.provider.soft_disconnect()
+        services.provider._connection_allowed.clear()
+        try:
+            init_event = asyncio.Event()
+            init_event.set()
+
+            result = await handle_tool_call(
+                tool_name="search",
+                arguments={"type": "regex", "query": "test", "page_size": 10, "offset": 0},
+                services=services,
+                embedding_manager=None,
+                initialization_complete=init_event,
+            )
+
+            assert len(result) == 1
+            body = json.loads(result[0].text)
+            assert body["error"]["type"] == "CompactionError"
+            assert "compaction in progress" in body["error"]["message"]
+        finally:
+            services.provider._connection_allowed.set()
+            services.provider.connect()
+
     @pytest.mark.skipif(get_api_key_for_tests()[0] is None, reason="No API key available")
     @pytest.mark.asyncio
     async def test_mcp_semantic_search_finds_new_files(self, mcp_setup):
