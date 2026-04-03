@@ -73,6 +73,23 @@ class DuckDBConnectionManager:
         """Check if database connection is active."""
         return self.connection is not None
 
+    def _probe_db_valid(self, path: Path) -> bool:
+        """Quick probe: can DuckDB open the file and read metadata?
+
+        Used during crash recovery to verify db_path integrity before
+        discarding the pre-compaction backup.
+        """
+        try:
+            conn = duckdb.connect(str(path), read_only=True)
+            try:
+                conn.execute("SELECT 1").fetchone()
+                return True
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.debug(f"Integrity probe failed for {path}: {e}")
+            return False
+
     def connect(self) -> None:
         """Establish database connection and initialize schema with WAL validation."""
         logger.info(f"Connecting to DuckDB database: {self.db_path}")
@@ -145,9 +162,22 @@ class DuckDBConnectionManager:
                 os.replace(old_db, self.db_path)
 
             # Clean stale artifacts
-            for artifact in [compact_db, old_db]:
-                if artifact.exists() and self.db_path.exists():
-                    artifact.unlink()
+            if compact_db.exists() and self.db_path.exists():
+                compact_db.unlink()
+
+            # old_db requires integrity check before deletion — on Windows
+            # the two-step swap is not atomic, so db_path may be
+            # corrupt/incomplete if a crash occurred between the two
+            # os.replace() calls.
+            if old_db.exists() and self.db_path.exists():
+                if self._probe_db_valid(self.db_path):
+                    old_db.unlink()
+                else:
+                    logger.warning(
+                        "Database file failed integrity probe; "
+                        "restoring from pre-compaction backup"
+                    )
+                    os.replace(old_db, self.db_path)
             if export_dir.exists():
                 shutil.rmtree(export_dir, ignore_errors=True)
 
