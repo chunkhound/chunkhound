@@ -8,6 +8,7 @@ from loguru import logger
 
 from chunkhound.core.config.config import Config
 from chunkhound.core.exceptions import CompactionError
+from chunkhound.core.utils import format_size
 from chunkhound.registry import configure_registry, get_provider
 from chunkhound.services.compaction_service import estimate_reclaimable_bytes
 
@@ -56,7 +57,7 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
         sys.exit(1)
 
     formatter.info(f"Database: {db_path}")
-    formatter.info(f"Current size: {_format_size(original_size)}")
+    formatter.info(f"Current size: {format_size(original_size)}")
 
     # Dry-run mode - just show stats
     if args.dry_run:
@@ -75,7 +76,7 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
             reclaimable_bytes = estimate_reclaimable_bytes(stats)
             formatter.info(
                 f"Estimated reclaimable: "
-                f"~{_format_size(reclaimable_bytes)}"
+                f"~{format_size(reclaimable_bytes)}"
             )
             threshold = config.database.compaction_threshold
             if effective_waste >= threshold:
@@ -132,14 +133,14 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
         reduction_pct = (reduction / original_size) * 100 if original_size > 0 else 0
 
         formatter.success("Repack complete!")
-        formatter.info(f"Before: {_format_size(original_size)}")
-        formatter.info(f"After:  {_format_size(new_size)}")
+        formatter.info(f"Before: {format_size(original_size)}")
+        formatter.info(f"After:  {format_size(new_size)}")
 
         if reduction > 0:
-            formatter.info(f"Saved:  {_format_size(reduction)} ({reduction_pct:.1f}%)")
+            formatter.info(f"Saved:  {format_size(reduction)} ({reduction_pct:.1f}%)")
         elif reduction < 0:
             formatter.warning(
-                f"Size increased by {_format_size(-reduction)} "
+                f"Size increased by {format_size(-reduction)} "
                 "(this can happen if indexes were rebuilt)"
             )
         else:
@@ -161,22 +162,3 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
     finally:
         if provider.is_connected:
             provider.disconnect()
-
-
-def _format_size(size_bytes: int) -> str:
-    """Format byte size as human-readable string.
-
-    Args:
-        size_bytes: Size in bytes
-
-    Returns:
-        Human-readable size string (e.g., "1.23 MB")
-    """
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.2f} KB"
-    elif size_bytes < 1024 * 1024 * 1024:
-        return f"{size_bytes / 1024 / 1024:.2f} MB"
-    else:
-        return f"{size_bytes / 1024 / 1024 / 1024:.2f} GB"
