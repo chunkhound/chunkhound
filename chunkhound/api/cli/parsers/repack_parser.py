@@ -35,7 +35,7 @@ def add_repack_subparser(subparsers: Any) -> argparse.ArgumentParser:
     repack_parser.add_argument(
         "--backup",
         action="store_true",
-        help="Keep backup of original database as .duckdb.bak",
+        help="Keep backup of original database (.bak suffix)",
     )
 
     # Add common arguments (verbose, config, debug)
