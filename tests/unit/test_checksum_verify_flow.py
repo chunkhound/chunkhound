@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit.helpers import _Cfg
+
 
 class _FakeDB:
     def __init__(self, records):
@@ -88,18 +90,6 @@ class _FakeDB:
 
     async def delete_chunks_batch_async(self, chunk_ids):
         return self.delete_chunks_batch(chunk_ids)
-
-
-class _Cfg:
-    class _Indexing:
-        cleanup = False
-        force_reindex = False
-        per_file_timeout_seconds = 0.0
-        min_dirs_for_parallel = 4
-        max_discovery_workers = 4
-        parallel_discovery = False
-
-    indexing = _Indexing()
 
 
 def test_checksum_verify_populate_and_skip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

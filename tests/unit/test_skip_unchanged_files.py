@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit.helpers import _Cfg
 
 def _install_parser_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     """Install lightweight stubs to avoid importing heavy tree-sitter modules in tests."""
@@ -52,18 +53,6 @@ class _FakeDB:
     def has_reclaimable_space(self, operation: str = "") -> bool:
         return False
 
-
-class _Cfg:
-    class _Indexing:
-        cleanup = False
-        force_reindex = False
-        per_file_timeout_seconds = 0.0
-        # Discovery config used by coordinator
-        min_dirs_for_parallel = 4
-        max_discovery_workers = 4
-        parallel_discovery = False  # keep sequential for test stability
-
-    indexing = _Indexing()
 
 
 def test_process_directory_skips_unchanged_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
