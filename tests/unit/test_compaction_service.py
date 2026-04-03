@@ -826,8 +826,86 @@ class TestCompactionServiceEndToEnd:
         )
 
 
+class TestBackgroundCompactionE2E:
+    """End-to-end: compact_background() with a real DuckDB provider."""
+
+    @pytest.mark.asyncio
+    async def test_compact_background_end_to_end(
+        self, tmp_path: Path, provider_with_fragmentation: tuple
+    ):
+        """compact_background() completes with real provider and preserves data."""
+        provider, db_path = provider_with_fragmentation
+
+        config = Config(
+            database=DatabaseConfig(
+                path=tmp_path / ".chunkhound",
+                compaction_enabled=True,
+                compaction_threshold=0.01,
+                compaction_min_size_mb=0,
+            ),
+            target_dir=tmp_path,
+        )
+        service = CompactionService(db_path=db_path, config=config)
+
+        chunks_before = provider.get_all_chunks_with_metadata()
+
+        callback_called = asyncio.Event()
+
+        async def on_complete():
+            callback_called.set()
+
+        result = await service.compact_background(provider, on_complete=on_complete)
+        assert result is True
+
+        # Wait for the background task to finish
+        if service._compaction_task:
+            await asyncio.wait_for(service._compaction_task, timeout=30.0)
+
+        assert callback_called.is_set(), "on_complete callback was not invoked"
+
+        # Verify data integrity
+        chunks_after = provider.get_all_chunks_with_metadata()
+        assert len(chunks_after) == len(chunks_before), (
+            f"Chunk count mismatch: {len(chunks_before)} -> {len(chunks_after)}"
+        )
+        assert provider.get_file_by_path("test_8.py") is not None
+        assert provider.get_file_by_path("test_9.py") is not None
+
+
 class TestCompactionErrorRecovery:
     """Test error recovery during compaction."""
+
+    def test_optimize_recovers_on_export_failure(
+        self, provider_with_fragmentation: tuple
+    ):
+        """Provider recovers when _export_database_for_compaction raises."""
+        provider, db_path = provider_with_fragmentation
+
+        chunks_before = provider.get_all_chunks_with_metadata()
+
+        with patch.object(
+            provider,
+            "_export_database_for_compaction",
+            side_effect=RuntimeError("export crashed"),
+        ):
+            with pytest.raises(CompactionError, match="export crashed") as exc_info:
+                provider.optimize()
+
+            assert exc_info.value.operation == "compaction"
+
+        # Provider should have reconnected
+        assert provider.is_connected is True
+
+        # Data should be intact
+        chunks_after = provider.get_all_chunks_with_metadata()
+        assert len(chunks_after) == len(chunks_before), (
+            f"Chunk count mismatch: {len(chunks_before)} -> {len(chunks_after)}"
+        )
+        assert provider.get_file_by_path("test_8.py") is not None
+        assert provider.get_file_by_path("test_9.py") is not None
+
+        # No compact temp file should exist (export failed before creating it)
+        assert not db_path.with_suffix(".compact.duckdb").exists()
 
     def test_optimize_recovers_on_import_failure(
         self, provider_with_fragmentation: tuple
@@ -1018,7 +1096,7 @@ class TestConcurrentAccessDuringCompaction:
 
             # Let compaction finish
             export_proceed.set()
-            compact_thread.join(timeout=30)
+            compact_thread.join(timeout=10)
 
         # After compaction, reads should work again
         result = provider.get_file_by_path("test_8.py")
@@ -1055,7 +1133,11 @@ class TestEmbeddingVectorSurvival:
 
         # Create database with embeddings using direct DuckDB connection
         conn = duckdb.connect(str(db_path))
-        conn.execute("LOAD vss")
+        try:
+            conn.execute("LOAD vss")
+        except duckdb.Error:
+            conn.close()
+            pytest.skip("VSS extension not available")
         try:
             conn.execute("SET hnsw_enable_experimental_persistence = true")
         except duckdb.Error:
