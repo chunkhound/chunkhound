@@ -458,3 +458,49 @@ class NewlyAddedClass:
         # Old content should be gone
         old_results = services.provider.search_chunks_regex("func.*initial")
         assert len(old_results) == 0, "Old content should be replaced"
+
+    @pytest.mark.asyncio
+    async def test_mcp_search_works_after_compaction(self, mcp_setup):
+        """Search results are preserved after database compaction."""
+        services, _, watch_dir, _, _ = mcp_setup
+
+        # Index a file with unique content
+        test_file = watch_dir / "compaction_search_test.py"
+        test_file.write_text(
+            "def compaction_survivor_func():\n"
+            "    return 'data_that_must_survive_compaction'\n"
+        )
+        await services.indexing_coordinator.process_file(test_file)
+
+        # Verify content is searchable before compaction
+        before = await execute_tool(
+            tool_name="search",
+            services=services,
+            embedding_manager=None,
+            arguments={
+                "type": "regex",
+                "query": "compaction_survivor_func",
+                "page_size": 10,
+                "offset": 0,
+            },
+        )
+        assert len(before.get("results", [])) > 0, "Content should exist before compaction"
+
+        # Compact the database
+        services.provider.optimize()
+
+        # Regex search must still return the indexed content
+        after = await execute_tool(
+            tool_name="search",
+            services=services,
+            embedding_manager=None,
+            arguments={
+                "type": "regex",
+                "query": "compaction_survivor_func",
+                "page_size": 10,
+                "offset": 0,
+            },
+        )
+        assert len(after.get("results", [])) > 0, (
+            "Search results must be preserved after compaction"
+        )
