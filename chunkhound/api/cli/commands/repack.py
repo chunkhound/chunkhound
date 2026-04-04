@@ -97,6 +97,10 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
                     f"min-size gate ({min_size_mb}MB) — "
                     f"auto-compaction would skip"
                 )
+        except Exception as e:
+            formatter.error(f"Failed to read storage stats: {e}")
+            logger.exception("Full error details:")
+            sys.exit(1)
         finally:
             provider.disconnect()
 
