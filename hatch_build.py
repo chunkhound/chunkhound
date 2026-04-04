@@ -176,15 +176,18 @@ class CustomBuildHook(BuildHookInterface):
     def initialize(self, version: str, build_data: dict[str, object]) -> None:
         if _should_skip_native_runtime_for_build_version(version):
             return
-        force_include = build_data.setdefault("force_include", {})
-        if not isinstance(force_include, dict):
-            raise RuntimeError("hatch build_data.force_include must be a mapping")
-        force_include.update(_manifest_force_include_entries())
         if not _should_build_packaged_runtime(version):
+            force_include = build_data.setdefault("force_include", {})
+            if not isinstance(force_include, dict):
+                raise RuntimeError("hatch build_data.force_include must be a mapping")
+            force_include.update(_manifest_force_include_entries())
             return
         supported_platforms = _load_supported_watchman_platforms()
         _require_supported_build_host(supported_platforms)
         allowed_platform_tags = _allowed_wheel_platform_tags_for_build_host()
+        force_include = build_data.setdefault("force_include", {})
+        if not isinstance(force_include, dict):
+            raise RuntimeError("hatch build_data.force_include must be a mapping")
         force_include.update(_hydrate_runtime_for_build())
         build_data["pure_python"] = False
         build_data["tag"] = _platform_only_tag(allowed_platform_tags)

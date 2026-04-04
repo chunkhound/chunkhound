@@ -56,7 +56,9 @@ def test_custom_build_hook_hydrates_runtime_for_host(
     monkeypatch.setattr(
         hatch_build,
         "_manifest_force_include_entries",
-        lambda: {"manifest-src": "manifest-dst"},
+        lambda: pytest.fail(
+            "release wheel builds should rely on hydrated host payload entries only"
+        ),
     )
     monkeypatch.setattr(
         hatch_build,
@@ -84,10 +86,7 @@ def test_custom_build_hook_hydrates_runtime_for_host(
     hook.initialize("standard", build_data)
 
     assert calls == ["hydrated"]
-    assert build_data["force_include"] == {
-        "manifest-src": "manifest-dst",
-        "src": "dst",
-    }
+    assert build_data["force_include"] == {"src": "dst"}
     assert build_data["pure_python"] is False
     assert isinstance(build_data["tag"], str)
 
@@ -228,7 +227,9 @@ def test_custom_build_hook_rejects_unsupported_release_wheel_host(
     monkeypatch.setattr(
         hatch_build,
         "_manifest_force_include_entries",
-        lambda: {"manifest-src": "manifest-dst"},
+        lambda: pytest.fail(
+            "unsupported release wheel hosts should fail before adding fallback manifests"
+        ),
     )
     monkeypatch.setattr(
         hatch_build,
@@ -246,12 +247,7 @@ def test_custom_build_hook_rejects_unsupported_release_wheel_host(
     with pytest.raises(RuntimeError, match="macos-arm64"):
         hook.initialize("standard", build_data)
 
-    assert build_data == {
-        "force_include": {
-            "existing": "entry",
-            "manifest-src": "manifest-dst",
-        }
-    }
+    assert build_data == {"force_include": {"existing": "entry"}}
 
 
 def test_manifest_force_include_entries_cover_supported_platforms() -> None:
