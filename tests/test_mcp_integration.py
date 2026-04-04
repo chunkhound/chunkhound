@@ -113,6 +113,7 @@ class TestMCPIntegration:
             body = json.loads(result[0].text)
             assert body["error"]["type"] == "CompactionError"
             assert "compaction in progress" in body["error"]["message"]
+            assert "retry_hint" in body["error"]
         finally:
             services.provider._connection_allowed.set()
             services.provider.connect()

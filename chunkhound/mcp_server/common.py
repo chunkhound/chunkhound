@@ -231,6 +231,9 @@ async def handle_tool_call(
     except CompactionError as e:
         logger.debug("Request rejected: database compaction in progress")
         error_response = format_error_response(e, include_traceback=False)
+        error_response["error"]["retry_hint"] = (
+            "Database compaction in progress. Retry in a few seconds."
+        )
         return [types.TextContent(type="text", text=json.dumps(error_response))]
     except Exception as e:
         error_response = format_error_response(e, include_traceback=debug_mode)
