@@ -707,8 +707,8 @@ class EmbeddingService(BaseService):
                 if result > 0:
                     # Track completed batches for periodic optimization
                     self._completed_batches += 1
-                    # Check inline so optimization fires every N batches,
-                    # not just once after all batches complete
+                    # All batches completed above via gather(); this loop
+                    # processes results sequentially, checking after each
                     await self._maybe_optimize_database()
             else:
                 # Find the failed batch and extract chunk details
