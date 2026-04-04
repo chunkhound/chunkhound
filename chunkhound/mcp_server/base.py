@@ -1196,6 +1196,14 @@ class MCPServerBase(ABC):
                     self._compaction_service.compaction_thread_done.wait,
                     timeout=5.0,
                 )
+                if not self._compaction_service.compaction_thread_done.is_set():
+                    # Proceeding with disconnect despite live thread — not
+                    # disconnecting would leak the connection and leave the
+                    # process hanging. The error log gives operators visibility.
+                    logger.error(
+                        "Compaction thread still alive after secondary wait — "
+                        "provider disconnect may corrupt state"
+                    )
             self._compaction_service = None
 
         if (
