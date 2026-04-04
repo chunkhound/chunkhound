@@ -18,6 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from loguru import logger
+
 from chunkhound.core.config import EmbeddingProviderFactory
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices, create_services
@@ -390,6 +392,14 @@ class MCPServerBase(ABC):
                     self._compaction_service.compaction_thread_done.wait,
                     timeout=5.0,
                 )
+                if not self._compaction_service.compaction_thread_done.is_set():
+                    # Proceeding with disconnect despite live thread — not
+                    # disconnecting would leak the connection and leave the
+                    # process hanging. The error log gives operators visibility.
+                    logger.error(
+                        "Compaction thread still alive after secondary wait — "
+                        "provider disconnect may corrupt state"
+                    )
             self._compaction_service = None
 
         # Cancel deferred startup task if still running
