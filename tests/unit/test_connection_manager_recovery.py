@@ -183,13 +183,26 @@ class TestLockFileRecovery:
             lock_path.unlink(missing_ok=True)
 
     def test_preserves_lock_old_timestamp_live_pid(self, tmp_path: Path):
-        """Lock with live PID is preserved even with old timestamp (long compaction)."""
+        """Lock with live PID is preserved even with old timestamp (long compaction).
+
+        Invariant: a live process's compaction lock must NEVER be removed based
+        on age alone.  Compaction on a large database may legitimately run for
+        hours.  Removing the lock while the process is alive would allow a
+        second compaction to start concurrently, risking data corruption.
+
+        The timestamp is anchored to boot_time (not wall-clock) so the test
+        is valid in CI containers where uptime can be shorter than the
+        simulated lock age.
+        """
+        import psutil
+
         db_path = tmp_path / "chunks.duckdb"
         lock_path = get_compaction_lock_path(db_path)
 
         _create_valid_duckdb(db_path)
-        # Current PID (alive) but timestamp from 25 hours ago
-        old_timestamp = time.time() - 90000
+        # Shortly after boot — old enough to be non-trivial, but guaranteed
+        # post-boot so the "PID reused after reboot" path is not triggered.
+        old_timestamp = psutil.boot_time() + 60
         lock_path.write_text(f"{os.getpid()}:{old_timestamp:.0f}")
 
         mgr = DuckDBConnectionManager(db_path)
