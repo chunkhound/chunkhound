@@ -13,9 +13,13 @@ flow against a local project checkout.
   default, `polling` remains an explicit fallback, and `backend=watchman`
   should be treated as unsupported because no packaged Watchman runtime slot is
   shipped for macOS.
-- Source checkouts and editable installs do not embed the native payloads, so
-  they default to `watchdog` unless operators explicitly set
-  `realtime_backend=watchman` and accept the pinned-source hydration path.
+- Released sdists, ordinary source installs, and editable installs do not embed
+  the native payloads, so they default to `watchdog` unless operators
+  explicitly set `realtime_backend=watchman` and accept the pinned-source
+  hydration path.
+- Unsupported-host source/sdist installs may still build a local generic wheel
+  as an installation byproduct, but that fallback-capable wheel is not a
+  supported release artifact.
 - That source-hydration path is network-bounded and fails fast on repeated
   download timeout/connection errors instead of waiting indefinitely.
 - `watchdog` and `polling` remain available as explicit fallback backends.
@@ -207,7 +211,7 @@ The Linux and Windows native Watchman rollout is gated on all of the following:
      resources, and proves installed-wheel live indexing for that host.
    - The downstream aggregate rollout-gate lane downloads both wheel artifacts,
      enforces the full supported wheel matrix, and proves the documented
-     source/editable fallback contract.
+     sdist/source/editable fallback contract.
 2. Built wheel artifacts pass
    `uv run python scripts/verify_watchman_runtime_resources.py --require-supported-matrix <wheel...>`.
 3. A Watchman-backed daemon smoke run reaches steady state with
@@ -219,10 +223,10 @@ The Linux and Windows native Watchman rollout is gated on all of the following:
 4. A forced fresh-instance, recrawl, or disconnect path proves that
    `watchman_loss_of_sync.count` increments and the resync contract surfaces
    through `resync.last_reason == "realtime_loss_of_sync"`.
-5. A source checkout or editable install without packaged payloads proves that
-   `watchdog` remains the default fallback backend, while explicit
-   `backend=watchman` still fails fast with startup diagnostics instead of
-   silently downgrading.
+5. A released sdist install, ordinary source checkout install, and editable
+   install without packaged payloads each prove that `watchdog` remains the
+   default fallback backend, while explicit `backend=watchman` still fails fast
+   with startup diagnostics instead of silently downgrading.
 
 Current status:
 
@@ -230,7 +234,8 @@ Current status:
   `x86_64`.
 - On installed Linux and Windows platform wheels, Watchman remains the default
   realtime backend.
-- In source checkouts and editable installs, `watchdog` remains the default
-  unless operators explicitly opt into `watchman`.
+- In released sdists, ordinary source installs, and editable installs,
+  `watchdog` remains the default unless operators explicitly opt into
+  `watchman`.
 - On macOS, no Watchman runtime slot is staged in this rollout; `watchdog` is
   the default and `polling` remains an explicit fallback.

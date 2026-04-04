@@ -52,6 +52,7 @@ def test_custom_build_hook_hydrates_runtime_for_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
+    monkeypatch.setenv(hatch_build._PACKAGED_RUNTIME_BUILD_ENV, "1")
     monkeypatch.setattr(
         hatch_build,
         "_host_watchman_platform",
@@ -86,6 +87,7 @@ def test_custom_build_hook_hydrates_runtime_for_host(
 def test_custom_build_hook_skips_native_runtime_for_supported_editable_build(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv(hatch_build._PACKAGED_RUNTIME_BUILD_ENV, "1")
     monkeypatch.setattr(
         hatch_build,
         "_host_watchman_platform",
@@ -109,6 +111,7 @@ def test_custom_build_hook_skips_native_runtime_for_supported_editable_build(
 def test_custom_build_hook_skips_native_runtime_for_unsupported_editable_build(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv(hatch_build._PACKAGED_RUNTIME_BUILD_ENV, "1")
     monkeypatch.setattr(
         hatch_build,
         "_host_watchman_platform",
@@ -162,9 +165,32 @@ def test_platform_only_tag_rejects_when_declared_runtime_tag_is_unavailable(
         hatch_build._platform_only_tag({"manylinux_2_34_x86_64"})
 
 
-def test_custom_build_hook_rejects_unsupported_wheel_host(
+def test_custom_build_hook_skips_packaged_runtime_when_release_env_is_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv(hatch_build._PACKAGED_RUNTIME_BUILD_ENV, raising=False)
+    monkeypatch.setattr(
+        hatch_build,
+        "_host_watchman_platform",
+        lambda **_: "linux-x86_64",
+    )
+    monkeypatch.setattr(
+        hatch_build,
+        "_hydrate_runtime_for_build",
+        lambda: pytest.fail("standard builds without the release env should skip hydration"),
+    )
+
+    build_data: dict[str, object] = {"force_include": {"existing": "entry"}}
+    hook = object.__new__(hatch_build.CustomBuildHook)
+    hook.initialize("standard", build_data)
+
+    assert build_data == {"force_include": {"existing": "entry"}}
+
+
+def test_custom_build_hook_rejects_unsupported_release_wheel_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(hatch_build._PACKAGED_RUNTIME_BUILD_ENV, "1")
     monkeypatch.setattr(
         hatch_build,
         "_host_watchman_platform",

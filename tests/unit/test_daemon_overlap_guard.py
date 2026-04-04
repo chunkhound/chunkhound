@@ -468,3 +468,37 @@ def test_format_startup_failure_includes_phase_elapsed_and_error(
     assert "Elapsed startup duration so far: 9.500s" in message
     assert "Last startup error: watchman bootstrap exploded" in message
     assert "Recent daemon log output" in message
+
+
+def test_format_startup_failure_parses_prefixed_breadcrumbs_and_keeps_legacy_support(
+    tmp_path: Path,
+) -> None:
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    discovery = DaemonDiscovery(project_dir)
+    log_path = project_dir / ".chunkhound" / "daemon.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    started_at = (datetime.now() - timedelta(seconds=12)).isoformat()
+    log_path.write_text(
+        "\n".join(
+            [
+                f"[{started_at}] [startup] startup: startup tracking began mode=daemon",
+                f"[{started_at}] [startup] phase completed: db_connect duration=0.125s",
+                f"[{started_at}] [startup] startup: phase started: watchman_watch_project",
+                (
+                    f"[{started_at}] [startup] startup: startup failed duration=12.0s "
+                    "error=watchman session bootstrap exploded"
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    message = discovery._format_startup_failure(
+        prefix="ChunkHound daemon did not become reachable within 30.0s",
+        log_path=log_path,
+    )
+
+    assert "Last known startup phase: watchman_watch_project" in message
+    assert "Elapsed startup duration so far: 12.000s" in message
+    assert "Last startup error: watchman session bootstrap exploded" in message

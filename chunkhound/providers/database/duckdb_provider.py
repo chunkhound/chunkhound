@@ -2289,11 +2289,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         batch_size: int | None = None,
         connection=None,
     ) -> int:
-        """Insert multiple embedding vectors using executemany.
-
-        Note: This executor-based method does NOT implement HNSW index optimization.
-        For bulk inserts with HNSW drop/recreate optimization, use
-        EmbeddingRepository.insert_embeddings_batch directly.
+        """Insert multiple embeddings through the executor-owned repository path.
 
         Args:
             embeddings_data: List of embedding dictionaries
@@ -2316,57 +2312,73 @@ class DuckDBProvider(SerialDatabaseProvider):
     ) -> int:
         """Executor method for insert_embeddings_batch - runs in DB thread.
 
-        Uses simple executemany for inserts. Does NOT manage HNSW indexes.
+        Uses direct batched upserts while preserving any outer executor
+        transaction that is already active.
         """
         if not embeddings_data:
             return 0
 
         # Track operation for checkpoint management
         track_operation(state)
+        transaction_started = False
+        if not state.get("transaction_active", False):
+            self._executor_begin_transaction(conn, state)
+            transaction_started = True
 
-        # Group embeddings by dimension
-        embeddings_by_dims = {}
-        for emb_data in embeddings_data:
-            dims = emb_data["dims"]
-            if dims not in embeddings_by_dims:
-                embeddings_by_dims[dims] = []
-            embeddings_by_dims[dims].append(emb_data)
+        try:
+            # Group embeddings by dimension
+            embeddings_by_dims = {}
+            for emb_data in embeddings_data:
+                dims = emb_data["dims"]
+                if dims not in embeddings_by_dims:
+                    embeddings_by_dims[dims] = []
+                embeddings_by_dims[dims].append(emb_data)
 
-        total_inserted = 0
+            total_inserted = 0
 
-        # Insert into dimension-specific tables
-        for dims, dim_embeddings in embeddings_by_dims.items():
-            # Ensure table exists
-            table_name = self._executor_ensure_embedding_table_exists(conn, state, dims)
-            upsert_sql = DuckDBEmbeddingRepository.build_embedding_upsert_sql(
-                table_name
-            )
-
-            # Prepare batch data
-            batch_data = []
-            for emb in dim_embeddings:
-                batch_data.append(
-                    (
-                        emb["chunk_id"],
-                        emb["provider"],
-                        emb["model"],
-                        emb["embedding"],
-                        dims,
-                    )
+            # Insert into dimension-specific tables
+            for dims, dim_embeddings in embeddings_by_dims.items():
+                # Ensure table exists
+                table_name = self._executor_ensure_embedding_table_exists(
+                    conn, state, dims
+                )
+                upsert_sql = DuckDBEmbeddingRepository.build_embedding_upsert_sql(
+                    table_name
                 )
 
-            # Insert in batches if specified
-            if batch_size:
-                for i in range(0, len(batch_data), batch_size):
-                    batch = batch_data[i : i + batch_size]
-                    conn.executemany(upsert_sql, batch)
-                    total_inserted += len(batch)
-            else:
-                # Insert all at once
-                conn.executemany(upsert_sql, batch_data)
-                total_inserted += len(batch_data)
+                # Prepare batch data
+                batch_data = []
+                for emb in dim_embeddings:
+                    batch_data.append(
+                        (
+                            emb["chunk_id"],
+                            emb["provider"],
+                            emb["model"],
+                            emb["embedding"],
+                            dims,
+                        )
+                    )
 
-        return total_inserted
+                # Insert in batches if specified
+                if batch_size:
+                    for i in range(0, len(batch_data), batch_size):
+                        batch = batch_data[i : i + batch_size]
+                        conn.executemany(upsert_sql, batch)
+                        total_inserted += len(batch)
+                else:
+                    # Insert all at once
+                    conn.executemany(upsert_sql, batch_data)
+                    total_inserted += len(batch_data)
+
+            if transaction_started:
+                self._executor_commit_transaction(conn, state, True)
+                transaction_started = False
+
+            return total_inserted
+        except Exception:
+            if transaction_started and state.get("transaction_active", False):
+                self._executor_rollback_transaction(conn, state)
+            raise
 
     def get_embedding_by_chunk_id(
         self, chunk_id: int, provider: str, model: str

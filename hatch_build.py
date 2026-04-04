@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from platform import machine as current_machine
@@ -32,6 +33,7 @@ _MACHINE_ALIASES = {
 _SYSTEM_ALIASES = {
     "darwin": "macos",
 }
+_PACKAGED_RUNTIME_BUILD_ENV = "CHUNKHOUND_BUILD_PACKAGED_WATCHMAN_RUNTIME"
 
 
 def _hydrate_runtime_for_build() -> dict[str, str]:
@@ -118,6 +120,13 @@ def _should_skip_native_runtime_for_build_version(version: str) -> bool:
     return version == "editable"
 
 
+def _should_build_packaged_runtime(version: str) -> bool:
+    if _should_skip_native_runtime_for_build_version(version):
+        return False
+    value = os.environ.get(_PACKAGED_RUNTIME_BUILD_ENV, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _platform_only_tag(allowed_platform_tags: set[str] | None = None) -> str:
     for tag in tags.sys_tags():
         if tag.interpreter != "py3" or tag.abi != "none" or tag.platform == "any":
@@ -147,13 +156,10 @@ class CustomBuildHook(BuildHookInterface):
     PLUGIN_NAME = "custom"
 
     def initialize(self, version: str, build_data: dict[str, object]) -> None:
-        if _should_skip_native_runtime_for_build_version(version):
+        if not _should_build_packaged_runtime(version):
             return
         supported_platforms = _load_supported_watchman_platforms()
-        try:
-            _require_supported_build_host(supported_platforms)
-        except RuntimeError:
-            raise
+        _require_supported_build_host(supported_platforms)
         allowed_platform_tags = _allowed_wheel_platform_tags_for_build_host()
         force_include = build_data.setdefault("force_include", {})
         if not isinstance(force_include, dict):

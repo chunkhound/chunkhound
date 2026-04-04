@@ -1287,7 +1287,7 @@ class WatchmanRealtimeAdapter:
         self._service.watchman_subscription_queue = self._shared_subscription_queue
         self._path_filter = RealtimePathFilter(
             config=self._service.config,
-            root_path=watch_path,
+            root_path=scope_plan.primary_scope.requested_path,
         )
         self._subscription_bridge_tasks = [
             loop.create_task(self._bridge_session_subscription_pdus(session))

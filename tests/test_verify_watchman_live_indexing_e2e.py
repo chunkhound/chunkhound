@@ -31,9 +31,9 @@ def test_prepare_release_runs_watchman_release_verifiers_in_order() -> None:
     assert runtime_call in script_text
     assert installed_live_call in script_text
     assert source_fallback_call in script_text
-    assert script_text.index(runtime_call) < script_text.index(installed_live_call)
-    assert script_text.index(installed_live_call) < script_text.index(
-        source_fallback_call
+    assert script_text.index(runtime_call) < script_text.index(source_fallback_call)
+    assert script_text.index(source_fallback_call) < script_text.index(
+        installed_live_call
     )
 
 
@@ -254,8 +254,12 @@ async def test_verify_source_fallback_ignores_transient_state_and_checks_contrac
 
     work_root = tmp_path / "work"
     editable_source_roots: list[Path] = []
+    source_install_roots: list[Path] = []
+    sdist_build_roots: list[Path] = []
+    sdist_artifacts: list[Path] = []
     default_project_dirs: list[Path] = []
     watchman_project_dirs: list[Path] = []
+    daemon_status_descriptions: list[str] = []
     cleanup_roots: list[Path] = []
 
     monkeypatch.setattr(
@@ -276,6 +280,7 @@ async def test_verify_source_fallback_ignores_transient_state_and_checks_contrac
         capture_output: bool,
         text: bool,
         env: dict[str, str] | None = None,
+        cwd: str | None = None,
     ) -> SimpleNamespace:
         assert check
         assert capture_output
@@ -289,21 +294,13 @@ async def test_verify_source_fallback_ignores_transient_state_and_checks_contrac
             python_path.write_text("", encoding="utf-8")
             chunkhound_path.write_text("", encoding="utf-8")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
-        if command == ("uv", "pip", "install"):
-            editable_source_root = Path(args[-1])
-            editable_source_roots.append(editable_source_root)
-            assert env is not None
-            assert env["SETUPTOOLS_SCM_PRETEND_VERSION"] == "0.0.0"
-            assert env["SETUPTOOLS_SCM_PRETEND_VERSION_FOR_CHUNKHOUND"] == "0.0.0"
-            assert not (editable_source_root / ".chunkhound").exists()
-            assert not (editable_source_root / ".uvcache").exists()
-            assert not (editable_source_root / ".uv-cache").exists()
-            assert not (editable_source_root / ".uv_cache").exists()
-            assert not (editable_source_root / ".cache").exists()
-            assert not (editable_source_root / ".ruff_cache").exists()
+        if command == ("uv", "build", "--sdist"):
+            assert cwd is not None
+            build_root = Path(cwd)
+            sdist_build_roots.append(build_root)
             rewritten_manifest = json.loads(
                 (
-                    editable_source_root
+                    build_root
                     / "chunkhound"
                     / "watchman_runtime"
                     / "platforms"
@@ -314,6 +311,55 @@ async def test_verify_source_fallback_ignores_transient_state_and_checks_contrac
             assert rewritten_manifest["source_url"].startswith(
                 live_verifier._DETERMINISTIC_FAILURE_URL_BASE
             )
+            dist_dir = Path(args[-1])
+            dist_dir.mkdir(parents=True, exist_ok=True)
+            sdist_path = dist_dir / "chunkhound-0.0.0.tar.gz"
+            sdist_path.write_text("sdist", encoding="utf-8")
+            sdist_artifacts.append(sdist_path)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if command == ("uv", "pip", "install"):
+            assert env is not None
+            assert env["SETUPTOOLS_SCM_PRETEND_VERSION"] == "0.0.0"
+            assert env["SETUPTOOLS_SCM_PRETEND_VERSION_FOR_CHUNKHOUND"] == "0.0.0"
+            install_target = Path(args[-1])
+            if "-e" in args:
+                editable_source_roots.append(install_target)
+                assert not (install_target / ".chunkhound").exists()
+                assert not (install_target / ".uvcache").exists()
+                assert not (install_target / ".uv-cache").exists()
+                assert not (install_target / ".uv_cache").exists()
+                assert not (install_target / ".cache").exists()
+                assert not (install_target / ".ruff_cache").exists()
+                rewritten_manifest = json.loads(
+                    (
+                        install_target
+                        / "chunkhound"
+                        / "watchman_runtime"
+                        / "platforms"
+                        / "linux-x86_64"
+                        / "manifest.json"
+                    ).read_text(encoding="utf-8")
+                )
+                assert rewritten_manifest["source_url"].startswith(
+                    live_verifier._DETERMINISTIC_FAILURE_URL_BASE
+                )
+            elif install_target.suffix == ".gz":
+                assert install_target in sdist_artifacts
+            else:
+                source_install_roots.append(install_target)
+                rewritten_manifest = json.loads(
+                    (
+                        install_target
+                        / "chunkhound"
+                        / "watchman_runtime"
+                        / "platforms"
+                        / "linux-x86_64"
+                        / "manifest.json"
+                    ).read_text(encoding="utf-8")
+                )
+                assert rewritten_manifest["source_url"].startswith(
+                    live_verifier._DETERMINISTIC_FAILURE_URL_BASE
+                )
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError(f"Unexpected subprocess.run invocation: {args}")
 
@@ -361,7 +407,7 @@ async def test_verify_source_fallback_ignores_transient_state_and_checks_contrac
         timeout: float = live_verifier._READY_TIMEOUT_SECONDS,
     ) -> dict[str, object]:
         assert client is default_client
-        assert description == "watchdog fallback readiness"
+        daemon_status_descriptions.append(description)
         assert timeout == live_verifier._READY_TIMEOUT_SECONDS
         status = {
             "status": "ready",
@@ -435,9 +481,17 @@ async def test_verify_source_fallback_ignores_transient_state_and_checks_contrac
 
     await live_verifier._verify_source_fallback(source_root)
 
+    assert len(sdist_build_roots) == 1
+    assert len(sdist_artifacts) == 1
+    assert len(source_install_roots) == 1
     assert len(editable_source_roots) == 1
-    assert len(default_project_dirs) == 1
-    assert len(watchman_project_dirs) == 1
+    assert len(default_project_dirs) == 3
+    assert len(watchman_project_dirs) == 3
+    assert daemon_status_descriptions == [
+        "sdist install watchdog fallback readiness",
+        "source install watchdog fallback readiness",
+        "editable install watchdog fallback readiness",
+    ]
     assert default_client.closed is True
     assert cleanup_roots == [work_root, work_root]
 

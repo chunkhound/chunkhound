@@ -342,6 +342,7 @@ class DuckDBEmbeddingRepository:
         embeddings_data: list[dict],
         batch_size: int | None = None,
         connection=None,
+        manage_transaction: bool = True,
     ) -> int:
         """Insert multiple embedding vectors with HNSW index optimization.
 
@@ -356,6 +357,7 @@ class DuckDBEmbeddingRepository:
             embeddings_data: List of dicts with keys: chunk_id, provider, model, embedding, dims
             batch_size: Threshold for HNSW optimization (default: 50)
             connection: Optional database connection to use (for transaction contexts)
+            manage_transaction: Whether this helper should own the batch transaction
 
         Returns:
             Number of successfully inserted embeddings
@@ -427,13 +429,17 @@ class DuckDBEmbeddingRepository:
         try:
             total_inserted = 0
             start_time = time.time()
+            transaction_started = False
+
+            if manage_transaction:
+                conn.execute("BEGIN TRANSACTION")
+                transaction_started = True
 
             if use_hnsw_optimization:
                 logger.debug(
                     f"🔧 Large batch detected ({actual_batch_size} embeddings >= {hnsw_threshold}), applying HNSW optimization"
                 )
 
-                transaction_started = False
                 dropped_indexes: list[dict[str, Any]] = []
 
                 if self._provider_instance and hasattr(
@@ -447,8 +453,6 @@ class DuckDBEmbeddingRepository:
 
                 try:
                     if dropped_indexes:
-                        conn.execute("BEGIN TRANSACTION")
-                        transaction_started = True
                         conn.execute("SET preserve_insertion_order = false")
                         for index_info in dropped_indexes:
                             self._drop_existing_index(conn, index_info)
@@ -474,11 +478,13 @@ class DuckDBEmbeddingRepository:
 
                     if transaction_started:
                         conn.execute("COMMIT")
+                        transaction_started = False
 
                 except Exception as e:
                     if transaction_started:
                         try:
                             conn.execute("ROLLBACK")
+                            transaction_started = False
                         except Exception as rollback_error:
                             raise RuntimeError(
                                 "insert_embeddings_batch failed and rollback failed: "
@@ -502,8 +508,16 @@ class DuckDBEmbeddingRepository:
                         f"✅ Small parameterized UPSERT batch completed in {small_time:.3f}s ({len(embeddings_data) / small_time:.1f} emb/s)"
                     )
                     total_inserted = len(embeddings_data)
-
                 except Exception as e:
+                    if transaction_started:
+                        try:
+                            conn.execute("ROLLBACK")
+                        except Exception as rollback_error:
+                            raise RuntimeError(
+                                "insert_embeddings_batch failed and rollback failed: "
+                                f"{rollback_error}"
+                            ) from rollback_error
+                        transaction_started = False
                     logger.error(f"Small VALUES batch failed: {e}")
                     raise
 
@@ -542,6 +556,10 @@ class DuckDBEmbeddingRepository:
                 # Update progress for small batch completion
                 logger.debug(f"✅ Stored {actual_batch_size} embeddings successfully")
 
+                if transaction_started:
+                    conn.execute("COMMIT")
+                    transaction_started = False
+
             insert_time = time.time() - start_time
             logger.debug(f"⚡ Batch INSERT completed in {insert_time:.3f}s")
 
@@ -560,6 +578,19 @@ class DuckDBEmbeddingRepository:
             return total_inserted
 
         except Exception as e:
+            if transaction_started:
+                try:
+                    conn.execute("ROLLBACK")
+                    transaction_started = False
+                except Exception as rollback_error:
+                    logger.error(
+                        "💥 CRITICAL: Optimized batch insert failed and rollback "
+                        f"failed: {rollback_error}"
+                    )
+                    raise RuntimeError(
+                        "insert_embeddings_batch failed and rollback failed: "
+                        f"{rollback_error}"
+                    ) from rollback_error
             logger.error(f"💥 CRITICAL: Optimized batch insert failed: {e}")
             raise
 

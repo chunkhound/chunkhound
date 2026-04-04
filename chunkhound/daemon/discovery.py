@@ -221,6 +221,13 @@ def _startup_elapsed_seconds(started_at: datetime) -> float:
     return max((datetime.now(started_at.tzinfo) - started_at).total_seconds(), 0.0)
 
 
+def _normalize_startup_breadcrumb_message(message: str) -> str:
+    normalized = message.strip()
+    if normalized.startswith("startup: "):
+        return normalized.removeprefix("startup: ").strip()
+    return normalized
+
+
 @dataclass(slots=True)
 class DaemonStartupHandle:
     """Process handle and diagnostics surface for a daemon startup attempt."""
@@ -491,7 +498,7 @@ class DaemonDiscovery:
             if "[startup]" not in raw_line:
                 continue
             _, _, message = raw_line.partition("[startup]")
-            message = message.strip()
+            message = _normalize_startup_breadcrumb_message(message)
             timestamp = _parse_startup_log_timestamp(raw_line)
             if message.startswith("startup tracking began"):
                 startup_started_at = timestamp

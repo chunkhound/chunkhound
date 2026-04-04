@@ -1576,7 +1576,10 @@ async def test_watchman_junction_scope_translation_preserves_logical_path(
     try:
         monkeypatch.setattr(realtime_service_module.Path, "resolve", fake_resolve)
         adapter = await _start_isolated_watchman_translation(service, target_dir)
-        adapter._path_filter = SimpleNamespace(should_index=lambda _path: True)
+        adapter._path_filter = realtime_service_module.RealtimePathFilter(
+            config=service.config,
+            root_path=logical_junction,
+        )
 
         file_path = logical_junction / "src" / "junctioned.py"
         file_path.parent.mkdir(parents=True, exist_ok=True)

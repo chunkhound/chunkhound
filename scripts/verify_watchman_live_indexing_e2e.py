@@ -367,6 +367,62 @@ def _editable_install_env() -> dict[str, str]:
     return env
 
 
+def _install_into_venv(
+    *,
+    venv_dir: Path,
+    install_target: Path,
+    editable: bool = False,
+) -> Path:
+    subprocess.run(
+        ["uv", "venv", str(venv_dir)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    python_path = _python_path(venv_dir)
+    install_args = [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        str(python_path),
+    ]
+    if editable:
+        install_args.append("-e")
+    install_args.append(str(install_target))
+    subprocess.run(
+        install_args,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_editable_install_env(),
+    )
+    chunkhound_exe = _chunkhound_path(venv_dir)
+    if not chunkhound_exe.is_file():
+        raise FileNotFoundError(
+            f"Installed chunkhound executable not found: {chunkhound_exe}"
+        )
+    return chunkhound_exe
+
+
+def _build_sdist_artifact(*, source_root: Path, dist_dir: Path) -> Path:
+    subprocess.run(
+        ["uv", "build", "--sdist", "--out-dir", str(dist_dir)],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=str(source_root),
+        env=_editable_install_env(),
+    )
+    sdists = sorted(dist_dir.glob("*.tar.gz"))
+    if len(sdists) != 1:
+        raise RuntimeError(
+            "Expected exactly one sdist artifact from source fallback verifier, "
+            f"found {len(sdists)} in {dist_dir}"
+        )
+    return sdists[0]
+
+
 def _assert_sidecar_uses_installed_runtime(
     realtime: dict[str, Any], *, venv_dir: Path
 ) -> None:
@@ -669,149 +725,174 @@ async def _run_proxy_to_failure(
     return proc.returncode or 0, stdout.decode(), stderr.decode()
 
 
+async def _verify_fallback_install_contract(
+    *,
+    chunkhound_exe: Path,
+    install_root: Path,
+    install_label: str,
+) -> None:
+    venv_dir = install_root / "venv"
+    runtime_dir = install_root / "runtime"
+    cache_dir = install_root / "cache"
+    default_project_dir = install_root / "project-default"
+    watchman_project_dir = install_root / "project-watchman"
+    default_project_dir.mkdir(parents=True, exist_ok=True)
+    watchman_project_dir.mkdir(parents=True, exist_ok=True)
+    _write_project_config(default_project_dir, realtime_backend=None)
+    _write_project_config(watchman_project_dir, realtime_backend="watchman")
+
+    default_env = _clean_room_env(
+        venv_dir,
+        runtime_dir=runtime_dir / "default",
+        extra_env={
+            "CHUNKHOUND_WATCHMAN_RUNTIME_CACHE_DIR": str(cache_dir / "default"),
+        },
+    )
+    proc, client = await _start_proxy_client(
+        chunkhound_exe=chunkhound_exe,
+        project_dir=default_project_dir,
+        env=default_env,
+    )
+    default_stderr = ""
+    try:
+        status = await _wait_for_daemon_status(
+            client,
+            predicate=lambda payload: payload.get("status") == "ready"
+            and payload.get("scan_progress", {})
+            .get("realtime", {})
+            .get("configured_backend")
+            == "watchdog"
+            and payload.get("scan_progress", {})
+            .get("realtime", {})
+            .get("effective_backend")
+            == "watchdog",
+            description=f"{install_label} watchdog fallback readiness",
+        )
+        realtime = status["scan_progress"]["realtime"]
+        if realtime.get("configured_backend") != "watchdog":
+            raise RuntimeError(
+                f"{install_label} configured backend was not watchdog: {realtime}"
+            )
+        if realtime.get("effective_backend") != "watchdog":
+            raise RuntimeError(
+                f"{install_label} effective backend was not watchdog: {realtime}"
+            )
+    finally:
+        await client.close()
+        if proc.stderr is not None:
+            default_stderr = (await proc.stderr.read()).decode(
+                "utf-8",
+                errors="replace",
+            )
+    if default_stderr.strip():
+        print(default_stderr, file=os.sys.stderr)
+
+    failure_runtime_dir = runtime_dir / "watchman"
+    failure_env = _clean_room_env(
+        venv_dir,
+        runtime_dir=failure_runtime_dir,
+        extra_env={
+            "CHUNKHOUND_WATCHMAN_RUNTIME_CACHE_DIR": str(cache_dir / "watchman"),
+            "CHUNKHOUND_WATCHMAN_RUNTIME_DOWNLOAD_TIMEOUT_SECONDS": "1",
+            "CHUNKHOUND_WATCHMAN_RUNTIME_DOWNLOAD_RETRIES": "1",
+        },
+    )
+    returncode, _stdout, stderr_text = await _run_proxy_to_failure(
+        chunkhound_exe=chunkhound_exe,
+        project_dir=watchman_project_dir,
+        env=failure_env,
+    )
+    if returncode == 0:
+        raise RuntimeError(
+            f"Explicit {install_label} watchman startup unexpectedly succeeded"
+        )
+    if "Recent daemon log output" not in stderr_text:
+        raise RuntimeError(
+            f"Explicit {install_label} watchman failure did not include "
+            f"daemon log context: {stderr_text}"
+        )
+
+    daemon_log_path = watchman_project_dir / ".chunkhound" / "daemon.log"
+    if not daemon_log_path.exists():
+        raise RuntimeError(
+            f"Explicit {install_label} watchman failure did not write daemon.log"
+        )
+    daemon_log_text = daemon_log_path.read_text(
+        encoding="utf-8",
+        errors="replace",
+    )
+    if (
+        "Watchman runtime archive download failed" not in daemon_log_text
+        and "Watchman" not in daemon_log_text
+    ):
+        raise RuntimeError(
+            f"Explicit {install_label} watchman failure did not surface "
+            f"Watchman startup evidence: {daemon_log_text}"
+        )
+
+    lock_path = _lock_path_for_runtime(watchman_project_dir, failure_runtime_dir)
+    if lock_path.exists():
+        raise RuntimeError(
+            f"Explicit {install_label} watchman failure published a daemon lock"
+        )
+
+
 async def _verify_source_fallback(source_root: Path) -> None:
     root = Path(tempfile.mkdtemp(prefix="chunkhound-watchman-source-verify-"))
     try:
+        sdist_source_root = root / "sdist-source"
+        source_tree_root = root / "source-tree"
         editable_source_root = root / "editable-source"
-        shutil.copytree(
-            source_root,
+        for copied_root in (
+            sdist_source_root,
+            source_tree_root,
             editable_source_root,
-            ignore=_source_tree_copy_ignore,
-        )
-        _rewrite_watchman_source_urls(editable_source_root)
-
-        venv_dir = root / "venv"
-        runtime_dir = root / "runtime"
-        cache_dir = root / "cache"
-        default_project_dir = root / "project-default"
-        watchman_project_dir = root / "project-watchman"
-        default_project_dir.mkdir(parents=True, exist_ok=True)
-        watchman_project_dir.mkdir(parents=True, exist_ok=True)
-        _write_project_config(default_project_dir, realtime_backend=None)
-        _write_project_config(watchman_project_dir, realtime_backend="watchman")
-
-        subprocess.run(
-            ["uv", "venv", str(venv_dir)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        python_path = _python_path(venv_dir)
-        subprocess.run(
-            [
-                "uv",
-                "pip",
-                "install",
-                "--python",
-                str(python_path),
-                "-e",
-                str(editable_source_root),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            env=_editable_install_env(),
-        )
-        chunkhound_exe = _chunkhound_path(venv_dir)
-        if not chunkhound_exe.is_file():
-            raise FileNotFoundError(
-                f"Installed chunkhound executable not found: {chunkhound_exe}"
-            )
-
-        default_env = _clean_room_env(
-            venv_dir,
-            runtime_dir=runtime_dir / "default",
-            extra_env={
-                "CHUNKHOUND_WATCHMAN_RUNTIME_CACHE_DIR": str(cache_dir / "default"),
-            },
-        )
-        proc, client = await _start_proxy_client(
-            chunkhound_exe=chunkhound_exe,
-            project_dir=default_project_dir,
-            env=default_env,
-        )
-        default_stderr = ""
-        try:
-            status = await _wait_for_daemon_status(
-                client,
-                predicate=lambda payload: payload.get("status") == "ready"
-                and payload.get("scan_progress", {})
-                .get("realtime", {})
-                .get("configured_backend")
-                == "watchdog"
-                and payload.get("scan_progress", {})
-                .get("realtime", {})
-                .get("effective_backend")
-                == "watchdog",
-                description="watchdog fallback readiness",
-            )
-            realtime = status["scan_progress"]["realtime"]
-            if realtime.get("configured_backend") != "watchdog":
-                raise RuntimeError(
-                    f"Source fallback configured backend was not watchdog: {realtime}"
-                )
-            if realtime.get("effective_backend") != "watchdog":
-                raise RuntimeError(
-                    f"Source fallback effective backend was not watchdog: {realtime}"
-                )
-        finally:
-            await client.close()
-            if proc.stderr is not None:
-                default_stderr = (await proc.stderr.read()).decode(
-                    "utf-8",
-                    errors="replace",
-                )
-        if default_stderr.strip():
-            print(default_stderr, file=os.sys.stderr)
-
-        failure_runtime_dir = runtime_dir / "watchman"
-        failure_env = _clean_room_env(
-            venv_dir,
-            runtime_dir=failure_runtime_dir,
-            extra_env={
-                "CHUNKHOUND_WATCHMAN_RUNTIME_CACHE_DIR": str(cache_dir / "watchman"),
-                "CHUNKHOUND_WATCHMAN_RUNTIME_DOWNLOAD_TIMEOUT_SECONDS": "1",
-                "CHUNKHOUND_WATCHMAN_RUNTIME_DOWNLOAD_RETRIES": "1",
-            },
-        )
-        returncode, _stdout, stderr_text = await _run_proxy_to_failure(
-            chunkhound_exe=chunkhound_exe,
-            project_dir=watchman_project_dir,
-            env=failure_env,
-        )
-        if returncode == 0:
-            raise RuntimeError(
-                "Explicit source-install watchman startup unexpectedly succeeded"
-            )
-        if "Recent daemon log output" not in stderr_text:
-            raise RuntimeError(
-                "Explicit source-install watchman failure did not include "
-                f"daemon log context: {stderr_text}"
-            )
-
-        daemon_log_path = watchman_project_dir / ".chunkhound" / "daemon.log"
-        if not daemon_log_path.exists():
-            raise RuntimeError(
-                "Explicit source-install watchman failure did not write daemon.log"
-            )
-        daemon_log_text = daemon_log_path.read_text(
-            encoding="utf-8",
-            errors="replace",
-        )
-        if (
-            "Watchman runtime archive download failed" not in daemon_log_text
-            and "Watchman" not in daemon_log_text
         ):
-            raise RuntimeError(
-                "Explicit source-install watchman failure did not surface "
-                f"Watchman startup evidence: {daemon_log_text}"
+            shutil.copytree(
+                source_root,
+                copied_root,
+                ignore=_source_tree_copy_ignore,
             )
+            _rewrite_watchman_source_urls(copied_root)
 
-        lock_path = _lock_path_for_runtime(watchman_project_dir, failure_runtime_dir)
-        if lock_path.exists():
-            raise RuntimeError(
-                "Explicit source-install watchman failure published a daemon lock"
-            )
+        sdist_install_root = root / "sdist-install"
+        sdist_dist_dir = root / "sdist-dist"
+        sdist_artifact = _build_sdist_artifact(
+            source_root=sdist_source_root,
+            dist_dir=sdist_dist_dir,
+        )
+        sdist_chunkhound_exe = _install_into_venv(
+            venv_dir=sdist_install_root / "venv",
+            install_target=sdist_artifact,
+        )
+        await _verify_fallback_install_contract(
+            chunkhound_exe=sdist_chunkhound_exe,
+            install_root=sdist_install_root,
+            install_label="sdist install",
+        )
+
+        source_install_root = root / "source-install"
+        source_chunkhound_exe = _install_into_venv(
+            venv_dir=source_install_root / "venv",
+            install_target=source_tree_root,
+        )
+        await _verify_fallback_install_contract(
+            chunkhound_exe=source_chunkhound_exe,
+            install_root=source_install_root,
+            install_label="source install",
+        )
+
+        editable_install_root = root / "editable-install"
+        editable_chunkhound_exe = _install_into_venv(
+            venv_dir=editable_install_root / "venv",
+            install_target=editable_source_root,
+            editable=True,
+        )
+        await _verify_fallback_install_contract(
+            chunkhound_exe=editable_chunkhound_exe,
+            install_root=editable_install_root,
+            install_label="editable install",
+        )
     finally:
         _terminate_processes_using_root(root)
         _remove_tree_with_retries(root)
@@ -914,7 +995,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Verify installed-wheel Watchman live indexing and the documented "
-            "source/editable fallback contract."
+            "sdist/source/editable fallback contract."
         )
     )
     parser.add_argument(
@@ -935,7 +1016,7 @@ def main(argv: list[str] | None = None) -> int:
         "--verify-source-fallback",
         action="store_true",
         help=(
-            "Verify that a source/editable install defaults to watchdog and "
+            "Verify that sdist, source, and editable installs default to watchdog and "
             "fails fast when watchman is explicitly requested."
         ),
     )
@@ -944,7 +1025,7 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=_source_root(),
         help=(
-            "Source tree root to use for the source/editable fallback proof "
+            "Source tree root to use for the sdist/source/editable fallback proof "
             "(defaults to this repository root)."
         ),
     )

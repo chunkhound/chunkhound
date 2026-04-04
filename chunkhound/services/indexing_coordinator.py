@@ -2929,12 +2929,24 @@ class IndexingCoordinator(BaseService):
                 for file_path in current_files
             }
 
-            # Get all files in database (stored as relative paths)
-            query = """
-                SELECT id, path
-                FROM files
-            """
-            db_files = self._db.execute_query(query, [])
+            # Restrict cleanup to the indexed subtree so sibling rows survive
+            # narrower reindex runs and are left for a later broader scan.
+            relative_directory = directory.relative_to(base_dir)
+            if relative_directory == Path("."):
+                query = """
+                    SELECT id, path
+                    FROM files
+                """
+                query_params: list[str] = []
+            else:
+                directory_prefix = relative_directory.as_posix()
+                query = """
+                    SELECT id, path
+                    FROM files
+                    WHERE path = ? OR path LIKE ?
+                """
+                query_params = [directory_prefix, f"{directory_prefix}/%"]
+            db_files = self._db.execute_query(query, query_params)
 
             # Find DB entries that are now missing on disk or excluded by the
             # same effective scope rules used by discovery/realtime admission.

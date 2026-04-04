@@ -549,3 +549,403 @@ def test_repository_fallback_upgrades_existing_table_before_on_conflict(
         assert "idx_3_chunk_provider_model_unique" in {row[0] for row in indexes}
     finally:
         connection_manager.disconnect()
+
+
+def test_repository_fallback_batch_failure_rolls_back_without_hnsw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("duckdb")
+
+    connection_manager = DuckDBConnectionManager(tmp_path / "fallback.duckdb")
+    connection_manager.connect()
+    try:
+        assert connection_manager.connection is not None
+        connection_manager.connection.execute(
+            "CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq"
+        )
+        connection_manager.connection.execute(
+            "CREATE TABLE IF NOT EXISTS chunks (id INTEGER PRIMARY KEY)"
+        )
+        connection_manager.connection.execute("INSERT INTO chunks (id) VALUES (1), (2)")
+        repository = DuckDBEmbeddingRepository(connection_manager, provider=None)
+
+        def _fail_after_first_write(conn, upsert_sql: str, batch_rows: list[tuple]) -> None:
+            conn.executemany(upsert_sql, batch_rows[:1])
+            raise RuntimeError("forced no-hnsw repository batch failure")
+
+        monkeypatch.setattr(
+            repository,
+            "_execute_upsert_batches",
+            _fail_after_first_write,
+        )
+
+        with pytest.raises(
+            RuntimeError, match="forced no-hnsw repository batch failure"
+        ):
+            repository.insert_embeddings_batch(
+                [
+                    {
+                        "chunk_id": 1,
+                        "provider": "fallback",
+                        "model": "mini",
+                        "embedding": [1.0, 2.0, 3.0],
+                        "dims": 3,
+                    },
+                    {
+                        "chunk_id": 2,
+                        "provider": "fallback",
+                        "model": "mini",
+                        "embedding": [4.0, 5.0, 6.0],
+                        "dims": 3,
+                    },
+                ],
+                batch_size=5,
+                connection=connection_manager.connection,
+            )
+
+        rows = connection_manager.connection.execute(
+            "SELECT COUNT(*) FROM embeddings_3"
+        ).fetchone()
+        assert rows == (0,)
+    finally:
+        connection_manager.disconnect()
+
+
+def test_repository_batch_joins_existing_transaction_without_committing(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("duckdb")
+
+    connection_manager = DuckDBConnectionManager(tmp_path / "joined-fallback.duckdb")
+    connection_manager.connect()
+    try:
+        assert connection_manager.connection is not None
+        conn = connection_manager.connection
+        conn.execute("CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq")
+        conn.execute("CREATE TABLE IF NOT EXISTS chunks (id INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO chunks (id) VALUES (1), (2)")
+        repository = DuckDBEmbeddingRepository(connection_manager, provider=None)
+
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            inserted = repository.insert_embeddings_batch(
+                [
+                    {
+                        "chunk_id": 1,
+                        "provider": "fallback",
+                        "model": "mini",
+                        "embedding": [1.0, 2.0, 3.0],
+                        "dims": 3,
+                    },
+                    {
+                        "chunk_id": 2,
+                        "provider": "fallback",
+                        "model": "mini",
+                        "embedding": [4.0, 5.0, 6.0],
+                        "dims": 3,
+                    },
+                ],
+                batch_size=5,
+                connection=conn,
+                manage_transaction=False,
+            )
+            assert inserted == 2
+            rows = conn.execute("SELECT COUNT(*) FROM embeddings_3").fetchone()
+            assert rows == (2,)
+        finally:
+            conn.execute("ROLLBACK")
+
+        table_count = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_name = 'embeddings_3'
+            """
+        ).fetchone()
+        assert table_count == (0,)
+    finally:
+        connection_manager.disconnect()
+
+
+def test_repository_batch_failure_leaves_outer_transaction_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("duckdb")
+
+    connection_manager = DuckDBConnectionManager(
+        tmp_path / "joined-failure-fallback.duckdb"
+    )
+    connection_manager.connect()
+    try:
+        assert connection_manager.connection is not None
+        conn = connection_manager.connection
+        conn.execute("CREATE SEQUENCE IF NOT EXISTS embeddings_id_seq")
+        conn.execute("CREATE TABLE IF NOT EXISTS chunks (id INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO chunks (id) VALUES (1), (2)")
+        repository = DuckDBEmbeddingRepository(connection_manager, provider=None)
+
+        def _fail_inside_outer_transaction(
+            conn, upsert_sql: str, batch_rows: list[tuple]
+        ) -> None:
+            conn.executemany(upsert_sql, batch_rows[:1])
+            raise RuntimeError("forced joined repository batch failure")
+
+        monkeypatch.setattr(
+            repository,
+            "_execute_upsert_batches",
+            _fail_inside_outer_transaction,
+        )
+
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            with pytest.raises(
+                RuntimeError, match="forced joined repository batch failure"
+            ):
+                repository.insert_embeddings_batch(
+                    [
+                        {
+                            "chunk_id": 1,
+                            "provider": "fallback",
+                            "model": "mini",
+                            "embedding": [1.0, 2.0, 3.0],
+                            "dims": 3,
+                        },
+                        {
+                            "chunk_id": 2,
+                            "provider": "fallback",
+                            "model": "mini",
+                            "embedding": [4.0, 5.0, 6.0],
+                            "dims": 3,
+                        },
+                    ],
+                    batch_size=5,
+                    connection=conn,
+                    manage_transaction=False,
+                )
+
+            rows = conn.execute("SELECT COUNT(*) FROM embeddings_3").fetchone()
+            assert rows == (1,)
+        finally:
+            conn.execute("ROLLBACK")
+
+        table_count = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_name = 'embeddings_3'
+            """
+        ).fetchone()
+        assert table_count == (0,)
+    finally:
+        connection_manager.disconnect()
+
+
+def test_provider_batch_failure_rolls_back_without_hnsw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("duckdb")
+
+    provider = DuckDBProvider(db_path=tmp_path / "provider.duckdb", base_directory=tmp_path)
+    provider.connect()
+    try:
+        class FailingConnection:
+            def __init__(self, real_conn) -> None:
+                self._real_conn = real_conn
+                self._executemany_calls = 0
+
+            def execute(self, *args, **kwargs):
+                return self._real_conn.execute(*args, **kwargs)
+
+            def executemany(self, sql, batch):
+                self._executemany_calls += 1
+                if self._executemany_calls == 1:
+                    self._real_conn.executemany(sql, batch)
+                    raise RuntimeError("forced no-hnsw provider batch failure")
+                return self._real_conn.executemany(sql, batch)
+
+            def __getattr__(self, name: str):
+                return getattr(self._real_conn, name)
+
+        with pytest.raises(RuntimeError, match="forced no-hnsw provider batch failure"):
+            provider._executor_insert_embeddings_batch(
+                FailingConnection(provider.connection),
+                {
+                    "operations_since_checkpoint": 0,
+                    "transaction_active": False,
+                    "deferred_checkpoint": False,
+                },
+                [
+                    {
+                        "chunk_id": 1,
+                        "provider": "fallback",
+                        "model": "mini",
+                        "embedding": [1.0, 2.0, 3.0],
+                        "dims": 3,
+                    },
+                    {
+                        "chunk_id": 2,
+                        "provider": "fallback",
+                        "model": "mini",
+                        "embedding": [4.0, 5.0, 6.0],
+                        "dims": 3,
+                    },
+                ],
+                batch_size=5,
+            )
+
+        rows = provider.execute_query(
+            """
+            SELECT COUNT(*) AS count
+            FROM information_schema.tables
+            WHERE table_name = 'embeddings_3'
+            """,
+            [],
+        )
+        assert rows[0]["count"] == 0
+    finally:
+        provider.disconnect(skip_checkpoint=True)
+
+
+def test_provider_batch_joins_existing_transaction_without_committing(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("duckdb")
+
+    provider = DuckDBProvider(
+        db_path=tmp_path / "joined-provider.duckdb",
+        base_directory=tmp_path,
+    )
+    provider.connect()
+    try:
+        state = {
+            "operations_since_checkpoint": 0,
+            "transaction_active": False,
+            "deferred_checkpoint": False,
+        }
+        provider._executor_begin_transaction(provider.connection, state)
+        try:
+            inserted = provider._executor_insert_embeddings_batch(
+                provider.connection,
+                state,
+                [
+                    {
+                        "chunk_id": 1,
+                        "provider": "fallback",
+                        "model": "mini",
+                        "embedding": [1.0, 2.0, 3.0],
+                        "dims": 3,
+                    },
+                    {
+                        "chunk_id": 2,
+                        "provider": "fallback",
+                        "model": "mini",
+                        "embedding": [4.0, 5.0, 6.0],
+                        "dims": 3,
+                    },
+                ],
+                batch_size=5,
+            )
+            assert inserted == 2
+            rows = provider.connection.execute(
+                "SELECT COUNT(*) FROM embeddings_3"
+            ).fetchone()
+            assert rows == (2,)
+        finally:
+            if state["transaction_active"]:
+                provider._executor_rollback_transaction(provider.connection, state)
+
+        rows = provider.execute_query(
+            """
+            SELECT COUNT(*) AS count
+            FROM information_schema.tables
+            WHERE table_name = 'embeddings_3'
+            """,
+            [],
+        )
+        assert rows[0]["count"] == 0
+    finally:
+        provider.disconnect(skip_checkpoint=True)
+
+
+def test_provider_batch_failure_leaves_outer_transaction_open(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("duckdb")
+
+    provider = DuckDBProvider(
+        db_path=tmp_path / "joined-provider-failure.duckdb",
+        base_directory=tmp_path,
+    )
+    provider.connect()
+    try:
+        state = {
+            "operations_since_checkpoint": 0,
+            "transaction_active": False,
+            "deferred_checkpoint": False,
+        }
+
+        class FailingConnection:
+            def __init__(self, real_conn) -> None:
+                self._real_conn = real_conn
+                self._executemany_calls = 0
+
+            def execute(self, *args, **kwargs):
+                return self._real_conn.execute(*args, **kwargs)
+
+            def executemany(self, sql, batch):
+                self._executemany_calls += 1
+                if self._executemany_calls == 1:
+                    self._real_conn.executemany(sql, batch[:1])
+                    raise RuntimeError("forced joined provider batch failure")
+                return self._real_conn.executemany(sql, batch)
+
+            def __getattr__(self, name: str):
+                return getattr(self._real_conn, name)
+
+        provider._executor_begin_transaction(provider.connection, state)
+        try:
+            with pytest.raises(
+                RuntimeError, match="forced joined provider batch failure"
+            ):
+                provider._executor_insert_embeddings_batch(
+                    FailingConnection(provider.connection),
+                    state,
+                    [
+                        {
+                            "chunk_id": 1,
+                            "provider": "fallback",
+                            "model": "mini",
+                            "embedding": [1.0, 2.0, 3.0],
+                            "dims": 3,
+                        },
+                        {
+                            "chunk_id": 2,
+                            "provider": "fallback",
+                            "model": "mini",
+                            "embedding": [4.0, 5.0, 6.0],
+                            "dims": 3,
+                        },
+                    ],
+                    batch_size=5,
+                )
+
+            assert state["transaction_active"] is True
+            rows = provider.connection.execute(
+                "SELECT COUNT(*) FROM embeddings_3"
+            ).fetchone()
+            assert rows == (1,)
+        finally:
+            if state["transaction_active"]:
+                provider._executor_rollback_transaction(provider.connection, state)
+
+        rows = provider.execute_query(
+            """
+            SELECT COUNT(*) AS count
+            FROM information_schema.tables
+            WHERE table_name = 'embeddings_3'
+            """,
+            [],
+        )
+        assert rows[0]["count"] == 0
+    finally:
+        provider.disconnect(skip_checkpoint=True)

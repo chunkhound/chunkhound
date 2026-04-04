@@ -399,6 +399,49 @@ def test_process_directory_batches_orphan_cleanup_by_reason(
     ]
 
 
+def test_subtree_reindex_keeps_sibling_rows_outside_active_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import asyncio
+
+    provider = DuckDBProvider(db_path=tmp_path / "db.duckdb", base_directory=tmp_path)
+    provider.connect()
+
+    active_dir = tmp_path / "pkg"
+    active_dir.mkdir()
+    current_file = active_dir / "current.py"
+    current_file.write_text("def current():\n    return 1\n")
+
+    provider.insert_file(
+        File(path="pkg/missing.py", mtime=1.0, size_bytes=24, language=Language.PYTHON)
+    )
+    provider.insert_file(
+        File(
+            path="other/sibling.py",
+            mtime=1.0,
+            size_bytes=24,
+            language=Language.PYTHON,
+        )
+    )
+
+    coordinator = IndexingCoordinator(provider, tmp_path)
+
+    async def _skip_processing(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(coordinator, "_process_files_in_batches", _skip_processing)
+
+    result = asyncio.run(
+        coordinator.process_directory(
+            active_dir, patterns=["**/*.py"], exclude_patterns=[]
+        )
+    )
+
+    assert result["status"] == "success"
+    assert provider.get_file_by_path("pkg/missing.py", as_model=False) is None
+    assert provider.get_file_by_path("other/sibling.py", as_model=False) is not None
+
+
 def test_process_directory_drops_nonstandard_hnsw_indexes_for_excluded_existing_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
