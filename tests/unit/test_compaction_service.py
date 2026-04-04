@@ -671,6 +671,27 @@ class TestShutdown:
         )
 
 
+    @pytest.mark.asyncio
+    async def test_shutdown_completes_when_to_thread_fails_before_start(
+        self, tmp_path: Path, config_with_compaction: Config, mock_provider: MagicMock
+    ):
+        """shutdown() doesn't deadlock when asyncio.to_thread raises before spawning thread."""
+        db_path = tmp_path / "test.duckdb"
+        db_path.write_bytes(b"x" * 1024)
+
+        service = CompactionService(db_path, config_with_compaction)
+
+        with patch("asyncio.to_thread", side_effect=RuntimeError("no running event loop")):
+            with pytest.raises(RuntimeError):
+                await service.compact_blocking(mock_provider)
+
+        # The thread_entered guard should have restored _compaction_thread_done
+        assert service.compaction_thread_done.is_set()
+
+        # shutdown must complete without hanging
+        await asyncio.wait_for(service.shutdown(timeout=2.0), timeout=3.0)
+
+
 class TestIsCompacting:
     """Test is_compacting property."""
 
