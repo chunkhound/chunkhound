@@ -64,7 +64,7 @@ uv run pytest tests/test_smoke.py -v -n auto
 ./scripts/prepare_release.sh
 
 # 4. Test local install
-pip install dist/chunkhound-X.Y.Z-py3-none-any.whl
+pip install dist/chunkhound-X.Y.Z-<platform-tag>.whl
 
 # 5. Push tag
 git push origin vX.Y.Z

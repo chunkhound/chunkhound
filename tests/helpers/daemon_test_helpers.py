@@ -52,7 +52,12 @@ def is_daemon_running(project_dir: Path) -> bool:
     return discovery.is_daemon_alive()
 
 
-async def wait_for_daemon_start(project_dir: Path, timeout: float = 10.0) -> bool:
+async def wait_for_daemon_start(
+    project_dir: Path,
+    timeout: float = 10.0,
+    *,
+    runtime_dir: Path | None = None,
+) -> bool:
     """Poll until the daemon for ``project_dir`` is alive and accepting connections.
 
     Args:
@@ -62,24 +67,30 @@ async def wait_for_daemon_start(project_dir: Path, timeout: float = 10.0) -> boo
     Returns:
         True if the daemon became available within ``timeout``, False otherwise.
     """
-    discovery = DaemonDiscovery(project_dir)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        lock = discovery.read_lock()
-        if lock is not None:
-            pid = lock.get("pid")
-            address = str(lock.get("socket_path", discovery.get_ipc_address()))
-            if isinstance(pid, int) and psutil.pid_exists(pid):
-                try:
-                    if await ipc.is_connectable(address):
-                        return True
-                except Exception:
-                    pass
-        await asyncio.sleep(0.1)
+    with runtime_dir_env(runtime_dir):
+        discovery = DaemonDiscovery(project_dir)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            lock = discovery.read_lock()
+            if lock is not None:
+                pid = lock.get("pid")
+                address = str(lock.get("socket_path", discovery.get_ipc_address()))
+                if isinstance(pid, int) and psutil.pid_exists(pid):
+                    try:
+                        if await ipc.is_connectable(address):
+                            return True
+                    except Exception:
+                        pass
+            await asyncio.sleep(0.1)
     return False
 
 
-async def wait_for_daemon_shutdown(project_dir: Path, timeout: float = 5.0) -> bool:
+async def wait_for_daemon_shutdown(
+    project_dir: Path,
+    timeout: float = 5.0,
+    *,
+    runtime_dir: Path | None = None,
+) -> bool:
     """Poll until the daemon lock file for ``project_dir`` is gone.
 
     This is sufficient to show that the daemon is no longer discoverable for
@@ -93,12 +104,13 @@ async def wait_for_daemon_shutdown(project_dir: Path, timeout: float = 5.0) -> b
     Returns:
         True if the lock file was removed within ``timeout``, False otherwise.
     """
-    lock_path = project_dir / ".chunkhound" / "daemon.lock"
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not lock_path.exists():
-            return True
-        await asyncio.sleep(0.1)
+    with runtime_dir_env(runtime_dir):
+        lock_path = DaemonDiscovery(project_dir).get_lock_path()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not lock_path.exists():
+                return True
+            await asyncio.sleep(0.1)
     return False
 
 

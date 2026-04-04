@@ -432,6 +432,7 @@ dependencies = [
     { name = "voyageai" },
     { name = "watchdog" },
     { name = "xxhash" },
+    { name = "zstandard" },
 ]
 
 [package.optional-dependencies]
@@ -533,6 +534,7 @@ requires-dist = [
     { name = "voyageai", specifier = ">=0.2.0" },
     { name = "watchdog", specifier = ">=4.0.0" },
     { name = "xxhash", specifier = ">=3.0.0" },
+    { name = "zstandard", specifier = ">=0.23.0" },
 ]
 provides-extras = ["dev", "test"]
 

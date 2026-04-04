@@ -23,16 +23,275 @@ class DuckDBEmbeddingRepository:
         """
         self.connection_manager = connection_manager
         self._provider = provider
-        self._provider_instance = None  # Will be set by provider
+        self._provider_instance: Any | None = None  # Will be set by provider
 
     @property
     def connection(self) -> Any | None:
         """Get database connection from connection manager."""
         return self.connection_manager.connection
 
-    def set_provider_instance(self, provider_instance):
+    def set_provider_instance(self, provider_instance: Any) -> None:
         """Set the provider instance for index management operations."""
         self._provider_instance = provider_instance
+
+    def _drop_existing_index(self, conn: Any, index_info: dict[str, Any]) -> None:
+        """Drop one discovered HNSW index by its exact current identity."""
+        if self._provider_instance and hasattr(
+            self._provider_instance, "_executor_drop_vector_index_by_name"
+        ):
+            self._provider_instance._executor_drop_vector_index_by_name(
+                conn, index_info["index_name"]
+            )
+            return
+
+        if (
+            self._provider_instance
+            and index_info.get("provider") is not None
+            and index_info.get("model") is not None
+        ):
+            self._provider_instance.drop_vector_index(
+                index_info["provider"],
+                index_info["model"],
+                index_info["dims"],
+                index_info["metric"],
+            )
+            return
+
+        raise RuntimeError(
+            "Cannot drop HNSW index without identity information: "
+            f"{index_info['index_name']}"
+        )
+
+    def _recreate_existing_index(self, conn: Any, index_info: dict[str, Any]) -> None:
+        """Recreate one discovered HNSW index with its original SQL when available."""
+        create_sql = index_info.get("create_sql")
+        if create_sql:
+            conn.execute(create_sql)
+            return
+
+        if (
+            self._provider_instance
+            and index_info.get("provider") is not None
+            and index_info.get("model") is not None
+        ):
+            self._provider_instance.create_vector_index(
+                index_info["provider"],
+                index_info["model"],
+                index_info["dims"],
+                index_info["metric"],
+            )
+            return
+
+        raise RuntimeError(
+            "Cannot recreate HNSW index without SQL or identity: "
+            f"{index_info['index_name']}"
+        )
+
+    @staticmethod
+    def build_embedding_upsert_sql(table_name: str) -> str:
+        """Build the parameterized upsert SQL for one embedding table."""
+        return f"""
+            INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (chunk_id, provider, model) DO UPDATE
+            SET embedding = EXCLUDED.embedding, dims = EXCLUDED.dims
+        """
+
+    @staticmethod
+    def _quote_duckdb_identifier(identifier: str) -> str:
+        """Quote a DuckDB identifier safely."""
+        return f'"{identifier.replace(chr(34), chr(34) * 2)}"'
+
+    @staticmethod
+    def _is_hnsw_index(index_name: str, create_sql: str | None) -> bool:
+        """Return True when the index metadata describes an HNSW index."""
+        if create_sql and "USING HNSW" in create_sql.upper():
+            return True
+        return index_name.startswith("hnsw_") or index_name.startswith("idx_hnsw_")
+
+    def _fallback_index_exists(
+        self, conn: Any, table_name: str, index_name: str
+    ) -> bool:
+        """Return True when one named index exists on the fallback table."""
+        result = conn.execute(
+            """
+            SELECT 1
+            FROM duckdb_indexes()
+            WHERE table_name = ? AND index_name = ?
+            LIMIT 1
+            """,
+            [table_name, index_name],
+        ).fetchone()
+        return result is not None
+
+    def _get_fallback_hnsw_indexes(
+        self, conn: Any, table_name: str
+    ) -> list[dict[str, str | None]]:
+        """Discover exact HNSW index identity for a fallback embedding table."""
+        rows = conn.execute(
+            """
+            SELECT index_name, sql
+            FROM duckdb_indexes()
+            WHERE table_name = ?
+            ORDER BY index_name
+            """,
+            [table_name],
+        ).fetchall()
+        indexes: list[dict[str, str | None]] = []
+        for index_name, create_sql in rows:
+            if not self._is_hnsw_index(index_name, create_sql):
+                continue
+            indexes.append({"index_name": index_name, "create_sql": create_sql})
+        return indexes
+
+    def _get_fallback_duplicate_row_ids(
+        self, conn: Any, table_name: str
+    ) -> list[int]:
+        """Return duplicate row ids that block the unique upsert contract."""
+        rows = conn.execute(
+            f"""
+            SELECT id
+            FROM (
+                SELECT
+                    id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY chunk_id, provider, model
+                        ORDER BY created_at DESC NULLS LAST, id DESC
+                    ) AS row_num
+                FROM {table_name}
+            )
+            WHERE row_num > 1
+            ORDER BY id
+            """
+        ).fetchall()
+        return [int(row[0]) for row in rows]
+
+    def _delete_rows_by_id(self, conn: Any, table_name: str, row_ids: list[int]) -> None:
+        """Delete specific rows from one embedding table by primary key."""
+        if not row_ids:
+            return
+
+        placeholders = ", ".join(["?"] * len(row_ids))
+        conn.execute(f"DELETE FROM {table_name} WHERE id IN ({placeholders})", row_ids)
+
+    def _ensure_fallback_embedding_upsert_contract(
+        self, conn: Any, table_name: str, dims: int
+    ) -> None:
+        """Upgrade an existing fallback embedding table before using ON CONFLICT."""
+        provider_model_index = f"idx_{dims}_provider_model"
+        if not self._fallback_index_exists(conn, table_name, provider_model_index):
+            conn.execute(
+                f"CREATE INDEX {provider_model_index} ON {table_name}(provider, model)"
+            )
+
+        unique_index_name = f"idx_{dims}_chunk_provider_model_unique"
+        if self._fallback_index_exists(conn, table_name, unique_index_name):
+            return
+
+        duplicate_row_ids = self._get_fallback_duplicate_row_ids(conn, table_name)
+        hnsw_indexes = self._get_fallback_hnsw_indexes(conn, table_name)
+
+        try:
+            conn.execute("BEGIN TRANSACTION")
+            for index_info in hnsw_indexes:
+                conn.execute(
+                    "DROP INDEX IF EXISTS "
+                    f"{self._quote_duckdb_identifier(str(index_info['index_name']))}"
+                )
+
+            if duplicate_row_ids:
+                self._delete_rows_by_id(conn, table_name, duplicate_row_ids)
+
+            conn.execute(
+                f"""
+                CREATE UNIQUE INDEX {unique_index_name}
+                ON {table_name}(chunk_id, provider, model)
+                """
+            )
+
+            for index_info in hnsw_indexes:
+                create_sql = index_info["create_sql"]
+                if create_sql:
+                    conn.execute(create_sql)
+
+            conn.execute("COMMIT")
+        except Exception as e:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception as rollback_error:
+                raise RuntimeError(
+                    "Failed to upgrade fallback embedding table "
+                    f"{table_name}: {e}; rollback failed: {rollback_error}"
+                ) from rollback_error
+            raise RuntimeError(
+                f"Failed to upgrade fallback embedding table {table_name}: {e}"
+            ) from e
+
+    def _ensure_fallback_embedding_table_exists(self, conn: Any, dims: int) -> str:
+        """Create the dimension-specific embedding table when no provider is available."""
+        table_name = f"embeddings_{dims}"
+        result = conn.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_name = ?",
+            [table_name],
+        ).fetchone()
+        if result is not None:
+            self._ensure_fallback_embedding_upsert_contract(conn, table_name, dims)
+            return table_name
+
+        conn.execute(f"""
+            CREATE TABLE {table_name} (
+                id INTEGER PRIMARY KEY DEFAULT nextval('embeddings_id_seq'),
+                chunk_id INTEGER REFERENCES chunks(id),
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                embedding FLOAT[{dims}],
+                dims INTEGER NOT NULL DEFAULT {dims},
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{dims}_chunk_id ON {table_name}(chunk_id)")
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{dims}_provider_model ON {table_name}(provider, model)"
+        )
+        conn.execute(
+            f"""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_{dims}_chunk_provider_model_unique
+            ON {table_name}(chunk_id, provider, model)
+            """
+        )
+        return table_name
+
+    def _execute_upsert_batches(
+        self, conn: Any, upsert_sql: str, batch_rows: list[tuple[Any, ...]]
+    ) -> None:
+        """Execute parameterized upserts in bounded chunks."""
+        write_batch_size = 1000
+        for offset in range(0, len(batch_rows), write_batch_size):
+            conn.executemany(upsert_sql, batch_rows[offset : offset + write_batch_size])
+
+    def _get_embedding_row_id(
+        self,
+        conn: Any,
+        table_name: str,
+        chunk_id: int,
+        provider: str,
+        model: str,
+    ) -> int:
+        """Return the canonical row id for one embedding upsert key."""
+        result = conn.execute(
+            f"""
+            SELECT id
+            FROM {table_name}
+            WHERE chunk_id = ? AND provider = ? AND model = ?
+            """,
+            [chunk_id, provider, model],
+        ).fetchone()
+        if result is None:
+            raise RuntimeError(
+                "Embedding upsert completed without a stored row for "
+                f"{table_name} ({chunk_id}, {provider}, {model})"
+            )
+        return int(result[0])
 
     def insert_embedding(self, embedding: Embedding) -> int:
         """Insert embedding record and return embedding ID."""
@@ -46,32 +305,14 @@ class DuckDBEmbeddingRepository:
                     embedding.dims
                 )
             else:
-                # Fallback for tests - create table if needed
-                table_name = f"embeddings_{embedding.dims}"
-                # Check if table exists by querying information_schema
-                result = self.connection_manager.connection.execute(
-                    "SELECT table_name FROM information_schema.tables WHERE table_name = ?",
-                    [table_name],
-                ).fetchone()
-                if result is None:
-                    self.connection_manager.connection.execute(f"""  
-                        CREATE TABLE {table_name} (
-                            id INTEGER PRIMARY KEY DEFAULT nextval('embeddings_id_seq'),
-                            chunk_id INTEGER REFERENCES chunks(id),
-                            provider TEXT NOT NULL,
-                            model TEXT NOT NULL,
-                            embedding FLOAT[{embedding.dims}],
-                            dims INTEGER NOT NULL DEFAULT {embedding.dims},
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                    """)
+                table_name = self._ensure_fallback_embedding_table_exists(
+                    self.connection_manager.connection, embedding.dims
+                )
 
-            result = self.connection_manager.connection.execute(
-                f"""
-                INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims)
-                VALUES (?, ?, ?, ?, ?)
-                RETURNING id
-            """,
+            conn = self.connection_manager.connection
+            upsert_sql = self.build_embedding_upsert_sql(table_name)
+            conn.execute(
+                upsert_sql,
                 [
                     embedding.chunk_id,
                     embedding.provider,
@@ -80,10 +321,15 @@ class DuckDBEmbeddingRepository:
                     embedding.dims,
                 ],
             )
-
-            embedding_id = result.fetchone()[0]
+            embedding_id = self._get_embedding_row_id(
+                conn,
+                table_name,
+                embedding.chunk_id,
+                embedding.provider,
+                embedding.model,
+            )
             logger.debug(
-                f"Inserted embedding {embedding_id} for chunk {embedding.chunk_id}"
+                f"Upserted embedding {embedding_id} for chunk {embedding.chunk_id}"
             )
             return embedding_id
 
@@ -96,12 +342,13 @@ class DuckDBEmbeddingRepository:
         embeddings_data: list[dict],
         batch_size: int | None = None,
         connection=None,
+        manage_transaction: bool = True,
     ) -> int:
         """Insert multiple embedding vectors with HNSW index optimization.
 
         For large batches (>= batch_size threshold), uses the Context7-recommended optimization:
         1. Drop HNSW indexes to avoid insert slowdown (60s+ -> 5s for 300 items)
-        2. Use fast INSERT for new embeddings, INSERT OR REPLACE for updates
+        2. Use parameterized ON CONFLICT upserts for new and existing embeddings
         3. Recreate HNSW indexes after bulk operations
 
         Expected speedup: 10-20x faster for large batches (90s -> 5-10s).
@@ -110,11 +357,11 @@ class DuckDBEmbeddingRepository:
             embeddings_data: List of dicts with keys: chunk_id, provider, model, embedding, dims
             batch_size: Threshold for HNSW optimization (default: 50)
             connection: Optional database connection to use (for transaction contexts)
+            manage_transaction: Whether this helper should own the batch transaction
 
         Returns:
             Number of successfully inserted embeddings
         """
-        # Use provided connection or default connection
         conn = connection if connection is not None else self.connection
         if conn is None:
             raise RuntimeError("No database connection")
@@ -142,41 +389,31 @@ class DuckDBEmbeddingRepository:
                     f"expected {detected_dims} (detected from first embedding)"
                 )
 
-        # Ensure appropriate table exists for these dimensions
         if self._provider:
             table_name = self._provider._ensure_embedding_table_exists(detected_dims)
         else:
-            # Fallback for tests
-            table_name = f"embeddings_{detected_dims}"
-            # Check if table exists by querying information_schema
-            result = conn.execute(
-                "SELECT table_name FROM information_schema.tables WHERE table_name = ?",
-                [table_name],
-            ).fetchone()
-            if result is None:
-                conn.execute(f"""
-                    CREATE TABLE {table_name} (
-                        id INTEGER PRIMARY KEY DEFAULT nextval('embeddings_id_seq'),
-                        chunk_id INTEGER REFERENCES chunks(id),
-                        provider TEXT NOT NULL,
-                        model TEXT NOT NULL,
-                        embedding FLOAT[{detected_dims}],
-                        dims INTEGER NOT NULL DEFAULT {detected_dims},
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
+            table_name = self._ensure_fallback_embedding_table_exists(
+                conn, detected_dims
+            )
         logger.debug(
             f"Using table {table_name} for {detected_dims}-dimensional embeddings"
         )
 
-        # Extract provider/model for conflict checking
         first_embedding = embeddings_data[0]
         provider = first_embedding["provider"]
         model = first_embedding["model"]
+        upsert_sql = self.build_embedding_upsert_sql(table_name)
+        batch_rows = [
+            (
+                embedding_data["chunk_id"],
+                embedding_data["provider"],
+                embedding_data["model"],
+                embedding_data["embedding"],
+                embedding_data["dims"],
+            )
+            for embedding_data in embeddings_data
+        ]
 
-        # Use HNSW index optimization only for larger batches (research-based optimal threshold)
-        # Based on benchmarks: small batches (1-10) keep indexes, medium+ batches (≥50) use optimization
-        # This fixes semantic search for new files while maintaining bulk performance
         use_hnsw_optimization = actual_batch_size >= hnsw_threshold
 
         # Log the optimization decision for debugging
@@ -192,195 +429,95 @@ class DuckDBEmbeddingRepository:
         try:
             total_inserted = 0
             start_time = time.time()
+            transaction_started = False
+
+            if manage_transaction:
+                conn.execute("BEGIN TRANSACTION")
+                transaction_started = True
 
             if use_hnsw_optimization:
-                # CRITICAL OPTIMIZATION: Drop HNSW indexes for bulk operations (research-based best practice)
                 logger.debug(
                     f"🔧 Large batch detected ({actual_batch_size} embeddings >= {hnsw_threshold}), applying HNSW optimization"
                 )
 
-                # Extract dims for index management
-                dims = first_embedding["dims"]
+                dropped_indexes: list[dict[str, Any]] = []
 
-                # Step 1: Drop HNSW index to enable fast insertions
                 if self._provider_instance and hasattr(
                     self._provider_instance, "get_existing_vector_indexes"
                 ):
-                    existing_indexes = (
-                        self._provider_instance.get_existing_vector_indexes()
-                    )
-                    dropped_indexes = []
-
-                    for index_info in existing_indexes:
-                        try:
-                            self._provider_instance.drop_vector_index(
-                                index_info["provider"],
-                                index_info["model"],
-                                index_info["dims"],
-                                index_info["metric"],
-                            )
-                            dropped_indexes.append(index_info)
-                            logger.debug(f"Dropped index: {index_info['index_name']}")
-                        except Exception as e:
-                            logger.warning(
-                                f"Could not drop index {index_info['index_name']}: {e}"
-                            )
-
-                    # Step 2: Separate new vs existing embeddings for optimal INSERT strategy
-                    chunk_ids = [emb["chunk_id"] for emb in embeddings_data]
-                    existing_chunk_ids = self.get_existing_embeddings(
-                        chunk_ids, provider, model
-                    )
-
-                    # Separate new vs existing embeddings
-                    new_embeddings = [
-                        emb
-                        for emb in embeddings_data
-                        if emb["chunk_id"] not in existing_chunk_ids
-                    ]
-                    update_embeddings = [
-                        emb
-                        for emb in embeddings_data
-                        if emb["chunk_id"] in existing_chunk_ids
+                    dropped_indexes = [
+                        index_info
+                        for index_info in self._provider_instance.get_existing_vector_indexes()
+                        if index_info["table_name"] == table_name
                     ]
 
-                    # Step 3: Fast INSERT for new embeddings using VALUES table construction
-                    if new_embeddings:
-                        insert_start = time.time()
-
-                        try:
-                            # Set DuckDB performance options for bulk loading
-                            conn.execute("SET preserve_insertion_order = false")
-
-                            # Build VALUES clause for bulk insert (much faster than executemany)
-                            values_parts = []
-                            for embedding_data in new_embeddings:
-                                vector_str = str(embedding_data["embedding"])
-                                values_parts.append(
-                                    f"({embedding_data['chunk_id']}, '{embedding_data['provider']}', '{embedding_data['model']}', {vector_str}, {embedding_data['dims']})"
-                                )
-
-                            # Single INSERT with all values (fastest approach without external deps)
-                            values_clause = ",\n    ".join(values_parts)
-                            conn.execute(f"""
-                                INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims)
-                                VALUES {values_clause}
-                            """)
-
-                            insert_time = time.time() - insert_start
-                            logger.debug(
-                                f"✅ Fast VALUES INSERT completed in {insert_time:.3f}s ({len(new_embeddings) / insert_time:.1f} emb/s)"
-                            )
-                            total_inserted += len(new_embeddings)
-
-                        except Exception as e:
-                            logger.error(f"Fast VALUES INSERT failed: {e}")
-                            raise
-
-                    # Step 4: INSERT OR REPLACE only for updates using VALUES approach
-                    if update_embeddings:
-                        update_start = time.time()
-
-                        try:
-                            # Build VALUES clause for bulk updates
-                            values_parts = []
-                            for embedding_data in update_embeddings:
-                                vector_str = str(embedding_data["embedding"])
-                                values_parts.append(
-                                    f"({embedding_data['chunk_id']}, '{embedding_data['provider']}', '{embedding_data['model']}', {vector_str}, {embedding_data['dims']})"
-                                )
-
-                            # Single INSERT OR REPLACE with all values
-                            values_clause = ",\n    ".join(values_parts)
-                            conn.execute(f"""
-                                INSERT OR REPLACE INTO {table_name} (chunk_id, provider, model, embedding, dims)
-                                VALUES {values_clause}
-                            """)
-
-                            update_time = time.time() - update_start
-                            logger.debug(
-                                f"✅ VALUES UPDATE completed in {update_time:.3f}s ({len(update_embeddings) / update_time:.1f} emb/s)"
-                            )
-                            total_inserted += len(update_embeddings)
-
-                        except Exception as e:
-                            logger.error(f"VALUES UPDATE failed: {e}")
-                            raise
-
-                    # Step 5: Recreate HNSW index for fast similarity search
-                    if dropped_indexes and self._provider_instance:
-                        logger.debug(
-                            "📈 Recreating HNSW index for fast similarity search"
-                        )
-                        index_start = time.time()
+                try:
+                    if dropped_indexes:
+                        conn.execute("SET preserve_insertion_order = false")
                         for index_info in dropped_indexes:
-                            try:
-                                self._provider_instance.create_vector_index(
-                                    index_info["provider"],
-                                    index_info["model"],
-                                    index_info["dims"],
-                                    index_info["metric"],
-                                )
-                                logger.debug(
-                                    f"Recreated HNSW index: {index_info['index_name']}"
-                                )
-                            except Exception as e:
-                                logger.error(
-                                    f"Failed to recreate index {index_info['index_name']}: {e}"
-                                )
-                                # Continue - data is inserted, just no index optimization for search
-                        index_time = time.time() - index_start
-                        logger.debug(f"✅ HNSW index recreated in {index_time:.3f}s")
+                            self._drop_existing_index(conn, index_info)
+                            logger.debug(f"Dropped index: {index_info['index_name']}")
 
+                    insert_start = time.time()
+                    self._execute_upsert_batches(conn, upsert_sql, batch_rows)
+                    total_inserted = len(batch_rows)
+                    insert_time = time.time() - insert_start
                     logger.debug(
-                        f"✅ Stored {actual_batch_size} embeddings successfully"
+                        f"✅ Parameterized UPSERT completed in {insert_time:.3f}s ({total_inserted / insert_time:.1f} emb/s)"
                     )
-                else:
-                    # Fallback to simple batch insert without optimization
-                    logger.warning(
-                        "Provider instance not available for index management, using simple batch insert"
-                    )
-                    values_parts = []
-                    for embedding_data in embeddings_data:
-                        vector_str = str(embedding_data["embedding"])
-                        values_parts.append(
-                            f"({embedding_data['chunk_id']}, '{embedding_data['provider']}', '{embedding_data['model']}', {vector_str}, {embedding_data['dims']})"
-                        )
 
-                    values_clause = ",\n    ".join(values_parts)
-                    conn.execute(f"""
-                        INSERT OR REPLACE INTO {table_name} (chunk_id, provider, model, embedding, dims)
-                        VALUES {values_clause}
-                    """)
-                    total_inserted = len(embeddings_data)
+                    if dropped_indexes:
+                        logger.debug(
+                            "📈 Recreating exact HNSW indexes after bulk embedding upsert"
+                        )
+                        for index_info in dropped_indexes:
+                            self._recreate_existing_index(conn, index_info)
+                            logger.debug(
+                                f"Recreated HNSW index: {index_info['index_name']}"
+                            )
+
+                    if transaction_started:
+                        conn.execute("COMMIT")
+                        transaction_started = False
+
+                except Exception as e:
+                    if transaction_started:
+                        try:
+                            conn.execute("ROLLBACK")
+                            transaction_started = False
+                        except Exception as rollback_error:
+                            raise RuntimeError(
+                                "insert_embeddings_batch failed and rollback failed: "
+                                f"{rollback_error}"
+                            ) from rollback_error
+                    raise RuntimeError(
+                        "insert_embeddings_batch failed while enforcing strict HNSW restore: "
+                        f"{e}"
+                    ) from e
+
+                logger.debug(f"✅ Stored {actual_batch_size} embeddings successfully")
 
             else:
-                # Small batch: use VALUES approach for consistency
                 small_start = time.time()
 
                 try:
-                    # Build VALUES clause for small batch
-                    values_parts = []
-                    for embedding_data in embeddings_data:
-                        vector_str = str(embedding_data["embedding"])
-                        values_parts.append(
-                            f"({embedding_data['chunk_id']}, '{embedding_data['provider']}', '{embedding_data['model']}', {vector_str}, {embedding_data['dims']})"
-                        )
-
-                    # Single INSERT OR REPLACE with all values
-                    values_clause = ",\n    ".join(values_parts)
-                    conn.execute(f"""
-                        INSERT OR REPLACE INTO {table_name} (chunk_id, provider, model, embedding, dims)
-                        VALUES {values_clause}
-                    """)
+                    self._execute_upsert_batches(conn, upsert_sql, batch_rows)
 
                     small_time = time.time() - small_start
                     logger.debug(
-                        f"✅ Small VALUES batch completed in {small_time:.3f}s ({len(embeddings_data) / small_time:.1f} emb/s)"
+                        f"✅ Small parameterized UPSERT batch completed in {small_time:.3f}s ({len(embeddings_data) / small_time:.1f} emb/s)"
                     )
                     total_inserted = len(embeddings_data)
-
                 except Exception as e:
+                    if transaction_started:
+                        try:
+                            conn.execute("ROLLBACK")
+                        except Exception as rollback_error:
+                            raise RuntimeError(
+                                "insert_embeddings_batch failed and rollback failed: "
+                                f"{rollback_error}"
+                            ) from rollback_error
+                        transaction_started = False
                     logger.error(f"Small VALUES batch failed: {e}")
                     raise
 
@@ -419,6 +556,10 @@ class DuckDBEmbeddingRepository:
                 # Update progress for small batch completion
                 logger.debug(f"✅ Stored {actual_batch_size} embeddings successfully")
 
+                if transaction_started:
+                    conn.execute("COMMIT")
+                    transaction_started = False
+
             insert_time = time.time() - start_time
             logger.debug(f"⚡ Batch INSERT completed in {insert_time:.3f}s")
 
@@ -437,13 +578,21 @@ class DuckDBEmbeddingRepository:
             return total_inserted
 
         except Exception as e:
+            if transaction_started:
+                try:
+                    conn.execute("ROLLBACK")
+                    transaction_started = False
+                except Exception as rollback_error:
+                    logger.error(
+                        "💥 CRITICAL: Optimized batch insert failed and rollback "
+                        f"failed: {rollback_error}"
+                    )
+                    raise RuntimeError(
+                        "insert_embeddings_batch failed and rollback failed: "
+                        f"{rollback_error}"
+                    ) from rollback_error
             logger.error(f"💥 CRITICAL: Optimized batch insert failed: {e}")
-            logger.warning(
-                "⚠️ This indicates a critical issue with VALUES clause approach!"
-            )
             raise
-        finally:
-            pass
 
     def get_embedding_by_chunk_id(
         self, chunk_id: int, provider: str, model: str

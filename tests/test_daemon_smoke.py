@@ -18,12 +18,14 @@ import json
 import os
 import shutil
 import sys
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import psutil
 import pytest
 
+from chunkhound.daemon.discovery import DaemonDiscovery
 from tests.helpers.daemon_test_helpers import (
     runtime_dir_env,
     wait_for_daemon_full_cleanup,
@@ -75,6 +77,7 @@ def _make_env(
     project_dir: Path,
     *,
     runtime_dir: Path | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Return a clean subprocess environment pointing to project_dir."""
     env = get_safe_subprocess_env(os.environ.copy())
@@ -86,6 +89,8 @@ def _make_env(
     if runtime_dir is not None:
         runtime_dir.mkdir(parents=True, exist_ok=True)
         env["CHUNKHOUND_DAEMON_RUNTIME_DIR"] = str(runtime_dir)
+    if extra_env is not None:
+        env.update(extra_env)
     return env
 
 
@@ -95,9 +100,10 @@ async def _start_proxy_process(
     runtime_dir: Path | None = None,
     stdin: int | None = asyncio.subprocess.PIPE,
     capture_stderr: bool = False,
+    extra_env: dict[str, str] | None = None,
 ) -> asyncio.subprocess.Process:
     """Launch a ``chunkhound mcp`` proxy subprocess and return the process."""
-    env = _make_env(project_dir, runtime_dir=runtime_dir)
+    env = _make_env(project_dir, runtime_dir=runtime_dir, extra_env=extra_env)
     stderr = asyncio.subprocess.PIPE if capture_stderr else asyncio.subprocess.DEVNULL
     return await create_subprocess_exec_safe(
         _chunkhound_exe(),
@@ -116,12 +122,14 @@ async def _start_proxy(
     *,
     runtime_dir: Path | None = None,
     capture_stderr: bool = False,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[asyncio.subprocess.Process, SubprocessJsonRpcClient]:
     """Launch a ``chunkhound mcp`` proxy subprocess and return (proc, client)."""
     proc = await _start_proxy_process(
         project_dir,
         runtime_dir=runtime_dir,
         capture_stderr=capture_stderr,
+        extra_env=extra_env,
     )
     client = SubprocessJsonRpcClient(proc)
     await client.start()
@@ -132,6 +140,7 @@ async def _run_proxy_to_failure(
     project_dir: Path,
     *,
     runtime_dir: Path | None = None,
+    extra_env: dict[str, str] | None = None,
     timeout: float = 30.0,
 ) -> tuple[int, str, str]:
     """Run ``chunkhound mcp`` until it exits and capture stdio."""
@@ -140,6 +149,7 @@ async def _run_proxy_to_failure(
         runtime_dir=runtime_dir,
         stdin=asyncio.subprocess.DEVNULL,
         capture_stderr=True,
+        extra_env=extra_env,
     )
     stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     return proc.returncode or 0, stdout.decode(), stderr.decode()
@@ -434,7 +444,7 @@ async def test_daemon_lock_file_created(pre_indexed_project_dir: Path) -> None:
     """Verify the daemon lock file is created with correct content and cleaned up.
 
     Checks:
-    - Lock file is created at .chunkhound/daemon.lock.
+    - Lock file is created at the runtime-scoped daemon lock path.
     - Lock file contains valid JSON with 'pid', 'socket_path', 'started_at'.
     - Recorded PID matches a live process.
     - Lock file is removed after the daemon shuts down.
@@ -443,7 +453,8 @@ async def test_daemon_lock_file_created(pre_indexed_project_dir: Path) -> None:
     graceful shutdown, causing the lock file cleanup to be inconsistent.
     """
     project_dir = pre_indexed_project_dir
-    lock_path = project_dir / ".chunkhound" / "daemon.lock"
+    discovery = DaemonDiscovery(project_dir)
+    lock_path = discovery.get_lock_path()
 
     proc, client = await _start_proxy(project_dir)
     try:
@@ -481,13 +492,16 @@ async def test_daemon_lock_file_created(pre_indexed_project_dir: Path) -> None:
 
         # Socket path should exist (Unix) or be a valid TCP address (Windows)
         socket_path = lock_data["socket_path"]
+        expected_socket_path = DaemonDiscovery(project_dir).get_socket_path()
+        assert socket_path == expected_socket_path
         if socket_path.startswith("tcp:"):
-            # On Windows: verify it's a valid TCP address format
-            assert socket_path.startswith("tcp:127.0.0.1:"), (
-                f"Invalid TCP address format in lock file: {socket_path}"
+            assert socket_path.startswith("tcp:127.0.0.1:")
+            assert not socket_path.endswith(":0"), (
+                f"Windows lock published a bind-time port placeholder: {socket_path}"
             )
         else:
-            # On Unix: verify the socket file exists
+            # On Unix: verify the runtime-scoped socket file exists
+            assert Path(socket_path).parent == discovery.get_socket_dir()
             assert os.path.exists(socket_path), (
                 f"Socket file '{socket_path}' listed in lock file does not exist"
             )
@@ -509,6 +523,43 @@ async def test_daemon_lock_file_created(pre_indexed_project_dir: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_native_watchman
+async def test_watchman_start_failure_returns_fast_and_skips_lock_publication(
+    pre_indexed_project_dir: Path,
+) -> None:
+    """Watchman startup failures should surface quickly without publishing a lock."""
+    project_dir = pre_indexed_project_dir
+    config_path = project_dir / ".chunkhound.json"
+    config = json.loads(config_path.read_text())
+    config.setdefault("indexing", {})["realtime_backend"] = "watchman"
+    config_path.write_text(json.dumps(config))
+
+    start_time = time.monotonic()
+    returncode, _stdout, stderr_text = await _run_proxy_to_failure(
+        project_dir,
+        extra_env={"CHUNKHOUND_FAKE_WATCHMAN_FAIL_BEFORE_READY": "1"},
+        timeout=20.0,
+    )
+    elapsed = time.monotonic() - start_time
+
+    assert returncode != 0, "Proxy should fail when watchman startup fails"
+    assert elapsed < 20.0, f"Expected fail-fast startup error, got {elapsed:.2f}s"
+    assert "Watchman sidecar startup failed" in stderr_text
+    assert "Recent daemon log output" in stderr_text
+
+    lock_path = DaemonDiscovery(project_dir).get_lock_path()
+    assert not lock_path.exists(), (
+        "Daemon lock should not be published on watchman failure"
+    )
+    assert not await wait_for_daemon_start(project_dir, timeout=1.0)
+
+    daemon_log_path = project_dir / ".chunkhound" / "daemon.log"
+    assert daemon_log_path.exists()
+    daemon_log_text = daemon_log_path.read_text(encoding="utf-8", errors="replace")
+    assert "Watchman sidecar startup failed" in daemon_log_text
+
+
+@pytest.mark.asyncio
 async def test_daemon_sibling_roots_allowed(tmp_path: Path) -> None:
     """Sibling project roots should start separate daemons without conflict."""
     root_a = tmp_path / "repo-a"
@@ -521,11 +572,11 @@ async def test_daemon_sibling_roots_allowed(tmp_path: Path) -> None:
     try:
         proc_a, client_a = await _start_proxy(root_a, runtime_dir=runtime_dir)
         await _do_mcp_handshake(client_a, timeout=30.0)
-        assert await wait_for_daemon_start(root_a, timeout=15.0)
+        assert await wait_for_daemon_start(root_a, timeout=15.0, runtime_dir=runtime_dir)
 
         proc_b, client_b = await _start_proxy(root_b, runtime_dir=runtime_dir)
         await _do_mcp_handshake(client_b, timeout=30.0)
-        assert await wait_for_daemon_start(root_b, timeout=15.0)
+        assert await wait_for_daemon_start(root_b, timeout=15.0, runtime_dir=runtime_dir)
     finally:
         await asyncio.gather(
             *[
@@ -552,7 +603,7 @@ async def test_daemon_parent_then_child_blocks(tmp_path: Path) -> None:
     try:
         proc, client = await _start_proxy(parent, runtime_dir=runtime_dir)
         await _do_mcp_handshake(client, timeout=30.0)
-        assert await wait_for_daemon_start(parent, timeout=15.0)
+        assert await wait_for_daemon_start(parent, timeout=15.0, runtime_dir=runtime_dir)
 
         returncode, _, stderr = await _run_proxy_to_failure(
             child,
@@ -587,7 +638,7 @@ async def test_daemon_child_then_parent_blocks(tmp_path: Path) -> None:
     try:
         proc, client = await _start_proxy(child, runtime_dir=runtime_dir)
         await _do_mcp_handshake(client, timeout=30.0)
-        assert await wait_for_daemon_start(child, timeout=15.0)
+        assert await wait_for_daemon_start(child, timeout=15.0, runtime_dir=runtime_dir)
 
         returncode, _, stderr = await _run_proxy_to_failure(
             parent,
@@ -643,7 +694,9 @@ async def test_daemon_concurrent_parent_child_first_start_allows_only_one(
         loser_root = child if parent_ok else parent
         loser_proc = child_proc if parent_ok else parent_proc
 
-        assert await wait_for_daemon_start(winner_root, timeout=15.0)
+        assert await wait_for_daemon_start(
+            winner_root, timeout=15.0, runtime_dir=runtime_dir
+        )
 
         assert loser_proc is not None
         loser_returncode = await asyncio.wait_for(loser_proc.wait(), timeout=30.0)
@@ -653,6 +706,9 @@ async def test_daemon_concurrent_parent_child_first_start_allows_only_one(
         assert "Overlapping daemon roots are not supported." in loser_stderr
         assert str(parent.resolve()) in loser_stderr
         assert str(child.resolve()) in loser_stderr
+        with runtime_dir_env(runtime_dir):
+            assert DaemonDiscovery(winner_root).get_lock_path().exists()
+            assert not DaemonDiscovery(loser_root).get_lock_path().exists()
         assert await wait_for_daemon_full_cleanup(
             loser_root,
             runtime_dir=runtime_dir,
@@ -691,16 +747,16 @@ async def test_daemon_symlink_path_reuses_canonical_root(tmp_path: Path) -> None
     try:
         proc1, client1 = await _start_proxy(project_dir, runtime_dir=runtime_dir)
         await _do_mcp_handshake(client1, timeout=30.0)
-        assert await wait_for_daemon_start(project_dir, timeout=15.0)
-        first_pid = json.loads(
-            (project_dir / ".chunkhound" / "daemon.lock").read_text()
-        )["pid"]
+        assert await wait_for_daemon_start(
+            project_dir, timeout=15.0, runtime_dir=runtime_dir
+        )
+        with runtime_dir_env(runtime_dir):
+            lock_path = DaemonDiscovery(project_dir).get_lock_path()
+        first_pid = json.loads(lock_path.read_text())["pid"]
 
         proc2, client2 = await _start_proxy(alias, runtime_dir=runtime_dir)
         await _do_mcp_handshake(client2, timeout=30.0)
-        second_pid = json.loads(
-            (project_dir / ".chunkhound" / "daemon.lock").read_text()
-        )["pid"]
+        second_pid = json.loads(lock_path.read_text())["pid"]
 
         assert first_pid == second_pid
     finally:
@@ -731,7 +787,9 @@ async def test_daemon_registry_entry_removed_on_shutdown(
     registry_entry = None
     try:
         await _do_mcp_handshake(client, timeout=30.0)
-        assert await wait_for_daemon_start(project_dir, timeout=15.0)
+        assert await wait_for_daemon_start(
+            project_dir, timeout=15.0, runtime_dir=runtime_dir
+        )
 
         registry_entry = await _wait_for_registry_entry(
             runtime_dir, project_dir, timeout=15.0

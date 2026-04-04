@@ -7,6 +7,7 @@ preventing issues where tools have incorrect or missing descriptions.
 import pytest
 
 from chunkhound.mcp_server.tools import TOOL_REGISTRY
+from chunkhound.version import __version__
 
 
 def test_tool_registry_populated():
@@ -16,6 +17,7 @@ def test_tool_registry_populated():
     # Check expected tools are present
     expected_tools = [
         "search",
+        "daemon_status",
         "code_research",
     ]
     for tool_name in expected_tools:
@@ -96,6 +98,18 @@ def test_code_research_schema():
     assert "query" in required, "'query' should be required for code_research"
 
 
+def test_daemon_status_schema():
+    """Verify daemon_status has a zero-arg runtime schema."""
+    tool = TOOL_REGISTRY["daemon_status"]
+
+    assert "status" in tool.description.lower()
+    props = tool.parameters["properties"]
+    required = tool.parameters.get("required", [])
+
+    assert props == {}, "daemon_status should not expose infrastructure arguments"
+    assert required == [], "daemon_status should not require client-supplied args"
+
+
 def test_capability_flags():
     """Verify tools correctly declare capability requirements."""
     # search: no special requirements (validates embedding at runtime)
@@ -103,10 +117,882 @@ def test_capability_flags():
     assert not TOOL_REGISTRY["search"].requires_llm
     assert not TOOL_REGISTRY["search"].requires_reranker
 
+    assert not TOOL_REGISTRY["daemon_status"].requires_embeddings
+    assert not TOOL_REGISTRY["daemon_status"].requires_llm
+    assert not TOOL_REGISTRY["daemon_status"].requires_reranker
+
     # code_research: requires all capabilities
     assert TOOL_REGISTRY["code_research"].requires_embeddings
     assert TOOL_REGISTRY["code_research"].requires_llm
     assert TOOL_REGISTRY["code_research"].requires_reranker
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_returns_scan_progress_snapshot():
+    """Verify daemon_status returns the shared base scan_progress payload."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "realtime": {
+            "service_state": "running",
+            "last_error": None,
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    assert result["status"] == "ready"
+    assert result["server_version"] == __version__
+    assert result["query_ready"] is True
+    assert result["scan_progress"]["realtime"]["service_state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_degrades_on_realtime_state():
+    """Verify daemon_status honors degraded realtime state even without scan_error."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "realtime": {
+            "service_state": "degraded",
+            "last_error": None,
+            "resync": {"last_error": None},
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    assert result["status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_exposes_watchman_realtime_details():
+    """Verify daemon_status exposes stale Watchman state through the summary surface."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "realtime": {
+            "configured_backend": "watchman",
+            "effective_backend": "watchman",
+            "monitoring_mode": "watchman",
+            "service_state": "running",
+            "watchman_sidecar_state": "running",
+            "watchman_connection_state": "connected",
+            "live_indexing_state": "idle",
+            "live_indexing_hint": "Live indexing is connected and idle.",
+            "watchman_watch_root": "/repo",
+            "watchman_relative_root": "packages/api",
+            "watchman_subscription_names": ["chunkhound-live-indexing"],
+            "watchman_subscription_count": 1,
+            "watchman_subscription_pdu_dropped": 3,
+            "watchman_scopes": [
+                {
+                    "subscription_name": "chunkhound-live-indexing",
+                    "scope_kind": "primary",
+                    "requested_path": "/repo/packages/api",
+                    "watch_root": "/repo",
+                    "relative_root": "packages/api",
+                }
+            ],
+            "last_warning": "watchman recrawl observed",
+            "last_error": None,
+            "watchman_loss_of_sync": {
+                "count": 2,
+                "fresh_instance_count": 1,
+                "recrawl_count": 1,
+                "disconnect_count": 0,
+                "last_reason": "recrawl",
+                "last_at": "2026-03-08T00:00:04Z",
+                "last_details": {"warning": "Recrawled this watch"},
+            },
+            "watchman_reconnect": {
+                "state": "restored",
+                "attempt_count": 1,
+                "max_attempts": 3,
+                "retry_delay_seconds": 1.0,
+                "last_started_at": "2026-03-08T00:00:03Z",
+                "last_completed_at": "2026-03-08T00:00:04Z",
+                "last_error": None,
+                "last_result": "restored",
+            },
+            "resync": {
+                "needs_resync": True,
+                "in_progress": False,
+                "last_reason": "realtime_loss_of_sync",
+                "last_error": None,
+            },
+            "pipeline": {
+                "last_source_event_at": "2026-03-08T00:00:02Z",
+                "last_source_event_type": "modified",
+                "last_source_event_path": "/repo/packages/api/app.py",
+                "last_accepted_event_at": "2026-03-08T00:00:02Z",
+                "last_accepted_event_type": "modified",
+                "last_accepted_event_path": "/repo/packages/api/app.py",
+                "last_processing_started_at": "2026-03-08T00:00:03Z",
+                "last_processing_started_path": "/repo/packages/api/app.py",
+                "last_processing_completed_at": "2026-03-08T00:00:04Z",
+                "last_processing_completed_path": "/repo/packages/api/app.py",
+                "filtered_event_count": 1,
+                "suppressed_duplicate_count": 2,
+                "translation_error_count": 0,
+                "processing_error_count": 0,
+                "stall_threshold_seconds": 30.0,
+            },
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    realtime = result["scan_progress"]["realtime"]
+    assert result["status"] == "degraded"
+    assert result["query_ready"] is True
+    assert realtime["configured_backend"] == "watchman"
+    assert realtime["watchman_sidecar_state"] == "running"
+    assert realtime["watchman_connection_state"] == "connected"
+    assert realtime["watchman_subscription_count"] == 1
+    assert realtime["watchman_subscription_names"] == ["chunkhound-live-indexing"]
+    assert realtime["watchman_subscription_pdu_dropped"] == 3
+    assert realtime["live_indexing_state"] == "idle"
+    assert realtime["live_indexing_hint"] == "Live indexing is connected and idle."
+    assert realtime["watchman_watch_root"] == "/repo"
+    assert realtime["watchman_relative_root"] == "packages/api"
+    assert realtime["watchman_scopes"] == [
+        {
+            "subscription_name": "chunkhound-live-indexing",
+            "scope_kind": "primary",
+            "requested_path": "/repo/packages/api",
+            "watch_root": "/repo",
+            "relative_root": "packages/api",
+        }
+    ]
+    assert realtime["watchman_loss_of_sync"]["fresh_instance_count"] == 1
+    assert realtime["watchman_loss_of_sync"]["recrawl_count"] == 1
+    assert realtime["watchman_reconnect"]["state"] == "restored"
+    assert realtime["watchman_reconnect"]["last_result"] == "restored"
+    assert realtime["resync"]["needs_resync"] is True
+    assert realtime["resync"]["last_reason"] == "realtime_loss_of_sync"
+    assert realtime["pipeline"]["filtered_event_count"] == 1
+    assert realtime["pipeline"]["suppressed_duplicate_count"] == 2
+    assert realtime["pipeline"]["last_processing_completed_path"] == (
+        "/repo/packages/api/app.py"
+    )
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_exposes_startup_timing_breakdown():
+    """Startup phase timing should surface without changing the top-level summary."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "realtime": {
+            "service_state": "running",
+            "last_error": None,
+            "startup": {
+                "state": "completed",
+                "mode": "daemon",
+                "started_at": "2026-03-08T00:00:00Z",
+                "completed_at": "2026-03-08T00:00:04Z",
+                "exposure_ready_at": "2026-03-08T00:00:04Z",
+                "total_duration_seconds": 4.0,
+                "current_phase": None,
+                "last_error": None,
+                "phases": {
+                    "initialize": {
+                        "state": "completed",
+                        "started_at": "2026-03-08T00:00:00Z",
+                        "completed_at": "2026-03-08T00:00:00Z",
+                        "duration_seconds": 0.12,
+                    },
+                    "db_connect": {
+                        "state": "completed",
+                        "started_at": "2026-03-08T00:00:00Z",
+                        "completed_at": "2026-03-08T00:00:01Z",
+                        "duration_seconds": 0.83,
+                    },
+                    "realtime_start": {
+                        "state": "completed",
+                        "started_at": "2026-03-08T00:00:01Z",
+                        "completed_at": "2026-03-08T00:00:03Z",
+                        "duration_seconds": 2.0,
+                    },
+                    "startup_barrier": {
+                        "state": "completed",
+                        "started_at": "2026-03-08T00:00:03Z",
+                        "completed_at": "2026-03-08T00:00:03Z",
+                        "duration_seconds": 0.01,
+                    },
+                    "daemon_publish": {
+                        "state": "completed",
+                        "started_at": "2026-03-08T00:00:03Z",
+                        "completed_at": "2026-03-08T00:00:04Z",
+                        "duration_seconds": 1.04,
+                    },
+                    "watchman_sidecar_start": {
+                        "state": "completed",
+                        "started_at": "2026-03-08T00:00:01Z",
+                        "completed_at": "2026-03-08T00:00:02Z",
+                        "duration_seconds": 1.2,
+                    },
+                    "watchman_watch_project": {
+                        "state": "completed",
+                        "started_at": "2026-03-08T00:00:02Z",
+                        "completed_at": "2026-03-08T00:00:02Z",
+                        "duration_seconds": 0.3,
+                    },
+                    "watchman_scope_discovery": {
+                        "state": "completed",
+                        "started_at": "2026-03-08T00:00:02Z",
+                        "completed_at": "2026-03-08T00:00:02Z",
+                        "duration_seconds": 0.2,
+                    },
+                    "watchman_subscription_setup": {
+                        "state": "completed",
+                        "started_at": "2026-03-08T00:00:02Z",
+                        "completed_at": "2026-03-08T00:00:03Z",
+                        "duration_seconds": 0.3,
+                    },
+                    "watchdog_setup": {
+                        "state": "uninitialized",
+                        "started_at": None,
+                        "completed_at": None,
+                        "duration_seconds": None,
+                    },
+                    "polling_setup": {
+                        "state": "uninitialized",
+                        "started_at": None,
+                        "completed_at": None,
+                        "duration_seconds": None,
+                    },
+                },
+            },
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    startup = result["scan_progress"]["realtime"]["startup"]
+    assert result["status"] == "ready"
+    assert result["query_ready"] is True
+    assert startup["mode"] == "daemon"
+    assert startup["exposure_ready_at"] == "2026-03-08T00:00:04Z"
+    assert startup["phases"]["watchman_sidecar_start"]["duration_seconds"] == 1.2
+    assert startup["phases"]["daemon_publish"]["duration_seconds"] == 1.04
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_degrades_stalled_pipeline_summary():
+    """A stalled pipeline should degrade the top-level daemon summary."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "realtime": {
+            "service_state": "running",
+            "last_error": None,
+            "resync": {
+                "needs_resync": False,
+                "in_progress": False,
+                "last_reason": None,
+                "last_error": None,
+            },
+            "live_indexing_state": "stalled",
+            "live_indexing_hint": (
+                "Accepted events are queued but processing has not advanced in "
+                "30s; inspect pipeline timestamps and processing_error_count."
+            ),
+            "pipeline": {
+                "last_source_event_at": "2026-03-08T00:00:01Z",
+                "last_source_event_type": "modified",
+                "last_source_event_path": "/repo/app.py",
+                "last_accepted_event_at": "2026-03-08T00:00:01Z",
+                "last_accepted_event_type": "modified",
+                "last_accepted_event_path": "/repo/app.py",
+                "last_processing_started_at": None,
+                "last_processing_started_path": None,
+                "last_processing_completed_at": None,
+                "last_processing_completed_path": None,
+                "filtered_event_count": 0,
+                "suppressed_duplicate_count": 0,
+                "translation_error_count": 0,
+                "processing_error_count": 0,
+                "stall_threshold_seconds": 30.0,
+            },
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    assert result["status"] == "degraded"
+    assert result["query_ready"] is True
+    assert result["scan_progress"]["realtime"]["live_indexing_state"] == "stalled"
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_keeps_query_ready_after_realtime_failure():
+    """Later realtime reconciliation failures should stay queryable."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "scan_error": (
+            "Storage reconciliation cleanup failed: "
+            "database invalidated during orphan cleanup"
+        ),
+        "realtime": {
+            "service_state": "degraded",
+            "last_error": (
+                "Realtime resync failed: "
+                "Storage reconciliation cleanup failed: "
+                "database invalidated during orphan cleanup"
+            ),
+            "resync": {
+                "needs_resync": True,
+                "in_progress": False,
+                "last_reason": "realtime_loss_of_sync",
+                "last_error": (
+                    "Storage reconciliation cleanup failed: "
+                    "database invalidated during orphan cleanup"
+                ),
+            },
+            "live_indexing_state": "degraded",
+            "live_indexing_hint": (
+                "Live indexing remains degraded after reconciliation failure; "
+                "inspect resync.last_error."
+            ),
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    assert result["status"] == "degraded"
+    assert result["query_ready"] is True
+    assert (
+        "Storage reconciliation cleanup failed"
+        in result["scan_progress"]["scan_error"]
+    )
+    assert (
+        "Storage reconciliation cleanup failed"
+        in result["scan_progress"]["realtime"]["resync"]["last_error"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_keeps_initial_scan_failure_unqueryable():
+    """Initial scan failure should still leave daemon_status unqueryable."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 0,
+        "chunks_created": 0,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": None,
+        "scan_error": "Initial directory scan failed: database unavailable",
+        "realtime": {
+            "service_state": "running",
+            "last_error": None,
+            "resync": {
+                "needs_resync": False,
+                "in_progress": False,
+                "last_reason": None,
+                "last_error": None,
+            },
+            "live_indexing_state": "idle",
+            "live_indexing_hint": "Live indexing is connected and idle.",
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    assert result["status"] == "degraded"
+    assert result["query_ready"] is False
+    assert result["scan_progress"]["scan_error"] == (
+        "Initial directory scan failed: database unavailable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_keeps_query_ready_during_post_bootstrap_scan():
+    """Post-bootstrap scans should not clear query readiness."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": True,
+        "scan_started_at": "2026-04-01T00:00:10",
+        "scan_completed_at": "2026-04-01T00:00:05",
+        "scan_error": None,
+        "realtime": {
+            "service_state": "running",
+            "last_error": None,
+            "resync": {
+                "needs_resync": False,
+                "in_progress": True,
+                "last_reason": "realtime_loss_of_sync",
+                "last_error": None,
+            },
+            "live_indexing_state": "busy",
+            "live_indexing_hint": "Live indexing is applying a reconciliation scan.",
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    assert result["status"] == "ready"
+    assert result["query_ready"] is True
+    assert result["scan_progress"]["is_scanning"] is True
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_keeps_initial_scan_in_progress_unqueryable():
+    """Initial bootstrap scans should remain unqueryable until the first success."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 1,
+        "chunks_created": 2,
+        "is_scanning": True,
+        "scan_started_at": "2026-04-01T00:00:00",
+        "scan_completed_at": None,
+        "scan_error": None,
+        "realtime": {
+            "service_state": "running",
+            "last_error": None,
+            "resync": {
+                "needs_resync": False,
+                "in_progress": False,
+                "last_reason": None,
+                "last_error": None,
+            },
+            "live_indexing_state": "busy",
+            "live_indexing_hint": "Live indexing is applying the initial scan.",
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    assert result["status"] == "initializing"
+    assert result["query_ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_exposes_pending_mutation_backlog_details():
+    """Pending mutation composition should be visible through daemon_status."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "realtime": {
+            "service_state": "running",
+            "last_error": None,
+            "pending_files": 3,
+            "pending_mutations": {
+                "total": 4,
+                "unique_paths": 3,
+                "counts_by_operation": {
+                    "change": 2,
+                    "delete": 1,
+                    "embed": 1,
+                    "dir_delete": 0,
+                    "dir_index": 0,
+                },
+                "retry_counts_by_operation": {
+                    "change": 0,
+                    "delete": 1,
+                    "embed": 0,
+                    "dir_delete": 0,
+                    "dir_index": 0,
+                },
+                "retrying_mutations": 1,
+                "oldest_pending_at": "2026-03-08T00:00:01Z",
+                "oldest_pending_age_seconds": 37,
+                "oldest_pending_operation": "delete",
+                "oldest_pending_path": "/repo/retry_delete.py",
+                "oldest_pending_retry_count": 1,
+                "recovery_phase": "mutation_drain",
+                "resync_reason": None,
+            },
+            "resync": {
+                "needs_resync": False,
+                "in_progress": False,
+                "last_reason": None,
+                "last_error": None,
+            },
+            "live_indexing_state": "busy",
+            "live_indexing_hint": "Live indexing is actively processing changes.",
+            "pipeline": {
+                "last_source_event_at": "2026-03-08T00:00:01Z",
+                "last_source_event_type": "modified",
+                "last_source_event_path": "/repo/retry_delete.py",
+                "last_accepted_event_at": "2026-03-08T00:00:01Z",
+                "last_accepted_event_type": "modified",
+                "last_accepted_event_path": "/repo/retry_delete.py",
+                "last_processing_started_at": "2026-03-08T00:00:02Z",
+                "last_processing_started_path": "/repo/retry_delete.py",
+                "last_processing_completed_at": "2026-03-08T00:00:03Z",
+                "last_processing_completed_path": "/repo/retry_delete.py",
+                "filtered_event_count": 0,
+                "suppressed_duplicate_count": 0,
+                "translation_error_count": 0,
+                "processing_error_count": 0,
+                "stall_threshold_seconds": 30.0,
+            },
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    realtime = result["scan_progress"]["realtime"]
+    assert result["status"] == "ready"
+    assert result["query_ready"] is True
+    assert realtime["live_indexing_state"] == "busy"
+    assert realtime["pending_files"] == 3
+    assert realtime["pending_mutations"]["total"] == 4
+    assert realtime["pending_mutations"]["unique_paths"] == 3
+    assert realtime["pending_mutations"]["counts_by_operation"]["change"] == 2
+    assert realtime["pending_mutations"]["counts_by_operation"]["delete"] == 1
+    assert realtime["pending_mutations"]["retry_counts_by_operation"]["delete"] == 1
+    assert realtime["pending_mutations"]["retrying_mutations"] == 1
+    assert realtime["pending_mutations"]["oldest_pending_operation"] == "delete"
+    assert realtime["pending_mutations"]["oldest_pending_path"] == (
+        "/repo/retry_delete.py"
+    )
+    assert realtime["pending_mutations"]["recovery_phase"] == "mutation_drain"
+    assert realtime["pending_mutations"]["resync_reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_exposes_hot_path_event_pressure():
+    """Hot-path pressure detail should surface through daemon_status unchanged."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "realtime": {
+            "service_state": "running",
+            "last_error": None,
+            "live_indexing_state": "busy",
+            "live_indexing_hint": "Live indexing is actively processing changes.",
+            "event_pressure": {
+                "state": "elevated",
+                "sample_path": "/repo/generated/build.log",
+                "sample_scope": "excluded",
+                "sample_event_type": "modified",
+                "events_in_window": 42,
+                "coalesced_updates": 0,
+                "window_seconds": 30.0,
+                "last_observed_at": "2026-03-08T00:00:04Z",
+            },
+            "pipeline": {
+                "last_source_event_at": "2026-03-08T00:00:04Z",
+                "last_source_event_type": "modified",
+                "last_source_event_path": "/repo/generated/build.log",
+                "last_accepted_event_at": "2026-03-08T00:00:01Z",
+                "last_accepted_event_type": "modified",
+                "last_accepted_event_path": "/repo/app.py",
+                "last_processing_started_at": "2026-03-08T00:00:03Z",
+                "last_processing_started_path": "/repo/app.py",
+                "last_processing_completed_at": "2026-03-08T00:00:03Z",
+                "last_processing_completed_path": "/repo/app.py",
+                "filtered_event_count": 42,
+                "suppressed_duplicate_count": 0,
+                "translation_error_count": 0,
+                "processing_error_count": 0,
+                "stall_threshold_seconds": 30.0,
+            },
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    realtime = result["scan_progress"]["realtime"]
+    assert result["status"] == "ready"
+    assert result["query_ready"] is True
+    assert realtime["event_pressure"]["state"] == "elevated"
+    assert realtime["event_pressure"]["sample_path"] == "/repo/generated/build.log"
+    assert realtime["event_pressure"]["sample_scope"] == "excluded"
+    assert realtime["event_pressure"]["sample_event_type"] == "modified"
+    assert realtime["event_pressure"]["events_in_window"] == 42
+    assert realtime["event_pressure"]["coalesced_updates"] == 0
+    assert realtime["event_pressure"]["window_seconds"] == 30.0
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_exposes_event_queue_overflow_reconciling_payload():
+    """Overflow-burst status should be visible through the public daemon_status tool."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "realtime": {
+            "service_state": "running",
+            "last_error": None,
+            "live_indexing_state": "degraded",
+            "live_indexing_hint": (
+                "Live indexing is reconciling after internal event queue "
+                "overflow; inspect event_queue.overflow and resync.last_reason."
+            ),
+            "event_queue": {
+                "size": 1000,
+                "maxsize": 1000,
+                "accepted": 1007,
+                "dropped": 2097,
+                "last_reason": "queue_full",
+                "last_event_type": "modified",
+                "last_file_path": "/repo/overflow.py",
+                "last_enqueued_at": "2026-03-08T00:00:04Z",
+                "last_dropped_at": "2026-03-08T00:00:04Z",
+                "overflow": {
+                    "state": "reconciling",
+                    "burst_count": 1,
+                    "current_burst_dropped": 2097,
+                    "last_burst_dropped": 0,
+                    "last_started_at": "2026-03-08T00:00:04Z",
+                    "last_cleared_at": None,
+                    "sample_event_type": "modified",
+                    "sample_file_path": "/repo/overflow.py",
+                },
+            },
+            "resync": {
+                "needs_resync": True,
+                "in_progress": False,
+                "last_reason": "event_queue_overflow",
+                "last_error": None,
+            },
+            "pipeline": {
+                "last_source_event_at": "2026-03-08T00:00:04Z",
+                "last_source_event_type": "modified",
+                "last_source_event_path": "/repo/overflow.py",
+                "last_accepted_event_at": "2026-03-08T00:00:04Z",
+                "last_accepted_event_type": "modified",
+                "last_accepted_event_path": "/repo/overflow.py",
+                "last_processing_started_at": None,
+                "last_processing_started_path": None,
+                "last_processing_completed_at": None,
+                "last_processing_completed_path": None,
+                "filtered_event_count": 0,
+                "suppressed_duplicate_count": 0,
+                "translation_error_count": 0,
+                "processing_error_count": 0,
+                "stall_threshold_seconds": 30.0,
+            },
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    realtime = result["scan_progress"]["realtime"]
+    assert result["status"] == "degraded"
+    assert result["query_ready"] is True
+    assert realtime["event_queue"]["overflow"]["state"] == "reconciling"
+    assert realtime["event_queue"]["overflow"]["current_burst_dropped"] == 2097
+    assert realtime["event_queue"]["overflow"]["sample_file_path"] == (
+        "/repo/overflow.py"
+    )
+    assert realtime["resync"]["last_reason"] == "event_queue_overflow"
+    assert realtime["live_indexing_hint"] == (
+        "Live indexing is reconciling after internal event queue overflow; "
+        "inspect event_queue.overflow and resync.last_reason."
+    )
+
+
+@pytest.mark.asyncio
+async def test_daemon_status_tool_exposes_event_queue_overflow_failed_payload():
+    """Failed overflow recovery should stay explicit through daemon_status."""
+    from chunkhound.mcp_server.tools import execute_tool
+
+    scan_progress = {
+        "files_processed": 3,
+        "chunks_created": 9,
+        "is_scanning": False,
+        "scan_started_at": "2026-03-08T00:00:00",
+        "scan_completed_at": "2026-03-08T00:00:05",
+        "realtime": {
+            "service_state": "degraded",
+            "last_error": "No resync callback configured",
+            "live_indexing_state": "degraded",
+            "live_indexing_hint": (
+                "Live indexing remains degraded after internal event queue "
+                "overflow; inspect event_queue.overflow and resync.last_error."
+            ),
+            "event_queue": {
+                "size": 1000,
+                "maxsize": 1000,
+                "accepted": 1007,
+                "dropped": 2097,
+                "last_reason": "queue_full",
+                "last_event_type": "modified",
+                "last_file_path": "/repo/overflow.py",
+                "last_enqueued_at": "2026-03-08T00:00:04Z",
+                "last_dropped_at": "2026-03-08T00:00:04Z",
+                "overflow": {
+                    "state": "failed",
+                    "burst_count": 1,
+                    "current_burst_dropped": 2097,
+                    "last_burst_dropped": 2097,
+                    "last_started_at": "2026-03-08T00:00:04Z",
+                    "last_cleared_at": None,
+                    "sample_event_type": "modified",
+                    "sample_file_path": "/repo/overflow.py",
+                },
+            },
+            "resync": {
+                "needs_resync": True,
+                "in_progress": False,
+                "last_reason": "event_queue_overflow",
+                "last_error": "No resync callback configured",
+            },
+            "pipeline": {
+                "last_source_event_at": "2026-03-08T00:00:04Z",
+                "last_source_event_type": "modified",
+                "last_source_event_path": "/repo/overflow.py",
+                "last_accepted_event_at": "2026-03-08T00:00:04Z",
+                "last_accepted_event_type": "modified",
+                "last_accepted_event_path": "/repo/overflow.py",
+                "last_processing_started_at": None,
+                "last_processing_started_path": None,
+                "last_processing_completed_at": None,
+                "last_processing_completed_path": None,
+                "filtered_event_count": 0,
+                "suppressed_duplicate_count": 0,
+                "translation_error_count": 0,
+                "processing_error_count": 0,
+                "stall_threshold_seconds": 30.0,
+            },
+        },
+    }
+
+    result = await execute_tool(
+        tool_name="daemon_status",
+        services=None,
+        embedding_manager=None,
+        arguments={},
+        scan_progress=scan_progress,
+    )
+
+    realtime = result["scan_progress"]["realtime"]
+    assert result["status"] == "degraded"
+    assert result["query_ready"] is True
+    assert realtime["event_queue"]["overflow"]["state"] == "failed"
+    assert realtime["event_queue"]["overflow"]["last_burst_dropped"] == 2097
+    assert realtime["resync"]["last_error"] == "No resync callback configured"
+    assert realtime["live_indexing_hint"] == (
+        "Live indexing remains degraded after internal event queue overflow; "
+        "inspect event_queue.overflow and resync.last_error."
+    )
 
 
 def test_stdio_server_uses_registry_descriptions():
@@ -202,6 +1088,8 @@ def test_search_enum_restricted_without_embeddings():
     # Find the search tool
     search_tool = next((t for t in tools if t.name == "search"), None)
     assert search_tool is not None, "search tool should be in list"
+    daemon_status_tool = next((t for t in tools if t.name == "daemon_status"), None)
+    assert daemon_status_tool is not None, "daemon_status tool should be in list"
 
     # Verify the type enum is restricted to regex only
     type_schema = search_tool.inputSchema["properties"]["type"]

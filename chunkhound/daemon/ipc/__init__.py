@@ -8,8 +8,8 @@ Public API:
     write_frame(writer, obj)   -> None
 
 Address format:
-    Unix/macOS : /tmp/chunkhound-XXXXXXXX.sock  (filesystem path)
-    Windows    : tcp:127.0.0.1:<port>           (TCP loopback)
+    Unix/macOS : /tmp/chunkhound-daemon-sockets/<runtime-hash>/chunkhound-XXXXXXXX.sock
+    Windows    : tcp:127.0.0.1:<runtime-selected-port>
 """
 
 from __future__ import annotations
@@ -39,9 +39,9 @@ async def create_server(
 ) -> tuple[asyncio.AbstractServer, str]:
     """Start the IPC server and return (server, actual_address).
 
-    On Unix, *address* is a socket path and returned unchanged.
-    On Windows, *address* is 'tcp:127.0.0.1:0' and the actual port is
-    resolved and returned as 'tcp:127.0.0.1:<port>'.
+    On Unix, *address* is a runtime-scoped socket path and is returned unchanged.
+    On Windows, *address* is the loopback port selected by discovery startup
+    coordination and the returned address should match it exactly.
     """
     if _WINDOWS:
         from .windows_pipe import create_server as _ws_create
