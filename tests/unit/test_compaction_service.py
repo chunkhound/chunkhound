@@ -185,6 +185,7 @@ class TestStorageStats:
 
         service = CompactionService(db_path, config_with_compaction)
         service._compaction_in_progress = True
+        service._compaction_thread_done.clear()  # Simulate active thread
 
         should, stats = service.check_should_compact(mock_provider)
         assert should is False
@@ -233,6 +234,7 @@ class TestBlockingCompaction:
 
         # Simulate an in-progress compaction
         service._compaction_in_progress = True
+        service._compaction_thread_done.clear()  # Simulate active thread
 
         # This should be rejected immediately
         result = await service.compact_blocking(mock_provider)
@@ -442,6 +444,98 @@ class TestShutdown:
             assert compaction_cancelled.is_set()
 
     @pytest.mark.asyncio
+    async def test_cancelled_task_preserves_flag_while_thread_alive(
+        self, tmp_path: Path, config_with_compaction: Config, mock_provider: MagicMock
+    ):
+        """When CancelledError propagates but the compaction thread is still
+        running, _compaction_in_progress must remain True to prevent a
+        concurrent compaction from starting."""
+        db_path = tmp_path / "test.duckdb"
+        db_path.write_bytes(b"x" * 1024)
+
+        service = CompactionService(db_path, config_with_compaction)
+
+        thread_started = threading.Event()
+        thread_can_finish = threading.Event()
+
+        def blocking_optimize(cancel_check=None):
+            thread_started.set()
+            thread_can_finish.wait(timeout=10.0)
+            return True
+
+        mock_provider.optimize = blocking_optimize
+
+        await service.compact_background(mock_provider)
+        await asyncio.sleep(0)
+        assert thread_started.wait(timeout=5.0), "Thread did not start"
+
+        # Cancel the asyncio task while thread is still running
+        task = service._compaction_task
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+        # Thread is alive → flag must stay True
+        assert not service.compaction_thread_done.is_set()
+        assert service.is_compacting, (
+            "_compaction_in_progress was reset despite thread still running"
+        )
+
+        # Cleanup
+        thread_can_finish.set()
+        await service.shutdown(timeout=5.0)
+
+    @pytest.mark.asyncio
+    async def test_self_heals_flag_after_cancelled_task_and_thread_finish(
+        self, tmp_path: Path, config_with_compaction: Config, mock_provider: MagicMock
+    ):
+        """After task cancellation + thread completion, check_should_compact
+        self-heals the stuck _compaction_in_progress flag."""
+        db_path = tmp_path / "test.duckdb"
+        db_path.write_bytes(b"x" * 1024)
+
+        service = CompactionService(db_path, config_with_compaction)
+
+        thread_started = threading.Event()
+        thread_can_finish = threading.Event()
+
+        def blocking_optimize(cancel_check=None):
+            thread_started.set()
+            thread_can_finish.wait(timeout=10.0)
+            return True
+
+        mock_provider.optimize = blocking_optimize
+
+        await service.compact_background(mock_provider)
+        await asyncio.sleep(0)
+        assert thread_started.wait(timeout=5.0)
+
+        # Cancel the asyncio task while thread is still running
+        task = service._compaction_task
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+        assert service.is_compacting, "Flag should stay True while thread alive"
+
+        # Let thread finish — _compaction_thread_done gets set
+        thread_can_finish.set()
+        assert service.compaction_thread_done.wait(timeout=5.0)
+
+        # Flag is still stuck True (no one reset it after cancellation)
+        assert service.is_compacting
+
+        # check_should_compact should self-heal
+        should, _ = service.check_should_compact(mock_provider)
+        assert not service.is_compacting, (
+            "check_should_compact should have reset the stuck flag"
+        )
+
+    @pytest.mark.asyncio
     async def test_shutdown_cleans_up_resources(
         self, tmp_path: Path, config_with_compaction: Config, mock_provider: MagicMock
     ):
@@ -536,6 +630,45 @@ class TestShutdown:
 
         # Should be set again after completion
         assert service.compaction_thread_done.is_set()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_timeout_keeps_flag_when_thread_alive(
+        self, tmp_path: Path, config_with_compaction: Config, mock_provider: MagicMock
+    ):
+        """When shutdown times out with thread still alive, is_compacting stays True."""
+        db_path = tmp_path / "test.duckdb"
+        db_path.write_bytes(b"x" * 1024)
+
+        service = CompactionService(db_path, config_with_compaction)
+
+        thread_started = threading.Event()
+        thread_can_finish = threading.Event()
+
+        def blocking_optimize(cancel_check=None):
+            thread_started.set()
+            thread_can_finish.wait(timeout=30.0)
+            return True
+
+        mock_provider.optimize = blocking_optimize
+
+        await service.compact_background(mock_provider)
+        await asyncio.sleep(0)
+        assert thread_started.wait(timeout=5.0), "Thread did not start"
+
+        # Shutdown with very short timeout — thread will still be alive
+        await service.shutdown(timeout=0.1)
+
+        # Thread is still alive → flag must stay True
+        assert not service.compaction_thread_done.is_set()
+        assert service.is_compacting, (
+            "_compaction_in_progress was reset despite thread still running"
+        )
+
+        # Cleanup
+        thread_can_finish.set()
+        assert service.compaction_thread_done.wait(timeout=5.0), (
+            "Cleanup: thread did not exit"
+        )
 
 
 class TestIsCompacting:
