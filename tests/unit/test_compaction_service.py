@@ -860,6 +860,25 @@ class TestDuckDBProviderOptimize:
         # Lock file should not exist after completion
         assert not lock_path.exists(), f"Lock file not cleaned up: {lock_path}"
 
+    def test_optimize_does_not_delete_foreign_lock(
+        self, provider_with_fragmentation: tuple
+    ):
+        """Pre-existing lock file is not deleted when optimize() fails to acquire it."""
+        from chunkhound.providers.database.duckdb.connection_manager import (
+            get_compaction_lock_path,
+        )
+
+        provider, db_path = provider_with_fragmentation
+        lock_path = get_compaction_lock_path(db_path)
+
+        # Simulate another process holding the lock
+        lock_path.write_text("99999:1700000000")
+
+        with pytest.raises(CompactionError, match="lock"):
+            provider.optimize()
+
+        assert lock_path.exists(), "Foreign lock file was incorrectly deleted"
+
 
 class TestRowWasteRatio:
     """Test row_waste_ratio computation and its role in compaction decisions."""

@@ -3110,26 +3110,28 @@ class DuckDBProvider(SerialDatabaseProvider):
         """
         db_path = Path(self._connection_manager.db_path)
 
-        # Check disk space — 2.5x covers: exported parquet (~1x) + new compact DB (~1x)
-        # + original DB retained until swap (~0.5x safety margin)
-        self._has_sufficient_disk_space(db_path, multiplier=2.5)
-
         export_dir = db_path.parent / ".chunkhound_compaction_export"
         new_db_path = db_path.with_suffix(".compact.duckdb")
         old_db_path = db_path.with_suffix(".duckdb.old")
         wal_file = db_path.with_suffix(db_path.suffix + ".wal")
         lock_file = get_compaction_lock_path(db_path)
 
+        lock_acquired = False
         try:
             # Atomic lock acquisition (matches daemon PID lock pattern)
             try:
                 with open(lock_file, "x") as f:
                     f.write(f"{os.getpid()}:{time.time():.0f}")
+                lock_acquired = True
             except FileExistsError:
                 raise CompactionError(
                     "Compaction already in progress (lock file exists)",
                     operation="lock",
                 ) from None
+
+            # Check disk space — 2.5x covers: exported parquet (~1x) + new compact DB (~1x)
+            # + original DB retained until swap (~0.5x safety margin)
+            self._has_sufficient_disk_space(db_path, multiplier=2.5)
 
             # Suspend auto-reconnect before soft_disconnect so any concurrent
             # MCP request gets a clear error instead of opening a stale connection
@@ -3227,7 +3229,8 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Always clean up export directory and lock file
             if export_dir.exists():
                 shutil.rmtree(export_dir, ignore_errors=True)
-            lock_file.unlink(missing_ok=True)
+            if lock_acquired:
+                lock_file.unlink(missing_ok=True)
             # Only restore connection gate if provider is actually connected.
             # Success/cancel paths already set() explicitly above.
             # If error recovery failed to reconnect, leave gate closed so
