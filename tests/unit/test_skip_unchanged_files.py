@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.unit.helpers import _Cfg
+from tests.unit.helpers import _Cfg, _FakeDB
 
 
 def _install_parser_stubs(monkeypatch: pytest.MonkeyPatch):
@@ -27,34 +27,6 @@ def _install_parser_stubs(monkeypatch: pytest.MonkeyPatch):
         return _DummyParser()
     pf.create_parser_for_language = create_parser_for_language
     monkeypatch.setitem(sys.modules, "chunkhound.parsers.parser_factory", pf)
-
-
-class _FakeDB:
-    """Minimal DatabaseProvider stub that serves File records by path."""
-    def __init__(self, records):
-        # records: dict[str, FileModel]
-        self._records = records
-
-    # Methods used by IndexingCoordinator in this test path
-    def get_file_by_path(self, path: str, as_model: bool = False):
-        rec = self._records.get(path)
-        if not rec:
-            return None
-        return rec if as_model else {
-            "id": rec.id,
-            "path": rec.path,
-            "size": rec.size_bytes,
-            "modified_time": rec.mtime,
-            "language": rec.language.value,
-            "content_hash": rec.content_hash,
-        }
-
-    async def get_file_by_path_async(self, path: str, as_model: bool = False):
-        return self.get_file_by_path(path, as_model)
-
-    def has_reclaimable_space(self, operation: str = "") -> bool:
-        return False
-
 
 
 def test_process_directory_skips_unchanged_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
