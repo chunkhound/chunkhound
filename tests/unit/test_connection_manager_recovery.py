@@ -21,10 +21,14 @@ from chunkhound.providers.database.duckdb.connection_manager import (
 
 
 def _create_valid_duckdb(path: Path) -> None:
-    """Create a minimal valid DuckDB database file."""
+    """Create a minimal valid DuckDB database with required tables.
+
+    Matches ``_REQUIRED_TABLES`` in connection_manager so the integrity
+    probe (``_probe_db_valid``) recognises the file as a valid ChunkHound DB.
+    """
     conn = duckdb.connect(str(path))
-    conn.execute("CREATE TABLE _marker (id INTEGER)")
-    conn.execute("INSERT INTO _marker VALUES (1)")
+    conn.execute("CREATE TABLE files (path VARCHAR)")
+    conn.execute("CREATE TABLE chunks (id INTEGER)")
     conn.close()
 
 
@@ -87,9 +91,9 @@ class TestCrashMidSwap:
             assert not old_path.exists(), ".old should be cleaned up after restore"
             # Verify the restored file is actually usable
             result = mgr.connection.execute(
-                "SELECT id FROM _marker"
+                "SELECT count(*) FROM files"
             ).fetchone()
-            assert result == (1,), "Restored data should be intact"
+            assert result == (0,), "Restored DB should have files table"
         finally:
             mgr.disconnect()
 
@@ -230,3 +234,36 @@ class TestLockFileRecovery:
             assert not lock_path.exists(), "Empty (legacy) lock should be removed"
         finally:
             mgr.disconnect()
+
+
+class TestProbeDbValid:
+    """Test integrity probe rejects databases missing required tables."""
+
+    def test_probe_rejects_missing_tables(self, tmp_path: Path):
+        """Database without 'files' and 'chunks' tables fails probe."""
+        db_path = tmp_path / "incomplete.duckdb"
+        conn = duckdb.connect(str(db_path))
+        conn.execute("CREATE TABLE other_table (id INTEGER)")
+        conn.close()
+
+        mgr = DuckDBConnectionManager(db_path)
+        assert not mgr._probe_db_valid(db_path)
+
+    def test_probe_accepts_valid_schema(self, tmp_path: Path):
+        """Database with 'files' and 'chunks' tables passes probe."""
+        db_path = tmp_path / "valid.duckdb"
+        conn = duckdb.connect(str(db_path))
+        conn.execute("CREATE TABLE files (id INTEGER)")
+        conn.execute("CREATE TABLE chunks (id INTEGER)")
+        conn.close()
+
+        mgr = DuckDBConnectionManager(db_path)
+        assert mgr._probe_db_valid(db_path)
+
+    def test_probe_rejects_corrupt_file(self, tmp_path: Path):
+        """Corrupt file fails probe gracefully."""
+        db_path = tmp_path / "corrupt.duckdb"
+        db_path.write_bytes(b"not a database")
+
+        mgr = DuckDBConnectionManager(db_path)
+        assert not mgr._probe_db_valid(db_path)

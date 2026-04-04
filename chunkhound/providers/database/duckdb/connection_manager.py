@@ -32,6 +32,10 @@ warnings.filterwarnings(
 import duckdb
 from loguru import logger
 
+# Tables that must exist for a post-compaction DB to be considered valid.
+# Created in DuckDBProvider._executor_create_schema.
+_REQUIRED_TABLES = frozenset({"files", "chunks"})
+
 
 def get_compaction_lock_path(db_path: Path) -> Path:
     """Get the compaction lock file path for a database.
@@ -82,7 +86,10 @@ class DuckDBConnectionManager:
         try:
             conn = duckdb.connect(str(path), read_only=True)
             try:
-                conn.execute("SELECT 1").fetchone()
+                tables = {row[0] for row in conn.execute("SHOW TABLES").fetchall()}
+                if not _REQUIRED_TABLES.issubset(tables):
+                    logger.debug(f"Integrity probe: missing tables (found: {tables})")
+                    return False
                 return True
             finally:
                 conn.close()
