@@ -2923,7 +2923,8 @@ class IndexingCoordinator(BaseService):
         """
         try:
             # Create set of relative paths for fast lookup
-            base_dir = self._base_directory
+            base_dir = self._base_directory.resolve()
+            directory = directory.resolve()
             current_file_paths = {
                 file_path.relative_to(base_dir).as_posix()
                 for file_path in current_files

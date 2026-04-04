@@ -98,7 +98,9 @@ jobs:
           -q
 
       - name: Build wheel artifacts
-        run: CHUNKHOUND_BUILD_PACKAGED_WATCHMAN_RUNTIME=1 uv build --wheel --clear
+        env:
+          CHUNKHOUND_BUILD_PACKAGED_WATCHMAN_RUNTIME: "1"
+        run: uv build --wheel --clear
 
       - name: Verify Watchman runtime wheel artifacts
         shell: bash
