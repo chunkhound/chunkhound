@@ -81,10 +81,12 @@ async def _start_isolated_watchman_translation(
     service: RealtimeIndexingService, target_dir: Path
 ) -> realtime_service_module.WatchmanRealtimeAdapter:
     adapter = realtime_service_module.WatchmanRealtimeAdapter(service)
-    adapter._path_filter = realtime_service_module.RealtimePathFilter(
+    primary_filter = realtime_service_module.RealtimePathFilter(
         config=service.config,
         root_path=target_dir,
     )
+    adapter._path_filter = primary_filter
+    adapter._scope_path_filters = {str(target_dir): primary_filter}
     service.watch_path = target_dir
     service._service_state = "running"
     service._effective_backend = "watchman"
@@ -1576,9 +1578,11 @@ async def test_watchman_junction_scope_translation_preserves_logical_path(
     try:
         monkeypatch.setattr(realtime_service_module.Path, "resolve", fake_resolve)
         adapter = await _start_isolated_watchman_translation(service, target_dir)
-        adapter._path_filter = realtime_service_module.RealtimePathFilter(
-            config=service.config,
-            root_path=logical_junction,
+        adapter._scope_path_filters[str(logical_junction)] = (
+            realtime_service_module.RealtimePathFilter(
+                config=service.config,
+                root_path=logical_junction,
+            )
         )
 
         file_path = logical_junction / "src" / "junctioned.py"
@@ -1612,6 +1616,85 @@ async def test_watchman_junction_scope_translation_preserves_logical_path(
 
         stats = await service.get_health()
         assert stats["pipeline"]["last_accepted_event_path"] == str(file_path)
+    finally:
+        await service.stop()
+        services.provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_watchman_junction_scope_filter_uses_logical_scope_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target_dir = tmp_path / "workspace_root"
+    logical_junction = target_dir / "linked_workspace"
+    physical_root = tmp_path / "external_workspace"
+    db_path = target_dir / ".chunkhound" / "test.db"
+    target_dir.mkdir(parents=True)
+    logical_junction.mkdir(parents=True)
+    physical_root.mkdir(parents=True)
+    config = Config(
+        args=SimpleNamespace(path=target_dir),
+        target_dir=target_dir,
+        database={"path": str(db_path), "provider": "duckdb"},
+        indexing={
+            "include": ["**/*.py"],
+            "exclude": ["generated/**"],
+            "realtime_backend": "watchman",
+        },
+    )
+    services = create_services(db_path, config)
+    services.provider.connect()
+    service = RealtimeIndexingService(services, config)
+    original_resolve = realtime_service_module.Path.resolve
+
+    def fake_resolve(self: Path, strict: bool = False) -> Path:
+        if self == logical_junction:
+            return physical_root
+        try:
+            relative_to_junction = self.relative_to(logical_junction)
+        except ValueError:
+            return original_resolve(self, strict=strict)
+        return physical_root / relative_to_junction
+
+    try:
+        monkeypatch.setattr(realtime_service_module.Path, "resolve", fake_resolve)
+        adapter = await _start_isolated_watchman_translation(service, target_dir)
+        adapter._scope_path_filters[str(logical_junction)] = (
+            realtime_service_module.RealtimePathFilter(
+                config=service.config,
+                root_path=logical_junction,
+            )
+        )
+
+        blocked_file = logical_junction / "generated" / "blocked.py"
+        blocked_file.parent.mkdir(parents=True, exist_ok=True)
+        blocked_file.write_text("def blocked():\n    return 1\n", encoding="utf-8")
+
+        adapter._translate_subscription_pdu(
+            {
+                "subscription": "chunkhound-live-indexing--linked-workspace",
+                "clock": "c:0:6",
+                "files": [
+                    {
+                        "name": "generated/blocked.py",
+                        "exists": True,
+                        "new": True,
+                        "type": "f",
+                    }
+                ],
+            },
+            WatchmanSubscriptionScope(
+                requested_path=logical_junction,
+                watch_root=physical_root.resolve(),
+                relative_root=None,
+                scope_kind="nested_junction",
+            ),
+        )
+
+        stats = await _wait_for_pipeline_count(service, "filtered_event_count", 1)
+        assert service.event_queue.empty()
+        assert stats["pipeline"]["last_source_event_path"] == str(blocked_file)
+        assert stats["pipeline"]["last_accepted_event_path"] is None
     finally:
         await service.stop()
         services.provider.disconnect()

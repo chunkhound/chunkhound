@@ -76,7 +76,7 @@ class RealtimePathFilter:
     @staticmethod
     def _resolve_root(*, config: Config | None, root_path: Path | None) -> Path:
         if root_path is not None:
-            return root_path.resolve()
+            return root_path.expanduser().absolute()
         try:
             target_dir = (
                 config.target_dir if config and config.target_dir else Path.cwd()

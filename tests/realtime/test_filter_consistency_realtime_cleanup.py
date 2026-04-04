@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import chunkhound.core.utils.path_utils as path_utils_module
+import chunkhound.services.indexing_coordinator as indexing_coordinator_module
 from chunkhound.core.config.config import Config
 from chunkhound.core.models import File
 from chunkhound.core.types.common import Language
@@ -19,7 +21,10 @@ from chunkhound.services.realtime_indexing_service import (
     SimpleEventHandler,
     WatchmanRealtimeAdapter,
 )
-from chunkhound.services.realtime_path_filter import RealtimePathFilter
+from chunkhound.services.realtime_path_filter import (
+    RealtimePathFilter,
+    RealtimePathFilterSettings,
+)
 from chunkhound.watchman import WatchmanSubscriptionScope
 
 
@@ -267,5 +272,132 @@ async def test_discovery_realtime_and_cleanup_agree_on_gitignored_worktree_path(
 
         assert cleaned == 2
         assert deleted_paths == [missing_rel, ignored_rel]
+    finally:
+        provider.disconnect()
+
+
+def test_realtime_path_filter_preserves_explicit_logical_nested_scope_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "workspace"
+    logical_junction = root / "linked_workspace"
+    physical_root = tmp_path / "external_workspace"
+    root.mkdir(parents=True)
+    logical_junction.mkdir(parents=True)
+    physical_root.mkdir(parents=True)
+    original_resolve = path_utils_module.Path.resolve
+
+    def fake_resolve(self: Path, strict: bool = False) -> Path:
+        if self == logical_junction:
+            return physical_root
+        try:
+            relative_to_junction = self.relative_to(logical_junction)
+        except ValueError:
+            return original_resolve(self, strict=strict)
+        return physical_root / relative_to_junction
+
+    monkeypatch.setattr(path_utils_module.Path, "resolve", fake_resolve)
+
+    settings = RealtimePathFilterSettings(include_patterns=("src/**/*.py",))
+    workspace_filter = RealtimePathFilter(
+        config=None,
+        root_path=root,
+        settings=settings,
+    )
+    junction_filter = RealtimePathFilter(
+        config=None,
+        root_path=logical_junction,
+        settings=settings,
+    )
+
+    assert workspace_filter._root == root.absolute()
+    assert junction_filter._root == logical_junction.absolute()
+
+
+def test_cleanup_orphaned_files_keeps_logical_subtree_scope_when_resolved_outside_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "workspace"
+    logical_junction = root / "linked_workspace"
+    physical_root = tmp_path / "external_workspace"
+    db_path = tmp_path / "logical-cleanup.duckdb"
+    root.mkdir(parents=True)
+    logical_junction.mkdir(parents=True)
+    physical_root.mkdir(parents=True)
+    config = _build_config(root, db_path)
+    provider = DuckDBProvider(db_path, base_directory=root)
+    provider.connect()
+    original_resolve = path_utils_module.Path.resolve
+
+    def fake_resolve(self: Path, strict: bool = False) -> Path:
+        if self == logical_junction:
+            return physical_root
+        try:
+            relative_to_junction = self.relative_to(logical_junction)
+        except ValueError:
+            return original_resolve(self, strict=strict)
+        return physical_root / relative_to_junction
+
+    monkeypatch.setattr(path_utils_module.Path, "resolve", fake_resolve)
+    monkeypatch.setattr(indexing_coordinator_module.Path, "resolve", fake_resolve)
+
+    keep_file = logical_junction / "src" / "keep.py"
+    keep_file.parent.mkdir(parents=True, exist_ok=True)
+    keep_file.write_text("def keep():\n    return 1\n", encoding="utf-8")
+    missing_rel = "linked_workspace/src/missing.py"
+    sibling_rel = "src/sibling.py"
+    sibling_file = root / sibling_rel
+    sibling_file.parent.mkdir(parents=True, exist_ok=True)
+    sibling_file.write_text("def sibling():\n    return 1\n", encoding="utf-8")
+
+    try:
+        provider.insert_file(
+            File(
+                path=keep_file.relative_to(root).as_posix(),
+                mtime=float(keep_file.stat().st_mtime),
+                language=Language.PYTHON,
+                size_bytes=int(keep_file.stat().st_size),
+            )
+        )
+        provider.insert_file(
+            File(
+                path=missing_rel,
+                mtime=0.0,
+                language=Language.PYTHON,
+                size_bytes=0,
+            )
+        )
+        provider.insert_file(
+            File(
+                path=sibling_rel,
+                mtime=float(sibling_file.stat().st_mtime),
+                language=Language.PYTHON,
+                size_bytes=int(sibling_file.stat().st_size),
+            )
+        )
+
+        deleted_paths: list[str] = []
+
+        def fake_delete_files_batch(file_paths: list[str]) -> int:
+            deleted_paths.extend(file_paths)
+            return len(file_paths)
+
+        monkeypatch.setattr(provider, "delete_files_batch", fake_delete_files_batch)
+
+        coordinator = IndexingCoordinator(
+            database_provider=provider,
+            base_directory=root,
+            config=config,
+        )
+
+        cleaned = coordinator._cleanup_orphaned_files(
+            logical_junction,
+            [keep_file],
+            ["**/*.py"],
+            [],
+        )
+
+        assert cleaned == 1
+        assert deleted_paths == [missing_rel]
     finally:
         provider.disconnect()

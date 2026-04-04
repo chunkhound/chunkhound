@@ -2865,6 +2865,8 @@ class IndexingCoordinator(BaseService):
         self,
         include_patterns: list[str] | None,
         exclude_patterns: list[str] | None,
+        *,
+        root_path: Path | None = None,
     ) -> RealtimePathFilter:
         settings = RealtimePathFilterSettings.from_config(
             self.config,
@@ -2881,7 +2883,7 @@ class IndexingCoordinator(BaseService):
 
         return RealtimePathFilter(
             config=None,
-            root_path=self._base_directory,
+            root_path=root_path or self._base_directory,
             settings=settings,
         )
 
@@ -2923,16 +2925,20 @@ class IndexingCoordinator(BaseService):
         """
         try:
             # Create set of relative paths for fast lookup
-            base_dir = self._base_directory.resolve()
-            directory = directory.resolve()
+            base_dir = (
+                self._base_directory
+                if self._base_directory.is_absolute()
+                else self._base_directory.absolute()
+            )
+            directory = directory if directory.is_absolute() else base_dir / directory
             current_file_paths = {
-                file_path.relative_to(base_dir).as_posix()
+                self._get_relative_path(file_path).as_posix()
                 for file_path in current_files
             }
 
             # Restrict cleanup to the indexed subtree so sibling rows survive
             # narrower reindex runs and are left for a later broader scan.
-            relative_directory = directory.relative_to(base_dir)
+            relative_directory = self._get_relative_path(directory)
             if relative_directory == Path("."):
                 query = """
                     SELECT id, path
@@ -2957,7 +2963,9 @@ class IndexingCoordinator(BaseService):
                 "excluded_by_current_policy": 0,
             }
             cleanup_filter = self._build_cleanup_path_filter(
-                include_patterns, exclude_patterns
+                include_patterns,
+                exclude_patterns,
+                root_path=directory,
             )
 
             for db_file in db_files:

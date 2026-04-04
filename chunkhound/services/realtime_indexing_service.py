@@ -680,6 +680,7 @@ class WatchmanRealtimeAdapter:
         self._session: WatchmanCliSession | None = None
         self._sessions: list[WatchmanCliSession] = []
         self._path_filter: RealtimePathFilter | None = None
+        self._scope_path_filters: dict[str, RealtimePathFilter] = {}
         self._shared_subscription_queue: asyncio.Queue[dict[str, object]] | None = None
         self._subscription_consumer_task: asyncio.Task[None] | None = None
         self._subscription_bridge_tasks: list[asyncio.Task[None]] = []
@@ -839,6 +840,7 @@ class WatchmanRealtimeAdapter:
         await self._cancel_subscription_consumer_task()
         await self._cancel_subscription_bridge_tasks()
         self._path_filter = None
+        self._scope_path_filters = {}
         self._service.watchman_scope_plan = None
         self._service.watchman_subscription_queue = None
         self._service.monitoring_ready.clear()
@@ -873,7 +875,7 @@ class WatchmanRealtimeAdapter:
             )
             return
 
-        path_filter = self._path_filter
+        path_filter = self._path_filter_for_scope(scope)
         if path_filter is None:
             self._record_translation_loss_of_sync(
                 "translation_failure",
@@ -915,6 +917,14 @@ class WatchmanRealtimeAdapter:
                 event_type,
                 file_path,
             )
+
+    def _path_filter_for_scope(
+        self, scope: WatchmanSubscriptionScope
+    ) -> RealtimePathFilter | None:
+        return self._scope_path_filters.get(
+            str(scope.requested_path),
+            self._path_filter,
+        )
 
     def _translate_watchman_file_entry(
         self,
@@ -1071,6 +1081,7 @@ class WatchmanRealtimeAdapter:
         self._service.watchman_scope_plan = None
         self._service.watchman_subscription_queue = None
         self._path_filter = None
+        self._scope_path_filters = {}
         self._shared_subscription_queue = None
         self._subscription_scope_map = {}
         self._service.monitoring_ready.clear()
@@ -1285,9 +1296,15 @@ class WatchmanRealtimeAdapter:
         self._subscription_scope_map = dict(subscription_scope_map)
         self._service.watchman_scope_plan = scope_plan
         self._service.watchman_subscription_queue = self._shared_subscription_queue
-        self._path_filter = RealtimePathFilter(
-            config=self._service.config,
-            root_path=scope_plan.primary_scope.requested_path,
+        self._scope_path_filters = {
+            str(scope.requested_path): RealtimePathFilter(
+                config=self._service.config,
+                root_path=scope.requested_path,
+            )
+            for scope in scope_plan.scopes
+        }
+        self._path_filter = self._scope_path_filters.get(
+            str(scope_plan.primary_scope.requested_path)
         )
         self._subscription_bridge_tasks = [
             loop.create_task(self._bridge_session_subscription_pdus(session))
