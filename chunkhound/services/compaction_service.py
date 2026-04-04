@@ -228,6 +228,7 @@ class CompactionService:
             return False
 
         self._compaction_thread_done.clear()
+        thread_entered = threading.Event()
 
         def _run_in_thread() -> bool:
             """Run provider.optimize() and signal completion via threading.Event.
@@ -237,6 +238,7 @@ class CompactionService:
             in ``finally`` so callers waiting on it are unblocked regardless of
             success, failure, or asyncio-level cancellation.
             """
+            thread_entered.set()
             try:
                 return provider.optimize(
                     cancel_check=lambda: self._shutdown_requested,
@@ -244,7 +246,15 @@ class CompactionService:
             finally:
                 self._compaction_thread_done.set()
 
-        result = await asyncio.to_thread(_run_in_thread)
+        try:
+            result = await asyncio.to_thread(_run_in_thread)
+        except BaseException:
+            if not thread_entered.is_set():
+                # to_thread failed before the thread started (e.g. RuntimeError
+                # from a shutting-down loop).  Without this, shutdown() would
+                # block forever waiting on _compaction_thread_done.
+                self._compaction_thread_done.set()
+            raise
 
         if result:
             logger.info("Compaction complete")
