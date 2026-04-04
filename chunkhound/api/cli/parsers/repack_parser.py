@@ -29,7 +29,7 @@ def add_repack_subparser(subparsers: Any) -> argparse.ArgumentParser:
     repack_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show current database size without repacking",
+        help="Show storage stats and estimated reclaimable space without repacking",
     )
 
     repack_parser.add_argument(
