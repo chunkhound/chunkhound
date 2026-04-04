@@ -182,8 +182,8 @@ class TestLockFileRecovery:
             # Clean up lock so it doesn't interfere with other tests
             lock_path.unlink(missing_ok=True)
 
-    def test_removes_stale_lock_old_timestamp(self, tmp_path: Path):
-        """Lock with live PID but timestamp > 24h is treated as stale (PID reuse)."""
+    def test_preserves_lock_old_timestamp_live_pid(self, tmp_path: Path):
+        """Lock with live PID is preserved even with old timestamp (long compaction)."""
         db_path = tmp_path / "chunks.duckdb"
         lock_path = get_compaction_lock_path(db_path)
 
@@ -195,8 +195,30 @@ class TestLockFileRecovery:
         mgr = DuckDBConnectionManager(db_path)
         mgr.connect()
         try:
+            assert lock_path.exists(), (
+                "Lock with live PID should be preserved even with old timestamp"
+            )
+        finally:
+            mgr.disconnect()
+            lock_path.unlink(missing_ok=True)
+
+    def test_removes_lock_from_before_reboot(self, tmp_path: Path):
+        """Lock created before last boot is removed even if PID is alive (reuse)."""
+        import psutil
+
+        db_path = tmp_path / "chunks.duckdb"
+        lock_path = get_compaction_lock_path(db_path)
+
+        _create_valid_duckdb(db_path)
+        # Timestamp before boot = guaranteed PID reuse
+        pre_boot = psutil.boot_time() - 3600
+        lock_path.write_text(f"{os.getpid()}:{pre_boot:.0f}")
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
             assert not lock_path.exists(), (
-                "Lock with live PID but old timestamp should be removed"
+                "Lock from before reboot should be removed (PID reuse)"
             )
         finally:
             mgr.disconnect()
