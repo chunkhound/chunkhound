@@ -735,7 +735,10 @@ def is_packaged_watchman_runtime_available(
     if relative_root is None:
         return False
 
-    manifest = _read_packaged_json(relative_root / "manifest.json")
+    manifest_path = relative_root / "manifest.json"
+    if not _packaged_resource_exists(manifest_path):
+        return False
+    manifest = _read_packaged_json(manifest_path)
     relative_binary_path = _validate_relative_path(
         _require_manifest_string(manifest, "binary")
     )

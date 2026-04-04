@@ -55,6 +55,11 @@ def test_custom_build_hook_hydrates_runtime_for_host(
     monkeypatch.setenv(hatch_build._PACKAGED_RUNTIME_BUILD_ENV, "1")
     monkeypatch.setattr(
         hatch_build,
+        "_manifest_force_include_entries",
+        lambda: {"manifest-src": "manifest-dst"},
+    )
+    monkeypatch.setattr(
+        hatch_build,
         "_host_watchman_platform",
         lambda **_: "linux-x86_64",
     )
@@ -79,7 +84,10 @@ def test_custom_build_hook_hydrates_runtime_for_host(
     hook.initialize("standard", build_data)
 
     assert calls == ["hydrated"]
-    assert build_data["force_include"] == {"src": "dst"}
+    assert build_data["force_include"] == {
+        "manifest-src": "manifest-dst",
+        "src": "dst",
+    }
     assert build_data["pure_python"] is False
     assert isinstance(build_data["tag"], str)
 
@@ -88,6 +96,13 @@ def test_custom_build_hook_skips_native_runtime_for_supported_editable_build(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(hatch_build._PACKAGED_RUNTIME_BUILD_ENV, "1")
+    monkeypatch.setattr(
+        hatch_build,
+        "_manifest_force_include_entries",
+        lambda: pytest.fail(
+            "editable builds should not add manifest force-include entries"
+        ),
+    )
     monkeypatch.setattr(
         hatch_build,
         "_host_watchman_platform",
@@ -112,6 +127,13 @@ def test_custom_build_hook_skips_native_runtime_for_unsupported_editable_build(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(hatch_build._PACKAGED_RUNTIME_BUILD_ENV, "1")
+    monkeypatch.setattr(
+        hatch_build,
+        "_manifest_force_include_entries",
+        lambda: pytest.fail(
+            "editable builds should not add manifest force-include entries"
+        ),
+    )
     monkeypatch.setattr(
         hatch_build,
         "_host_watchman_platform",
@@ -171,26 +193,43 @@ def test_custom_build_hook_skips_packaged_runtime_when_release_env_is_absent(
     monkeypatch.delenv(hatch_build._PACKAGED_RUNTIME_BUILD_ENV, raising=False)
     monkeypatch.setattr(
         hatch_build,
+        "_manifest_force_include_entries",
+        lambda: {"manifest-src": "manifest-dst"},
+    )
+    monkeypatch.setattr(
+        hatch_build,
         "_host_watchman_platform",
         lambda **_: "linux-x86_64",
     )
     monkeypatch.setattr(
         hatch_build,
         "_hydrate_runtime_for_build",
-        lambda: pytest.fail("standard builds without the release env should skip hydration"),
+        lambda: pytest.fail(
+            "standard builds without the release env should skip hydration"
+        ),
     )
 
     build_data: dict[str, object] = {"force_include": {"existing": "entry"}}
     hook = object.__new__(hatch_build.CustomBuildHook)
     hook.initialize("standard", build_data)
 
-    assert build_data == {"force_include": {"existing": "entry"}}
+    assert build_data == {
+        "force_include": {
+            "existing": "entry",
+            "manifest-src": "manifest-dst",
+        }
+    }
 
 
 def test_custom_build_hook_rejects_unsupported_release_wheel_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(hatch_build._PACKAGED_RUNTIME_BUILD_ENV, "1")
+    monkeypatch.setattr(
+        hatch_build,
+        "_manifest_force_include_entries",
+        lambda: {"manifest-src": "manifest-dst"},
+    )
     monkeypatch.setattr(
         hatch_build,
         "_host_watchman_platform",
@@ -207,4 +246,37 @@ def test_custom_build_hook_rejects_unsupported_release_wheel_host(
     with pytest.raises(RuntimeError, match="macos-arm64"):
         hook.initialize("standard", build_data)
 
-    assert build_data == {"force_include": {"existing": "entry"}}
+    assert build_data == {
+        "force_include": {
+            "existing": "entry",
+            "manifest-src": "manifest-dst",
+        }
+    }
+
+
+def test_manifest_force_include_entries_cover_supported_platforms() -> None:
+    entries = hatch_build._manifest_force_include_entries()
+
+    linux_manifest = (
+        hatch_build._REPO_ROOT
+        / "chunkhound"
+        / "watchman_runtime"
+        / "platforms"
+        / "linux-x86_64"
+        / "manifest.json"
+    )
+    windows_manifest = (
+        hatch_build._REPO_ROOT
+        / "chunkhound"
+        / "watchman_runtime"
+        / "platforms"
+        / "windows-x86_64"
+        / "manifest.json"
+    )
+
+    assert entries[str(linux_manifest)] == (
+        "chunkhound/watchman_runtime/platforms/linux-x86_64/manifest.json"
+    )
+    assert entries[str(windows_manifest)] == (
+        "chunkhound/watchman_runtime/platforms/windows-x86_64/manifest.json"
+    )

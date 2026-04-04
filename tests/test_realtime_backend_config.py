@@ -4,6 +4,8 @@ import argparse
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from chunkhound.api.cli.parsers.daemon_parser import add_daemon_subparser
 from chunkhound.api.cli.parsers.mcp_parser import add_mcp_subparser
 from chunkhound.core.config.config import Config
@@ -44,6 +46,33 @@ def test_default_realtime_backend_for_current_install_uses_watchman_when_payload
     )
 
     assert default_realtime_backend_for_current_install() == "watchman"
+
+
+def test_packaged_watchman_runtime_availability_returns_false_when_manifest_is_missing(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        watchman_runtime_loader,
+        "_normalize_platform_key",
+        lambda **_: ("linux", "x86_64"),
+    )
+    monkeypatch.setattr(
+        watchman_runtime_loader,
+        "_packaged_resource_exists",
+        lambda relative_path: (
+            False
+            if relative_path.as_posix() == "platforms/linux-x86_64/manifest.json"
+            else pytest.fail(f"unexpected resource probe: {relative_path}")
+        ),
+    )
+
+    assert (
+        watchman_runtime_loader.is_packaged_watchman_runtime_available(
+            system_name="Linux",
+            machine_name="x86_64",
+        )
+        is False
+    )
 
 
 def test_default_realtime_backend_for_supported_windows_host() -> None:
