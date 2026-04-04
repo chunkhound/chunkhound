@@ -6,11 +6,14 @@ only mocking external dependencies like disk operations.
 """
 
 import asyncio
+import io
 import os
 import shutil
 import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+from loguru import logger
 
 import pytest
 
@@ -860,6 +863,26 @@ class TestDuckDBProviderOptimize:
         # Lock file should not exist after completion
         assert not lock_path.exists(), f"Lock file not cleaned up: {lock_path}"
 
+    def test_optimize_succeeds_when_old_db_unlink_fails(
+        self, provider_with_fragmentation: tuple
+    ):
+        """Compaction succeeds even if removing the old DB file fails."""
+        provider, db_path = provider_with_fragmentation
+        old_db_path = db_path.with_suffix(".duckdb.old")
+        original_unlink = Path.unlink
+
+        def selective_unlink(self_path, *args, **kwargs):
+            if str(self_path).endswith(".duckdb.old"):
+                raise PermissionError("simulated permission denied")
+            return original_unlink(self_path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", selective_unlink):
+            result = provider.optimize()
+
+        assert result is True
+        assert provider.is_connected, "provider should be reconnected"
+        assert old_db_path.exists(), "old DB should remain when unlink fails"
+
     def test_optimize_does_not_delete_foreign_lock(
         self, provider_with_fragmentation: tuple
     ):
@@ -1209,6 +1232,39 @@ class TestPostSwapCancelCheck:
         assert not provider.is_connected, "reconnect should have been skipped"
         assert not old_db_path.exists(), "backup should have been cleaned up"
         assert provider.is_accepting_connections, "gate should be restored"
+
+    def test_optimize_preserves_backup_when_probe_fails_on_cancel(
+        self, provider_with_fragmentation: tuple
+    ):
+        """When probe fails after swap on cancel path, backup is preserved."""
+        provider, db_path = provider_with_fragmentation
+        old_db_path = db_path.with_suffix(".duckdb.old")
+
+        swap_complete = False
+        original_replace = os.replace
+
+        def tracking_replace(src, dst):
+            nonlocal swap_complete
+            result = original_replace(src, dst)
+            if str(src).endswith(".compact.duckdb"):
+                swap_complete = True
+            return result
+
+        log_buf = io.StringIO()
+        sink_id = logger.add(log_buf, level="WARNING")
+        try:
+            with patch("os.replace", side_effect=tracking_replace), patch.object(
+                provider._connection_manager, "_probe_db_valid", return_value=False
+            ):
+                result = provider.optimize(cancel_check=lambda: swap_complete)
+        finally:
+            logger.remove(sink_id)
+
+        assert result is False
+        assert not provider.is_connected, "reconnect should have been skipped"
+        assert old_db_path.exists(), "backup should be preserved when probe fails"
+        assert provider.is_accepting_connections, "gate should be restored"
+        assert "failed integrity probe on cancel path" in log_buf.getvalue()
 
 
 class TestConnectionGateDuringCompaction:

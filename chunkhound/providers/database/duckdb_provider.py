@@ -3184,15 +3184,28 @@ class DuckDBProvider(SerialDatabaseProvider):
                 # cleanup() will handle provider teardown. Ungate so cleanup
                 # can proceed without CompactionError.
                 self._connection_allowed.set()
-                old_db_path.unlink(missing_ok=True)
-                return True
+                if self._connection_manager._probe_db_valid(db_path):
+                    old_db_path.unlink(missing_ok=True)
+                    return True
+                else:
+                    logger.warning(
+                        "Swapped DB failed integrity probe on cancel path; "
+                        "keeping backup %s for recovery",
+                        old_db_path,
+                    )
+                    return False
 
             # Reconnect to swapped database
             self._connection_allowed.set()  # Ungate before reconnect
             self.connect()
 
             # Clean up old file
-            old_db_path.unlink()
+            try:
+                old_db_path.unlink(missing_ok=True)
+            except OSError as exc:
+                # Compaction succeeded and new DB is connected — cleanup failure is non-fatal.
+                # Recovery on next startup will handle the stale file.
+                logger.warning("Could not remove old database after compaction: %s", exc)
 
             logger.info(f"Compaction complete: {db_path}")
             return True
