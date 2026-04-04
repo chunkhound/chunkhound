@@ -255,6 +255,41 @@ class TestRealtimeFailures:
             "Polling task should be cleaned up after stop()"
 
     @pytest.mark.asyncio
+    async def test_compaction_error_defers_file_to_failed_files(self, realtime_setup):
+        """CompactionError during processing adds file to failed_files for retry."""
+        service, watch_dir, _, services = realtime_setup
+        await service.start(watch_dir)
+
+        # Wait for initial scan to finish
+        assert await service.wait_for_monitoring_ready(timeout=10.0)
+
+        test_file = watch_dir / "compaction_deferred.py"
+        test_file.write_text("def deferred(): pass")
+
+        # Simulate compaction: close gate AND drop thread-local connection
+        # so next DB access raises CompactionError instead of reusing existing conn.
+        services.provider._connection_allowed.clear()
+        services.provider.soft_disconnect(skip_checkpoint=True)
+
+        # Put file directly in the queue — bypasses debouncing
+        await service.file_queue.put(("change", test_file))
+
+        # wait_for_file_indexed checks failed_files in its condition,
+        # so it returns as soon as the file lands in either set.
+        await service.wait_for_file_indexed(test_file, timeout=5.0)
+
+        from chunkhound.services.realtime_indexing_service import normalize_file_path
+
+        assert normalize_file_path(test_file) in service.failed_files, (
+            "File should be in failed_files after CompactionError"
+        )
+
+        # Restore gate and reconnect for clean teardown
+        services.provider._connection_allowed.set()
+        services.provider.connect()
+        await service.stop()
+
+    @pytest.mark.asyncio
     async def test_nested_file_gets_indexed(self, realtime_setup):
         """Test that process_file indexes files in subdirectories.
 

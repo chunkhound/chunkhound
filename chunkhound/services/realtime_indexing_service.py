@@ -23,6 +23,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from chunkhound.core.config.config import Config
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.utils.windows_constants import IS_WINDOWS
 
@@ -844,6 +845,14 @@ class RealtimeIndexingService:
             except asyncio.CancelledError:
                 logger.debug("Processing loop cancelled")
                 raise
+            except CompactionError:
+                logger.debug(
+                    f"Compaction in progress, deferring {file_path} — "
+                    "will be picked up on next event or reindex"
+                )
+                async with self._file_condition:
+                    self.failed_files.add(normalize_file_path(file_path))
+                    self._file_condition.notify_all()
             except Exception as e:
                 logger.error(f"Error processing {file_path}: {e}")
                 # Track failed files for debugging and monitoring
