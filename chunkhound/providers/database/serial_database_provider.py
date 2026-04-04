@@ -69,8 +69,8 @@ class SerialDatabaseProvider(ABC):
         self._base_directory: Path = base_directory
 
         # Connection gate: set = connections allowed, clear = suspended
-        # during compaction. Initially set; subclasses clear() it around
-        # file-swap operations.
+        # during compaction.  "Ungate" (.set()) resumes accepting connections.
+        # Initially set; subclasses clear() it around file-swap operations.
         self._connection_allowed = threading.Event()
         self._connection_allowed.set()
 
@@ -150,9 +150,8 @@ class SerialDatabaseProvider(ABC):
             # Perform final operations in DB thread
             self._execute_in_db_thread_sync("disconnect", skip_checkpoint)
         finally:
-            # Clear thread-local storage
-            self._executor.clear_thread_local()
-            # Shutdown executor with Windows-specific handling
+            # Shutdown destroys the thread pool, making thread-local state
+            # unreachable — no explicit clear_thread_local() needed.
             self._executor.shutdown(wait=True)
 
     def soft_disconnect(self, skip_checkpoint: bool = False) -> None:
