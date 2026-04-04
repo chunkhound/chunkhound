@@ -80,7 +80,13 @@ class CompactionService:
         # compact_blocking (single caller) and MCP calls compact_background
         # once from the post-index hook — no concurrent callers in practice.
         if self._compaction_in_progress:
-            return False, {}
+            # Self-heal after task cancellation: if the thread finished but
+            # the asyncio task was already cancelled (so its finally block
+            # couldn't reset the flag), clear it now.
+            if self._compaction_thread_done.is_set() and self._compaction_task is None:
+                self._compaction_in_progress = False
+            else:
+                return False, {}
 
         if not self._config.database.compaction_enabled:
             return False, {}
@@ -200,7 +206,9 @@ class CompactionService:
             self._last_error = e
             logger.error(f"Background compaction failed: {e}")
         finally:
-            self._compaction_in_progress = False
+            # Thread may outlive a cancelled asyncio task — only reset flag once thread exits.
+            if self._compaction_thread_done.is_set():
+                self._compaction_in_progress = False
             self._compaction_task = None
 
     async def _do_compaction(self, provider: "DuckDBProvider") -> bool:
@@ -283,4 +291,10 @@ class CompactionService:
                 )
 
         self._compaction_task = None
-        self._compaction_in_progress = False
+        if self._compaction_thread_done.is_set():
+            self._compaction_in_progress = False
+        else:
+            logger.error(
+                "Compaction thread still running after shutdown — "
+                "leaving _compaction_in_progress=True to prevent new compaction"
+            )
