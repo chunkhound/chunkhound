@@ -3144,7 +3144,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             self._export_database_for_compaction(db_path, export_dir)
 
             if cancel_check and cancel_check():
-                self._connection_allowed.set()  # Allow reconnect before restoring
+                self._connection_allowed.set()  # Ungate before reconnect
                 self.connect()  # Restore connection after soft_disconnect
                 return False
 
@@ -3156,7 +3156,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 # Clean up the compacted DB since we won't swap
                 if new_db_path.exists():
                     new_db_path.unlink()
-                self._connection_allowed.set()  # Allow reconnect before restoring
+                self._connection_allowed.set()  # Ungate before reconnect
                 self.connect()  # Restore connection after soft_disconnect
                 return False
 
@@ -3178,14 +3178,15 @@ class DuckDBProvider(SerialDatabaseProvider):
             os.replace(new_db_path, db_path)
 
             if cancel_check and cancel_check():
-                # Swap succeeded but shutdown requested — skip reconnect.
-                # cleanup() will handle provider teardown.
+                # Swap succeeded but shutdown requested — skip connect().
+                # cleanup() will handle provider teardown. Ungate so cleanup
+                # can proceed without CompactionError.
                 self._connection_allowed.set()
                 old_db_path.unlink(missing_ok=True)
                 return True
 
             # Reconnect to swapped database
-            self._connection_allowed.set()  # Allow reconnect to new file
+            self._connection_allowed.set()  # Ungate before reconnect
             self.connect()
 
             # Clean up old file
@@ -3204,7 +3205,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 os.replace(old_db_path, db_path)
             # Reconnect (we disconnected for export, need to restore connection)
             if not self.is_connected:
-                self._connection_allowed.set()  # Allow reconnect for recovery
+                self._connection_allowed.set()  # Ungate before recovery connect
                 try:
                     self.connect()
                 except Exception as err:
