@@ -30,7 +30,22 @@ warnings.filterwarnings(
 )
 
 import duckdb
+import psutil
 from loguru import logger
+
+# Tables that must exist for a post-compaction DB to be considered valid.
+# Created in DuckDBProvider._executor_create_schema.
+_REQUIRED_TABLES = frozenset({"files", "chunks"})
+
+_LONG_COMPACTION_WARNING_SECONDS = 600  # 10 minutes
+
+
+def get_compaction_lock_path(db_path: Path) -> Path:
+    """Get the compaction lock file path for a database.
+
+    Single source of truth for lock file location.
+    """
+    return Path(str(db_path) + ".compaction.lock")
 
 
 class DuckDBConnectionManager:
@@ -65,9 +80,190 @@ class DuckDBConnectionManager:
         """Check if database connection is active."""
         return self.connection is not None
 
+    def _probe_db_valid(self, path: Path) -> bool:
+        """Quick probe: can DuckDB open the file and read metadata?
+
+        Used during crash recovery to verify db_path integrity before
+        discarding the pre-compaction backup.
+        """
+        try:
+            conn = duckdb.connect(str(path), read_only=True)
+            try:
+                tables = {row[0] for row in conn.execute("SHOW TABLES").fetchall()}
+                if not _REQUIRED_TABLES.issubset(tables):
+                    logger.debug(f"Integrity probe: missing tables (found: {tables})")
+                    return False
+                return True
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.debug(f"Integrity probe failed for {path}: {e}")
+            return False
+
+    def _recover_from_intent(
+        self,
+        phase: str,
+        old_db: Path,
+        compact_db: Path,
+        intent_path: Path,
+    ) -> None:
+        """Recover from interrupted compaction using intent file."""
+        if phase == "phase1":
+            # Crash before/during first os.replace (db_path -> old_db).
+            # db_path may be missing if the rename completed; restore from old_db.
+            if not self.db_path.exists() and old_db.exists():
+                logger.warning(
+                    "phase1 recovery: restoring database from pre-compaction backup"
+                )
+                os.replace(old_db, self.db_path)
+            # Discard compact_db — compaction didn't finish
+            if compact_db.exists():
+                compact_db.unlink()
+        elif phase == "phase2":
+            # First rename succeeded (db_path -> old_db).
+            # Second rename (compact_db -> db_path) may not have completed.
+            if not self.db_path.exists() and compact_db.exists():
+                # Key fix: complete the swap — compact_db has the good data
+                logger.warning(
+                    "phase2 recovery: completing interrupted swap "
+                    "with compacted database"
+                )
+                os.replace(compact_db, self.db_path)
+            elif not self.db_path.exists() and old_db.exists():
+                # compact_db also missing — fall back to old
+                logger.warning(
+                    "phase2 recovery: compact database missing, restoring from backup"
+                )
+                os.replace(old_db, self.db_path)
+            # If db_path exists, probe and decide
+            if self.db_path.exists() and old_db.exists():
+                if self._probe_db_valid(self.db_path):
+                    old_db.unlink()
+                else:
+                    logger.warning(
+                        "phase2 recovery: database failed integrity probe, "
+                        "restoring from pre-compaction backup"
+                    )
+                    os.replace(old_db, self.db_path)
+        else:
+            logger.warning(
+                f"Unknown intent phase {phase!r}, falling back to legacy recovery"
+            )
+            self._recover_legacy(old_db, compact_db)
+
+        intent_path.unlink(missing_ok=True)
+
+    def _recover_legacy(self, old_db: Path, compact_db: Path) -> None:
+        """Legacy recovery when no intent file exists (pre-intent databases)."""
+        if not self.db_path.exists() and old_db.exists():
+            logger.warning("Restoring database from pre-compaction state")
+            os.replace(old_db, self.db_path)
+
+        # old_db requires integrity check before deletion — on Windows
+        # the two-step swap is not atomic, so db_path may be
+        # corrupt/incomplete if a crash occurred between the two
+        # os.replace() calls.
+        if old_db.exists() and self.db_path.exists():
+            if self._probe_db_valid(self.db_path):
+                old_db.unlink()
+            else:
+                logger.warning(
+                    "Database file failed integrity probe; "
+                    "restoring from pre-compaction backup"
+                )
+                os.replace(old_db, self.db_path)
+
     def connect(self) -> None:
         """Establish database connection and initialize schema with WAL validation."""
         logger.info(f"Connecting to DuckDB database: {self.db_path}")
+
+        # Recover from interrupted compaction
+        if isinstance(self.db_path, Path):
+            lock_file = get_compaction_lock_path(self.db_path)
+            if lock_file.exists():
+                # Check if lock is held by a live process before removing
+                lock_is_stale = True
+                try:
+                    content = lock_file.read_text().strip()
+                    # Format: "PID:TIMESTAMP" (new) or "PID" (legacy)
+                    parts = content.split(":", 1)
+                    pid_str = parts[0]
+                    lock_time = (
+                        float(parts[1]) if len(parts) > 1 else None
+                    )
+                    if pid_str.isdigit():
+                        pid = int(pid_str)
+                        age = (
+                            time.time() - lock_time
+                            if lock_time is not None
+                            else None
+                        )
+                        try:
+                            os.kill(pid, 0)
+                            # PID exists — but check for reuse after reboot
+                            if (
+                                lock_time is not None
+                                and lock_time < psutil.boot_time()
+                            ):
+                                logger.warning(
+                                    f"Removing stale compaction lock "
+                                    f"(PID {pid} reused after reboot)"
+                                )
+                            else:
+                                # Process alive and lock from current boot
+                                lock_is_stale = False
+                                threshold = _LONG_COMPACTION_WARNING_SECONDS
+                                if age is not None and age > threshold:
+                                    logger.warning(
+                                        f"Compaction lock held by live process "
+                                        f"(PID {pid}, age {age:.0f}s > "
+                                        f"{threshold}s). "
+                                        "Long compaction? Not removing lock file."
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"Compaction lock held by live process "
+                                        f"(PID {pid}). Not removing lock file."
+                                    )
+                        except ProcessLookupError:
+                            logger.warning(
+                                f"Removing stale compaction lock "
+                                f"(PID {pid} no longer running)"
+                            )
+                        except PermissionError:
+                            # Process alive but owned by different user
+                            lock_is_stale = False
+                            logger.warning(
+                                f"Compaction lock held by process PID "
+                                f"{pid} (different user). "
+                                "Not removing lock file."
+                            )
+                except (OSError, ValueError):
+                    logger.warning(
+                        "Removing compaction lock (unreadable or legacy format)"
+                    )
+
+                if lock_is_stale:
+                    lock_file.unlink(missing_ok=True)
+
+            # Recover from interrupted compaction swap
+            old_db = self.db_path.with_suffix(".duckdb.old")
+            compact_db = self.db_path.with_suffix(".compact.duckdb")
+            export_dir = self.db_path.parent / ".chunkhound_compaction_export"
+            intent_path = Path(str(self.db_path) + ".swap_intent")
+
+            if intent_path.exists():
+                phase = intent_path.read_text().strip()
+                self._recover_from_intent(phase, old_db, compact_db, intent_path)
+            else:
+                self._recover_legacy(old_db, compact_db)
+
+            # Clean stale compact_db (both paths may leave it)
+            if compact_db.exists() and self.db_path.exists():
+                compact_db.unlink()
+
+            if export_dir.exists():
+                shutil.rmtree(export_dir, ignore_errors=True)
 
         # Ensure parent directory exists for file-based databases
         if isinstance(self.db_path, Path):

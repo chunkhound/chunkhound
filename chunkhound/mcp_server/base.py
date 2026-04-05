@@ -16,15 +16,21 @@ import os
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from loguru import logger
 
 from chunkhound.core.config import EmbeddingProviderFactory
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices, create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
+from chunkhound.services.compaction_service import CompactionService
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+
+if TYPE_CHECKING:
+    from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 
 
 class MCPServerBase(ABC):
@@ -59,6 +65,8 @@ class MCPServerBase(ABC):
         self.embedding_manager: EmbeddingManager | None = None
         self.llm_manager: LLMManager | None = None
         self.realtime_indexing: RealtimeIndexingService | None = None
+        self._compaction_service: CompactionService | None = None
+        self._target_path: Path | None = None  # Stored for reindex callback
 
         # Initialization state
         self._initialized = False
@@ -82,21 +90,22 @@ class MCPServerBase(ABC):
         # Set MCP mode to suppress stderr output that interferes with JSON-RPC
         os.environ["CHUNKHOUND_MCP_MODE"] = "1"
 
-    def debug_log(self, message: str) -> None:
-        """Log debug message to file if debug mode is enabled."""
-        if self.debug_mode:
-            # Write to debug file instead of stderr to preserve JSON-RPC protocol
-            debug_file = os.getenv(
-                "CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_mcp_debug.log"
-            )
-            try:
-                with open(debug_file, "a") as f:
-                    timestamp = datetime.now().isoformat()
-                    f.write(f"[{timestamp}] [MCP] {message}\n")
-                    f.flush()
-            except Exception:
-                # Silently fail if we can't write to debug file
-                pass
+    def debug_log(self, message: str, *, always: bool = False) -> None:
+        """Log message to file. Logged only in debug mode unless always=True."""
+        if not always and not self.debug_mode:
+            return
+        # Write to debug file instead of stderr to preserve JSON-RPC protocol
+        debug_file = os.getenv(
+            "CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_mcp_debug.log"
+        )
+        try:
+            with open(debug_file, "a") as f:
+                timestamp = datetime.now().isoformat()
+                f.write(f"[{timestamp}] [MCP] {message}\n")
+                f.flush()
+        except Exception:
+            # Silently fail if we can't write to debug file
+            pass
 
     async def initialize(self) -> None:
         """Initialize services and database connection.
@@ -174,6 +183,14 @@ class MCPServerBase(ABC):
                 # Fallback to config resolution (shouldn't happen in normal usage)
                 target_path = self.config.target_dir or db_path.parent.parent
                 self.debug_log(f"Using fallback path resolution: {target_path}")
+
+            # Store target path for reindex callback
+            self._target_path = target_path
+
+            # Initialize compaction service for background compaction (MCP mode)
+            if self.config.database.provider == "duckdb":
+                self._compaction_service = CompactionService(db_path, self.config)
+                self.debug_log("CompactionService initialized for background mode")
 
             # Mark as initialized immediately (tools available)
             self._initialized = True
@@ -280,16 +297,111 @@ class MCPServerBase(ABC):
                 f"Background scan completed: {stats.files_processed} files, {stats.chunks_created} chunks"
             )
 
+            # Trigger background compaction after initial scan
+            await self._trigger_background_compaction()
+
         except Exception as e:
             self.debug_log(f"Background initial scan failed: {e}")
             self._scan_progress["is_scanning"] = False
             self._scan_progress["scan_error"] = str(e)
+
+    async def _trigger_background_compaction(self) -> None:
+        """Trigger background compaction if warranted.
+
+        Uses non-blocking compaction with a callback that triggers
+        incremental reindexing after the database swap completes.
+        """
+        if self._compaction_service is None:
+            return
+
+        if not self.services:
+            return
+
+        try:
+            from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+
+            if not isinstance(self.services.provider, DuckDBProvider):
+                self.debug_log(
+                    f"Expected DuckDBProvider, got "
+                    f"{type(self.services.provider).__name__}"
+                )
+                return
+            db_provider = self.services.provider
+            started = await self._compaction_service.compact_background(
+                provider=db_provider,
+                on_complete=self._post_compaction_reindex,
+            )
+            if started:
+                self.debug_log("Background compaction started")
+        except Exception as e:
+            self.debug_log(f"Background compaction failed to start: {e}", always=True)
+
+    async def _post_compaction_reindex(self) -> None:
+        """Callback after compaction - triggers incremental reindex.
+
+        This uses the existing change detection which will find
+        files with mtime > last_indexed_time and reprocess them.
+        """
+        if not self.services or not self._target_path:
+            self.debug_log(
+                "Skipping post-compaction reindex: services or target unavailable"
+            )
+            return
+
+        try:
+            self.debug_log("Starting post-compaction incremental reindex...")
+
+            # Create indexing service for incremental reindex
+            indexing_service = DirectoryIndexingService(
+                indexing_coordinator=self.services.indexing_coordinator,
+                config=self.config,
+                progress_callback=lambda msg: self.debug_log(f"[reindex] {msg}"),
+            )
+
+            # Incremental reindex - only processes files modified during compaction
+            stats = await indexing_service.process_directory(
+                self._target_path, no_embeddings=False
+            )
+
+            self.debug_log(
+                f"Post-compaction reindex complete: {stats.files_processed} files, "
+                f"{stats.chunks_created} chunks"
+            )
+
+        except Exception as e:
+            self.debug_log(f"Post-compaction reindex failed: {e}")
 
     async def cleanup(self) -> None:
         """Clean up resources and close database connection.
 
         This method is idempotent - safe to call multiple times.
         """
+        # Stop compaction service first (cancels any in-progress compaction).
+        # shutdown() signals the thread and waits for it via threading.Event.
+        # We also do a secondary check here as defense-in-depth: the compaction
+        # thread bypasses the serial executor (direct duckdb.connect()), so we
+        # must not disconnect the provider while the thread is still alive.
+        if self._compaction_service:
+            self.debug_log("Stopping compaction service")
+            await self._compaction_service.shutdown()
+            if not self._compaction_service.compaction_thread_done.is_set():
+                self.debug_log(
+                    "WARNING: compaction thread still alive after shutdown, waiting..."
+                )
+                await asyncio.to_thread(
+                    self._compaction_service.compaction_thread_done.wait,
+                    timeout=5.0,
+                )
+                if not self._compaction_service.compaction_thread_done.is_set():
+                    # Proceeding with disconnect despite live thread — not
+                    # disconnecting would leak the connection and leave the
+                    # process hanging. The error log gives operators visibility.
+                    logger.error(
+                        "Compaction thread still alive after secondary wait — "
+                        "provider disconnect may corrupt state"
+                    )
+            self._compaction_service = None
+
         # Cancel deferred startup task if still running
         if self._startup_task is not None and not self._startup_task.done():
             self.debug_log("Cancelling deferred startup task")

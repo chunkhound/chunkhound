@@ -18,6 +18,8 @@ from chunkhound.mcp_server.tools import execute_tool
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
+    is_ci,
+    is_windows,
     should_use_polling,
 )
 
@@ -81,6 +83,40 @@ class TestMCPIntegration:
             pass
 
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_mcp_rejects_during_compaction(self, mcp_setup):
+        """MCP tool calls return CompactionError JSON when compaction gate is closed."""
+        import json
+        from chunkhound.mcp_server.common import handle_tool_call
+
+        services, _, _, _, _ = mcp_setup
+
+        # Simulate active compaction: drop cached connection then close gate.
+        # Access _connection_allowed directly — no public API exists to
+        # close the compaction gate without running a real compaction cycle.
+        services.provider.soft_disconnect()
+        services.provider._connection_allowed.clear()
+        try:
+            init_event = asyncio.Event()
+            init_event.set()
+
+            result = await handle_tool_call(
+                tool_name="search",
+                arguments={"type": "regex", "query": "test", "page_size": 10, "offset": 0},
+                services=services,
+                embedding_manager=None,
+                initialization_complete=init_event,
+            )
+
+            assert len(result) == 1
+            body = json.loads(result[0].text)
+            assert body["error"]["type"] == "CompactionError"
+            assert "compaction in progress" in body["error"]["message"]
+            assert "retry_hint" in body["error"]
+        finally:
+            services.provider._connection_allowed.set()
+            services.provider.connect()
 
     @pytest.mark.skipif(get_api_key_for_tests()[0] is None, reason="No API key available")
     @pytest.mark.asyncio
@@ -342,6 +378,11 @@ class NewlyAddedClass:
         assert len(v1_results) == 0, "Old version_1 should be replaced via content-based chunk deduplication"
         assert len(v2_results) > 0, "New version_2 should be indexed"
 
+    @pytest.mark.xfail(
+        condition=is_windows() and is_ci(),
+        reason="Polling mtime detection unreliable on NTFS (fixed in PR #220)",
+        strict=False,
+    )
     @pytest.mark.asyncio
     async def test_file_modification_with_filesystem_ops(self, mcp_setup):
         """Test modification using different filesystem operations to ensure OS detection."""
@@ -383,3 +424,83 @@ class NewlyAddedClass:
         # Original should be gone
         old_results = services.provider.search_chunks_regex("func.*initial")
         assert len(old_results) == 0, "Original content should be replaced"
+
+    @pytest.mark.asyncio
+    async def test_modified_file_replaces_old_content(self, mcp_setup):
+        """Test that process_file replaces old content on modification.
+
+        Deterministic test that calls process_file() directly, bypassing
+        filesystem monitoring. Tests the reaction layer independently of
+        platform-dependent change detection.
+        """
+        services, _, watch_dir, _, _ = mcp_setup
+
+        test_file = watch_dir / "direct_modify_test.py"
+
+        # Write initial content and process directly
+        test_file.write_text("def func(): return 'initial'")
+        await services.indexing_coordinator.process_file(test_file)
+
+        initial_results = services.provider.search_chunks_regex("func.*initial")
+        assert len(initial_results) > 0, "Initial content should be searchable"
+
+        # Overwrite with new content and process again
+        test_file.write_text("def func(): return 'replaced'\ndef added(): pass")
+        await services.indexing_coordinator.process_file(test_file)
+
+        # New content should be searchable
+        new_results = services.provider.search_chunks_regex("func.*replaced")
+        assert len(new_results) > 0, "New content should be searchable"
+
+        added_results = services.provider.search_chunks_regex("added")
+        assert len(added_results) > 0, "Added function should be searchable"
+
+        # Old content should be gone
+        old_results = services.provider.search_chunks_regex("func.*initial")
+        assert len(old_results) == 0, "Old content should be replaced"
+
+    @pytest.mark.asyncio
+    async def test_mcp_search_works_after_compaction(self, mcp_setup):
+        """Search results are preserved after database compaction."""
+        services, _, watch_dir, _, _ = mcp_setup
+
+        # Index a file with unique content
+        test_file = watch_dir / "compaction_search_test.py"
+        test_file.write_text(
+            "def compaction_survivor_func():\n"
+            "    return 'data_that_must_survive_compaction'\n"
+        )
+        await services.indexing_coordinator.process_file(test_file)
+
+        # Verify content is searchable before compaction
+        before = await execute_tool(
+            tool_name="search",
+            services=services,
+            embedding_manager=None,
+            arguments={
+                "type": "regex",
+                "query": "compaction_survivor_func",
+                "page_size": 10,
+                "offset": 0,
+            },
+        )
+        assert len(before.get("results", [])) > 0, "Content should exist before compaction"
+
+        # Compact the database
+        services.provider.optimize()
+
+        # Regex search must still return the indexed content
+        after = await execute_tool(
+            tool_name="search",
+            services=services,
+            embedding_manager=None,
+            arguments={
+                "type": "regex",
+                "query": "compaction_survivor_func",
+                "page_size": 10,
+                "offset": 0,
+            },
+        )
+        assert len(after.get("results", [])) > 0, (
+            "Search results must be preserved after compaction"
+        )

@@ -23,6 +23,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from chunkhound.core.config.config import Config
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.utils.windows_constants import IS_WINDOWS
 
@@ -331,6 +332,7 @@ class RealtimeIndexingService:
         """Stop the service gracefully."""
         logger.debug("Stopping real-time indexing service")
         self._debug("stopping service")
+        self._stopping = True
 
         # Cancel watchdog setup if still running
         if hasattr(self, "_watchdog_setup_task") and self._watchdog_setup_task:
@@ -352,24 +354,24 @@ class RealtimeIndexingService:
         if self.event_consumer_task:
             self.event_consumer_task.cancel()
             try:
-                await self.event_consumer_task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(self.event_consumer_task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
 
         # Cancel processing task
         if self.process_task:
             self.process_task.cancel()
             try:
-                await self.process_task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(self.process_task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
 
         # Cancel polling task if running
         if self._polling_task:
             self._polling_task.cancel()
             try:
-                await self._polling_task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(self._polling_task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
 
         # Cancel all active debounce tasks
@@ -381,7 +383,6 @@ class RealtimeIndexingService:
             await asyncio.gather(*self._debounce_tasks, return_exceptions=True)
             self._debounce_tasks.clear()
 
-        self._stopping = True
         async with self._file_condition:
             self._file_condition.notify_all()
 
@@ -458,8 +459,10 @@ class RealtimeIndexingService:
         """Simple polling monitor for large directories."""
         logger.debug(f"Starting polling monitor for {watch_path}")
         self._debug(f"polling monitor active for {watch_path}")
-        # Track files with their mtime to detect modifications (not just new/deleted)
-        known_files: dict[Path, int] = {}
+        # Track files with (mtime_ns, size) to detect modifications reliably
+        # Using both fields avoids missed changes on NTFS where mtime granularity
+        # can hide rapid overwrites (aligned with PR #220's approach)
+        known_files: dict[Path, tuple[int, int]] = {}
 
         # Create a simple event handler for shouldIndex check once
         simple_handler = SimpleEventHandler(
@@ -473,7 +476,7 @@ class RealtimeIndexingService:
         try:
             while True:
                 try:
-                    current_files: dict[Path, int] = {}
+                    current_files: dict[Path, tuple[int, int]] = {}
                     files_checked = 0
 
                     # Walk directory tree but with limits to avoid hanging
@@ -535,24 +538,25 @@ class RealtimeIndexingService:
         self,
         file_path: Path,
         handler: SimpleEventHandler,
-        known_files: dict[Path, int],
-        current_files: dict[Path, int],
+        known_files: dict[Path, tuple[int, int]],
+        current_files: dict[Path, tuple[int, int]],
     ) -> None:
         """Check a single file for changes during polling."""
         if not handler._should_index(file_path):  # noqa: SLF001
             return
         try:
-            current_mtime = file_path.stat().st_mtime_ns
+            stat = file_path.stat()
+            file_state = (stat.st_mtime_ns, stat.st_size)
         except OSError:
             return
 
-        current_files[file_path] = current_mtime
+        current_files[file_path] = file_state
 
         if file_path not in known_files:
             logger.debug(f"Polling detected new file: {file_path}")
             self._debug(f"polling detected new file: {file_path}")
             await self.add_file(file_path, priority="change")
-        elif known_files[file_path] != current_mtime:
+        elif known_files[file_path] != file_state:
             logger.debug(f"Polling detected modified file: {file_path}")
             self._debug(f"polling detected modified file: {file_path}")
             await self.add_file(file_path, priority="change")
@@ -602,7 +606,7 @@ class RealtimeIndexingService:
 
     async def _consume_events(self) -> None:
         """Simple event consumer - pure asyncio queue."""
-        while True:
+        while not self._stopping:
             try:
                 # Get event from async queue with timeout
                 try:
@@ -667,6 +671,8 @@ class RealtimeIndexingService:
 
                 self.event_queue.task_done()
 
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.error(f"Error consuming event: {e}")
                 await asyncio.sleep(0.1)  # Brief pause on error
@@ -839,6 +845,14 @@ class RealtimeIndexingService:
             except asyncio.CancelledError:
                 logger.debug("Processing loop cancelled")
                 raise
+            except CompactionError:
+                logger.debug(
+                    f"Compaction in progress, deferring {file_path} — "
+                    "will be picked up on next event or reindex"
+                )
+                async with self._file_condition:
+                    self.failed_files.add(normalize_file_path(file_path))
+                    self._file_condition.notify_all()
             except Exception as e:
                 logger.error(f"Error processing {file_path}: {e}")
                 # Track failed files for debugging and monitoring

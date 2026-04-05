@@ -11,6 +11,10 @@ import json
 from collections.abc import Coroutine
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from loguru import logger
+
+from chunkhound.core.exceptions import CompactionError
+
 if TYPE_CHECKING:  # type-checkers only; avoid runtime hard dep
     import mcp.types as types  # noqa: F401
 
@@ -224,6 +228,13 @@ async def handle_tool_call(
             response_text = format_tool_response(result, format_type="json")
         return [types.TextContent(type="text", text=response_text)]
 
+    except CompactionError as e:
+        logger.debug("Request rejected: database compaction in progress")
+        error_response = format_error_response(e, include_traceback=False)
+        error_response["error"]["retry_hint"] = (
+            "Database compaction in progress. Retry in a few seconds."
+        )
+        return [types.TextContent(type="text", text=json.dumps(error_response))]
     except Exception as e:
         error_response = format_error_response(e, include_traceback=debug_mode)
         return [types.TextContent(type="text", text=json.dumps(error_response))]

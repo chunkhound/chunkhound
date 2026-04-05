@@ -323,3 +323,30 @@ class DiskUsageLimitExceededError(ChunkHoundError):
         super().__init__(message, context)
         self.current_size_mb = current_size_mb
         self.limit_mb = limit_mb
+
+
+class CompactionError(ChunkHoundError):
+    """Raised when database compaction fails or is in progress."""
+
+    def __init__(
+        self,
+        reason: str | None = None,
+        operation: str | None = None,
+        context: dict[str, Any] | None = None,
+    ):
+        """Initialize compaction error.
+
+        Args:
+            reason: Descriptive reason for the failure.
+            operation: Compaction phase that failed (e.g. "lock", "preflight").
+            context: Optional additional context.
+        """
+        if operation:
+            prefix = f"Compaction error (operation={operation})"
+        else:
+            prefix = "Compaction error"
+        full_message = f"{prefix}: {reason}" if reason else prefix
+
+        super().__init__(full_message, context)
+        self.operation = operation
+        self.reason = reason

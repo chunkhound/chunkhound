@@ -2278,7 +2278,7 @@ class LanceDBProvider(SerialDatabaseProvider):
 
         return result
 
-    def should_optimize(self, operation: str = "") -> bool:
+    def has_reclaimable_space(self, operation: str = "") -> bool:
         """Check if optimization is warranted based on fragment count vs threshold.
 
         Args:
