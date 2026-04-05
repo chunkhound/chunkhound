@@ -100,6 +100,79 @@ class DuckDBConnectionManager:
             logger.debug(f"Integrity probe failed for {path}: {e}")
             return False
 
+    def _recover_from_intent(
+        self,
+        phase: str,
+        old_db: Path,
+        compact_db: Path,
+        intent_path: Path,
+    ) -> None:
+        """Recover from interrupted compaction using intent file."""
+        if phase == "phase1":
+            # Crash before/during first os.replace (db_path -> old_db).
+            # db_path may be missing if the rename completed; restore from old_db.
+            if not self.db_path.exists() and old_db.exists():
+                logger.warning(
+                    "phase1 recovery: restoring database from pre-compaction backup"
+                )
+                os.replace(old_db, self.db_path)
+            # Discard compact_db — compaction didn't finish
+            if compact_db.exists():
+                compact_db.unlink()
+        elif phase == "phase2":
+            # First rename succeeded (db_path -> old_db).
+            # Second rename (compact_db -> db_path) may not have completed.
+            if not self.db_path.exists() and compact_db.exists():
+                # Key fix: complete the swap — compact_db has the good data
+                logger.warning(
+                    "phase2 recovery: completing interrupted swap "
+                    "with compacted database"
+                )
+                os.replace(compact_db, self.db_path)
+            elif not self.db_path.exists() and old_db.exists():
+                # compact_db also missing — fall back to old
+                logger.warning(
+                    "phase2 recovery: compact database missing, restoring from backup"
+                )
+                os.replace(old_db, self.db_path)
+            # If db_path exists, probe and decide
+            if self.db_path.exists() and old_db.exists():
+                if self._probe_db_valid(self.db_path):
+                    old_db.unlink()
+                else:
+                    logger.warning(
+                        "phase2 recovery: database failed integrity probe, "
+                        "restoring from pre-compaction backup"
+                    )
+                    os.replace(old_db, self.db_path)
+        else:
+            logger.warning(
+                f"Unknown intent phase {phase!r}, falling back to legacy recovery"
+            )
+            self._recover_legacy(old_db, compact_db)
+
+        intent_path.unlink(missing_ok=True)
+
+    def _recover_legacy(self, old_db: Path, compact_db: Path) -> None:
+        """Legacy recovery when no intent file exists (pre-intent databases)."""
+        if not self.db_path.exists() and old_db.exists():
+            logger.warning("Restoring database from pre-compaction state")
+            os.replace(old_db, self.db_path)
+
+        # old_db requires integrity check before deletion — on Windows
+        # the two-step swap is not atomic, so db_path may be
+        # corrupt/incomplete if a crash occurred between the two
+        # os.replace() calls.
+        if old_db.exists() and self.db_path.exists():
+            if self._probe_db_valid(self.db_path):
+                old_db.unlink()
+            else:
+                logger.warning(
+                    "Database file failed integrity probe; "
+                    "restoring from pre-compaction backup"
+                )
+                os.replace(old_db, self.db_path)
+
     def connect(self) -> None:
         """Establish database connection and initialize schema with WAL validation."""
         logger.info(f"Connecting to DuckDB database: {self.db_path}")
@@ -177,28 +250,18 @@ class DuckDBConnectionManager:
             old_db = self.db_path.with_suffix(".duckdb.old")
             compact_db = self.db_path.with_suffix(".compact.duckdb")
             export_dir = self.db_path.parent / ".chunkhound_compaction_export"
+            intent_path = Path(str(self.db_path) + ".swap_intent")
 
-            if not self.db_path.exists() and old_db.exists():
-                logger.warning("Restoring database from pre-compaction state")
-                os.replace(old_db, self.db_path)
+            if intent_path.exists():
+                phase = intent_path.read_text().strip()
+                self._recover_from_intent(phase, old_db, compact_db, intent_path)
+            else:
+                self._recover_legacy(old_db, compact_db)
 
-            # Clean stale artifacts
+            # Clean stale compact_db (both paths may leave it)
             if compact_db.exists() and self.db_path.exists():
                 compact_db.unlink()
 
-            # old_db requires integrity check before deletion — on Windows
-            # the two-step swap is not atomic, so db_path may be
-            # corrupt/incomplete if a crash occurred between the two
-            # os.replace() calls.
-            if old_db.exists() and self.db_path.exists():
-                if self._probe_db_valid(self.db_path):
-                    old_db.unlink()
-                else:
-                    logger.warning(
-                        "Database file failed integrity probe; "
-                        "restoring from pre-compaction backup"
-                    )
-                    os.replace(old_db, self.db_path)
             if export_dir.exists():
                 shutil.rmtree(export_dir, ignore_errors=True)
 
