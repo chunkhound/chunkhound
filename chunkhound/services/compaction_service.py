@@ -46,6 +46,7 @@ class CompactionService:
     def __init__(self, db_path: Path, config: "Config"):
         self._db_path = db_path
         self._config = config
+        self._lock = threading.Lock()
         self._compaction_in_progress = False
         self._compaction_task: asyncio.Task[None] | None = None
         self._shutdown_requested = False
@@ -60,7 +61,8 @@ class CompactionService:
     @property
     def is_compacting(self) -> bool:
         """Check if compaction is currently in progress."""
-        return self._compaction_in_progress
+        with self._lock:
+            return self._compaction_in_progress
 
     @property
     def compaction_thread_done(self) -> threading.Event:
@@ -76,17 +78,17 @@ class CompactionService:
         self, provider: "DuckDBProvider"
     ) -> tuple[bool, dict[str, Any]]:
         """Check if compaction is warranted. Returns (should_compact, stats)."""
-        # check-then-set on _compaction_in_progress is safe: CLI uses
-        # compact_blocking (single caller) and MCP calls compact_background
-        # once from the post-index hook — no concurrent callers in practice.
-        if self._compaction_in_progress:
-            # Self-heal after task cancellation: if the thread finished but
-            # the asyncio task was already cancelled (so its finally block
-            # couldn't reset the flag), clear it now.
-            if self._compaction_thread_done.is_set() and self._compaction_task is None:
-                self._compaction_in_progress = False
-            else:
-                return False, {}
+        with self._lock:
+            if self._compaction_in_progress:
+                # Self-heal after task cancellation: if the thread
+                # finished but the asyncio task was already cancelled
+                # (so its finally block couldn't reset the flag),
+                # clear it now.
+                thread_done = self._compaction_thread_done.is_set()
+                if thread_done and self._compaction_task is None:
+                    self._compaction_in_progress = False
+                else:
+                    return False, {}
 
         if not self._config.database.compaction_enabled:
             return False, {}
@@ -113,6 +115,36 @@ class CompactionService:
         # Disk space check delegated to provider.optimize()
         return True, stats
 
+    def _try_start_compaction(
+        self, provider: "DuckDBProvider"
+    ) -> tuple[bool, dict[str, Any]]:
+        """Atomically check eligibility and acquire compaction rights.
+
+        Eliminates the TOCTOU window between check_should_compact() and
+        the manual ``_compaction_in_progress = True`` assignment.
+        """
+        with self._lock:
+            if self._compaction_in_progress:
+                return False, {}
+
+        # Config/threshold checks (read-only, no lock needed)
+        if not self._config.database.compaction_enabled:
+            return False, {}
+        threshold = self._config.database.compaction_threshold
+        should, stats = provider.should_compact(threshold=threshold)
+        if not should:
+            return False, {}
+        reclaimable = estimate_reclaimable_bytes(stats)
+        if reclaimable < self._config.database.compaction_min_size_mb * 1024 * 1024:
+            return False, {}
+
+        # Re-check and atomically acquire
+        with self._lock:
+            if self._compaction_in_progress:
+                return False, {}
+            self._compaction_in_progress = True
+        return True, stats
+
     def _log_compaction_trigger(
         self, stats: dict[str, Any], *, background: bool = False
     ) -> None:
@@ -135,17 +167,17 @@ class CompactionService:
         Raises:
             CompactionError: If compaction fails (propagated from provider).
         """
-        should, stats = self.check_should_compact(provider)
+        should, stats = self._try_start_compaction(provider)
         if not should:
             return False
 
         self._log_compaction_trigger(stats)
 
-        self._compaction_in_progress = True
         try:
             return await self._do_compaction(provider)
         finally:
-            self._compaction_in_progress = False
+            with self._lock:
+                self._compaction_in_progress = False
 
     async def compact_background(
         self,
@@ -164,19 +196,19 @@ class CompactionService:
 
         Returns True if compaction was started, False if skipped.
         """
-        should, stats = self.check_should_compact(provider)
+        should, stats = self._try_start_compaction(provider)
         if not should:
             return False
 
         self._log_compaction_trigger(stats, background=True)
 
-        self._compaction_in_progress = True
         try:
             self._compaction_task = asyncio.create_task(
                 self._do_compaction_with_callback(provider, on_complete)
             )
         except Exception:
-            self._compaction_in_progress = False
+            with self._lock:
+                self._compaction_in_progress = False
             raise
         return True
 
@@ -206,10 +238,12 @@ class CompactionService:
             self._last_error = e
             logger.error(f"Background compaction failed: {e}")
         finally:
-            # Thread may outlive a cancelled asyncio task — only reset flag once thread exits.
-            if self._compaction_thread_done.is_set():
-                self._compaction_in_progress = False
-            self._compaction_task = None
+            # Thread may outlive a cancelled asyncio task —
+            # only reset flag once thread exits.
+            with self._lock:
+                if self._compaction_thread_done.is_set():
+                    self._compaction_in_progress = False
+                self._compaction_task = None
 
     async def _do_compaction(self, provider: "DuckDBProvider") -> bool:
         """Perform compaction by delegating to provider.optimize().
@@ -301,10 +335,11 @@ class CompactionService:
                 )
 
         self._compaction_task = None
-        if self._compaction_thread_done.is_set():
-            self._compaction_in_progress = False
-        else:
-            logger.error(
-                "Compaction thread still running after shutdown — "
-                "leaving _compaction_in_progress=True to prevent new compaction"
-            )
+        with self._lock:
+            if self._compaction_thread_done.is_set():
+                self._compaction_in_progress = False
+            else:
+                logger.error(
+                    "Compaction thread still running after shutdown — "
+                    "leaving _compaction_in_progress=True to prevent new compaction"
+                )

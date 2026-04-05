@@ -194,6 +194,33 @@ class TestStorageStats:
         assert should is False
         assert stats == {}
 
+    def test_try_start_compaction_concurrent_only_one_wins(
+        self, tmp_path: Path, config_with_compaction: Config, mock_provider: MagicMock
+    ):
+        """Two concurrent _try_start_compaction calls — only one succeeds."""
+        db_path = tmp_path / "test.duckdb"
+        db_path.touch()
+
+        service = CompactionService(db_path, config_with_compaction)
+
+        barrier = threading.Barrier(2)
+        results: list[bool] = []
+
+        def try_start():
+            barrier.wait()
+            ok, _ = service._try_start_compaction(mock_provider)
+            results.append(ok)
+
+        t1 = threading.Thread(target=try_start)
+        t2 = threading.Thread(target=try_start)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert results.count(True) == 1, "Exactly one caller should win"
+        assert results.count(False) == 1, "Other caller should be rejected"
+
 
 class TestBlockingCompaction:
     """Test blocking compaction mode (CLI)."""
