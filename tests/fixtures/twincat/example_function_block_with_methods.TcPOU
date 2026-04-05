@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_WithMethods" Id="{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}" SpecialFunc="None">
+    <Declaration><![CDATA[// Function block with methods demonstrating TwinCAT 3 OOP features
+
+FUNCTION_BLOCK FB_WithMethods
+
+VAR_INPUT
+    bEnable : BOOL;
+END_VAR
+
+VAR_OUTPUT
+    bDone : BOOL;
+    nStatus : INT;
+END_VAR
+
+VAR
+    nInternalState : INT := 0;
+    fValue : REAL := 0.0;
+END_VAR
+
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[// Main execution logic
+IF bEnable THEN
+    nInternalState := nInternalState + 1;
+END_IF;
+]]></ST>
+    </Implementation>
+    <Method Name="Initialize" Id="{11111111-2222-3333-4444-555555555555}">
+      <Declaration><![CDATA[// Method: Initialize
+// Initializes the function block state
+
+METHOD Initialize : BOOL
+
+VAR_INPUT
+    bReset : BOOL := FALSE;
+    nInitValue : INT := 0;
+END_VAR
+
+VAR
+    bLocalFlag : BOOL;
+END_VAR
+
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// Initialize method implementation
+IF bReset THEN
+    nInternalState := nInitValue;
+    fValue := 0.0;
+    bLocalFlag := TRUE;
+END_IF;
+
+Initialize := bLocalFlag;
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetStatus" Id="{22222222-3333-4444-5555-666666666666}">
+      <Declaration><![CDATA[// Method: GetStatus
+// Returns the current status
+
+METHOD PUBLIC GetStatus : INT
+
+VAR_INPUT
+    bDetailed : BOOL := FALSE;
+END_VAR
+
+VAR
+    nTempStatus : INT;
+END_VAR
+
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// GetStatus method implementation
+nTempStatus := nInternalState;
+
+IF bDetailed AND nInternalState > 0 THEN
+    nTempStatus := nTempStatus * 10;
+END_IF;
+
+GetStatus := nTempStatus;
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ProcessData" Id="{33333333-4444-5555-6666-777777777777}">
+      <Declaration><![CDATA[// Method: ProcessData
+// Processes data with loops
+
+METHOD PRIVATE ProcessData : REAL
+
+VAR_INPUT
+    anData : ARRAY[0..9] OF INT;
+END_VAR
+
+VAR
+    i : INT;
+    fSum : REAL := 0.0;
+END_VAR
+
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// ProcessData method with FOR loop
+FOR i := 0 TO 9 DO
+    fSum := fSum + INT_TO_REAL(anData[i]);
+END_FOR;
+
+ProcessData := fSum;
+]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

@@ -239,6 +239,12 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     Language.PDF: LanguageConfig(
         None, PDFMapping, True, "pdf"
     ),  # PDF doesn't need tree-sitter
+    Language.TWINCAT: LanguageConfig(
+        None,  # No tree-sitter module (uses Lark)
+        None,  # No mapping class (custom parser)
+        True,  # Always available - lark is a hard dependency
+        "twincat",
+    ),
 }
 
 # File extension to language mapping
@@ -338,6 +344,9 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     ".text": Language.TEXT,
     # PDF files
     ".pdf": Language.PDF,
+    # TwinCAT / IEC 61131-3 Structured Text
+    ".TcPOU": Language.TWINCAT,
+    ".tcpou": Language.TWINCAT,
 }
 
 
@@ -395,6 +404,17 @@ class ParserFactory:
             from chunkhound.parsers.makefile_parser import MakefileParser
 
             return MakefileParser(cast_config, detect_embedded_sql)
+
+        # Special case: TwinCAT uses Lark-based custom parser via mapping
+        # This routes TwinCAT through UniversalParser to benefit from
+        # cAST algorithm (deduplication, comment merging, greedy merge)
+        if language == Language.TWINCAT:
+            from chunkhound.parsers.twincat.twincat_mapping import TwinCATMapping
+
+            mapping = TwinCATMapping()
+            return UniversalParser(
+                engine=None, mapping=mapping, cast_config=cast_config
+            )
 
         # Use cache to avoid recreating parsers
         cache_key = self._cache_key(language, detect_embedded_sql)

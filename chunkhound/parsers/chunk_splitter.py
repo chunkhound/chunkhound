@@ -474,6 +474,10 @@ CHUNK_TYPE_TO_CONCEPT: dict[ChunkType, UniversalConcept] = {
     ChunkType.EXTENSION_FUNCTION: UniversalConcept.DEFINITION,
     ChunkType.VARIABLE: UniversalConcept.DEFINITION,
     ChunkType.MACRO: UniversalConcept.DEFINITION,
+    # IEC 61131-3 / TwinCAT-only kinds (not mapped above) -> DEFINITION
+    ChunkType.PROGRAM: UniversalConcept.DEFINITION,
+    ChunkType.FUNCTION_BLOCK: UniversalConcept.DEFINITION,
+    ChunkType.ACTION: UniversalConcept.DEFINITION,
     # Code structure -> STRUCTURE
     ChunkType.CLASS: UniversalConcept.STRUCTURE,
     ChunkType.INTERFACE: UniversalConcept.STRUCTURE,

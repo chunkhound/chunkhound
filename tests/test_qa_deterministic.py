@@ -405,6 +405,7 @@ function qaTestFunction() {
             Language.PDF: None,  # PDF is binary, skip content template
             Language.SQL: '-- SQL QA test\nCREATE TABLE qa_test (\n    id INTEGER PRIMARY KEY,\n    content TEXT DEFAULT \'sql_qa_unique\'\n);',
             Language.ELIXIR: 'defmodule QATest do\n  # Elixir QA test\n  def test, do: "elixir_qa_unique"\nend',
+            Language.TWINCAT: '<?xml version="1.0" encoding="utf-8"?>\n<TcPlcObject Version="1.1.0.1">\n  <POU Name="QA_TEST" Id="{00000000-0000-0000-0000-000000000001}">\n    <Declaration><![CDATA[PROGRAM QA_TEST\nVAR\n  bFlag : BOOL := TRUE;\nEND_VAR]]></Declaration>\n    <Implementation>\n      <ST><![CDATA[IF bFlag THEN\n  (* twincat_qa_unique *)\nEND_IF]]></ST>\n    </Implementation>\n  </POU>\n</TcPlcObject>',
         }
 
         # Create extension mapping for file creation
@@ -445,6 +446,7 @@ function qaTestFunction() {
             Language.PDF: ".pdf",
             Language.SQL: ".sql",
             Language.ELIXIR: ".ex",
+            Language.TWINCAT: ".tcpou",
         }
 
         # Validate ALL languages have test coverage (fail explicitly for new languages)

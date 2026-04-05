@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FC_WithAction" Id="{55555555-5555-5555-5555-555555555555}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION FC_WithAction : DINT
+VAR_INPUT
+    nInput : DINT;
+    bProcess : BOOL;
+END_VAR
+VAR
+    nResult : DINT;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[nResult := nInput;
+
+IF bProcess THEN
+    nResult := nResult * 2;
+END_IF;
+
+FC_WithAction := nResult;
+]]></ST>
+    </Implementation>
+    <Action Name="ProcessArray" Id="{aaaaaaaa-1111-2222-3333-444444444444}">
+      <Declaration><![CDATA[VAR
+    i : INT;
+    nLocalSum : DINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[nLocalSum := 0;
+
+FOR i := 0 TO 9 DO
+    IF i MOD 2 = 0 THEN
+        nLocalSum := nLocalSum + i;
+    END_IF;
+END_FOR;
+
+WHILE nLocalSum > 100 DO
+    nLocalSum := nLocalSum - 10;
+END_WHILE;
+
+nResult := nLocalSum;
+]]></ST>
+      </Implementation>
+    </Action>
+  </POU>
+</TcPlcObject>
