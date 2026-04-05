@@ -190,21 +190,6 @@ class EmbeddingService(BaseService):
             raise ValueError("chunk_ids and chunk_texts must have the same length")
 
         try:
-            # Debug log entry point to confirm our code executes
-            import os
-            from datetime import datetime
-
-            debug_file = os.getenv("CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_debug.log")
-            timestamp = datetime.now().isoformat()
-            try:
-                with open(debug_file, "a") as f:
-                    f.write(
-                        f"[{timestamp}] [ENTRY] Starting embedding generation for {len(chunk_ids)} chunks\n"
-                    )
-                    f.flush()
-            except Exception:
-                pass
-
             logger.debug(f"Generating embeddings for {len(chunk_ids)} chunks")
 
             # Filter out chunks that already have embeddings
@@ -229,21 +214,6 @@ class EmbeddingService(BaseService):
             chunk_sizes = [len(text) for text in chunk_texts]
             max_size = max(chunk_sizes) if chunk_sizes else 0
             total_chars = sum(chunk_sizes)
-            # Debug log to trace execution path
-            import os
-            from datetime import datetime
-
-            debug_file = os.getenv("CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_debug.log")
-            timestamp = datetime.now().isoformat()
-            try:
-                with open(debug_file, "a") as f:
-                    f.write(
-                        f"[{timestamp}] [TOP-LEVEL] Failed to generate embeddings (chunks: {len(chunk_sizes)}, total_chars: {total_chars}, max_chars: {max_size}): {e}\n"
-                    )
-                    f.flush()
-            except Exception:
-                pass
-
             logger.error(
                 f"[EmbSvc-L101] Failed to generate embeddings (chunks: {len(chunk_sizes)}, total_chars: {total_chars}, max_chars: {max_size}): {e}"
             )
@@ -637,23 +607,6 @@ class EmbeddingService(BaseService):
                     # Log batch details for non-retryable errors or max retries exceeded
                     batch_sizes = [len(text) for _, text in batch]
                     max_size = max(batch_sizes) if batch_sizes else 0
-                    # Debug log to trace execution path
-                    import os
-                    from datetime import datetime
-
-                    debug_file = os.getenv(
-                        "CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_debug.log"
-                    )
-                    timestamp = datetime.now().isoformat()
-                    try:
-                        with open(debug_file, "a") as f:
-                            f.write(
-                                f"[{timestamp}] [BATCH-PROCESS] Batch {batch_num + 1} failed (chunks: {len(batch)}, max_chars: {max_size}): {e}\n"
-                            )
-                            f.flush()
-                    except Exception:
-                        pass
-
                     logger.error(
                         f"[EmbSvc-BatchProcess] Batch {batch_num + 1} failed (chunks: {len(batch)}, max_chars: {max_size}): {e}"
                     )
@@ -717,30 +670,7 @@ class EmbeddingService(BaseService):
                 max_chars = max(batch_sizes) if batch_sizes else 0
                 total_chars = sum(batch_sizes)
 
-                # Use debug_log mechanism to trace the mystery logging source
-                import os
-                import traceback
-                from datetime import datetime
-
-                # Write directly to debug file like the MCP debug_log mechanism
-                debug_file = os.getenv(
-                    "CHUNKHOUND_DEBUG_FILE", "/tmp/chunkhound_debug.log"
-                )
-                timestamp = datetime.now().isoformat()
-                debug_msg = (
-                    f"[{timestamp}] [EMBEDDING-DEBUG] Batch {i + 1} failed "
-                    f"(chunks: {len(batch_sizes)}, total_chars: {total_chars:,}, max_chars: {max_chars:,}): {result}\n"
-                    f"[{timestamp}] [EMBEDDING-DEBUG] Stack: {' -> '.join(traceback.format_stack()[-5:])}\n"
-                )
-
-                try:
-                    with open(debug_file, "a") as f:
-                        f.write(debug_msg)
-                        f.flush()
-                except Exception:
-                    pass  # Silently fail like the original debug_log
-
-                # Also keep the standard logging
+                # Log batch failure details
                 logger.error(
                     f"[EmbSvc-AsyncBatch] Batch {i + 1} failed "
                     f"(chunks: {len(batch_sizes)}, total_chars: {total_chars:,}, max_chars: {max_chars:,}): {result}"
