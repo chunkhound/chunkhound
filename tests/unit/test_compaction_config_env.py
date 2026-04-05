@@ -58,6 +58,14 @@ class TestCompactionEnvConfig:
         config = DatabaseConfig.load_from_env()
         assert config["compaction_min_size_mb"] == 50
 
+    def test_compaction_enabled_empty_string_uses_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Empty string env var treated as unset (project convention)."""
+        monkeypatch.setenv("CHUNKHOUND_DATABASE__COMPACTION_ENABLED", "")
+        config = DatabaseConfig.load_from_env()
+        assert "compaction_enabled" not in config
+
     def test_compaction_min_size_invalid_ignored(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
