@@ -302,3 +302,102 @@ class TestProbeDbValid:
 
         mgr = DuckDBConnectionManager(db_path)
         assert not mgr._probe_db_valid(db_path)
+
+
+class TestIntentBasedRecovery:
+    """Test intent-file-based crash recovery."""
+
+    def test_phase1_restores_old_discards_compact(self, tmp_path: Path):
+        """phase1 crash: db missing, old exists, compact exists -> restore old, discard compact."""
+        db_path = tmp_path / "chunks.duckdb"
+        old_path = db_path.with_suffix(".duckdb.old")
+        compact_path = db_path.with_suffix(".compact.duckdb")
+        intent_path = Path(str(db_path) + ".swap_intent")
+
+        _create_valid_duckdb(old_path)
+        compact_path.write_bytes(b"incomplete compact")
+        intent_path.write_text("phase1")
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert db_path.exists(), "Should be restored from old"
+            assert not old_path.exists(), "old should be consumed"
+            assert not compact_path.exists(), "compact should be discarded"
+            assert not intent_path.exists(), "intent should be cleaned up"
+        finally:
+            mgr.disconnect()
+
+    def test_phase2_completes_swap_with_compact_db(self, tmp_path: Path):
+        """phase2 crash: db missing, compact exists -> complete swap with compact (THE key fix)."""
+        db_path = tmp_path / "chunks.duckdb"
+        old_path = db_path.with_suffix(".duckdb.old")
+        compact_path = db_path.with_suffix(".compact.duckdb")
+        intent_path = Path(str(db_path) + ".swap_intent")
+
+        _create_valid_duckdb(old_path)
+        _create_valid_duckdb(compact_path)
+        intent_path.write_text("phase2")
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert db_path.exists(), "Should be completed from compact"
+            assert not compact_path.exists(), "compact should be consumed/cleaned"
+            assert not old_path.exists(), "old should be cleaned after successful swap"
+            assert not intent_path.exists(), "intent should be cleaned up"
+        finally:
+            mgr.disconnect()
+
+    def test_phase2_falls_back_to_old_when_compact_missing(self, tmp_path: Path):
+        """phase2 crash: db missing, compact missing, old exists -> restore old."""
+        db_path = tmp_path / "chunks.duckdb"
+        old_path = db_path.with_suffix(".duckdb.old")
+        intent_path = Path(str(db_path) + ".swap_intent")
+
+        _create_valid_duckdb(old_path)
+        intent_path.write_text("phase2")
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert db_path.exists(), "Should be restored from old"
+            assert not old_path.exists(), "old should be consumed"
+            assert not intent_path.exists(), "intent should be cleaned up"
+        finally:
+            mgr.disconnect()
+
+    def test_intent_cleaned_after_recovery(self, tmp_path: Path):
+        """Intent file is removed even when no crash artifacts exist."""
+        db_path = tmp_path / "chunks.duckdb"
+        intent_path = Path(str(db_path) + ".swap_intent")
+
+        _create_valid_duckdb(db_path)
+        intent_path.write_text("phase2")
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert db_path.exists()
+            assert not intent_path.exists(), "intent should always be cleaned up"
+        finally:
+            mgr.disconnect()
+
+    def test_unknown_phase_falls_back_to_legacy(self, tmp_path: Path):
+        """Unknown intent content triggers legacy recovery path."""
+        db_path = tmp_path / "chunks.duckdb"
+        old_path = db_path.with_suffix(".duckdb.old")
+        intent_path = Path(str(db_path) + ".swap_intent")
+
+        # Simulate unknown phase with db missing and old present
+        _create_valid_duckdb(old_path)
+        intent_path.write_text("unknown_phase")
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert db_path.exists(), "Legacy recovery should restore from old"
+            assert not old_path.exists(), "old should be consumed"
+            assert not intent_path.exists(), "intent should be cleaned up"
+        finally:
+            mgr.disconnect()

@@ -53,6 +53,16 @@ if TYPE_CHECKING:
     from chunkhound.core.config.database_config import DatabaseConfig
 
 
+def _write_intent(path: Path, phase: str) -> None:
+    """Write an fsync'd intent file for crash recovery."""
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+    try:
+        os.write(fd, phase.encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 class DuckDBProvider(SerialDatabaseProvider):
     """DuckDB implementation of DatabaseProvider protocol.
 
@@ -3115,6 +3125,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         old_db_path = db_path.with_suffix(".duckdb.old")
         wal_file = db_path.with_suffix(db_path.suffix + ".wal")
         lock_file = get_compaction_lock_path(db_path)
+        intent_path = Path(str(db_path) + ".swap_intent")
 
         lock_acquired = False
         try:
@@ -3178,8 +3189,13 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             # os.replace is atomic on POSIX; on Windows the two-step
             # rename is NOT atomic — crash recovery in connect() handles this
+            _write_intent(intent_path, "phase1")
             os.replace(db_path, old_db_path)
+
+            _write_intent(intent_path, "phase2")
             os.replace(new_db_path, db_path)
+
+            intent_path.unlink(missing_ok=True)
 
             if cancel_check and cancel_check():
                 # Swap succeeded but shutdown requested — skip connect().
@@ -3246,6 +3262,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 shutil.rmtree(export_dir, ignore_errors=True)
             if lock_acquired:
                 lock_file.unlink(missing_ok=True)
+            intent_path.unlink(missing_ok=True)
             # Only restore connection gate if provider is actually connected.
             # Success/cancel paths already set() explicitly above.
             # If error recovery failed to reconnect, leave gate closed so
