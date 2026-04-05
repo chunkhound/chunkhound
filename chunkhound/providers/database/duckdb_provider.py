@@ -3133,8 +3133,10 @@ class DuckDBProvider(SerialDatabaseProvider):
             # + original DB retained until swap (~0.5x safety margin)
             self._has_sufficient_disk_space(db_path, multiplier=2.5)
 
-            # Suspend auto-reconnect before soft_disconnect so any concurrent
-            # MCP request gets a clear error instead of opening a stale connection
+            # Suspend auto-reconnect before soft_disconnect so concurrent MCP
+            # requests get CompactionError instead of opening stale connections.
+            # Safe: the executor is single-threaded, so any in-flight request
+            # completes before soft_disconnect's disconnect task runs.
             self._connection_allowed.clear()
 
             # Soft disconnect before export — DuckDB doesn't allow mixing
