@@ -160,10 +160,9 @@ class SerialDatabaseProvider(ABC):
         Use for temporary disconnections (e.g., compaction) where reconnection
         will happen soon. For final cleanup, use disconnect() instead.
 
-        Note: thread-local state (transaction_active, deferred_checkpoint, etc.)
-        persists across soft_disconnect/reconnect. The connection itself is
-        properly cleared by _executor_disconnect. This is safe for compaction
-        since no transaction is active at compaction time.
+        Note: thread-local state is reset on disconnect for session safety.
+        The connection is cleared by _executor_disconnect, and state fields
+        like transaction_active and deferred_checkpoint are reset to defaults.
 
         Args:
             skip_checkpoint: If True, skip final checkpoint (faster but less safe)
@@ -247,7 +246,10 @@ class SerialDatabaseProvider(ABC):
         connection gate in get_thread_local_connection() blocks reconnection
         during compaction.
         """
-        from chunkhound.providers.database.serial_executor import _executor_local
+        from chunkhound.providers.database.serial_executor import (
+            _executor_local,
+            reset_thread_local_state,
+        )
 
         try:
             # Close connection
@@ -261,6 +263,7 @@ class SerialDatabaseProvider(ABC):
             # gate prevents stale reconnections during compaction.
             if hasattr(_executor_local, "connection"):
                 delattr(_executor_local, "connection")
+            reset_thread_local_state()
 
     # Common capability detection pattern using hasattr()
 

@@ -78,6 +78,20 @@ def get_thread_local_state() -> dict[str, Any]:
     return _executor_local.state
 
 
+def reset_thread_local_state() -> None:
+    """Reset thread-local state to defaults for clean reconnect.
+
+    Clears session-specific keys (deferred_checkpoint, last_checkpoint_time,
+    etc.) and restores default values.  Preserves the dict reference.
+    """
+    if hasattr(_executor_local, "state"):
+        _executor_local.state.clear()
+        _executor_local.state.update({
+            "transaction_active": False,
+            "last_activity_time": time.time(),
+        })
+
+
 class SerialDatabaseExecutor:
     """Thread-safe executor for database operations requiring single-threaded execution.
 
