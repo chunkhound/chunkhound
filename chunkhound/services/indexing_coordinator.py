@@ -2853,12 +2853,29 @@ class IndexingCoordinator(BaseService):
                 for file_path in current_files
             }
 
-            # Get all files in database (stored as relative paths)
-            query = """
-                SELECT id, path
-                FROM files
-            """
-            db_files = self._db.execute_query(query, [])
+            # Compute the directory prefix relative to base_dir so the DB query
+            # is scoped to only files under the directory being indexed.
+            # This prevents re-indexing a sub-directory from deleting other
+            # repos' data stored under sibling prefixes.
+            try:
+                dir_prefix = directory.resolve().relative_to(base_dir.resolve()).as_posix()
+            except ValueError:
+                dir_prefix = ""
+
+            # Get only files under the directory being indexed (stored as relative paths)
+            if dir_prefix and dir_prefix != ".":
+                query = """
+                    SELECT id, path
+                    FROM files
+                    WHERE path = ? OR path LIKE ?
+                """
+                db_files = self._db.execute_query(query, [dir_prefix, dir_prefix + "/%"])
+            else:
+                query = """
+                    SELECT id, path
+                    FROM files
+                """
+                db_files = self._db.execute_query(query, [])
 
             # Find orphaned files (in DB but not on disk or excluded by patterns)
             orphaned_files = []
