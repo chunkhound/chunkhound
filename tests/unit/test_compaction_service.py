@@ -220,6 +220,23 @@ class TestStorageStats:
         assert results.count(True) == 1, "Exactly one caller should win"
         assert results.count(False) == 1, "Other caller should be rejected"
 
+    def test_try_start_compaction_skips_on_compaction_error(
+        self, tmp_path: Path, config_with_compaction: Config, mock_provider: MagicMock
+    ):
+        """should_compact raising CompactionError -> gracefully return False."""
+        db_path = tmp_path / "test.duckdb"
+        db_path.touch()
+
+        mock_provider.should_compact.side_effect = CompactionError(
+            "connection gated", operation="connection"
+        )
+
+        service = CompactionService(db_path, config_with_compaction)
+        ok, stats = service._try_start_compaction(mock_provider)
+
+        assert ok is False
+        assert stats == {}
+
 
 class TestBlockingCompaction:
     """Test blocking compaction mode (CLI)."""
