@@ -243,7 +243,12 @@ class SerialDatabaseProvider(ABC):
         """Default executor method for disconnect - runs in DB thread.
 
         Subclasses should override to add provider-specific cleanup.
+        Must always clear the thread-local connection attribute so the
+        connection gate in get_thread_local_connection() blocks reconnection
+        during compaction.
         """
+        from chunkhound.providers.database.serial_executor import _executor_local
+
         try:
             # Close connection
             if conn:
@@ -251,6 +256,11 @@ class SerialDatabaseProvider(ABC):
             logger.info("Database connection closed in executor thread")
         except Exception as e:
             logger.error(f"Error closing connection: {e}")
+        finally:
+            # Always clear the cached connection so the is_accepting_connections
+            # gate prevents stale reconnections during compaction.
+            if hasattr(_executor_local, "connection"):
+                delattr(_executor_local, "connection")
 
     # Common capability detection pattern using hasattr()
 

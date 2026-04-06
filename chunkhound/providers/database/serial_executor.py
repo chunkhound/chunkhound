@@ -33,12 +33,15 @@ def get_thread_local_connection(provider: Any) -> Any:
         RuntimeError: If connection creation fails
     """
     if not hasattr(_executor_local, "connection"):
-        # Refuse to reconnect while compaction holds the file.
-        # Narrow TOCTOU: another thread could clear _connection_allowed between
-        # is_set() and _create_connection(). Safe in practice because only the
-        # single executor thread calls this function, and compaction's
-        # soft_disconnect() is submitted through the same executor queue,
-        # guaranteeing ordering.
+        # Refuse to create a new connection while compaction holds the file.
+        # Placed inside the `not hasattr` guard so that disconnect operations
+        # (which need the cached connection) can still proceed.  The gate is
+        # effective because _executor_disconnect always delattrs the cached
+        # connection — any provider that skips delattr must be fixed there,
+        # not here.
+        # No TOCTOU risk: only the single executor thread calls this function,
+        # and compaction's soft_disconnect() is submitted through the same
+        # executor queue, guaranteeing ordering.
         if not provider.is_accepting_connections:
             raise CompactionError(
                 "Database connection suspended: compaction in progress",
