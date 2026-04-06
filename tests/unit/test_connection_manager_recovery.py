@@ -385,6 +385,89 @@ class TestIntentBasedRecovery:
         finally:
             mgr.disconnect()
 
+    def test_phase2_falls_back_when_compact_corrupt(self, tmp_path: Path):
+        """phase2 crash: compact_db corrupt + old_db valid -> restore old_db."""
+        db_path = tmp_path / "chunks.duckdb"
+        old_path = db_path.with_suffix(".duckdb.old")
+        compact_path = db_path.with_suffix(".compact.duckdb")
+        intent_path = Path(str(db_path) + ".swap_intent")
+
+        _create_valid_duckdb(old_path)
+        compact_path.write_bytes(b"corrupt compact db")
+        intent_path.write_text("phase2")
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert db_path.exists(), "Should be restored from old_db"
+            assert not old_path.exists(), "old should be consumed"
+            assert not compact_path.exists(), "corrupt compact should be cleaned up"
+            assert not intent_path.exists(), "intent should be cleaned up"
+            # Verify the restored file is usable
+            result = mgr.connection.execute(
+                "SELECT count(*) FROM files"
+            ).fetchone()
+            assert result == (0,), "Restored DB should have files table"
+        finally:
+            mgr.disconnect()
+
+    def test_phase2_completes_swap_without_backup(self, tmp_path: Path):
+        """phase2 crash: db missing, compact valid, no old_db -> install compact."""
+        db_path = tmp_path / "chunks.duckdb"
+        compact_path = db_path.with_suffix(".compact.duckdb")
+        intent_path = Path(str(db_path) + ".swap_intent")
+
+        _create_valid_duckdb(compact_path)
+        intent_path.write_text("phase2")
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert db_path.exists(), "Should be installed from compact"
+            assert not compact_path.exists(), "compact should be consumed"
+            assert not intent_path.exists(), "intent should be cleaned up"
+            result = mgr.connection.execute(
+                "SELECT count(*) FROM files"
+            ).fetchone()
+            assert result == (0,), "Installed DB should have files table"
+        finally:
+            mgr.disconnect()
+
+    def test_phase2_raises_when_both_unavailable(self, tmp_path: Path):
+        """phase2 crash: compact_db corrupt + no old_db -> raise CompactionError."""
+        db_path = tmp_path / "chunks.duckdb"
+        compact_path = db_path.with_suffix(".compact.duckdb")
+        intent_path = Path(str(db_path) + ".swap_intent")
+
+        compact_path.write_bytes(b"corrupt compact db")
+        intent_path.write_text("phase2")
+
+        mgr = DuckDBConnectionManager(db_path)
+        with pytest.raises(CompactionError, match="Unrecoverable"):
+            mgr.connect()
+
+    def test_pre_swap_recovery_discards_compact(self, tmp_path: Path):
+        """pre_swap crash: db_path exists, compact/old artifacts -> discard both."""
+        db_path = tmp_path / "chunks.duckdb"
+        old_path = db_path.with_suffix(".duckdb.old")
+        compact_path = db_path.with_suffix(".compact.duckdb")
+        intent_path = Path(str(db_path) + ".swap_intent")
+
+        _create_valid_duckdb(db_path)
+        old_path.write_bytes(b"stale old db")
+        compact_path.write_bytes(b"incomplete compact")
+        intent_path.write_text("pre_swap")
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert db_path.exists(), "db_path should remain intact"
+            assert not compact_path.exists(), "compact should be discarded"
+            assert not old_path.exists(), "stale old_db should be cleaned up"
+            assert not intent_path.exists(), "intent should be cleaned up"
+        finally:
+            mgr.disconnect()
+
     def test_unknown_phase_falls_back_to_legacy(self, tmp_path: Path):
         """Unknown intent content triggers legacy recovery path."""
         db_path = tmp_path / "chunks.duckdb"
