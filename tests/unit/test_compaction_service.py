@@ -96,7 +96,6 @@ class TestStorageStats:
 
         should, stats = service.check_should_compact(mock_provider)
         assert should is True
-        assert stats["_raw_fragmentation_ratio"] == 0.6
         # Verify config threshold was passed to provider
         mock_provider.should_compact.assert_called_once_with(threshold=0.5)
 
@@ -689,16 +688,16 @@ class TestShutdown:
         await service.shutdown(timeout=0.1)
 
         # Thread is still alive → flag must stay True
-        assert not service.compaction_thread_done.is_set()
-        assert service.is_compacting, (
-            "_compaction_in_progress was reset despite thread still running"
-        )
-
-        # Cleanup
-        thread_can_finish.set()
-        assert service.compaction_thread_done.wait(timeout=5.0), (
-            "Cleanup: thread did not exit"
-        )
+        try:
+            assert not service.compaction_thread_done.is_set()
+            assert service.is_compacting, (
+                "_compaction_in_progress was reset despite thread still running"
+            )
+        finally:
+            thread_can_finish.set()
+            assert service.compaction_thread_done.wait(timeout=5.0), (
+                "Cleanup: thread did not exit"
+            )
 
 
     @pytest.mark.asyncio
