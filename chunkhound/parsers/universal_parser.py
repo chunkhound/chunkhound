@@ -913,10 +913,6 @@ class UniversalParser:
                 return ChunkType.FUNCTION_BLOCK
             elif kind == "action":
                 return ChunkType.ACTION
-            elif kind == "transition":
-                return ChunkType.FUNCTION
-            elif kind in {"sfc_step", "sfc_initial_step"}:
-                return ChunkType.BLOCK
             elif kind == "namespace" or "namespace" in node_type:
                 return ChunkType.NAMESPACE
             elif kind == "property" or "property" in node_type:

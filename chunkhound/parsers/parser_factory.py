@@ -81,6 +81,7 @@ from chunkhound.parsers.mappings import (
     ZigMapping,
 )
 from chunkhound.parsers.mappings.base import BaseMapping
+from chunkhound.parsers.twincat.twincat_mapping import TwinCATMapping
 from chunkhound.parsers.universal_engine import SetupError, TreeSitterEngine
 from chunkhound.parsers.universal_parser import CASTConfig, UniversalParser
 
@@ -241,7 +242,7 @@ LANGUAGE_CONFIGS: dict[Language, LanguageConfig] = {
     ),  # PDF doesn't need tree-sitter
     Language.TWINCAT: LanguageConfig(
         None,  # No tree-sitter module (uses Lark)
-        None,  # No mapping class (custom parser)
+        TwinCATMapping,
         True,  # Always available - lark is a hard dependency
         "twincat",
     ),
@@ -405,17 +406,6 @@ class ParserFactory:
 
             return MakefileParser(cast_config, detect_embedded_sql)
 
-        # Special case: TwinCAT uses Lark-based custom parser via mapping
-        # This routes TwinCAT through UniversalParser to benefit from
-        # cAST algorithm (deduplication, comment merging, greedy merge)
-        if language == Language.TWINCAT:
-            from chunkhound.parsers.twincat.twincat_mapping import TwinCATMapping
-
-            mapping = TwinCATMapping()
-            return UniversalParser(
-                engine=None, mapping=mapping, cast_config=cast_config
-            )
-
         # Use cache to avoid recreating parsers
         cache_key = self._cache_key(language, detect_embedded_sql)
         if cache_key in self._parser_cache:
@@ -444,9 +434,9 @@ class ParserFactory:
 
         parser: UniversalParser
 
-        # Special handling for text and PDF files (no tree-sitter required)
-        if language in (Language.TEXT, Language.PDF):
-            # Text and PDF mappings don't need tree-sitter engine
+        # Special handling for non-tree-sitter languages (text, PDF, TwinCAT)
+        if language in (Language.TEXT, Language.PDF, Language.TWINCAT):
+            # These mappings don't need a tree-sitter engine
             mapping = config.mapping_class()
             parser = UniversalParser(None, mapping, cast_config, detect_embedded_sql)  # type: ignore[arg-type]
             wrapped = self._maybe_wrap_yaml_parser(language, parser, cast_config)
