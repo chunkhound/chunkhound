@@ -14,8 +14,10 @@ import duckdb
 import pytest
 from loguru import logger
 
+from chunkhound.core.exceptions import CompactionError
 from chunkhound.providers.database.duckdb.connection_manager import (
     DuckDBConnectionManager,
+    _REQUIRED_TABLES,
     get_compaction_lock_path,
 )
 
@@ -23,12 +25,12 @@ from chunkhound.providers.database.duckdb.connection_manager import (
 def _create_valid_duckdb(path: Path) -> None:
     """Create a minimal valid DuckDB database with required tables.
 
-    Matches ``_REQUIRED_TABLES`` in connection_manager so the integrity
+    Uses ``_REQUIRED_TABLES`` from connection_manager so the integrity
     probe (``_probe_db_valid``) recognises the file as a valid ChunkHound DB.
     """
     conn = duckdb.connect(str(path))
-    conn.execute("CREATE TABLE files (path VARCHAR)")
-    conn.execute("CREATE TABLE chunks (id INTEGER)")
+    for table in _REQUIRED_TABLES:
+        conn.execute(f"CREATE TABLE {table} (id INTEGER)")
     conn.close()
 
 
