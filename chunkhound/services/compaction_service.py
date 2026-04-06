@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from chunkhound.core.exceptions.core import CompactionError
+
 if TYPE_CHECKING:
     from chunkhound.core.config.config import Config
     from chunkhound.providers.database.duckdb_provider import DuckDBProvider
@@ -94,7 +96,10 @@ class CompactionService:
             return False, {}
 
         threshold = self._config.database.compaction_threshold
-        should, stats = provider.should_compact(threshold=threshold)
+        try:
+            should, stats = provider.should_compact(threshold=threshold)
+        except CompactionError:
+            return False, {}
 
         if not should:
             return False, {}
@@ -131,7 +136,11 @@ class CompactionService:
         if not self._config.database.compaction_enabled:
             return False, {}
         threshold = self._config.database.compaction_threshold
-        should, stats = provider.should_compact(threshold=threshold)
+        try:
+            should, stats = provider.should_compact(threshold=threshold)
+        except CompactionError as e:
+            logger.debug(f"Compaction eligibility check failed, skipping auto-compaction: {e}")
+            return False, {}
         if not should:
             return False, {}
         reclaimable = estimate_reclaimable_bytes(stats)
