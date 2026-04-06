@@ -38,6 +38,7 @@ class TestSafeSqlPath:
             "/tmp/\u00e9",
             '/tmp/foo"bar',
             "/tmp/$HOME",
+            "/tmp/foo:bar",
         ],
         ids=[
             "semicolon",
@@ -47,6 +48,7 @@ class TestSafeSqlPath:
             "unicode",
             "double-quote",
             "dollar-sign",
+            "colon-non-drive-letter",
         ],
     )
     def test_rejected_paths_raise(self, path_str: str) -> None:

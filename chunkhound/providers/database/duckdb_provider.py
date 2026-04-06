@@ -3321,8 +3321,8 @@ class DuckDBProvider(SerialDatabaseProvider):
         so we must interpolate. Only allow known-safe characters.
         """
         path_str = path.as_posix()
-        # Colon needed for Windows drive letters (C:); safe inside SQL string literals
-        if not re.fullmatch(r"[-a-zA-Z0-9/_. :+,=~]+", path_str):
+        # Allow colon only as part of a Windows drive letter prefix (e.g. C:/)
+        if not re.fullmatch(r"(?:[a-zA-Z]:)?[-a-zA-Z0-9/_. +,=~]+", path_str):
             raise CompactionError(
                 f"Database path contains characters not allowed in SQL "
                 f"interpolation (path failed allowlist check: {path_str!r})",
