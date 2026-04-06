@@ -435,7 +435,7 @@ class ParserFactory:
         parser: UniversalParser
 
         # Special handling for non-tree-sitter languages (text, PDF, TwinCAT)
-        if language in (Language.TEXT, Language.PDF, Language.TWINCAT):
+        if config.tree_sitter_module is None:
             # These mappings don't need a tree-sitter engine
             mapping = config.mapping_class()
             parser = UniversalParser(None, mapping, cast_config, detect_embedded_sql)  # type: ignore[arg-type]
@@ -594,7 +594,7 @@ class ParserFactory:
         """
         missing = {}
         for language, config in LANGUAGE_CONFIGS.items():
-            if not config.available and language not in (Language.TEXT, Language.PDF):
+            if not config.available and config.tree_sitter_module is not None:
                 missing[language] = (
                     f"pip install tree-sitter-{config.language_name.lower()}"
                 )

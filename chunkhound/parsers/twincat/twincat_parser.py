@@ -410,7 +410,7 @@ class TwinCATParser:
         location = declaration_location or content.declaration_location
 
         # Find all var_block nodes
-        var_blocks = self._find_nodes(tree, "var_block")
+        var_blocks = list(tree.find_data("var_block"))
 
         for var_block in var_blocks:
             # Extract var class from var_block_start
@@ -1234,17 +1234,6 @@ class TwinCATParser:
             return f"{pou_name}.{action_name}.{element_name}"
         return f"{pou_name}.{element_name}"
 
-    def _find_nodes(self, tree: Tree, rule_name: str) -> list[Tree]:
-        """Recursively find all nodes with given rule name."""
-        results: list[Tree] = []
-        if isinstance(tree, Tree):
-            if tree.data == rule_name:
-                results.append(tree)
-            for child in tree.children:
-                if isinstance(child, Tree):
-                    results.extend(self._find_nodes(child, rule_name))
-        return results
-
     def _get_token_value(self, tree: Tree, token_type: str) -> str | None:
         """Find first token of given type in tree's children."""
         for child in tree.children:
@@ -1403,7 +1392,7 @@ class TwinCATParser:
         chunks: list[UniversalChunk] = []
 
         # Find all var_block nodes
-        var_blocks = self._find_nodes(tree, "var_block")
+        var_blocks = list(tree.find_data("var_block"))
 
         for var_block in var_blocks:
             # Check if this is a VAR_EXTERNAL block
@@ -1490,21 +1479,21 @@ class TwinCATParser:
         chunks: list[UniversalChunk] = []
 
         # Find pou_header node
-        pou_headers = self._find_nodes(tree, "pou_header")
+        pou_headers = list(tree.find_data("pou_header"))
         if not pou_headers:
             return chunks
 
         pou_header = pou_headers[0]
 
         # Extract extends_clause
-        extends_clauses = self._find_nodes(pou_header, "extends_clause")
+        extends_clauses = list(pou_header.find_data("extends_clause"))
         for extends_clause in extends_clauses:
             chunk = self._create_extends_import_chunk(extends_clause, content)
             if chunk:
                 chunks.append(chunk)
 
         # Extract implements_clause
-        implements_clauses = self._find_nodes(pou_header, "implements_clause")
+        implements_clauses = list(pou_header.find_data("implements_clause"))
         for implements_clause in implements_clauses:
             impl_chunks = self._create_implements_import_chunks(
                 implements_clause, content
@@ -1622,7 +1611,7 @@ class TwinCATParser:
         seen_types: set[str] = set()  # Deduplicate type references
 
         # Find all var_declaration nodes
-        var_decls = self._find_nodes(tree, "var_declaration")
+        var_decls = list(tree.find_data("var_declaration"))
 
         for var_decl in var_decls:
             # Get variable name(s) for context
@@ -1670,7 +1659,7 @@ class TwinCATParser:
                                 user_types.append(str(token))
                 elif child.data in ("array_type", "pointer_type", "reference_type"):
                     # Recurse into nested type_spec
-                    nested_type_specs = self._find_nodes(child, "type_spec")
+                    nested_type_specs = list(child.find_data("type_spec"))
                     for nested in nested_type_specs:
                         user_types.extend(
                             self._extract_user_types_from_type_spec(nested)
