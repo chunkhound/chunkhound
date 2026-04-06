@@ -52,7 +52,7 @@ class DatabaseConfig(BaseModel):
 
     # Compaction settings
     compaction_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Enable automatic compaction when fragmentation exceeds threshold",
     )
 

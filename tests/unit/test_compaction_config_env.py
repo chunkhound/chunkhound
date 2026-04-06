@@ -5,9 +5,9 @@ import pytest
 from chunkhound.core.config.database_config import DatabaseConfig
 
 
-def test_compaction_disabled_by_default() -> None:
+def test_compaction_enabled_by_default() -> None:
     cfg = DatabaseConfig()
-    assert cfg.compaction_enabled is False
+    assert cfg.compaction_enabled is True
 
 
 class TestCompactionEnvConfig:
