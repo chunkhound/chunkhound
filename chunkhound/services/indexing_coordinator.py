@@ -42,6 +42,7 @@ from chunkhound.parsers.chunk_splitter import (
     universal_to_chunk,
 )
 from chunkhound.parsers.universal_parser import UniversalParser
+from chunkhound.providers.database.like_utils import escape_like_pattern
 
 # File pattern utilities for directory discovery
 from chunkhound.utils.file_patterns import (
@@ -2858,18 +2859,19 @@ class IndexingCoordinator(BaseService):
             # This prevents re-indexing a sub-directory from deleting other
             # repos' data stored under sibling prefixes.
             try:
-                dir_prefix = directory.resolve().relative_to(base_dir.resolve()).as_posix()
+                dir_prefix = get_relative_path_safe(directory, base_dir).as_posix()
             except ValueError:
                 dir_prefix = ""
 
             # Get only files under the directory being indexed (stored as relative paths)
             if dir_prefix and dir_prefix != ".":
+                escaped_prefix = escape_like_pattern(dir_prefix)
                 query = """
                     SELECT id, path
                     FROM files
-                    WHERE path = ? OR path LIKE ?
+                    WHERE path = ? OR path LIKE ? ESCAPE '\\'
                 """
-                db_files = self._db.execute_query(query, [dir_prefix, dir_prefix + "/%"])
+                db_files = self._db.execute_query(query, [dir_prefix, escaped_prefix + "/%"])
             else:
                 query = """
                     SELECT id, path
