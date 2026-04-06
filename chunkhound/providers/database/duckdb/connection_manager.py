@@ -33,11 +33,19 @@ import duckdb
 import psutil
 from loguru import logger
 
+from chunkhound.core.exceptions.core import CompactionError
+
 # Tables that must exist for a post-compaction DB to be considered valid.
 # Created in DuckDBProvider._executor_create_schema.
 _REQUIRED_TABLES = frozenset({"files", "chunks"})
 
 _LONG_COMPACTION_WARNING_SECONDS = 600  # 10 minutes
+
+# Intent-file phase constants used by both the provider (writer) and
+# connection manager (reader) to coordinate crash recovery.
+PHASE_PRE_SWAP = "pre_swap"
+PHASE_1 = "phase1"
+PHASE_2 = "phase2"
 
 
 def get_compaction_lock_path(db_path: Path) -> Path:
@@ -108,7 +116,14 @@ class DuckDBConnectionManager:
         intent_path: Path,
     ) -> None:
         """Recover from interrupted compaction using intent file."""
-        if phase == "phase1":
+        if phase == PHASE_PRE_SWAP:
+            # Crash during pre-swap cleanup. db_path should still exist.
+            # Discard any leftover compact_db and stale old_db.
+            if compact_db.exists():
+                compact_db.unlink()
+            if old_db.exists():
+                old_db.unlink()
+        elif phase == PHASE_1:
             # Crash before/during first os.replace (db_path -> old_db).
             # db_path may be missing if the rename completed; restore from old_db.
             if not self.db_path.exists() and old_db.exists():
@@ -119,16 +134,32 @@ class DuckDBConnectionManager:
             # Discard compact_db — compaction didn't finish
             if compact_db.exists():
                 compact_db.unlink()
-        elif phase == "phase2":
+        elif phase == PHASE_2:
             # First rename succeeded (db_path -> old_db).
             # Second rename (compact_db -> db_path) may not have completed.
             if not self.db_path.exists() and compact_db.exists():
-                # Key fix: complete the swap — compact_db has the good data
-                logger.warning(
-                    "phase2 recovery: completing interrupted swap "
-                    "with compacted database"
-                )
-                os.replace(compact_db, self.db_path)
+                if self._probe_db_valid(compact_db):
+                    logger.warning(
+                        "phase2 recovery: completing interrupted swap "
+                        "with compacted database"
+                    )
+                    os.replace(compact_db, self.db_path)
+                elif old_db.exists():
+                    logger.warning(
+                        "phase2 recovery: compact database failed integrity probe, "
+                        "restoring from pre-compaction backup"
+                    )
+                    compact_db.unlink()
+                    os.replace(old_db, self.db_path)
+                else:
+                    logger.error(
+                        "phase2 recovery: both compact and backup databases unavailable"
+                    )
+                    raise CompactionError(
+                        "Unrecoverable: no valid database or backup found "
+                        "after interrupted compaction",
+                        operation="recovery",
+                    )
             elif not self.db_path.exists() and old_db.exists():
                 # compact_db also missing — fall back to old
                 logger.warning(

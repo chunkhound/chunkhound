@@ -34,6 +34,9 @@ from chunkhound.embeddings import EmbeddingManager
 from chunkhound.providers.database.duckdb.chunk_repository import DuckDBChunkRepository
 from chunkhound.providers.database.duckdb.connection_manager import (
     DuckDBConnectionManager,
+    PHASE_1,
+    PHASE_2,
+    PHASE_PRE_SWAP,
     get_compaction_lock_path,
 )
 from chunkhound.providers.database.duckdb.embedding_repository import (
@@ -3178,6 +3181,8 @@ class DuckDBProvider(SerialDatabaseProvider):
             # 3. Atomic swap
             logger.info("Performing atomic swap...")
 
+            _write_intent(intent_path, PHASE_PRE_SWAP)
+
             # Explicitly delete orphaned WAL before swap
             if wal_file.exists():
                 wal_file.unlink()
@@ -3189,10 +3194,10 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             # os.replace is atomic on POSIX; on Windows the two-step
             # rename is NOT atomic — crash recovery in connect() handles this
-            _write_intent(intent_path, "phase1")
+            _write_intent(intent_path, PHASE_1)
             os.replace(db_path, old_db_path)
 
-            _write_intent(intent_path, "phase2")
+            _write_intent(intent_path, PHASE_2)
             os.replace(new_db_path, db_path)
 
             intent_path.unlink(missing_ok=True)
