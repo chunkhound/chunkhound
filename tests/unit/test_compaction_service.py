@@ -1186,6 +1186,38 @@ class TestCompactionErrorRecovery:
         # Provider couldn't reconnect
         assert provider.is_connected is False
 
+    def test_optimize_raises_unrecoverable_when_both_db_files_missing(
+        self, provider_with_fragmentation: tuple
+    ):
+        """CompactionError raised when swap fails and neither db nor backup exist."""
+        provider, db_path = provider_with_fragmentation
+        old_db_path = db_path.with_suffix(".duckdb.old")
+
+        real_replace = os.replace
+
+        def destructive_replace(src, dst):
+            if Path(dst) == old_db_path:
+                # First swap step: db_path -> old_db_path — let it succeed
+                real_replace(src, dst)
+            elif Path(dst) == db_path:
+                # Second swap step: compact_db -> db_path — simulate corruption
+                old_db_path.unlink(missing_ok=True)
+                raise OSError("filesystem corruption during swap")
+            else:
+                real_replace(src, dst)
+
+        with patch(
+            "chunkhound.providers.database.duckdb_provider.os.replace",
+            side_effect=destructive_replace,
+        ):
+            with pytest.raises(CompactionError, match="Manual recovery required") as exc_info:
+                provider.optimize()
+
+            assert exc_info.value.operation == "compaction"
+
+        assert not db_path.exists()
+        assert not old_db_path.exists()
+
     def test_optimize_rejects_insufficient_disk_space(
         self, provider_with_fragmentation: tuple
     ):

@@ -3241,6 +3241,17 @@ class DuckDBProvider(SerialDatabaseProvider):
             if old_db_path.exists() and not db_path.exists():
                 logger.warning("Restoring original database from backup...")
                 os.replace(old_db_path, db_path)
+            elif not db_path.exists():
+                logger.critical(
+                    "No database file found after compaction failure. "
+                    "The database was renamed during swap but could not be restored. "
+                    "Manual recovery required."
+                )
+                raise CompactionError(
+                    "No database file found after compaction failure. "
+                    "Manual recovery required.",
+                    operation="compaction",
+                ) from e
             # Reconnect (we disconnected for export, need to restore connection)
             if not self.is_connected:
                 self._connection_allowed.set()  # Ungate before recovery connect
