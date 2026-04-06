@@ -98,6 +98,9 @@ class _FakeDB:
     def has_reclaimable_space(self, operation: str = "") -> bool:
         return False
 
+    def create_deferred_indexes(self) -> None:
+        pass
+
     # Async wrappers
     async def begin_transaction_async(self):
         return self.begin_transaction()
