@@ -49,6 +49,7 @@ from chunkhound.providers.database.serial_database_provider import (
 )
 from chunkhound.providers.database.serial_executor import (
     _executor_local,
+    reset_thread_local_state,
 )
 
 # Type hinting only
@@ -319,6 +320,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Clear thread-local connection
             if hasattr(_executor_local, "connection"):
                 delattr(_executor_local, "connection")
+            reset_thread_local_state()
             if not os.environ.get("CHUNKHOUND_MCP_MODE"):
                 logger.info("DuckDB connection closed in executor thread")
 
