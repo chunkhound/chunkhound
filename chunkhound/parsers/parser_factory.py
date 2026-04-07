@@ -44,6 +44,7 @@ import tree_sitter_zig as ts_zig
 from tree_sitter_language_pack import get_language as _get_lang
 
 from chunkhound.core.types.common import Language
+from chunkhound.parsers._grammar_availability import SCSS_AVAILABLE
 from chunkhound.interfaces.language_parser import LanguageParser
 from chunkhound.parsers.concept_extractor import LanguageMapping
 from chunkhound.parsers.mappings import (
@@ -119,7 +120,6 @@ _scss_lang = _get_lang("scss")
 ts_scss: _LanguagePackWrapper | None = (
     _LanguagePackWrapper(_scss_lang) if _scss_lang else None
 )
-SCSS_AVAILABLE: bool = ts_scss is not None
 
 logger = logging.getLogger(__name__)
 
@@ -360,7 +360,6 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     ".j2": Language.JINJA,
     ".njk": Language.JINJA,
     ".ejs": Language.JINJA,
-    ".erb": Language.JINJA,
     ".css": Language.CSS,
     # .scss falls back to TEXT when the SCSS grammar is unavailable, matching
     # the documented graceful-degradation behaviour and mirroring .sass.
