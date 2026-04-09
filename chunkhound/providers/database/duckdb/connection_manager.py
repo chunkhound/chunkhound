@@ -284,6 +284,13 @@ class DuckDBConnectionManager:
                 logger.info(
                     "Skipping compaction recovery — lock held by live process"
                 )
+                if not self.db_path.exists():
+                    raise CompactionError(
+                        f"Database file {self.db_path} does not exist but compaction lock "
+                        f"is held by a live process (possible PID reuse after crash). "
+                        f"Remove lock file {lock_file} and restart to trigger recovery.",
+                        operation="connect",
+                    )
             else:
                 # Recover from interrupted compaction swap
                 old_db = self.db_path.with_suffix(".duckdb.old")
