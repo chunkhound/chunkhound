@@ -210,6 +210,7 @@ class DuckDBConnectionManager:
 
         # Recover from interrupted compaction
         if isinstance(self.db_path, Path):
+            foreign_lock_alive = False
             lock_file = get_compaction_lock_path(self.db_path)
             if lock_file.exists():
                 # Check if lock is held by a live process before removing
@@ -276,25 +277,32 @@ class DuckDBConnectionManager:
 
                 if lock_is_stale:
                     lock_file.unlink(missing_ok=True)
+                else:
+                    foreign_lock_alive = True
 
-            # Recover from interrupted compaction swap
-            old_db = self.db_path.with_suffix(".duckdb.old")
-            compact_db = self.db_path.with_suffix(".compact.duckdb")
-            export_dir = self.db_path.parent / ".chunkhound_compaction_export"
-            intent_path = Path(str(self.db_path) + ".swap_intent")
-
-            if intent_path.exists():
-                phase = intent_path.read_text().strip()
-                self._recover_from_intent(phase, old_db, compact_db, intent_path)
+            if foreign_lock_alive:
+                logger.info(
+                    "Skipping compaction recovery — lock held by live process"
+                )
             else:
-                self._recover_legacy(old_db, compact_db)
+                # Recover from interrupted compaction swap
+                old_db = self.db_path.with_suffix(".duckdb.old")
+                compact_db = self.db_path.with_suffix(".compact.duckdb")
+                export_dir = self.db_path.parent / ".chunkhound_compaction_export"
+                intent_path = Path(str(self.db_path) + ".swap_intent")
 
-            # Clean stale compact_db (both paths may leave it)
-            if compact_db.exists() and self.db_path.exists():
-                compact_db.unlink()
+                if intent_path.exists():
+                    phase = intent_path.read_text().strip()
+                    self._recover_from_intent(phase, old_db, compact_db, intent_path)
+                else:
+                    self._recover_legacy(old_db, compact_db)
 
-            if export_dir.exists():
-                shutil.rmtree(export_dir, ignore_errors=True)
+                # Clean stale compact_db (both paths may leave it)
+                if compact_db.exists() and self.db_path.exists():
+                    compact_db.unlink()
+
+                if export_dir.exists():
+                    shutil.rmtree(export_dir, ignore_errors=True)
 
         # Ensure parent directory exists for file-based databases
         if isinstance(self.db_path, Path):
