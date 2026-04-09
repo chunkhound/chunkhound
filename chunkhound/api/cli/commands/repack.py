@@ -31,6 +31,14 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
 
     formatter.section_header("ChunkHound Database Repack")
 
+    # Check provider type first - repack only supported for DuckDB
+    if config.database.provider != "duckdb":
+        formatter.error(
+            f"Repack is only supported for DuckDB databases. "
+            f"Current provider: {config.database.provider}"
+        )
+        sys.exit(1)
+
     # Verify database exists
     try:
         verify_database_exists(config)
@@ -40,14 +48,6 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
 
     # Get actual database path (includes provider-specific suffix like .duckdb)
     db_path = config.database.get_db_path()
-
-    # Check provider type - repack only supported for DuckDB
-    if config.database.provider != "duckdb":
-        formatter.error(
-            f"Repack is only supported for DuckDB databases. "
-            f"Current provider: {config.database.provider}"
-        )
-        sys.exit(1)
 
     # Get original size
     try:

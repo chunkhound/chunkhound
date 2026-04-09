@@ -50,5 +50,5 @@ def test_repack_non_duckdb_error() -> None:
     proc = _run(["chunkhound", "repack", "--database-provider", "lancedb"])
     assert proc.returncode != 0
     combined = (proc.stdout + proc.stderr).lower()
-    # May fail with "only supported for duckdb" or "database not found" depending on config
-    assert "only supported for duckdb" in combined or "not found" in combined
+    # Provider-type check must run before database-existence check.
+    assert "only supported for duckdb" in combined
