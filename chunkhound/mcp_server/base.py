@@ -393,15 +393,30 @@ class MCPServerBase(ABC):
                     timeout=5.0,
                 )
                 if not self._compaction_service.compaction_thread_done.is_set():
-                    # Proceeding with disconnect despite live thread — not
-                    # disconnecting would leak the connection and leave the
-                    # process hanging. The error log gives operators visibility.
                     logger.error(
                         "Compaction thread still alive after secondary wait — "
-                        "provider disconnect may corrupt state"
+                        "skipping provider disconnect to avoid corruption"
                     )
+                    self._compaction_service = None
+                    await self._cleanup_non_provider_resources()
+                    # _initialized intentionally stays True: cleanup() is terminal
+                    # (process exits after this), so no reconnection will follow.
+                    return
             self._compaction_service = None
 
+        await self._cleanup_non_provider_resources()
+
+        if self.services and self.services.provider.is_connected:
+            self.debug_log("Closing database connection")
+            # Use new close() method for proper cleanup, with fallback to disconnect()
+            if hasattr(self.services.provider, "close"):
+                self.services.provider.close()
+            else:
+                self.services.provider.disconnect()
+            self._initialized = False
+
+    async def _cleanup_non_provider_resources(self) -> None:
+        """Cancel background tasks and stop real-time indexing."""
         # Cancel deferred startup task if still running
         if self._startup_task is not None and not self._startup_task.done():
             self.debug_log("Cancelling deferred startup task")
@@ -424,15 +439,6 @@ class MCPServerBase(ABC):
         if self.realtime_indexing:
             self.debug_log("Stopping real-time indexing service")
             await self.realtime_indexing.stop()
-
-        if self.services and self.services.provider.is_connected:
-            self.debug_log("Closing database connection")
-            # Use new close() method for proper cleanup, with fallback to disconnect()
-            if hasattr(self.services.provider, "close"):
-                self.services.provider.close()
-            else:
-                self.services.provider.disconnect()
-            self._initialized = False
 
     async def ensure_services(self) -> DatabaseServices:
         """Ensure services are initialized and return them.
