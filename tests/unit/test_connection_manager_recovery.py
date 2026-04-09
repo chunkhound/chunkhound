@@ -288,6 +288,39 @@ class TestLockFileRecovery:
             compact_path.unlink(missing_ok=True)
             shutil.rmtree(export_dir, ignore_errors=True)
 
+    def test_raises_when_foreign_lock_alive_but_db_missing(self, tmp_path: Path):
+        """When a live process holds the lock but the DB file is missing, raise CompactionError."""
+        db_path = tmp_path / "chunks.duckdb"
+        lock_path = get_compaction_lock_path(db_path)
+        old_db = db_path.with_suffix(".duckdb.old")
+        compact_db = db_path.with_suffix(".compact.duckdb")
+        export_dir = db_path.parent / ".chunkhound_compaction_export"
+
+        # Do NOT create db_path — it must not exist
+        # Write a lock held by current process (guaranteed alive)
+        lock_path.write_text(f"{os.getpid()}:{time.time():.0f}")
+        # Create artifacts to verify they're untouched after error
+        old_db.write_bytes(b"old backup")
+        compact_db.write_bytes(b"compacting")
+        export_dir.mkdir()
+        (export_dir / "data.parquet").write_bytes(b"export data")
+
+        mgr = DuckDBConnectionManager(db_path)
+        try:
+            with pytest.raises(CompactionError, match="does not exist"):
+                mgr.connect()
+
+            # Artifacts should be untouched
+            assert lock_path.exists(), "Lock should be preserved"
+            assert old_db.exists(), "Old DB should NOT be cleaned up"
+            assert compact_db.exists(), "Compact DB should NOT be deleted"
+            assert export_dir.exists(), "Export dir should NOT be deleted"
+        finally:
+            lock_path.unlink(missing_ok=True)
+            old_db.unlink(missing_ok=True)
+            compact_db.unlink(missing_ok=True)
+            shutil.rmtree(export_dir, ignore_errors=True)
+
     def test_removes_empty_legacy_lock(self, tmp_path: Path):
         """Empty lock file (legacy format) is treated as stale."""
         db_path = tmp_path / "chunks.duckdb"
