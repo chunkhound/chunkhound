@@ -359,7 +359,6 @@ EXTENSION_TO_LANGUAGE: dict[str, Language] = {
     ".jinja": Language.JINJA,
     ".j2": Language.JINJA,
     ".njk": Language.JINJA,
-    ".ejs": Language.JINJA,
     ".css": Language.CSS,
     # .scss falls back to TEXT when the SCSS grammar is unavailable, matching
     # the documented graceful-degradation behaviour and mirroring .sass.

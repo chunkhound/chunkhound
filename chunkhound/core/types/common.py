@@ -178,7 +178,7 @@ class Language(Enum):
     HTML = "html"
     CSS = "css"
     SCSS = "scss"
-    JINJA = "jinja"  # .jinja, .j2, .njk, .ejs — parsed with HTML grammar
+    JINJA = "jinja"  # .jinja, .j2, .njk — parsed with HTML grammar
 
     # Documentation languages
     MARKDOWN = "markdown"
@@ -301,7 +301,6 @@ class Language(Enum):
             ".jinja": cls.JINJA,
             ".j2": cls.JINJA,
             ".njk": cls.JINJA,
-            ".ejs": cls.JINJA,
         }
 
         if extension in extension_map:

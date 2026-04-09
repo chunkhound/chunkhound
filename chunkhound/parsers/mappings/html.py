@@ -7,7 +7,7 @@ Script/style blocks, comments, and imports are also captured.
 
 ``JinjaMapping`` is a thin subclass of ``HtmlMapping`` that overrides the
 language label to ``Language.JINJA``, ensuring chunks produced from ``.jinja``,
-``.j2``, ``.njk``, ``.erb``, and ``.ejs`` files are tagged correctly.
+``.j2``, and ``.njk`` files are tagged correctly.
 """
 
 import re
