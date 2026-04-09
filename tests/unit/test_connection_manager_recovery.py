@@ -257,6 +257,37 @@ class TestLockFileRecovery:
             mgr.disconnect()
             lock_path.unlink(missing_ok=True)
 
+    def test_skips_recovery_when_foreign_lock_alive(self, tmp_path: Path):
+        """When a live process holds the compaction lock, recovery and cleanup are skipped."""
+        db_path = tmp_path / "chunks.duckdb"
+        lock_path = get_compaction_lock_path(db_path)
+        intent_path = Path(str(db_path) + ".swap_intent")
+        compact_path = db_path.with_suffix(".compact.duckdb")
+        export_dir = db_path.parent / ".chunkhound_compaction_export"
+
+        _create_valid_duckdb(db_path)
+        # Write a lock held by current process (guaranteed alive)
+        lock_path.write_text(f"{os.getpid()}:{time.time():.0f}")
+        # Create artifacts that a foreign compaction would be using
+        intent_path.write_text("phase2")
+        compact_path.write_bytes(b"compacting")
+        export_dir.mkdir()
+        (export_dir / "data.parquet").write_bytes(b"export data")
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr.connect()
+        try:
+            assert lock_path.exists(), "Lock should be preserved"
+            assert intent_path.exists(), "Intent file should NOT be cleaned up"
+            assert compact_path.exists(), "Compact DB should NOT be deleted"
+            assert export_dir.exists(), "Export dir should NOT be deleted"
+        finally:
+            mgr.disconnect()
+            lock_path.unlink(missing_ok=True)
+            intent_path.unlink(missing_ok=True)
+            compact_path.unlink(missing_ok=True)
+            shutil.rmtree(export_dir, ignore_errors=True)
+
     def test_removes_empty_legacy_lock(self, tmp_path: Path):
         """Empty lock file (legacy format) is treated as stale."""
         db_path = tmp_path / "chunks.duckdb"
