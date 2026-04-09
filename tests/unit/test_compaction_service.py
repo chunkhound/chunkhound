@@ -534,6 +534,48 @@ class TestShutdown:
         await service.shutdown(timeout=5.0)
 
     @pytest.mark.asyncio
+    async def test_cancelled_blocking_preserves_flag_while_thread_alive(
+        self, tmp_path: Path, config_with_compaction: Config, mock_provider: MagicMock
+    ):
+        """When compact_blocking's task is cancelled but the compaction thread
+        is still running, _compaction_in_progress must remain True."""
+        db_path = tmp_path / "test.duckdb"
+        db_path.write_bytes(b"x" * 1024)
+
+        service = CompactionService(db_path, config_with_compaction)
+
+        thread_started = threading.Event()
+        thread_can_finish = threading.Event()
+
+        def blocking_optimize(cancel_check=None):
+            thread_started.set()
+            thread_can_finish.wait(timeout=10.0)
+            return True
+
+        mock_provider.optimize = blocking_optimize
+
+        task = asyncio.create_task(service.compact_blocking(mock_provider))
+        await asyncio.sleep(0)
+        assert thread_started.wait(timeout=5.0), "Thread did not start"
+
+        # Cancel the asyncio task while thread is still running
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+        # Thread is alive → flag must stay True
+        assert not service.compaction_thread_done.is_set()
+        assert service.is_compacting, (
+            "_compaction_in_progress was reset despite thread still running"
+        )
+
+        # Cleanup
+        thread_can_finish.set()
+        await service.shutdown(timeout=5.0)
+
+    @pytest.mark.asyncio
     async def test_self_heals_flag_after_cancelled_task_and_thread_finish(
         self, tmp_path: Path, config_with_compaction: Config, mock_provider: MagicMock
     ):
@@ -702,7 +744,7 @@ class TestShutdown:
         assert thread_started.wait(timeout=5.0), "Thread did not start"
 
         # Shutdown with very short timeout — thread will still be alive
-        await service.shutdown(timeout=0.1)
+        await service.shutdown(timeout=0.5)
 
         # Thread is still alive → flag must stay True
         try:
