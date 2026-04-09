@@ -11,6 +11,7 @@ method that UniversalParser calls when engine=None.
 
 from __future__ import annotations
 
+import functools
 import re
 from pathlib import Path
 from typing import Any
@@ -34,15 +35,9 @@ _STDLIB_TYPES = frozenset({
 # File extension for TcPOU files (Function Blocks, Interfaces, Programs, Functions)
 _TWINCAT_EXTENSION = ".TcPOU"
 
-_parser: TwinCATParser | None = None
-
-
+@functools.lru_cache(maxsize=1)
 def _get_parser() -> TwinCATParser:
-    """Get or create the cached TwinCATParser instance."""
-    global _parser
-    if _parser is None:
-        _parser = TwinCATParser()
-    return _parser
+    return TwinCATParser()
 
 
 class TwinCATMapping(BaseMapping):
