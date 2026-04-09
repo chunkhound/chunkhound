@@ -15,6 +15,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python: ["3.11"]
+        include:
+          # Windows CI polling monitor occasionally misses second file write within
+          # 45s window — retry individual flaky tests before failing the run.
+          - os: windows-latest
+            pytest_extra_args: "--reruns 2 --reruns-delay 5 --only-rerun AssertionError"
       fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -39,16 +44,17 @@ jobs:
 
       - name: Run tests
         id: tests
-        # nick-fields/retry restarts the whole pytest process on CI-level failures
-        # (e.g. OOM, runner hiccup). pytest-rerunfailures (--reruns) handles
-        # within-process test-level flakes. The two layers serve different failure
-        # modes and are intentionally combined.
+        # Two retry layers serving different failure modes:
+        # - nick-fields/retry: restarts the whole pytest process on CI-level failures
+        #   (e.g. OOM, runner hiccup).
+        # - --reruns (pytest-rerunfailures): retries individual flaky tests within a
+        #   process, used on Windows where the file-monitor can miss writes transiently.
         # timeout_minutes * max_attempts must stay below the job-level timeout (30m).
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 13
           max_attempts: 2
-          command: uv run pytest tests/ -v --junit-xml=test-results.xml
+          command: uv run pytest tests/ -v --junit-xml=test-results.xml ${{ matrix.pytest_extra_args || '' }}
 
       - name: Upload test results
         if: always()

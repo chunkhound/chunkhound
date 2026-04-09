@@ -32,7 +32,7 @@ jobs:
         # No token needed — OIDC Trusted Publishing configured on PyPI project
 
       - name: Cleanup on failure (delete release and tag)
-        if: failure() && steps.publish.outcome != 'success'
+        if: failure() && steps.publish.outcome == 'failure'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

@@ -18,6 +18,15 @@ jobs:
     timeout-minutes: 15
 
     steps:
+      - name: Validate pre-release tag format (PEP 440)
+        shell: python
+        run: |
+          import re, sys
+          tag = "${{ github.ref_name }}"
+          if not re.match(r'^v\d+\.\d+\.\d+(a|b|rc)\d+$', tag):
+              print(f"::error::Tag {tag!r} is not a valid PEP 440 pre-release (expected vX.Y.Z(a|b|rc)N)")
+              sys.exit(1)
+
       - name: Checkout code
         uses: actions/checkout@v4
         with:
