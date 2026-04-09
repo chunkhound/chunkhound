@@ -49,22 +49,8 @@ from chunkhound.core.exceptions import CompactionError  # noqa: E402
 from chunkhound.version import __version__  # noqa: E402
 
 from .base import MCPServerBase  # noqa: E402
-from .common import format_error_response, handle_tool_call  # noqa: E402
+from .common import compaction_error_response, handle_tool_call  # noqa: E402
 
-
-def _compaction_error_response(exc: CompactionError) -> dict[str, Any]:
-    """Build structured error response for a CompactionError with appropriate hint."""
-    error_response = format_error_response(exc, include_traceback=False)
-    if exc.operation == "recovery" and exc.reason and "Unrecoverable" in exc.reason:
-        error_response["error"]["retry_hint"] = (
-            "Database recovery failed after interrupted compaction. "
-            "Restore from backup or re-index."
-        )
-    else:
-        error_response["error"]["retry_hint"] = (
-            "Database compaction in progress. Retry in a few seconds."
-        )
-    return error_response
 
 # CRITICAL: Disable ALL logging to prevent JSON-RPC corruption
 logging.disable(logging.CRITICAL)
@@ -181,7 +167,7 @@ class StdioMCPServer(MCPServerBase):
             except CompactionError as exc:
                 return [types.TextContent(
                     type="text",
-                    text=json.dumps(_compaction_error_response(exc)),
+                    text=json.dumps(compaction_error_response(exc)),
                 )]
             return await handle_tool_call(
                 tool_name=tool_name,

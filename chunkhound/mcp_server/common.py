@@ -18,12 +18,26 @@ from chunkhound.core.exceptions import CompactionError
 if TYPE_CHECKING:  # type-checkers only; avoid runtime hard dep
     import mcp.types as types  # noqa: F401
 
-from .tools import TOOL_REGISTRY, execute_tool
-
-if TYPE_CHECKING:
     from chunkhound.database_factory import DatabaseServices
     from chunkhound.embeddings import EmbeddingManager
     from chunkhound.llm_manager import LLMManager
+
+from .tools import TOOL_REGISTRY, execute_tool
+
+
+def compaction_error_response(exc: CompactionError) -> dict[str, Any]:
+    """Build structured error response for a CompactionError with appropriate hint."""
+    error_response = format_error_response(exc, include_traceback=False)
+    if exc.operation == "recovery" and exc.reason and "Unrecoverable" in exc.reason:
+        error_response["error"]["retry_hint"] = (
+            "Database recovery failed after interrupted compaction. "
+            "Restore from backup or re-index."
+        )
+    else:
+        error_response["error"]["retry_hint"] = (
+            "Database compaction in progress. Retry in a few seconds."
+        )
+    return error_response
 
 T = TypeVar("T")
 
@@ -230,11 +244,7 @@ async def handle_tool_call(
 
     except CompactionError as e:
         logger.debug("Request rejected: database compaction in progress")
-        error_response = format_error_response(e, include_traceback=False)
-        error_response["error"]["retry_hint"] = (
-            "Database compaction in progress. Retry in a few seconds."
-        )
-        return [types.TextContent(type="text", text=json.dumps(error_response))]
+        return [types.TextContent(type="text", text=json.dumps(compaction_error_response(e)))]
     except Exception as e:
         error_response = format_error_response(e, include_traceback=debug_mode)
         return [types.TextContent(type="text", text=json.dumps(error_response))]
