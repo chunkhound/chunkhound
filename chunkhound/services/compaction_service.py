@@ -186,7 +186,12 @@ class CompactionService:
             return await self._do_compaction(provider)
         finally:
             with self._lock:
-                self._compaction_in_progress = False
+                # Only reset if the thread finished; a cancelled task leaves the
+                # flag True, which is fine—compact_blocking is CLI-only (fresh
+                # service per invocation). compact_background handles cleanup in
+                # _do_compaction_with_callback instead.
+                if self._compaction_thread_done.is_set():
+                    self._compaction_in_progress = False
 
     async def compact_background(
         self,
