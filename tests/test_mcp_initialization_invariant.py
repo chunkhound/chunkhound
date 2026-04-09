@@ -9,7 +9,7 @@ import textwrap
 import threading
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -469,3 +469,43 @@ class TestCleanup:
         assert provider.disconnect_calls == 0
         assert not server._initialized
         assert "Database close failed: close exploded" in debug_file.read_text()
+
+class TestShutdownSafety:
+    """Verify cleanup() skips provider disconnect when compaction thread is stuck."""
+
+    @pytest.mark.asyncio
+    async def test_stuck_compaction_skips_provider_disconnect(self, tmp_path: Path):
+        """When compaction thread won't stop, provider.close() must not be called."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm = None
+        config.target_dir = tmp_path
+
+        with patch("chunkhound.mcp_server.base.create_services") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.is_connected = True
+
+            mock_services = MagicMock()
+            mock_services.provider = mock_provider
+            mock_create.return_value = mock_services
+
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+                server = ConcreteMCPServer(config=config)
+                await server.initialize()
+                assert server._initialized
+
+                # Simulate a compaction service whose thread never finishes.
+                stuck_event = threading.Event()  # never set
+                mock_compaction = MagicMock()
+                mock_compaction.compaction_thread_done = stuck_event
+                mock_compaction.shutdown = AsyncMock()
+                server._compaction_service = mock_compaction
+
+                # Patch asyncio.to_thread so the 5s wait returns immediately.
+                with patch("asyncio.to_thread", new_callable=AsyncMock):
+                    await server.cleanup()
+
+                # Provider must NOT have been closed/disconnected.
+                mock_provider.close.assert_not_called()
+                mock_provider.disconnect.assert_not_called()
