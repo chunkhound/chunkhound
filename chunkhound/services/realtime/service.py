@@ -20,6 +20,10 @@ from watchdog.observers.api import BaseObserver
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices
+from chunkhound.services.realtime_path_filter import (
+    RealtimePathFilter,
+    RealtimePathFilterSettings,
+)
 from chunkhound.watchman import (
     PrivateWatchmanSidecar,
     WatchmanCliSession,
@@ -47,7 +51,11 @@ from .events import (
     normalize_file_path,
 )
 from .pipeline import RealtimePipelineMixin
-from .startup import RealtimeStartupMixin, RealtimeStartupStatusTracker
+from .startup import (
+    RealtimeStartupMixin,
+    RealtimeStartupStatusTracker,
+    default_realtime_backend_for_current_install,
+)
 from .task_supervision import OwnedTaskSet
 
 

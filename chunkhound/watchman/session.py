@@ -833,7 +833,6 @@ class WatchmanCliSession:
                 message = "Watchman session stderr closed unexpectedly"
                 self._record_error(message)
                 self._fail_pending_reply(RuntimeError(message))
-                self._resolve_unexpected_exit(message)
 
     def _queue_subscription_pdu(self, payload: dict[str, object]) -> None:
         self._last_subscription_at = _utc_now()

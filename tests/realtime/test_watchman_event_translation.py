@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 import chunkhound.services.realtime_indexing_service as realtime_service_module
+from chunkhound.core.config.config import Config
+from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 from chunkhound.watchman import WatchmanScopePlan, WatchmanSubscriptionScope
 from tests.helpers.watchman_realtime import (

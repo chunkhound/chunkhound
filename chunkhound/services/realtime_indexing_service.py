@@ -1,36 +1,11 @@
 """Compatibility module alias for the packaged realtime implementation."""
 
-# Transitional shim: keep the legacy import path working until a later
-# dedicated import-cleanup follow-up removes it.
+# Transitional shim: keep the legacy import path bound to the live realtime
+# service module so existing module-level monkeypatches still affect runtime
+# symbols.
 
-from loguru import logger
+from importlib import import_module
+import sys
 
-from .realtime import (
-    HotPathPressure,
-    PollingRealtimeAdapter,
-    QueueResultCallback,
-    RealtimeIndexingService,
-    RealtimeMonitorAdapter,
-    RealtimeMutation,
-    RealtimePathFilter,
-    RealtimePathFilterSettings,
-    RealtimeStartupStatusTracker,
-    SimpleEventHandler,
-    WatchdogRealtimeAdapter,
-    WatchmanRealtimeAdapter,
-    normalize_file_path,
-)
-from .realtime.service import (
-    PrivateWatchmanSidecar,
-    WatchmanCliSession,
-    WatchmanScopePlan,
-    WatchmanSubscriptionScope,
-    build_watchman_scope_plan,
-    build_watchman_subscription_name_for_scope,
-    build_watchman_subscription_names_for_scope_plan,
-    discover_nested_linux_mount_roots,
-    discover_nested_windows_junction_scopes,
-)
-from .realtime.startup import default_realtime_backend_for_current_install
-
-__all__ = [name for name in globals() if not name.startswith("_")]
+_MODULE = import_module("chunkhound.services.realtime.service")
+sys.modules[__name__] = _MODULE
