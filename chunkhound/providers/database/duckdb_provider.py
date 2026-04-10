@@ -63,6 +63,8 @@ class DuckDBProvider(SerialDatabaseProvider):
     # PERFORMANCE: Uses column-store format, vectorized execution
     """
 
+    _SUPPORTED_HNSW_METRICS = frozenset({"cosine", "ip", "l2sq"})
+
     def __init__(
         self,
         db_path: Path | str,
@@ -996,15 +998,20 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Ensure the table exists before creating the index
             self._executor_ensure_embedding_table_exists(conn, state, dims)
 
-            index_name = f"hnsw_{provider}_{model}_{dims}_{metric}".replace(
-                "-", "_"
-            ).replace(".", "_")
+            normalized_metric = self._normalize_hnsw_metric(metric)
+            index_name = self._custom_hnsw_index_name(
+                provider,
+                model,
+                dims,
+                normalized_metric,
+            )
 
             # Create HNSW index using VSS extension on the dimension-specific table
             conn.execute(f"""
-                CREATE INDEX {index_name} ON {table_name}
+                CREATE INDEX IF NOT EXISTS {self._quote_duckdb_identifier(index_name)}
+                ON {self._quote_duckdb_identifier(table_name)}
                 USING HNSW (embedding)
-                WITH (metric = '{metric}')
+                WITH (metric = '{normalized_metric}')
             """)
 
             logger.info(f"HNSW index {index_name} created successfully on {table_name}")
@@ -1037,20 +1044,28 @@ class DuckDBProvider(SerialDatabaseProvider):
         - Standard: idx_hnsw_{dims} (from initial table creation)
         """
         # Custom index name pattern (from create_vector_index)
-        custom_index_name = f"hnsw_{provider}_{model}_{dims}_{metric}".replace(
-            "-", "_"
-        ).replace(".", "_")
+        normalized_metric = self._normalize_hnsw_metric(metric)
+        custom_index_name = self._custom_hnsw_index_name(
+            provider,
+            model,
+            dims,
+            normalized_metric,
+        )
         # Standard index name pattern (from table creation)
         standard_index_name = f"idx_hnsw_{dims}"
 
         dropped_indexes = []
         try:
             # Try to drop custom index first
-            conn.execute(f"DROP INDEX IF EXISTS {custom_index_name}")
+            conn.execute(
+                f"DROP INDEX IF EXISTS {self._quote_duckdb_identifier(custom_index_name)}"
+            )
             dropped_indexes.append(custom_index_name)
 
             # Also try to drop standard index (created during table initialization)
-            conn.execute(f"DROP INDEX IF EXISTS {standard_index_name}")
+            conn.execute(
+                f"DROP INDEX IF EXISTS {self._quote_duckdb_identifier(standard_index_name)}"
+            )
             dropped_indexes.append(standard_index_name)
 
             logger.info(f"HNSW index drop attempted: {', '.join(dropped_indexes)}")
@@ -1063,6 +1078,38 @@ class DuckDBProvider(SerialDatabaseProvider):
     def _quote_duckdb_identifier(self, identifier: str) -> str:
         """Quote an identifier for DuckDB SQL."""
         return f'"{identifier.replace(chr(34), chr(34) * 2)}"'
+
+    def _is_safe_duckdb_identifier(self, identifier: str) -> bool:
+        return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", identifier))
+
+    def _sanitize_hnsw_identifier_component(self, value: str) -> str:
+        sanitized = re.sub(r"[^A-Za-z0-9_]+", "_", value.strip())
+        sanitized = re.sub(r"_+", "_", sanitized).strip("_")
+        if not sanitized:
+            return "value"
+        if sanitized[0].isdigit():
+            return f"v_{sanitized}"
+        return sanitized
+
+    def _normalize_hnsw_metric(self, metric: str) -> str:
+        normalized = metric.strip().lower()
+        if normalized not in self._SUPPORTED_HNSW_METRICS:
+            raise ValueError(
+                "Unsupported HNSW metric "
+                f"{metric!r}; expected one of {sorted(self._SUPPORTED_HNSW_METRICS)}"
+            )
+        return normalized
+
+    def _custom_hnsw_index_name(
+        self, provider: str, model: str, dims: int, metric: str
+    ) -> str:
+        normalized_metric = self._normalize_hnsw_metric(metric)
+        provider_component = self._sanitize_hnsw_identifier_component(provider)
+        model_component = self._sanitize_hnsw_identifier_component(model)
+        return (
+            f"hnsw_{provider_component}_{model_component}_{int(dims)}_"
+            f"{normalized_metric}"
+        )
 
     def _is_hnsw_index_definition(
         self, index_name: str, create_sql: str | None
@@ -1151,7 +1198,6 @@ class DuckDBProvider(SerialDatabaseProvider):
                         "model": model,
                         "dims": dims,
                         "metric": self._extract_hnsw_metric(create_sql),
-                        "create_sql": create_sql,
                     }
                 )
 
@@ -1171,18 +1217,29 @@ class DuckDBProvider(SerialDatabaseProvider):
         self, conn: Any, state: dict[str, Any], index_info: dict[str, Any]
     ) -> None:
         """Recreate one previously discovered HNSW index with its original name."""
-        table_name = index_info["table_name"]
+        table_name = str(index_info["table_name"])
         dims = int(index_info["dims"])
         self._executor_ensure_embedding_table_exists(conn, state, dims)
-        create_sql = index_info.get("create_sql")
-        if create_sql:
-            conn.execute(create_sql)
+        index_name = str(index_info["index_name"])
+        if not self._is_safe_duckdb_identifier(index_name):
+            logger.warning(
+                "Skipping HNSW index restore for unsafe identifier "
+                f"{index_name!r} on {table_name}"
+            )
             return
 
-        index_name = index_info["index_name"]
-        metric = index_info.get("metric", "cosine")
+        try:
+            metric = self._normalize_hnsw_metric(str(index_info.get("metric", "cosine")))
+        except ValueError as error:
+            logger.warning(
+                "Skipping HNSW index restore for "
+                f"{index_name!r} on {table_name}: {error}"
+            )
+            return
+
         conn.execute(f"""
-            CREATE INDEX {index_name} ON {table_name}
+            CREATE INDEX IF NOT EXISTS {self._quote_duckdb_identifier(index_name)}
+            ON {self._quote_duckdb_identifier(table_name)}
             USING HNSW (embedding)
             WITH (metric = '{metric}')
         """)

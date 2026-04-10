@@ -64,6 +64,18 @@ class DuckDBEmbeddingRepository:
 
     def _recreate_existing_index(self, conn: Any, index_info: dict[str, Any]) -> None:
         """Recreate one discovered HNSW index with its original SQL when available."""
+        if self._provider_instance and hasattr(
+            self._provider_instance, "_executor_recreate_vector_index_from_info"
+        ):
+            # Stay on the caller's transactional connection so drop/recreate
+            # sees one consistent DuckDB index catalog.
+            self._provider_instance._executor_recreate_vector_index_from_info(
+                conn,
+                {},
+                index_info,
+            )
+            return
+
         create_sql = index_info.get("create_sql")
         if create_sql:
             conn.execute(create_sql)

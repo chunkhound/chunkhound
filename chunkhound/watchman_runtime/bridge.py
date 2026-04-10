@@ -95,6 +95,10 @@ class RuntimeSubscription:
             return
         observer.stop()
         observer.join(timeout=5.0)
+        if observer.is_alive():
+            _stderr(
+                "chunkhound watchman runtime: observer thread did not stop within 5.0s"
+            )
 
     def emit_file_event(
         self, *, absolute_path: Path, exists: bool, is_new: bool

@@ -7,26 +7,17 @@ from types import SimpleNamespace
 import pytest
 
 import chunkhound.services.realtime_indexing_service as realtime_service_module
-from chunkhound.core.config.config import Config
-from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 from chunkhound.watchman import WatchmanScopePlan, WatchmanSubscriptionScope
+from tests.helpers.watchman_realtime import (
+    build_watchman_service as _build_watchman_service,
+    start_isolated_watchman_translation as _start_isolated_watchman_translation,
+    wait_for_logical_indexed as _wait_for_logical_indexed,
+    wait_for_removed as _wait_for_removed,
+)
 from tests.utils.windows_compat import wait_for_indexed
 
 pytestmark = pytest.mark.requires_native_watchman
-
-
-def _build_watchman_service(target_dir: Path) -> tuple[RealtimeIndexingService, object]:
-    db_path = target_dir / ".chunkhound" / "test.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    config = Config(
-        args=SimpleNamespace(path=target_dir),
-        database={"path": str(db_path), "provider": "duckdb"},
-        indexing={"realtime_backend": "watchman"},
-    )
-    services = create_services(db_path, config)
-    services.provider.connect()
-    return RealtimeIndexingService(services, config), services
 
 
 def _subscription_pdu(*, name: str, exists: bool, is_new: bool) -> dict[str, object]:
@@ -43,27 +34,6 @@ def _subscription_pdu(*, name: str, exists: bool, is_new: bool) -> dict[str, obj
         ],
     }
 
-
-async def _wait_for_removed(service_provider: object, file_path: Path) -> bool:
-    deadline = asyncio.get_running_loop().time() + 5.0
-    while asyncio.get_running_loop().time() < deadline:
-        record = service_provider.get_file_by_path(str(file_path))
-        if record is None:
-            return True
-        await asyncio.sleep(0.1)
-    return False
-
-
-async def _wait_for_logical_indexed(service_provider: object, file_path: Path) -> bool:
-    deadline = asyncio.get_running_loop().time() + 5.0
-    while asyncio.get_running_loop().time() < deadline:
-        record = service_provider.get_file_by_path(str(file_path))
-        if record is not None:
-            return True
-        await asyncio.sleep(0.1)
-    return False
-
-
 async def _wait_for_pipeline_count(
     service: RealtimeIndexingService, field: str, minimum: int
 ) -> dict[str, object]:
@@ -75,26 +45,6 @@ async def _wait_for_pipeline_count(
             return stats
         await asyncio.sleep(0.1)
     raise AssertionError(f"Timed out waiting for pipeline.{field} >= {minimum}")
-
-
-async def _start_isolated_watchman_translation(
-    service: RealtimeIndexingService, target_dir: Path
-) -> realtime_service_module.WatchmanRealtimeAdapter:
-    adapter = realtime_service_module.WatchmanRealtimeAdapter(service)
-    primary_filter = realtime_service_module.RealtimePathFilter(
-        config=service.config,
-        root_path=target_dir,
-    )
-    adapter._path_filter = primary_filter
-    adapter._scope_path_filters = {str(target_dir): primary_filter}
-    service.watch_path = target_dir
-    service._service_state = "running"
-    service._effective_backend = "watchman"
-    service.monitoring_ready.set()
-    service._monitoring_ready_at = service._utc_now()
-    service.event_consumer_task = asyncio.create_task(service._consume_events())
-    service.process_task = asyncio.create_task(service._process_loop())
-    return adapter
 
 
 @pytest.mark.asyncio

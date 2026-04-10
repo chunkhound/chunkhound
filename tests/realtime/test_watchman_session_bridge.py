@@ -13,8 +13,6 @@ from types import SimpleNamespace
 import pytest
 
 import chunkhound.watchman.session as watchman_session_module
-from chunkhound.core.config.config import Config
-from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import (
     RealtimeIndexingService,
     WatchmanRealtimeAdapter,
@@ -25,6 +23,10 @@ from chunkhound.watchman import (
     WatchmanScopePlan,
     WatchmanSubscriptionScope,
     build_watchman_subscription_names_for_scope_plan,
+)
+from tests.helpers.watchman_realtime import (
+    build_watchman_service as _build_watchman_service,
+    prepend_poisoned_python_shims as _prepend_poisoned_python_shims,
 )
 
 pytestmark = pytest.mark.requires_native_watchman
@@ -264,43 +266,6 @@ def test_scope_plan_subscription_names_preserve_logical_root_when_target_resolve
         "chunkhound-live-indexing",
         "chunkhound-live-indexing--linked-workspace",
     )
-
-
-def _prepend_poisoned_python_shims(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    shims_dir = tmp_path / "poisoned-python"
-    shims_dir.mkdir()
-    if os.name == "nt":
-        for name in ("python.cmd", "python3.cmd"):
-            (shims_dir / name).write_text(
-                "@echo off\r\nexit /b 97\r\n", encoding="utf-8"
-            )
-    else:
-        for name in ("python", "python3"):
-            shim_path = shims_dir / name
-            shim_path.write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
-            shim_path.chmod(0o755)
-    current_path = os.environ.get("PATH", "")
-    monkeypatch.setenv(
-        "PATH",
-        str(shims_dir)
-        if not current_path
-        else f"{shims_dir}{os.pathsep}{current_path}",
-    )
-
-
-def _build_watchman_service(target_dir: Path) -> tuple[RealtimeIndexingService, object]:
-    db_path = target_dir / ".chunkhound" / "test.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    config = Config(
-        args=SimpleNamespace(path=target_dir),
-        database={"path": str(db_path), "provider": "duckdb"},
-        indexing={"realtime_backend": "watchman"},
-    )
-    services = create_services(db_path, config)
-    services.provider.connect()
-    return RealtimeIndexingService(services, config), services
 
 
 def test_watchman_cli_session_queue_overflow_reports_drop_and_calls_handler(

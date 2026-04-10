@@ -3,78 +3,24 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from pathlib import Path
-from types import SimpleNamespace
 
 import psutil
 import pytest
 
-from chunkhound.core.config.config import Config
-from chunkhound.database_factory import create_services
 from chunkhound.mcp_server.status import derive_daemon_status
 from chunkhound.services.realtime_indexing_service import (
     RealtimeIndexingService,
     WatchmanRealtimeAdapter,
 )
+from tests.helpers.watchman_realtime import (
+    active_session_close_handle as _active_session_close_handle,
+    active_watchman_disconnect_process as _active_watchman_disconnect_process,
+    build_watchman_service as _build_watchman_service,
+    wait_for_watchman_reconnect_state as _wait_for_watchman_reconnect_state,
+)
 
 pytestmark = pytest.mark.requires_native_watchman
 
-
-def _build_watchman_service(target_dir: Path) -> tuple[RealtimeIndexingService, object]:
-    db_path = target_dir / ".chunkhound" / "test.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    config = Config(
-        args=SimpleNamespace(path=target_dir),
-        database={"path": str(db_path), "provider": "duckdb"},
-        indexing={"realtime_backend": "watchman"},
-    )
-    services = create_services(db_path, config)
-    services.provider.connect()
-    return RealtimeIndexingService(services, config), services
-
-
-async def _wait_for_watchman_reconnect_state(
-    service: RealtimeIndexingService,
-    expected_state: str,
-    *,
-    timeout: float = 10.0,
-) -> dict[str, object]:
-    async def _poll() -> dict[str, object]:
-        while True:
-            stats = await service.get_health()
-            reconnect = stats.get("watchman_reconnect")
-            if isinstance(reconnect, dict) and reconnect.get("state") == expected_state:
-                return stats
-            await asyncio.sleep(0.05)
-
-    return await asyncio.wait_for(_poll(), timeout=timeout)
-
-
-def _active_watchman_disconnect_process(adapter: WatchmanRealtimeAdapter) -> object:
-    session = getattr(adapter, "_session", None)
-    process = getattr(session, "_process", None)
-    if process is not None:
-        return process
-
-    sidecar = getattr(adapter, "_sidecar", None)
-    sidecar_process = getattr(sidecar, "_process", None)
-    if sidecar_process is not None:
-        return sidecar_process
-
-    raise AssertionError("No active Watchman process available to trigger disconnect")
-
-
-def _active_session_close_handle(adapter: WatchmanRealtimeAdapter) -> object:
-    session = getattr(adapter, "_session", None)
-    process = getattr(session, "_process", None)
-    stdin = getattr(process, "stdin", None)
-    if stdin is not None:
-        return stdin
-
-    writer = getattr(session, "_stream_writer", None)
-    if writer is not None:
-        return writer
-
-    raise AssertionError("No active Watchman session close handle is available")
 
 
 @pytest.mark.asyncio

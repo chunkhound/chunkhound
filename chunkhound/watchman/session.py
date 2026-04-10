@@ -813,16 +813,27 @@ class WatchmanCliSession:
         process = self._process
         if process is None or process.stderr is None:
             return
-
-        while True:
-            raw_line = await process.stderr.readline()
-            if not raw_line:
-                break
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-            self._debug(f"watchman session stderr: {line}")
-            self._record_warning(f"watchman stderr: {line}")
+        try:
+            while True:
+                raw_line = await process.stderr.readline()
+                if not raw_line:
+                    break
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                self._debug(f"watchman session stderr: {line}")
+                self._record_warning(f"watchman stderr: {line}")
+        except asyncio.CancelledError:
+            pass
+        except Exception as error:
+            self._record_error(f"Watchman stderr reader failed: {error}")
+            self._fail_pending_reply(error)
+        else:
+            if process.returncode is None and not self._stop_requested:
+                message = "Watchman session stderr closed unexpectedly"
+                self._record_error(message)
+                self._fail_pending_reply(RuntimeError(message))
+                self._resolve_unexpected_exit(message)
 
     def _queue_subscription_pdu(self, payload: dict[str, object]) -> None:
         self._last_subscription_at = _utc_now()

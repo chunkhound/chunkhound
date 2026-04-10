@@ -140,3 +140,80 @@ def test_delete_files_batch_restores_rows_when_hnsw_index_recreation_fails(
     assert _get_hnsw_index_names(provider) == initial_indexes
 
     assert provider.delete_files_batch(["orphan_one.py", "orphan_two.py"]) == 2
+
+
+def test_delete_files_batch_skips_unsafe_hnsw_restore_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("duckdb")
+
+    provider = DuckDBProvider(db_path=tmp_path / "db.duckdb", base_directory=tmp_path)
+    provider.connect()
+
+    _insert_file_with_embedding(provider, "unsafe.py", 0.1)
+
+    warning_messages: list[str] = []
+    monkeypatch.setattr(
+        "chunkhound.providers.database.duckdb_provider.logger.warning",
+        lambda message: warning_messages.append(message),
+    )
+    monkeypatch.setattr(
+        provider,
+        "_executor_get_existing_vector_indexes",
+        lambda conn, state: [
+            {
+                "index_name": "bad-index-name",
+                "table_name": "embeddings_3",
+                "dims": 3,
+                "metric": "cosine",
+            }
+        ],
+    )
+
+    assert provider.delete_files_batch(["unsafe.py"]) == 1
+    assert any("unsafe identifier" in message for message in warning_messages)
+
+
+def test_delete_files_batch_skips_invalid_hnsw_restore_metric(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("duckdb")
+
+    provider = DuckDBProvider(db_path=tmp_path / "db.duckdb", base_directory=tmp_path)
+    provider.connect()
+
+    _insert_file_with_embedding(provider, "invalid_metric.py", 0.1)
+
+    warning_messages: list[str] = []
+    monkeypatch.setattr(
+        "chunkhound.providers.database.duckdb_provider.logger.warning",
+        lambda message: warning_messages.append(message),
+    )
+    monkeypatch.setattr(
+        provider,
+        "_executor_get_existing_vector_indexes",
+        lambda conn, state: [
+            {
+                "index_name": "idx_hnsw_3",
+                "table_name": "embeddings_3",
+                "dims": 3,
+                "metric": "unsupported",
+            }
+        ],
+    )
+
+    assert provider.delete_files_batch(["invalid_metric.py"]) == 1
+    assert any("Unsupported HNSW metric" in message for message in warning_messages)
+
+
+def test_create_vector_index_sanitizes_provider_and_model_identifier_components(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("duckdb")
+
+    provider = DuckDBProvider(db_path=tmp_path / "db.duckdb", base_directory=tmp_path)
+    provider.connect()
+
+    provider.create_vector_index("test-provider", "mini.v1", 3, "cosine")
+
+    assert "hnsw_test_provider_mini_v1_3_cosine" in _get_hnsw_index_names(provider)

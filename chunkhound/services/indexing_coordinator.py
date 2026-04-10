@@ -1973,6 +1973,7 @@ class IndexingCoordinator(BaseService):
         )
 
         # Process subtrees in parallel
+        _ensure_mp_start_method()
         loop = asyncio.get_running_loop()
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
             futures = []
