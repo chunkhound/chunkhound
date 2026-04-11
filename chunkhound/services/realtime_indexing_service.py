@@ -685,6 +685,7 @@ class RealtimeIndexingService:
             self._debug(f"removed file from database: {file_path}")
             normalized = normalize_file_path(file_path)
             async with self._file_condition:
+                self.failed_files.discard(normalized)
                 self._removed_files.add(normalized)
                 self._file_condition.notify_all()
         except Exception as e:
@@ -815,6 +816,7 @@ class RealtimeIndexingService:
                 # Notify waiters that this file has been indexed
                 normalized = normalize_file_path(file_path)
                 async with self._file_condition:
+                    self.failed_files.discard(normalized)
                     self._indexed_files.add(normalized)
                     self._file_condition.notify_all()
 

@@ -290,6 +290,107 @@ class TestRealtimeFailures:
         await service.stop()
 
     @pytest.mark.asyncio
+    async def test_successful_retry_clears_failed_files(self, realtime_setup):
+        """A successful reindex after a CompactionError must clear failed_files.
+
+        Regression guard for the leak where failed_files was add-only from
+        _process_loop, turning get_stats()["failed_files"] into a phantom
+        monotonic counter across retry cycles.
+        """
+        from chunkhound.services.realtime_indexing_service import normalize_file_path
+
+        service, watch_dir, _, services = realtime_setup
+        await service.start(watch_dir)
+        assert await service.wait_for_monitoring_ready(timeout=10.0)
+
+        test_file = watch_dir / "retry_clears.py"
+        test_file.write_text("def deferred(): pass")
+        normalized = normalize_file_path(test_file)
+
+        # 1. Force CompactionError — file lands in failed_files.
+        services.provider._connection_allowed.clear()
+        services.provider.soft_disconnect(skip_checkpoint=True)
+        await service.file_queue.put(("change", test_file))
+        await service.wait_for_file_indexed(test_file, timeout=5.0)
+        assert normalized in service.failed_files, (
+            "Precondition: file should be in failed_files after CompactionError"
+        )
+
+        # 2. Reopen the gate and reconnect so the retry can succeed.
+        services.provider._connection_allowed.set()
+        services.provider.connect()
+
+        # 3. Re-queue the same file. Wait specifically for the success-path
+        # update on _indexed_files — wait_for_file_indexed would return
+        # immediately because failed_files still contains the entry.
+        await service.file_queue.put(("change", test_file))
+
+        async def _wait_until_indexed() -> None:
+            async with service._file_condition:
+                await service._file_condition.wait_for(
+                    lambda: normalized in service._indexed_files
+                )
+
+        await asyncio.wait_for(_wait_until_indexed(), timeout=10.0)
+
+        # 4. Success path must have cleared failed_files under the same lock.
+        assert normalized not in service.failed_files, (
+            "Successful retry must discard entry from failed_files"
+        )
+        stats = await service.get_stats()
+        assert stats["failed_files"] == 0, (
+            f"get_stats()['failed_files'] must be 0 after retry, got {stats['failed_files']}"
+        )
+
+        await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_remove_file_clears_failed_files(self, realtime_setup):
+        """remove_file() must also clear failed_files for the target path.
+
+        Symmetric regression guard: a previously-failed file that is later
+        deleted must not linger as a phantom in failed_files.
+        """
+        from chunkhound.services.realtime_indexing_service import normalize_file_path
+
+        service, watch_dir, _, services = realtime_setup
+        await service.start(watch_dir)
+        assert await service.wait_for_monitoring_ready(timeout=10.0)
+
+        test_file = watch_dir / "remove_clears.py"
+        test_file.write_text("def deferred(): pass")
+        normalized = normalize_file_path(test_file)
+
+        # 1. Force CompactionError — file lands in failed_files.
+        services.provider._connection_allowed.clear()
+        services.provider.soft_disconnect(skip_checkpoint=True)
+        await service.file_queue.put(("change", test_file))
+        await service.wait_for_file_indexed(test_file, timeout=5.0)
+        assert normalized in service.failed_files
+
+        # 2. Reopen gate so remove_file()'s provider call can succeed.
+        services.provider._connection_allowed.set()
+        services.provider.connect()
+
+        # 3. Delete on disk and call remove_file() directly. This exercises
+        # the method-level contract without depending on the filesystem
+        # event pipeline.
+        test_file.unlink()
+        await service.remove_file(test_file)
+
+        # 4. remove_file() must discard the entry from failed_files.
+        assert normalized not in service.failed_files, (
+            "remove_file() must discard entry from failed_files"
+        )
+        assert normalized in service._removed_files
+        stats = await service.get_stats()
+        assert stats["failed_files"] == 0, (
+            f"get_stats()['failed_files'] must be 0 after remove, got {stats['failed_files']}"
+        )
+
+        await service.stop()
+
+    @pytest.mark.asyncio
     async def test_nested_file_gets_indexed(self, realtime_setup):
         """Test that process_file indexes files in subdirectories.
 
