@@ -52,3 +52,85 @@ def test_repack_non_duckdb_error() -> None:
     combined = (proc.stdout + proc.stderr).lower()
     # Provider-type check must run before database-existence check.
     assert "only supported for duckdb" in combined
+
+
+def test_repack_db_flag_anchors_config_without_positional(tmp_path: Path) -> None:
+    """`chunkhound repack --db <abs>` from an unrelated CWD must succeed.
+
+    main.py remaps args.path to the --db file's parent when no positional
+    path is given, so Config does not pick up a conflicting CWD-local
+    .chunkhound.json (e.g. provider=lancedb).
+    """
+    import json
+
+    # 1. Index a real DuckDB project at tmp_path/dbproj
+    dbproj = tmp_path / "dbproj"
+    dbproj.mkdir()
+    (dbproj / "hello.py").write_text("print('hello')\n")
+    proc = _run(
+        ["chunkhound", "index", "--no-embeddings", str(dbproj)],
+        cwd=dbproj,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    # 2. Create a conflicting CWD-local config in an unrelated directory
+    conflict_cwd = tmp_path / "conflict_cwd"
+    conflict_cwd.mkdir()
+    (conflict_cwd / ".chunkhound.json").write_text(
+        json.dumps({"database": {"provider": "lancedb"}})
+    )
+
+    # 3. Run `chunkhound repack --db <dbproj-db> --dry-run` from the conflict
+    #    dir WITHOUT the positional. main.py must remap args.path to the
+    #    --db parent, bypassing the lancedb config in CWD.
+    db_path = dbproj / ".chunkhound" / "db"
+    proc = _run(
+        ["chunkhound", "repack", "--db", str(db_path), "--dry-run"],
+        cwd=conflict_cwd,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    combined = (proc.stdout + proc.stderr).lower()
+    assert "only supported for duckdb" not in combined
+
+
+def test_repack_positional_path_anchors_config(tmp_path: Path) -> None:
+    """Positional project path must anchor config discovery on the target project.
+
+    Without a positional arg, Config falls back to Path.cwd() and merges any
+    CWD-local .chunkhound.json — so running repack from a directory with a
+    conflicting lancedb config would falsely reject a valid DuckDB target.
+    """
+    import json
+
+    # 1. Create a DuckDB project at tmp_path/dbproj
+    dbproj = tmp_path / "dbproj"
+    dbproj.mkdir()
+    (dbproj / "hello.py").write_text("print('hello')\n")
+    proc = _run(
+        ["chunkhound", "index", "--no-embeddings", str(dbproj)],
+        cwd=dbproj,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    # 2. Create a second dir with a conflicting CWD-local .chunkhound.json
+    conflict_cwd = tmp_path / "conflict_cwd"
+    conflict_cwd.mkdir()
+    (conflict_cwd / ".chunkhound.json").write_text(
+        json.dumps({"database": {"provider": "lancedb"}})
+    )
+
+    # 3. From the conflict dir, run `chunkhound repack <dbproj> --dry-run`.
+    #    Without the positional arg fix, Config would pick up the lancedb
+    #    config from CWD and reject the DuckDB target.
+    proc = _run(
+        ["chunkhound", "repack", str(dbproj), "--dry-run"],
+        cwd=conflict_cwd,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    combined = (proc.stdout + proc.stderr).lower()
+    assert "only supported for duckdb" not in combined
+    assert "waste" in combined or "reclaimable" in combined

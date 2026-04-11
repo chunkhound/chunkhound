@@ -110,6 +110,17 @@ async def async_main() -> None:
 
         args.path = _Path(args.project_dir).resolve()
 
+    # When `chunkhound repack --db <abs>` is invoked without an explicit project
+    # directory, anchor target_dir to the --db file's parent. Otherwise Config
+    # falls back to CWD and merges any CWD-local .chunkhound.json (e.g.
+    # provider=lancedb), causing repack to abort with "only supported for duckdb".
+    if (
+        args.command == "repack"
+        and getattr(args, "db", None)
+        and args.path == Path(".")
+    ):
+        args.path = Path(args.db).resolve().parent
+
     config, validation_errors = create_validated_config(args, args.command)
 
     if validation_errors:

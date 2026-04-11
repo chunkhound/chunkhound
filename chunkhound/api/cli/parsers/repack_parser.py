@@ -1,6 +1,7 @@
 """Repack command argument parser for ChunkHound CLI."""
 
 import argparse
+from pathlib import Path
 from typing import Any, cast
 
 from .common_arguments import add_common_arguments, add_config_arguments
@@ -24,6 +25,17 @@ def add_repack_subparser(subparsers: Any) -> argparse.ArgumentParser:
             "repack guarantees complete space reclamation by rebuilding the "
             "entire database."
         ),
+    )
+
+    # Positional project directory (matches index/search/mcp conventions). Without
+    # this, Config falls back to Path.cwd() and may merge a conflicting CWD-local
+    # .chunkhound.json (e.g. provider=lancedb), breaking `repack --db <duckdb>`.
+    repack_parser.add_argument(
+        "path",
+        type=Path,
+        nargs="?",
+        default=Path("."),
+        help="Project directory (default: current directory)",
     )
 
     repack_parser.add_argument(
