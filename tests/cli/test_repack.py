@@ -46,6 +46,36 @@ def test_repack_dry_run(tmp_path: Path) -> None:
     assert size_after == size_before
 
 
+def test_repack_backup_creates_bak_file(tmp_path: Path) -> None:
+    """`chunkhound repack --backup <project>` must leave a .bak file next to the DB."""
+    src = tmp_path / "hello.py"
+    src.write_text("def hello():\n    return 'world'\n")
+
+    proc = _run(
+        ["chunkhound", "index", "--no-embeddings", str(tmp_path)],
+        cwd=tmp_path,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    db_dir = tmp_path / ".chunkhound" / "db"
+    db_file = db_dir / "chunks.db"
+    # repack.py uses db_path.with_suffix(db_path.suffix + ".bak")
+    # which yields chunks.db.bak next to chunks.db.
+    backup_path = db_file.with_suffix(db_file.suffix + ".bak")
+
+    proc = _run(
+        ["chunkhound", "repack", "--backup", str(tmp_path)],
+        cwd=tmp_path,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert backup_path.exists(), (
+        f"--backup must create {backup_path}; got files: "
+        f"{sorted(p.name for p in db_dir.iterdir())}"
+    )
+
+
 def test_repack_non_duckdb_error() -> None:
     proc = _run(["chunkhound", "repack", "--database-provider", "lancedb"])
     assert proc.returncode != 0
