@@ -66,7 +66,11 @@ class DuckDBConnectionManager:
             db_path: Path to DuckDB database file or ":memory:" for in-memory database
             config: Database configuration for provider-specific settings
         """
-        self._db_path = db_path
+        # Coerce to Path so recovery/compaction code paths work regardless of
+        # whether the caller passed a str (e.g. from the registry) or a Path.
+        self._db_path: Path | str = (
+            db_path if str(db_path) == ":memory:" else Path(db_path)
+        )
         self.connection: Any | None = None
         self.config = config
 
@@ -209,7 +213,8 @@ class DuckDBConnectionManager:
         logger.info(f"Connecting to DuckDB database: {self.db_path}")
 
         # Recover from interrupted compaction
-        if isinstance(self.db_path, Path):
+        if not self.is_memory_db:
+            assert isinstance(self.db_path, Path)
             foreign_lock_alive = False
             lock_file = get_compaction_lock_path(self.db_path)
             if lock_file.exists():
@@ -312,7 +317,8 @@ class DuckDBConnectionManager:
                     shutil.rmtree(export_dir, ignore_errors=True)
 
         # Ensure parent directory exists for file-based databases
-        if isinstance(self.db_path, Path):
+        if not self.is_memory_db:
+            assert isinstance(self.db_path, Path)
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
