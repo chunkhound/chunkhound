@@ -88,6 +88,12 @@ class MCPServerBase(ABC):
         self._init_lock = asyncio.Lock()
         self._connect_lock = asyncio.Lock()
         self._provider_close_future: asyncio.Future[None] | None = None
+        self._cleanup_lock = asyncio.Lock()
+        # One-shot cleanup guard. cleanup() may leave _initialized=True and
+        # the provider still connected on the stuck-compaction-thread path
+        # (to avoid racing the foreign DuckDB handle), so we can't use
+        # _initialized as an idempotency signal. See cleanup() docstring.
+        self._cleanup_done = False
 
         # Background tasks
         self._deferred_start_task: asyncio.Task | None = None
@@ -1175,98 +1181,74 @@ class MCPServerBase(ABC):
     async def cleanup(self) -> None:
         """Clean up resources and start at most one provider close attempt.
 
-        The timeout only bounds how long each cleanup call waits. A blocking
-        synchronous provider close keeps running on its daemon thread, and later
-        cleanup calls reuse that same in-flight attempt instead of starting a
-        second one.
+        Idempotent and concurrent-safe — multiple callers awaiting cleanup()
+        in parallel will serialize through _cleanup_lock; only the first runs
+        the teardown, subsequent callers see _cleanup_done=True and return.
         """
-        # Stop compaction service first (cancels any in-progress compaction).
-        # shutdown() signals the thread and waits for it via threading.Event.
-        # We also do a secondary check here as defense-in-depth: the compaction
-        # thread bypasses the serial executor (direct duckdb.connect()), so we
-        # must not disconnect the provider while the thread is still alive.
-        if self._compaction_service:
-            self.debug_log("Stopping compaction service")
-            await self._compaction_service.shutdown()
-            if not self._compaction_service.compaction_thread_done.is_set():
-                self.debug_log(
-                    "WARNING: compaction thread still alive after shutdown, waiting..."
-                )
-                await asyncio.to_thread(
-                    self._compaction_service.compaction_thread_done.wait,
-                    timeout=5.0,
-                )
-                if not self._compaction_service.compaction_thread_done.is_set():
-                    logger.error(
-                        "Compaction thread still alive after secondary wait — "
-                        "skipping provider disconnect to avoid corruption"
-                    )
+        async with self._cleanup_lock:
+            if self._cleanup_done:
+                return
+
+            try:
+                # Stop compaction service first (cancels any in-progress compaction).
+                # shutdown() signals the thread and waits for it via threading.Event.
+                # We also do a secondary check here as defense-in-depth: the compaction
+                # thread bypasses the serial executor (direct duckdb.connect()), so we
+                # must not disconnect the provider while the thread is still alive.
+                if self._compaction_service:
+                    self.debug_log("Stopping compaction service")
+                    await self._compaction_service.shutdown()
+                    if not self._compaction_service.compaction_thread_done.is_set():
+                        self.debug_log(
+                            "WARNING: compaction thread still alive after "
+                            "shutdown, waiting..."
+                        )
+                        await asyncio.to_thread(
+                            self._compaction_service.compaction_thread_done.wait,
+                            timeout=5.0,
+                        )
+                        if not self._compaction_service.compaction_thread_done.is_set():
+                            logger.error(
+                                "Compaction thread still alive after secondary wait — "
+                                "skipping provider disconnect to avoid corruption"
+                            )
+                            self._compaction_service = None
+                            await self._cleanup_non_provider_resources()
+                            # _initialized intentionally stays True: cleanup() is terminal
+                            # (process exits after this), so no reconnection will follow.
+                            return
                     self._compaction_service = None
-                    await self._cleanup_non_provider_resources()
-                    # _initialized intentionally stays True: cleanup() is terminal
-                    # (process exits after this), so no reconnection will follow.
-                    return
-            self._compaction_service = None
 
-        if (
-            self._deferred_start_task is not None
-            and not self._deferred_start_task.done()
-        ):
-            self.debug_log("Cancelling deferred realtime startup task")
-            self._deferred_start_task.cancel()
-            try:
-                await self._deferred_start_task
-            except asyncio.CancelledError:
-                pass
+                await self._cleanup_non_provider_resources()
 
-        if (
-            self._realtime_start_task is not None
-            and not self._realtime_start_task.done()
-        ):
-            self.debug_log("Cancelling realtime start task")
-            self._realtime_start_task.cancel()
-            try:
-                await self._realtime_start_task
-            except asyncio.CancelledError:
-                pass
-
-        # Cancel background scan task if still running
-        if self._scan_task is not None and not self._scan_task.done():
-            self.debug_log("Cancelling background scan task")
-            self._scan_task.cancel()
-            try:
-                await self._scan_task
-            except asyncio.CancelledError:
-                pass
-
-        # Stop real-time indexing
-        if self.realtime_indexing:
-            self.debug_log("Stopping real-time indexing service")
-            await self.realtime_indexing.stop()
-
-        if self.services and (
-            self.services.provider.is_connected
-            or self._provider_close_future is not None
-        ):
-            self.debug_log("Closing database connection")
-            # Run sync provider cleanup on a dedicated daemon thread so cleanup()
-            # never depends on asyncio's default executor shutdown behavior.
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(self._close_provider_in_background()),
-                    timeout=_DATABASE_CLOSE_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                self.debug_log(
-                    "Database close exceeded "
-                    f"{_DATABASE_CLOSE_TIMEOUT_SECONDS:.1f}s and will continue in "
-                    "the background daemon thread",
-                    always=True,
-                )
-            except Exception as e:
-                self.debug_log(f"Database close failed: {e}", always=True)
+                if self.services and (
+                    self.services.provider.is_connected
+                    or self._provider_close_future is not None
+                ):
+                    self.debug_log("Closing database connection")
+                    # Run sync provider cleanup on a dedicated daemon thread so cleanup()
+                    # never depends on asyncio's default executor shutdown behavior.
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(self._close_provider_in_background()),
+                            timeout=_DATABASE_CLOSE_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError:
+                        self.debug_log(
+                            "Database close exceeded "
+                            f"{_DATABASE_CLOSE_TIMEOUT_SECONDS:.1f}s and will continue in "
+                            "the background daemon thread",
+                            always=True,
+                        )
+                    except Exception as e:
+                        self.debug_log(f"Database close failed: {e}", always=True)
+                    finally:
+                        self._initialized = False
             finally:
-                self._initialized = False
+                # Mark cleanup done even on exception paths. cleanup() is terminal
+                # (process exits after) and a second call from an outer finally
+                # must not re-enter an already-half-torn-down provider.
+                self._cleanup_done = True
 
     async def ensure_services(self) -> DatabaseServices:
         """Ensure services are initialized and return them.
