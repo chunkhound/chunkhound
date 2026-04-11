@@ -178,8 +178,13 @@ class DuckDBConnectionManager:
             test_conn.execute("SELECT 1").fetchone()
             logger.debug("WAL file validation passed")
         except Exception as e:
-            logger.warning(f"WAL validation failed ({e}), cleaning up WAL file")
-            self._handle_wal_corruption()
+            if "Could not set lock" in str(e):
+                logger.warning(
+                    f"WAL validation hit lock contention ({e}), leaving WAL intact"
+                )
+            else:
+                logger.warning(f"WAL validation failed ({e}), cleaning up WAL file")
+                self._handle_wal_corruption()
         finally:
             # Ensure temporary validation connection is always closed
             if test_conn is not None:
