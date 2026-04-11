@@ -2,11 +2,10 @@
 
 
 class _FakeDB:
-    """Shared DatabaseProvider stub for unit tests.
+    """File-level DatabaseProvider stub for unit tests.
 
-    Accepts records as either plain dicts or File model instances.
-    When a File model is stored, get_file_by_path converts it to a dict
-    automatically (unless as_model=True).
+    Chunk and storage-maintenance methods are no-ops; tests exercising
+    chunk lifecycle or compaction must use DuckDBProvider.
     """
 
     def __init__(self, records):
