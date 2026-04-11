@@ -460,6 +460,147 @@ class NewlyAddedClass:
         assert len(old_results) == 0, "Old content should be replaced"
 
     @pytest.mark.asyncio
+    async def test_search_returns_modified_content_after_compaction(self, mcp_setup):
+        """A file mutated between compaction's on-disk export and the atomic swap
+        must be reindexed by the on_complete callback and be searchable
+        afterwards.
+
+        The pausing stub sits inside `_export_database_for_compaction`, which
+        runs after `soft_disconnect(skip_checkpoint=False)` has flushed the DB
+        file and opens its own read-only connection against that flushed copy
+        (duckdb_provider.py:3352). A mutation arriving during this pause is
+        guaranteed to miss this compaction cycle's data and must be picked up
+        by the post-swap reindex.
+
+        This test exercises the production reindex path via
+        `DirectoryIndexingService.process_directory()`, covering the
+        mtime/size/content_hash change detection in `indexing_coordinator`
+        (indexing_coordinator.py:1256-1298) — the same path used by
+        `chunkhound/mcp_server/base.py:345-370`.
+
+        Scope: this covers the pre-swap portion of the race window and uses
+        `no_embeddings=True` to keep the test scoped (production uses
+        `no_embeddings=False`). Mutations landing mid-swap or during the
+        callback itself, and embedding-pipeline interactions, are not
+        exercised here.
+        """
+        import threading
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from chunkhound.services.compaction_service import CompactionService
+        from chunkhound.services.directory_indexing_service import (
+            DirectoryIndexingService,
+        )
+
+        services, _, watch_dir, temp_dir, _ = mcp_setup
+
+        test_file = watch_dir / "modify_during_compact.py"
+        test_file.write_text("def original_marker():\n    return 'OLD'\n")
+        await services.indexing_coordinator.process_file(test_file)
+
+        # Build a dedicated Config that bypasses the auto-compaction thresholds
+        # (real tiny test DBs never cross the default 100MB reclaimable gate).
+        # threshold=0.0 + min_size=0 guarantees compact_background() starts.
+        fake_args = SimpleNamespace(path=temp_dir)
+        compaction_config = Config(
+            args=fake_args,
+            database={
+                "path": str(Path(services.provider.db_path).parent),
+                "provider": "duckdb",
+                "compaction_enabled": True,
+                "compaction_threshold": 0.0,
+                "compaction_min_size_mb": 0,
+            },
+            indexing={"include": ["*.py"], "exclude": []},
+        )
+
+        export_started = threading.Event()
+        export_proceed = threading.Event()
+        real_export = services.provider._export_database_for_compaction
+
+        def pausing_export(db_p, export_dir):
+            # Signal that export phase has started (compaction gate is closed)
+            export_started.set()
+            # Wait for the test to mutate the file before finishing export
+            assert export_proceed.wait(timeout=10.0), "export_proceed never set"
+            return real_export(db_p, export_dir)
+
+        async def reindex_modified() -> None:
+            # Mirror chunkhound/mcp_server/base.py:361-370 — drive the
+            # production reindex path so change detection (mtime/size/
+            # content_hash) discovers the mutated file, rather than
+            # hand-feeding process_file() a known path.
+            indexing_service = DirectoryIndexingService(
+                indexing_coordinator=services.indexing_coordinator,
+                config=compaction_config,
+            )
+            await indexing_service.process_directory(watch_dir, no_embeddings=True)
+
+        with patch.object(
+            services.provider,
+            "_export_database_for_compaction",
+            side_effect=pausing_export,
+        ):
+            compaction_service = CompactionService(
+                db_path=Path(services.provider.db_path),
+                config=compaction_config,
+            )
+            started = await compaction_service.compact_background(
+                provider=services.provider,
+                on_complete=reindex_modified,
+            )
+            assert started, "Compaction should start with zero thresholds"
+
+            # Capture the background task so we can await its completion
+            # without going through shutdown() (which cancels instead).
+            compaction_task = compaction_service._compaction_task
+            assert compaction_task is not None
+
+            # Wait for the thread to enter the paused export phase, then mutate
+            # the file. asyncio.to_thread so the event loop is not blocked.
+            await asyncio.to_thread(export_started.wait, 10.0)
+            assert export_started.is_set(), "Export phase never started"
+
+            test_file.write_text("def modified_marker():\n    return 'NEW'\n")
+
+            # Unblock export and wait for the full compaction + on_complete
+            # callback to finish (on_complete runs inline inside the task).
+            export_proceed.set()
+            await asyncio.wait_for(compaction_task, timeout=30.0)
+
+        # Post-compaction reindex callback should have picked up the new content.
+        after = await execute_tool(
+            tool_name="search",
+            services=services,
+            embedding_manager=None,
+            arguments={
+                "type": "regex",
+                "query": "modified_marker",
+                "page_size": 10,
+                "offset": 0,
+            },
+        )
+        assert len(after.get("results", [])) > 0, (
+            "Modified content must be searchable after post-compaction reindex"
+        )
+
+        old = await execute_tool(
+            tool_name="search",
+            services=services,
+            embedding_manager=None,
+            arguments={
+                "type": "regex",
+                "query": "original_marker",
+                "page_size": 10,
+                "offset": 0,
+            },
+        )
+        assert len(old.get("results", [])) == 0, (
+            "Old content must be replaced by reindex"
+        )
+
+    @pytest.mark.asyncio
     async def test_mcp_search_works_after_compaction(self, mcp_setup):
         """Search results are preserved after database compaction."""
         services, _, watch_dir, _, _ = mcp_setup
