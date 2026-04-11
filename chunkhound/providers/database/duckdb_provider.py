@@ -3139,6 +3139,9 @@ class DuckDBProvider(SerialDatabaseProvider):
                 with open(lock_file, "x") as f:
                     f.write(f"{os.getpid()}:{time.time():.0f}")
                 lock_acquired = True
+                # Signal to connect() that the lock it may encounter on
+                # reconnect is ours. Authoritative over on-disk PID.
+                self._connection_manager._compaction_in_progress = True
             except FileExistsError:
                 raise CompactionError(
                     "Compaction already in progress (lock file exists)",
@@ -3280,6 +3283,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 shutil.rmtree(export_dir, ignore_errors=True)
             if lock_acquired:
                 lock_file.unlink(missing_ok=True)
+                self._connection_manager._compaction_in_progress = False
             intent_path.unlink(missing_ok=True)
             # Only restore connection gate if provider is actually connected.
             # Success/cancel paths already set() explicitly above.

@@ -73,6 +73,11 @@ class DuckDBConnectionManager:
         )
         self.connection: Any | None = None
         self.config = config
+        # Set by DuckDBProvider._run_blocking_compaction while a compaction is
+        # in flight. connect() uses this as the authoritative signal for the
+        # "own lock → skip recovery" branch; on-disk PID alone is unsafe under
+        # legacy-format locks if the kernel reuses a crashed process's PID.
+        self._compaction_in_progress: bool = False
 
         # Note: Thread safety is now handled by DuckDBProvider's executor pattern
         # All database operations are serialized to a single thread
@@ -216,10 +221,12 @@ class DuckDBConnectionManager:
         if not self.is_memory_db:
             assert isinstance(self.db_path, Path)
             foreign_lock_alive = False
+            own_lock_alive = False
             lock_file = get_compaction_lock_path(self.db_path)
             if lock_file.exists():
                 # Check if lock is held by a live process before removing
                 lock_is_stale = True
+                is_own_lock = False
                 try:
                     content = lock_file.read_text().strip()
                     # Format: "PID:TIMESTAMP" (new) or "PID" (legacy)
@@ -235,9 +242,12 @@ class DuckDBConnectionManager:
                             if lock_time is not None
                             else None
                         )
-                        try:
-                            os.kill(pid, 0)
-                            # PID exists — but check for reuse after reboot
+                        if psutil.pid_exists(pid):
+                            # PID exists — but check for reuse after reboot.
+                            # psutil.pid_exists is cross-platform and reports
+                            # True for processes owned by other users on POSIX,
+                            # so the "different user" branch is folded into the
+                            # generic "process alive" path below.
                             if (
                                 lock_time is not None
                                 and lock_time < psutil.boot_time()
@@ -245,6 +255,28 @@ class DuckDBConnectionManager:
                                 logger.warning(
                                     f"Removing stale compaction lock "
                                     f"(PID {pid} reused after reboot)"
+                                )
+                            elif self._compaction_in_progress and pid == os.getpid():
+                                # Our own lock — the provider is mid-compaction
+                                # and reconnecting after the swap. Leave the
+                                # lock for the caller's finally block to clean
+                                # up, and skip the foreign-lock raise. The
+                                # in-process flag is authoritative; the PID
+                                # check is defense-in-depth against legacy
+                                # PID-only locks after PID reuse.
+                                lock_is_stale = False
+                                is_own_lock = True
+                            elif pid == os.getpid():
+                                # Same PID as us but no compaction in progress
+                                # — the lock cannot belong to us. Either a
+                                # prior process with the same PID crashed and
+                                # the kernel reused its PID, or a stale legacy
+                                # PID-only lock survived. Remove as stale
+                                # (lock_is_stale stays True).
+                                logger.warning(
+                                    f"Removing stale compaction lock "
+                                    f"(PID {pid} matches ours but no "
+                                    "compaction in progress)"
                                 )
                             else:
                                 # Process alive and lock from current boot
@@ -262,18 +294,10 @@ class DuckDBConnectionManager:
                                         f"Compaction lock held by live process "
                                         f"(PID {pid}). Not removing lock file."
                                     )
-                        except ProcessLookupError:
+                        else:
                             logger.warning(
                                 f"Removing stale compaction lock "
                                 f"(PID {pid} no longer running)"
-                            )
-                        except PermissionError:
-                            # Process alive but owned by different user
-                            lock_is_stale = False
-                            logger.warning(
-                                f"Compaction lock held by process PID "
-                                f"{pid} (different user). "
-                                "Not removing lock file."
                             )
                 except (OSError, ValueError):
                     logger.warning(
@@ -282,20 +306,34 @@ class DuckDBConnectionManager:
 
                 if lock_is_stale:
                     lock_file.unlink(missing_ok=True)
+                elif is_own_lock:
+                    own_lock_alive = True
                 else:
                     foreign_lock_alive = True
 
             if foreign_lock_alive:
-                logger.info(
-                    "Skipping compaction recovery — lock held by live process"
+                # Another process is actively compacting this database. Opening
+                # a second handle here would race EXPORT/IMPORT swap: the
+                # exporter uses duckdb.connect(read_only=True) which does NOT
+                # take DuckDB's exclusive write lock, so a concurrent reader
+                # could see a dangling inode after os.replace() (POSIX) or
+                # crash the swap outright (Windows). Fail fast — callers
+                # (CLI repack, CompactionService) surface this as a retry hint.
+                raise CompactionError(
+                    f"Another process is compacting this database "
+                    f"(lock held by live PID). Retry in a few seconds. "
+                    f"Lock file: {lock_file}",
+                    operation="connect",
                 )
-                if not self.db_path.exists():
-                    raise CompactionError(
-                        f"Database file {self.db_path} does not exist but compaction lock "
-                        f"is held by a live process (possible PID reuse after crash). "
-                        f"Remove lock file {lock_file} and restart to trigger recovery.",
-                        operation="connect",
-                    )
+            elif own_lock_alive:
+                # Our own compaction is reconnecting after the swap — the
+                # artifacts (intent file, compact_db, export_dir) are in use
+                # by the in-flight compaction. Skip recovery/cleanup entirely
+                # and fall through to the normal DB connect.
+                logger.debug(
+                    "Compaction lock matches in-progress compaction; "
+                    "skipping recovery (own-lock fast-path)"
+                )
             else:
                 # Recover from interrupted compaction swap
                 old_db = self.db_path.with_suffix(".duckdb.old")
