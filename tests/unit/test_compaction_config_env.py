@@ -40,14 +40,18 @@ class TestCompactionEnvConfig:
         config = DatabaseConfig.load_from_env()
         assert config["compaction_threshold"] == 0.75
 
-    def test_compaction_threshold_invalid_ignored(
+    def test_compaction_threshold_invalid_raises(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Unparseable threshold must raise — no silent fallback to default."""
         monkeypatch.setenv(
             "CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD", "not-a-number"
         )
-        config = DatabaseConfig.load_from_env()
-        assert "compaction_threshold" not in config
+        with pytest.raises(
+            ValueError,
+            match=r"CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD=.*not a valid number",
+        ):
+            DatabaseConfig.load_from_env()
 
     def test_compaction_min_size_valid(
         self, monkeypatch: pytest.MonkeyPatch
@@ -66,11 +70,54 @@ class TestCompactionEnvConfig:
         config = DatabaseConfig.load_from_env()
         assert "compaction_enabled" not in config
 
-    def test_compaction_min_size_invalid_ignored(
+    def test_compaction_min_size_invalid_raises(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Unparseable min-size must raise — no silent fallback to default."""
         monkeypatch.setenv(
             "CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB", "abc"
         )
-        config = DatabaseConfig.load_from_env()
-        assert "compaction_min_size_mb" not in config
+        with pytest.raises(
+            ValueError,
+            match=r"CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB=.*not a valid integer",
+        ):
+            DatabaseConfig.load_from_env()
+
+    @pytest.mark.parametrize("value", ["-0.1", "1.1", "2.0", "-1.0"])
+    def test_compaction_threshold_out_of_range_raises(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        """Out-of-range threshold must raise a loud, explicit error.
+
+        "No silent errors" policy — a user typo like COMPACTION_THRESHOLD=1.5
+        must not silently fall back to the default.
+        """
+        monkeypatch.setenv(
+            "CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD", value
+        )
+        with pytest.raises(
+            ValueError,
+            match=r"CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD=.*out of range",
+        ):
+            DatabaseConfig.load_from_env()
+
+    def test_compaction_min_size_negative_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(
+            "CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB", "-5"
+        )
+        with pytest.raises(
+            ValueError,
+            match=r"CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB=.*must be >= 0",
+        ):
+            DatabaseConfig.load_from_env()
+
+    def test_compaction_threshold_boundary_values(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """0.0 and 1.0 are at the boundary and must be accepted."""
+        monkeypatch.setenv("CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD", "0.0")
+        assert DatabaseConfig.load_from_env()["compaction_threshold"] == 0.0
+        monkeypatch.setenv("CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD", "1.0")
+        assert DatabaseConfig.load_from_env()["compaction_threshold"] == 1.0

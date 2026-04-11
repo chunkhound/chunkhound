@@ -192,22 +192,36 @@ class DatabaseConfig(BaseModel):
             "CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD"
         ):
             try:
-                config["compaction_threshold"] = float(compaction_threshold)
-            except ValueError:
-                logger.warning(
-                    "Ignoring invalid CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD value: {!r}",
-                    compaction_threshold,
+                parsed_threshold = float(compaction_threshold)
+            except ValueError as e:
+                # No silent errors — surface a loud, explicit failure rather
+                # than falling back to the default for a user typo.
+                raise ValueError(
+                    f"CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD="
+                    f"{compaction_threshold!r} is not a valid number"
+                ) from e
+            if not (0.0 <= parsed_threshold <= 1.0):
+                raise ValueError(
+                    f"CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD="
+                    f"{compaction_threshold!r} out of range [0.0, 1.0]"
                 )
+            config["compaction_threshold"] = parsed_threshold
         if compaction_min_size := os.getenv(
             "CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB"
         ):
             try:
-                config["compaction_min_size_mb"] = int(compaction_min_size)
-            except ValueError:
-                logger.warning(
-                    "Ignoring invalid CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB value: {!r}",
-                    compaction_min_size,
+                parsed_min_size = int(compaction_min_size)
+            except ValueError as e:
+                raise ValueError(
+                    f"CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB="
+                    f"{compaction_min_size!r} is not a valid integer"
+                ) from e
+            if parsed_min_size < 0:
+                raise ValueError(
+                    f"CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB="
+                    f"{compaction_min_size!r} must be >= 0"
                 )
+            config["compaction_min_size_mb"] = parsed_min_size
         return config
 
     @classmethod
