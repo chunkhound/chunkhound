@@ -13,6 +13,7 @@ Architecture:
 
 import asyncio
 import gc
+import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -261,6 +262,15 @@ class RealtimeIndexingService:
         self.event_handler: SimpleEventHandler | None = None
         self.watch_path: Path | None = None
 
+        # Signals whether the _start_fs_monitor executor thread has exited.
+        # Cleared in _setup_watchdog synchronously before dispatching the thread;
+        # set in the _run_wrapped finally. stop() waits on it before touching
+        # self.observer, because asyncio task cancellation does NOT interrupt
+        # an already-running executor thread. Mirrors
+        # CompactionService._compaction_thread_done.
+        self._fs_monitor_done = threading.Event()
+        self._fs_monitor_done.set()  # No setup running initially
+
         # Processing tasks
         self.process_task: asyncio.Task | None = None
         self.event_consumer_task: asyncio.Task | None = None
@@ -334,7 +344,9 @@ class RealtimeIndexingService:
         self._debug("stopping service")
         self._stopping = True
 
-        # Cancel watchdog setup if still running
+        # Cancel watchdog setup if still running. Note: cancelling a task that is
+        # awaiting loop.run_in_executor delivers CancelledError to the awaiter but
+        # does NOT interrupt the executor thread — the thread continues running.
         if hasattr(self, "_watchdog_setup_task") and self._watchdog_setup_task:
             self._watchdog_setup_task.cancel()
             try:
@@ -342,8 +354,19 @@ class RealtimeIndexingService:
             except asyncio.CancelledError:
                 pass
 
-        # Stop filesystem observer
-        if self.observer:
+        # Wait for any in-flight _start_fs_monitor executor thread to truly exit
+        # before touching self.observer. Without this, the thread may have
+        # assigned self.observer = Observer() but not yet called observer.start(),
+        # and observer.join() below would raise "cannot join thread before it is
+        # started". The deadline inside _start_fs_monitor bounds this to ~1s
+        # (5s on Windows); use 5s here so Windows is also covered.
+        if not self._fs_monitor_done.is_set():
+            await asyncio.to_thread(self._fs_monitor_done.wait, 5.0)
+
+        # Stop filesystem observer. is_alive() guards the case where
+        # _start_fs_monitor raised after assigning self.observer but before
+        # observer.start() (e.g. observer.schedule() failure).
+        if self.observer and self.observer.is_alive():
             self.observer.stop()
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self.observer.join, 1.0)
@@ -389,7 +412,14 @@ class RealtimeIndexingService:
     async def _setup_watchdog(
         self, watch_path: Path, loop: asyncio.AbstractEventLoop
     ) -> None:
-        """Setup watchdog, falling back to polling on failure."""
+        """Setup watchdog, falling back to polling on failure.
+
+        The _start_fs_monitor callable runs on the default executor. We clear
+        _fs_monitor_done here (synchronously, before dispatch) and guarantee it
+        is set in the wrapper's finally. A thread_entered flag covers the
+        "dispatch failed before the thread ran" case so stop() is never stranded
+        waiting on an event that will never fire.
+        """
         # Skip watchdog entirely if force_polling is enabled (e.g., Windows CI)
         if self._force_polling:
             logger.info(f"Polling mode forced for {watch_path}")
@@ -401,10 +431,28 @@ class RealtimeIndexingService:
             self._debug("force_polling enabled; using polling mode")
             return
 
+        self._fs_monitor_done.clear()
+        thread_entered = threading.Event()
+
+        def _run_wrapped() -> None:
+            thread_entered.set()
+            try:
+                self._start_fs_monitor(watch_path, loop)
+            finally:
+                self._fs_monitor_done.set()
+
         try:
             # No asyncio-level timeout: _start_fs_monitor has its own deadline,
             # and asyncio.wait_for cannot interrupt running executor threads.
-            await loop.run_in_executor(None, self._start_fs_monitor, watch_path, loop)
+            try:
+                await loop.run_in_executor(None, _run_wrapped)
+            except BaseException:
+                if not thread_entered.is_set():
+                    # Executor never ran the callable (e.g. cancel won the race
+                    # before dispatch). Without this, stop() would block for the
+                    # full timeout waiting on an event no thread will ever set.
+                    self._fs_monitor_done.set()
+                raise
             logger.debug("Watchdog setup completed successfully (recursive mode)")
             self._debug("watchdog setup complete (recursive)")
             self._monitoring_ready_time = time.time()
@@ -421,7 +469,12 @@ class RealtimeIndexingService:
     def _start_fs_monitor(
         self, watch_path: Path, loop: asyncio.AbstractEventLoop
     ) -> None:
-        """Start filesystem monitoring with recursive watching for complete coverage."""
+        """Start filesystem monitoring with recursive watching for complete coverage.
+
+        Runs on the default executor; _setup_watchdog wraps the call and manages
+        _fs_monitor_done so stop() can wait on this thread before tearing down
+        the observer.
+        """
         # Deadline covers the entire setup (schedule + start + thread alive check).
         # On Windows, observer thread startup can be noticeably slower.
         deadline = time.time() + (5.0 if IS_WINDOWS else 1.0)
@@ -445,7 +498,9 @@ class RealtimeIndexingService:
             time.sleep(0.01)
 
         if self.observer.is_alive():
-            logger.debug(f"Started recursive filesystem monitoring for {watch_path}")
+            logger.debug(
+                f"Started recursive filesystem monitoring for {watch_path}"
+            )
         else:
             raise RuntimeError("Observer failed to start within timeout")
 

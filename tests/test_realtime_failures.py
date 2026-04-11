@@ -411,3 +411,68 @@ class TestRealtimeFailures:
 
         record = services.provider.get_file_by_path(str(nested_file.resolve()))
         assert record is not None, "Nested file should be indexed by process_file"
+
+    @pytest.mark.skipif(
+        should_use_polling(),
+        reason="Watchdog path is not exercised when polling is forced",
+    )
+    @pytest.mark.asyncio
+    async def test_stop_during_fs_monitor_setup_does_not_crash_or_leak(
+        self, realtime_setup, monkeypatch
+    ):
+        """stop() racing with _start_fs_monitor must not crash or leak a live observer.
+
+        Freezes the executor thread between `self.observer = Observer()` and
+        `observer.start()` by gating `observer.schedule()`, then drives stop().
+        Without the hoisted _fs_monitor_done clear, stop() would either crash
+        with "cannot join thread before it is started" or leave a live observer
+        running after return.
+        """
+        import threading as _threading
+
+        from chunkhound.services import realtime_indexing_service as rt
+
+        service, watch_dir, _, _ = realtime_setup
+        # Force the watchdog path: fixture defaults to should_use_polling()
+        # which flips _force_polling on Windows CI (guarded by skipif above)
+        # but may also be False already. Be explicit.
+        service._force_polling = False
+
+        schedule_gate = _threading.Event()
+        real_observer_cls = rt.Observer
+
+        class _GatedObserver(real_observer_cls):  # type: ignore[misc, valid-type]
+            def schedule(self, *args, **kwargs):
+                # Block until the test lets us proceed, pinning the executor
+                # thread in the exact mid-setup state stop() must survive.
+                schedule_gate.wait(timeout=30.0)
+                return super().schedule(*args, **kwargs)
+
+        monkeypatch.setattr(rt, "Observer", _GatedObserver)
+
+        start_task = asyncio.create_task(service.start(watch_dir))
+
+        # Wait for the executor thread to reach the gate (self.observer assigned
+        # but observer.start() not yet called).
+        for _ in range(200):
+            if service.observer is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert service.observer is not None, (
+            "executor thread never reached Observer construction"
+        )
+
+        # stop() must not raise and must not strand a live observer.
+        stop_task = asyncio.create_task(service.stop())
+        # Release the gate so _start_fs_monitor can complete and set the event.
+        schedule_gate.set()
+        await asyncio.wait_for(stop_task, timeout=10.0)
+
+        try:
+            await asyncio.wait_for(start_task, timeout=5.0)
+        except (asyncio.CancelledError, Exception):
+            pass
+
+        assert service.observer is None or not service.observer.is_alive(), (
+            "stop() returned while a live filesystem observer was still running"
+        )
