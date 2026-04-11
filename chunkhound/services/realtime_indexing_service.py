@@ -24,9 +24,12 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from chunkhound.core.config.config import Config
-from chunkhound.core.utils.path_utils import normalize_path_for_lookup
+from chunkhound.core.utils.path_utils import (
+    directory_prefix_for_relative_path,
+    normalize_path_for_lookup,
+    path_is_within_relative_directory,
+)
 from chunkhound.database_factory import DatabaseServices
-from chunkhound.providers.database.like_utils import escape_like_pattern
 from chunkhound.utils.windows_constants import IS_WINDOWS
 
 
@@ -439,7 +442,8 @@ class RealtimeIndexingService:
         self._watchdog_stop_event.set()
 
         watchdog_task = self._watchdog_setup_task
-        if watchdog_task is not None:
+        current_task = asyncio.current_task()
+        if watchdog_task is not None and watchdog_task is not current_task:
             try:
                 await asyncio.wait_for(asyncio.shield(watchdog_task), timeout=2.0)
             except asyncio.TimeoutError:
@@ -770,26 +774,25 @@ class RealtimeIndexingService:
         try:
             base_dir = self.watch_path or self.config.target_dir
             relative_dir = normalize_path_for_lookup(dir_path, base_dir)
-            directory_prefix = (
-                ""
-                if relative_dir in {"", "."}
-                else relative_dir.rstrip("/") + "/"
-            )
-            escaped_prefix = escape_like_pattern(directory_prefix)
-            search_results = self.services.provider.execute_query(
-                "SELECT path FROM files WHERE path LIKE ? ESCAPE '\\'",
-                [f"{escaped_prefix}%"],
-            )
+            directory_prefix = directory_prefix_for_relative_path(relative_dir)
+            search_results = self.services.provider.execute_query("SELECT path FROM files")
+            scoped_results = [
+                result
+                for result in search_results
+                if path_is_within_relative_directory(
+                    str(result.get("path", "")), directory_prefix
+                )
+            ]
 
             # Delete each file found in the directory
-            for result in search_results:
+            for result in scoped_results:
                 file_path = result.get("path", "")
                 if file_path:
                     logger.debug(f"Cleaning up deleted file: {file_path}")
                     await self.services.provider.delete_file_completely_async(file_path)
 
             logger.info(
-                f"Cleaned up {len(search_results)} files from deleted directory: {dir_path}"
+                f"Cleaned up {len(scoped_results)} files from deleted directory: {dir_path}"
             )
 
         except Exception as e:

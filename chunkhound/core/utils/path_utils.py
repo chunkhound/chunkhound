@@ -110,3 +110,20 @@ def normalize_path_for_lookup(
             f"Path {input_path} is not under base directory {base_dir}. "
             f"This indicates a configuration or indexing issue."
         )
+
+
+def directory_prefix_for_relative_path(relative_path: str | Path) -> str:
+    """Return a normalized subtree prefix for stored relative file paths."""
+    normalized = Path(relative_path).as_posix()
+    if normalized in {"", "."}:
+        return ""
+    return normalized.rstrip("/") + "/"
+
+
+def path_is_within_relative_directory(path: str, directory: str | Path) -> bool:
+    """Check whether a stored relative path is inside the given relative directory."""
+    normalized_path = Path(path).as_posix()
+    prefix = directory_prefix_for_relative_path(directory)
+    if not prefix:
+        return True
+    return normalized_path.startswith(prefix)

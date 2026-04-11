@@ -34,11 +34,12 @@ from chunkhound.core.types.common import FilePath, Language
 from chunkhound.core.utils import estimate_tokens_chunking
 from chunkhound.core.utils.path_utils import (
     canonicalize_base_directory,
+    directory_prefix_for_relative_path,
     get_relative_path_safe,
+    path_is_within_relative_directory,
 )
 from chunkhound.interfaces.database_provider import DatabaseProvider
 from chunkhound.interfaces.embedding_provider import EmbeddingProvider
-from chunkhound.providers.database.like_utils import escape_like_pattern
 from chunkhound.parsers.chunk_splitter import (
     CASTConfig,
     ChunkMetrics,
@@ -2887,19 +2888,15 @@ class IndexingCoordinator(BaseService):
             }
 
             directory_prefix_path = self._get_relative_path(directory)
-            directory_prefix = (
-                ""
-                if str(directory_prefix_path) in {"", "."}
-                else directory_prefix_path.as_posix().rstrip("/") + "/"
-            )
-
-            escaped_prefix = escape_like_pattern(directory_prefix)
-            query = """
-                SELECT id, path
-                FROM files
-                WHERE path LIKE ? ESCAPE '\\'
-            """
-            db_files = self._db.execute_query(query, [f"{escaped_prefix}%"])
+            directory_prefix = directory_prefix_for_relative_path(directory_prefix_path)
+            db_files = self._db.execute_query("SELECT path FROM files")
+            scoped_db_files = [
+                db_file
+                for db_file in db_files
+                if path_is_within_relative_directory(
+                    str(db_file.get("path", "")), directory_prefix
+                )
+            ]
 
             # Find orphaned files (in DB but not on disk or excluded by patterns)
             orphaned_files = []
@@ -2922,7 +2919,7 @@ class IndexingCoordinator(BaseService):
             else:
                 patterns_to_check = exclude_patterns
 
-            for db_file in db_files:
+            for db_file in scoped_db_files:
                 file_path = db_file["path"]
 
                 # Check if file should be excluded based on current patterns
