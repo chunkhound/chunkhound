@@ -34,6 +34,31 @@ def _create_valid_duckdb(path: Path) -> None:
     conn.close()
 
 
+@pytest.fixture
+def foreign_live_pid():
+    """Spawn a short-lived subprocess and yield its PID.
+
+    Using ``os.getppid()`` is unsafe in container environments where pytest
+    may run as PID 1 — ``os.kill(0, 0)`` then signals the process group
+    instead of raising, which makes "foreign live PID" tests pass via a
+    degenerate branch. Owning the subprocess makes the intent explicit.
+    """
+    import contextlib
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"]
+    )
+    try:
+        yield proc.pid
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
+
+
 class TestCrashMidSwap:
     """Test recovery when process crashed between rename operations."""
 
@@ -190,25 +215,32 @@ class TestLockFileRecovery:
         finally:
             mgr.disconnect()
 
-    def test_preserves_lock_live_pid(self, tmp_path: Path):
-        """Lock file with live PID is NOT removed on connect."""
+    def test_preserves_lock_live_pid(self, tmp_path: Path, foreign_live_pid: int):
+        """Lock file with foreign live PID must be preserved AND connect() must raise.
+
+        Opening a second handle while another process holds the compaction
+        lock would race EXPORT/IMPORT swap. connect() fails fast so the
+        caller (CLI repack / CompactionService) can retry later.
+        """
         db_path = tmp_path / "chunks.duckdb"
         lock_path = get_compaction_lock_path(db_path)
 
         _create_valid_duckdb(db_path)
-        # Write current process PID with recent timestamp (guaranteed alive)
-        lock_path.write_text(f"{os.getpid()}:{time.time():.0f}")
+        # Subprocess-owned PID: alive during the test, distinct from ours,
+        # and environment-agnostic (no container/PID-1 edge cases).
+        lock_path.write_text(f"{foreign_live_pid}:{time.time():.0f}")
 
         mgr = DuckDBConnectionManager(db_path)
-        mgr.connect()
         try:
+            with pytest.raises(CompactionError, match="Another process is compacting"):
+                mgr.connect()
             assert lock_path.exists(), "Lock held by live process should be preserved"
         finally:
-            mgr.disconnect()
-            # Clean up lock so it doesn't interfere with other tests
             lock_path.unlink(missing_ok=True)
 
-    def test_preserves_lock_old_timestamp_live_pid(self, tmp_path: Path):
+    def test_preserves_lock_old_timestamp_live_pid(
+        self, tmp_path: Path, foreign_live_pid: int
+    ):
         """Lock with live PID is preserved even with old timestamp (long compaction).
 
         Invariant: a live process's compaction lock must NEVER be removed based
@@ -229,16 +261,18 @@ class TestLockFileRecovery:
         # Shortly after boot — old enough to be non-trivial, but guaranteed
         # post-boot so the "PID reused after reboot" path is not triggered.
         old_timestamp = psutil.boot_time() + 60
-        lock_path.write_text(f"{os.getpid()}:{old_timestamp:.0f}")
+        # Subprocess-owned foreign PID (alive, not us) so the "own lock →
+        # skip raise" branch does not apply.
+        lock_path.write_text(f"{foreign_live_pid}:{old_timestamp:.0f}")
 
         mgr = DuckDBConnectionManager(db_path)
-        mgr.connect()
         try:
+            with pytest.raises(CompactionError, match="Another process is compacting"):
+                mgr.connect()
             assert lock_path.exists(), (
                 "Lock with live PID should be preserved even with old timestamp"
             )
         finally:
-            mgr.disconnect()
             lock_path.unlink(missing_ok=True)
 
     def test_removes_lock_from_before_reboot(self, tmp_path: Path):
@@ -262,8 +296,69 @@ class TestLockFileRecovery:
         finally:
             mgr.disconnect()
 
-    def test_preserves_lock_legacy_pid_only(self, tmp_path: Path):
-        """Legacy lock file with only PID (no timestamp) and live PID is preserved."""
+    def test_preserves_lock_legacy_pid_only(
+        self, tmp_path: Path, foreign_live_pid: int
+    ):
+        """Legacy lock file (PID only, no timestamp) with live foreign PID must raise."""
+        db_path = tmp_path / "chunks.duckdb"
+        lock_path = get_compaction_lock_path(db_path)
+
+        _create_valid_duckdb(db_path)
+        # Legacy format: PID only, no timestamp. Subprocess-owned foreign PID.
+        lock_path.write_text(str(foreign_live_pid))
+
+        mgr = DuckDBConnectionManager(db_path)
+        try:
+            with pytest.raises(CompactionError, match="Another process is compacting"):
+                mgr.connect()
+            assert lock_path.exists(), (
+                "Legacy lock with live PID should be preserved"
+            )
+        finally:
+            lock_path.unlink(missing_ok=True)
+
+    def test_allows_connect_when_own_lock_alive(self, tmp_path: Path):
+        """Own-process lock must NOT cause raise or recovery.
+
+        During compaction, the provider holds its own lock across
+        soft_disconnect → export/import/swap → connect. Treating our own
+        lock as foreign would break the compaction reconnect. The
+        in-process ``_compaction_in_progress`` flag is the authoritative
+        signal.
+        """
+        db_path = tmp_path / "chunks.duckdb"
+        lock_path = get_compaction_lock_path(db_path)
+        intent_path = Path(str(db_path) + ".swap_intent")
+
+        _create_valid_duckdb(db_path)
+        # Our own PID in the lock = in-progress compaction reconnecting
+        lock_path.write_text(f"{os.getpid()}:{time.time():.0f}")
+        # Intent file would normally be cleaned by recovery — verify it's NOT
+        intent_path.write_text("phase2")
+
+        mgr = DuckDBConnectionManager(db_path)
+        mgr._compaction_in_progress = True
+        try:
+            mgr.connect()  # Must succeed
+            assert mgr.is_connected
+            assert lock_path.exists(), (
+                "Own lock must be preserved for caller's finally block"
+            )
+            assert intent_path.exists(), (
+                "Own-lock path must skip recovery — intent file belongs to "
+                "the in-flight compaction"
+            )
+        finally:
+            mgr.disconnect()
+            lock_path.unlink(missing_ok=True)
+            intent_path.unlink(missing_ok=True)
+
+    def test_allows_connect_legacy_own_lock_via_flag(self, tmp_path: Path):
+        """Legacy-format own lock is honored when the in-process flag is set.
+
+        Locks in pre-timestamp format (``PID`` only, no colon) must still be
+        recognized as our own during an in-flight compaction reconnect.
+        """
         db_path = tmp_path / "chunks.duckdb"
         lock_path = get_compaction_lock_path(db_path)
 
@@ -272,17 +367,53 @@ class TestLockFileRecovery:
         lock_path.write_text(str(os.getpid()))
 
         mgr = DuckDBConnectionManager(db_path)
-        mgr.connect()
+        mgr._compaction_in_progress = True
         try:
+            mgr.connect()
+            assert mgr.is_connected
             assert lock_path.exists(), (
-                "Legacy lock with live PID should be preserved"
+                "Own legacy lock must be preserved for caller's finally block"
             )
         finally:
             mgr.disconnect()
             lock_path.unlink(missing_ok=True)
 
-    def test_skips_recovery_when_foreign_lock_alive(self, tmp_path: Path):
-        """When a live process holds the compaction lock, recovery and cleanup are skipped."""
+    def test_rejects_legacy_own_pid_without_flag(self, tmp_path: Path):
+        """Without the in-process flag, a legacy own-PID lock is stale.
+
+        This is the PID-reuse-after-crash scenario: a previous process
+        crashed leaving a PID-only lock; the kernel later reused that PID
+        for us. We never started a compaction, so the lock is stale and
+        must be removed instead of silently honored.
+        """
+        db_path = tmp_path / "chunks.duckdb"
+        lock_path = get_compaction_lock_path(db_path)
+
+        _create_valid_duckdb(db_path)
+        lock_path.write_text(str(os.getpid()))
+
+        mgr = DuckDBConnectionManager(db_path)
+        # Do NOT set _compaction_in_progress
+        try:
+            mgr.connect()
+            assert not lock_path.exists(), (
+                "Legacy own-PID lock with no in-flight compaction must be "
+                "removed as stale (guards against PID reuse after crash)"
+            )
+        finally:
+            mgr.disconnect()
+            lock_path.unlink(missing_ok=True)
+
+    def test_raises_when_foreign_lock_alive(
+        self, tmp_path: Path, foreign_live_pid: int
+    ):
+        """When a live process holds the compaction lock, connect() must raise.
+
+        Opening a concurrent DuckDB handle while another process is running
+        EXPORT (via read_only=True — which does NOT take the exclusive write
+        lock) would race the os.replace() swap and risk dangling-inode reads
+        on POSIX or a crashed swap on Windows. Fail fast instead.
+        """
         db_path = tmp_path / "chunks.duckdb"
         lock_path = get_compaction_lock_path(db_path)
         intent_path = Path(str(db_path) + ".swap_intent")
@@ -290,8 +421,8 @@ class TestLockFileRecovery:
         export_dir = db_path.parent / ".chunkhound_compaction_export"
 
         _create_valid_duckdb(db_path)
-        # Write a lock held by current process (guaranteed alive)
-        lock_path.write_text(f"{os.getpid()}:{time.time():.0f}")
+        # Subprocess-owned foreign PID (alive, not us)
+        lock_path.write_text(f"{foreign_live_pid}:{time.time():.0f}")
         # Create artifacts that a foreign compaction would be using
         intent_path.write_text("phase2")
         compact_path.write_bytes(b"compacting")
@@ -299,21 +430,25 @@ class TestLockFileRecovery:
         (export_dir / "data.parquet").write_bytes(b"export data")
 
         mgr = DuckDBConnectionManager(db_path)
-        mgr.connect()
         try:
+            with pytest.raises(CompactionError, match="Another process is compacting"):
+                mgr.connect()
+
+            # Artifacts must be preserved — they belong to the other process
             assert lock_path.exists(), "Lock should be preserved"
             assert intent_path.exists(), "Intent file should NOT be cleaned up"
             assert compact_path.exists(), "Compact DB should NOT be deleted"
             assert export_dir.exists(), "Export dir should NOT be deleted"
         finally:
-            mgr.disconnect()
             lock_path.unlink(missing_ok=True)
             intent_path.unlink(missing_ok=True)
             compact_path.unlink(missing_ok=True)
             shutil.rmtree(export_dir, ignore_errors=True)
 
-    def test_raises_when_foreign_lock_alive_but_db_missing(self, tmp_path: Path):
-        """When a live process holds the lock but the DB file is missing, raise CompactionError."""
+    def test_raises_when_foreign_lock_alive_but_db_missing(
+        self, tmp_path: Path, foreign_live_pid: int
+    ):
+        """Same unified raise applies when the DB file is also missing."""
         db_path = tmp_path / "chunks.duckdb"
         lock_path = get_compaction_lock_path(db_path)
         old_db = db_path.with_suffix(".duckdb.old")
@@ -321,8 +456,8 @@ class TestLockFileRecovery:
         export_dir = db_path.parent / ".chunkhound_compaction_export"
 
         # Do NOT create db_path — it must not exist
-        # Write a lock held by current process (guaranteed alive)
-        lock_path.write_text(f"{os.getpid()}:{time.time():.0f}")
+        # Subprocess-owned foreign PID (alive, not us)
+        lock_path.write_text(f"{foreign_live_pid}:{time.time():.0f}")
         # Create artifacts to verify they're untouched after error
         old_db.write_bytes(b"old backup")
         compact_db.write_bytes(b"compacting")
@@ -331,7 +466,7 @@ class TestLockFileRecovery:
 
         mgr = DuckDBConnectionManager(db_path)
         try:
-            with pytest.raises(CompactionError, match="does not exist"):
+            with pytest.raises(CompactionError, match="Another process is compacting"):
                 mgr.connect()
 
             # Artifacts should be untouched
