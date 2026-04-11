@@ -72,6 +72,12 @@ class MCPServerBase(ABC):
         self._initialized = False
         self._init_lock = asyncio.Lock()
         self._connect_lock = asyncio.Lock()
+        self._cleanup_lock = asyncio.Lock()
+        # One-shot cleanup guard. cleanup() may leave _initialized=True and
+        # the provider still connected on the stuck-compaction-thread path
+        # (to avoid racing the foreign DuckDB handle), so we can't use
+        # _initialized as an idempotency signal. See cleanup() docstring.
+        self._cleanup_done = False
 
         # Background tasks
         self._startup_task: asyncio.Task | None = None
@@ -374,46 +380,59 @@ class MCPServerBase(ABC):
     async def cleanup(self) -> None:
         """Clean up resources and close database connection.
 
-        This method is idempotent - safe to call multiple times.
+        Idempotent and concurrent-safe — multiple callers awaiting cleanup()
+        in parallel will serialize through _cleanup_lock; only the first runs
+        the teardown, subsequent callers see _cleanup_done=True and return.
         """
-        # Stop compaction service first (cancels any in-progress compaction).
-        # shutdown() signals the thread and waits for it via threading.Event.
-        # We also do a secondary check here as defense-in-depth: the compaction
-        # thread bypasses the serial executor (direct duckdb.connect()), so we
-        # must not disconnect the provider while the thread is still alive.
-        if self._compaction_service:
-            self.debug_log("Stopping compaction service")
-            await self._compaction_service.shutdown()
-            if not self._compaction_service.compaction_thread_done.is_set():
-                self.debug_log(
-                    "WARNING: compaction thread still alive after shutdown, waiting..."
-                )
-                await asyncio.to_thread(
-                    self._compaction_service.compaction_thread_done.wait,
-                    timeout=5.0,
-                )
-                if not self._compaction_service.compaction_thread_done.is_set():
-                    logger.error(
-                        "Compaction thread still alive after secondary wait — "
-                        "skipping provider disconnect to avoid corruption"
-                    )
+        async with self._cleanup_lock:
+            if self._cleanup_done:
+                return
+
+            try:
+                # Stop compaction service first (cancels any in-progress compaction).
+                # shutdown() signals the thread and waits for it via threading.Event.
+                # We also do a secondary check here as defense-in-depth: the compaction
+                # thread bypasses the serial executor (direct duckdb.connect()), so we
+                # must not disconnect the provider while the thread is still alive.
+                if self._compaction_service:
+                    self.debug_log("Stopping compaction service")
+                    await self._compaction_service.shutdown()
+                    if not self._compaction_service.compaction_thread_done.is_set():
+                        self.debug_log(
+                            "WARNING: compaction thread still alive after "
+                            "shutdown, waiting..."
+                        )
+                        await asyncio.to_thread(
+                            self._compaction_service.compaction_thread_done.wait,
+                            timeout=5.0,
+                        )
+                        if not self._compaction_service.compaction_thread_done.is_set():
+                            logger.error(
+                                "Compaction thread still alive after secondary wait — "
+                                "skipping provider disconnect to avoid corruption"
+                            )
+                            self._compaction_service = None
+                            await self._cleanup_non_provider_resources()
+                            # _initialized intentionally stays True: cleanup() is terminal
+                            # (process exits after this), so no reconnection will follow.
+                            return
                     self._compaction_service = None
-                    await self._cleanup_non_provider_resources()
-                    # _initialized intentionally stays True: cleanup() is terminal
-                    # (process exits after this), so no reconnection will follow.
-                    return
-            self._compaction_service = None
 
-        await self._cleanup_non_provider_resources()
+                await self._cleanup_non_provider_resources()
 
-        if self.services and self.services.provider.is_connected:
-            self.debug_log("Closing database connection")
-            # Use new close() method for proper cleanup, with fallback to disconnect()
-            if hasattr(self.services.provider, "close"):
-                self.services.provider.close()
-            else:
-                self.services.provider.disconnect()
-            self._initialized = False
+                if self.services and self.services.provider.is_connected:
+                    self.debug_log("Closing database connection")
+                    # Use close() for proper cleanup, with fallback to disconnect()
+                    if hasattr(self.services.provider, "close"):
+                        self.services.provider.close()
+                    else:
+                        self.services.provider.disconnect()
+                    self._initialized = False
+            finally:
+                # Mark cleanup done even on exception paths. cleanup() is terminal
+                # (process exits after) and a second call from an outer finally
+                # must not re-enter an already-half-torn-down provider.
+                self._cleanup_done = True
 
     async def _cleanup_non_provider_resources(self) -> None:
         """Cancel background tasks and stop real-time indexing."""
