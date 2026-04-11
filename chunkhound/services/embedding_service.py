@@ -681,8 +681,11 @@ class EmbeddingService(BaseService):
     async def _maybe_optimize_database(self) -> None:
         """Trigger periodic database optimization to prevent fragment accumulation.
 
-        Optimization maintains query performance during long-running embedding
-        generation by checkpointing and reclaiming deleted row space.
+        Invoked after each successful batch inside the gather() result loop.
+        `self._completed_batches` is an instance attribute that persists across
+        `generate_embeddings_for_chunks()` calls, so optimization fires based
+        on total batch count regardless of gather() boundaries (and may fire
+        mid-loop if the threshold is crossed).
 
         Only runs if:
         1. Batch counter >= configured frequency
