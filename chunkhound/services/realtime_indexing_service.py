@@ -415,6 +415,7 @@ class RealtimeIndexingService:
                 logger.debug("Watchdog setup aborted during shutdown/timeout")
                 return
             logger.warning(f"Watchdog setup failed: {e} - falling back to polling")
+            await self._stop_watchdog_observer()
             await self._start_polling_fallback(watch_path)
             self._debug("watchdog failed; switched to polling")
 
