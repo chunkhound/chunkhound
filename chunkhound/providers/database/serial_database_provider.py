@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from chunkhound.core.models import Chunk, File
+from chunkhound.core.utils.path_utils import canonicalize_base_directory
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.file_discovery_cache import FileDiscoveryCache
 from chunkhound.providers.database.serial_executor import SerialDatabaseExecutor
@@ -64,7 +65,7 @@ class SerialDatabaseProvider(ABC):
         self._file_discovery_cache = FileDiscoveryCache()
 
         # Base directory for path normalization (immutable after initialization)
-        self._base_directory: Path = base_directory
+        self._base_directory: Path = canonicalize_base_directory(base_directory)
 
     @abstractmethod
     def _create_connection(self) -> Any:
