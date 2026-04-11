@@ -3314,21 +3314,36 @@ class DuckDBProvider(SerialDatabaseProvider):
             ) from e
 
     @staticmethod
-    def _safe_sql_path(path: Path) -> str:
-        """Validate and escape a path for use in DuckDB SQL statements.
+    def _sql_literal_path(path: Path) -> str:
+        """Escape a path for embedding inside a single-quoted DuckDB SQL literal.
 
-        DuckDB's EXPORT/IMPORT DATABASE don't support parameterized paths,
-        so we must interpolate. Only allow known-safe characters.
+        DuckDB's EXPORT/IMPORT DATABASE don't support parameterized paths, so
+        callers interpolate the result inside f"... '{x}' ...". This function:
+          1. Rejects characters that can break SQL string literals or embed
+             commands (denylist), allowing arbitrary Unicode for accented
+             usernames and CJK paths.
+          2. Escapes embedded single quotes by doubling them (DuckDB SQL
+             literal convention).
+
+        Callers MUST wrap the return in single quotes. The result is NOT safe
+        for embedding in double-quoted identifiers or raw paths.
         """
         path_str = path.as_posix()
-        # Allow colon only as part of a Windows drive letter prefix (e.g. C:/)
-        if not re.fullmatch(r"(?:[a-zA-Z]:)?[-a-zA-Z0-9/_. +,=~]+", path_str):
+        # Characters that can break SQL string literals or embed commands.
+        # Backslash is rejected for cross-platform safety: as_posix() has
+        # already normalised Windows separators to '/', so any backslash
+        # reaching here would be an unusual filename char.
+        forbidden = {"\x00", "\n", "\r", '"', "`", ";", "\\"}
+        if any(c in path_str for c in forbidden) or any(
+            ord(c) < 0x20 for c in path_str
+        ):
             raise CompactionError(
-                f"Database path contains characters not allowed in SQL "
-                f"interpolation (path failed allowlist check: {path_str!r})",
+                f"Database path contains forbidden characters for SQL "
+                f"interpolation: {path_str!r}",
                 operation="validation",
             )
-        return path_str
+        # Escape single quotes by doubling (DuckDB SQL literal convention).
+        return path_str.replace("'", "''")
 
     def _export_database_for_compaction(self, db_path: Path, export_dir: Path) -> None:
         """Export database to Parquet files for compaction."""
@@ -3341,7 +3356,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         conn = duckdb.connect(str(db_path), read_only=True)
         try:
             conn.execute("LOAD vss")
-            safe_path = self._safe_sql_path(export_dir)
+            safe_path = self._sql_literal_path(export_dir)
             conn.execute(f"EXPORT DATABASE '{safe_path}' (FORMAT PARQUET)")
         finally:
             conn.close()
@@ -3359,7 +3374,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         try:
             conn.execute("LOAD vss")
             self._enable_hnsw_persistence_on_conn(conn)
-            safe_path = self._safe_sql_path(export_dir)
+            safe_path = self._sql_literal_path(export_dir)
             conn.execute(f"IMPORT DATABASE '{safe_path}'")
             # CRITICAL: Checkpoint to persist imported data before closing
             # Without this, the imported data may not be written to disk
