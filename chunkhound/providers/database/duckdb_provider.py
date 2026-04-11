@@ -317,6 +317,7 @@ class DuckDBProvider(SerialDatabaseProvider):
         table_name = f"embeddings_{dims}"
 
         if self._executor_table_exists(conn, state, table_name):
+            self._executor_ensure_embedding_uniqueness(conn, state, table_name)
             return table_name
 
         logger.info(f"Creating embedding table for {dims} dimensions: {table_name}")
@@ -331,7 +332,8 @@ class DuckDBProvider(SerialDatabaseProvider):
                     model TEXT NOT NULL,
                     embedding FLOAT[{dims}],
                     dims INTEGER NOT NULL DEFAULT {dims},
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (chunk_id, provider, model)
                 )
             """)
 
@@ -357,11 +359,37 @@ class DuckDBProvider(SerialDatabaseProvider):
                 f"Created {table_name} with HNSW index {hnsw_index_name} "
                 "and regular indexes"
             )
+            self._executor_ensure_embedding_uniqueness(conn, state, table_name)
             return table_name
 
         except Exception as e:
             logger.error(f"Failed to create embedding table for {dims} dimensions: {e}")
             raise
+
+    def _executor_ensure_embedding_uniqueness(
+        self, conn: Any, state: dict[str, Any], table_name: str
+    ) -> None:
+        """Deduplicate and enforce a unique embedding key for existing tables."""
+        conn.execute(f"""
+            DELETE FROM {table_name}
+            WHERE id IN (
+                SELECT id
+                FROM (
+                    SELECT
+                        id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY chunk_id, provider, model
+                            ORDER BY id
+                        ) AS row_num
+                    FROM {table_name}
+                ) ranked
+                WHERE row_num > 1
+            )
+        """)
+        conn.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table_name}_chunk_provider_model "
+            f"ON {table_name}(chunk_id, provider, model)"
+        )
 
     def _maybe_checkpoint(self, force: bool = False) -> None:
         """Perform checkpoint if needed - delegate to connection manager."""
@@ -483,7 +511,8 @@ class DuckDBProvider(SerialDatabaseProvider):
                     model TEXT NOT NULL,
                     embedding FLOAT[1536],
                     dims INTEGER NOT NULL DEFAULT 1536,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (chunk_id, provider, model)
                 )
             """)
 
@@ -509,6 +538,9 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             # Handle schema migrations for existing databases
             self._executor_migrate_schema(conn, state)
+            self._executor_ensure_embedding_uniqueness(
+                conn, state, "embeddings_1536"
+            )
 
             # Track schema version
             current_version = self._get_schema_version(conn)
@@ -613,6 +645,9 @@ class DuckDBProvider(SerialDatabaseProvider):
 
             # Add metadata column if it doesn't exist (for databases without size/signature migration)
             conn.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS metadata TEXT")
+
+            for table_name in self._executor_get_all_embedding_tables(conn, state):
+                self._executor_ensure_embedding_uniqueness(conn, state, table_name)
 
         except Exception as e:
             logger.error(f"Failed to migrate schema: {e}")
@@ -1722,7 +1757,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                     batch = batch_data[i : i + batch_size]
                     conn.executemany(
                         f"""
-                        INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims)
+                        INSERT OR IGNORE INTO {table_name} (chunk_id, provider, model, embedding, dims)
                         VALUES (?, ?, ?, ?, ?)
                     """,
                         batch,
@@ -1732,7 +1767,7 @@ class DuckDBProvider(SerialDatabaseProvider):
                 # Insert all at once
                 conn.executemany(
                     f"""
-                    INSERT INTO {table_name} (chunk_id, provider, model, embedding, dims)
+                    INSERT OR IGNORE INTO {table_name} (chunk_id, provider, model, embedding, dims)
                     VALUES (?, ?, ?, ?, ?)
                 """,
                     batch_data,
