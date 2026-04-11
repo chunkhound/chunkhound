@@ -113,8 +113,9 @@ class EmbeddingService(BaseService):
             progress.advance(embed_task, batch_size)
             # Calculate and display speed
             task_obj = progress.tasks[embed_task]
-            if task_obj.elapsed and task_obj.elapsed > 0:
-                speed = processed_count / task_obj.elapsed
+            elapsed = getattr(task_obj, "elapsed", None)
+            if elapsed and elapsed > 0:
+                speed = processed_count / elapsed
                 progress.update(embed_task, speed=f"{speed:.1f} chunks/s")
         except (AttributeError, IndexError, TypeError, KeyError) as e:
             # Progress display is non-critical, but log for debugging
