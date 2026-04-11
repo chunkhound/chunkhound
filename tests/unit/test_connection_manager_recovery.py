@@ -150,6 +150,30 @@ class TestStaleArtifacts:
 class TestLockFileRecovery:
     """Test PID-aware lock file handling on startup."""
 
+    def test_str_db_path_triggers_recovery(self, tmp_path: Path):
+        """A string db_path must still exercise the lock recovery path.
+
+        Regression guard for the ``str → Path`` coercion in ``__init__``.
+        The registry passes ``db_path`` as a string in some code paths;
+        recovery logic uses ``Path.with_suffix`` and friends, so without
+        coercion the entire recovery branch would crash with AttributeError.
+        """
+        db_path = tmp_path / "chunks.duckdb"
+        lock_path = get_compaction_lock_path(db_path)
+
+        _create_valid_duckdb(db_path)
+        lock_path.write_text(f"999999999:{time.time():.0f}")
+
+        # Note: str, not Path
+        mgr = DuckDBConnectionManager(str(db_path))
+        mgr.connect()
+        try:
+            assert not lock_path.exists(), (
+                "Stale lock must be removed even when db_path is a str"
+            )
+        finally:
+            mgr.disconnect()
+
     def test_removes_stale_lock_dead_pid(self, tmp_path: Path):
         """Lock file with dead PID is removed on connect."""
         db_path = tmp_path / "chunks.duckdb"
