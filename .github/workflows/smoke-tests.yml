@@ -50,7 +50,7 @@ jobs:
         # - --reruns (pytest-rerunfailures): retries individual flaky tests within a
         #   process, used on Windows where the file-monitor can miss writes transiently.
         # timeout_minutes * max_attempts must stay below the job-level timeout (30m).
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08  # v3
         with:
           timeout_minutes: 13
           max_attempts: 2
