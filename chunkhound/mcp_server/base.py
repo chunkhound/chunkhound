@@ -18,8 +18,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from loguru import logger
-
 from chunkhound.core.config import EmbeddingProviderFactory
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import DatabaseServices, create_services
@@ -407,9 +405,10 @@ class MCPServerBase(ABC):
                             timeout=5.0,
                         )
                         if not self._compaction_service.compaction_thread_done.is_set():
-                            logger.error(
+                            self.debug_log(
                                 "Compaction thread still alive after secondary wait — "
-                                "skipping provider disconnect to avoid corruption"
+                                "skipping provider disconnect to avoid corruption",
+                                always=True,
                             )
                             self._compaction_service = None
                             await self._cleanup_non_provider_resources()
