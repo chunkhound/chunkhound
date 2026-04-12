@@ -369,6 +369,21 @@ class PrivateWatchmanSidecar:
 
     async def start(self) -> WatchmanSidecarMetadata:
         if self._process is not None and self._process.poll() is None:
+            # Reuse the live owned sidecar across reconnect cycles when its
+            # on-disk identity still matches what we already started. Tearing it
+            # down here would remove metadata.json while leaving the logfile
+            # behind, which then trips the missing-metadata fail-closed guard
+            # in cleanup_stale_state() during a normal session-only reconnect.
+            existing_metadata = self._metadata
+            if existing_metadata is not None:
+                on_disk_metadata = self.read_metadata()
+                if (
+                    on_disk_metadata is not None
+                    and on_disk_metadata.pid == existing_metadata.pid
+                    and on_disk_metadata.process_start_time_epoch
+                    == existing_metadata.process_start_time_epoch
+                ):
+                    return existing_metadata
             await self.stop()
 
         self.paths.root.mkdir(parents=True, exist_ok=True)

@@ -420,6 +420,33 @@ async def test_private_watchman_sidecar_refuses_cleanup_without_metadata(
 
 
 @pytest.mark.asyncio
+async def test_private_watchman_sidecar_start_is_idempotent_for_owned_live_sidecar(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    sidecar = PrivateWatchmanSidecar(repo_root)
+
+    first_metadata = await sidecar.start()
+    try:
+        assert sidecar.paths.metadata_path.is_file()
+        assert sidecar.paths.logfile_path.is_file()
+
+        second_metadata = await sidecar.start()
+
+        assert second_metadata.pid == first_metadata.pid
+        assert (
+            second_metadata.process_start_time_epoch
+            == first_metadata.process_start_time_epoch
+        )
+        assert pid_alive(first_metadata.pid)
+        assert sidecar.paths.metadata_path.is_file()
+        assert sidecar.paths.logfile_path.is_file()
+    finally:
+        await sidecar.stop()
+
+
+@pytest.mark.asyncio
 async def test_private_watchman_sidecar_refuses_shutdown_for_mismatched_live_process(
     tmp_path: Path,
 ) -> None:
