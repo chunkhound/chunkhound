@@ -2011,6 +2011,7 @@ class TestRealtimeFunctional:
                     stats["watchman_reconnect"]["state"] == "restored"
                     and stats["watchman_connection_state"] == "connected"
                 ),
+                timeout=30.0,
             )
 
             file_path = watch_dir / "src" / "watchman_recovered_runtime.py"

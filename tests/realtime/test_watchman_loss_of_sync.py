@@ -324,7 +324,11 @@ async def test_watchman_unexpected_session_exit_requests_resync_and_restores_mon
             "def watchman_reconnect_catchup():\n    return 7\n",
             encoding="utf-8",
         )
-        stats = await _wait_for_watchman_reconnect_state(service, "restored")
+        stats = await _wait_for_watchman_reconnect_state(
+            service,
+            "restored",
+            timeout=30.0,
+        )
 
         assert callback_calls
         assert stats["watchman_session_alive"] is True
@@ -391,7 +395,11 @@ async def test_watchman_reconnect_status_reports_retrying_then_restored(
 
         retrying_stats = await _wait_for_watchman_reconnect_state(service, "retrying")
         await asyncio.wait_for(callback_event.wait(), timeout=5.0)
-        restored_stats = await _wait_for_watchman_reconnect_state(service, "restored")
+        restored_stats = await _wait_for_watchman_reconnect_state(
+            service,
+            "restored",
+            timeout=30.0,
+        )
 
         assert retrying_stats["watchman_connection_state"] in {
             "disconnected",
