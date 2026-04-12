@@ -711,8 +711,10 @@ class EmbeddingService(BaseService):
                         f"Database optimization failed after {batch_count} batches "
                         f"(non-fatal): {e}"
                     )
-            # Always reset — avoid per-batch pragma_storage_info() overhead
-            self._completed_batches = 0
+                # Only reset after an optimization attempt so that when
+                # has_reclaimable_space returns False the counter keeps
+                # accumulating and the very next batch re-checks immediately.
+                self._completed_batches = 0
 
     def _create_token_aware_batches(
         self, chunk_data: list[tuple[ChunkId, str]]

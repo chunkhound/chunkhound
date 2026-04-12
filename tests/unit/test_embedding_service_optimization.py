@@ -134,8 +134,26 @@ class TestEmbeddingServiceOptimization:
             await service._maybe_optimize_database()
             assert not spy.called, "optimize_tables should not be called without reclaimable space"
 
-        # Counter still resets to avoid per-batch overhead
-        assert service._completed_batches == 0
+        # Counter must NOT reset when no optimization was attempted, so the
+        # very next batch re-checks immediately instead of going dormant.
+        assert service._completed_batches == 5
+
+    @pytest.mark.asyncio
+    async def test_counter_not_reset_when_no_reclaimable_space(self, clean_provider):
+        """Counter stays accumulated when has_reclaimable_space is False.
+
+        This ensures the next batch triggers a re-check immediately rather
+        than the DB going dormant for another N batches.
+        """
+        service = EmbeddingService(database_provider=clean_provider)
+        service._optimization_batch_frequency = 3
+        service._completed_batches = 4  # already past threshold
+
+        await service._maybe_optimize_database()
+
+        assert service._completed_batches == 4, (
+            "Counter must not reset when has_reclaimable_space returns False"
+        )
 
     @pytest.mark.asyncio
     async def test_optimization_counter_resets_even_on_failure(
