@@ -183,45 +183,58 @@ class DatabaseConfig(BaseModel):
                     max_disk_gb,
                 )
         if compaction_enabled := os.getenv("CHUNKHOUND_DATABASE__COMPACTION_ENABLED"):
-            config["compaction_enabled"] = compaction_enabled.lower() in (
-                "true",
-                "1",
-                "yes",
-            )
+            lowered = compaction_enabled.lower()
+            truthy = ("true", "1", "yes")
+            falsy = ("false", "0", "no")
+            if lowered in truthy:
+                config["compaction_enabled"] = True
+            elif lowered in falsy:
+                config["compaction_enabled"] = False
+            else:
+                logger.warning(
+                    "Unrecognized CHUNKHOUND_DATABASE__COMPACTION_ENABLED value: {!r}; "
+                    "defaulting to True (enabled)",
+                    compaction_enabled,
+                )
+                config["compaction_enabled"] = True
         if compaction_threshold := os.getenv(
             "CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD"
         ):
             try:
                 parsed_threshold = float(compaction_threshold)
-            except ValueError as e:
-                # No silent errors — surface a loud, explicit failure rather
-                # than falling back to the default for a user typo.
-                raise ValueError(
-                    f"CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD="
-                    f"{compaction_threshold!r} is not a valid number"
-                ) from e
-            if not (0.0 <= parsed_threshold <= 1.0):
-                raise ValueError(
-                    f"CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD="
-                    f"{compaction_threshold!r} out of range [0.0, 1.0]"
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD value: {!r}",
+                    compaction_threshold,
                 )
-            config["compaction_threshold"] = parsed_threshold
+            else:
+                if not (0.0 <= parsed_threshold <= 1.0):
+                    logger.warning(
+                        "Ignoring out-of-range CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD "
+                        "value: {!r} (must be 0.0–1.0)",
+                        compaction_threshold,
+                    )
+                else:
+                    config["compaction_threshold"] = parsed_threshold
         if compaction_min_size := os.getenv(
             "CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB"
         ):
             try:
                 parsed_min_size = int(compaction_min_size)
-            except ValueError as e:
-                raise ValueError(
-                    f"CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB="
-                    f"{compaction_min_size!r} is not a valid integer"
-                ) from e
-            if parsed_min_size < 0:
-                raise ValueError(
-                    f"CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB="
-                    f"{compaction_min_size!r} must be >= 0"
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB value: {!r}",
+                    compaction_min_size,
                 )
-            config["compaction_min_size_mb"] = parsed_min_size
+            else:
+                if parsed_min_size < 0:
+                    logger.warning(
+                        "Ignoring negative CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB "
+                        "value: {!r} (must be >= 0)",
+                        compaction_min_size,
+                    )
+                else:
+                    config["compaction_min_size_mb"] = parsed_min_size
         return config
 
     @classmethod

@@ -1,8 +1,22 @@
 """Tests for compaction environment variable configuration."""
 
 import pytest
+from loguru import logger
 
 from chunkhound.core.config.database_config import DatabaseConfig
+
+
+@pytest.fixture
+def loguru_warnings():
+    """Capture loguru warning messages for assertion."""
+    messages: list[str] = []
+    handler_id = logger.add(
+        lambda msg: messages.append(str(msg)),
+        level="WARNING",
+        format="{message}",
+    )
+    yield messages
+    logger.remove(handler_id)
 
 
 def test_compaction_enabled_by_default() -> None:
@@ -21,7 +35,7 @@ class TestCompactionEnvConfig:
         config = DatabaseConfig.load_from_env()
         assert config["compaction_enabled"] is True
 
-    @pytest.mark.parametrize("value", ["false", "0", "no", "anything"])
+    @pytest.mark.parametrize("value", ["false", "0", "no"])
     def test_compaction_enabled_falsy(
         self, monkeypatch: pytest.MonkeyPatch, value: str
     ) -> None:
@@ -30,6 +44,17 @@ class TestCompactionEnvConfig:
         )
         config = DatabaseConfig.load_from_env()
         assert config["compaction_enabled"] is False
+
+    @pytest.mark.parametrize("value", ["on", "enabled", "anything"])
+    def test_compaction_enabled_unrecognized_warns_and_defaults_true(
+        self, monkeypatch: pytest.MonkeyPatch, loguru_warnings: list[str], value: str
+    ) -> None:
+        monkeypatch.setenv(
+            "CHUNKHOUND_DATABASE__COMPACTION_ENABLED", value
+        )
+        config = DatabaseConfig.load_from_env()
+        assert config["compaction_enabled"] is True
+        assert any("Unrecognized" in msg for msg in loguru_warnings)
 
     def test_compaction_threshold_valid(
         self, monkeypatch: pytest.MonkeyPatch
@@ -40,18 +65,16 @@ class TestCompactionEnvConfig:
         config = DatabaseConfig.load_from_env()
         assert config["compaction_threshold"] == 0.75
 
-    def test_compaction_threshold_invalid_raises(
-        self, monkeypatch: pytest.MonkeyPatch
+    def test_compaction_threshold_invalid_warns_and_skips(
+        self, monkeypatch: pytest.MonkeyPatch, loguru_warnings: list[str]
     ) -> None:
-        """Unparseable threshold must raise — no silent fallback to default."""
+        """Unparseable threshold logs a warning and uses the default."""
         monkeypatch.setenv(
             "CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD", "not-a-number"
         )
-        with pytest.raises(
-            ValueError,
-            match=r"CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD=.*not a valid number",
-        ):
-            DatabaseConfig.load_from_env()
+        config = DatabaseConfig.load_from_env()
+        assert "compaction_threshold" not in config
+        assert any("COMPACTION_THRESHOLD" in msg for msg in loguru_warnings)
 
     def test_compaction_min_size_valid(
         self, monkeypatch: pytest.MonkeyPatch
@@ -70,48 +93,38 @@ class TestCompactionEnvConfig:
         config = DatabaseConfig.load_from_env()
         assert "compaction_enabled" not in config
 
-    def test_compaction_min_size_invalid_raises(
-        self, monkeypatch: pytest.MonkeyPatch
+    def test_compaction_min_size_invalid_warns_and_skips(
+        self, monkeypatch: pytest.MonkeyPatch, loguru_warnings: list[str]
     ) -> None:
-        """Unparseable min-size must raise — no silent fallback to default."""
+        """Unparseable min-size logs a warning and uses the default."""
         monkeypatch.setenv(
             "CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB", "abc"
         )
-        with pytest.raises(
-            ValueError,
-            match=r"CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB=.*not a valid integer",
-        ):
-            DatabaseConfig.load_from_env()
+        config = DatabaseConfig.load_from_env()
+        assert "compaction_min_size_mb" not in config
+        assert any("COMPACTION_MIN_SIZE_MB" in msg for msg in loguru_warnings)
 
     @pytest.mark.parametrize("value", ["-0.1", "1.1", "2.0", "-1.0"])
-    def test_compaction_threshold_out_of_range_raises(
-        self, monkeypatch: pytest.MonkeyPatch, value: str
+    def test_compaction_threshold_out_of_range_warns_and_skips(
+        self, monkeypatch: pytest.MonkeyPatch, loguru_warnings: list[str], value: str
     ) -> None:
-        """Out-of-range threshold must raise a loud, explicit error.
-
-        "No silent errors" policy — a user typo like COMPACTION_THRESHOLD=1.5
-        must not silently fall back to the default.
-        """
+        """Out-of-range threshold logs a warning and uses the default."""
         monkeypatch.setenv(
             "CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD", value
         )
-        with pytest.raises(
-            ValueError,
-            match=r"CHUNKHOUND_DATABASE__COMPACTION_THRESHOLD=.*out of range",
-        ):
-            DatabaseConfig.load_from_env()
+        config = DatabaseConfig.load_from_env()
+        assert "compaction_threshold" not in config
+        assert any("COMPACTION_THRESHOLD" in msg for msg in loguru_warnings)
 
-    def test_compaction_min_size_negative_raises(
-        self, monkeypatch: pytest.MonkeyPatch
+    def test_compaction_min_size_negative_warns_and_skips(
+        self, monkeypatch: pytest.MonkeyPatch, loguru_warnings: list[str]
     ) -> None:
         monkeypatch.setenv(
             "CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB", "-5"
         )
-        with pytest.raises(
-            ValueError,
-            match=r"CHUNKHOUND_DATABASE__COMPACTION_MIN_SIZE_MB=.*must be >= 0",
-        ):
-            DatabaseConfig.load_from_env()
+        config = DatabaseConfig.load_from_env()
+        assert "compaction_min_size_mb" not in config
+        assert any("COMPACTION_MIN_SIZE_MB" in msg for msg in loguru_warnings)
 
     def test_compaction_threshold_boundary_values(
         self, monkeypatch: pytest.MonkeyPatch
