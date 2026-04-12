@@ -451,6 +451,34 @@ class TestBackgroundCompaction:
             # Callback should NOT have been called for a cancelled compaction
             assert not callback_called.is_set()
 
+    @pytest.mark.asyncio
+    async def test_callback_failure_surfaces_via_last_error(
+        self, tmp_path: Path, config_with_compaction: Config, mock_provider: MagicMock
+    ):
+        """Successful compaction + failing callback → last_error captures callback error."""
+        db_path = tmp_path / "test.duckdb"
+        db_path.write_bytes(b"x" * 1024)
+
+        service = CompactionService(db_path, config_with_compaction)
+
+        async def failing_callback():
+            raise RuntimeError("Callback failed")
+
+        async def successful_compaction(provider):
+            return True
+
+        with patch.object(service, "_do_compaction", successful_compaction):
+            await service.compact_background(mock_provider, on_complete=failing_callback)
+
+            if service._compaction_task:
+                try:
+                    await service._compaction_task
+                except Exception:
+                    pass
+
+            assert isinstance(service.last_error, RuntimeError)
+            assert "Callback failed" in str(service.last_error)
+
 
 class TestShutdown:
     """Test graceful shutdown."""
