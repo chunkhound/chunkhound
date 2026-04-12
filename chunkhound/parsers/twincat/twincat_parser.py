@@ -25,7 +25,6 @@ from chunkhound.parsers.twincat.xml_extractor import (
     TcPOUExtractor,
 )
 from chunkhound.parsers.universal_engine import UniversalChunk, UniversalConcept
-from chunkhound.parsers.universal_parser import CASTConfig
 
 # Regex patterns for comment extraction
 # Block comments: (* ... *)
@@ -53,12 +52,11 @@ class TwinCATParser:
     AST transformation to extract semantic chunks.
     """
 
-    def __init__(self, cast_config: CASTConfig | None = None) -> None:
+    def __init__(self) -> None:
         self._grammar_dir = Path(__file__).parent
         self._decl_parser: Lark | None = None
         self._impl_parser: Lark | None = None
         self._extractor = TcPOUExtractor()
-        self.cast_config = cast_config or CASTConfig()
         self._parse_errors: list[str] = []
 
     @property

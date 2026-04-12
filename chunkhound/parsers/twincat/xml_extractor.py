@@ -89,7 +89,7 @@ class TcPOUExtractor:
             raise XMLExtractionError(f"File not found: {path}")
 
         # Read file as text first for position tracking
-        xml_text = path.read_text()
+        xml_text = path.read_text(encoding="utf-8", errors="replace")
 
         try:
             root = ET.fromstring(xml_text)

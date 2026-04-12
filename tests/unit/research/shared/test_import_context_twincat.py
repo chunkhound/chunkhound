@@ -277,11 +277,7 @@ class TestTypeReferenceExtraction:
         imports = import_context_service.get_file_imports(
             "test.TcPOU", PRIMITIVES_ONLY_FIXTURE
         )
-
-        # No imports should be extracted for primitives only
-        import_text = "\n".join(imports)
-        # Primitive types should not appear as standalone imports
-        assert "BOOL" not in import_text.split()[0] if imports else True
+        assert imports == [], f"Expected no imports for primitives-only fixture, got: {imports}"
 
 
 class TestCombinedExtraction:
