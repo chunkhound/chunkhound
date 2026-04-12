@@ -3148,9 +3148,11 @@ class DuckDBProvider(SerialDatabaseProvider):
                     operation="lock",
                 ) from None
 
-            # Check disk space — 2.5x covers: exported parquet (~1x) + new compact DB (~1x)
-            # + original DB retained until swap (~0.5x safety margin)
-            self._has_sufficient_disk_space(db_path, multiplier=2.5)
+            # Peak footprint during IMPORT: original DB (1x) + exported
+            # parquet (~1x) + new compact DB (~1x) = 3x worst case. Parquet
+            # compression typically yields less, but compaction failing
+            # mid-IMPORT is catastrophic — stay conservative.
+            self._has_sufficient_disk_space(db_path, multiplier=3.0)
 
             # Suspend auto-reconnect before soft_disconnect so concurrent MCP
             # requests get CompactionError instead of opening stale connections.
@@ -3292,7 +3294,7 @@ class DuckDBProvider(SerialDatabaseProvider):
             if self.is_connected:
                 self._connection_allowed.set()
 
-    def _has_sufficient_disk_space(self, db_path: Path, multiplier: float = 2.5) -> None:
+    def _has_sufficient_disk_space(self, db_path: Path, multiplier: float = 3.0) -> None:
         """Check if sufficient disk space exists for compaction.
 
         Raises:
