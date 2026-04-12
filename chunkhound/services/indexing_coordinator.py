@@ -1136,10 +1136,17 @@ class IndexingCoordinator(BaseService):
         """
         # Fail-closed indexed-root identity guard BEFORE any discovery or
         # cleanup. Wrong-root reopens must not do any destructive work.
+        # Validate against the provider's authoritative base_directory so the
+        # sidecar stays consistent with connect-time validation across
+        # normalization differences (e.g. macOS /var ↔ /private/var, Windows
+        # 8.3 short-name expansion) that can otherwise cause the caller-passed
+        # `directory` to diverge from the already-validated provider base.
         ensure_root = getattr(self._db, "ensure_indexed_root_identity", None)
         if callable(ensure_root):
+            get_base = getattr(self._db, "get_base_directory", None)
+            requested_root = get_base() if callable(get_base) else directory
             ensure_root(
-                requested_root=directory,
+                requested_root=requested_root,
                 allow_claim_if_missing=True,
             )
         try:

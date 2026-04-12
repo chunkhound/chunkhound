@@ -17,6 +17,8 @@ from chunkhound.database_factory import create_services
 from chunkhound.providers.database.duckdb_provider import (
     DuckDBIndexedRootMismatchError,
     DuckDBProvider,
+    _indexed_root_sidecar_path,
+    _normalize_indexed_root,
 )
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
 from chunkhound.services.realtime_indexing_service import (
@@ -410,9 +412,11 @@ def test_cleanup_orphaned_files_keeps_logical_subtree_scope_when_resolved_outsid
 async def test_realtime_start_rejects_wrong_root_before_monitor_setup(
     tmp_path: Path,
 ) -> None:
-    """Step 101: RealtimeStartupMixin.start must fail-closed before any watcher/
-    monitor state is constructed when start() is called with a root that does
-    not match the DB's claimed indexed root."""
+    """Step 101: `RealtimeStartupMixin.start(...)` must fail-closed before any
+    watcher/monitor state is constructed when the sidecar records a different
+    logical root than the provider's authoritative base_directory."""
+    import json as _json
+
     root_a = tmp_path / "root_a"
     root_b = tmp_path / "root_b"
     root_a.mkdir()
@@ -423,17 +427,33 @@ async def test_realtime_start_rejects_wrong_root_before_monitor_setup(
     services = create_services(db_path, config)
     services.provider.connect()
     try:
-        # Claim under root_a via an explicit mutation-capable call.
+        # Claim the sidecar under root_a first.
         services.provider.ensure_indexed_root_identity(
             requested_root=root_a, allow_claim_if_missing=True
         )
 
+        # Simulate cross-session divergence by rewriting the sidecar to a
+        # different logical root. The next RealtimeStartupMixin.start(...)
+        # call must raise before any monitor adapter, watcher, consumer, or
+        # process task is constructed.
+        sidecar = _indexed_root_sidecar_path(
+            services.provider._connection_manager.db_path
+        )
+        assert sidecar is not None and sidecar.exists()
+        sidecar.write_text(
+            _json.dumps(
+                {
+                    "version": 1,
+                    "indexed_root_path": _normalize_indexed_root(root_b),
+                }
+            ),
+            encoding="utf-8",
+        )
+
         service = RealtimeIndexingService(services, config)
 
-        # Calling start() with a different logical root must raise the typed
-        # mismatch error before any monitor adapter or watcher state is built.
         with pytest.raises(DuckDBIndexedRootMismatchError):
-            await service.start(root_b)
+            await service.start(root_a)
 
         assert service._monitor_adapter is None
         assert service.event_consumer_task is None

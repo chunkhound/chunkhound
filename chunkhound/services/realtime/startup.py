@@ -426,11 +426,18 @@ class RealtimeStartupMixin:
         """Start real-time indexing service."""
         # Fail-closed indexed-root identity guard BEFORE any state mutation,
         # path normalization, monitor construction, or watcher setup.
+        # Validate against the provider's authoritative base_directory so the
+        # sidecar stays consistent with connect-time validation across
+        # normalization differences (e.g. macOS /var ↔ /private/var, Windows
+        # 8.3 short-name expansion) that can otherwise cause the caller-passed
+        # `watch_path` to diverge from the already-validated provider base.
         provider = getattr(getattr(self, "services", None), "provider", None)
         ensure_root = getattr(provider, "ensure_indexed_root_identity", None)
         if callable(ensure_root):
+            get_base = getattr(provider, "get_base_directory", None)
+            requested_root = get_base() if callable(get_base) else watch_path
             ensure_root(
-                requested_root=watch_path,
+                requested_root=requested_root,
                 allow_claim_if_missing=True,
             )
 

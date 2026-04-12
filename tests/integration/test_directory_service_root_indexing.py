@@ -6,6 +6,7 @@ where include patterns that already start with "**/" were over-prefixed to
 "**/**/…", causing root-level files not to match.
 """
 
+import json
 import os
 import pytest
 from pathlib import Path
@@ -16,6 +17,8 @@ from chunkhound.parsers.parser_factory import create_parser_for_language
 from chunkhound.providers.database.duckdb_provider import (
     DuckDBIndexedRootMismatchError,
     DuckDBProvider,
+    _indexed_root_sidecar_path,
+    _normalize_indexed_root,
 )
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
@@ -74,7 +77,8 @@ async def test_process_directory_rejects_wrong_root_before_discovery_or_cleanup(
 ) -> None:
     """Step 101: `IndexingCoordinator.process_directory(...)` must fail-closed
     with `DuckDBIndexedRootMismatchError` BEFORE file discovery or orphan
-    cleanup run when the DB was claimed for a different indexed root.
+    cleanup run when the sidecar records a different indexed root than the
+    provider's authoritative `base_directory`.
     """
     db_path = tmp_path / "chunks.db"
     root_a = tmp_path / "root_a"
@@ -82,33 +86,38 @@ async def test_process_directory_rejects_wrong_root_before_discovery_or_cleanup(
     root_a.mkdir()
     root_b.mkdir()
     (root_a / "alpha.py").write_text("print('a')\n")
-    (root_b / "beta.py").write_text("print('b')\n")
 
     parser = create_parser_for_language(Language.PYTHON)
 
-    # Phase 1 — claim the sidecar under root_a by making the first
-    # mutation-capable call through process_directory(root_a). This proves the
-    # top-of-method guard's `allow_claim_if_missing=True` path also works.
-    db_a = DuckDBProvider(db_path, base_directory=root_a)
-    db_a.connect()
+    # Phase 1 — claim the sidecar under root_a via a real
+    # `IndexingCoordinator.process_directory(...)` call, exercising the
+    # top-of-method `allow_claim_if_missing=True` path.
+    db = DuckDBProvider(db_path, base_directory=root_a)
+    db.connect()
     try:
-        coordinator_a = IndexingCoordinator(
-            db_a, root_a, None, {Language.PYTHON: parser}, None, None
+        coordinator = IndexingCoordinator(
+            db, root_a, None, {Language.PYTHON: parser}, None, None
         )
-        await coordinator_a.process_directory(root_a, patterns=["**/*.py"])
-    finally:
-        db_a.disconnect()
+        await coordinator.process_directory(root_a, patterns=["**/*.py"])
 
-    # Phase 2 — reopen with base_directory=root_a so provider connect() passes
-    # the sidecar validation, then call process_directory(root_b). The
-    # top-of-method guard MUST raise before any discovery / cleanup runs.
-    # Monkeypatching `_discover_files` and `_cleanup_orphaned_files` to fail
-    # if invoked proves the ordering.
-    db_b = DuckDBProvider(db_path, base_directory=root_a)
-    db_b.connect()
-    try:
-        coordinator_b = IndexingCoordinator(
-            db_b, root_a, None, {Language.PYTHON: parser}, None, None
+        sidecar = _indexed_root_sidecar_path(db_path)
+        assert sidecar is not None and sidecar.exists()
+        stored = json.loads(sidecar.read_text(encoding="utf-8"))
+        assert stored["indexed_root_path"] == _normalize_indexed_root(root_a)
+
+        # Phase 2 — simulate cross-session divergence by rewriting the sidecar
+        # to a different logical root, then call process_directory(...) again.
+        # The top-of-method guard must raise BEFORE any discovery or orphan
+        # cleanup runs. Monkeypatching `_discover_files` and
+        # `_cleanup_orphaned_files` to fail if invoked proves the ordering.
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "indexed_root_path": _normalize_indexed_root(root_b),
+                }
+            ),
+            encoding="utf-8",
         )
 
         discovery_invoked: list[str] = []
@@ -126,16 +135,16 @@ async def test_process_directory_rejects_wrong_root_before_discovery_or_cleanup(
                 "_cleanup_orphaned_files must not run when Step 101 guard refuses reuse"
             )
 
-        monkeypatch.setattr(coordinator_b, "_discover_files", _fail_discovery)
-        monkeypatch.setattr(coordinator_b, "_cleanup_orphaned_files", _fail_cleanup)
+        monkeypatch.setattr(coordinator, "_discover_files", _fail_discovery)
+        monkeypatch.setattr(coordinator, "_cleanup_orphaned_files", _fail_cleanup)
 
         with pytest.raises(DuckDBIndexedRootMismatchError):
-            await coordinator_b.process_directory(root_b, patterns=["**/*.py"])
+            await coordinator.process_directory(root_a, patterns=["**/*.py"])
 
         assert discovery_invoked == []
         assert cleanup_invoked == []
     finally:
-        db_b.disconnect()
+        db.disconnect()
 
 
 @pytest.mark.asyncio
