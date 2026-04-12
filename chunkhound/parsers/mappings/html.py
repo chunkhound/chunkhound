@@ -339,7 +339,9 @@ class HtmlMapping(BaseMapping):
             else (base_dir / source_file).parent
         )
         # Try href (stylesheet link) — support both quoted and unquoted values.
-        m = re.search(r'href=(?:["\']([^"\']+)["\']|([^\s>/"\']+))', import_text)
+        # Note: unquoted values may contain '/' (path separators), so we only
+        # stop at whitespace, '>', and quote characters.
+        m = re.search(r'href=(?:["\']([^"\']+)["\']|([^\s>"\']+))', import_text)
         if m:
             raw = m.group(1) or m.group(2)
             path = raw.split("?")[0].split("#")[0]
@@ -347,7 +349,7 @@ class HtmlMapping(BaseMapping):
             if candidate.exists():
                 return [candidate.resolve()]
         # Try src (external script) — same attribute format.
-        m = re.search(r'src=(?:["\']([^"\']+)["\']|([^\s>/"\']+))', import_text)
+        m = re.search(r'src=(?:["\']([^"\']+)["\']|([^\s>"\']+))', import_text)
         if m:
             raw = m.group(1) or m.group(2)
             path = raw.split("?")[0].split("#")[0]

@@ -320,6 +320,20 @@ def test_resolve_import_paths_html_fragment(tmp_path):
     assert resolved[0] == tmp_path / "style.css"
 
 
+def test_resolve_import_paths_html_unquoted_nested(tmp_path):
+    """resolve_import_paths resolves unquoted href with a nested path (contains '/')."""
+    from chunkhound.parsers.mappings.html import HtmlMapping
+    html = HtmlMapping()
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    (assets / "style.css").write_text("body{}")
+    # Unquoted attribute value with a path separator — the bug was that '/' terminated matching
+    link_tag = "<link rel=stylesheet href=assets/style.css>"
+    resolved = html.resolve_import_paths(link_tag, tmp_path, tmp_path / "index.html")
+    assert len(resolved) == 1, f"Expected 1 resolved path, got {resolved}"
+    assert resolved[0] == (tmp_path / "assets" / "style.css").resolve()
+
+
 def test_stylesheet_import_name_strips_query_string(html_parser):
     """IMPORT chunk name for <link rel=stylesheet> strips cache-busting query strings."""
     code = '<link rel="stylesheet" href="main.css?v=2.0.0">'
