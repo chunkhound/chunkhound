@@ -57,6 +57,15 @@ if TYPE_CHECKING:
     from chunkhound.core.config.database_config import DatabaseConfig
 
 
+def _fsync_directory(dir_path: Path) -> None:
+    """Fsync a directory so that new/renamed entries are durable on ext4."""
+    fd = os.open(str(dir_path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _write_intent(path: Path, phase: str) -> None:
     """Write an fsync'd intent file for crash recovery."""
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
@@ -65,6 +74,7 @@ def _write_intent(path: Path, phase: str) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+    _fsync_directory(path.parent)
 
 
 class DuckDBProvider(SerialDatabaseProvider):
