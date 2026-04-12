@@ -468,8 +468,7 @@ class TestNonBlockingInitialization:
                 assert realtime["watchman_reconnect"] == {
                     "state": "idle",
                     "attempt_count": 0,
-                    "max_attempts": 3,
-                    "retry_delay_seconds": 1.0,
+                    "retry_delay_seconds": None,
                     "last_started_at": None,
                     "last_completed_at": None,
                     "last_error": None,

@@ -235,8 +235,7 @@ async def test_daemon_status_tool_exposes_watchman_realtime_details():
             "watchman_reconnect": {
                 "state": "restored",
                 "attempt_count": 1,
-                "max_attempts": 3,
-                "retry_delay_seconds": 1.0,
+                "retry_delay_seconds": None,
                 "last_started_at": "2026-03-08T00:00:03Z",
                 "last_completed_at": "2026-03-08T00:00:04Z",
                 "last_error": None,

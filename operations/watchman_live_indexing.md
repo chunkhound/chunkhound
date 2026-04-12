@@ -199,6 +199,28 @@ During an incident, confirm that:
 - `watchman_loss_of_sync.count` increased for the expected reason
 - `resync.last_reason == "realtime_loss_of_sync"` once the request is recorded
 - `resync.needs_resync` eventually clears after reconciliation completes
+- `watchman_reconnect.state` moves through `running` and, between attempts,
+  `retrying`; normal recovery should finish at `restored` rather than a
+  terminal reconnect-failed state
+- `watchman_reconnect.retry_delay_seconds` is populated only while the adapter
+  is waiting to retry the next reconnect attempt
+
+## Reconnect and ownership safety
+
+- A Watchman outage does not trigger a hidden fallback backend. ChunkHound
+  keeps the effective backend at `watchman`, leaves top-level status degraded,
+  and continues reconnect attempts with one owned reconnect task until recovery
+  or daemon shutdown.
+- Reconnect backoff is bounded-resource: exponential retry delay capped at
+  60 seconds, no parallel reconnect loops, and no tight spin.
+- `watchman_reconnect.attempt_count` is per outage/recovery cycle.
+- `watchman_reconnect.last_result` reports the most recent completed attempt.
+  During a long outage it may stay `failed` while `state == "retrying"` and a
+  later attempt is still pending.
+- Managed Watchman artifacts without `metadata.json` are treated as ambiguous
+  ownership, not stale state. ChunkHound refuses automatic cleanup in that
+  case and tells operators to inspect `.chunkhound/watchman/` manually before
+  removing anything.
 
 ## Rollout gate
 

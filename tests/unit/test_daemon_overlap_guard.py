@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import socket
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -218,6 +219,39 @@ def test_windows_startup_ipc_address_avoids_live_sibling_port_collision_without_
 
     assert startup_address != collided_address
     assert startup_address.startswith("tcp:127.0.0.1:")
+
+
+def test_windows_startup_ipc_address_skips_kernel_occupied_port_without_lock_entry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Startup selection should avoid ports occupied outside ChunkHound metadata."""
+    _set_runtime_dir_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(discovery_module.sys, "platform", "win32")
+
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    discovery = DaemonDiscovery(project_dir)
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    occupied_port = listener.getsockname()[1]
+    occupied_address = f"tcp:127.0.0.1:{occupied_port}"
+
+    try:
+        monkeypatch.setattr(
+            discovery,
+            "_preferred_windows_ipc_address",
+            lambda: occupied_address,
+        )
+
+        startup_address = discovery._select_startup_ipc_address()
+
+        assert startup_address != occupied_address
+        assert startup_address.startswith("tcp:127.0.0.1:")
+    finally:
+        listener.close()
 
 
 def test_registry_validation_removes_dead_entry(

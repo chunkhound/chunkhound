@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import secrets
+import socket
 import subprocess
 import sys
 import tempfile
@@ -136,6 +137,18 @@ def _parse_tcp_address(address: str) -> tuple[str, int] | None:
         return parts[1], int(parts[2])
     except ValueError:
         return None
+
+
+def _windows_loopback_port_is_bindable(host: str, port: int) -> bool:
+    """Return True when a Windows loopback port can be bound right now."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind((host, port))
+    except OSError:
+        return False
+    finally:
+        sock.close()
+    return True
 
 
 def _roots_overlap(root_a: Path, root_b: Path) -> bool:
@@ -317,7 +330,9 @@ class DaemonDiscovery:
             port = _WINDOWS_PORT_BASE + (
                 (preferred_port - _WINDOWS_PORT_BASE + offset) % _WINDOWS_PORT_SPAN
             )
-            if port not in used_ports:
+            if port in used_ports:
+                continue
+            if _windows_loopback_port_is_bindable(_WINDOWS_LOOPBACK_HOST, port):
                 return f"tcp:{_WINDOWS_LOOPBACK_HOST}:{port}"
 
         raise RuntimeError(

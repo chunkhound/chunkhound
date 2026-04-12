@@ -16,6 +16,7 @@ from tests.helpers.watchman_realtime import (
     active_session_close_handle as _active_session_close_handle,
     active_watchman_disconnect_process as _active_watchman_disconnect_process,
     build_watchman_service as _build_watchman_service,
+    wait_for_logical_indexed as _wait_for_logical_indexed,
     wait_for_watchman_reconnect_state as _wait_for_watchman_reconnect_state,
 )
 
@@ -317,6 +318,12 @@ async def test_watchman_unexpected_session_exit_requests_resync_and_restores_mon
         disconnect_process.terminate()
 
         await asyncio.wait_for(callback_event.wait(), timeout=5.0)
+        file_path = watch_dir / "src" / "watchman_reconnect_catchup.py"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(
+            "def watchman_reconnect_catchup():\n    return 7\n",
+            encoding="utf-8",
+        )
         stats = await _wait_for_watchman_reconnect_state(service, "restored")
 
         assert callback_calls
@@ -332,6 +339,7 @@ async def test_watchman_unexpected_session_exit_requests_resync_and_restores_mon
         )
         assert stats["watchman_reconnect"]["attempt_count"] >= 1
         assert stats["watchman_reconnect"]["last_result"] == "restored"
+        assert await _wait_for_logical_indexed(services.provider, file_path)
         assert stats["service_state"] == "running"
     finally:
         await service.stop()
@@ -339,7 +347,7 @@ async def test_watchman_unexpected_session_exit_requests_resync_and_restores_mon
 
 
 @pytest.mark.asyncio
-async def test_watchman_failed_reconnect_state_is_observable(
+async def test_watchman_reconnect_status_reports_retrying_then_restored(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -361,29 +369,49 @@ async def test_watchman_failed_reconnect_state_is_observable(
         await service.start(watch_dir)
         adapter = service._monitor_adapter
         assert adapter is not None
-        monkeypatch.setattr(adapter, "_RECONNECT_RETRY_DELAY_SECONDS", 0.01)
+        monkeypatch.setattr(adapter, "_RECONNECT_INITIAL_RETRY_DELAY_SECONDS", 0.2)
+        monkeypatch.setattr(adapter, "_RECONNECT_MAX_RETRY_DELAY_SECONDS", 0.2)
+        original_establish = adapter._establish_monitoring
+        reconnect_attempts = 0
 
         async def failing_establish(*args, **kwargs) -> None:
-            raise RuntimeError("simulated reconnect failure")
+            nonlocal reconnect_attempts
+            if kwargs.get("phase") != "reconnect":
+                await original_establish(*args, **kwargs)
+                return
+            reconnect_attempts += 1
+            if reconnect_attempts < 3:
+                raise RuntimeError("simulated reconnect failure")
+            await original_establish(*args, **kwargs)
 
         monkeypatch.setattr(adapter, "_establish_monitoring", failing_establish)
 
         disconnect_process = _active_watchman_disconnect_process(adapter)
         disconnect_process.terminate()
 
+        retrying_stats = await _wait_for_watchman_reconnect_state(service, "retrying")
         await asyncio.wait_for(callback_event.wait(), timeout=5.0)
-        stats = await _wait_for_watchman_reconnect_state(service, "failed")
+        restored_stats = await _wait_for_watchman_reconnect_state(service, "restored")
 
-        assert stats["watchman_connection_state"] in {"disconnected", "sidecar_only"}
-        assert (
-            stats["watchman_reconnect"]["attempt_count"]
-            == adapter._RECONNECT_MAX_ATTEMPTS
-        )
-        assert stats["watchman_reconnect"]["last_result"] == "failed"
+        assert retrying_stats["watchman_connection_state"] in {
+            "disconnected",
+            "sidecar_only",
+        }
+        assert retrying_stats["watchman_reconnect"]["state"] == "retrying"
+        assert retrying_stats["watchman_reconnect"]["attempt_count"] >= 1
+        assert retrying_stats["watchman_reconnect"]["last_result"] == "failed"
+        assert retrying_stats["watchman_reconnect"]["retry_delay_seconds"] is not None
+        assert "max_attempts" not in retrying_stats["watchman_reconnect"]
         assert "simulated reconnect failure" in (
-            stats["watchman_reconnect"]["last_error"] or ""
+            retrying_stats["watchman_reconnect"]["last_error"] or ""
         )
-        assert stats["service_state"] == "degraded"
+        assert retrying_stats["service_state"] == "degraded"
+
+        assert restored_stats["watchman_reconnect"]["attempt_count"] == 3
+        assert restored_stats["watchman_reconnect"]["last_result"] == "restored"
+        assert restored_stats["watchman_reconnect"]["last_error"] is None
+        assert restored_stats["watchman_reconnect"]["retry_delay_seconds"] is None
+        assert restored_stats["service_state"] == "running"
     finally:
         await service.stop()
         services.provider.disconnect()

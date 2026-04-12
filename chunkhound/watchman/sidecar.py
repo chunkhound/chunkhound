@@ -320,6 +320,17 @@ class PrivateWatchmanSidecar:
             "watchman_alive": running,
         }
 
+    def _missing_metadata_fail_closed_error(self) -> RuntimeError:
+        watchman_root = self.paths.root
+        return RuntimeError(
+            "Managed Watchman artifacts were found under "
+            f"{watchman_root}, but {self.paths.metadata_path.name} is missing. "
+            "ChunkHound could not prove ownership and intentionally refused "
+            "automatic cleanup. Inspect the existing .chunkhound/watchman/ "
+            "state and confirm that no live Watchman sidecar still owns it "
+            "before any manual cleanup."
+        )
+
     async def cleanup_stale_state(self) -> str | None:
         self.paths.root.mkdir(parents=True, exist_ok=True)
         metadata = self.read_metadata()
@@ -329,13 +340,12 @@ class PrivateWatchmanSidecar:
                 path.exists()
                 for path in (
                     *self.paths.managed_socket_paths(),
+                    self.paths.pidfile_path,
                     self.paths.statefile_path,
                     self.paths.logfile_path,
                 )
             ):
-                self._debug("cleaning orphaned Watchman artifacts without metadata")
-                self._remove_owned_artifacts(remove_log=True)
-                return "orphaned_artifacts"
+                raise self._missing_metadata_fail_closed_error()
             return None
 
         owned_pid = await asyncio.to_thread(

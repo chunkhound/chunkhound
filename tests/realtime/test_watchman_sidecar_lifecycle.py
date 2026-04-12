@@ -400,6 +400,26 @@ async def test_private_watchman_sidecar_refuses_live_process_with_legacy_metadat
 
 
 @pytest.mark.asyncio
+async def test_private_watchman_sidecar_refuses_cleanup_without_metadata(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    sidecar = PrivateWatchmanSidecar(repo_root)
+    sidecar.paths.root.mkdir(parents=True, exist_ok=True)
+    sidecar.paths.pidfile_path.write_text("12345\n", encoding="utf-8")
+
+    with pytest.raises(
+        RuntimeError,
+        match="metadata.json is missing|refused automatic cleanup",
+    ):
+        await sidecar.start()
+
+    assert sidecar.paths.pidfile_path.exists()
+    assert not sidecar.paths.metadata_path.exists()
+
+
+@pytest.mark.asyncio
 async def test_private_watchman_sidecar_refuses_shutdown_for_mismatched_live_process(
     tmp_path: Path,
 ) -> None:

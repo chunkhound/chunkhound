@@ -4,7 +4,10 @@ import pytest
 
 from chunkhound.core.models import Chunk, Embedding, File
 from chunkhound.core.types.common import ChunkType, FileId, Language, LineNumber
-from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+from chunkhound.providers.database.duckdb_provider import (
+    DuckDBProvider,
+    DuckDBTransactionConflictError,
+)
 
 
 def _insert_file_with_embedding(
@@ -204,6 +207,35 @@ def test_delete_files_batch_skips_invalid_hnsw_restore_metric(
 
     assert provider.delete_files_batch(["invalid_metric.py"]) == 1
     assert any("Unsupported HNSW metric" in message for message in warning_messages)
+
+
+def test_delete_files_batch_raises_typed_conflict_inside_outer_transaction(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("duckdb")
+
+    provider = DuckDBProvider(db_path=tmp_path / "db.duckdb", base_directory=tmp_path)
+    provider.connect()
+    try:
+        _insert_file_with_embedding(provider, "conflict.py", 0.1)
+        state = {
+            "operations_since_checkpoint": 0,
+            "transaction_active": True,
+            "deferred_checkpoint": False,
+            "base_directory": str(tmp_path),
+        }
+
+        with pytest.raises(
+            DuckDBTransactionConflictError,
+            match="delete_files_batch cannot run while another DuckDB transaction is active",
+        ):
+            provider._executor_delete_files_batch(
+                provider.connection,
+                state,
+                [str((tmp_path / "conflict.py").resolve())],
+            )
+    finally:
+        provider.disconnect(skip_checkpoint=True)
 
 
 def test_create_vector_index_sanitizes_provider_and_model_identifier_components(

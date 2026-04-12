@@ -489,12 +489,14 @@ class DuckDBProvider(SerialDatabaseProvider):
                 )
             self._executor_create_embedding_unique_index(conn, table_name, dims)
 
+        manage_transaction = not state.get("transaction_active", False)
         self._executor_run_embedding_table_hnsw_guarded_mutation(
             conn,
             state,
             table_name,
             f"ensure_embedding_upsert_contract({table_name})",
             _apply_contract,
+            transactional=manage_transaction,
         )
 
     def _ensure_embedding_table_exists(self, dims: int) -> str:
@@ -1865,6 +1867,11 @@ class DuckDBProvider(SerialDatabaseProvider):
         """Executor method for delete_files_batch - runs in DB thread."""
         if not file_paths:
             return 0
+        if state.get("transaction_active", False):
+            raise DuckDBTransactionConflictError(
+                "delete_files_batch cannot run while another DuckDB transaction "
+                "is active"
+            )
 
         base_dir = state.get("base_directory")
         normalized_paths: list[str] = []

@@ -36,8 +36,7 @@ def _default_watchman_reconnect_snapshot() -> dict[str, Any]:
     return {
         "state": "idle",
         "attempt_count": 0,
-        "max_attempts": WatchmanRealtimeAdapter._RECONNECT_MAX_ATTEMPTS,
-        "retry_delay_seconds": WatchmanRealtimeAdapter._RECONNECT_RETRY_DELAY_SECONDS,
+        "retry_delay_seconds": None,
         "last_started_at": None,
         "last_completed_at": None,
         "last_error": None,
@@ -90,8 +89,8 @@ class WatchmanRealtimeAdapter:
 
     backend_name = "watchman"
     _SUBSCRIPTION_NAME = "chunkhound-live-indexing"
-    _RECONNECT_MAX_ATTEMPTS = 3
-    _RECONNECT_RETRY_DELAY_SECONDS = 1.0
+    _RECONNECT_INITIAL_RETRY_DELAY_SECONDS = 1.0
+    _RECONNECT_MAX_RETRY_DELAY_SECONDS = 60.0
 
     def __init__(self, context: RealtimeServiceContext | object) -> None:
         self._context = coerce_realtime_context(context)
@@ -124,6 +123,7 @@ class WatchmanRealtimeAdapter:
         self._bridge_subscription_pdu_dropped = 0
         self._reconnect_state = "idle"
         self._reconnect_attempt_count = 0
+        self._reconnect_retry_delay_seconds: float | None = None
         self._last_reconnect_started_at: str | None = None
         self._last_reconnect_completed_at: str | None = None
         self._last_reconnect_error: str | None = None
@@ -453,6 +453,7 @@ class WatchmanRealtimeAdapter:
     def _reset_reconnect_state(self) -> None:
         self._reconnect_state = "idle"
         self._reconnect_attempt_count = 0
+        self._reconnect_retry_delay_seconds = None
         self._last_reconnect_started_at = None
         self._last_reconnect_completed_at = None
         self._last_reconnect_error = None
@@ -740,8 +741,9 @@ class WatchmanRealtimeAdapter:
             return
         if self._watch_path is None or self._loop is None:
             return
-        self._reconnect_state = "pending"
+        self._reconnect_state = "running"
         self._reconnect_attempt_count = 0
+        self._reconnect_retry_delay_seconds = None
         self._last_reconnect_started_at = None
         self._last_reconnect_completed_at = None
         self._last_reconnect_error = None
@@ -756,17 +758,14 @@ class WatchmanRealtimeAdapter:
             return
 
         try:
-            for attempt in range(1, self._RECONNECT_MAX_ATTEMPTS + 1):
-                if attempt > 1:
-                    self._reconnect_state = "pending"
-                    self._context.emit_status_update()
-                    await asyncio.sleep(self._RECONNECT_RETRY_DELAY_SECONDS)
-
+            retry_delay = self._RECONNECT_INITIAL_RETRY_DELAY_SECONDS
+            attempt = 0
+            while True:
+                attempt += 1
                 self._reconnect_state = "running"
                 self._reconnect_attempt_count = attempt
+                self._reconnect_retry_delay_seconds = None
                 self._last_reconnect_started_at = self._context.utc_now()
-                self._last_reconnect_error = None
-                self._last_reconnect_result = None
                 self._context.emit_status_update()
 
                 try:
@@ -781,24 +780,27 @@ class WatchmanRealtimeAdapter:
                 except Exception as error:
                     self._last_reconnect_error = str(error)
                     self._last_reconnect_completed_at = self._context.utc_now()
-                    if attempt < self._RECONNECT_MAX_ATTEMPTS:
-                        self._context.set_warning(
-                            "Watchman reconnect attempt "
-                            f"{attempt}/{self._RECONNECT_MAX_ATTEMPTS} failed: "
-                            f"{self._last_reconnect_error}"
-                        )
-                        continue
-                    self._reconnect_state = "failed"
                     self._last_reconnect_result = "failed"
-                    self._context.set_error(
-                        f"Watchman reconnect failed: {self._last_reconnect_error}"
-                    )
+                    self._reconnect_state = "retrying"
+                    self._reconnect_retry_delay_seconds = retry_delay
                     self._context.emit_status_update()
-                    return
+                    self._context.set_warning(
+                        "Watchman reconnect attempt "
+                        f"{attempt} failed: {self._last_reconnect_error}; "
+                        f"retrying in {retry_delay:.1f}s"
+                    )
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(
+                        retry_delay * 2.0,
+                        self._RECONNECT_MAX_RETRY_DELAY_SECONDS,
+                    )
+                    continue
 
                 self._reconnect_state = "restored"
+                self._reconnect_retry_delay_seconds = None
                 self._last_reconnect_completed_at = self._context.utc_now()
                 self._last_reconnect_result = "restored"
+                self._last_reconnect_error = None
                 self._context.clear_error_state(
                     prefixes=(
                         "Watchman session disconnected:",
@@ -1077,8 +1079,7 @@ class WatchmanRealtimeAdapter:
         health["watchman_reconnect"] = {
             "state": self._reconnect_state,
             "attempt_count": self._reconnect_attempt_count,
-            "max_attempts": self._RECONNECT_MAX_ATTEMPTS,
-            "retry_delay_seconds": self._RECONNECT_RETRY_DELAY_SECONDS,
+            "retry_delay_seconds": self._reconnect_retry_delay_seconds,
             "last_started_at": self._last_reconnect_started_at,
             "last_completed_at": self._last_reconnect_completed_at,
             "last_error": self._last_reconnect_error,

@@ -187,7 +187,12 @@ class DuckDBEmbeddingRepository:
         conn.execute(f"DELETE FROM {table_name} WHERE id IN ({placeholders})", row_ids)
 
     def _ensure_fallback_embedding_upsert_contract(
-        self, conn: Any, table_name: str, dims: int
+        self,
+        conn: Any,
+        table_name: str,
+        dims: int,
+        *,
+        manage_transaction: bool = True,
     ) -> None:
         """Upgrade an existing fallback embedding table before using ON CONFLICT."""
         provider_model_index = f"idx_{dims}_provider_model"
@@ -203,8 +208,11 @@ class DuckDBEmbeddingRepository:
         duplicate_row_ids = self._get_fallback_duplicate_row_ids(conn, table_name)
         hnsw_indexes = self._get_fallback_hnsw_indexes(conn, table_name)
 
+        transaction_started = False
         try:
-            conn.execute("BEGIN TRANSACTION")
+            if manage_transaction:
+                conn.execute("BEGIN TRANSACTION")
+                transaction_started = True
             for index_info in hnsw_indexes:
                 conn.execute(
                     "DROP INDEX IF EXISTS "
@@ -226,20 +234,28 @@ class DuckDBEmbeddingRepository:
                 if create_sql:
                     conn.execute(create_sql)
 
-            conn.execute("COMMIT")
+            if transaction_started:
+                conn.execute("COMMIT")
         except Exception as e:
-            try:
-                conn.execute("ROLLBACK")
-            except Exception as rollback_error:
-                raise RuntimeError(
-                    "Failed to upgrade fallback embedding table "
-                    f"{table_name}: {e}; rollback failed: {rollback_error}"
-                ) from rollback_error
+            if transaction_started:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception as rollback_error:
+                    raise RuntimeError(
+                        "Failed to upgrade fallback embedding table "
+                        f"{table_name}: {e}; rollback failed: {rollback_error}"
+                    ) from rollback_error
             raise RuntimeError(
                 f"Failed to upgrade fallback embedding table {table_name}: {e}"
             ) from e
 
-    def _ensure_fallback_embedding_table_exists(self, conn: Any, dims: int) -> str:
+    def _ensure_fallback_embedding_table_exists(
+        self,
+        conn: Any,
+        dims: int,
+        *,
+        manage_transaction: bool = True,
+    ) -> str:
         """Create the dimension-specific embedding table when no provider is available."""
         table_name = f"embeddings_{dims}"
         result = conn.execute(
@@ -247,7 +263,12 @@ class DuckDBEmbeddingRepository:
             [table_name],
         ).fetchone()
         if result is not None:
-            self._ensure_fallback_embedding_upsert_contract(conn, table_name, dims)
+            self._ensure_fallback_embedding_upsert_contract(
+                conn,
+                table_name,
+                dims,
+                manage_transaction=manage_transaction,
+            )
             return table_name
 
         conn.execute(f"""
@@ -318,7 +339,8 @@ class DuckDBEmbeddingRepository:
                 )
             else:
                 table_name = self._ensure_fallback_embedding_table_exists(
-                    self.connection_manager.connection, embedding.dims
+                    self.connection_manager.connection,
+                    embedding.dims,
                 )
 
             conn = self.connection_manager.connection
@@ -405,7 +427,9 @@ class DuckDBEmbeddingRepository:
             table_name = self._provider._ensure_embedding_table_exists(detected_dims)
         else:
             table_name = self._ensure_fallback_embedding_table_exists(
-                conn, detected_dims
+                conn,
+                detected_dims,
+                manage_transaction=manage_transaction,
             )
         logger.debug(
             f"Using table {table_name} for {detected_dims}-dimensional embeddings"

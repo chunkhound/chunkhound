@@ -59,9 +59,9 @@ def build_watchman_scope_plan(
         watch_project_result,
     )
     mount_roots = (
-        discover_nested_linux_mount_roots(resolved_requested_path)
+        discover_nested_linux_mount_roots(logical_requested_path)
         if nested_mount_roots is None
-        else _normalize_nested_mount_roots(resolved_requested_path, nested_mount_roots)
+        else _normalize_nested_mount_roots(logical_requested_path, nested_mount_roots)
     )
     normalized_additional_scopes = (
         ()
@@ -74,7 +74,7 @@ def build_watchman_scope_plan(
         scopes.append(
             WatchmanSubscriptionScope(
                 requested_path=mount_root,
-                watch_root=mount_root,
+                watch_root=mount_root.expanduser().resolve(),
                 relative_root=None,
                 scope_kind="nested_mount",
             )
@@ -93,7 +93,7 @@ def discover_nested_linux_mount_roots(
     if not sys.platform.startswith("linux"):
         return ()
 
-    requested_path = target_dir.expanduser().resolve()
+    requested_path = _lexical_absolute_path(target_dir)
     resolved_mountinfo_path = mountinfo_path or Path("/proc/self/mountinfo")
     try:
         mountinfo_text = resolved_mountinfo_path.read_text(
@@ -206,7 +206,7 @@ def _normalize_nested_mount_roots(
 ) -> tuple[Path, ...]:
     normalized_mount_roots: set[Path] = set()
     for candidate in nested_mount_roots:
-        mount_root = Path(candidate).expanduser().resolve()
+        mount_root = _lexical_absolute_path(Path(candidate))
         if mount_root == requested_path:
             continue
         try:
@@ -286,7 +286,7 @@ def _parse_mountinfo_mount_root(line: str) -> Path | None:
     if len(fields) < 5:
         return None
     mount_point = _unescape_mountinfo_field(fields[4])
-    return Path(mount_point).expanduser().resolve()
+    return _lexical_absolute_path(Path(mount_point))
 
 
 def _unescape_mountinfo_field(value: str) -> str:

@@ -302,7 +302,7 @@ class RealtimeStartupMixin:
             reconnect_state = reconnect.get("state")
         connection_state = adapter_health.get("watchman_connection_state")
         if self._effective_backend == "watchman" and (
-            reconnect_state in {"pending", "running", "failed"}
+            reconnect_state in {"retrying", "running"}
             or connection_state in {"disconnected", "sidecar_only"}
         ):
             self._service_state = "degraded"
