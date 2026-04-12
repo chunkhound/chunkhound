@@ -33,9 +33,13 @@ def compaction_error_response(exc: CompactionError) -> dict[str, Any]:
             "Database recovery failed after interrupted compaction. "
             "Restore from backup or re-index."
         )
-    else:
+    elif exc.operation == "connection":
         error_response["error"]["retry_hint"] = (
             "Database compaction in progress. Retry in a few seconds."
+        )
+    else:
+        error_response["error"]["retry_hint"] = (
+            "Compaction failed. Check logs for details."
         )
     return error_response
 
