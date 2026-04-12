@@ -1088,6 +1088,83 @@ class TestRowWasteRatio:
         )
 
 
+class TestCompactionServiceEligibilityReal:
+    """CompactionService gating exercised against a real DuckDB provider.
+
+    The bulk of the eligibility suite uses a MagicMock provider. These tests
+    validate that threshold/min-size config values actually propagate through
+    the real provider.should_compact() path.
+    """
+
+    def _make_service(
+        self,
+        tmp_path: Path,
+        db_path: Path,
+        *,
+        threshold: float,
+        min_size_mb: int,
+    ) -> CompactionService:
+        config = Config(
+            database=DatabaseConfig(
+                path=tmp_path / ".chunkhound",
+                compaction_enabled=True,
+                compaction_threshold=threshold,
+                compaction_min_size_mb=min_size_mb,
+            ),
+            target_dir=tmp_path,
+        )
+        return CompactionService(db_path=db_path, config=config)
+
+    def test_should_compact_gate_respects_threshold_real_duckdb(
+        self, tmp_path: Path, provider_with_fragmentation: tuple
+    ):
+        """Config threshold is propagated through to provider.should_compact()."""
+        provider, db_path = provider_with_fragmentation
+
+        # Low threshold: fragmented DB must exceed it.
+        service_low = self._make_service(
+            tmp_path, db_path, threshold=0.1, min_size_mb=0
+        )
+        should_low, stats_low = service_low.check_should_compact(provider)
+        assert should_low is True, (
+            f"Expected compaction to fire at threshold=0.1, stats={stats_low}"
+        )
+
+        # Near-impossible threshold: nothing can exceed it.
+        service_high = self._make_service(
+            tmp_path, db_path, threshold=0.99, min_size_mb=0
+        )
+        should_high, _ = service_high.check_should_compact(provider)
+        assert should_high is False, (
+            "Expected compaction to be gated off at threshold=0.99"
+        )
+
+    def test_should_compact_gate_respects_min_size_real_duckdb(
+        self, tmp_path: Path, provider_with_fragmentation: tuple
+    ):
+        """Reclaimable-byte gate is applied against real provider stats."""
+        provider, db_path = provider_with_fragmentation
+
+        # min_size=0 ⇒ any reclaimable space is enough.
+        service_zero = self._make_service(
+            tmp_path, db_path, threshold=0.01, min_size_mb=0
+        )
+        should_zero, _ = service_zero.check_should_compact(provider)
+        assert should_zero is True, (
+            "Expected compaction to fire with min_size_mb=0"
+        )
+
+        # min_size=1000 MB ⇒ the small fixture DB cannot exceed it.
+        service_huge = self._make_service(
+            tmp_path, db_path, threshold=0.01, min_size_mb=1000
+        )
+        should_huge, _ = service_huge.check_should_compact(provider)
+        assert should_huge is False, (
+            "Expected compaction to be gated off when reclaimable bytes "
+            "fall below the min-size threshold"
+        )
+
+
 class TestCompactionServiceEndToEnd:
     """End-to-end: CompactionService.compact_blocking() -> provider.optimize()."""
 
