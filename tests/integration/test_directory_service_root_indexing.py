@@ -13,7 +13,10 @@ from pathlib import Path
 from chunkhound.core.config.indexing_config import IndexingConfig
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.parser_factory import create_parser_for_language
-from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+from chunkhound.providers.database.duckdb_provider import (
+    DuckDBIndexedRootMismatchError,
+    DuckDBProvider,
+)
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
 
@@ -62,3 +65,113 @@ async def test_directory_service_indexes_root_file(tmp_path: Path):
     assert result.get("files_processed", 0) >= 1, (
         f"Expected root file to be indexed, got: {result}"
     )
+
+
+@pytest.mark.asyncio
+async def test_process_directory_rejects_wrong_root_before_discovery_or_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Step 101: `IndexingCoordinator.process_directory(...)` must fail-closed
+    with `DuckDBIndexedRootMismatchError` BEFORE file discovery or orphan
+    cleanup run when the DB was claimed for a different indexed root.
+    """
+    db_path = tmp_path / "chunks.db"
+    root_a = tmp_path / "root_a"
+    root_b = tmp_path / "root_b"
+    root_a.mkdir()
+    root_b.mkdir()
+    (root_a / "alpha.py").write_text("print('a')\n")
+    (root_b / "beta.py").write_text("print('b')\n")
+
+    parser = create_parser_for_language(Language.PYTHON)
+
+    # Phase 1 — claim the sidecar under root_a by making the first
+    # mutation-capable call through process_directory(root_a). This proves the
+    # top-of-method guard's `allow_claim_if_missing=True` path also works.
+    db_a = DuckDBProvider(db_path, base_directory=root_a)
+    db_a.connect()
+    try:
+        coordinator_a = IndexingCoordinator(
+            db_a, root_a, None, {Language.PYTHON: parser}, None, None
+        )
+        await coordinator_a.process_directory(root_a, patterns=["**/*.py"])
+    finally:
+        db_a.disconnect()
+
+    # Phase 2 — reopen with base_directory=root_a so provider connect() passes
+    # the sidecar validation, then call process_directory(root_b). The
+    # top-of-method guard MUST raise before any discovery / cleanup runs.
+    # Monkeypatching `_discover_files` and `_cleanup_orphaned_files` to fail
+    # if invoked proves the ordering.
+    db_b = DuckDBProvider(db_path, base_directory=root_a)
+    db_b.connect()
+    try:
+        coordinator_b = IndexingCoordinator(
+            db_b, root_a, None, {Language.PYTHON: parser}, None, None
+        )
+
+        discovery_invoked: list[str] = []
+        cleanup_invoked: list[str] = []
+
+        async def _fail_discovery(*args, **kwargs):  # pragma: no cover
+            discovery_invoked.append("called")
+            raise AssertionError(
+                "_discover_files must not run when Step 101 guard refuses reuse"
+            )
+
+        def _fail_cleanup(*args, **kwargs):  # pragma: no cover
+            cleanup_invoked.append("called")
+            raise AssertionError(
+                "_cleanup_orphaned_files must not run when Step 101 guard refuses reuse"
+            )
+
+        monkeypatch.setattr(coordinator_b, "_discover_files", _fail_discovery)
+        monkeypatch.setattr(coordinator_b, "_cleanup_orphaned_files", _fail_cleanup)
+
+        with pytest.raises(DuckDBIndexedRootMismatchError):
+            await coordinator_b.process_directory(root_b, patterns=["**/*.py"])
+
+        assert discovery_invoked == []
+        assert cleanup_invoked == []
+    finally:
+        db_b.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_process_directory_same_root_reuse_happy_path(tmp_path: Path) -> None:
+    """Step 101: reusing the same DB under the same root via
+    `IndexingCoordinator.process_directory(...)` still succeeds after an
+    initial claim at that same entrypoint."""
+    db_path = tmp_path / "chunks.db"
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "sample.py").write_text("print('ok')\n")
+
+    parser = create_parser_for_language(Language.PYTHON)
+
+    db1 = DuckDBProvider(db_path, base_directory=root)
+    db1.connect()
+    try:
+        coordinator1 = IndexingCoordinator(
+            db1, root, None, {Language.PYTHON: parser}, None, None
+        )
+        result1 = await coordinator1.process_directory(root, patterns=["**/*.py"])
+        assert result1.get("status") != "error", (
+            f"Expected initial claim run to succeed, got: {result1}"
+        )
+    finally:
+        db1.disconnect()
+
+    db2 = DuckDBProvider(db_path, base_directory=root)
+    db2.connect()
+    try:
+        coordinator2 = IndexingCoordinator(
+            db2, root, None, {Language.PYTHON: parser}, None, None
+        )
+        result2 = await coordinator2.process_directory(root, patterns=["**/*.py"])
+        assert result2.get("status") != "error", (
+            f"Expected same-root reuse to succeed, got: {result2}"
+        )
+    finally:
+        db2.disconnect()

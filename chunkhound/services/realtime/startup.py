@@ -424,6 +424,16 @@ class RealtimeStartupMixin:
             self._watchdog_bootstrap_future = None
     async def start(self, watch_path: Path) -> None:
         """Start real-time indexing service."""
+        # Fail-closed indexed-root identity guard BEFORE any state mutation,
+        # path normalization, monitor construction, or watcher setup.
+        provider = getattr(getattr(self, "services", None), "provider", None)
+        ensure_root = getattr(provider, "ensure_indexed_root_identity", None)
+        if callable(ensure_root):
+            ensure_root(
+                requested_root=watch_path,
+                allow_claim_if_missing=True,
+            )
+
         start_task = asyncio.current_task()
         self._active_start_task = start_task
         self._start_generation += 1

@@ -1134,6 +1134,14 @@ class IndexingCoordinator(BaseService):
         Returns:
             Dictionary with processing statistics
         """
+        # Fail-closed indexed-root identity guard BEFORE any discovery or
+        # cleanup. Wrong-root reopens must not do any destructive work.
+        ensure_root = getattr(self._db, "ensure_indexed_root_identity", None)
+        if callable(ensure_root):
+            ensure_root(
+                requested_root=directory,
+                allow_claim_if_missing=True,
+            )
         try:
             import time as _t
 

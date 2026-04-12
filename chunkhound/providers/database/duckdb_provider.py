@@ -55,6 +55,83 @@ class DuckDBTransactionConflictError(RuntimeError):
     """A guarded mutation collided with an already-open DuckDB transaction."""
 
 
+class DuckDBIndexedRootMismatchError(RuntimeError):
+    """A DuckDB database was reopened under a different indexed root than the one it was claimed for."""
+
+
+_INDEXED_ROOT_SIDECAR_SUFFIX = ".root.json"
+_INDEXED_ROOT_SIDECAR_VERSION = 1
+
+
+def _normalize_indexed_root(root: Path | str) -> str:
+    """Normalize a requested indexed root to the authoritative logical form.
+
+    Uses `expanduser()` + `absolute()` + `as_posix()`. Intentionally does not
+    call `resolve()` — the logical requested-root contract is authoritative and
+    physical/resolved paths are routing details only.
+    """
+    return Path(root).expanduser().absolute().as_posix()
+
+
+def _indexed_root_sidecar_path(db_path: Path | str) -> Path | None:
+    """Return the sidecar path for a DuckDB file, or None for :memory: databases."""
+    if str(db_path) == ":memory:":
+        return None
+    db_file = Path(db_path)
+    return db_file.with_name(db_file.name + _INDEXED_ROOT_SIDECAR_SUFFIX)
+
+
+def _read_indexed_root_sidecar(sidecar: Path) -> str:
+    """Read and validate the sidecar file, returning the stored logical root.
+
+    Raises plain `RuntimeError` on malformed/unreadable/wrong-version/missing-key
+    content. Callers that want a typed mismatch error handle that separately.
+    """
+    try:
+        raw = sidecar.read_text(encoding="utf-8")
+    except OSError as error:
+        raise RuntimeError(
+            f"Indexed-root sidecar {sidecar} could not be read: {error}"
+        ) from error
+    if not raw.strip():
+        raise RuntimeError(f"Indexed-root sidecar {sidecar} is empty")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            f"Indexed-root sidecar {sidecar} is not valid JSON: {error}"
+        ) from error
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"Indexed-root sidecar {sidecar} must be a JSON object"
+        )
+    version = data.get("version")
+    if version != _INDEXED_ROOT_SIDECAR_VERSION:
+        raise RuntimeError(
+            f"Indexed-root sidecar {sidecar} has unsupported version {version!r}"
+        )
+    stored = data.get("indexed_root_path")
+    if not isinstance(stored, str) or not stored:
+        raise RuntimeError(
+            f"Indexed-root sidecar {sidecar} is missing indexed_root_path"
+        )
+    return stored
+
+
+def _write_indexed_root_sidecar(sidecar: Path, logical_root: str) -> None:
+    """Atomically write the sidecar via temp sibling + os.replace()."""
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        {
+            "version": _INDEXED_ROOT_SIDECAR_VERSION,
+            "indexed_root_path": logical_root,
+        }
+    )
+    tmp = sidecar.with_name(sidecar.name + ".tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, sidecar)
+
+
 class DuckDBProvider(SerialDatabaseProvider):
     """DuckDB implementation of DatabaseProvider protocol.
 
@@ -181,9 +258,71 @@ class DuckDBProvider(SerialDatabaseProvider):
             # Call parent connect which handles executor initialization
             super().connect()
 
+            # Validate stored indexed-root identity against the requested base
+            # directory. A missing sidecar at connect-time is treated as the
+            # legacy migration case and left for the first mutation-capable
+            # call site to claim (see ensure_indexed_root_identity below).
+            self.ensure_indexed_root_identity(
+                requested_root=self._base_directory,
+                allow_claim_if_missing=False,
+            )
+
         except Exception as e:
             logger.error(f"DuckDB connection failed: {e}")
             raise
+
+    def ensure_indexed_root_identity(
+        self,
+        *,
+        requested_root: Path | str,
+        allow_claim_if_missing: bool,
+    ) -> None:
+        """Validate (or claim) the authoritative indexed-root identity for this DB.
+
+        The authoritative indexed root is stored in a DB-adjacent sidecar
+        (``<dbfile>.root.json``). ``:memory:`` databases have no filesystem
+        artifact and are treated as a no-op.
+
+        Behavior:
+        - sidecar exists and matches current root: return.
+        - sidecar exists and mismatches: raise
+          ``DuckDBIndexedRootMismatchError`` without touching the DB.
+        - sidecar exists but is malformed / unreadable / wrong version:
+          raise plain ``RuntimeError`` (fail-closed; never silently rewritten).
+        - sidecar missing and ``allow_claim_if_missing`` is ``False``:
+          return (legacy migration is deferred to the first mutation-capable
+          call site).
+        - sidecar missing and ``allow_claim_if_missing`` is ``True``:
+          atomically claim the current root and log a one-time warning.
+        """
+        sidecar = _indexed_root_sidecar_path(self._connection_manager.db_path)
+        if sidecar is None:
+            return
+
+        current_root = _normalize_indexed_root(requested_root)
+
+        if sidecar.exists():
+            stored_root = _read_indexed_root_sidecar(sidecar)
+            if stored_root == current_root:
+                return
+            raise DuckDBIndexedRootMismatchError(
+                f"Refusing to open DuckDB database {self._connection_manager.db_path} "
+                f"under indexed root {current_root!r}: sidecar {sidecar} records "
+                f"previously claimed root {stored_root!r}. This database must only "
+                f"be reopened under its original indexed root."
+            )
+
+        if not allow_claim_if_missing:
+            return
+
+        _write_indexed_root_sidecar(sidecar, current_root)
+        logger.warning(
+            "DuckDB indexed-root sidecar was missing for %s; treated as legacy "
+            "DB migration and claimed current root %s. Future opens under a "
+            "different root will fail.",
+            self._connection_manager.db_path,
+            current_root,
+        )
 
     def _executor_connect(self, conn: Any, state: dict[str, Any]) -> None:
         """Executor method for connect - runs in DB thread.

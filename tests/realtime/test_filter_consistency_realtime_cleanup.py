@@ -14,7 +14,10 @@ from chunkhound.core.config.config import Config
 from chunkhound.core.models import File
 from chunkhound.core.types.common import Language
 from chunkhound.database_factory import create_services
-from chunkhound.providers.database.duckdb_provider import DuckDBProvider
+from chunkhound.providers.database.duckdb_provider import (
+    DuckDBIndexedRootMismatchError,
+    DuckDBProvider,
+)
 from chunkhound.services.indexing_coordinator import IndexingCoordinator
 from chunkhound.services.realtime_indexing_service import (
     RealtimeIndexingService,
@@ -401,3 +404,40 @@ def test_cleanup_orphaned_files_keeps_logical_subtree_scope_when_resolved_outsid
         assert deleted_paths == [missing_rel]
     finally:
         provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_realtime_start_rejects_wrong_root_before_monitor_setup(
+    tmp_path: Path,
+) -> None:
+    """Step 101: RealtimeStartupMixin.start must fail-closed before any watcher/
+    monitor state is constructed when start() is called with a root that does
+    not match the DB's claimed indexed root."""
+    root_a = tmp_path / "root_a"
+    root_b = tmp_path / "root_b"
+    root_a.mkdir()
+    root_b.mkdir()
+    db_path = tmp_path / "wrong-root.duckdb"
+
+    config = _build_config(root_a, db_path)
+    services = create_services(db_path, config)
+    services.provider.connect()
+    try:
+        # Claim under root_a via an explicit mutation-capable call.
+        services.provider.ensure_indexed_root_identity(
+            requested_root=root_a, allow_claim_if_missing=True
+        )
+
+        service = RealtimeIndexingService(services, config)
+
+        # Calling start() with a different logical root must raise the typed
+        # mismatch error before any monitor adapter or watcher state is built.
+        with pytest.raises(DuckDBIndexedRootMismatchError):
+            await service.start(root_b)
+
+        assert service._monitor_adapter is None
+        assert service.event_consumer_task is None
+        assert service.process_task is None
+        assert getattr(service, "watch_path", None) is None
+    finally:
+        services.provider.disconnect()
