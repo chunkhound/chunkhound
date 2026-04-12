@@ -37,6 +37,66 @@ def test_prepare_release_runs_watchman_release_verifiers_in_order() -> None:
     )
 
 
+def test_rollout_gate_workflow_runs_single_aggregate_fallback_proof() -> None:
+    """The supported rollout contract (Step 105) is a single aggregate
+    fallback proof on one host, not a per-host duplication. Lock the
+    workflow shape so doc/workflow drift is caught in CI."""
+    try:
+        import yaml  # type: ignore[import-not-found]
+    except ImportError:
+        pytest.skip("PyYAML not available")
+
+    workflow_path = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "smoke-tests.yml"
+    )
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    jobs = workflow["jobs"]
+
+    assert "watchman-runtime-validation" in jobs
+    assert "watchman-rollout-gate" in jobs
+
+    runtime_validation = jobs["watchman-runtime-validation"]
+    runtime_oses = runtime_validation["strategy"]["matrix"]["os"]
+    assert "ubuntu-latest" in runtime_oses
+    assert "windows-latest" in runtime_oses
+
+    rollout_gate = jobs["watchman-rollout-gate"]
+    assert rollout_gate.get("needs") == "watchman-runtime-validation"
+    assert "strategy" not in rollout_gate, (
+        "watchman-rollout-gate must stay a single aggregate job; the "
+        "fallback proof is intentionally platform-neutral and not matrixed"
+    )
+    runs_on = rollout_gate["runs-on"]
+    assert runs_on == "ubuntu-latest", (
+        f"rollout gate should run on a single aggregate host, got {runs_on}"
+    )
+
+    step_runs = [
+        (step.get("name", ""), step.get("run", ""))
+        for step in rollout_gate["steps"]
+    ]
+    joined_runs = "\n".join(run for _, run in step_runs)
+    assert "--require-supported-matrix" in joined_runs, (
+        "rollout gate must enforce the full supported wheel matrix"
+    )
+    assert "--verify-source-fallback" in joined_runs, (
+        "rollout gate must invoke the aggregate sdist/source/editable "
+        "fallback proof exactly once"
+    )
+    assert joined_runs.count("--verify-source-fallback") == 1, (
+        "fallback proof should run exactly once in the aggregate job"
+    )
+
+    for name, run in step_runs:
+        if "--verify-source-fallback" in run:
+            assert "--source-root" in run, (
+                f"fallback proof step {name!r} must pin --source-root"
+            )
+
+
 def test_prepare_release_enforces_supported_matrix_for_runtime_verifier() -> None:
     prepare_release = (
         Path(__file__).resolve().parents[1] / "scripts" / "prepare_release.sh"

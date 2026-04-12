@@ -231,9 +231,15 @@ The Linux and Windows native Watchman rollout is gated on all of the following:
    `windows-latest`.
    - Each host-native lane builds its own wheel, proves host-native runtime
      resources, and proves installed-wheel live indexing for that host.
-   - The downstream aggregate rollout-gate lane downloads both wheel artifacts,
-     enforces the full supported wheel matrix, and proves the documented
-     sdist/source/editable fallback contract.
+   - The downstream aggregate `watchman-rollout-gate` lane downloads both
+     wheel artifacts, enforces the full supported wheel matrix, and proves
+     the documented sdist/source/editable fallback contract once on a
+     single aggregation host. The sdist/source/editable fallback default is
+     platform-neutral Python behavior (config-driven selection plus forced
+     runtime-hydration fail-fast), so a single aggregate proof is the
+     intended contract — per-host duplication of this proof is not
+     required, and the per-host runtime-validation lanes above already
+     cover host-specific wheel hydration separately.
 2. Built wheel artifacts pass
    `uv run python scripts/verify_watchman_runtime_resources.py --require-supported-matrix <wheel...>`.
 3. A Watchman-backed daemon smoke run reaches steady state with
@@ -246,9 +252,13 @@ The Linux and Windows native Watchman rollout is gated on all of the following:
    `watchman_loss_of_sync.count` increments and the resync contract surfaces
    through `resync.last_reason == "realtime_loss_of_sync"`.
 5. A released sdist install, ordinary source checkout install, and editable
-   install without packaged payloads each prove that `watchdog` remains the
-   default fallback backend, while explicit `backend=watchman` still fails fast
-   with startup diagnostics instead of silently downgrading.
+   install without packaged payloads each prove — on the single aggregate
+   `watchman-rollout-gate` host — that `watchdog` remains the default
+   fallback backend, while explicit `backend=watchman` still fails fast
+   with startup diagnostics instead of silently downgrading. Because the
+   selection logic and the forced runtime-hydration fail-fast path are
+   platform-neutral, this single-host proof is the intended supported
+   rollout contract and is not duplicated on every native host.
 
 Current status:
 
