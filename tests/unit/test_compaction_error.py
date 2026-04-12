@@ -1,6 +1,7 @@
 """Tests for CompactionError structured fields."""
 
 from chunkhound.core.exceptions.core import CompactionError
+from chunkhound.mcp_server.common import compaction_error_response
 
 
 class TestCompactionError:
@@ -30,3 +31,23 @@ class TestCompactionError:
         assert err.operation is None
         assert err.reason is None
         assert "Compaction error" in str(err)
+
+
+class TestCompactionErrorResponse:
+    def test_connection_operation_gives_retry_hint(self) -> None:
+        exc = CompactionError("busy", operation="connection")
+        response = compaction_error_response(exc)
+        hint = response["error"]["retry_hint"]
+        assert "Retry in a few seconds" in hint
+
+    def test_non_connection_operation_gives_generic_failure(self) -> None:
+        exc = CompactionError("export failed", operation="export")
+        response = compaction_error_response(exc)
+        hint = response["error"]["retry_hint"]
+        assert hint == "Compaction failed. Check logs for details."
+
+    def test_recovery_unrecoverable_still_gives_restore_hint(self) -> None:
+        exc = CompactionError("Unrecoverable corruption", operation="recovery")
+        response = compaction_error_response(exc)
+        hint = response["error"]["retry_hint"]
+        assert "Restore from backup" in hint
