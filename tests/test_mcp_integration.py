@@ -124,8 +124,11 @@ class TestMCPIntegration:
         """Test that MCP semantic search finds newly created files."""
         services, realtime_service, watch_dir, _, embedding_manager = mcp_setup
 
-        # Wait for initial scan
-        await asyncio.sleep(1.0)
+        # Wait for fs observer to start; wait_for_file_indexed() below is the
+        # deterministic gate on actual indexing.
+        assert await realtime_service.wait_for_monitoring_ready(
+            timeout=get_fs_event_timeout()
+        ), "Realtime monitoring did not become ready"
 
         # Get initial search results using MCP tool execution
         initial_results = await execute_tool(
@@ -202,8 +205,11 @@ def modified_unique_regex_pattern():
         """Test that database stats reflect real-time indexing changes."""
         services, realtime_service, watch_dir, _, _ = mcp_setup
 
-        # Wait for initial scan
-        await asyncio.sleep(1.0)
+        # Wait for fs observer to start; wait_for_file_indexed() below is the
+        # deterministic gate on actual indexing.
+        assert await realtime_service.wait_for_monitoring_ready(
+            timeout=get_fs_event_timeout()
+        ), "Realtime monitoring did not become ready"
 
         # Get initial stats directly from database provider
         initial_stats = services.provider.get_stats()
