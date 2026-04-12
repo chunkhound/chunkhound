@@ -73,32 +73,34 @@ class CompactionService:
 
     @property
     def last_error(self) -> Exception | None:
-        """Last error from a compaction attempt, or None if last attempt succeeded."""
+        """Last error from a background compaction attempt, or None on success.
+
+        Populated only by ``compact_background`` — covers both compaction-phase
+        failures (EXPORT/IMPORT/SWAP) and post-compaction callback failures
+        (e.g. reindex after swap window). ``compact_blocking`` propagates
+        exceptions directly and does not update this field.
+        """
         return self._last_error
 
-    def check_should_compact(
+    def _is_eligible(
         self, provider: "DuckDBProvider"
     ) -> tuple[bool, dict[str, Any]]:
-        """Check if compaction is warranted. Returns (should_compact, stats)."""
-        with self._lock:
-            if self._compaction_in_progress:
-                # Self-heal after task cancellation: if the thread
-                # finished but the asyncio task was already cancelled
-                # (so its finally block couldn't reset the flag),
-                # clear it now.
-                thread_done = self._compaction_thread_done.is_set()
-                if thread_done and self._compaction_task is None:
-                    self._compaction_in_progress = False
-                else:
-                    return False, {}
+        """Pure eligibility check: config enabled + provider should_compact +
+        reclaimable-byte threshold.
 
+        Returns (eligible, stats). Does NOT touch ``_compaction_in_progress``
+        or the lock — callers handle the atomic check-and-set.
+        """
         if not self._config.database.compaction_enabled:
             return False, {}
 
         threshold = self._config.database.compaction_threshold
         try:
             should, stats = provider.should_compact(threshold=threshold)
-        except CompactionError:
+        except CompactionError as e:
+            logger.debug(
+                f"Compaction eligibility check failed, skipping auto-compaction: {e}"
+            )
             return False, {}
 
         if not should:
@@ -120,6 +122,24 @@ class CompactionService:
         # Disk space check delegated to provider.optimize()
         return True, stats
 
+    def check_should_compact(
+        self, provider: "DuckDBProvider"
+    ) -> tuple[bool, dict[str, Any]]:
+        """Check if compaction is warranted. Returns (should_compact, stats)."""
+        with self._lock:
+            if self._compaction_in_progress:
+                # Self-heal after task cancellation: if the thread
+                # finished but the asyncio task was already cancelled
+                # (so its finally block couldn't reset the flag),
+                # clear it now.
+                thread_done = self._compaction_thread_done.is_set()
+                if thread_done and self._compaction_task is None:
+                    self._compaction_in_progress = False
+                else:
+                    return False, {}
+
+        return self._is_eligible(provider)
+
     def _try_start_compaction(
         self, provider: "DuckDBProvider"
     ) -> tuple[bool, dict[str, Any]]:
@@ -132,19 +152,8 @@ class CompactionService:
             if self._compaction_in_progress:
                 return False, {}
 
-        # Config/threshold checks (read-only, no lock needed)
-        if not self._config.database.compaction_enabled:
-            return False, {}
-        threshold = self._config.database.compaction_threshold
-        try:
-            should, stats = provider.should_compact(threshold=threshold)
-        except CompactionError as e:
-            logger.debug(f"Compaction eligibility check failed, skipping auto-compaction: {e}")
-            return False, {}
-        if not should:
-            return False, {}
-        reclaimable = estimate_reclaimable_bytes(stats)
-        if reclaimable < self._config.database.compaction_min_size_mb * 1024 * 1024:
+        eligible, stats = self._is_eligible(provider)
+        if not eligible:
             return False, {}
 
         # Re-check and atomically acquire
@@ -243,6 +252,7 @@ class CompactionService:
                     )
                     await on_complete()
                 except Exception as cb_err:
+                    self._last_error = cb_err
                     logger.error(f"Post-compaction callback failed: {cb_err}")
 
         except asyncio.CancelledError:
