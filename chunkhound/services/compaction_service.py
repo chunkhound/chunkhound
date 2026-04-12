@@ -152,14 +152,10 @@ class CompactionService:
             if self._compaction_in_progress:
                 return False, {}
 
-        eligible, stats = self._is_eligible(provider)
-        if not eligible:
-            return False, {}
-
-        # Re-check and atomically acquire
-        with self._lock:
-            if self._compaction_in_progress:
+            eligible, stats = self._is_eligible(provider)
+            if not eligible:
                 return False, {}
+
             self._compaction_in_progress = True
         return True, stats
 
