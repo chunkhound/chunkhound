@@ -130,7 +130,7 @@ async def repack_command(args: argparse.Namespace, config: Config) -> None:
 
         if not completed:
             formatter.warning("Repack was cancelled before completion")
-            return
+            sys.exit(1)
 
         # Report results
         new_size = db_path.stat().st_size
