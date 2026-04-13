@@ -28,7 +28,7 @@ from .tools import TOOL_REGISTRY, execute_tool
 def compaction_error_response(exc: CompactionError) -> dict[str, Any]:
     """Build structured error response for a CompactionError with appropriate hint."""
     error_response = format_error_response(exc, include_traceback=False)
-    if exc.operation == "recovery" and exc.reason and "Unrecoverable" in exc.reason:
+    if exc.operation == "recovery" and not exc.recoverable:
         error_response["error"]["retry_hint"] = (
             "Database recovery failed after interrupted compaction. "
             "Restore from backup or re-index."
