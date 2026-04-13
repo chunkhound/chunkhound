@@ -1,0 +1,72 @@
+// Common terminals and rules shared between declaration and implementation grammars
+
+// Whitespace and comments - to be ignored
+%import common.WS
+%ignore WS
+
+// Comments
+BLOCK_COMMENT: /\(\*[\s\S]*?\*\)/
+LINE_COMMENT: /\/\/[^\n]*/
+%ignore BLOCK_COMMENT
+%ignore LINE_COMMENT
+
+// Numbers
+HEX_NUMBER: /16#[0-9A-Fa-f_]+/
+BINARY_NUMBER: /2#[01_]+/
+OCTAL_NUMBER: /8#[0-7_]+/
+// FLOAT matches decimal numbers and scientific notation (with or without decimal point)
+FLOAT: /\d+\.\d+([eE][+-]?\d+)?/ | /\d+[eE][+-]?\d+/
+INTEGER: /\d+/
+
+// Time literals - various formats
+TIME_LITERAL: /[tT]#-?\d+(\.\d+)?([dDhHmMsS]|[mM][sS])+/
+           | /[tT][iI][mM][eE]#-?\d+(\.\d+)?([dDhHmMsS]|[mM][sS])+/
+
+// String literals
+STRING: /"[^"]*"/ | /'[^']*'/
+
+// Hardware addresses (I/O mapping)
+HW_ADDRESS: /%[IQM][XBWDLxbwdl]?\*/ | /%[IQM][XBWDLxbwdl]?\d+(\.\d+)?/
+
+// Primitive data types
+BOOL: /BOOL/i
+BYTE: /BYTE/i
+WORD: /WORD/i
+DWORD: /DWORD/i
+LWORD: /LWORD/i
+SINT: /SINT/i
+USINT: /USINT/i
+INT: /INT/i
+UINT: /UINT/i
+DINT: /DINT/i
+UDINT: /UDINT/i
+LINT: /LINT/i
+ULINT: /ULINT/i
+REAL: /REAL/i
+LREAL: /LREAL/i
+TIME: /TIME/i
+DATE: /DATE/i
+TIME_OF_DAY: /TIME_OF_DAY/i | /TOD/i
+DATE_AND_TIME: /DATE_AND_TIME/i | /DT/i
+STRING_TYPE: /STRING/i
+WSTRING: /WSTRING/i
+
+// Boolean literals
+TRUE: /TRUE/i
+FALSE: /FALSE/i
+
+// Shared keywords
+OF: /OF/i
+TO: /TO/i
+
+// Arithmetic operator
+MINUS: "-"
+
+// Integer value rule (array bounds, case labels)
+integer_value: MINUS? INTEGER
+             | HEX_NUMBER
+             | BINARY_NUMBER
+             | OCTAL_NUMBER
+
+// Note: IDENTIFIER is intentionally NOT shared. Each grammar defines its own
+// IDENTIFIER with a negative lookahead that excludes grammar-specific keywords.

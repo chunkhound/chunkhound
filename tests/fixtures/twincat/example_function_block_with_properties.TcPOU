@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_WithProperties" Id="{bbbbbbbb-cccc-dddd-eeee-ffffffffffff}" SpecialFunc="None">
+    <Declaration><![CDATA[// Function block with properties demonstrating TwinCAT 3 OOP features
+
+FUNCTION_BLOCK FB_WithProperties
+
+VAR
+    nInternal : INT := 0;
+    fInternalValue : REAL := 0.0;
+    sInternalName : STRING(50) := '';
+END_VAR
+
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[// Main execution - no-op for property demo
+]]></ST>
+    </Implementation>
+    <Property Name="Value" Id="{44444444-5555-6666-7777-888888888888}">
+      <Declaration><![CDATA[// Property: Value
+// Gets or sets the internal integer value
+
+PROPERTY Value : INT
+
+]]></Declaration>
+      <Get Name="Get" Id="{44444444-5555-6666-7777-888888888889}">
+        <Declaration><![CDATA[// Getter for Value property
+
+VAR
+END_VAR
+
+]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Value := nInternal;
+]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{44444444-5555-6666-7777-88888888888a}">
+        <Declaration><![CDATA[// Setter for Value property
+
+VAR
+END_VAR
+
+]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[nInternal := Value;
+]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+    <Property Name="ReadOnlyStatus" Id="{55555555-6666-7777-8888-999999999999}">
+      <Declaration><![CDATA[// Property: ReadOnlyStatus
+// Read-only property returning calculated status
+
+PROPERTY ReadOnlyStatus : INT
+
+]]></Declaration>
+      <Get Name="Get" Id="{55555555-6666-7777-8888-99999999999a}">
+        <Declaration><![CDATA[// Getter for ReadOnlyStatus property
+
+VAR
+    nCalcStatus : INT;
+END_VAR
+
+]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[nCalcStatus := nInternal * 2;
+ReadOnlyStatus := nCalcStatus;
+]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Property Name="Name" Id="{66666666-7777-8888-9999-aaaaaaaaaaaa}">
+      <Declaration><![CDATA[// Property: Name
+// Gets or sets the internal name string
+
+PROPERTY Name : STRING(50)
+
+]]></Declaration>
+      <Get Name="Get" Id="{66666666-7777-8888-9999-aaaaaaaaaa0b}">
+        <Declaration><![CDATA[// Getter for Name property
+
+VAR
+END_VAR
+
+]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[Name := sInternalName;
+]]></ST>
+        </Implementation>
+      </Get>
+      <Set Name="Set" Id="{66666666-7777-8888-9999-aaaaaaaaaa0c}">
+        <Declaration><![CDATA[// Setter for Name property
+
+VAR
+END_VAR
+
+]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[sInternalName := Name;
+]]></ST>
+        </Implementation>
+      </Set>
+    </Property>
+  </POU>
+</TcPlcObject>

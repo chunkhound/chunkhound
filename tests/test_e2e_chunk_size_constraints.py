@@ -397,6 +397,23 @@ LARGE_LANGUAGE_SAMPLES: dict[Language, tuple[str, str, str]] = {
         # Normal
         "Unknown file type content line one.\nSecond line of unknown content.",
     ),
+    Language.TWINCAT: (
+        ".TcPOU",
+        # Large FUNCTION_BLOCK - triggers line-based split
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<TcPlcObject Version="1.1.0.1">\n'
+        '  <POU Name="FB_Large" Id="{00000000-0000-0000-0000-000000000001}" SpecialFunc="None">\n'
+        "    <Declaration><![CDATA[FUNCTION_BLOCK FB_Large\nVAR\nEND_VAR\n]]></Declaration>\n"
+        "    <Implementation>\n      <ST><![CDATA["
+        + _make_large_statements("    nX := nX + 1;")
+        + "]]></ST>\n    </Implementation>\n  </POU>\n</TcPlcObject>",
+        # Normal - small FUNCTION_BLOCK, no over-splitting
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<TcPlcObject Version="1.1.0.1">\n'
+        '  <POU Name="FB_Greet" Id="{00000000-0000-0000-0000-000000000002}" SpecialFunc="None">\n'
+        "    <Declaration><![CDATA[FUNCTION_BLOCK FB_Greet\nVAR\nEND_VAR\n]]></Declaration>\n"
+        "    <Implementation>\n      <ST><![CDATA[nX := 1;\n]]></ST>\n    </Implementation>\n  </POU>\n</TcPlcObject>",
+    ),
 }
 
 

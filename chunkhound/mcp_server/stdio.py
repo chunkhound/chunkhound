@@ -413,9 +413,7 @@ async def main(args: Any = None) -> None:
 
     if validation_errors:
         msg = "; ".join(str(e) for e in validation_errors)
-        _respond_with_startup_error(
-            Exception(f"Configuration errors: {msg}"), config
-        )
+        _respond_with_startup_error(Exception(f"Configuration errors: {msg}"), config)
         sys.exit(1)
 
     # Create and run the stdio server

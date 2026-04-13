@@ -58,6 +58,15 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
         "chunkhound.services.research.shared.unified_search",
         None,
     ),
+    # Boundary expansion
+    "expand_to_natural_boundaries": (
+        "chunkhound.services.research.shared.chunk_range",
+        None,
+    ),
+    "get_chunk_expanded_range": (
+        "chunkhound.services.research.shared.chunk_range",
+        None,
+    ),
     # Chunk deduplication
     "deduplicate_chunks": (
         "chunkhound.services.research.shared.chunk_dedup",
@@ -378,6 +387,9 @@ __all__ = [
     "ImportResolverService",
     "QueryExpander",
     "UnifiedSearch",
+    # Boundary expansion
+    "expand_to_natural_boundaries",
+    "get_chunk_expanded_range",
     # Utilities
     "build_output_guidance",
     "find_elbow_kneedle",
