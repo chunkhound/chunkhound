@@ -186,12 +186,11 @@ class TwinCATMapping(BaseMapping):
         if symbol_upper in _STDLIB_TYPES:
             return []
 
-        # Search from source file's directory rather than base_dir.
-        # While base_dir would provide complete coverage, searching the entire
-        # project tree on every import resolution is expensive. We compromise
-        # by searching from source_file's directory, which covers most cases
-        # since TwinCAT projects typically co-locate related POUs.
-        result = self._find_symbol_file(symbol, source_file.parent)
+        # TwinCAT has project-wide symbol visibility: any POU can reference any
+        # other regardless of directory structure. This requires scanning from
+        # base_dir on every call (O(files × symbols)), but is acceptable in
+        # practice — typical TwinCAT projects have tens to low hundreds of POUs.
+        result = self._find_symbol_file(symbol, base_dir)
         if result is not None:
             return [result.resolve()]  # Ensure absolute path
         return []
