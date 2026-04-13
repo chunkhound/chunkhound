@@ -42,6 +42,7 @@ from chunkhound.parsers.chunk_splitter import (
     universal_to_chunk,
 )
 from chunkhound.parsers.universal_parser import UniversalParser
+from chunkhound.providers.database.like_utils import escape_like_pattern
 
 # File pattern utilities for directory discovery
 from chunkhound.utils.file_patterns import (
@@ -2851,12 +2852,30 @@ class IndexingCoordinator(BaseService):
                 for file_path in current_files
             }
 
-            # Get all files in database (stored as relative paths)
-            query = """
-                SELECT id, path
-                FROM files
-            """
-            db_files = self._db.execute_query(query, [])
+            # Compute the directory prefix relative to base_dir so the DB query
+            # is scoped to only files under the directory being indexed.
+            # This prevents re-indexing a sub-directory from deleting other
+            # repos' data stored under sibling prefixes.
+            try:
+                dir_prefix = get_relative_path_safe(directory, base_dir).as_posix()
+            except ValueError:
+                dir_prefix = ""
+
+            # Get only files under the directory being indexed (stored as relative paths)
+            if dir_prefix and dir_prefix != ".":
+                escaped_prefix = escape_like_pattern(dir_prefix)
+                query = """
+                    SELECT id, path
+                    FROM files
+                    WHERE path = ? OR path LIKE ? ESCAPE '\\'
+                """
+                db_files = self._db.execute_query(query, [dir_prefix, escaped_prefix + "/%"])
+            else:
+                query = """
+                    SELECT id, path
+                    FROM files
+                """
+                db_files = self._db.execute_query(query, [])
 
             # Find orphaned files (in DB but not on disk or excluded by patterns)
             orphaned_files = []
