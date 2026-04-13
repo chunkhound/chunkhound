@@ -191,10 +191,10 @@ class CompactionService:
             return await self._do_compaction(provider)
         finally:
             with self._lock:
-                # Only reset if the thread finished; a cancelled task leaves the
-                # flag True, which is fine—compact_blocking is CLI-only (fresh
-                # service per invocation). compact_background handles cleanup in
-                # _do_compaction_with_callback instead.
+                # Guard: only reset when the thread has finished. If cancelled before
+                # the thread completed, the flag stays True — harmless for CLI usage
+                # (fresh CompactionService per invocation). The background path
+                # handles its own cleanup in _do_compaction_with_callback.
                 if self._compaction_thread_done.is_set():
                     self._compaction_in_progress = False
 
