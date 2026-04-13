@@ -341,10 +341,12 @@ class MCPServerBase(ABC):
             self.debug_log(f"Background compaction failed to start: {e}", always=True)
 
     async def _post_compaction_reindex(self) -> None:
-        """Callback after compaction - triggers incremental reindex.
+        """Callback after compaction - triggers full reindex.
 
-        This uses the existing change detection which will find
-        files with mtime > last_indexed_time and reprocess them.
+        Post-compaction the DB was rebuilt from a Parquet export, so stored
+        mtimes may not reflect reality (especially on Windows where mtime
+        resolution is ~100ms-2s).  force_reindex=True ensures every file is
+        re-verified.
         """
         if not self.services or not self._target_path:
             self.debug_log(
@@ -353,16 +355,22 @@ class MCPServerBase(ABC):
             return
 
         try:
-            self.debug_log("Starting post-compaction incremental reindex...")
+            self.debug_log("Starting post-compaction reindex...")
 
-            # Create indexing service for incremental reindex
+            # Force reindex: the DB was rebuilt from export, mtime-based
+            # skip logic is unreliable after compaction.
+            reindex_config = self.config.model_copy(
+                update={"indexing": self.config.indexing.model_copy(
+                    update={"force_reindex": True}
+                )}
+            )
+
             indexing_service = DirectoryIndexingService(
                 indexing_coordinator=self.services.indexing_coordinator,
-                config=self.config,
+                config=reindex_config,
                 progress_callback=lambda msg: self.debug_log(f"[reindex] {msg}"),
             )
 
-            # Incremental reindex - only processes files modified during compaction
             stats = await indexing_service.process_directory(
                 self._target_path, no_embeddings=False
             )

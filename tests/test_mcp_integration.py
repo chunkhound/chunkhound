@@ -518,7 +518,7 @@ class NewlyAddedClass:
                 "compaction_threshold": 0.0,
                 "compaction_min_size_mb": 0,
             },
-            indexing={"include": ["*.py"], "exclude": []},
+            indexing={"include": ["*.py"], "exclude": [], "force_reindex": True},
         )
 
         export_started = threading.Event()
