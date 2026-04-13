@@ -13,6 +13,7 @@ Architecture:
 
 import asyncio
 import gc
+import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -23,6 +24,11 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from chunkhound.core.config.config import Config
+from chunkhound.core.utils.path_utils import (
+    directory_prefix_for_relative_path,
+    normalize_path_for_lookup,
+    path_is_within_relative_directory,
+)
 from chunkhound.database_factory import DatabaseServices
 from chunkhound.utils.windows_constants import IS_WINDOWS
 
@@ -264,6 +270,9 @@ class RealtimeIndexingService:
         self.process_task: asyncio.Task | None = None
         self.event_consumer_task: asyncio.Task | None = None
         self._polling_task: asyncio.Task | None = None
+        self._watchdog_setup_task: asyncio.Task | None = None
+        self._watchdog_stop_event = threading.Event()
+        self._using_polling = False
 
         # Directory watch management for progressive monitoring
         self.watched_directories: set[str] = set()  # Track watched dirs
@@ -308,6 +317,10 @@ class RealtimeIndexingService:
 
         # Store the watch path
         self.watch_path = watch_path
+        self.monitoring_ready.clear()
+        self._monitoring_ready_time = None
+        self._using_polling = False
+        self._watchdog_stop_event.clear()
 
         loop = asyncio.get_running_loop()
 
@@ -325,28 +338,21 @@ class RealtimeIndexingService:
         if monitoring_ok:
             self._debug("monitoring ready")
         else:
-            self._debug("monitoring timeout; continuing")
+            logger.warning(
+                "Watchdog setup timed out before readiness; stopping watchdog startup"
+                " and switching to polling"
+            )
+            self._debug("monitoring timeout; switching to polling")
+            await self._stop_watchdog_observer()
+            await self._start_polling_fallback(watch_path)
 
     async def stop(self) -> None:
         """Stop the service gracefully."""
         logger.debug("Stopping real-time indexing service")
         self._debug("stopping service")
 
-        # Cancel watchdog setup if still running
-        if hasattr(self, "_watchdog_setup_task") and self._watchdog_setup_task:
-            self._watchdog_setup_task.cancel()
-            try:
-                await self._watchdog_setup_task
-            except asyncio.CancelledError:
-                pass
-
-        # Stop filesystem observer
-        if self.observer:
-            self.observer.stop()
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self.observer.join, 1.0)
-            if self.observer.is_alive():
-                logger.warning("Observer thread did not exit within timeout")
+        self._watchdog_stop_event.set()
+        await self._stop_watchdog_observer()
 
         # Cancel event consumer task
         if self.event_consumer_task:
@@ -392,11 +398,7 @@ class RealtimeIndexingService:
         # Skip watchdog entirely if force_polling is enabled (e.g., Windows CI)
         if self._force_polling:
             logger.info(f"Polling mode forced for {watch_path}")
-            self._using_polling = True
-            self._polling_task = asyncio.create_task(self._polling_monitor(watch_path))
-            await asyncio.sleep(0.5)
-            self._monitoring_ready_time = time.time()
-            self.monitoring_ready.set()
+            await self._start_polling_fallback(watch_path)
             self._debug("force_polling enabled; using polling mode")
             return
 
@@ -404,18 +406,63 @@ class RealtimeIndexingService:
             # No asyncio-level timeout: _start_fs_monitor has its own deadline,
             # and asyncio.wait_for cannot interrupt running executor threads.
             await loop.run_in_executor(None, self._start_fs_monitor, watch_path, loop)
+            if self._watchdog_stop_event.is_set():
+                logger.debug("Watchdog startup aborted before readiness")
+                return
             logger.debug("Watchdog setup completed successfully (recursive mode)")
             self._debug("watchdog setup complete (recursive)")
             self._monitoring_ready_time = time.time()
             self.monitoring_ready.set()
         except Exception as e:
+            if self._watchdog_stop_event.is_set():
+                logger.debug("Watchdog setup aborted during shutdown/timeout")
+                return
             logger.warning(f"Watchdog setup failed: {e} - falling back to polling")
-            self._using_polling = True
-            self._polling_task = asyncio.create_task(self._polling_monitor(watch_path))
-            await asyncio.sleep(0.5)
-            self._monitoring_ready_time = time.time()
-            self.monitoring_ready.set()
+            await self._stop_watchdog_observer()
+            await self._start_polling_fallback(watch_path)
             self._debug("watchdog failed; switched to polling")
+
+    async def _start_polling_fallback(self, watch_path: Path) -> None:
+        """Start polling mode once, after watchdog has been ruled out."""
+        if self._polling_task is not None and not self._polling_task.done():
+            self._using_polling = True
+            if not self.monitoring_ready.is_set():
+                self._monitoring_ready_time = time.time()
+                self.monitoring_ready.set()
+            return
+
+        self._using_polling = True
+        self._polling_task = asyncio.create_task(self._polling_monitor(watch_path))
+        await asyncio.sleep(0.5)
+        self._monitoring_ready_time = time.time()
+        self.monitoring_ready.set()
+
+    async def _stop_watchdog_observer(self) -> None:
+        """Stop watchdog setup/observer before switching modes or shutting down."""
+        self._watchdog_stop_event.set()
+
+        watchdog_task = self._watchdog_setup_task
+        current_task = asyncio.current_task()
+        if watchdog_task is not None and watchdog_task is not current_task:
+            try:
+                await asyncio.wait_for(asyncio.shield(watchdog_task), timeout=2.0)
+            except asyncio.TimeoutError:
+                logger.warning("Watchdog setup task did not exit within timeout")
+            except Exception:
+                pass
+
+        observer = self.observer
+        self.observer = None
+        self.event_handler = None
+
+        if observer is None:
+            return
+
+        observer.stop()
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, observer.join, 1.0)
+        if observer.is_alive():
+            logger.warning("Observer thread did not exit within timeout")
 
     def _start_fs_monitor(
         self, watch_path: Path, loop: asyncio.AbstractEventLoop
@@ -424,6 +471,9 @@ class RealtimeIndexingService:
         # Deadline covers the entire setup (schedule + start + thread alive check).
         # On Windows, observer thread startup can be noticeably slower.
         deadline = time.time() + (5.0 if IS_WINDOWS else 1.0)
+
+        if self._watchdog_stop_event.is_set():
+            return
 
         self.event_handler = SimpleEventHandler(
             self.event_queue, self.config, loop, root_path=watch_path
@@ -438,10 +488,23 @@ class RealtimeIndexingService:
             recursive=True,  # Use recursive for complete event coverage
         )
         self.watched_directories.add(str(watch_path))
+
+        if self._watchdog_stop_event.is_set():
+            return
+
         self.observer.start()
 
-        while not self.observer.is_alive() and time.time() < deadline:
+        while (
+            not self.observer.is_alive()
+            and time.time() < deadline
+            and not self._watchdog_stop_event.is_set()
+        ):
             time.sleep(0.01)
+
+        if self._watchdog_stop_event.is_set():
+            self.observer.stop()
+            self.observer.join(timeout=1.0)
+            return
 
         if self.observer.is_alive():
             logger.debug(f"Started recursive filesystem monitoring for {watch_path}")
@@ -492,12 +555,6 @@ class RealtimeIndexingService:
                                     )
                                 if files_checked % 100 == 0:
                                     await asyncio.sleep(0)
-                                    if files_checked > 5000:
-                                        logger.warning(
-                                            f"Polling checked {files_checked} files,"
-                                            " skipping rest",
-                                        )
-                                        break
                             except (OSError, PermissionError):
                                 continue
                     finally:
@@ -715,22 +772,27 @@ class RealtimeIndexingService:
     async def _cleanup_deleted_directory(self, dir_path: str) -> None:
         """Clean up database entries for files in a deleted directory."""
         try:
-            # Get all files that were in this directory from database
-            # Use the provider's search capability to find files with this path prefix
-            search_results, _ = await self.services.provider.search_regex_async(
-                pattern=f"^{dir_path}/.*",
-                page_size=1000,  # Large page to get all matches
-            )
+            base_dir = self.watch_path or self.config.target_dir
+            relative_dir = normalize_path_for_lookup(dir_path, base_dir)
+            directory_prefix = directory_prefix_for_relative_path(relative_dir)
+            search_results = self.services.provider.execute_query("SELECT path FROM files")
+            scoped_results = [
+                result
+                for result in search_results
+                if path_is_within_relative_directory(
+                    str(result.get("path", "")), directory_prefix
+                )
+            ]
 
             # Delete each file found in the directory
-            for result in search_results:
-                file_path = result.get("file_path", result.get("path", ""))
+            for result in scoped_results:
+                file_path = result.get("path", "")
                 if file_path:
                     logger.debug(f"Cleaning up deleted file: {file_path}")
                     await self.services.provider.delete_file_completely_async(file_path)
 
             logger.info(
-                f"Cleaned up {len(search_results)} files from deleted directory: {dir_path}"
+                f"Cleaned up {len(scoped_results)} files from deleted directory: {dir_path}"
             )
 
         except Exception as e:
@@ -853,7 +915,7 @@ class RealtimeIndexingService:
         monitoring_active = False
         if self.observer and self.observer.is_alive():
             monitoring_active = True
-        elif hasattr(self, "_using_polling"):
+        elif self._using_polling:
             # If we're using polling mode, consider it "alive"
             monitoring_active = True
 

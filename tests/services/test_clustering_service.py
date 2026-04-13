@@ -162,7 +162,7 @@ class TestKMeansClustering:
         self, clustering_service: ClusteringService
     ) -> None:
         """Test that token counts in metadata are accurate."""
-        files = {f"file{i}.py": "test content" * 10 for i in range(5)}
+        files = {f"file{i}.py": f"test content {i} " * 10 for i in range(5)}
 
         clusters, metadata = await clustering_service.cluster_files(files, n_clusters=2)
 
@@ -705,8 +705,10 @@ class TestClusterFilesHDBSCANBounded:
     ) -> None:
         """Test that final cluster IDs are renumbered sequentially from 0."""
         # Create scenario that produces multiple clusters
-        medium_content = self._make_content_with_tokens(25_000)
-        files = {f"file{i}.py": medium_content for i in range(4)}
+        files = {
+            f"file{i}.py": self._make_unique_content_with_tokens(25_000, seed=f"medium{i}")
+            for i in range(4)
+        }
 
         clusters, _ = await clustering_service.cluster_files_hdbscan_bounded(
             files,

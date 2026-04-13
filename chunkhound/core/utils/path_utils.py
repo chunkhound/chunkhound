@@ -3,6 +3,27 @@
 from pathlib import Path
 
 
+def canonicalize_base_directory(base_dir: Path) -> Path:
+    """Return a stable project base directory for path storage and lookup.
+
+    When callers index a subdirectory inside the same repository from different
+    working directories, storing file paths relative to the raw input directory
+    produces duplicate logical file entries. This helper walks upward from the
+    requested base and prefers a project marker directory when one exists.
+    """
+    resolved_base = base_dir.resolve()
+
+    for candidate in (resolved_base, *resolved_base.parents):
+        if (candidate / ".chunkhound.json").exists():
+            return candidate
+        if (candidate / ".chunkhound" / "db").exists():
+            return candidate
+        if (candidate / ".git").exists():
+            return candidate
+
+    return resolved_base
+
+
 def resolve_path_for_relative(path: Path, base_dir: Path) -> tuple[Path, Path]:
     """Resolve path and base_dir for relative_to() computation.
 
@@ -16,7 +37,7 @@ def resolve_path_for_relative(path: Path, base_dir: Path) -> tuple[Path, Path]:
     Returns:
         Tuple of (path_to_use, resolved_base_dir) ready for relative_to()
     """
-    resolved_base = base_dir.resolve()
+    resolved_base = canonicalize_base_directory(base_dir)
     if path.is_symlink():
         return path, resolved_base
     return path.resolve(), resolved_base
@@ -43,7 +64,7 @@ def get_relative_path_safe(path: Path, base_dir: Path) -> Path:
         return path_to_use.relative_to(resolved_base)
     except ValueError:
         # Fallback for edge cases (e.g., symlink with different base resolution)
-        return path.relative_to(base_dir)
+        return path.relative_to(canonicalize_base_directory(base_dir))
 
 
 def normalize_path_for_lookup(
@@ -89,3 +110,20 @@ def normalize_path_for_lookup(
             f"Path {input_path} is not under base directory {base_dir}. "
             f"This indicates a configuration or indexing issue."
         )
+
+
+def directory_prefix_for_relative_path(relative_path: str | Path) -> str:
+    """Return a normalized subtree prefix for stored relative file paths."""
+    normalized = Path(relative_path).as_posix()
+    if normalized in {"", "."}:
+        return ""
+    return normalized.rstrip("/") + "/"
+
+
+def path_is_within_relative_directory(path: str, directory: str | Path) -> bool:
+    """Check whether a stored relative path is inside the given relative directory."""
+    normalized_path = Path(path).as_posix()
+    prefix = directory_prefix_for_relative_path(directory)
+    if not prefix:
+        return True
+    return normalized_path.startswith(prefix)

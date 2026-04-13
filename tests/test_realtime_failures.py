@@ -12,6 +12,7 @@ import pytest
 
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
+from chunkhound.services import realtime_indexing_service as realtime_module
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
@@ -246,3 +247,33 @@ class TestRealtimeFailures:
         # Verify cleanup completed - task should be done or None
         assert service._polling_task is None or service._polling_task.done(), \
             "Polling task should be cleaned up after stop()"
+
+    @pytest.mark.asyncio
+    async def test_watchdog_failure_switches_to_polling_without_self_wait_warning(
+        self, realtime_setup, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Watchdog startup failure should fall back without timing out on itself."""
+        service, watch_dir, _, _ = realtime_setup
+
+        def fail_start_fs_monitor(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        warning_messages: list[str] = []
+
+        monkeypatch.setattr(service, "_start_fs_monitor", fail_start_fs_monitor)
+        monkeypatch.setattr(
+            realtime_module.logger,
+            "warning",
+            lambda message: warning_messages.append(str(message)),
+        )
+
+        await service.start(watch_dir)
+
+        assert service._using_polling is True
+        assert service.monitoring_ready.is_set()
+        assert not any(
+            "Watchdog setup task did not exit within timeout" in message
+            for message in warning_messages
+        )
+
+        await service.stop()
