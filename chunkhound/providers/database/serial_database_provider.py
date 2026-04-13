@@ -154,6 +154,14 @@ class SerialDatabaseProvider(ABC):
             # unreachable — no explicit clear_thread_local() needed.
             self._executor.shutdown(wait=True)
 
+    def shutdown_executor(self) -> None:
+        """Shut down executor thread pool without closing DB connection.
+
+        Used during stuck-compaction cleanup where the DB handle must stay
+        open but the executor thread should be reclaimed.
+        """
+        self._executor.shutdown(wait=False)
+
     def soft_disconnect(self, skip_checkpoint: bool = False) -> None:
         """Close DB connection without shutting down executor.
 

@@ -418,6 +418,8 @@ class MCPServerBase(ABC):
                                 "skipping provider disconnect to avoid corruption",
                                 always=True,
                             )
+                            if self.services and hasattr(self.services.provider, "shutdown_executor"):
+                                self.services.provider.shutdown_executor()
                             self._compaction_service = None
                             await self._cleanup_non_provider_resources()
                             # _initialized intentionally stays True: cleanup() is terminal
