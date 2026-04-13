@@ -30,6 +30,7 @@ class TestCompactionError:
         err = CompactionError()
         assert err.operation is None
         assert err.reason is None
+        assert err.recoverable is True
         assert "Compaction error" in str(err)
 
 
@@ -47,7 +48,13 @@ class TestCompactionErrorResponse:
         assert hint == "Compaction failed. Check logs for details."
 
     def test_recovery_unrecoverable_still_gives_restore_hint(self) -> None:
-        exc = CompactionError("Unrecoverable corruption", operation="recovery")
+        exc = CompactionError("corruption detected", operation="recovery", recoverable=False)
         response = compaction_error_response(exc)
         hint = response["error"]["retry_hint"]
         assert "Restore from backup" in hint
+
+    def test_recovery_recoverable_gives_generic_hint(self) -> None:
+        exc = CompactionError("recovery issue", operation="recovery", recoverable=True)
+        response = compaction_error_response(exc)
+        hint = response["error"]["retry_hint"]
+        assert hint == "Compaction failed. Check logs for details."

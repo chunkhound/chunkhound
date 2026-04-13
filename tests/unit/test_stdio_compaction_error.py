@@ -20,8 +20,9 @@ def test_transient_compaction_error_has_retry_hint():
 def test_unrecoverable_compaction_error_no_retry():
     """Unrecoverable errors advise restore/re-index, not retry."""
     exc = CompactionError(
-        "Unrecoverable: no valid database or backup found",
+        "no valid database or backup found",
         operation="recovery",
+        recoverable=False,
     )
     resp = compaction_error_response(exc)
     assert resp["error"]["type"] == "CompactionError"

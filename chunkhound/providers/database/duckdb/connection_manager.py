@@ -168,6 +168,7 @@ class DuckDBConnectionManager:
                         "Unrecoverable: no valid database or backup found "
                         "after interrupted compaction",
                         operation="recovery",
+                        recoverable=False,
                     )
             elif not self.db_path.exists() and old_db.exists():
                 # compact_db also missing — fall back to old

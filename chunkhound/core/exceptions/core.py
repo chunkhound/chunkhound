@@ -333,6 +333,7 @@ class CompactionError(ChunkHoundError):
         reason: str | None = None,
         operation: str | None = None,
         context: dict[str, Any] | None = None,
+        recoverable: bool = True,
     ):
         """Initialize compaction error.
 
@@ -340,6 +341,7 @@ class CompactionError(ChunkHoundError):
             reason: Descriptive reason for the failure.
             operation: Compaction phase that failed (e.g. "lock", "preflight").
             context: Optional additional context.
+            recoverable: Whether the error is recoverable (retry/re-compact may help).
         """
         if operation:
             prefix = f"Compaction error (operation={operation})"
@@ -350,3 +352,4 @@ class CompactionError(ChunkHoundError):
         super().__init__(full_message, context)
         self.operation = operation
         self.reason = reason
+        self.recoverable = recoverable
