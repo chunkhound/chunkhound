@@ -153,19 +153,14 @@ uv run scripts/update_version.py --bump minor b1 # Bump to next minor beta
 
 #### Publishing Workflow
 
+Releases are fully automated via GitHub Actions (OIDC Trusted Publishing). Do **not** use
+`prepare_release.sh` or `uv publish` manually — CI owns the publish step.
+
 1. **Create version tag**: Use `update_version.py` (see above)
 2. **Run smoke tests**: `uv run pytest tests/test_smoke.py -v -n auto` (MANDATORY)
-3. **Prepare release**: `./scripts/prepare_release.sh`
-   - Regenerates `requirements-lock.txt` with exact versions
-   - Ensures all lock files are synchronized
-   - Creates reproducible release artifacts
-4. **Test locally**: `pip install dist/chunkhound-X.Y.Z-py3-none-any.whl`
-5. **Push tag**: `git push origin vX.Y.Z`
-6. **Publish**: `uv publish` (requires PYPI_TOKEN)
+3. **Create a GitHub Release** from the tag — `release.yml` builds and uploads to PyPI automatically.
 
-This ensures that users can install ChunkHound with either:
-- **Library install**: `pip install chunkhound` (flexible dependencies)
-- **Production install**: `pip install -r requirements-lock.txt` (exact versions)
+For pre-releases (alpha/beta/RC), pushing the tag triggers `release-rc.yml`, which publishes to TestPyPI.
 
 ## Community
 
