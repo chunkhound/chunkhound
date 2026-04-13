@@ -17,8 +17,8 @@ import re
 import shutil
 import threading
 import time
-from pathlib import Path
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import duckdb
@@ -33,10 +33,10 @@ from chunkhound.core.utils import normalize_path_for_lookup
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.providers.database.duckdb.chunk_repository import DuckDBChunkRepository
 from chunkhound.providers.database.duckdb.connection_manager import (
-    DuckDBConnectionManager,
     PHASE_1,
     PHASE_2,
     PHASE_PRE_SWAP,
+    DuckDBConnectionManager,
     get_compaction_lock_path,
 )
 from chunkhound.providers.database.duckdb.embedding_repository import (
@@ -51,6 +51,7 @@ from chunkhound.providers.database.serial_executor import (
     _executor_local,
     reset_thread_local_state,
 )
+from chunkhound.utils.windows_constants import IS_WINDOWS
 
 # Type hinting only
 if TYPE_CHECKING:
@@ -58,7 +59,14 @@ if TYPE_CHECKING:
 
 
 def _fsync_directory(dir_path: Path) -> None:
-    """Fsync a directory so that new/renamed entries are durable on ext4."""
+    """Fsync a directory so that new/renamed entries are durable on ext4.
+
+    No-op on Windows: NTFS metadata journaling provides sufficient
+    consistency for the intent-file recovery protocol, and os.open()
+    on a directory raises PermissionError on Windows anyway.
+    """
+    if IS_WINDOWS:
+        return
     fd = os.open(str(dir_path), os.O_RDONLY)
     try:
         os.fsync(fd)
