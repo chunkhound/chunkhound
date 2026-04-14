@@ -380,6 +380,7 @@ dependencies = [
     { name = "google-genai" },
     { name = "httpx" },
     { name = "lancedb" },
+    { name = "lark" },
     { name = "loguru" },
     { name = "mcp" },
     { name = "msgpack" },
@@ -474,6 +475,7 @@ requires-dist = [
     { name = "google-genai", specifier = ">=1.51.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "lancedb", specifier = ">=0.25.3" },
+    { name = "lark", specifier = ">=1.1.0" },
     { name = "loguru", specifier = ">=0.6.0" },
     { name = "mcp", specifier = ">=1.0.0" },
     { name = "msgpack", specifier = ">=1.0" },
@@ -1110,6 +1112,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/d9/1e/c5b808f96340753f4b7c6b889e3c845cfe6fb6994720614fce8ed3329a92/langsmith-0.4.32.tar.gz", hash = "sha256:a90bb8297fe0d3c63d9868ea58fe46c52d7e2d1f06b614e43c6a78c948275f24", size = 963489, upload-time = "2025-10-03T03:07:25.711Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/72/80/ff33907e4d7b7dc56f8a592e404488baec9e79a1e5517dd19673a93597b7/langsmith-0.4.32-py3-none-any.whl", hash = "sha256:5c4dcaa5049360bd126fec2fd59af703294e08c75c8d5363261f71a941fa2963", size = 386360, upload-time = "2025-10-03T03:07:20.973Z" },
+]
+
+[[package]]
+name = "lark"
+version = "1.3.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/da/34/28fff3ab31ccff1fd4f6c7c7b0ceb2b6968d8ea4950663eadcb5720591a0/lark-1.3.1.tar.gz", hash = "sha256:b426a7a6d6d53189d318f2b6236ab5d6429eaf09259f1ca33eb716eed10d2905", size = 382732, upload-time = "2025-10-27T18:25:56.653Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/82/3d/14ce75ef66813643812f3093ab17e46d3a206942ce7376d31ec2d36229e7/lark-1.3.1-py3-none-any.whl", hash = "sha256:c629b661023a014c37da873b4ff58a817398d12635d3bbb2c5a03be7fe5d1e12", size = 113151, upload-time = "2025-10-27T18:25:54.882Z" },
 ]
 
 [[package]]

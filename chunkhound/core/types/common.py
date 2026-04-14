@@ -50,6 +50,11 @@ class ChunkType(Enum):
     DATA_CLASS = "data_class"
     EXTENSION_FUNCTION = "extension_function"
 
+    # IEC 61131-3 / PLC types
+    PROGRAM = "program"
+    FUNCTION_BLOCK = "function_block"
+    ACTION = "action"
+
     # C-specific types
     VARIABLE = "variable"
     TYPE = "type"
@@ -120,6 +125,9 @@ class ChunkType(Enum):
             ChunkType.MACRO,
             ChunkType.IMPORT,
             ChunkType.EMBEDDED_SQL,
+            ChunkType.PROGRAM,
+            ChunkType.FUNCTION_BLOCK,
+            ChunkType.ACTION,
         }
 
     @property
@@ -171,6 +179,7 @@ class Language(Enum):
     DART = "dart"
     ELIXIR = "elixir"
     LUA = "lua"
+    TWINCAT = "twincat"
 
     # Documentation languages
     MARKDOWN = "markdown"
@@ -281,6 +290,7 @@ class Language(Enum):
             ".ex": cls.ELIXIR,
             ".exs": cls.ELIXIR,
             ".lua": cls.LUA,
+            ".tcpou": cls.TWINCAT,
         }
 
         return extension_map.get(extension, cls.UNKNOWN)
@@ -323,6 +333,7 @@ class Language(Enum):
             Language.DART,
             Language.ELIXIR,
             Language.LUA,
+            Language.TWINCAT,
         }
 
     @property

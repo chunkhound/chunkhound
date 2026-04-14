@@ -17,8 +17,6 @@ from tests.utils.windows_compat import (
     get_fs_event_timeout,
     should_use_polling,
     stabilize_polling_monitor,
-    wait_for_indexed,
-    wait_for_removed,
 )
 
 
@@ -172,12 +170,10 @@ class TestRealtimeFailures:
         subdir = watch_dir / "subdir"
         subdir.mkdir()
         subdir_file = subdir / "nested.py"
-        subdir_file.write_text("def nested(): pass")
-
         # Use platform-appropriate timeout for Windows CI polling mode
-        found = await wait_for_indexed(
-            services.provider, subdir_file, timeout=get_fs_event_timeout()
-        )
+        service.reset_file_tracking(subdir_file)
+        subdir_file.write_text("def nested(): pass")
+        found = await service.wait_for_file_indexed(subdir_file, timeout=get_fs_event_timeout())
         assert found, "Nested files should be detected by recursive monitoring"
 
         await service.stop()
@@ -190,21 +186,17 @@ class TestRealtimeFailures:
 
         # Create and process a file
         test_file = watch_dir / "delete_test.py"
-        test_file.write_text("def to_be_deleted(): pass")
-
         # Wait for file to be indexed
-        found = await wait_for_indexed(
-            services.provider, test_file, timeout=get_fs_event_timeout()
-        )
+        service.reset_file_tracking(test_file)
+        test_file.write_text("def to_be_deleted(): pass")
+        found = await service.wait_for_file_indexed(test_file, timeout=get_fs_event_timeout())
         assert found, "File should be processed initially"
 
         # Delete the file
-        test_file.unlink()
-
         # Wait for deletion processing
-        removed = await wait_for_removed(
-            services.provider, test_file, timeout=get_fs_event_timeout()
-        )
+        service.reset_file_tracking(test_file)
+        test_file.unlink()
+        removed = await service.wait_for_file_removed(test_file, timeout=get_fs_event_timeout())
         assert removed, "Deleted files should be removed from database"
 
         await service.stop()

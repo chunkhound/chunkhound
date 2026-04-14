@@ -14,7 +14,7 @@ import pytest
 from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
-from tests.utils.windows_compat import should_use_polling, wait_for_indexed
+from tests.utils.windows_compat import should_use_polling
 
 
 class TestRealtimeFunctional:
@@ -92,7 +92,7 @@ class TestRealtimeFunctional:
         test_file.write_text("def hello_world(): pass")
 
         # Wait for filesystem event + debouncing + processing
-        found = await wait_for_indexed(services.provider, test_file)
+        found = await service.wait_for_file_indexed(test_file)
 
         # This tests the full pipeline: detection -> processing -> storage
         assert found, "File should be detected and processed by filesystem monitoring"

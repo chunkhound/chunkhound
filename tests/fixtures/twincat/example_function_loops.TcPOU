@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FC_LoopDemo" Id="{44444444-4444-4444-4444-444444444444}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION FC_LoopDemo : DINT
+VAR_INPUT
+    nCount : INT;
+    nMode : INT;
+END_VAR
+VAR
+    nSum : DINT;
+    i : INT;
+    bDone : BOOL;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[nSum := 0;
+bDone := FALSE;
+
+CASE nMode OF
+    1:
+        FOR i := 0 TO nCount DO
+            nSum := nSum + i;
+        END_FOR;
+    2:
+        i := 0;
+        WHILE i < nCount DO
+            nSum := nSum + i;
+            i := i + 1;
+        END_WHILE;
+    3:
+        i := 0;
+        REPEAT
+            nSum := nSum + i;
+            i := i + 1;
+        UNTIL i >= nCount
+        END_REPEAT;
+ELSE
+    nSum := -1;
+END_CASE;
+
+FC_LoopDemo := nSum;
+]]></ST>
+    </Implementation>
+  </POU>
+</TcPlcObject>
