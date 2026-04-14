@@ -232,8 +232,9 @@ class TestLockFileRecovery:
 
         mgr = DuckDBConnectionManager(db_path)
         try:
-            with pytest.raises(CompactionError, match="Another process is compacting"):
+            with pytest.raises(CompactionError, match="Another process is compacting") as exc_info:
                 mgr.connect()
+            assert exc_info.value.operation == "connection"
             assert lock_path.exists(), "Lock held by live process should be preserved"
         finally:
             lock_path.unlink(missing_ok=True)
@@ -267,8 +268,9 @@ class TestLockFileRecovery:
 
         mgr = DuckDBConnectionManager(db_path)
         try:
-            with pytest.raises(CompactionError, match="Another process is compacting"):
+            with pytest.raises(CompactionError, match="Another process is compacting") as exc_info:
                 mgr.connect()
+            assert exc_info.value.operation == "connection"
             assert lock_path.exists(), (
                 "Lock with live PID should be preserved even with old timestamp"
             )
@@ -309,8 +311,9 @@ class TestLockFileRecovery:
 
         mgr = DuckDBConnectionManager(db_path)
         try:
-            with pytest.raises(CompactionError, match="Another process is compacting"):
+            with pytest.raises(CompactionError, match="Another process is compacting") as exc_info:
                 mgr.connect()
+            assert exc_info.value.operation == "connection"
             assert lock_path.exists(), (
                 "Legacy lock with live PID should be preserved"
             )
@@ -431,8 +434,9 @@ class TestLockFileRecovery:
 
         mgr = DuckDBConnectionManager(db_path)
         try:
-            with pytest.raises(CompactionError, match="Another process is compacting"):
+            with pytest.raises(CompactionError, match="Another process is compacting") as exc_info:
                 mgr.connect()
+            assert exc_info.value.operation == "connection"
 
             # Artifacts must be preserved — they belong to the other process
             assert lock_path.exists(), "Lock should be preserved"
@@ -466,8 +470,9 @@ class TestLockFileRecovery:
 
         mgr = DuckDBConnectionManager(db_path)
         try:
-            with pytest.raises(CompactionError, match="Another process is compacting"):
+            with pytest.raises(CompactionError, match="Another process is compacting") as exc_info:
                 mgr.connect()
+            assert exc_info.value.operation == "connection"
 
             # Artifacts should be untouched
             assert lock_path.exists(), "Lock should be preserved"

@@ -324,7 +324,7 @@ class DuckDBConnectionManager:
                     f"Another process is compacting this database "
                     f"(lock held by live PID). Retry in a few seconds. "
                     f"Lock file: {lock_file}",
-                    operation="connect",
+                    operation="connection",
                 )
             elif own_lock_alive:
                 # Our own compaction is reconnecting after the swap — the
