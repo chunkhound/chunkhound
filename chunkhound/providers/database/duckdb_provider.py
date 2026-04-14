@@ -3556,6 +3556,16 @@ class DuckDBProvider(SerialDatabaseProvider):
             self._execute_in_db_thread_sync("execute_query", query, params),
         )
 
+    def list_file_paths_under_directory(
+        self, directory_prefix: str
+    ) -> list[str]:
+        escaped_prefix = escape_like_pattern(directory_prefix)
+        rows = self.execute_query(
+            "SELECT path FROM files WHERE path = ? OR path LIKE ? ESCAPE '\\'",
+            [directory_prefix, f"{escaped_prefix}/%"],
+        )
+        return [row["path"] for row in rows if row.get("path")]
+
     def _executor_execute_query(
         self, conn: Any, state: dict[str, Any], query: str, params: list[Any] | None
     ) -> list[dict[str, Any]]:

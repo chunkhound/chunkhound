@@ -34,8 +34,26 @@ _STARTER_LOCKS_DIR_NAME = "daemon-starter-locks"
 _RUNTIME_DIR_ENV = "CHUNKHOUND_DAEMON_RUNTIME_DIR"
 # User-scoped registry of running daemons, keyed by canonical project root hash
 _REGISTRY_DIR_NAME = "daemon-registry"
-# User-scoped startup lock — serializes overlap checks across project roots
+# Dedicated user-scoped registry directory override (used by tests and
+# debugging). The registry dir is intentionally not resolved from the runtime
+# dir so two daemons under different CHUNKHOUND_DAEMON_RUNTIME_DIR values can
+# still discover each other through the cross-runtime overlap gate.
+_REGISTRY_DIR_ENV = "CHUNKHOUND_DAEMON_REGISTRY_DIR"
+# Runtime-scoped startup lock — serializes overlap checks across project roots
+# within one runtime dir (note: the name is historical; this lock is NOT
+# user-scoped — see _CROSS_RUNTIME_STARTUP_LOCKS_DIR_NAME for the cross-runtime
+# per-root barrier).
 _GLOBAL_STARTUP_LOCK_NAME = "daemon.global.startup.lock"
+# User-scoped, user-wide cross-runtime startup lock — a single file that
+# serializes the find_conflicting_daemon → spawn critical section across every
+# canonical project root. Hash-keying this lock per-root only covers exact
+# same-root startups and lets two proxies on parent/child roots (e.g. /proj and
+# /proj/sub) race past each other before either publishes a registry entry, so
+# the barrier is deliberately user-wide. Daemon startup is infrequent and
+# brief, so serializing unrelated-root startups is acceptable.
+# Stored as a sibling of the user-scoped daemon-registry dir so
+# CHUNKHOUND_DAEMON_REGISTRY_DIR overrides isolate this lock in tests.
+_CROSS_RUNTIME_STARTUP_LOCK_NAME = "daemon-startup.lock"
 # Short runtime-scoped socket root (Linux/macOS) to stay within AF_UNIX limits
 _SOCKETS_DIR_NAME = "chunkhound-daemon-sockets"
 _WINDOWS_LOOPBACK_HOST = "127.0.0.1"
@@ -99,6 +117,23 @@ def _default_runtime_dir() -> Path:
         if runtime_root:
             return Path(runtime_root) / suffix
 
+    return Path(tempfile.gettempdir()) / suffix
+
+
+def _default_registry_dir() -> Path:
+    """Return the user-scoped registry dir for the cross-runtime overlap gate.
+
+    Deliberately independent of ``_default_runtime_dir`` so daemons launched
+    under different ``CHUNKHOUND_DAEMON_RUNTIME_DIR`` values still discover
+    each other through the cross-runtime registry pass. Callers that want
+    test isolation should override the dedicated registry env var rather
+    than leaning on the runtime-dir env var.
+    """
+    override = os.environ.get(_REGISTRY_DIR_ENV)
+    if override:
+        return Path(override).expanduser()
+
+    suffix = f"chunkhound-{_runtime_owner_tag()}-registry"
     return Path(tempfile.gettempdir()) / suffix
 
 
@@ -241,6 +276,20 @@ def _normalize_startup_breadcrumb_message(message: str) -> str:
     return normalized
 
 
+def _normalize_started_at(raw: object) -> float:
+    """Coerce a started_at metadata field to float, defaulting on garbage.
+
+    A malformed started_at must not raise during overlap-gate iteration.
+    Losing the entry is precisely the failure mode that lets a second
+    daemon slip past the cross-runtime overlap gate, so callers preserve
+    the entry and only the timestamp degrades.
+    """
+    try:
+        return float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+
+
 @dataclass(slots=True)
 class DaemonStartupHandle:
     """Process handle and diagnostics surface for a daemon startup attempt."""
@@ -276,12 +325,36 @@ class DaemonDiscovery:
         return _default_runtime_dir()
 
     def get_registry_dir(self) -> Path:
-        """Return the user-scoped daemon registry directory."""
-        return self.get_runtime_dir() / _REGISTRY_DIR_NAME
+        """Return the user-scoped daemon registry directory.
+
+        Not resolved under :py:meth:`get_runtime_dir` — the registry is the
+        cross-runtime overlap gate, so two daemons under different
+        runtime-dir env values must still see each other here.
+        """
+        return _default_registry_dir() / _REGISTRY_DIR_NAME
 
     def get_global_startup_lock_path(self) -> Path:
-        """Return the user-scoped global startup lock path."""
+        """Return the runtime-scoped global startup lock path.
+
+        Despite the historical name, this lock only serializes overlap checks
+        *within* one ``CHUNKHOUND_DAEMON_RUNTIME_DIR``. Cross-runtime same-root
+        serialization is owned by :py:meth:`get_cross_runtime_startup_lock_path`.
+        """
         return self.get_runtime_dir() / _GLOBAL_STARTUP_LOCK_NAME
+
+    def get_cross_runtime_startup_lock_path(self) -> Path:
+        """Return the user-wide cross-runtime startup lock path.
+
+        Deliberately stored under :py:func:`_default_registry_dir` — *not*
+        under :py:meth:`get_runtime_dir` — and deliberately a single file
+        (not hash-keyed per canonical project root). A per-root hash would
+        only serialize exact same-root startups, but the pre-registry race
+        extends to parent/child overlapping roots (e.g. ``/proj`` and
+        ``/proj/sub``) whose hashes differ, so the barrier must be user-wide.
+        Daemon startup is infrequent and brief, so serializing unrelated-root
+        startups on this file is acceptable.
+        """
+        return _default_registry_dir() / _CROSS_RUNTIME_STARTUP_LOCK_NAME
 
     def get_registry_entry_path(self) -> Path:
         """Return the registry entry path for this canonical project root."""
@@ -458,17 +531,12 @@ class DaemonDiscovery:
             self._remove_lock_file(lock_path)
             return None
 
-        try:
-            normalized_started_at = float(started_at)
-        except (TypeError, ValueError):
-            normalized_started_at = 0.0
-
         return {
             "project_dir": str(root),
             "pid": pid,
             "socket_path": socket_path,
             "lock_path": str(expected_lock_path),
-            "started_at": normalized_started_at,
+            "started_at": _normalize_started_at(started_at),
         }
 
     def _iter_validated_lock_entries(self) -> list[dict[str, Any]]:
@@ -653,7 +721,14 @@ class DaemonDiscovery:
         return None
 
     def _validated_registry_entry(self, entry_path: Path) -> dict[str, Any] | None:
-        """Return authoritative live-daemon metadata for a registry entry."""
+        """Return authoritative live-daemon metadata for a registry entry.
+
+        Trusts the ``lock_path`` stored in the entry as the absolute path of
+        the authoritative lock file for that daemon — not a path derived
+        from the current process's runtime dir. That lets the cross-runtime
+        overlap gate validate daemons whose lock files live under a
+        different ``CHUNKHOUND_DAEMON_RUNTIME_DIR``.
+        """
         entry = self._read_registry_entry(entry_path)
         if entry is None:
             return None
@@ -661,25 +736,23 @@ class DaemonDiscovery:
         project_dir_raw = entry.get("project_dir")
         pid = entry.get("pid")
         lock_path_raw = entry.get("lock_path")
-        if not isinstance(project_dir_raw, str) or not isinstance(pid, int):
+        if (
+            not isinstance(project_dir_raw, str)
+            or not isinstance(pid, int)
+            or not isinstance(lock_path_raw, str)
+            or not lock_path_raw
+        ):
             self._remove_registry_entry_file(entry_path)
             return None
 
         root = _canonical_project_dir(Path(project_dir_raw))
-        expected_lock_path = DaemonDiscovery(root).get_lock_path()
-        if (
-            not isinstance(lock_path_raw, str)
-            or Path(lock_path_raw) != expected_lock_path
-        ):
-            self._remove_registry_entry_file(entry_path)
-            return None
 
         if not pid_alive(pid):
             self._remove_registry_entry_file(entry_path)
             return None
 
-        other_discovery = DaemonDiscovery(root)
-        lock = other_discovery.read_lock()
+        stored_lock_path = Path(lock_path_raw)
+        lock = self._read_json_file(stored_lock_path)
         if lock is None:
             self._remove_registry_entry_file(entry_path)
             return None
@@ -699,8 +772,10 @@ class DaemonDiscovery:
             "project_dir": str(root),
             "pid": pid,
             "socket_path": str(lock.get("socket_path", entry.get("socket_path", ""))),
-            "lock_path": str(expected_lock_path),
-            "started_at": float(lock.get("started_at", entry.get("started_at", 0.0))),
+            "lock_path": str(stored_lock_path),
+            "started_at": _normalize_started_at(
+                lock.get("started_at", entry.get("started_at", 0.0))
+            ),
         }
 
     def find_conflicting_daemon(self) -> dict[str, Any] | None:
@@ -718,15 +793,20 @@ class DaemonDiscovery:
         if not registry_dir.exists():
             return None
 
+        own_lock_path = self.get_lock_path()
         for entry_path in registry_dir.glob("*.json"):
             entry = self._validated_registry_entry(entry_path)
             if entry is None:
                 continue
-            other_root = _canonical_project_dir(Path(str(entry["project_dir"])))
-            if _normalized_project_dir(other_root) == _normalized_project_dir(
-                self._project_dir
-            ):
+            # Skip only this runtime's own registry entry for the current root.
+            # Same-root entries whose authoritative lock lives under a
+            # *different* runtime dir MUST be reported so two daemons cannot
+            # coexist on one project checkout across runtime dirs. The lock
+            # pass above owns same-runtime same-root protection; the registry
+            # pass owns cross-runtime same-root protection.
+            if Path(str(entry["lock_path"])) == own_lock_path:
                 continue
+            other_root = _canonical_project_dir(Path(str(entry["project_dir"])))
             if _roots_overlap(self._project_dir, other_root):
                 return entry
         return None
@@ -788,12 +868,20 @@ class DaemonDiscovery:
         self._release_pid_lock(self.get_starter_lock_path())
 
     def _acquire_global_startup_lock(self) -> bool:
-        """Try to acquire the user-scoped global startup lock."""
+        """Try to acquire the runtime-scoped global startup lock."""
         return self._acquire_pid_lock(self.get_global_startup_lock_path())
 
     def _release_global_startup_lock(self) -> None:
-        """Release the user-scoped global startup lock."""
+        """Release the runtime-scoped global startup lock."""
         self._release_pid_lock(self.get_global_startup_lock_path())
+
+    def _acquire_cross_runtime_startup_lock(self) -> bool:
+        """Try to acquire the user-scoped per-root cross-runtime startup lock."""
+        return self._acquire_pid_lock(self.get_cross_runtime_startup_lock_path())
+
+    def _release_cross_runtime_startup_lock(self) -> None:
+        """Release the user-scoped per-root cross-runtime startup lock."""
+        self._release_pid_lock(self.get_cross_runtime_startup_lock_path())
 
     # ------------------------------------------------------------------
     # Liveness checks
@@ -1028,7 +1116,14 @@ class DaemonDiscovery:
 
         deadline = time.monotonic() + _STARTUP_TIMEOUT
         while time.monotonic() < deadline:
-            if not self._acquire_global_startup_lock():
+            # User-scoped per-root startup barrier: closes the concurrent
+            # cross-runtime startup race where two proxies under different
+            # CHUNKHOUND_DAEMON_RUNTIME_DIR values both pass
+            # find_conflicting_daemon() before either publishes its registry
+            # entry. Within one runtime dir, the runtime-scoped global startup
+            # lock below still owns serialization and is strictly nested under
+            # this user-scoped lock.
+            if not self._acquire_cross_runtime_startup_lock():
                 conflict = self.find_conflicting_daemon()
                 if conflict is not None:
                     raise self._overlap_error(conflict)
@@ -1048,79 +1143,123 @@ class DaemonDiscovery:
                 continue
 
             try:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
+                if not self._acquire_global_startup_lock():
+                    conflict = self.find_conflicting_daemon()
+                    if conflict is not None:
+                        raise self._overlap_error(conflict)
 
-                existing_address = await self._reuse_live_daemon(
-                    initial_address,
-                    remaining,
-                )
-                if existing_address is not None:
-                    return existing_address
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
 
-                conflict = self.find_conflicting_daemon()
-                if conflict is not None:
-                    raise self._overlap_error(conflict)
-
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-
-                # No live daemon — race to become the sole daemon starter.
-                # The global startup lock is acquired before the per-root
-                # starter lock and released after it, so no live process can
-                # hold the starter lock while we already hold the global one.
-                if not self._acquire_starter_lock():
-                    raise AssertionError(
-                        "starter lock unavailable while global startup lock is held"
+                    existing_address = await self._reuse_live_daemon(
+                        initial_address,
+                        remaining,
                     )
+                    if existing_address is not None:
+                        return existing_address
+
+                    await asyncio.sleep(min(_STARTUP_POLL_INTERVAL, remaining))
+                    continue
 
                 try:
-                    startup_address = self._select_startup_ipc_address()
-                    startup = self._start_daemon_subprocess(
-                        args,
-                        socket_path=startup_address,
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+
+                    existing_address = await self._reuse_live_daemon(
+                        initial_address,
+                        remaining,
                     )
-                    poll_deadline = time.monotonic() + remaining
-                    while time.monotonic() < poll_deadline:
-                        returncode = startup.process.poll()
-                        if returncode is not None:
-                            raise RuntimeError(
-                                self._format_startup_failure(
-                                    prefix=(
-                                        "ChunkHound daemon exited before it became "
-                                        f"reachable (address: {startup_address})"
-                                    ),
-                                    log_path=startup.log_path,
-                                    returncode=returncode,
-                                )
-                            )
-                        lock = self.read_lock()
-                        if lock is not None:
-                            actual_address = str(
-                                lock.get("socket_path", initial_address)
-                            )
-                            if await self._socket_connectable(actual_address):
-                                return actual_address
-                        sleep_for = poll_deadline - time.monotonic()
-                        await asyncio.sleep(
-                            min(_STARTUP_POLL_INTERVAL, max(sleep_for, 0.0))
+                    if existing_address is not None:
+                        return existing_address
+
+                    conflict = self.find_conflicting_daemon()
+                    if conflict is not None:
+                        raise self._overlap_error(conflict)
+
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+
+                    # No live daemon — race to become the sole daemon starter.
+                    # The global startup lock is acquired before the per-root
+                    # starter lock and released after it, so no live process
+                    # can hold the starter lock while we already hold the
+                    # global one.
+                    if not self._acquire_starter_lock():
+                        raise AssertionError(
+                            "starter lock unavailable while global startup lock is held"
                         )
 
-                    raise RuntimeError(
-                        self._format_startup_failure(
-                            prefix=(
-                                f"ChunkHound daemon did not start within "
-                                f"{_STARTUP_TIMEOUT}s (address: {startup_address})"
-                            ),
-                            log_path=startup.log_path,
+                    try:
+                        startup_address = self._select_startup_ipc_address()
+                        startup = self._start_daemon_subprocess(
+                            args,
+                            socket_path=startup_address,
                         )
-                    )
+                        poll_deadline = time.monotonic() + remaining
+                        while time.monotonic() < poll_deadline:
+                            returncode = startup.process.poll()
+                            if returncode is not None:
+                                raise RuntimeError(
+                                    self._format_startup_failure(
+                                        prefix=(
+                                            "ChunkHound daemon exited before it became "
+                                            f"reachable (address: {startup_address})"
+                                        ),
+                                        log_path=startup.log_path,
+                                        returncode=returncode,
+                                    )
+                                )
+                            lock = self.read_lock()
+                            if lock is not None:
+                                actual_address = str(
+                                    lock.get("socket_path", initial_address)
+                                )
+                                actual_pid = lock.get("pid")
+                                if (
+                                    isinstance(actual_pid, int)
+                                    and await self._socket_connectable(actual_address)
+                                ):
+                                    # Authoritative registry publication from
+                                    # the proxy. Cross-runtime discovery reads
+                                    # only the user-scoped registry dir, so if
+                                    # the entry is missing when we release the
+                                    # user-wide startup lock a later proxy
+                                    # cannot see this daemon (IPC addresses and
+                                    # authoritative lock files are runtime-
+                                    # scoped). The daemon's own best-effort
+                                    # write in server.py is retained as an
+                                    # idempotent secondary path, but the proxy
+                                    # is the contract owner here: any failure
+                                    # of this write must fail the startup so
+                                    # the cross-runtime barrier is never
+                                    # released over an unpublished daemon.
+                                    self.write_registry_entry(
+                                        actual_pid, actual_address
+                                    )
+                                    return actual_address
+                            sleep_for = poll_deadline - time.monotonic()
+                            await asyncio.sleep(
+                                min(_STARTUP_POLL_INTERVAL, max(sleep_for, 0.0))
+                            )
+
+                        raise RuntimeError(
+                            self._format_startup_failure(
+                                prefix=(
+                                    f"ChunkHound daemon did not start within "
+                                    f"{_STARTUP_TIMEOUT}s (address: {startup_address})"
+                                ),
+                                log_path=startup.log_path,
+                            )
+                        )
+                    finally:
+                        self._release_starter_lock()
                 finally:
-                    self._release_starter_lock()
+                    self._release_global_startup_lock()
             finally:
-                self._release_global_startup_lock()
+                self._release_cross_runtime_startup_lock()
 
         raise RuntimeError(
             self._format_startup_failure(

@@ -1009,17 +1009,37 @@ class RealtimePipelineMixin:
     async def _cleanup_deleted_directory(
         self, dir_path: str | Path, *, source_generation: int | None = None
     ) -> int:
-        """Queue cleanup work for files that were under a deleted directory."""
-        normalized_dir = str(self._normalize_mutation_path(dir_path))
+        """Queue cleanup work for files that were under a deleted directory.
 
-        search_results, _ = await self.services.provider.search_regex_async(
-            pattern=f"^{normalized_dir}/.*",
-            page_size=1000,
-        )
+        Enumerates rows directly from the ``files`` table by path prefix so
+        chunkless rows (binary, empty, or unparseable files) are still cleaned
+        up alongside chunked rows.
+        """
+        normalized_dir = self._normalize_mutation_path(dir_path)
+        absolute_dir = str(normalized_dir)
+
+        base_root = self._path_filter_root(normalized_dir)
+        try:
+            relative_dir = normalized_dir.relative_to(base_root).as_posix()
+        except ValueError:
+            relative_dir = absolute_dir
+
+        provider = self.services.provider
+        list_paths = getattr(provider, "list_file_paths_under_directory", None)
+        if callable(list_paths):
+            file_paths = await asyncio.to_thread(list_paths, relative_dir)
+        else:
+            search_results, _ = await provider.search_regex_async(
+                pattern=f"^{absolute_dir}/.*",
+                page_size=1000,
+            )
+            file_paths = [
+                result.get("file_path") or result.get("path", "")
+                for result in search_results
+            ]
 
         queued_files = 0
-        for result in search_results:
-            file_path = result.get("file_path", result.get("path", ""))
+        for file_path in file_paths:
             if not file_path:
                 continue
             accepted = await self._enqueue_mutation(
@@ -1034,10 +1054,10 @@ class RealtimePipelineMixin:
 
         logger.info(
             "Queued cleanup for "
-            f"{queued_files} files from deleted directory: {normalized_dir}"
+            f"{queued_files} files from deleted directory: {absolute_dir}"
         )
         self._debug(
-            f"queued deleted directory cleanup {normalized_dir} files={queued_files}"
+            f"queued deleted directory cleanup {absolute_dir} files={queued_files}"
         )
         return queued_files
     async def _process_delete_mutation(

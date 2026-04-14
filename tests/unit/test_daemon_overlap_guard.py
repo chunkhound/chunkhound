@@ -12,22 +12,31 @@ import pytest
 import chunkhound.daemon.discovery as discovery_module
 from chunkhound.daemon.discovery import (
     DaemonDiscovery,
+    DaemonStartupHandle,
     _normalized_project_dir,
     _roots_overlap,
     _write_json_atomically,
 )
 
 _RUNTIME_DIR_ENV = "CHUNKHOUND_DAEMON_RUNTIME_DIR"
+_REGISTRY_DIR_ENV = "CHUNKHOUND_DAEMON_REGISTRY_DIR"
 
 
 def _set_runtime_dir_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> Path:
-    """Point daemon runtime metadata at a test-local directory."""
+    """Point daemon runtime metadata at a test-local directory.
+
+    Also isolates the user-scoped registry directory so tests cannot reach
+    a real developer's registry state on the host.
+    """
     runtime_dir = tmp_path / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv(_RUNTIME_DIR_ENV, str(runtime_dir))
+    registry_dir = tmp_path / "registry"
+    registry_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv(_REGISTRY_DIR_ENV, str(registry_dir))
     return runtime_dir
 
 
@@ -405,6 +414,470 @@ def test_registry_validation_removes_entry_with_mismatched_lock_project_dir(
 
     assert DaemonDiscovery(tmp_path / "other").find_conflicting_daemon() is None
     assert not discovery.get_registry_entry_path().exists()
+
+
+def test_registry_overlap_same_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Within one runtime dir, same-root protection runs through the lock path.
+
+    Two daemons under the same ``CHUNKHOUND_DAEMON_RUNTIME_DIR`` collide on
+    the runtime-scoped lock file before overlap detection is consulted, so
+    the registry pass intentionally skips entries whose authoritative
+    ``lock_path`` is this runtime's own ``get_lock_path()``. Cross-runtime
+    same-root protection is exercised by
+    ``test_registry_overlap_blocks_second_daemon_across_runtime_dirs``.
+    """
+    _set_runtime_dir_env(monkeypatch, tmp_path)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+
+    seeded = DaemonDiscovery(project_dir)
+    seeded.write_lock(os.getpid(), "tcp:127.0.0.1:54330", auth_token="token")
+    seeded.write_registry_entry(os.getpid(), "tcp:127.0.0.1:54330")
+
+    conflict = DaemonDiscovery(project_dir).find_conflicting_daemon()
+    assert conflict is None
+    assert seeded.get_registry_entry_path().exists()
+
+
+def test_registry_overlap_nested_child(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A live registry entry for a parent root must block a nested-child daemon."""
+    _set_runtime_dir_env(monkeypatch, tmp_path)
+
+    parent = tmp_path / "proj"
+    child = parent / "sub"
+    child.mkdir(parents=True)
+
+    seeded = DaemonDiscovery(parent)
+    seeded.write_lock(os.getpid(), "tcp:127.0.0.1:54331", auth_token="token")
+    seeded.write_registry_entry(os.getpid(), "tcp:127.0.0.1:54331")
+
+    conflict = DaemonDiscovery(child).find_conflicting_daemon()
+    assert conflict is not None
+    assert conflict["project_dir"] == str(parent.resolve())
+    assert conflict["pid"] == os.getpid()
+
+
+def test_registry_overlap_nested_parent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A live registry entry for a child root must block a parent-root daemon."""
+    _set_runtime_dir_env(monkeypatch, tmp_path)
+
+    parent = tmp_path / "proj"
+    child = parent / "sub"
+    child.mkdir(parents=True)
+
+    seeded = DaemonDiscovery(child)
+    seeded.write_lock(os.getpid(), "tcp:127.0.0.1:54332", auth_token="token")
+    seeded.write_registry_entry(os.getpid(), "tcp:127.0.0.1:54332")
+
+    conflict = DaemonDiscovery(parent).find_conflicting_daemon()
+    assert conflict is not None
+    assert conflict["project_dir"] == str(child.resolve())
+    assert conflict["pid"] == os.getpid()
+
+
+def test_registry_overlap_blocks_second_daemon_across_runtime_dirs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Two daemons under different runtime dirs must still collide.
+
+    Locks a same-root daemon launched under ``runtime_a`` and then constructs
+    a fresh ``DaemonDiscovery`` under ``runtime_b`` (different runtime dir,
+    same user-scoped registry dir). The second daemon's startup must be
+    refused via the cross-runtime registry pass because the first daemon
+    already owns an overlapping project root.
+    """
+    # Shared user-scoped registry dir so both runtimes look at the same file.
+    registry_dir = tmp_path / "shared-registry"
+    registry_dir.mkdir()
+    monkeypatch.setenv(_REGISTRY_DIR_ENV, str(registry_dir))
+
+    runtime_a = tmp_path / "runtime-a"
+    runtime_b = tmp_path / "runtime-b"
+    runtime_a.mkdir()
+    runtime_b.mkdir()
+
+    parent = tmp_path / "proj"
+    child = parent / "sub"
+    child.mkdir(parents=True)
+
+    # Seed a live daemon under runtime A for the parent root.
+    monkeypatch.setenv(_RUNTIME_DIR_ENV, str(runtime_a))
+    seeded = DaemonDiscovery(parent)
+    seeded.write_lock(os.getpid(), "tcp:127.0.0.1:54340", auth_token="token")
+    seeded.write_registry_entry(os.getpid(), "tcp:127.0.0.1:54340")
+    runtime_a_lock_path = seeded.get_lock_path()
+    assert runtime_a_lock_path.is_file()
+
+    # Construct a fresh discovery under runtime B (different runtime dir, same
+    # user-scoped registry dir). Both the same-root and the parent/child cases
+    # must be refused: the registry pass owns cross-runtime protection.
+    monkeypatch.setenv(_RUNTIME_DIR_ENV, str(runtime_b))
+    fresh_same_root = DaemonDiscovery(parent)
+    child_conflict = DaemonDiscovery(child).find_conflicting_daemon()
+    assert child_conflict is not None
+    assert child_conflict["project_dir"] == str(parent.resolve())
+    assert child_conflict["pid"] == os.getpid()
+    # The lock path in the returned entry points at runtime A's lock file,
+    # not runtime B's expected lock path. That is the invariant that proves
+    # the cross-runtime registry pass trusts stored lock paths rather than
+    # deriving them from the current runtime dir.
+    assert Path(child_conflict["lock_path"]) == runtime_a_lock_path
+    assert not Path(child_conflict["lock_path"]).is_relative_to(runtime_b)
+
+    # Same-root across runtime dirs: runtime B must see runtime A's parent-root
+    # daemon and refuse to start. This is the cross-runtime contract the lock
+    # pass cannot enforce — lock files are runtime-scoped and would not collide.
+    parent_conflict = fresh_same_root.find_conflicting_daemon()
+    assert parent_conflict is not None
+    assert parent_conflict["project_dir"] == str(parent.resolve())
+    assert parent_conflict["pid"] == os.getpid()
+    assert Path(parent_conflict["lock_path"]) == runtime_a_lock_path
+    assert not Path(parent_conflict["lock_path"]).is_relative_to(runtime_b)
+    assert seeded.get_registry_entry_path().exists()
+
+
+def test_cross_runtime_startup_lock_path_is_not_runtime_scoped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The cross-runtime startup lock must live outside ``get_runtime_dir``.
+
+    If this lock ever leaks back under the runtime dir, two proxies under
+    different ``CHUNKHOUND_DAEMON_RUNTIME_DIR`` values can both acquire their
+    own copy and the pre-registry cross-runtime startup race reopens. Pin the
+    invariant so no future refactor can silently put the file back.
+    """
+    _set_runtime_dir_env(monkeypatch, tmp_path)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    discovery = DaemonDiscovery(project_dir)
+
+    lock_path = discovery.get_cross_runtime_startup_lock_path()
+    runtime_dir = discovery.get_runtime_dir().resolve()
+    assert not lock_path.resolve().is_relative_to(runtime_dir)
+
+
+def test_cross_runtime_startup_lock_path_is_user_wide(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The cross-runtime startup lock must be a single user-wide file.
+
+    Hash-keying the lock per canonical project root would only serialize
+    exact same-root startups and would still let parent/child overlapping
+    roots (e.g. ``/proj`` and ``/proj/sub``) race past each other before
+    either publishes a registry entry. Pin the invariant that
+    ``get_cross_runtime_startup_lock_path`` returns the same path for every
+    project root so the barrier is user-wide.
+    """
+    _set_runtime_dir_env(monkeypatch, tmp_path)
+
+    proj_a = tmp_path / "proj-a"
+    proj_b = tmp_path / "proj-b"
+    nested = proj_a / "sub"
+    proj_a.mkdir()
+    proj_b.mkdir()
+    nested.mkdir()
+
+    path_a = DaemonDiscovery(proj_a).get_cross_runtime_startup_lock_path()
+    path_b = DaemonDiscovery(proj_b).get_cross_runtime_startup_lock_path()
+    path_nested = DaemonDiscovery(nested).get_cross_runtime_startup_lock_path()
+    assert path_a == path_b == path_nested
+
+
+def test_cross_runtime_startup_lock_serializes_same_root_across_runtime_dirs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Two same-root proxies under different runtime dirs must not both acquire.
+
+    Concrete pre-registry race the user-scoped barrier closes: proxy A under
+    ``runtime_a`` and proxy B under ``runtime_b`` both target ``/proj``; both
+    pass ``_reuse_live_daemon`` (no daemon yet), both would call
+    ``find_conflicting_daemon`` and find nothing, and both would spawn a
+    daemon. The new user-scoped per-root startup lock must block proxy B
+    from acquiring while proxy A holds.
+    """
+    # Shared user-scoped registry dir so both runtimes resolve the same
+    # cross-runtime startup lock path.
+    registry_dir = tmp_path / "shared-registry"
+    registry_dir.mkdir()
+    monkeypatch.setenv(_REGISTRY_DIR_ENV, str(registry_dir))
+
+    runtime_a = tmp_path / "runtime-a"
+    runtime_b = tmp_path / "runtime-b"
+    runtime_a.mkdir()
+    runtime_b.mkdir()
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+
+    # Proxy A acquires under runtime A.
+    monkeypatch.setenv(_RUNTIME_DIR_ENV, str(runtime_a))
+    discovery_a = DaemonDiscovery(project_dir)
+    assert discovery_a._acquire_cross_runtime_startup_lock() is True
+    lock_path_a = discovery_a.get_cross_runtime_startup_lock_path()
+    assert lock_path_a.is_file()
+
+    # Proxy B attempts to acquire under runtime B — must be refused even
+    # though runtime dirs differ, because the lock is user-scoped per root.
+    monkeypatch.setenv(_RUNTIME_DIR_ENV, str(runtime_b))
+    discovery_b = DaemonDiscovery(project_dir)
+    lock_path_b = discovery_b.get_cross_runtime_startup_lock_path()
+    assert lock_path_b == lock_path_a
+    assert discovery_b._acquire_cross_runtime_startup_lock() is False
+
+    # Proxy A releases; proxy B can now acquire.
+    monkeypatch.setenv(_RUNTIME_DIR_ENV, str(runtime_a))
+    discovery_a._release_cross_runtime_startup_lock()
+    assert not lock_path_a.exists()
+
+    monkeypatch.setenv(_RUNTIME_DIR_ENV, str(runtime_b))
+    assert discovery_b._acquire_cross_runtime_startup_lock() is True
+    discovery_b._release_cross_runtime_startup_lock()
+
+
+def test_cross_runtime_startup_lock_serializes_parent_child_across_runtime_dirs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Parent/child overlapping roots must contend on the cross-runtime lock.
+
+    The original pre-registry race is not limited to exact same-root: a
+    proxy on ``/proj`` under runtime A and a proxy on ``/proj/sub`` under
+    runtime B can both pass ``find_conflicting_daemon`` and spawn duplicate
+    overlapping daemons. A hash-keyed per-root lock would let them through
+    because the two canonical roots produce different project hashes. The
+    user-wide barrier must block them regardless.
+    """
+    registry_dir = tmp_path / "shared-registry"
+    registry_dir.mkdir()
+    monkeypatch.setenv(_REGISTRY_DIR_ENV, str(registry_dir))
+
+    runtime_a = tmp_path / "runtime-a"
+    runtime_b = tmp_path / "runtime-b"
+    runtime_a.mkdir()
+    runtime_b.mkdir()
+
+    parent = tmp_path / "proj"
+    child = parent / "sub"
+    child.mkdir(parents=True)
+
+    monkeypatch.setenv(_RUNTIME_DIR_ENV, str(runtime_a))
+    disc_parent = DaemonDiscovery(parent)
+    assert disc_parent._acquire_cross_runtime_startup_lock() is True
+    try:
+        monkeypatch.setenv(_RUNTIME_DIR_ENV, str(runtime_b))
+        disc_child = DaemonDiscovery(child)
+        # Parent-vs-child must contend even though canonical project hashes
+        # differ, because the underlying lock file is user-wide.
+        assert (
+            disc_parent.get_cross_runtime_startup_lock_path()
+            == disc_child.get_cross_runtime_startup_lock_path()
+        )
+        assert disc_child._acquire_cross_runtime_startup_lock() is False
+    finally:
+        monkeypatch.setenv(_RUNTIME_DIR_ENV, str(runtime_a))
+        disc_parent._release_cross_runtime_startup_lock()
+
+
+def test_cross_runtime_startup_lock_serializes_unrelated_roots_user_wide(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Unrelated roots must also contend; the barrier is deliberately user-wide.
+
+    Serializing the startup critical section across every root is the only
+    sound way to close the parent/child race without building a full overlap
+    lattice inside the lock layer. Pin that unrelated roots contend too so a
+    future refactor cannot silently hash-key this lock and reopen the gap.
+    """
+    registry_dir = tmp_path / "shared-registry"
+    registry_dir.mkdir()
+    monkeypatch.setenv(_REGISTRY_DIR_ENV, str(registry_dir))
+    monkeypatch.setenv(_RUNTIME_DIR_ENV, str(tmp_path / "runtime"))
+
+    proj_a = tmp_path / "proj-a"
+    proj_b = tmp_path / "proj-b"
+    proj_a.mkdir()
+    proj_b.mkdir()
+
+    disc_a = DaemonDiscovery(proj_a)
+    disc_b = DaemonDiscovery(proj_b)
+    assert disc_a._acquire_cross_runtime_startup_lock() is True
+    try:
+        assert disc_b._acquire_cross_runtime_startup_lock() is False
+    finally:
+        disc_a._release_cross_runtime_startup_lock()
+    # After the holder releases, the second proxy can finally acquire.
+    assert disc_b._acquire_cross_runtime_startup_lock() is True
+    disc_b._release_cross_runtime_startup_lock()
+
+
+async def test_ensure_daemon_running_publishes_registry_entry_authoritatively(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The proxy must write the registry entry before releasing the cross-runtime lock.
+
+    Cross-runtime discovery reads only the user-scoped registry dir, so if
+    the entry is missing when the user-wide startup lock is released, a
+    later proxy under a different ``CHUNKHOUND_DAEMON_RUNTIME_DIR`` cannot
+    see this daemon — IPC addresses and authoritative lock files are
+    runtime-scoped and invisible to it. Server-side ``write_registry_entry``
+    in ``daemon/server.py`` is wrapped in a non-fatal ``try/except``, so the
+    only way to guarantee publication for this startup path is for the
+    proxy itself to write the entry while the lock is still held.
+
+    This test simulates a daemon that writes its lock file but never calls
+    ``write_registry_entry`` (mirroring the non-fatal publish-failure mode)
+    and asserts that after ``find_or_start_daemon`` returns, the registry
+    entry is nonetheless present and visible to a proxy under a different
+    runtime dir.
+    """
+    _set_runtime_dir_env(monkeypatch, tmp_path)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    discovery = DaemonDiscovery(project_dir)
+
+    fake_address = "tcp:127.0.0.1:54997"
+
+    class _FakeProcess:
+        def poll(self) -> int | None:
+            return None
+
+    log_path = discovery.get_daemon_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.touch()
+
+    def fake_start(args: object, *, socket_path: str | None = None) -> DaemonStartupHandle:
+        # Publish an authoritative runtime-scoped lock file the way a real
+        # daemon would — but deliberately never publish a registry entry, so
+        # the proxy-side write is the only thing that can close the gap.
+        discovery.write_lock(os.getpid(), fake_address, auth_token="token")
+        return DaemonStartupHandle(process=_FakeProcess(), log_path=log_path)  # type: ignore[arg-type]
+
+    async def fake_connectable(address: str) -> bool:
+        return address == fake_address
+
+    monkeypatch.setattr(discovery, "_start_daemon_subprocess", fake_start)
+    monkeypatch.setattr(discovery, "_socket_connectable", fake_connectable)
+
+    entry_path = discovery.get_registry_entry_path()
+    assert not entry_path.exists()
+
+    address = await discovery.find_or_start_daemon(object())
+    assert address == fake_address
+
+    # The proxy-side authoritative write ran before the cross-runtime lock
+    # was released, so the registry entry is present even though the
+    # simulated daemon never published its own.
+    assert entry_path.exists()
+    payload = json.loads(entry_path.read_text())
+    assert payload["pid"] == os.getpid()
+    assert payload["socket_path"] == fake_address
+    assert payload["project_dir"] == str(project_dir.resolve())
+
+    # And a proxy under a different runtime dir can see the daemon via
+    # the user-scoped registry pass — the contract the whole cross-runtime
+    # barrier exists to enforce.
+    alt_runtime = tmp_path / "runtime-alt"
+    alt_runtime.mkdir()
+    monkeypatch.setenv(_RUNTIME_DIR_ENV, str(alt_runtime))
+    alt_discovery = DaemonDiscovery(project_dir)
+    conflict = alt_discovery.find_conflicting_daemon()
+    assert conflict is not None
+    assert conflict["pid"] == os.getpid()
+    assert conflict["socket_path"] == fake_address
+
+
+def test_validated_registry_entry_normalizes_corrupt_started_at(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A non-numeric ``started_at`` must default to 0.0 without raising."""
+    _set_runtime_dir_env(monkeypatch, tmp_path)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    discovery = DaemonDiscovery(project_dir)
+    discovery.write_lock(os.getpid(), "tcp:127.0.0.1:54333", auth_token="token")
+    # Overwrite the lock file with a corrupt started_at so both lookup paths
+    # exercise the defensive normalization.
+    lock_path = discovery.get_lock_path()
+    lock_path.write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "socket_path": "tcp:127.0.0.1:54333",
+                "started_at": "not-a-float",
+                "project_dir": str(project_dir.resolve()),
+                "auth_token": "token",
+            }
+        )
+    )
+    discovery.write_registry_entry(os.getpid(), "tcp:127.0.0.1:54333")
+    entry_path = discovery.get_registry_entry_path()
+    payload = json.loads(entry_path.read_text())
+    payload["started_at"] = "also-not-a-float"
+    entry_path.write_text(json.dumps(payload))
+
+    entry = discovery._validated_registry_entry(entry_path)
+    assert entry is not None
+    assert entry["started_at"] == 0.0
+    assert entry["pid"] == os.getpid()
+    # Defensive normalization must NOT delete the entry.
+    assert entry_path.exists()
+
+
+def test_find_conflicting_daemon_skips_corrupt_started_at_entry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A corrupt registry entry must not break iteration over real overlaps."""
+    _set_runtime_dir_env(monkeypatch, tmp_path)
+
+    parent = tmp_path / "proj"
+    other_root = tmp_path / "unrelated"
+    parent.mkdir()
+    other_root.mkdir()
+
+    # Seed the *real* overlapping entry first so file iteration order does
+    # not let the test pass by accident.
+    real = DaemonDiscovery(parent)
+    real.write_lock(os.getpid(), "tcp:127.0.0.1:54334", auth_token="token")
+    real.write_registry_entry(os.getpid(), "tcp:127.0.0.1:54334")
+
+    # Seed a corrupt registry entry for an unrelated root with non-numeric
+    # started_at metadata in BOTH the lock file and the registry entry.
+    # _validated_registry_entry walks through the float() conversion and
+    # must not raise on either field.
+    other = DaemonDiscovery(other_root)
+    other.write_lock(os.getpid(), "tcp:127.0.0.1:54335", auth_token="token")
+    other_lock_path = other.get_lock_path()
+    other_lock_path.write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "socket_path": "tcp:127.0.0.1:54335",
+                "started_at": "garbage",
+                "project_dir": str(other_root.resolve()),
+                "auth_token": "token",
+            }
+        )
+    )
+    other.write_registry_entry(os.getpid(), "tcp:127.0.0.1:54335")
+    other_entry_path = other.get_registry_entry_path()
+    other_payload = json.loads(other_entry_path.read_text())
+    other_payload["started_at"] = "also-garbage"
+    other_entry_path.write_text(json.dumps(other_payload))
+
+    child = parent / "sub"
+    child.mkdir()
+    conflict = DaemonDiscovery(child).find_conflicting_daemon()
+    assert conflict is not None
+    assert conflict["project_dir"] == str(parent.resolve())
 
 
 def test_write_json_atomically_survives_same_target_concurrency(tmp_path: Path) -> None:

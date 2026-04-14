@@ -556,6 +556,60 @@ async def test_verify_source_fallback_ignores_transient_state_and_checks_contrac
     assert cleanup_roots == [work_root, work_root]
 
 
+def test_main_fails_when_no_host_compatible_wheels(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """``main`` must fail loudly when wheel paths produce no compatible runs."""
+    macos_wheel = tmp_path / "chunkhound-0.0.0-py3-none-macosx_11_0_arm64.whl"
+    macos_wheel.write_text("wheel", encoding="utf-8")
+
+    monkeypatch.setattr(
+        live_verifier.runtime_verifier,
+        "_verify_supported_wheel_matrix",
+        lambda paths: {},
+    )
+    monkeypatch.setattr(
+        live_verifier,
+        "_host_compatible_wheels",
+        lambda paths: [],
+    )
+
+    def _should_not_run(*args: object, **kwargs: object) -> None:
+        raise AssertionError("verifier must not run when host has no compatible wheels")
+
+    monkeypatch.setattr(live_verifier, "_verify_wheel", _should_not_run)
+
+    exit_code = live_verifier.main([str(macos_wheel)])
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "no host-compatible wheels" in captured.err
+
+
+def test_main_source_fallback_only_returns_zero_with_no_compatible_wheels(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A ``--verify-source-fallback``-only invocation must remain unaffected."""
+    monkeypatch.setattr(
+        live_verifier,
+        "_host_compatible_wheels",
+        lambda paths: [],
+    )
+
+    async def fake_verify_source_fallback(source_root: Path) -> None:
+        return None
+
+    monkeypatch.setattr(
+        live_verifier,
+        "_verify_source_fallback",
+        fake_verify_source_fallback,
+    )
+
+    exit_code = live_verifier.main(
+        ["--verify-source-fallback", "--source-root", str(tmp_path)]
+    )
+    assert exit_code == 0
+
+
 def test_main_requires_wheels_or_source_fallback(capsys) -> None:
     try:
         live_verifier.main([])
@@ -620,6 +674,9 @@ def test_clean_room_env_injects_runtime_dir(tmp_path: Path, monkeypatch) -> None
     )
 
     assert env["CHUNKHOUND_DAEMON_RUNTIME_DIR"] == str(runtime_dir)
+    assert env["CHUNKHOUND_DAEMON_REGISTRY_DIR"] == str(
+        runtime_dir / "daemon-user-registry"
+    )
     assert env["TEST_FLAG"] == "1"
 
 

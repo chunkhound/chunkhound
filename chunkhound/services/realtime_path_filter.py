@@ -85,6 +85,21 @@ class RealtimePathFilter:
         except Exception:
             return Path.cwd().resolve()
 
+    @property
+    def is_degraded(self) -> bool:
+        """Return True when ignore/include evaluation cannot be trusted.
+
+        Realtime admission still fails closed when the filter is degraded,
+        but cleanup paths use this flag to preserve rows we cannot prove are
+        excluded — losing rows when the exclusion oracle is broken would
+        be user-visible data loss.
+        """
+        return (
+            self._engine_initialization_failed
+            or self._ignore_engine_degraded
+            or self._include_degraded
+        )
+
     def should_index(self, file_path: Path) -> bool:
         """Return whether a path should enter the realtime indexing pipeline."""
         settings = self._settings

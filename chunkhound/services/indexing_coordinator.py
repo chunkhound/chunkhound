@@ -2916,7 +2916,18 @@ class IndexingCoordinator(BaseService):
         if not full_path.exists():
             return "missing_on_disk"
 
+        if path_filter.is_degraded:
+            # The exclusion oracle cannot be trusted; preserving the row is
+            # the only safe choice. The next healthy pass will catch up on
+            # policy-excluded deletes.
+            return "degraded_filter_skipped"
+
         if not path_filter.should_index(full_path):
+            # should_index() can lazily build the ignore engine and flip
+            # is_degraded on the first call, so re-check before treating
+            # a False as a confirmed exclusion.
+            if path_filter.is_degraded:
+                return "degraded_filter_skipped"  # type: ignore[unreachable]
             return "excluded_by_current_policy"
 
         return None
@@ -2977,6 +2988,7 @@ class IndexingCoordinator(BaseService):
             cleanup_reason_counts = {
                 "missing_on_disk": 0,
                 "excluded_by_current_policy": 0,
+                "degraded_filter_skipped": 0,
             }
             cleanup_filter = self._build_cleanup_path_filter(
                 include_patterns,
@@ -2992,6 +3004,12 @@ class IndexingCoordinator(BaseService):
                     cleanup_filter,
                 )
                 if cleanup_reason is None:
+                    continue
+
+                if cleanup_reason == "degraded_filter_skipped":
+                    # Surface the preserved volume in the summary log but do
+                    # not enqueue the row for delete.
+                    cleanup_reason_counts["degraded_filter_skipped"] += 1
                     continue
 
                 orphaned_files.append((file_path, cleanup_reason))
@@ -3066,8 +3084,19 @@ class IndexingCoordinator(BaseService):
                     "("
                     f"missing_on_disk={cleanup_reason_counts['missing_on_disk']}, "
                     "excluded_by_current_policy="
-                    f"{cleanup_reason_counts['excluded_by_current_policy']}"
+                    f"{cleanup_reason_counts['excluded_by_current_policy']}, "
+                    "degraded_filter_skipped="
+                    f"{cleanup_reason_counts['degraded_filter_skipped']}"
                     ")"
+                )
+            elif cleanup_reason_counts["degraded_filter_skipped"] > 0:
+                logger.warning(
+                    "Cleanup preserved "
+                    f"{cleanup_reason_counts['degraded_filter_skipped']} rows "
+                    "because the realtime path filter is degraded "
+                    "(missing_on_disk=0, excluded_by_current_policy=0, "
+                    "degraded_filter_skipped="
+                    f"{cleanup_reason_counts['degraded_filter_skipped']})"
                 )
 
             return orphaned_count

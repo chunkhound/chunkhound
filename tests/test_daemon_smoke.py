@@ -89,6 +89,9 @@ def _make_env(
     if runtime_dir is not None:
         runtime_dir.mkdir(parents=True, exist_ok=True)
         env["CHUNKHOUND_DAEMON_RUNTIME_DIR"] = str(runtime_dir)
+        registry_dir = runtime_dir / "daemon-user-registry"
+        registry_dir.mkdir(parents=True, exist_ok=True)
+        env["CHUNKHOUND_DAEMON_REGISTRY_DIR"] = str(registry_dir)
     if extra_env is not None:
         env.update(extra_env)
     return env

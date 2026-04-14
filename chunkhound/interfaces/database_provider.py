@@ -327,6 +327,18 @@ class DatabaseProvider(Protocol):
         """Perform regex search on code content (asynchronous)."""
         ...
 
+    def list_file_paths_under_directory(
+        self, directory_prefix: str
+    ) -> list[str]:
+        """Return every ``files.path`` under a relative directory prefix.
+
+        Includes paths equal to ``directory_prefix`` and paths starting with
+        ``f"{directory_prefix}/"``. Used by realtime deleted-directory cleanup
+        so chunkless rows (binary, empty, or unparseable files) are still
+        enumerated alongside chunked rows.
+        """
+        ...
+
     def search_text(
         self, query: str, page_size: int = 10, offset: int = 0
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:

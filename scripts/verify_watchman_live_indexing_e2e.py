@@ -5,6 +5,7 @@ import asyncio
 import json
 import ntpath
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -353,6 +354,11 @@ def _clean_room_env(
     env = _mcp_env(venv_dir)
     if runtime_dir is not None:
         env["CHUNKHOUND_DAEMON_RUNTIME_DIR"] = str(runtime_dir)
+        # The user-scoped registry dir must also be redirected so the clean
+        # room verifier does not touch a real developer's overlap gate state.
+        env["CHUNKHOUND_DAEMON_REGISTRY_DIR"] = str(
+            runtime_dir / "daemon-user-registry"
+        )
     if extra_env:
         env.update(extra_env)
     return env
@@ -1044,7 +1050,18 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--require-supported-matrix requires at least one wheel.")
         runtime_verifier._verify_supported_wheel_matrix(wheel_paths)
 
-    for wheel_path in _host_compatible_wheels(wheel_paths):
+    compatible_wheels = _host_compatible_wheels(wheel_paths)
+    if wheel_paths and not compatible_wheels:
+        print(
+            f"ERROR: no host-compatible wheels for verification on "
+            f"{platform.system()}/{platform.machine()}. The installed-wheel "
+            f"live-indexing e2e must run on one of the supported rollout "
+            f"hosts (Linux x86_64, Windows x86_64).",
+            file=sys.stderr,
+        )
+        return 2
+
+    for wheel_path in compatible_wheels:
         asyncio.run(_verify_wheel(wheel_path))
 
     if args.verify_source_fallback:

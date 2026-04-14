@@ -281,6 +281,158 @@ async def test_discovery_realtime_and_cleanup_agree_on_gitignored_worktree_path(
         provider.disconnect()
 
 
+@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
+@pytest.mark.asyncio
+async def test_cleanup_deleted_directory_enumerates_chunkless_files(
+    tmp_path: Path,
+) -> None:
+    """Deleted-directory cleanup must enumerate file rows, not chunk content.
+
+    A chunkless file row (e.g. a binary or empty file) has no rows in the
+    chunks table, so the previous regex-over-chunk-content enumeration left
+    those rows behind. The new provider method walks the files table directly,
+    so chunkless rows must be queued for delete alongside chunked rows.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "sub").mkdir()
+    db_path = tmp_path / "deldir.duckdb"
+    config = _build_config(root, db_path)
+    services = create_services(db_path, config)
+    services.provider.connect()
+
+    try:
+        provider = services.provider
+        provider.insert_file(
+            File(
+                path="sub/empty.bin",
+                mtime=0.0,
+                language=Language.UNKNOWN,
+                size_bytes=0,
+            )
+        )
+        provider.insert_file(
+            File(
+                path="sub/code.py",
+                mtime=0.0,
+                language=Language.PYTHON,
+                size_bytes=10,
+            )
+        )
+        provider.insert_file(
+            File(
+                path="other/keep.py",
+                mtime=0.0,
+                language=Language.PYTHON,
+                size_bytes=5,
+            )
+        )
+
+        service = RealtimeIndexingService(services, config)
+        service.watch_path = root
+
+        queued: list[str] = []
+
+        async def fake_enqueue(mutation: object) -> bool:
+            queued.append(str(getattr(mutation, "path", "")))
+            return True
+
+        service._enqueue_mutation = fake_enqueue  # type: ignore[assignment]
+
+        await service._cleanup_deleted_directory(str(root / "sub"))
+
+        absolute_paths = {str(root / "sub" / "empty.bin"), str(root / "sub" / "code.py")}
+        assert set(queued) == absolute_paths
+        assert str(root / "other" / "keep.py") not in queued
+    finally:
+        services.provider.disconnect()
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
+@pytest.mark.asyncio
+async def test_cleanup_preserves_rows_when_realtime_filter_is_degraded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A degraded filter must not delete rows we cannot prove are excluded.
+
+    ``missing_on_disk`` reconciliation is orthogonal to the filter and must
+    still run, but ``excluded_by_current_policy`` deletes must be preserved
+    until a healthy pass can re-evaluate them.
+    """
+    root, _ignored_file, included_file = _build_gitignored_worktree_layout(tmp_path)
+    db_path = tmp_path / "degraded-cleanup.duckdb"
+    config = _build_config(root, db_path)
+    provider = DuckDBProvider(db_path, base_directory=root)
+    provider.connect()
+
+    try:
+        coordinator = IndexingCoordinator(
+            database_provider=provider,
+            base_directory=root,
+            config=config,
+        )
+
+        # Force RealtimePathFilter.should_index() to mark the engine as
+        # degraded by raising during build_repo_aware_ignore_engine.
+        import chunkhound.utils.ignore_engine as ignore_engine_module
+
+        def _broken_builder(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("simulated ignore-engine build failure")
+
+        monkeypatch.setattr(
+            ignore_engine_module,
+            "build_repo_aware_ignore_engine",
+            _broken_builder,
+        )
+
+        included_rel = included_file.relative_to(root).as_posix()
+        missing_rel = (root / "src" / "missing.py").relative_to(root).as_posix()
+
+        provider.insert_file(
+            File(
+                path=included_rel,
+                mtime=float(included_file.stat().st_mtime),
+                language=Language.PYTHON,
+                size_bytes=int(included_file.stat().st_size),
+            )
+        )
+        provider.insert_file(
+            File(
+                path=missing_rel,
+                mtime=0.0,
+                language=Language.PYTHON,
+                size_bytes=0,
+            )
+        )
+
+        deleted_paths: list[str] = []
+
+        def fake_delete_files_batch(file_paths: list[str]) -> int:
+            deleted_paths.extend(file_paths)
+            return len(file_paths)
+
+        monkeypatch.setattr(
+            provider,
+            "delete_files_batch",
+            fake_delete_files_batch,
+        )
+
+        # Discovery sees the file on disk; reconciliation pass is told it is
+        # not in the current discovered set so the cleanup path is exercised.
+        cleaned = coordinator._cleanup_orphaned_files(
+            root, [], ["**/*.py"], []
+        )
+
+        # Only the missing-on-disk row was deleted; the still-present row was
+        # preserved because the filter could not prove exclusion.
+        assert deleted_paths == [missing_rel]
+        assert cleaned == 1
+        assert included_rel not in deleted_paths
+    finally:
+        provider.disconnect()
+
+
 def test_realtime_path_filter_preserves_explicit_logical_nested_scope_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

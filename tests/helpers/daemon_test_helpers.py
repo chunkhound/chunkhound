@@ -19,14 +19,21 @@ from chunkhound.daemon import ipc
 from chunkhound.daemon.discovery import DaemonDiscovery
 
 _RUNTIME_DIR_ENV = "CHUNKHOUND_DAEMON_RUNTIME_DIR"
+_REGISTRY_DIR_ENV = "CHUNKHOUND_DAEMON_REGISTRY_DIR"
 
 
 @contextlib.contextmanager
 def runtime_dir_env(runtime_dir: Path | None):
-    """Temporarily point daemon runtime metadata at a test runtime dir."""
+    """Temporarily point daemon runtime metadata at a test runtime dir.
+
+    Also isolates the user-scoped registry directory under the same
+    temporary location so test runs cannot touch a real user's registry.
+    """
     previous_runtime_dir = os.environ.get(_RUNTIME_DIR_ENV)
+    previous_registry_dir = os.environ.get(_REGISTRY_DIR_ENV)
     if runtime_dir is not None:
         os.environ[_RUNTIME_DIR_ENV] = str(runtime_dir)
+        os.environ[_REGISTRY_DIR_ENV] = str(runtime_dir / "daemon-user-registry")
     try:
         yield
     finally:
@@ -34,6 +41,10 @@ def runtime_dir_env(runtime_dir: Path | None):
             os.environ.pop(_RUNTIME_DIR_ENV, None)
         else:
             os.environ[_RUNTIME_DIR_ENV] = previous_runtime_dir
+        if previous_registry_dir is None:
+            os.environ.pop(_REGISTRY_DIR_ENV, None)
+        else:
+            os.environ[_REGISTRY_DIR_ENV] = previous_registry_dir
 
 
 def is_daemon_running(project_dir: Path) -> bool:
