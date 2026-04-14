@@ -1,0 +1,252 @@
+// Grammar for TwinCAT Structured Text implementation code
+//
+// IMPORT STRATEGY: Shared terminals (numbers, strings, booleans, etc.) are imported
+// from common.lark. IDENTIFIER is defined locally with a negative lookahead that
+// excludes implementation-specific keywords (IF, WHILE, FOR, etc.). This prevents
+// keywords from being parsed as identifiers while allowing keywords from other
+// grammars (e.g., VAR, FUNCTION_BLOCK) to be valid variable names here.
+
+// Import shared terminals and rules from common.lark
+%import .common (HEX_NUMBER, BINARY_NUMBER, OCTAL_NUMBER, FLOAT, INTEGER, TIME_LITERAL, STRING, TRUE, FALSE, MINUS, OF, TO, integer_value, WS, BLOCK_COMMENT, LINE_COMMENT)
+%ignore WS
+%ignore BLOCK_COMMENT
+%ignore LINE_COMMENT
+
+// Entry point - sequence of statements
+start: statement*
+
+// Statements
+?statement: assignment_stmt
+          | function_call_stmt
+          | if_stmt
+          | case_stmt
+          | for_stmt
+          | while_stmt
+          | repeat_stmt
+          | exit_stmt
+          | continue_stmt
+          | return_stmt
+          | expression_stmt
+          | empty_stmt
+
+// Expression statement: standalone expression like member access
+// Must be placed after function_call_stmt so function calls take priority
+expression_stmt: variable ";"
+
+// Assignment statement: var := expr;
+assignment_stmt: variable ASSIGN expression ";"
+
+ASSIGN: ":="
+OUTPUT_ARROW: "=>"
+
+// Standalone function call: MyFunc(a, b);
+function_call_stmt: function_call ";"
+
+// IF statement
+if_stmt: IF expression THEN statement* elsif_clause* else_clause? END_IF ";"?
+
+elsif_clause: ELSIF expression THEN statement*
+
+else_clause: ELSE statement*
+
+// CASE statement
+// Uses left-factoring to resolve LALR shift-reduce conflict between:
+// - case_label: IDENTIFIER(.IDENTIFIER)* followed by ":"
+// - statement: IDENTIFIER(.IDENTIFIER)* followed by ":=" or ";" or "("
+// The common prefix is factored out, then disambiguation happens based on the following token.
+case_stmt: CASE expression OF case_body else_clause? END_CASE ";"?
+
+// Case body contains a sequence of case items
+// Each item is either a case label line or a statement
+case_body: case_item*
+
+// A case item starts with either an integer (unambiguous case label)
+// or an identifier (ambiguous - could be case label or statement)
+?case_item: integer_case_label
+          | identifier_case_item
+          | keyword_statement
+          | empty_stmt
+
+// Integer-based case labels are unambiguous
+// Handles: 1:  or  1..5:  or  1, 2, 3:
+integer_case_label: integer_case_value ("," integer_case_value)* ":"
+
+integer_case_value: integer_value
+                  | integer_value ".." integer_value
+
+// Identifier-starting items: left-factor the common IDENTIFIER prefix
+// After parsing IDENTIFIER, look at what follows to determine the path
+identifier_case_item: IDENTIFIER id_case_continuation
+
+// Continuation after IDENTIFIER in case body context
+// Determines whether this is a case label, assignment, expression stmt, or function call
+?id_case_continuation: "." IDENTIFIER id_case_continuation                           -> id_member_path
+                     | "." INTEGER id_case_continuation                              -> id_bit_path
+                     | "[" expression ("," expression)* "]" id_case_continuation     -> id_array_path
+                     | "^" id_case_continuation                                      -> id_deref_path
+                     | "(" (call_arg ("," call_arg)*)? ")" ";"                        -> id_func_call_end
+                     | ":"                                                             -> id_case_label_end
+                     | "," case_label_tail ":"                                         -> id_case_label_list_end
+                     | ASSIGN expression ";"                                          -> id_assignment_end
+                     | ";"                                                            -> id_expr_stmt_end
+
+// For case labels with multiple values after the first identifier path
+// e.g., Enum.a, Enum.b, 3:
+case_label_tail: case_label_value ("," case_label_value)*
+
+case_label_value: integer_value
+                | integer_value ".." integer_value
+                | IDENTIFIER ("." IDENTIFIER)*
+
+// Keyword-starting statements that cannot be confused with case labels
+// These are unambiguous because they start with reserved keywords
+?keyword_statement: if_stmt
+                  | for_stmt
+                  | while_stmt
+                  | repeat_stmt
+                  | exit_stmt
+                  | continue_stmt
+                  | return_stmt
+                  | case_stmt
+
+// FOR loop - supports both normal syntax and parenthesized initial assignment
+for_stmt: FOR IDENTIFIER ASSIGN expression TO expression by_clause? DO statement* END_FOR ";"?
+        | FOR "(" IDENTIFIER ASSIGN expression ")" TO expression by_clause? DO statement* END_FOR ";"?
+
+by_clause: BY expression
+
+// WHILE loop
+while_stmt: WHILE expression DO statement* END_WHILE ";"?
+
+// REPEAT loop
+repeat_stmt: REPEAT statement* UNTIL expression END_REPEAT ";"?
+
+// Jump statements
+exit_stmt: EXIT ";"
+continue_stmt: CONTINUE ";"
+return_stmt: RETURN ("(" expression ")")? ";"
+
+// Empty statement (just semicolon)
+empty_stmt: ";"
+
+// Expressions - precedence from lowest to highest
+?expression: or_xor_expr
+
+?or_xor_expr: and_expr ((OR | OR_ELSE | XOR) and_expr)*
+
+?and_expr: equality ((AND | AND_THEN) equality)*
+
+?equality: relational (eq_op relational)*
+eq_op: "=" -> eq
+     | "<>" -> ne
+
+?relational: add_expr (rel_op add_expr)*
+rel_op: "<=" -> le
+      | ">=" -> ge
+      | "<" -> lt
+      | ">" -> gt
+
+?add_expr: mul_expr ((PLUS | MINUS) mul_expr)*
+
+?mul_expr: unary_expr ((STAR | SLASH | MOD) unary_expr)*
+
+?unary_expr: NOT unary_expr -> not_expr
+           | MINUS unary_expr -> neg_expr
+           | exp_expr
+
+// Exponentiation binds tighter than unary operators per IEC 61131-3
+// i.e., -2**3 = -(2**3), NOT a**b = NOT(a**b)
+// Supports both ** operator and EXPT keyword
+?exp_expr: primary ((POWER | EXPT) exp_expr)?
+
+?primary: "(" expression ")"
+        | function_call
+        | literal
+        | variable
+
+// Function call: FUNC(arg1, arg2) or TYPE_CONVERSION(val)
+// Also handles FB invocations with named parameters
+// Also handles method calls: obj.Method(args)
+// Note: EXPT can be used as a function call (EXPT(a, b)) in addition to infix operator (a EXPT b)
+function_call: IDENTIFIER "(" (call_arg ("," call_arg)*)? ")"
+             | variable "(" (call_arg ("," call_arg)*)? ")"
+             | EXPT "(" (call_arg ("," call_arg)*)? ")"
+
+call_arg: IDENTIFIER ASSIGN expression? -> named_input_arg
+        | IDENTIFIER OUTPUT_ARROW variable? -> named_output_arg
+        | expression
+
+// Variable reference with possible member/array/bit access
+variable: IDENTIFIER accessor*
+
+accessor: "." IDENTIFIER -> member_access
+        | "." INTEGER -> bit_access
+        | "[" expression ("," expression)* "]" -> array_access
+        | "^" -> dereference
+
+// Literals
+literal: boolean_literal
+       | numeric_literal
+       | string_literal
+       | time_literal
+
+boolean_literal: TRUE -> true_lit
+               | FALSE -> false_lit
+
+numeric_literal: FLOAT -> float_lit
+               | INTEGER -> int_lit
+               | HEX_NUMBER -> hex_lit
+               | BINARY_NUMBER -> bin_lit
+               | OCTAL_NUMBER -> oct_lit
+
+string_literal: STRING -> string_lit
+
+time_literal: TIME_LITERAL -> time_lit
+
+// Keywords - contextual lexer will match correctly with IDENTIFIER negative lookahead
+IF: /IF/i
+THEN: /THEN/i
+ELSIF: /ELSIF/i
+ELSE: /ELSE/i
+END_IF: /END_IF/i
+
+CASE: /CASE/i
+END_CASE: /END_CASE/i
+
+FOR: /FOR/i
+BY: /BY/i
+DO: /DO/i
+END_FOR: /END_FOR/i
+
+WHILE: /WHILE/i
+END_WHILE: /END_WHILE/i
+
+REPEAT: /REPEAT/i
+UNTIL: /UNTIL/i
+END_REPEAT: /END_REPEAT/i
+
+EXIT: /EXIT/i
+CONTINUE: /CONTINUE/i
+RETURN: /RETURN/i
+
+// Operators
+AND: /AND(?!_THEN)/i
+AND_THEN: /AND_THEN/i
+OR: /OR(?!_ELSE)/i
+OR_ELSE: /OR_ELSE/i
+XOR: /XOR/i
+NOT: /NOT/i
+MOD: /MOD/i
+
+// Arithmetic operators as terminals
+PLUS: "+"
+STAR: "*"
+SLASH: "/"
+POWER: "**"
+EXPT: /EXPT/i
+
+// Identifiers - negative lookahead prevents matching keywords
+// Keywords: IF, THEN, ELSIF, ELSE, END_IF, CASE, OF, END_CASE, FOR, TO, BY, DO, END_FOR,
+// WHILE, END_WHILE, REPEAT, UNTIL, END_REPEAT, EXIT, CONTINUE, RETURN, AND, AND_THEN, OR, OR_ELSE, XOR, NOT, MOD, EXPT, TRUE, FALSE
+// Also exclude T# which is a time literal prefix
+IDENTIFIER: /(?!(IF|THEN|ELSIF|ELSE|END_IF|CASE|OF|END_CASE|FOR|TO|BY|DO|END_FOR|WHILE|END_WHILE|REPEAT|UNTIL|END_REPEAT|EXIT|CONTINUE|RETURN|AND_THEN|AND|OR_ELSE|OR|XOR|NOT|MOD|EXPT|TRUE|FALSE)\b)(?![tT]#)[a-zA-Z_][a-zA-Z0-9_]*/i

@@ -43,6 +43,7 @@ from chunkhound.parsers.chunk_splitter import (
     universal_to_chunk,
 )
 from chunkhound.parsers.universal_parser import UniversalParser
+from chunkhound.providers.database.like_utils import escape_like_pattern
 
 # File pattern utilities for directory discovery
 from chunkhound.utils.file_patterns import (
@@ -2341,9 +2342,7 @@ class IndexingCoordinator(BaseService):
         except Exception:
             pass
 
-        logger.debug(
-            f"Discovery backend resolved: {_resolved} (reasons: {_reasons})"
-        )
+        logger.debug(f"Discovery backend resolved: {_resolved} (reasons: {_reasons})")
 
         use_git_backend = _resolved in ("git", "git_only")
         git_only_mode = _resolved == "git_only"
@@ -2974,12 +2973,13 @@ class IndexingCoordinator(BaseService):
                 query_params: list[str] = []
             else:
                 directory_prefix = relative_directory.as_posix()
+                escaped_prefix = escape_like_pattern(directory_prefix)
                 query = """
                     SELECT id, path
                     FROM files
-                    WHERE path = ? OR path LIKE ?
+                    WHERE path = ? OR path LIKE ? ESCAPE '\\'
                 """
-                query_params = [directory_prefix, f"{directory_prefix}/%"]
+                query_params = [directory_prefix, escaped_prefix + "/%"]
             db_files = self._db.execute_query(query, query_params)
 
             # Find DB entries that are now missing on disk or excluded by the

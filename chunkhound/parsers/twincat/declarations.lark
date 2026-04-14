@@ -1,0 +1,224 @@
+// Grammar for TwinCAT Structured Text variable declarations
+//
+// IMPORT STRATEGY: Shared terminals (numbers, strings, booleans, etc.) are imported
+// from common.lark. IDENTIFIER is defined locally with a negative lookahead that
+// excludes declaration-specific keywords (VAR, FUNCTION_BLOCK, type names, etc.).
+// This prevents keywords from being parsed as identifiers while allowing keywords
+// from other grammars (e.g., IF, WHILE) to be valid variable names here.
+
+// Import shared terminals and rules from common.lark
+%import .common (HEX_NUMBER, BINARY_NUMBER, OCTAL_NUMBER, FLOAT, INTEGER, TIME_LITERAL, STRING, TRUE, FALSE, MINUS, OF, TO, integer_value, HW_ADDRESS, BOOL, BYTE, WORD, DWORD, LWORD, SINT, USINT, INT, UINT, DINT, UDINT, LINT, ULINT, REAL, LREAL, TIME, DATE, TIME_OF_DAY, DATE_AND_TIME, STRING_TYPE, WSTRING, WS, BLOCK_COMMENT, LINE_COMMENT)
+%ignore WS
+%ignore BLOCK_COMMENT
+%ignore LINE_COMMENT
+
+// Entry point - complete declaration section
+start: pou_declaration
+     | action_declaration
+     | method_declaration
+
+// POU (Program Organization Unit) header and body
+pou_declaration: pou_header var_block* pou_end?
+
+// Action declarations have only VAR blocks (no POU header)
+action_declaration: var_block+
+
+// Method declarations (within FUNCTION_BLOCK)
+method_declaration: attribute* method_header var_block* method_end?
+
+method_header: METHOD access_specifier? IDENTIFIER (":" type_spec)?
+
+access_specifier: PUBLIC | PRIVATE | PROTECTED | INTERNAL | FINAL | ABSTRACT
+
+method_end: END_METHOD
+
+pou_header: PROGRAM IDENTIFIER
+          | FUNCTION_BLOCK IDENTIFIER extends_clause? implements_clause?
+          | FUNCTION IDENTIFIER ":" type_spec
+
+extends_clause: EXTENDS IDENTIFIER
+implements_clause: IMPLEMENTS IDENTIFIER ("," IDENTIFIER)*
+
+pou_end: END_PROGRAM
+       | END_FUNCTION_BLOCK
+       | END_FUNCTION
+
+// Variable blocks
+var_block: attribute* var_block_start var_qualifier* var_declaration* var_block_end
+
+var_block_start: VAR_INPUT
+               | VAR_OUTPUT
+               | VAR_IN_OUT
+               | VAR_GLOBAL
+               | VAR_EXTERNAL
+               | VAR_TEMP
+               | VAR_STAT
+               | VAR
+
+var_qualifier: CONSTANT
+             | RETAIN
+             | PERSISTENT
+
+var_block_end: END_VAR
+
+// Variable declaration
+var_declaration: attribute* IDENTIFIER ("," IDENTIFIER)* hw_location? ":" type_spec (":=" initial_value)? ";"
+
+// Hardware location (AT directive)
+hw_location: "AT" HW_ADDRESS
+
+// Type specification
+type_spec: primitive_type
+         | string_type_with_size
+         | array_type
+         | pointer_type
+         | reference_type
+         | user_type
+
+primitive_type: BOOL | BYTE | WORD | DWORD | LWORD
+              | SINT | USINT | INT | UINT | DINT | UDINT | LINT | ULINT
+              | REAL | LREAL | TIME | DATE | TIME_OF_DAY | DATE_AND_TIME
+
+// STRING can have size in brackets [n] or parentheses (n)
+string_type_with_size: STRING_TYPE ("[" INTEGER "]")?
+                     | STRING_TYPE "(" INTEGER ")"
+                     | WSTRING ("[" INTEGER "]")?
+                     | WSTRING "(" INTEGER ")"
+
+array_type: ARRAY "[" array_range ("," array_range)* "]" OF type_spec
+
+array_range: array_bound ".." array_bound
+
+// Array bounds can be integer literals or constant identifiers
+array_bound: integer_value
+           | IDENTIFIER
+
+pointer_type: POINTER TO type_spec
+
+reference_type: REFERENCE TO type_spec
+
+user_type: IDENTIFIER
+
+// Initial values
+initial_value: literal
+             | array_initializer
+             | struct_initializer
+             | const_expression
+             | identifier_value
+
+// Combined rule for IDENTIFIER-starting initial values
+// Left-factors the common IDENTIFIER prefix to eliminate shift-reduce conflict
+// After IDENTIFIER, the parser looks ahead to determine:
+//   - "(" → function_call path
+//   - "." or end → qualified_identifier path
+identifier_value: IDENTIFIER "(" (init_call_arg ("," init_call_arg)*)? ")" -> function_call
+                | IDENTIFIER ("." IDENTIFIER)* -> qualified_identifier
+
+init_call_arg: IDENTIFIER ":=" init_call_arg_value?
+             | init_call_arg_value
+
+// Values that can appear as function call arguments
+// Uses same left-factoring pattern as identifier_value for IDENTIFIER-starting alternatives
+init_call_arg_value: literal
+                   | IDENTIFIER "(" (init_call_arg ("," init_call_arg)*)? ")" -> function_call
+                   | IDENTIFIER ("." IDENTIFIER)* -> qualified_identifier
+
+// Constant expressions (for use in initial values)
+const_expression: SIZEOF "(" type_or_var ")"
+                | "(" const_expr_operand (const_op const_expr_operand)* ")"
+
+const_expr_operand: const_expression
+                  | IDENTIFIER
+                  | integer_value
+
+type_or_var: IDENTIFIER
+           | primitive_type
+
+const_op: "+" | "-" | "*" | "/"
+
+SIZEOF: /SIZEOF/i
+
+literal: boolean_literal
+       | numeric_literal
+       | string_literal
+       | time_literal
+
+boolean_literal: TRUE | FALSE
+
+numeric_literal: MINUS? FLOAT
+               | MINUS? INTEGER
+               | HEX_NUMBER
+               | BINARY_NUMBER
+               | OCTAL_NUMBER
+
+string_literal: STRING
+
+time_literal: TIME_LITERAL
+
+// Array initializer
+array_initializer: "[" (array_init_element ("," array_init_element)*)? "]"
+
+// Array init element can be a simple value or a repetition like 81(0)
+array_init_element: INTEGER "(" initial_value ")"  // repetition: count(value)
+                  | initial_value
+
+// Struct initializer (parenthesized)
+struct_initializer: "(" (field_init ("," field_init)*)? ")"
+
+field_init: IDENTIFIER ":=" initial_value
+
+// Attribute pragmas
+attribute: "{" ATTRIBUTE_CONTENT "}"
+
+// Keywords - use negative lookahead for prefix keywords to prevent partial matching
+// With contextual lexer, parser state determines valid tokens
+FUNCTION_BLOCK: /FUNCTION_BLOCK/i
+END_FUNCTION_BLOCK: /END_FUNCTION_BLOCK/i
+END_FUNCTION: /END_FUNCTION/i
+FUNCTION: /FUNCTION(?!_)/i
+PROGRAM: /PROGRAM/i
+END_PROGRAM: /END_PROGRAM/i
+METHOD: /METHOD(?!_)/i
+END_METHOD: /END_METHOD/i
+
+// Access specifiers for methods
+PUBLIC: /PUBLIC/i
+PRIVATE: /PRIVATE/i
+PROTECTED: /PROTECTED/i
+INTERNAL: /INTERNAL/i
+FINAL: /FINAL/i
+ABSTRACT: /ABSTRACT/i
+
+// VAR compound keywords
+VAR_INPUT: /VAR_INPUT/i
+VAR_OUTPUT: /VAR_OUTPUT/i
+VAR_IN_OUT: /VAR_IN_OUT/i
+VAR_GLOBAL: /VAR_GLOBAL/i
+VAR_EXTERNAL: /VAR_EXTERNAL/i
+VAR_TEMP: /VAR_TEMP/i
+VAR_STAT: /VAR_STAT/i
+END_VAR: /END_VAR/i
+VAR: /VAR(?!_)/i
+
+CONSTANT: /CONSTANT/i
+RETAIN: /RETAIN/i
+PERSISTENT: /PERSISTENT/i
+
+ARRAY: /ARRAY/i
+POINTER: /POINTER/i
+REFERENCE: /REFERENCE/i
+
+// Inheritance keywords
+EXTENDS: /EXTENDS/i
+IMPLEMENTS: /IMPLEMENTS/i
+
+// Identifiers - negative lookahead prevents matching keywords and time literal prefix
+// Keywords that could conflict: END_VAR, END_PROGRAM, END_FUNCTION, END_FUNCTION_BLOCK,
+// END_METHOD, METHOD, VAR_*, VAR, FUNCTION_BLOCK, FUNCTION, PROGRAM, CONSTANT, RETAIN,
+// PERSISTENT, ARRAY, OF, POINTER, REFERENCE, TO, type keywords, TRUE, FALSE, SIZEOF,
+// PUBLIC, PRIVATE, PROTECTED, INTERNAL, FINAL, ABSTRACT, EXTENDS, IMPLEMENTS
+// Also exclude T# and t# which are time literal prefixes
+IDENTIFIER: /(?!(END_VAR|END_PROGRAM|END_FUNCTION_BLOCK|END_FUNCTION|END_METHOD|VAR_INPUT|VAR_OUTPUT|VAR_IN_OUT|VAR_GLOBAL|VAR_EXTERNAL|VAR_TEMP|VAR_STAT|VAR|FUNCTION_BLOCK|FUNCTION|PROGRAM|METHOD|CONSTANT|RETAIN|PERSISTENT|ARRAY|OF|POINTER|REFERENCE|TO|TIME_OF_DAY|DATE_AND_TIME|TOD|DT|BOOL|BYTE|WORD|DWORD|LWORD|SINT|USINT|UINT|UDINT|DINT|LINT|ULINT|INT|REAL|LREAL|TIME|DATE|STRING|WSTRING|TRUE|FALSE|SIZEOF|PUBLIC|PRIVATE|PROTECTED|INTERNAL|FINAL|ABSTRACT|EXTENDS|IMPLEMENTS)\b)(?![tT]#)[a-zA-Z_][a-zA-Z0-9_]*/i
+
+// Attribute content
+ATTRIBUTE_CONTENT: /[^}]+/

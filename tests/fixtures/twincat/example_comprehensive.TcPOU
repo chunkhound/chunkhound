@@ -1,0 +1,606 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_ComprehensiveExample" Id="{12345678-1234-1234-1234-123456789abc}" SpecialFunc="None">
+    <Declaration><![CDATA[// Comprehensive example demonstrating all supported parser constructs
+// This file exercises the declarations.lark and implementation.lark grammars
+
+FUNCTION_BLOCK FB_ComprehensiveExample
+
+// ============================================================================
+// VAR_INPUT - Input parameters
+// ============================================================================
+VAR_INPUT
+    // Primitive types
+    bEnable : BOOL;
+    nInputValue : INT := 100;
+    fSetpoint : REAL := 3.14159;
+    sCommand : STRING(80) := 'default';
+
+    // Arrays
+    anInputArray : ARRAY[0..9] OF INT;
+    afMatrix : ARRAY[1..3, 1..3] OF REAL;
+END_VAR
+
+// ============================================================================
+// VAR_OUTPUT - Output parameters
+// ============================================================================
+VAR_OUTPUT
+    bDone : BOOL := FALSE;
+    bError : BOOL;
+    nErrorCode : DINT;
+    sStatus : STRING(255);
+    anResults : ARRAY[0..4] OF DINT;
+END_VAR
+
+// ============================================================================
+// VAR_IN_OUT - In/Out parameters (passed by reference)
+// ============================================================================
+VAR_IN_OUT
+    refCounter : DINT;
+    aBuffer : ARRAY[0..1023] OF BYTE;
+END_VAR
+
+// ============================================================================
+// VAR - Local variables
+// ============================================================================
+VAR
+    // Boolean types
+    bFlag1 : BOOL := TRUE;
+    bFlag2, bFlag3 : BOOL;
+
+    // Integer types - various sizes
+    nSint : SINT := -128;
+    nUsint : USINT := 255;
+    nInt : INT := -32768;
+    nUint : UINT := 65535;
+    nDint : DINT := -2147483648;
+    nUdint : UDINT := 16#FFFFFFFF;
+    nLint : LINT;
+    nUlint : ULINT;
+
+    // Floating point types
+    fReal : REAL := 1.5e-3;
+    fLreal : LREAL := 2.718281828;
+
+    // Bit types
+    nByte : BYTE := 16#FF;
+    nWord : WORD := 2#1010101010101010;
+    nDword : DWORD := 8#77777777;
+    nLword : LWORD;
+
+    // String types
+    sName : STRING(50);
+    sDescription : STRING := 'Hello World';
+    wsUnicode : WSTRING(100);
+
+    // Time and date types
+    tDuration : TIME := T#5s;
+    tLongDuration : TIME := T#5400s;
+    dtTimestamp : DATE;
+    todTime : TIME_OF_DAY;
+    dtDateTime : DATE_AND_TIME;
+
+    // Array types - single dimension
+    anSimpleArray : ARRAY[0..9] OF INT := [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    abFlags : ARRAY[1..4] OF BOOL := [TRUE, FALSE, TRUE, FALSE];
+
+    // Array types - multi-dimensional
+    afMatrix2D : ARRAY[0..2, 0..2] OF REAL;
+    anCube : ARRAY[0..1, 0..1, 0..1] OF INT;
+
+    // Array with repetition initializer
+    anZeros : ARRAY[0..99] OF INT := [100(0)];
+
+    // User-defined types (structs, enums, FBs)
+    stData : ST_DataRecord;
+    eState : E_MachineState;
+    fbTimer : TON;
+    fbCounter : CTU;
+
+    // Pointers and references
+    pnValue : POINTER TO INT;
+    pstRecord : POINTER TO ST_DataRecord;
+    refValue : REFERENCE TO DINT;
+
+    // Struct initializer
+    stConfig : ST_Configuration := (nId := 1, sName := 'Config1', bEnabled := TRUE);
+
+    // SIZEOF usage
+    nBufferSize : UDINT := SIZEOF(aBuffer);
+    nIntSize : UDINT := SIZEOF(INT);
+
+    // Loop counters
+    i, j, k : INT;
+    nLoopCount : INT;
+END_VAR
+
+// ============================================================================
+// VAR_STAT - Static variables (retain value between calls)
+// ============================================================================
+VAR_STAT
+    nCallCount : UDINT := 0;
+    fAccumulator : LREAL := 0.0;
+END_VAR
+
+// ============================================================================
+// VAR_TEMP - Temporary variables
+// ============================================================================
+VAR_TEMP
+    nTempValue : INT;
+    fTempResult : REAL;
+END_VAR
+
+// ============================================================================
+// VAR with qualifiers
+// ============================================================================
+VAR CONSTANT
+    c_nMaxItems : INT := 100;
+    c_fPi : REAL := 3.14159265;
+    c_sVersion : STRING := '1.0.0';
+END_VAR
+
+VAR RETAIN
+    nRetainedCounter : DINT;
+    bRetainedFlag : BOOL;
+END_VAR
+
+VAR PERSISTENT
+    nPersistentValue : DINT;
+END_VAR
+
+VAR RETAIN PERSISTENT
+    stSavedState : ST_PersistentData;
+END_VAR
+
+// ============================================================================
+// Hardware-mapped variables (AT directive)
+// ============================================================================
+VAR
+    bDigitalInput AT %I* : BOOL;
+    nAnalogInput AT %IW100 : INT;
+    bDigitalOutput AT %Q* : BOOL;
+    nAnalogOutput AT %QW50 : INT;
+    nMemoryWord AT %MW200 : WORD;
+    bMemoryBit AT %MX100.0 : BOOL;
+END_VAR
+
+// ============================================================================
+// Attribute pragmas
+// ============================================================================
+{attribute 'OPC.UA.DA' := '1'}
+VAR
+    fOpcValue : REAL;
+END_VAR
+
+{attribute 'pack_mode' := '1'}
+VAR
+    {attribute 'hide'}
+    nHiddenVar : INT;
+END_VAR
+
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[// ============================================================================
+// IMPLEMENTATION - Demonstrates all statement and expression types
+// ============================================================================
+
+// Increment static call counter
+nCallCount := nCallCount + 1;
+
+// ============================================================================
+// Simple assignments with various operators
+// ============================================================================
+
+// Arithmetic operators
+nInt := 10 + 5;           // Addition
+nInt := nInt - 3;         // Subtraction
+nInt := nInt * 2;         // Multiplication
+nInt := nInt / 4;         // Division
+nInt := 17 MOD 5;         // Modulo
+fReal := 2.0 EXPT 3.0;    // Exponentiation with EXPT keyword
+fReal := 2.0 ** 3.0;      // Exponentiation with ** operator
+
+// Negation and precedence: -2 EXPT 2 = -(2^2) = -4
+fReal := -2.0 EXPT 2.0;
+
+// Logical operators
+bFlag1 := TRUE AND FALSE;
+bFlag2 := TRUE OR FALSE;
+bFlag3 := TRUE XOR FALSE;
+bFlag1 := NOT bFlag2;
+
+// Short-circuit operators
+bFlag1 := bFlag2 AND_THEN bFlag3;  // Only evaluates bFlag3 if bFlag2 is TRUE
+bFlag2 := bFlag1 OR_ELSE bFlag3;   // Only evaluates bFlag3 if bFlag1 is FALSE
+
+// Relational operators
+bFlag1 := nInt < 100;
+bFlag2 := nInt > 50;
+bFlag3 := nInt <= 75;
+bFlag1 := nInt >= 25;
+bFlag2 := nInt = 42;
+bFlag3 := nInt <> 0;
+
+// Compound expressions with precedence
+nDint := (10 + 5) * 3 - 2;
+bFlag1 := (nInt > 0) AND (nInt < 100) OR bFlag2;
+
+// ============================================================================
+// Numeric literals in various bases
+// ============================================================================
+
+nInt := 42;                // Decimal
+nByte := 16#FF;            // Hexadecimal
+nWord := 2#10101010;       // Binary
+nDword := 8#755;           // Octal
+fReal := 1.5;              // Float
+fReal := 3.14159;          // Float with decimals
+fReal := 1.0e-6;           // Scientific notation
+fReal := 2E10;             // Scientific without decimal
+
+// ============================================================================
+// String literals
+// ============================================================================
+
+sName := 'Single quoted string';
+sDescription := "Double quoted string";
+
+// ============================================================================
+// Time literals
+// ============================================================================
+
+tDuration := T#100ms;
+tDuration := T#5s;
+tDuration := T#150s;
+tDuration := T#3600s;
+tDuration := T#93784005ms;
+tDuration := T#500ms;
+tDuration := T#-10s;       // Negative time
+
+// ============================================================================
+// Variable access patterns
+// ============================================================================
+
+// Simple variable access
+nInt := nInputValue;
+
+// Member access (struct fields)
+nDint := stData.nValue;
+sName := stConfig.sName;
+
+// Chained member access
+fReal := stData.stNested.fValue;
+
+// Array access - single dimension
+nInt := anSimpleArray[0];
+nInt := anInputArray[i];
+
+// Array access - multi-dimensional
+fReal := afMatrix[1, 2];
+fReal := afMatrix2D[i, j];
+
+// Bit access on integers
+bFlag1 := nWord.0;         // Access bit 0
+bFlag2 := nDword.15;       // Access bit 15
+
+// Combined access patterns
+nInt := stData.anArray[i];
+bFlag1 := stData.nFlags.3;
+fReal := aStructArray[i].fValue;
+
+// ============================================================================
+// IF / ELSIF / ELSE / END_IF
+// ============================================================================
+
+IF bEnable THEN
+    bDone := TRUE;
+    nErrorCode := 0;
+END_IF;
+
+IF nInt > 100 THEN
+    nInt := 100;
+ELSIF nInt < 0 THEN
+    nInt := 0;
+ELSE
+    nInt := nInt + 1;
+END_IF;
+
+// Nested IF statements
+IF bFlag1 THEN
+    IF bFlag2 THEN
+        nInt := 1;
+    ELSE
+        nInt := 2;
+    END_IF;
+END_IF;
+
+// Complex condition
+IF (nInt > 0 AND nInt < 100) OR bEnable THEN
+    bFlag1 := TRUE;
+END_IF;
+
+// ============================================================================
+// CASE statement
+// ============================================================================
+
+CASE nInt OF
+    0:
+        sStatus := 'Zero';
+    1:
+        sStatus := 'One';
+    2, 3, 4:
+        sStatus := 'Two to Four';
+    5..10:
+        sStatus := 'Five to Ten';
+    100..200:
+        sStatus := 'Hundred range';
+        bFlag1 := TRUE;
+ELSE
+    sStatus := 'Other';
+END_CASE;
+
+// CASE with numeric constants
+CASE nInt OF
+    20:
+        bDone := FALSE;
+    21:
+        bDone := FALSE;
+    22:
+        bDone := TRUE;
+END_CASE;
+
+// ============================================================================
+// FOR loop
+// ============================================================================
+
+// Basic FOR loop
+FOR i := 0 TO 9 DO
+    anSimpleArray[i] := i * 2;
+END_FOR;
+
+// FOR loop with BY clause (step)
+FOR i := 0 TO 100 BY 10 DO
+    nInt := nInt + i;
+END_FOR;
+
+// FOR loop with negative step
+FOR i := 10 TO 0 BY -1 DO
+    anSimpleArray[i] := 0;
+END_FOR;
+
+// Nested FOR loops
+FOR i := 0 TO 2 DO
+    FOR j := 0 TO 2 DO
+        afMatrix2D[i, j] := DINT_TO_REAL(i * 3 + j);
+    END_FOR;
+END_FOR;
+
+// FOR with parenthesized assignment (alternative syntax)
+FOR (i := 0) TO 9 DO
+    nInt := nInt + 1;
+END_FOR;
+
+// ============================================================================
+// WHILE loop
+// ============================================================================
+
+nLoopCount := 0;
+WHILE nLoopCount < 10 DO
+    nLoopCount := nLoopCount + 1;
+    anSimpleArray[nLoopCount - 1] := nLoopCount;
+END_WHILE;
+
+// WHILE with complex condition
+WHILE bEnable AND (nLoopCount > 0) DO
+    nLoopCount := nLoopCount - 1;
+END_WHILE;
+
+// ============================================================================
+// REPEAT / UNTIL loop
+// ============================================================================
+
+nLoopCount := 0;
+REPEAT
+    nLoopCount := nLoopCount + 1;
+UNTIL nLoopCount >= 10
+END_REPEAT;
+
+// ============================================================================
+// Function calls
+// ============================================================================
+
+// Simple function call with positional arguments
+nInt := ABS(-42);
+fReal := SQRT(16.0);
+nInt := MAX(nInt, 100);
+nInt := MIN(nInt, 0);
+
+// Type conversion functions
+fReal := INT_TO_REAL(nInt);
+nInt := REAL_TO_INT(fReal);
+nDint := INT_TO_DINT(nInt);
+sName := DINT_TO_STRING(nDint);
+
+// Function call with named arguments
+fbTimer(IN := bEnable, PT := T#5s);
+
+// Function call with output arguments using =>
+fbTimer(IN := bEnable, PT := T#1s, Q => bDone, ET => tDuration);
+
+// Function block invocation
+fbCounter(CU := bFlag1, RESET := bFlag2, PV := 100);
+
+// Method call on function block
+fbTimer.Reset();
+
+// Method calls on nested objects
+stData.stNested.GetResult();
+
+// EXPT as function call
+fReal := EXPT(2.0, 8.0);
+
+// ============================================================================
+// Jump statements
+// ============================================================================
+
+// EXIT - break out of loop
+FOR i := 0 TO 100 DO
+    IF i > 50 THEN
+        EXIT;
+    END_IF;
+    nInt := i;
+END_FOR;
+
+// CONTINUE - skip to next iteration
+FOR i := 0 TO 9 DO
+    IF i MOD 2 = 0 THEN
+        CONTINUE;
+    END_IF;
+    anSimpleArray[i] := i;
+END_FOR;
+
+// RETURN - early return from function block
+IF bError THEN
+    RETURN;
+END_IF;
+
+// ============================================================================
+// Empty statement
+// ============================================================================
+
+;  // Empty statement is valid
+
+// ============================================================================
+// Comments
+// ============================================================================
+
+// This is a line comment
+nInt := 42;  // Inline comment
+
+(* This is a block comment *)
+
+(*
+   Multi-line
+   block comment
+*)
+
+nInt := (* inline block comment *) 100;
+
+// ============================================================================
+// Expression statement (standalone variable access)
+// ============================================================================
+
+stData.nCounter;  // Expression statement - accesses but discards result
+
+]]></ST>
+    </Implementation>
+    <Action Name="ProcessData" Id="{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}">
+      <Declaration><![CDATA[// Action: ProcessData
+// Demonstrates local variables in action declaration
+
+VAR
+    nLocalIndex : INT;
+    fLocalSum : REAL := 0.0;
+    bLocalFlag : BOOL;
+    anLocalBuffer : ARRAY[0..9] OF DINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// ProcessData action implementation
+// Demonstrates data processing with loops and conditionals
+
+// Initialize local buffer
+FOR nLocalIndex := 0 TO 9 DO
+    anLocalBuffer[nLocalIndex] := 0;
+END_FOR;
+
+// Process input array with accumulation
+fLocalSum := 0.0;
+FOR nLocalIndex := 0 TO 9 DO
+    IF anInputArray[nLocalIndex] > 0 THEN
+        fLocalSum := fLocalSum + INT_TO_REAL(anInputArray[nLocalIndex]);
+        anLocalBuffer[nLocalIndex] := INT_TO_DINT(anInputArray[nLocalIndex]) * 2;
+    ELSE
+        anLocalBuffer[nLocalIndex] := 0;
+    END_IF;
+END_FOR;
+
+// Copy results to output
+FOR nLocalIndex := 0 TO 4 DO
+    anResults[nLocalIndex] := anLocalBuffer[nLocalIndex];
+END_FOR;
+
+// Set status based on processing
+IF fLocalSum > 1000.0 THEN
+    sStatus := 'High sum detected';
+    bLocalFlag := TRUE;
+ELSIF fLocalSum > 100.0 THEN
+    sStatus := 'Normal processing';
+    bLocalFlag := FALSE;
+ELSE
+    sStatus := 'Low values';
+    bLocalFlag := FALSE;
+END_IF;
+
+// Update accumulator
+fAccumulator := fAccumulator + fLocalSum;
+
+]]></ST>
+      </Implementation>
+    </Action>
+    <Action Name="ResetState" Id="{11111111-2222-3333-4444-555555555555}">
+      <Declaration><![CDATA[// Action: ResetState
+// Demonstrates state reset logic
+
+VAR
+    nResetIndex : INT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// ResetState action implementation
+// Clears all state variables and outputs
+
+// Reset outputs
+bDone := FALSE;
+bError := FALSE;
+nErrorCode := 0;
+sStatus := '';
+
+// Clear output array
+FOR nResetIndex := 0 TO 4 DO
+    anResults[nResetIndex] := 0;
+END_FOR;
+
+// Reset internal state
+bFlag1 := FALSE;
+bFlag2 := FALSE;
+bFlag3 := FALSE;
+nInt := 0;
+fReal := 0.0;
+
+// Reset static accumulator
+fAccumulator := 0.0;
+
+// Reset timers and counters using method calls
+fbTimer(IN := FALSE);
+fbCounter(RESET := TRUE);
+
+// Clear arrays using nested loops
+FOR i := 0 TO 9 DO
+    anSimpleArray[i] := 0;
+END_FOR;
+
+FOR i := 0 TO 2 DO
+    FOR j := 0 TO 2 DO
+        afMatrix2D[i, j] := 0.0;
+    END_FOR;
+END_FOR;
+
+// Signal completion
+sStatus := 'Reset complete';
+
+]]></ST>
+      </Implementation>
+    </Action>
+  </POU>
+</TcPlcObject>
