@@ -243,6 +243,7 @@ class RealtimeIndexingService:
         # Deduplication and error tracking
         self.pending_files: set[Path] = set()
         self.failed_files: set[str] = set()
+        self._compaction_deferred_files: set[str] = set()
 
         # Simple debouncing for rapid file changes
         self._pending_debounce: dict[str, float] = {}  # file_path -> timestamp
@@ -318,6 +319,7 @@ class RealtimeIndexingService:
         self._indexed_files.clear()
         self._removed_files.clear()
         self.failed_files.clear()
+        self._compaction_deferred_files.clear()
         logger.debug(f"Starting real-time indexing for {watch_path}")
         self._debug(f"start watch on {watch_path}")
 
@@ -743,20 +745,30 @@ class RealtimeIndexingService:
 
     async def remove_file(self, file_path: Path) -> None:
         """Remove file from database."""
+        normalized = normalize_file_path(file_path)
         try:
             logger.debug(f"Removing file from database: {file_path}")
             await self.services.provider.delete_file_completely_async(str(file_path))
             self._debug(f"removed file from database: {file_path}")
-            normalized = normalize_file_path(file_path)
             async with self._file_condition:
                 self.failed_files.discard(normalized)
+                self._compaction_deferred_files.discard(normalized)
                 self._removed_files.add(normalized)
+                self._file_condition.notify_all()
+        except CompactionError:
+            logger.debug(
+                f"Compaction in progress, deferring removal of {file_path} — "
+                "will be retried on next event or reindex"
+            )
+            async with self._file_condition:
+                self.failed_files.discard(normalized)
+                self._compaction_deferred_files.add(normalized)
                 self._file_condition.notify_all()
         except Exception as e:
             logger.error(f"Error removing file {file_path}: {e}")
-            normalized = normalize_file_path(file_path)
             async with self._file_condition:
                 self.failed_files.add(normalized)
+                self._compaction_deferred_files.discard(normalized)
                 self._file_condition.notify_all()
 
     async def _add_directory_watch(self, dir_path: str) -> None:
@@ -850,7 +862,9 @@ class RealtimeIndexingService:
                 if not file_path.exists():
                     logger.debug(f"Skipping {file_path} - file no longer exists")
                     async with self._file_condition:
-                        self.failed_files.add(normalize_file_path(file_path))
+                        normalized = normalize_file_path(file_path)
+                        self.failed_files.add(normalized)
+                        self._compaction_deferred_files.discard(normalized)
                         self._file_condition.notify_all()
                     continue
 
@@ -881,6 +895,7 @@ class RealtimeIndexingService:
                 normalized = normalize_file_path(file_path)
                 async with self._file_condition:
                     self.failed_files.discard(normalized)
+                    self._compaction_deferred_files.discard(normalized)
                     self._indexed_files.add(normalized)
                     self._file_condition.notify_all()
 
@@ -917,13 +932,15 @@ class RealtimeIndexingService:
                     "will be picked up on next event or reindex"
                 )
                 async with self._file_condition:
-                    self.failed_files.add(normalize_file_path(file_path))
+                    self._compaction_deferred_files.add(normalize_file_path(file_path))
                     self._file_condition.notify_all()
             except Exception as e:
                 logger.error(f"Error processing {file_path}: {e}")
                 # Track failed files for debugging and monitoring
                 async with self._file_condition:
-                    self.failed_files.add(normalize_file_path(file_path))
+                    normalized = normalize_file_path(file_path)
+                    self.failed_files.add(normalized)
+                    self._compaction_deferred_files.discard(normalized)
                     self._file_condition.notify_all()
                 # Continue processing other files
 
@@ -946,6 +963,12 @@ class RealtimeIndexingService:
             "watching_directory": str(self.watch_path) if self.watch_path else None,
             "watched_directories_count": len(self.watched_directories),  # Added
         }
+
+    async def clear_compaction_deferred_files(self) -> None:
+        """Clear stale compaction-deferral records under the file condition lock."""
+        async with self._file_condition:
+            self._compaction_deferred_files.clear()
+            self._file_condition.notify_all()
 
     async def wait_for_monitoring_ready(self, timeout: float = 10.0) -> bool:
         """Wait for filesystem monitoring to be ready."""
@@ -976,6 +999,7 @@ class RealtimeIndexingService:
                 await self._file_condition.wait_for(
                     lambda: normalized in self._indexed_files
                     or normalized in self.failed_files
+                    or normalized in self._compaction_deferred_files
                     or self._stopping
                 )
 
@@ -1001,6 +1025,7 @@ class RealtimeIndexingService:
                 await self._file_condition.wait_for(
                     lambda: normalized in self._removed_files
                     or normalized in self.failed_files
+                    or normalized in self._compaction_deferred_files
                     or self._stopping
                 )
 
@@ -1020,3 +1045,4 @@ class RealtimeIndexingService:
         self._indexed_files.discard(normalized)
         self._removed_files.discard(normalized)
         self.failed_files.discard(normalized)
+        self._compaction_deferred_files.discard(normalized)

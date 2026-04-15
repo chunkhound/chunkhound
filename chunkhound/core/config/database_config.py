@@ -53,7 +53,11 @@ class DatabaseConfig(BaseModel):
     # Compaction settings
     compaction_enabled: bool = Field(
         default=True,
-        description="Enable automatic compaction when fragmentation exceeds threshold",
+        description=(
+            "Enable automatic background compaction in MCP server after initial scan "
+            "when fragmentation exceeds threshold. CLI indexing uses lightweight "
+            "optimize_tables() only; use 'chunkhound repack' for full CLI compaction."
+        ),
     )
 
     compaction_threshold: float = Field(

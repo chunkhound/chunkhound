@@ -255,8 +255,10 @@ class TestRealtimeFailures:
             "Polling task should be cleaned up after stop()"
 
     @pytest.mark.asyncio
-    async def test_compaction_error_defers_file_to_failed_files(self, realtime_setup):
-        """CompactionError during processing adds file to failed_files for retry."""
+    async def test_compaction_error_defers_file_without_counting_as_failure(
+        self, realtime_setup
+    ):
+        """CompactionError defers retry state without inflating failed_files stats."""
         service, watch_dir, _, services = realtime_setup
         await service.start(watch_dir)
 
@@ -274,15 +276,18 @@ class TestRealtimeFailures:
         # Put file directly in the queue — bypasses debouncing
         await service.file_queue.put(("change", test_file))
 
-        # wait_for_file_indexed checks failed_files in its condition,
-        # so it returns as soon as the file lands in either set.
+        # wait_for_file_indexed checks both terminal failure buckets,
+        # so it returns as soon as the deferred state is recorded.
         await service.wait_for_file_indexed(test_file, timeout=5.0)
 
         from chunkhound.services.realtime_indexing_service import normalize_file_path
 
-        assert normalize_file_path(test_file) in service.failed_files, (
-            "File should be in failed_files after CompactionError"
+        normalized = normalize_file_path(test_file)
+        assert normalized not in service.failed_files, (
+            "Compaction deferrals must not count as genuine failed_files"
         )
+        stats = await service.get_stats()
+        assert stats["failed_files"] == 0
 
         # Restore gate and reconnect for clean teardown
         services.provider._connection_allowed.set()
@@ -290,12 +295,10 @@ class TestRealtimeFailures:
         await service.stop()
 
     @pytest.mark.asyncio
-    async def test_successful_retry_clears_failed_files(self, realtime_setup):
-        """A successful reindex after a CompactionError must clear failed_files.
+    async def test_successful_retry_clears_deferred_state(self, realtime_setup):
+        """A successful retry after a CompactionError must clear deferred state.
 
-        Regression guard for the leak where failed_files was add-only from
-        _process_loop, turning get_stats()["failed_files"] into a phantom
-        monotonic counter across retry cycles.
+        Regression guard for the stale deferral leak after compaction resumes.
         """
         from chunkhound.services.realtime_indexing_service import normalize_file_path
 
@@ -307,14 +310,12 @@ class TestRealtimeFailures:
         test_file.write_text("def deferred(): pass")
         normalized = normalize_file_path(test_file)
 
-        # 1. Force CompactionError — file lands in failed_files.
+        # 1. Force CompactionError — file lands in deferred tracking only.
         services.provider._connection_allowed.clear()
         services.provider.soft_disconnect(skip_checkpoint=True)
         await service.file_queue.put(("change", test_file))
         await service.wait_for_file_indexed(test_file, timeout=5.0)
-        assert normalized in service.failed_files, (
-            "Precondition: file should be in failed_files after CompactionError"
-        )
+        assert normalized not in service.failed_files
 
         # 2. Reopen the gate and reconnect so the retry can succeed.
         services.provider._connection_allowed.set()
@@ -333,9 +334,12 @@ class TestRealtimeFailures:
 
         await asyncio.wait_for(_wait_until_indexed(), timeout=10.0)
 
-        # 4. Success path must have cleared failed_files under the same lock.
+        # 4. Success path must have cleared all stale failure state.
         assert normalized not in service.failed_files, (
             "Successful retry must discard entry from failed_files"
+        )
+        assert normalized not in service._compaction_deferred_files, (
+            "Successful retry must discard compaction-deferred state"
         )
         stats = await service.get_stats()
         assert stats["failed_files"] == 0, (
@@ -345,11 +349,11 @@ class TestRealtimeFailures:
         await service.stop()
 
     @pytest.mark.asyncio
-    async def test_remove_file_clears_failed_files(self, realtime_setup):
-        """remove_file() must also clear failed_files for the target path.
+    async def test_remove_file_clears_deferred_state(self, realtime_setup):
+        """remove_file() must also clear stale deferred state for the target path.
 
-        Symmetric regression guard: a previously-failed file that is later
-        deleted must not linger as a phantom in failed_files.
+        Symmetric regression guard: a previously deferred file that is later
+        deleted must not linger in either retry bucket.
         """
         from chunkhound.services.realtime_indexing_service import normalize_file_path
 
@@ -361,12 +365,12 @@ class TestRealtimeFailures:
         test_file.write_text("def deferred(): pass")
         normalized = normalize_file_path(test_file)
 
-        # 1. Force CompactionError — file lands in failed_files.
+        # 1. Force CompactionError — file lands in deferred tracking only.
         services.provider._connection_allowed.clear()
         services.provider.soft_disconnect(skip_checkpoint=True)
         await service.file_queue.put(("change", test_file))
         await service.wait_for_file_indexed(test_file, timeout=5.0)
-        assert normalized in service.failed_files
+        assert normalized not in service.failed_files
 
         # 2. Reopen gate so remove_file()'s provider call can succeed.
         services.provider._connection_allowed.set()
@@ -378,15 +382,74 @@ class TestRealtimeFailures:
         test_file.unlink()
         await service.remove_file(test_file)
 
-        # 4. remove_file() must discard the entry from failed_files.
+        # 4. remove_file() must discard the entry from both tracking buckets.
         assert normalized not in service.failed_files, (
             "remove_file() must discard entry from failed_files"
+        )
+        assert normalized not in service._compaction_deferred_files, (
+            "remove_file() must discard compaction-deferred state"
         )
         assert normalized in service._removed_files
         stats = await service.get_stats()
         assert stats["failed_files"] == 0, (
             f"get_stats()['failed_files'] must be 0 after remove, got {stats['failed_files']}"
         )
+
+        await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_remove_file_defers_compaction_without_counting_as_failure(
+        self, realtime_setup
+    ):
+        """remove_file() must treat CompactionError as deferred retry state."""
+        service, watch_dir, _, services = realtime_setup
+        await service.start(watch_dir)
+        assert await service.wait_for_monitoring_ready(timeout=10.0)
+
+        test_file = watch_dir / "remove_deferred.py"
+        test_file.write_text("def deferred_remove(): pass")
+
+        services.provider._connection_allowed.clear()
+        services.provider.soft_disconnect(skip_checkpoint=True)
+
+        test_file.unlink()
+        await service.remove_file(test_file)
+        removed = await service.wait_for_file_removed(test_file, timeout=1.0)
+        assert removed is False, "Deferred removals should not report as completed"
+
+        stats = await service.get_stats()
+        assert stats["failed_files"] == 0, (
+            "Compaction-deferred removals must not count as genuine failed_files"
+        )
+
+        services.provider._connection_allowed.set()
+        services.provider.connect()
+        await service.stop()
+
+    @pytest.mark.asyncio
+    async def test_clear_compaction_deferred_files_preserves_genuine_failures(
+        self, realtime_setup
+    ):
+        """Selective cleanup must not hide unrelated genuine failures."""
+        from chunkhound.services.realtime_indexing_service import normalize_file_path
+
+        service, watch_dir, _, _ = realtime_setup
+        await service.start(watch_dir)
+        assert await service.wait_for_monitoring_ready(timeout=10.0)
+
+        failed = normalize_file_path(watch_dir / "real_failure.py")
+        deferred = normalize_file_path(watch_dir / "compaction_deferred.py")
+
+        async with service._file_condition:
+            service.failed_files.add(failed)
+            service._compaction_deferred_files.add(deferred)
+
+        await service.clear_compaction_deferred_files()
+
+        assert failed in service.failed_files
+        assert deferred not in service._compaction_deferred_files
+        stats = await service.get_stats()
+        assert stats["failed_files"] == 1
 
         await service.stop()
 

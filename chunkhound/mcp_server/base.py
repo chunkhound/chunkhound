@@ -357,6 +357,11 @@ class MCPServerBase(ABC):
         try:
             self.debug_log("Starting post-compaction reindex...")
 
+            # Clear only stale compaction deferrals before reindex.
+            # Genuine realtime failures remain visible until they are resolved.
+            if self.realtime_indexing:
+                await self.realtime_indexing.clear_compaction_deferred_files()
+
             # Force reindex: the DB was rebuilt from export, mtime-based
             # skip logic is unreliable after compaction.
             reindex_config = self.config.model_copy(
