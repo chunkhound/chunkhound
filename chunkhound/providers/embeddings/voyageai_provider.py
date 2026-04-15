@@ -203,7 +203,11 @@ class VoyageAIEmbeddingProvider:
         # Initialize client
         self._client = voyageai.Client(api_key=effective_api_key, timeout=timeout)
         if base_url:
-            self._client._params["api_base"] = base_url  # per-instance, not global
+            # voyageai >=0.3.7 uses "base_url" in _params (popped before serialization);
+            # voyageai <0.3.7 uses "api_base" (named param in create()).
+            # Sending "api_base" on 0.3.7+ puts it in the request body → API error.
+            key = "base_url" if "base_url" in self._client._params else "api_base"
+            self._client._params[key] = base_url  # per-instance, not global
 
         # Model dimension mapping - built from configuration
         self._dimensions_map = {
