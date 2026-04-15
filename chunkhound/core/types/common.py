@@ -9,6 +9,8 @@ from enum import Enum
 from pathlib import Path
 from typing import NewType
 
+from chunkhound.parsers._grammar_availability import SCSS_AVAILABLE
+
 
 # String-based type aliases for better semantic clarity
 ProviderName = NewType("ProviderName", str)  # e.g., "openai"
@@ -298,6 +300,7 @@ class Language(Enum):
             ".ex": cls.ELIXIR,
             ".exs": cls.ELIXIR,
             ".lua": cls.LUA,
+            ".scss": cls.SCSS if SCSS_AVAILABLE else cls.TEXT,
             ".html": cls.HTML,
             ".htm": cls.HTML,
             ".xhtml": cls.HTML,
@@ -316,12 +319,7 @@ class Language(Enum):
         if extension in extension_map:
             return extension_map[extension]
 
-        # For conditionally-available extensions not in the local map (e.g. .scss),
-        # delegate to EXTENSION_TO_LANGUAGE — the single source of truth.
-        # Lazy import avoids the circular dependency (parser_factory imports Language).
-        from chunkhound.parsers.parser_factory import EXTENSION_TO_LANGUAGE
-
-        return EXTENSION_TO_LANGUAGE.get(extension, cls.UNKNOWN)
+        return cls.UNKNOWN
 
     @classmethod
     def from_string(cls, value: str) -> "Language":

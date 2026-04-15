@@ -11,6 +11,7 @@ language label to ``Language.JINJA``, ensuring chunks produced from ``.jinja``,
 """
 
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,18 @@ from typing import Any
 # Used to sanitize element attribute values before using them as chunk symbols.
 _JINJA_EXPR_RE = re.compile(r"\{\{.*?\}\}|\{%.*?%\}|\{#.*?#\}", re.DOTALL)
 
-from tree_sitter import Node
+from tree_sitter import Node, Parser as _TSParser
+
+
+@lru_cache(maxsize=1)
+def _html_ts_parser() -> "_TSParser | None":
+    """Return a cached tree-sitter HTML parser for attribute re-extraction."""
+    try:
+        from tree_sitter_language_pack import get_language
+        lang = get_language("html")
+        return _TSParser(lang) if lang else None
+    except Exception:
+        return None
 
 from chunkhound.core.types.common import Language
 from chunkhound.parsers.mappings._shared.css_family_helpers import (
@@ -314,14 +326,38 @@ class HtmlMapping(BaseMapping):
                 metadata["is_semantic"] = tag in SEMANTIC_TAGS
         return metadata
 
+    def _attr_from_element_text(self, import_text: str, *attrs: str) -> str | None:
+        """Extract the first matching attribute from element text via tree-sitter.
+
+        Mirrors ``_get_attribute()`` so import resolution stays in sync with
+        the attribute extraction used by ``extract_name`` and ``extract_content``.
+        """
+        parser = _html_ts_parser()
+        if parser is None:
+            return None
+        content = import_text.encode("utf-8")
+        tree = parser.parse(content)
+        for node in tree.root_node.children:
+            start_tag = self._get_start_tag(node)
+            if start_tag is None and node.type == "start_tag":
+                start_tag = node
+            if start_tag is None:
+                continue
+            for attr in attrs:
+                val = self._get_attribute(start_tag, attr, content)
+                if val:
+                    return val
+        return None
+
     def resolve_import_paths(
         self, import_text: str, base_dir: Path, source_file: Path
     ) -> list[Path]:
         """Resolve a relative href or src to an absolute filesystem path.
 
         Handles both ``<link rel="stylesheet" href="...">`` and
-        ``<script src="...">`` import forms.  Supports both quoted and
-        unquoted attribute values (e.g. ``href=style.css``).
+        ``<script src="...">`` import forms.  Uses the same tree-sitter
+        attribute extraction as ``extract_name``/``extract_content`` to keep
+        the two paths in sync.
 
         Args:
             import_text: The full element text (link or script_element).
@@ -332,27 +368,14 @@ class HtmlMapping(BaseMapping):
         Returns:
             List with a single resolved Path if it exists, otherwise empty list.
         """
-        # Resolve relative to the importing file's directory, not the project root.
         resolve_dir = (
             source_file.parent
             if source_file.is_absolute()
             else (base_dir / source_file).parent
         )
-        # Try href (stylesheet link) — support both quoted and unquoted values.
-        # Note: unquoted values may contain '/' (path separators), so we only
-        # stop at whitespace, '>', and quote characters.
-        m = re.search(r'href=(?:["\']([^"\']+)["\']|([^\s>"\']+))', import_text)
-        if m:
-            raw = m.group(1) or m.group(2)
-            path = raw.split("?")[0].split("#")[0]
-            candidate = resolve_dir / path
-            if candidate.exists():
-                return [candidate.resolve()]
-        # Try src (external script) — same attribute format.
-        m = re.search(r'src=(?:["\']([^"\']+)["\']|([^\s>"\']+))', import_text)
-        if m:
-            raw = m.group(1) or m.group(2)
-            path = raw.split("?")[0].split("#")[0]
+        attr_val = self._attr_from_element_text(import_text, "href", "src")
+        if attr_val:
+            path = attr_val.split("?")[0].split("#")[0]
             candidate = resolve_dir / path
             if candidate.exists():
                 return [candidate.resolve()]
