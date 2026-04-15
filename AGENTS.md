@@ -61,8 +61,40 @@ Quick summary:
 2. Run smoke tests: `uv run pytest tests/test_smoke.py -v -n auto` (MANDATORY)
 3. Create and publish a GitHub Release — `release.yml` handles the PyPI upload automatically.
 
-Pre-releases (alpha/beta/RC) publish to TestPyPI via `release-rc.yml` on tag push.
+Pre-releases (alpha/beta/RC) publish to **PyPI** (not TestPyPI) via `release-rc.yml` on tag push.
 Do NOT use `uv publish` or `prepare_release.sh` manually — CI owns the publish step.
+
+## TEST RELEASE (alpha to PyPI)
+
+**If version not specified:** fetch latest version from PyPI, increment minor, append `a1`:
+```bash
+LATEST=$(pip index versions chunkhound 2>/dev/null | grep -oP '[\d.]+' | head -1)
+# e.g. 4.0.3 → next minor = 4.1.0 → alpha = 4.1.0a1
+```
+
+**If version specified by user** (e.g. `4.2.0`): append `a1` → `4.2.0a1`
+
+**Steps:**
+```bash
+# 1. Save current remote and switch to chunkhound org remote
+ORIGINAL_REMOTE=$(git remote get-url origin)
+git remote set-url origin https://github.com/chunkhound/chunkhound.git
+
+# 2. Create the alpha tag
+uv run scripts/update_version.py X.Y.Za1
+
+# 3. Push the tag — triggers release-rc.yml → publishes to PyPI as pre-release
+git push origin vX.Y.Za1
+
+# 4. Revert remote back to original
+git remote set-url origin "$ORIGINAL_REMOTE"
+```
+
+PyPI trusted publisher required for `release-rc.yml`:
+- Owner: `chunkhound`
+- Repository: `chunkhound`
+- Workflow: `release-rc.yml`
+- Environment: `pypi`
 
 ## DB_PATH_GOTCHAS
 - **Preferred: pass project directory as positional arg** — `chunkhound search "query" /path/to/project` — this reads `.chunkhound.json` and resolves the DB correctly
