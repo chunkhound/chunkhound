@@ -1443,16 +1443,10 @@ class TestRealtimeFunctional:
         second_file = deleted_dir / "second.py"
         direct_delete_calls = 0
 
-        async def fake_search_regex_async(pattern: str, page_size: int = 1000):
-            assert pattern == f"^{deleted_dir.resolve()}/.*"
-            assert page_size == 1000
-            return (
-                [
-                    {"file_path": str(first_file)},
-                    {"file_path": str(second_file)},
-                ],
-                {},
-            )
+        def fake_list_file_paths_under_directory(
+            directory_prefix: str,
+        ) -> list[str]:
+            return [str(first_file), str(second_file)]
 
         async def unexpected_direct_delete(_file_path: str) -> bool:
             nonlocal direct_delete_calls
@@ -1461,8 +1455,8 @@ class TestRealtimeFunctional:
 
         monkeypatch.setattr(
             service.services.provider,
-            "search_regex_async",
-            fake_search_regex_async,
+            "list_file_paths_under_directory",
+            fake_list_file_paths_under_directory,
         )
         monkeypatch.setattr(
             service.services.provider,
