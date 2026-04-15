@@ -25,7 +25,6 @@ from chunkhound.services.realtime_indexing_service import RealtimeIndexingServic
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
     should_use_polling,
-    wait_for_regex_searchable,
 )
 
 from .test_utils import get_api_key_for_tests, get_embedding_config_for_tests, build_embedding_config_from_dict
@@ -165,7 +164,7 @@ class TestQADeterministic:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     @pytest.mark.asyncio
-    async def test_file_lifecycle_search_validation(self, qa_setup):
+    async def test_file_lifecycle_search_validation(self, qa_setup):  # flaky: Windows CI polling monitor occasionally misses second file write within 45s window, tracked in issue #254
         """QA Items 1-4: Test file lifecycle with search validation."""
         services, realtime_service, watch_dir, _ = qa_setup
 
@@ -181,8 +180,8 @@ class ExistingClass:
 """
         existing_file.write_text(existing_content)
 
-        # Wait for content to be searchable (handles Windows CI polling delay)
-        found = await wait_for_regex_searchable(services, "existing_function", timeout=get_fs_event_timeout())
+        # Wait for file to be indexed
+        found = await realtime_service.wait_for_file_indexed(existing_file, timeout=get_fs_event_timeout())
         assert found, "Existing content should be searchable"
 
         # Search for existing content
@@ -222,8 +221,8 @@ class NewlyAddedClass:
 """
         new_file.write_text(new_content)
 
-        # Wait for new content to be searchable (handles Windows CI polling delay)
-        found = await wait_for_regex_searchable(services, "newly_added_content_unique_string", timeout=get_fs_event_timeout())
+        # Wait for file to be indexed
+        found = await realtime_service.wait_for_file_indexed(new_file, timeout=get_fs_event_timeout())
         assert found, "New file content should be searchable"
 
         # Search for new content
@@ -258,10 +257,11 @@ def added_during_edit():
     '''This function was added during file edit'''
     return "added_content_edit_qa"
 """
+        realtime_service.reset_file_tracking(existing_file)
         existing_file.write_text(modified_content)
 
-        # Wait for added content to be searchable (handles Windows CI polling delay)
-        found = await wait_for_regex_searchable(services, "added_content_edit_qa", timeout=get_fs_event_timeout())
+        # Wait for modified file to be re-indexed
+        found = await realtime_service.wait_for_file_indexed(existing_file, timeout=get_fs_event_timeout())
         assert found, "Added content should be searchable"
 
         added_regex = await execute_tool("search", services, None, {
@@ -284,10 +284,11 @@ def added_during_edit():
 
 # Note: ExistingClass was DELETED
 """
+        realtime_service.reset_file_tracking(existing_file)
         existing_file.write_text(deleted_and_modified_content)
 
-        # Wait for modified content to be searchable (handles Windows CI polling delay)
-        found = await wait_for_regex_searchable(services, "MODIFIED_existing_content", timeout=get_fs_event_timeout())
+        # Wait for modified file to be re-indexed
+        found = await realtime_service.wait_for_file_indexed(existing_file, timeout=get_fs_event_timeout())
         assert found, "Modified content should be searchable"
 
         # Check modification worked
@@ -311,10 +312,12 @@ def added_during_edit():
 
         # QA Item 4: Delete file and verify search results
         delete_target = new_file  # Delete the new file we created
+        realtime_service.reset_file_tracking(delete_target)
         delete_target.unlink()
 
-        # Wait for deletion to be processed (use platform-appropriate timeout)
-        await asyncio.sleep(get_fs_event_timeout())
+        # Wait for deletion to be processed
+        removed = await realtime_service.wait_for_file_removed(delete_target, timeout=get_fs_event_timeout())
+        assert removed, "Deleted file should be removed"
 
         # Search for deleted file content
         deleted_file_regex = await execute_tool("search", services, None, {
@@ -406,6 +409,7 @@ function qaTestFunction() {
             Language.CSS: '/* CSS QA test */\n.qa-test {\n  content: "css_qa_unique";\n  color: blue;\n}',
             Language.SCSS: '/* SCSS QA test */\n$color: blue;\n.qa-test {\n  content: "scss_qa_unique";\n  color: $color;\n}',
             Language.JINJA: '<!DOCTYPE html>\n<html>\n<body>\n  {# Jinja QA test #}\n  <p>{{ "jinja_qa_unique" }}</p>\n</body>\n</html>',
+            Language.TWINCAT: '<?xml version="1.0" encoding="utf-8"?>\n<TcPlcObject Version="1.1.0.1">\n  <POU Name="QA_TEST" Id="{00000000-0000-0000-0000-000000000001}">\n    <Declaration><![CDATA[PROGRAM QA_TEST\nVAR\n  bFlag : BOOL := TRUE;\nEND_VAR]]></Declaration>\n    <Implementation>\n      <ST><![CDATA[IF bFlag THEN\n  (* twincat_qa_unique *)\nEND_IF]]></ST>\n    </Implementation>\n  </POU>\n</TcPlcObject>',
         }
 
         # Create extension mapping for file creation
@@ -446,10 +450,6 @@ function qaTestFunction() {
             Language.PDF: ".pdf",
             Language.SQL: ".sql",
             Language.ELIXIR: ".ex",
-            Language.HTML: ".html",
-            Language.CSS: ".css",
-            Language.SCSS: ".scss",
-            Language.JINJA: ".jinja",
         }
 
         # Validate ALL languages have test coverage (fail explicitly for new languages)

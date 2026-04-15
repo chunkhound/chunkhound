@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FC_ProcessValue" Id="{33333333-3333-3333-3333-333333333333}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION FC_ProcessValue : DINT
+VAR_INPUT
+    nValue : DINT;
+    bEnabled : BOOL;
+END_VAR
+VAR
+    nResult : DINT;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[nResult := 0;
+
+IF bEnabled THEN
+    IF nValue > 100 THEN
+        nResult := 100;
+    ELSIF nValue < 0 THEN
+        nResult := 0;
+    ELSE
+        nResult := nValue;
+    END_IF;
+END_IF;
+
+FC_ProcessValue := nResult;
+]]></ST>
+    </Implementation>
+  </POU>
+</TcPlcObject>

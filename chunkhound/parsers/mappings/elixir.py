@@ -248,8 +248,14 @@ class ElixirMapping(BaseMapping):
                 metadata["node_type"] = def_node.type
 
                 # Count body lines for functions
-                if keyword in ("def", "defp", "defmacro", "defmacrop",
-                               "defguard", "defguardp"):
+                if keyword in (
+                    "def",
+                    "defp",
+                    "defmacro",
+                    "defmacrop",
+                    "defguard",
+                    "defguardp",
+                ):
                     body = self.find_child_by_type(def_node, "do_block")
                     if body:
                         body_text = self.get_node_text(body, source)
@@ -263,8 +269,10 @@ class ElixirMapping(BaseMapping):
                     clean = self.clean_comment_text(text)
                     if clean:
                         upper = clean.upper()
-                        if any(p in upper for p in
-                               ["TODO:", "FIXME:", "HACK:", "NOTE:", "WARNING:"]):
+                        if any(
+                            p in upper
+                            for p in ["TODO:", "FIXME:", "HACK:", "NOTE:", "WARNING:"]
+                        ):
                             metadata["comment_type"] = "annotation"
                         else:
                             metadata["comment_type"] = "regular"
@@ -309,9 +317,7 @@ class ElixirMapping(BaseMapping):
     ) -> list[Path]:
         # Elixir imports are module aliases, not file paths.
         # We can try to resolve alias/import to lib/ paths.
-        match = re.search(
-            r"(?:alias|import|use|require)\s+([\w.]+)", import_text
-        )
+        match = re.search(r"(?:alias|import|use|require)\s+([\w.]+)", import_text)
         if not match:
             return []
 
@@ -414,9 +420,7 @@ class ElixirMapping(BaseMapping):
         name = self._extract_func_name_from_args(args_node, source)
         return (keyword, name)
 
-    def _extract_func_name_from_args(
-        self, args_node: Node, source: str
-    ) -> str | None:
+    def _extract_func_name_from_args(self, args_node: Node, source: str) -> str | None:
         """Extract function name from a def/defp arguments node.
 
         Handles: def foo(a, b), def foo, defguard is_pos(x) when x > 0
@@ -464,9 +468,7 @@ class ElixirMapping(BaseMapping):
             if call_node:
                 inner_args = self.find_child_by_type(call_node, "arguments")
                 if inner_args:
-                    name = self._extract_type_name_from_args(
-                        inner_args, source
-                    )
+                    name = self._extract_type_name_from_args(inner_args, source)
                     if name:
                         return f"{attr_keyword}_{name}"
 
@@ -476,9 +478,7 @@ class ElixirMapping(BaseMapping):
 
         return attr_keyword
 
-    def _extract_type_name_from_args(
-        self, args_node: Node, source: str
-    ) -> str | None:
+    def _extract_type_name_from_args(self, args_node: Node, source: str) -> str | None:
         """Extract the type/spec name from attribute arguments.
 
         @spec foo(integer()) :: atom() -> 'foo'

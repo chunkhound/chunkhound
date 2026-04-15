@@ -49,6 +49,7 @@ LANGUAGE_SAMPLES = {
     Language.SCSS: "$color: red; .btn { color: $color; }",
     Language.JINJA: "<section id='main'>{{ title }}</section>",
     Language.ELIXIR: "defmodule Hello do\n  def world, do: :ok\nend",
+    Language.TWINCAT: '<?xml version="1.0" encoding="utf-8"?>\n<TcPlcObject Version="1.1.0.1">\n  <POU Name="PRG_Main" Id="{00000000-0000-0000-0000-000000000000}" SpecialFunc="None">\n    <Declaration><![CDATA[PROGRAM PRG_Main\nVAR\n    x : INT;\nEND_VAR\n]]></Declaration>\n    <Implementation>\n      <ST><![CDATA[x := 1;\n]]></ST>\n    </Implementation>\n  </POU>\n</TcPlcObject>',
 }
 
 

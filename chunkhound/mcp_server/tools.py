@@ -358,39 +358,53 @@ def limit_response_size(
 # Tool Descriptions (optimized for LLM consumption)
 # =============================================================================
 
-SEARCH_DESCRIPTION = """Search code by exact pattern (regex) or meaning (semantic).
+SEARCH_DESCRIPTION = """Pinpoint specific code locations after building understanding with code_research. Returns structurally-parsed code chunks (functions, classes) — large definitions may span multiple results.
 
-TYPE SELECTION:
-- regex: Exact pattern matching. Use for function names, variable names,
-  import statements, or known string patterns.
-  Example queries: "def authenticate", "import.*pandas", "TODO:.*fix"
+TYPE — choose one:
+- **regex**: Match exact patterns against code content. Use for known identifiers, imports, or string literals.
+  Examples: "def authenticate", "class.*Handler", "import.*pandas", "TODO:.*refactor"
+- **semantic**: Find code by meaning via embedding similarity. Use for concepts or when exact identifiers are unknown.
+  Examples: "authentication logic", "retry with exponential backoff", "database connection pooling"
 
-- semantic: Meaning-based search. Use when describing functionality
-  conceptually or unsure of exact keywords.
-  Example queries: "authentication logic", "error handling for database"
+DECISION GUIDE:
+- Known symbol or pattern → regex
+- Concept or behavior → semantic
+- Cross-file architecture question → call code_research first
 
-WHEN TO USE: Quick lookup, finding references, exploring unfamiliar code.
-DO NOT USE: Multi-file architecture questions (use code_research instead).
+OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}"""
 
-OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}
-COST: Fast, cheap - use liberally."""
+SEARCH_DESCRIPTION_NO_RESEARCH = """Pinpoint specific code locations — find exact symbols, patterns, or concepts in the indexed codebase. Returns structurally-parsed code chunks (functions, classes) — large definitions may span multiple results.
 
-CODE_RESEARCH_DESCRIPTION = """Deep analysis for architecture and cross-file code.
+TYPE — choose one:
+- **regex**: Match exact patterns against code content. Use for known identifiers, imports, or string literals.
+  Examples: "def authenticate", "class.*Handler", "import.*pandas", "TODO:.*refactor"
+- **semantic**: Find code by meaning via embedding similarity. Use for concepts or when exact identifiers are unknown.
+  Examples: "authentication logic", "retry with exponential backoff", "database connection pooling"
 
-USE FOR:
-- Understanding how systems/features are implemented across files
-- Discovering component relationships and dependencies
-- Getting architectural explanations with code citations
+DECISION GUIDE:
+- Known symbol or pattern → regex
+- Concept or behavior → semantic
 
-DO NOT USE:
-- Looking for specific code locations (use search instead)
-- Simple pattern matching (use search with type="regex")
-- You already know where the code is (read files directly)
+OUTPUT: {results: [{file_path, content, start_line, end_line}], pagination}"""
 
-OUTPUT: Comprehensive markdown with architecture overview, key locations, relationships.
-COST: Expensive (LLM synthesis). 10-60s latency. One call often replaces 5-10 searches.
+CODE_RESEARCH_DESCRIPTION = """Start here for any coding task. Call code_research first to understand the relevant code area before writing or modifying code.
 
-ERROR RECOVERY: If incomplete, try narrower query or use path parameter to scope."""
+WORKFLOW:
+1. **Understand** — call code_research to map architecture, components, and data flow
+2. **Deepen** — call again with focused queries on specific subsystems discovered in step 1
+3. **Pinpoint** — switch to search (regex/semantic) for exact file locations and symbol references
+4. **Inspect** — use Explore/grep/read for granular line-level follow-up
+
+WHAT IT RETURNS: Cited markdown report covering architecture overview, key code locations, component relationships, and cross-file data flows.
+
+EXAMPLES:
+- "How does authentication work?" — traces the full auth flow across files
+- "What happens when a request hits /api/users?" — maps the request lifecycle
+- "Explain error handling patterns" — identifies cross-cutting concerns
+
+SCOPE: Use the path parameter to restrict analysis to a subdirectory for faster, focused results.
+
+One call replaces 5-10 manual searches. Call it liberally — understanding first, coding second."""
 
 
 # =============================================================================
@@ -417,9 +431,9 @@ async def search_impl(
     Args:
         services: Database services bundle
         embedding_manager: Embedding manager (required for semantic type)
-        type: "semantic" for meaning-based, "regex" for exact pattern
-        query: Search query (natural language for semantic, regex pattern for regex)
-        path: Optional path to limit search scope (e.g., "src/auth/")
+        type: Search mode — "regex" for exact pattern matching, "semantic" for meaning-based similarity
+        query: For regex: a regex pattern like "def authenticate" or "class.*Handler". For semantic: a natural language concept like "retry logic" or "database connection pooling"
+        path: Optional relative subdirectory to restrict search scope, e.g. "src/auth" or "lib/payments" (no leading slash)
         page_size: Number of results per page (1-100)
         offset: Starting offset for pagination
 
@@ -438,10 +452,6 @@ async def search_impl(
     # Validate and constrain parameters
     page_size = max(1, min(page_size, 100))
     offset = max(0, offset)
-
-    # Check database connection
-    if services and not services.provider.is_connected:
-        services.provider.connect()
 
     if type == "semantic":
         # Validate embedding manager for semantic search
@@ -498,7 +508,7 @@ async def search_impl(
 async def deep_research_impl(
     services: DatabaseServices,
     embedding_manager: EmbeddingManager,
-    llm_manager: LLMManager,
+    llm_manager: LLMManager | None,
     query: str,
     progress: Any = None,
     path: str | None = None,
@@ -510,10 +520,9 @@ async def deep_research_impl(
         services: Database services bundle
         embedding_manager: Embedding manager instance
         llm_manager: LLM manager instance
-        query: Research query
+        query: Natural language question about codebase architecture or behavior, e.g. "how does authentication work end-to-end?" or "explain the request lifecycle"
         progress: Optional Rich Progress instance for terminal UI (None for MCP)
-        path: Optional relative path to limit research scope
-            (e.g., 'tree-sitter-haskell', 'src/')
+        path: Optional relative subdirectory to restrict analysis scope, e.g. "src/auth" or "lib/payments" (no leading slash)
         config: Application configuration (optional, defaults to environment config)
 
     Returns:
@@ -522,6 +531,13 @@ async def deep_research_impl(
     Raises:
         Exception: If LLM or reranker not configured
     """
+    # Validate LLM is configured
+    if not llm_manager:
+        raise Exception(
+            "No LLM provider configured. Code research requires an LLM. "
+            "Configure an llm section in your chunkhound configuration."
+        )
+
     # Validate reranker is configured
     if not embedding_manager or not embedding_manager.list_providers():
         raise Exception(
