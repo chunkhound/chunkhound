@@ -191,14 +191,8 @@ POLLING_STABILIZATION_DELAY: float = 1.0  # Seconds to wait for first poll itera
 
 
 def get_fs_event_timeout() -> float:
-    """Get appropriate timeout for filesystem event detection.
-
-    Returns longer timeouts on Windows CI where ReadDirectoryChangesW
-    can be unreliable.
-    """
-    if is_ci():
-        return 45.0 if IS_WINDOWS else 5.0
-    return 3.0
+    """Get appropriate timeout for filesystem event detection."""
+    return 5.0 if is_ci() else 3.0
 
 
 async def stabilize_polling_monitor() -> None:

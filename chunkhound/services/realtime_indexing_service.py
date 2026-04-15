@@ -292,6 +292,10 @@ class RealtimeIndexingService:
         self._indexed_files: set[str] = set()
         self._removed_files: set[str] = set()
         self._stopping = False
+        self._using_polling: bool = False
+        # Trigger event that lets tests poke the polling loop into running an
+        # immediate scan instead of waiting for the next interval.
+        self._poll_trigger: asyncio.Event = asyncio.Event()
 
     # Internal helper to forward realtime events into the MCP debug log file
     def _debug(self, message: str) -> None:
@@ -570,13 +574,18 @@ class RealtimeIndexingService:
 
                     known_files = current_files
 
-                    # Adaptive poll interval: 0.5s for the first 60s, then 3s
-                    # Extended fast polling window ensures reliable detection during
-                    # multi-file test sequences on Windows CI where setup + indexing
-                    # can consume the initial fast-polling budget
+                    # Adaptive poll interval: 0.5s for the first 60s, then 3s.
+                    # Uses _poll_trigger so callers (e.g. wait_for_file_indexed) can
+                    # force an immediate scan instead of waiting for the full interval.
                     elapsed = time.time() - polling_start
                     interval = 0.5 if elapsed < 60.0 else 3.0
-                    await asyncio.sleep(interval)
+                    try:
+                        await asyncio.wait_for(
+                            self._poll_trigger.wait(), timeout=interval
+                        )
+                        self._poll_trigger.clear()
+                    except asyncio.TimeoutError:
+                        pass
 
                 except Exception as e:
                     logger.error(f"Polling monitor error: {e}")
@@ -924,7 +933,7 @@ class RealtimeIndexingService:
         monitoring_active = False
         if self.observer and self.observer.is_alive():
             monitoring_active = True
-        elif hasattr(self, "_using_polling"):
+        elif self._using_polling:
             # If we're using polling mode, consider it "alive"
             monitoring_active = True
 
@@ -956,6 +965,10 @@ class RealtimeIndexingService:
         Call reset_file_tracking(path) BEFORE triggering the file change
         to ensure the wait observes the new event, not a stale record.
         """
+        # In polling mode, nudge the loop so it scans immediately instead of
+        # waiting up to the full interval before noticing the change.
+        if self._using_polling:
+            self._poll_trigger.set()
         normalized = normalize_file_path(path)
 
         async def _wait() -> None:
@@ -979,6 +992,8 @@ class RealtimeIndexingService:
 
         Call reset_file_tracking(path) BEFORE triggering the file change.
         """
+        if self._using_polling:
+            self._poll_trigger.set()
         normalized = normalize_file_path(path)
 
         async def _wait() -> None:
