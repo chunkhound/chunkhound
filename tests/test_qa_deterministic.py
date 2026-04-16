@@ -11,7 +11,6 @@ import asyncio
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -38,13 +37,8 @@ from tests.helpers.embedding_config import (
 # =============================================================================
 
 # Timeout & Wait Durations
-INITIAL_SCAN_WAIT_SECONDS = 2.0           # Wait for initial scan after service start
-CONCURRENT_SETUP_WAIT_SECONDS = 3.0       # Wait before concurrent operations
-PAGINATION_SETUP_WAIT_SECONDS = 3.0       # Wait after creating pagination test files
 SEARCH_ITERATION_DELAY_SECONDS = 0.2      # Delay between search iterations
 FILE_OPERATION_DELAY_SECONDS = 0.3        # Delay between file operations
-STABILITY_CHECK_INTERVAL_SECONDS = 2.0    # Interval between stability checks
-INDEXING_POLL_INTERVAL_SECONDS = 0.5      # Polling interval for indexing completion
 RIPGREP_TIMEOUT_SECONDS = 10              # Timeout for ripgrep subprocess
 
 # Budget Constants (used in timeout calculations)
@@ -71,8 +65,6 @@ NUM_BASE_CONCURRENT_FILES = 3             # Base files for concurrent test
 NUM_CONCURRENT_SEARCHES = 10              # Searches during concurrent operations
 NUM_RAPID_MODIFICATIONS = 5               # File modifications in rapid test
 MAX_PAGINATION_PAGES = 10                 # Safety limit for pagination loop
-MAX_STABILITY_CHECKS = 10                 # Retry attempts for chunk stability
-MIN_EXPECTED_CHUNKS_PAGINATION = 15       # Minimum chunks for pagination test
 EXPECTED_CHUNKS_PER_FILE = 2              # Expected chunks per substantial file
 DEFAULT_PAGE_SIZE = 10                    # Standard pagination page size
 
@@ -170,15 +162,6 @@ class TestQADeterministic:
 
         shutil.rmtree(temp_dir, ignore_errors=True)
 
-    # TODO: Remove xfail after merging b1b3713f ("fix: retry early realtime
-    # debounce wake").  Windows timer granularity (~15.6 ms) can cause
-    # asyncio.sleep(0.5) to wake early, making _debounced_add_file silently
-    # drop files.  The fix adds a retry loop but hasn't landed on this branch.
-    @pytest.mark.xfail(
-        sys.platform == "win32",
-        reason="Windows debounce timer bug — waiting for b1b3713f",
-        strict=False,
-    )
     @pytest.mark.asyncio
     async def test_file_lifecycle_search_validation(self, qa_setup):  # flaky: Windows CI polling monitor occasionally misses second file write within 45s window, tracked in issue #254
         """QA Items 1-4: Test file lifecycle with search validation."""
@@ -337,12 +320,7 @@ def added_during_edit():
 
         # QA Item 4: Delete file and verify search results
         delete_target = new_file  # Delete the new file we created
-        realtime_service.reset_file_tracking(delete_target)
-        delete_target.unlink()
-
-        # Wait for deletion to be processed
-        removed = await realtime_service.wait_for_file_removed(delete_target, timeout=get_fs_event_timeout())
-        assert removed, "Deleted file should be removed"
+        await remove_file_from_index(realtime_service, delete_target)
 
         # Search for deleted file content
         deleted_file_regex = await search_impl(
@@ -495,7 +473,6 @@ function qaTestFunction() {
         )
 
         created_files = []
-        search_patterns = []
 
         # Create files for all testable languages
         for language in languages_to_test:
@@ -511,10 +488,8 @@ function qaTestFunction() {
 
                 file_path = watch_dir / filename
                 unique_pattern = f"{language.value}_qa_unique"
-
-                file_path.write_text(content)
                 created_files.append((file_path, language, unique_pattern))
-                search_patterns.append(unique_pattern)
+                await write_and_index_file(services, file_path, content)
 
                 print(f"Created {language.value} test file: {filename}")
 
@@ -542,13 +517,11 @@ function qaTestFunction() {
         # Final stats check with informative failure if indexing incomplete
         db_stats = await services.indexing_coordinator.get_stats()
         indexed_files = db_stats.get('files', 0)
+        expected_file_count = len(created_files)
         print(f"📊 Final: {indexed_files} files, {db_stats.get('chunks', 0)} chunks")
-
-        if indexed_files < expected_file_count:
-            pytest.fail(
-                f"Only {indexed_files}/{expected_file_count} files indexed after {elapsed:.1f}s. "
-                f"This may indicate indexing performance issues on CI."
-            )
+        assert indexed_files >= expected_file_count, (
+            f"Expected at least {expected_file_count} indexed files, got {indexed_files}"
+        )
 
         # QA Item 5: Test concurrent processing for all languages
         # Search for each language's unique content - run in parallel for speed
@@ -615,10 +588,8 @@ function qaTestFunction() {
     '''Concurrent test function {i}'''
     return "concurrent_qa_test_{i}"
 """
-            file_path.write_text(content)
+            await write_and_index_file(services, file_path, content)
             base_files.append((file_path, f"concurrent_qa_test_{i}"))
-
-        await asyncio.sleep(CONCURRENT_SETUP_WAIT_SECONDS)
 
         # Function to perform searches during file modifications
         async def search_during_modifications():
@@ -775,8 +746,7 @@ class RapidClass_{i}:
     '''This is a unique function that should appear only once'''
     return "single_unique_result_qa_test"
 """
-        single_file.write_text(single_content)
-        await asyncio.sleep(PAGINATION_SETUP_WAIT_SECONDS)
+        await write_and_index_file(services, single_file, single_content)
 
         single_results = await search_impl(
             services=services, embedding_manager=None,
@@ -1002,22 +972,8 @@ if __name__ == "__main__":
             content = content_template.format(
                 file_num=i, file_num_padded=f"{i:03d}", pattern=common_pattern
             )
-            file_path.write_text(content)
+            await write_and_index_file(services, file_path, content)
             created_files_for_pagination.append(file_path)
-
-        # Wait for all files to be processed with verification
-        # Poll until we get a stable chunk count
-        stable_count = None
-        for _ in range(MAX_STABILITY_CHECKS):
-            await asyncio.sleep(STABILITY_CHECK_INTERVAL_SECONDS)
-            stats = await services.indexing_coordinator.get_stats()
-            current_chunks = stats.get('chunks', 0)
-            if stable_count == current_chunks and current_chunks >= MIN_EXPECTED_CHUNKS_PAGINATION:
-                break
-            stable_count = current_chunks
-        else:
-            # Fallback - just wait a bit more
-            await asyncio.sleep(PAGINATION_SETUP_WAIT_SECONDS)
 
         # Test pagination by fetching all pages
         all_results = []
@@ -1160,11 +1116,6 @@ if __name__ == "__main__":
 """
 
         # Measure indexing time
-        timing_test_file.write_text(timing_content)
-
-        # Poll until content is searchable
-        max_wait = SINGLE_FILE_INDEXING_MAX_SECONDS
-        poll_interval = INDEXING_POLL_INTERVAL_SECONDS
         start_time = time.monotonic()
 
         while (elapsed := time.monotonic() - start_time) < max_wait:

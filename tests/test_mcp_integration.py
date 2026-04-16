@@ -1,13 +1,13 @@
 """Integration tests that use actual MCP server components.
 
-These tests verify the real integration path that users experience:
-Filesystem Event → Watchdog → AsyncHandler → IndexingCoordinator → Database → Search Tools
+These tests keep MCP tool assertions on the user-facing search path while using
+deterministic helpers for indexing-only contracts that do not need filesystem
+event coverage.
 """
 
 import asyncio
 import shutil
 import tempfile
-import time
 from pathlib import Path
 
 import pytest
@@ -16,6 +16,10 @@ from chunkhound.core.config.config import Config
 from chunkhound.database_factory import create_services
 from chunkhound.mcp_server.tools import execute_tool, search_impl
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from tests.utils.realtime_test_helpers import (
+    remove_file_from_index,
+    write_and_index_file,
+)
 from tests.utils.windows_compat import (
     get_fs_event_timeout,
     realtime_backend_for_tests,
@@ -126,13 +130,7 @@ class TestMCPIntegration:
     @pytest.mark.asyncio
     async def test_mcp_semantic_search_finds_new_files(self, mcp_setup):
         """Test that MCP semantic search finds newly created files."""
-        services, realtime_service, watch_dir, _, embedding_manager = mcp_setup
-
-        # Wait for fs observer to start; wait_for_file_indexed() below is the
-        # deterministic gate on actual indexing.
-        assert await realtime_service.wait_for_monitoring_ready(
-            timeout=get_fs_event_timeout()
-        ), "Realtime monitoring did not become ready"
+        services, _, watch_dir, _, embedding_manager = mcp_setup
 
         # Get initial search results using search_impl for dict access
         initial_results = await search_impl(
@@ -147,7 +145,7 @@ class TestMCPIntegration:
 
         # Create new file with unique content
         new_file = watch_dir / "mcp_test.py"
-        new_file.write_text("""
+        await write_and_index_file(services, new_file, """
 def unique_mcp_test_function():
     '''This is a unique function for MCP integration testing'''
     return "mcp_realtime_success"
@@ -173,8 +171,8 @@ def unique_mcp_test_function():
 
     @pytest.mark.asyncio
     async def test_mcp_regex_search_finds_modified_files(self, mcp_setup):
-        """Test that MCP regex search finds modified file content."""
-        services, realtime_service, watch_dir, _, _ = mcp_setup
+        """Test that MCP regex search returns modified file content."""
+        services, _, watch_dir, _, _ = mcp_setup
 
         # Create initial file
         test_file = watch_dir / "modify_test.py"
@@ -187,8 +185,7 @@ def unique_mcp_test_function():
         assert found, "Initial content should be found"
 
         # Modify file with new unique content
-        realtime_service.reset_file_tracking(test_file)
-        test_file.write_text("""
+        await write_and_index_file(services, test_file, """
 def initial_function(): pass
 
 def modified_unique_regex_pattern():
@@ -205,14 +202,8 @@ def modified_unique_regex_pattern():
 
     @pytest.mark.asyncio
     async def test_mcp_database_stats_change_with_realtime(self, mcp_setup):
-        """Test that database stats reflect real-time indexing changes."""
-        services, realtime_service, watch_dir, _, _ = mcp_setup
-
-        # Wait for fs observer to start; wait_for_file_indexed() below is the
-        # deterministic gate on actual indexing.
-        assert await realtime_service.wait_for_monitoring_ready(
-            timeout=get_fs_event_timeout()
-        ), "Realtime monitoring did not become ready"
+        """Test that database stats reflect direct indexing updates."""
+        services, _, watch_dir, _, _ = mcp_setup
 
         # Get initial stats directly from database provider
         initial_stats = services.provider.get_stats()
@@ -222,7 +213,7 @@ def modified_unique_regex_pattern():
         # Create multiple new files
         for i in range(3):
             new_file = watch_dir / f"stats_test_{i}.py"
-            new_file.write_text(f"""
+            await write_and_index_file(services, new_file, f"""
 def stats_test_function_{i}():
     '''File {i} for testing database stats updates'''
     return "stats_test_{i}"
@@ -260,16 +251,11 @@ class StatsTestClass_{i}:
 
         # Create file with unique content
         delete_file = watch_dir / "delete_test.py"
-        realtime_service.reset_file_tracking(delete_file)
-        delete_file.write_text("""
+        await write_and_index_file(services, delete_file, """
 def delete_test_unique_function():
     '''This function will be deleted'''
     return "to_be_deleted"
 """)
-
-        # Wait for processing
-        found = await realtime_service.wait_for_file_indexed(delete_file, timeout=get_fs_event_timeout())
-        assert found, "File should be indexed"
 
         # Verify content is searchable
         before_delete = await search_impl(
@@ -284,12 +270,7 @@ def delete_test_unique_function():
             "File should be indexed and searchable before deletion"
 
         # Delete the file
-        realtime_service.reset_file_tracking(delete_file)
-        delete_file.unlink()
-
-        # Wait for deletion processing
-        removed = await realtime_service.wait_for_file_removed(delete_file, timeout=get_fs_event_timeout())
-        assert removed, "File should be removed"
+        await remove_file_from_index(realtime_service, delete_file)
 
         # Verify content is no longer searchable
         after_delete = await search_impl(
@@ -306,7 +287,7 @@ def delete_test_unique_function():
     @pytest.mark.asyncio
     async def test_file_modification_detection_comprehensive(self, mcp_setup):
         """Comprehensive test to reproduce file modification detection issues."""
-        services, realtime_service, watch_dir, _, _ = mcp_setup
+        services, _, watch_dir, _, _ = mcp_setup
 
         # Create initial file
         test_file = watch_dir / "comprehensive_modify_test.py"
@@ -406,11 +387,17 @@ class NewlyAddedClass:
         reason="Polling mtime detection unreliable on NTFS (fixed in PR #220)",
         strict=False,
     )
+    @pytest.mark.native_watcher
     @pytest.mark.asyncio
     async def test_file_modification_with_filesystem_ops(self, mcp_setup):
         """Test modification using different filesystem operations to ensure OS detection."""
         services, realtime_service, watch_dir, _, _ = mcp_setup
         import os
+
+        await realtime_service.start(watch_dir)
+        assert await realtime_service.wait_for_monitoring_ready(
+            timeout=get_fs_event_timeout()
+        ), "Realtime monitoring did not become ready"
 
         test_file = watch_dir / "fs_ops_test.py"
 
@@ -466,15 +453,15 @@ class NewlyAddedClass:
         test_file = watch_dir / "direct_modify_test.py"
 
         # Write initial content and process directly
-        test_file.write_text("def func(): return 'initial'")
-        await services.indexing_coordinator.process_file(test_file)
+        await write_and_index_file(services, test_file, "def func(): return 'initial'")
 
         initial_results = services.provider.search_chunks_regex("func.*initial")
         assert len(initial_results) > 0, "Initial content should be searchable"
 
         # Overwrite with new content and process again
-        test_file.write_text("def func(): return 'replaced'\ndef added(): pass")
-        await services.indexing_coordinator.process_file(test_file)
+        await write_and_index_file(
+            services, test_file, "def func(): return 'replaced'\ndef added(): pass"
+        )
 
         # New content should be searchable
         new_results = services.provider.search_chunks_regex("func.*replaced")

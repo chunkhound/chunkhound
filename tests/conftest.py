@@ -105,3 +105,20 @@ def clean_environment(monkeypatch):
     for k in to_clear:
         monkeypatch.delenv(k, raising=False)
     yield
+
+
+@pytest.fixture
+def watcher_mode(request) -> str:
+    """Resolve watcher mode from explicit markers before falling back to env."""
+    native_markers = list(request.node.iter_markers(name="native_watcher"))
+    polling_markers = list(request.node.iter_markers(name="polling_watcher"))
+    if native_markers and polling_markers:
+        raise pytest.UsageError(
+            f"{request.node.nodeid} cannot request both native "
+            "and polling watcher modes"
+        )
+    if polling_markers:
+        return "polling"
+    if native_markers:
+        return "native"
+    return get_configured_watcher_mode()

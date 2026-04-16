@@ -97,7 +97,7 @@ class TestRealtimeFunctional:
     """Functional tests for real-time indexing - test what really matters."""
 
     @pytest.fixture
-    async def realtime_setup(self):
+    async def realtime_setup(self, watcher_mode):
         """Setup real service with temp database and project directory."""
         # Resolve immediately to handle symlinks (/var -> /private/var on macOS)
         # and Windows 8.3 short path names
@@ -144,6 +144,7 @@ class TestRealtimeFunctional:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     @pytest.mark.asyncio
+    @pytest.mark.native_watcher
     async def test_service_can_start_and_stop(self, realtime_setup):
         """Test basic service lifecycle - start and stop without crashing."""
         service, watch_dir, _, _ = realtime_setup
@@ -2657,6 +2658,7 @@ class TestRealtimeFunctional:
         await service.stop()
 
     @pytest.mark.asyncio
+    @pytest.mark.native_watcher
     async def test_multiple_rapid_changes_handling(self, realtime_setup):
         """Test handling multiple rapid file changes - stress test for concurrency."""
         service, watch_dir, _, _ = realtime_setup
@@ -2732,20 +2734,17 @@ class TestRealtimeFunctional:
         await service.stop()
 
     @pytest.mark.asyncio
-    async def test_file_type_filtering_works(self, realtime_setup):
-        """Test that only supported file types are processed."""
-        service, watch_dir, _, services = realtime_setup
-        await service.start(watch_dir)
+    async def test_file_type_filtering_works_in_direct_indexing(self, realtime_setup):
+        """Direct indexing should skip unsupported file types."""
+        _, watch_dir, _, services = realtime_setup
 
         # Create supported file
         py_file = watch_dir / "supported.py"
-        py_file.write_text("def supported(): pass")
+        await write_and_index_file(services, py_file, "def supported(): pass")
 
         # Create unsupported file
         bin_file = watch_dir / "unsupported.xyz"
-        bin_file.write_text("unsupported content")
-
-        await asyncio.sleep(1.5)
+        await write_and_index_file(services, bin_file, "unsupported content")
 
         # Check processing results
         bin_record = services.provider.get_file_by_path(str(bin_file))
@@ -2753,11 +2752,34 @@ class TestRealtimeFunctional:
         # Python file may still fail for unrelated reasons, but the unsupported
         # file should definitely be ignored.
         # Binary file should definitely be ignored
+        assert py_record is not None, "Supported file types should be indexed"
         assert bin_record is None, "Unsupported file types should be ignored"
+
+    @pytest.mark.asyncio
+    @pytest.mark.native_watcher
+    async def test_realtime_watcher_filters_unsupported_files(self, realtime_setup):
+        """Native watcher should queue supported files and ignore unsupported ones."""
+        service, watch_dir, _, services = realtime_setup
+        await service.start(watch_dir)
+
+        ignored_file = watch_dir / "ignored.xyz"
+        ignored_file.write_text("unsupported content")
+
+        tracked_file = watch_dir / "tracked.py"
+        tracked_file.write_text("def tracked(): pass")
+
+        found = await service.wait_for_file_indexed(tracked_file)
+        assert found, "Supported files should still be detected by realtime monitoring"
+
+        tracked_record = services.provider.get_file_by_path(str(tracked_file))
+        ignored_record = services.provider.get_file_by_path(str(ignored_file))
+        assert tracked_record is not None, "Supported file should be indexed"
+        assert ignored_record is None, "Unsupported file should be ignored by the watcher"
 
         await service.stop()
 
     @pytest.mark.asyncio
+    @pytest.mark.native_watcher
     async def test_background_vs_realtime_processing(self, realtime_setup):
         """Test interaction between initial scan and real-time processing."""
         service, watch_dir, _, services = realtime_setup
