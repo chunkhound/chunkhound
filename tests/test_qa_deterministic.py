@@ -450,6 +450,11 @@ function qaTestFunction() {
             Language.PDF: ".pdf",
             Language.SQL: ".sql",
             Language.ELIXIR: ".ex",
+            Language.HTML: ".html",
+            Language.CSS: ".css",
+            Language.SCSS: ".scss",
+            Language.JINJA: ".jinja",
+            Language.TWINCAT: ".TcPOU",
         }
 
         # Validate ALL languages have test coverage (fail explicitly for new languages)
