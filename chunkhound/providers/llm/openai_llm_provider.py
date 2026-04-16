@@ -5,6 +5,7 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.interfaces.llm_provider import LLMResponse
 from chunkhound.providers.llm.openai_compatible_provider import OpenAICompatibleProvider
 
@@ -63,7 +64,8 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
         api_key: str | None = None,
         model: str = "gpt-5-nano-mini",
         base_url: str | None = None,
-        timeout: int = 60,
+        ssl_verify: bool = True,
+        timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
         reasoning_effort: str | None = None,
     ):
@@ -73,6 +75,7 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
             api_key: OpenAI API key (defaults to OPENAI_API_KEY env var)
             model: Model name to use
             base_url: Base URL for OpenAI API (optional for custom endpoints)
+            ssl_verify: Verify TLS certificates for requests sent via base_url
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts for failed requests
             reasoning_effort: Reasoning effort for reasoning models
@@ -82,6 +85,7 @@ class OpenAILLMProvider(OpenAICompatibleProvider):
             api_key=api_key,
             model=model,
             base_url=base_url,
+            ssl_verify=ssl_verify,
             timeout=timeout,
             max_retries=max_retries,
         )

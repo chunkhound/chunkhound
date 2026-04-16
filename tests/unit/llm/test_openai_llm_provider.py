@@ -1,10 +1,12 @@
 """High-value functional tests for OpenAILLMProvider (Responses API path)."""
 
-import pytest
 from unittest.mock import AsyncMock, patch
 
-from chunkhound.providers.llm.openai_llm_provider import OpenAILLMProvider
+import pytest
+
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.interfaces.llm_provider import LLMResponse
+from chunkhound.providers.llm.openai_llm_provider import OpenAILLMProvider
 
 
 @pytest.fixture
@@ -14,6 +16,79 @@ def mock_openai_client():
         client.responses.create = AsyncMock()      # Responses API (default path)
         client.chat.completions.create = AsyncMock()  # fallback for older models
         yield client
+
+
+def test_default_timeout():
+    """Default timeout resolves to 120."""
+
+    p = OpenAILLMProvider(api_key="test-key")
+    assert p.timeout == DEFAULT_LLM_TIMEOUT
+
+
+def test_custom_endpoint_without_api_key_uses_placeholder_key():
+    """Custom endpoints should construct an SDK client without a real API key."""
+    with patch(
+        "chunkhound.providers.llm.openai_compatible_provider.AsyncOpenAI"
+    ) as mock_client:
+        OpenAILLMProvider(
+            api_key=None,
+            model="llama3.2",
+            base_url="http://localhost:11434/v1",
+        )
+
+    kwargs = mock_client.call_args.kwargs
+    assert kwargs["api_key"] == "not-required"
+    assert kwargs["base_url"] == "http://localhost:11434/v1"
+
+
+def test_official_openai_endpoint_keeps_real_api_key_contract():
+    """Official OpenAI endpoints must not use the custom-endpoint placeholder key."""
+    with patch(
+        "chunkhound.providers.llm.openai_compatible_provider.AsyncOpenAI"
+    ) as mock_client:
+        OpenAILLMProvider(
+            api_key="sk-real",
+            model="gpt-5",
+            base_url="https://api.openai.com/v1",
+        )
+
+    kwargs = mock_client.call_args.kwargs
+    assert kwargs["api_key"] == "sk-real"
+    assert kwargs["base_url"] == "https://api.openai.com/v1"
+
+
+def test_custom_endpoint_ssl_verify_false_creates_insecure_http_client():
+    """Explicit ssl_verify=false should only affect custom base_url traffic."""
+    with (
+        patch("chunkhound.providers.llm.openai_compatible_provider.AsyncOpenAI") as mock_client,
+        patch("chunkhound.providers.llm.openai_compatible_provider.httpx.AsyncClient") as mock_http_client,
+    ):
+        OpenAILLMProvider(
+            api_key=None,
+            model="llama3.2",
+            base_url="https://localhost:11434/v1",
+            ssl_verify=False,
+        )
+
+    kwargs = mock_client.call_args.kwargs
+    assert kwargs["base_url"] == "https://localhost:11434/v1"
+    assert kwargs["http_client"] == mock_http_client.return_value
+    assert mock_http_client.call_args.kwargs["verify"] is False
+
+
+def test_ssl_verify_is_ignored_without_llm_base_url():
+    """ssl_verify must not affect default endpoint routing when base_url is unset."""
+    with patch(
+        "chunkhound.providers.llm.openai_compatible_provider.AsyncOpenAI"
+    ) as mock_client:
+        OpenAILLMProvider(
+            api_key="sk-real",
+            model="gpt-5",
+            ssl_verify=False,
+        )
+
+    kwargs = mock_client.call_args.kwargs
+    assert "http_client" not in kwargs
 
 
 class TestOpenAILLMProvider:

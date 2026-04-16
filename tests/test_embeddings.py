@@ -854,7 +854,7 @@ def test_relative_rerank_url_requires_base_url():
     from chunkhound.core.config.embedding_config import EmbeddingConfig
 
     # Test 1: Relative URL without base_url should fail
-    with pytest.raises(ValueError, match="base_url is required"):
+    with pytest.raises(ValueError, match="requires base_url or explicit rerank_url"):
         config = EmbeddingConfig(
             provider="openai",
             model="text-embedding-3-small",
@@ -885,3 +885,29 @@ def test_relative_rerank_url_requires_base_url():
     print("✅ Relative URL validation test passed")
     print("   • Relative URL requires base_url")
     print("   • Absolute URL works without base_url")
+
+
+@pytest.mark.parametrize(
+    "rerank_format, rerank_model",
+    [
+        ("cohere", "rerank-v3"),
+        ("auto", "rerank-v3"),
+        (None, "some-model"),
+    ],
+    ids=["cohere", "auto", "default-None"],
+)
+def test_rerank_model_with_base_url_auto_sets_rerank_url(rerank_format, rerank_model):
+    """rerank_model + base_url should auto-set rerank_url."""
+    from chunkhound.core.config.embedding_config import EmbeddingConfig
+
+    kwargs = dict(
+        provider="openai",
+        model="text-embedding-3-small",
+        base_url="http://localhost:11434/v1",
+        rerank_model=rerank_model,
+    )
+    if rerank_format is not None:
+        kwargs["rerank_format"] = rerank_format
+
+    config = EmbeddingConfig(**kwargs)
+    assert config.rerank_url == "/rerank"

@@ -357,9 +357,10 @@ def _validate_run_arguments(
                 formatter.error("No embedding provider configured.")
                 formatter.info("To fix this, you can:")
                 formatter.info(
-                    "  1. Create .chunkhound.json config file with embeddings"
+                    "  1. Generate a config at https://chunkhound.ai"
                 )
-                formatter.info("  2. Use --no-embeddings to skip embeddings")
+                formatter.info("  2. Create .chunkhound.json manually")
+                formatter.info("  3. Use --no-embeddings to skip embeddings")
                 return False
         if not validate_provider_args(provider, api_key, base_url, model):
             return False

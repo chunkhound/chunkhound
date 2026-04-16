@@ -67,7 +67,7 @@ cd /project/with/config
 cat > .chunkhound.json << EOF
 {
   "database": {"provider": "lancedb"},
-  "embedding": {"provider": "ollama"}
+  "embedding": {"provider": "openai", "base_url": "http://localhost:11434/v1"}
 }
 EOF
 chunkhound index .

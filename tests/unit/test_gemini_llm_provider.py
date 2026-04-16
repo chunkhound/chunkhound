@@ -2,6 +2,7 @@
 
 import pytest
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.providers.llm.gemini_llm_provider import GeminiLLMProvider
 
 
@@ -197,6 +198,6 @@ class TestGeminiLLMProvider:
 
     def test_timeout_converted_to_milliseconds(self):
         """Regression: google-genai SDK expects milliseconds, not seconds."""
-        provider = GeminiLLMProvider(api_key="test-key", timeout=120)
+        provider = GeminiLLMProvider(api_key="test-key", timeout=DEFAULT_LLM_TIMEOUT)
         http_options = provider._client._api_client._http_options
-        assert http_options.timeout == 120_000
+        assert http_options.timeout == DEFAULT_LLM_TIMEOUT * 1000

@@ -188,6 +188,8 @@ def create_openai_provider(
     rerank_url: str = "/rerank",
     rerank_format: str = "auto",
     rerank_batch_size: int | None = None,
+    ssl_verify: bool = True,
+    rerank_ssl_verify: bool | None = None,
     api_version: str | None = None,
     azure_endpoint: str | None = None,
     azure_deployment: str | None = None,
@@ -207,6 +209,9 @@ def create_openai_provider(
             'cohere', 'tei', or 'auto' (default: 'auto')
         rerank_batch_size: Max documents per rerank batch
             (overrides model defaults, bounded by model caps)
+        ssl_verify: Verify TLS certificates for requests sent via base_url
+        rerank_ssl_verify: Verify TLS certificates for rerank requests.
+            Defaults to ssl_verify when unset.
         api_version: Azure OpenAI API version (e.g., '2024-02-01')
         azure_endpoint: Azure OpenAI endpoint URL (e.g., 'https://myresource.openai.azure.com')
         azure_deployment: Azure OpenAI deployment name
@@ -225,6 +230,8 @@ def create_openai_provider(
         rerank_url=rerank_url,
         rerank_format=rerank_format,
         rerank_batch_size=rerank_batch_size,
+        ssl_verify=ssl_verify,
+        rerank_ssl_verify=rerank_ssl_verify,
         api_version=api_version,
         azure_endpoint=azure_endpoint,
         azure_deployment=azure_deployment,

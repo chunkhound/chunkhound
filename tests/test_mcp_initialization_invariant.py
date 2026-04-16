@@ -117,3 +117,69 @@ class TestNonBlockingInitialization:
                 assert server._scan_progress["scan_completed_at"] is None
 
                 await server.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_initialize_skips_invalid_custom_endpoint_llm_without_manager(
+        self, tmp_path: Path
+    ):
+        """Invalid custom endpoint LLM config should not create an MCP LLM manager."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm.get_missing_config_for_roles.return_value = [
+            "explicit model selection required for custom OpenAI-compatible endpoint roles: utility, synthesis"
+        ]
+        config.target_dir = tmp_path
+
+        with patch("chunkhound.mcp_server.base.create_services") as mock_create:
+            mock_services = MagicMock()
+            mock_services.provider.is_connected = False
+            mock_create.return_value = mock_services
+
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+                with patch("chunkhound.mcp_server.base.LLMManager") as mock_llm_manager:
+                    server = ConcreteMCPServer(config=config)
+                    await server.initialize()
+
+                    mock_llm_manager.assert_not_called()
+                    assert server.llm_manager is None
+
+                    await server.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_initialize_allows_cleanup_only_llm_misconfiguration(
+        self, tmp_path: Path
+    ) -> None:
+        """Cleanup-only overrides must not block MCP's research-capable LLM roles."""
+        config = MagicMock()
+        config.database.path = str(tmp_path / "test.db")
+        config.embedding = None
+        config.llm.get_missing_config_for_roles.return_value = []
+        config.llm.get_provider_configs.return_value = (
+            {"provider": "codex-cli", "model": "codex"},
+            {"provider": "codex-cli", "model": "codex"},
+        )
+        config.target_dir = tmp_path
+
+        with patch("chunkhound.mcp_server.base.create_services") as mock_create:
+            mock_services = MagicMock()
+            mock_services.provider.is_connected = False
+            mock_create.return_value = mock_services
+
+            with patch("chunkhound.mcp_server.base.EmbeddingManager"):
+                with patch("chunkhound.mcp_server.base.LLMManager") as mock_llm_manager:
+                    mock_llm_manager.return_value = MagicMock()
+                    server = ConcreteMCPServer(config=config)
+                    await server.initialize()
+
+                    mock_llm_manager.assert_called_once_with(
+                        {"provider": "codex-cli", "model": "codex"},
+                        {"provider": "codex-cli", "model": "codex"},
+                    )
+                    assert server.llm_manager is mock_llm_manager.return_value
+                    config.llm.get_missing_config_for_roles.assert_called_once_with(
+                        ("utility", "synthesis")
+                    )
+                    config.llm.get_provider_configs.assert_called_once_with()
+
+                    await server.cleanup()

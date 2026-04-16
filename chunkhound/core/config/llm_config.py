@@ -10,8 +10,55 @@ import argparse
 import os
 from typing import Any, Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from chunkhound.core.config.openai_utils import is_official_openai_endpoint
+
+DEFAULT_LLM_TIMEOUT = 120
+OPENAI_COMPATIBLE_LLM_PROVIDERS = {"openai", "grok"}
+BASE_URL_CAPABLE_LLM_PROVIDERS = OPENAI_COMPATIBLE_LLM_PROVIDERS | {"anthropic"}
+
+REMOVED_PROVIDERS: dict[str, str] = {
+    "ollama": (
+        "The 'ollama' provider has been removed. "
+        "Use provider='openai' with base_url pointing to your Ollama "
+        "instance (e.g. http://localhost:11434/v1)."
+    ),
+}
+
+CLI_PROVIDER_CHOICES = (
+    "openai",
+    "claude-code-cli",
+    "codex-cli",
+    "anthropic",
+    "gemini",
+    "grok",
+    "opencode-cli",
+)
+
+
+def _parse_llm_provider_arg(value: str) -> str:
+    """Parse CLI provider arguments with migration hints for removed providers."""
+    normalized = value.strip().lower()
+    if normalized in REMOVED_PROVIDERS:
+        raise argparse.ArgumentTypeError(REMOVED_PROVIDERS[normalized])
+    if normalized not in CLI_PROVIDER_CHOICES:
+        allowed = ", ".join(CLI_PROVIDER_CHOICES)
+        raise argparse.ArgumentTypeError(
+            f"invalid choice: {value!r} (choose from {allowed})"
+        )
+    return normalized
+
+
+def _parse_env_bool(value: str) -> bool | None:
+    """Parse a boolean environment variable value."""
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
 
 
 class LLMConfig(BaseSettings):
@@ -46,7 +93,6 @@ class LLMConfig(BaseSettings):
     # Provider Selection
     provider: Literal[
         "openai",
-        "ollama",
         "claude-code-cli",
         "codex-cli",
         "gemini",
@@ -62,7 +108,6 @@ class LLMConfig(BaseSettings):
     utility_provider: (
         Literal[
             "openai",
-            "ollama",
             "claude-code-cli",
             "codex-cli",
             "anthropic",
@@ -76,7 +121,6 @@ class LLMConfig(BaseSettings):
     synthesis_provider: (
         Literal[
             "openai",
-            "ollama",
             "claude-code-cli",
             "codex-cli",
             "anthropic",
@@ -125,7 +169,6 @@ class LLMConfig(BaseSettings):
     map_hyde_provider: (
         Literal[
             "openai",
-            "ollama",
             "claude-code-cli",
             "codex-cli",
             "gemini",
@@ -170,7 +213,6 @@ class LLMConfig(BaseSettings):
     autodoc_cleanup_provider: (
         Literal[
             "openai",
-            "ollama",
             "claude-code-cli",
             "codex-cli",
             "gemini",
@@ -277,13 +319,43 @@ class LLMConfig(BaseSettings):
         default=None,
         description=(
             "Provider-specific base URL: "
-            "OpenAI/Ollama: API endpoint (e.g., http://localhost:11434/v1)"
+            "OpenAI-compatible: API endpoint (e.g., https://api.example.com/v1)"
+        ),
+    )
+    ssl_verify: bool = Field(
+        default=True,
+        description=(
+            "Verify TLS certificates for requests sent to the configured base_url. "
+            "Ignored when base_url is unset."
         ),
     )
 
     # Internal settings
-    timeout: int = Field(default=60, description="Internal timeout for LLM calls")
+    timeout: int = Field(
+        default=DEFAULT_LLM_TIMEOUT, description="Internal timeout for LLM calls"
+    )
     max_retries: int = Field(default=3, description="Internal max retries")
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_providers(cls, data: Any) -> Any:
+        """Reject removed providers with actionable migration hints."""
+        if not isinstance(data, dict):
+            return data
+        provider_fields = (
+            "provider",
+            "utility_provider",
+            "synthesis_provider",
+            "map_hyde_provider",
+            "autodoc_cleanup_provider",
+        )
+        for field in provider_fields:
+            v = data.get(field)
+            if isinstance(v, str) and v.lower() in REMOVED_PROVIDERS:
+                raise ValueError(
+                    f"{REMOVED_PROVIDERS[v.lower()]} (found in '{field}')"
+                )
+        return data
 
     @field_validator("base_url")
     def validate_base_url(cls, v: str | None) -> str | None:  # noqa: N805
@@ -328,6 +400,72 @@ class LLMConfig(BaseSettings):
         # However, for type safety we return v as is.
         return v
 
+    def _get_default_models_for_provider(self, provider: str) -> tuple[str, str]:
+        """Return the provider-specific utility/synthesis defaults."""
+        if provider == "openai":
+            return ("gpt-5-nano", "gpt-5")
+        elif provider == "claude-code-cli":
+            return ("claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001")
+        elif provider == "codex-cli":
+            return ("codex", "codex")
+        elif provider == "gemini":
+            return ("gemini-3-pro-preview", "gemini-3-pro-preview")
+        elif provider == "anthropic":
+            return ("claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929")
+        elif provider == "grok":
+            return ("grok-4-1-fast-reasoning", "grok-4-1-fast-reasoning")
+        elif provider == "opencode-cli":
+            return ("opencode/grok-code", "opencode/grok-code")
+        return ("gpt-5-nano", "gpt-5")
+
+    def build_provider_config(
+        self,
+        *,
+        provider: str,
+        model: str,
+        reasoning_effort: str | None = None,
+    ) -> dict[str, Any]:
+        """Build a provider config using the current shared config fields."""
+        config: dict[str, Any] = {
+            "provider": provider,
+            "model": model,
+            "timeout": self.timeout,
+            "max_retries": self.max_retries,
+        }
+
+        if self.api_key:
+            config["api_key"] = self.api_key.get_secret_value()
+
+        if base_url := self._base_url_for_provider(provider):
+            config["base_url"] = base_url
+            config["ssl_verify"] = self.ssl_verify
+
+        if provider in ("codex-cli", "openai") and reasoning_effort:
+            config["reasoning_effort"] = reasoning_effort
+
+        if provider == "anthropic":
+            config["thinking_enabled"] = self.anthropic_thinking_enabled
+            config["thinking_budget_tokens"] = self.anthropic_thinking_budget_tokens
+            config["interleaved_thinking"] = self.anthropic_interleaved_thinking
+            if self.anthropic_effort:
+                config["effort"] = self.anthropic_effort
+            if self.anthropic_context_management_enabled:
+                config["context_management_enabled"] = True
+                if self.anthropic_clear_thinking_keep_turns is not None:
+                    config["clear_thinking_keep_turns"] = (
+                        self.anthropic_clear_thinking_keep_turns
+                    )
+                if self.anthropic_clear_tool_uses_trigger_tokens is not None:
+                    config["clear_tool_uses_trigger_tokens"] = (
+                        self.anthropic_clear_tool_uses_trigger_tokens
+                    )
+                if self.anthropic_clear_tool_uses_keep is not None:
+                    config["clear_tool_uses_keep"] = (
+                        self.anthropic_clear_tool_uses_keep
+                    )
+
+        return config
+
     def get_provider_configs(self) -> tuple[dict[str, Any], dict[str, Any]]:
         """
         Get provider-specific configuration dictionaries for utility and synthesis models.
@@ -335,35 +473,15 @@ class LLMConfig(BaseSettings):
         Returns:
             Tuple of (utility_config, synthesis_config)
         """
-        # Get default models if not specified
-        utility_default, synthesis_default = self.get_default_models()
-
         # Resolve providers per-role
         resolved_utility_provider = self.utility_provider or self.provider
         resolved_synthesis_provider = self.synthesis_provider or self.provider
-
-        base_config: dict[str, Any] = {
-            "timeout": self.timeout,
-            "max_retries": self.max_retries,
-        }
-
-        # Add API key if available
-        if self.api_key:
-            base_config["api_key"] = self.api_key.get_secret_value()
-
-        # Add base URL if available
-        if self.base_url:
-            base_config["base_url"] = self.base_url
-
-        # Build utility config
-        utility_config = base_config.copy()
-        utility_config["provider"] = resolved_utility_provider
-        utility_config["model"] = self.utility_model or utility_default
-
-        # Build synthesis config
-        synthesis_config = base_config.copy()
-        synthesis_config["provider"] = resolved_synthesis_provider
-        synthesis_config["model"] = self.synthesis_model or synthesis_default
+        utility_default, _ = self._get_default_models_for_provider(
+            resolved_utility_provider
+        )
+        _, synthesis_default = self._get_default_models_for_provider(
+            resolved_synthesis_provider
+        )
 
         def _codex_effort_for(role: str) -> str | None:
             default_effort = self.codex_reasoning_effort
@@ -373,63 +491,16 @@ class LLMConfig(BaseSettings):
                 return self.codex_reasoning_effort_synthesis or default_effort
             return default_effort
 
-        # Add reasoning_effort for providers that support it (OpenAI and Codex)
-        utility_effort = _codex_effort_for("utility")
-        if resolved_utility_provider in ("codex-cli", "openai") and utility_effort:
-            utility_config["reasoning_effort"] = utility_effort
-
-        synthesis_effort = _codex_effort_for("synthesis")
-        if resolved_synthesis_provider in ("codex-cli", "openai") and synthesis_effort:
-            synthesis_config["reasoning_effort"] = synthesis_effort
-
-        # Add Anthropic configuration
-        if resolved_utility_provider == "anthropic":
-            utility_config["thinking_enabled"] = self.anthropic_thinking_enabled
-            utility_config["thinking_budget_tokens"] = (
-                self.anthropic_thinking_budget_tokens
-            )
-            utility_config["interleaved_thinking"] = self.anthropic_interleaved_thinking
-            if self.anthropic_effort:
-                utility_config["effort"] = self.anthropic_effort
-            if self.anthropic_context_management_enabled:
-                utility_config["context_management_enabled"] = True
-                if self.anthropic_clear_thinking_keep_turns is not None:
-                    utility_config["clear_thinking_keep_turns"] = (
-                        self.anthropic_clear_thinking_keep_turns
-                    )
-                if self.anthropic_clear_tool_uses_trigger_tokens is not None:
-                    utility_config["clear_tool_uses_trigger_tokens"] = (
-                        self.anthropic_clear_tool_uses_trigger_tokens
-                    )
-                if self.anthropic_clear_tool_uses_keep is not None:
-                    utility_config["clear_tool_uses_keep"] = (
-                        self.anthropic_clear_tool_uses_keep
-                    )
-
-        if resolved_synthesis_provider == "anthropic":
-            synthesis_config["thinking_enabled"] = self.anthropic_thinking_enabled
-            synthesis_config["thinking_budget_tokens"] = (
-                self.anthropic_thinking_budget_tokens
-            )
-            synthesis_config["interleaved_thinking"] = (
-                self.anthropic_interleaved_thinking
-            )
-            if self.anthropic_effort:
-                synthesis_config["effort"] = self.anthropic_effort
-            if self.anthropic_context_management_enabled:
-                synthesis_config["context_management_enabled"] = True
-                if self.anthropic_clear_thinking_keep_turns is not None:
-                    synthesis_config["clear_thinking_keep_turns"] = (
-                        self.anthropic_clear_thinking_keep_turns
-                    )
-                if self.anthropic_clear_tool_uses_trigger_tokens is not None:
-                    synthesis_config["clear_tool_uses_trigger_tokens"] = (
-                        self.anthropic_clear_tool_uses_trigger_tokens
-                    )
-                if self.anthropic_clear_tool_uses_keep is not None:
-                    synthesis_config["clear_tool_uses_keep"] = (
-                        self.anthropic_clear_tool_uses_keep
-                    )
+        utility_config = self.build_provider_config(
+            provider=resolved_utility_provider,
+            model=self.utility_model or utility_default,
+            reasoning_effort=_codex_effort_for("utility"),
+        )
+        synthesis_config = self.build_provider_config(
+            provider=resolved_synthesis_provider,
+            model=self.synthesis_model or synthesis_default,
+            reasoning_effort=_codex_effort_for("synthesis"),
+        )
 
         return utility_config, synthesis_config
 
@@ -440,39 +511,146 @@ class LLMConfig(BaseSettings):
         Returns:
             Tuple of (utility_model, synthesis_model)
         """
-        # Provider-specific smart defaults
-        if self.provider == "openai":
-            return ("gpt-5-nano", "gpt-5")
-        elif self.provider == "ollama":
-            # Ollama: use same model for both (local deployment)
-            return ("llama3.2", "llama3.2")
-        elif self.provider == "claude-code-cli":
-            # Claude Code CLI: Haiku 4.5 for both utility and synthesis
-            # (Haiku 4.5 is synthesis-capable and cost-effective, unlike 3.5)
-            return ("claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001")
-        elif self.provider == "codex-cli":
-            # Codex CLI: nominal label; require explicit model if desired
-            return ("codex", "codex")
-        elif self.provider == "gemini":
-            # Gemini: Use Gemini 3 Pro for both (advanced reasoning)
-            # Alternative models: gemini-2.5-pro (balanced), gemini-2.5-flash (fast)
-            return ("gemini-3-pro-preview", "gemini-3-pro-preview")
-        elif self.provider == "anthropic":
-            # Anthropic: Haiku 4.5 for utility (fast/cheap), Sonnet 4.5 for synthesis (powerful)
-            # Claude 4.5 generation models:
-            # - claude-haiku-4-5-20251001: Fastest model with near-frontier intelligence
-            # - claude-sonnet-4-5-20250929: Smartest model for complex agents and coding
-            # - claude-opus-4-5-20251101: Most capable model with effort control (supports effort parameter)
-            # - claude-opus-4-1-20250805: Exceptional model for specialized reasoning (legacy)
-            return ("claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929")
-        elif self.provider == "grok":
-            # Grok: Use the same flagship model for both utility and synthesis
-            # Intentional: Grok reasoning models (especially grok-4-1-fast-reasoning)
-            # are extremely strong across both roles — no benefit to splitting them.
-            # grok-4-1-fast-reasoning: Advanced reasoning, structured outputs, tool calling
-            return ("grok-4-1-fast-reasoning", "grok-4-1-fast-reasoning")
-        else:
-            return ("gpt-5-nano", "gpt-5")
+        return self._get_default_models_for_provider(self.provider)
+
+    def _provider_family(self, provider: str) -> str:
+        """Return the compatibility family for a provider."""
+        if provider in OPENAI_COMPATIBLE_LLM_PROVIDERS:
+            return "openai-compatible"
+        return provider
+
+    def _resolved_provider_for_role(self, role: str) -> str:
+        """Resolve the effective provider for a role."""
+        resolved_synth = self.synthesis_provider or self.provider
+        if role == "utility":
+            return self.utility_provider or self.provider
+        if role == "synthesis":
+            return resolved_synth
+        if role == "map_hyde":
+            return self.map_hyde_provider or resolved_synth
+        if role == "autodoc_cleanup":
+            return self.autodoc_cleanup_provider or resolved_synth
+        raise ValueError(f"Unknown LLM role: {role}")
+
+    def _role_uses_synthesis_provider_fallback(self, role: str) -> bool:
+        """Return whether a role falls back to synthesis provider settings."""
+        if role == "map_hyde":
+            return self.map_hyde_provider is None
+        if role == "autodoc_cleanup":
+            return self.autodoc_cleanup_provider is None
+        return False
+
+    def _explicit_model_for_role(self, role: str) -> str | None:
+        """Return the explicit model selection for a role, if any."""
+        if role == "utility":
+            return self.utility_model or self.model or None
+        if role == "synthesis":
+            return self.synthesis_model or self.model or None
+        if role == "map_hyde":
+            return self.map_hyde_model or None
+        if role == "autodoc_cleanup":
+            return self.autodoc_cleanup_model or None
+        raise ValueError(f"Unknown LLM role: {role}")
+
+    def _configured_model_for_role(self, role: str) -> str | None:
+        """Return a user-configured model for a role without injecting defaults."""
+        explicit_model = self._explicit_model_for_role(role)
+        if explicit_model:
+            return explicit_model
+
+        if role in {"utility", "synthesis"}:
+            return None
+
+        if self._role_uses_synthesis_provider_fallback(role):
+            return self._configured_model_for_role("synthesis")
+
+        synthesis_provider = self._resolved_provider_for_role("synthesis")
+        role_provider = self._resolved_provider_for_role(role)
+        if self._provider_family(role_provider) != self._provider_family(
+            synthesis_provider
+        ):
+            return None
+
+        return self._configured_model_for_role("synthesis")
+
+    def resolve_model_for_role(self, role: str) -> str | None:
+        """Resolve the effective model for a role.
+
+        For roles that fall back to synthesis settings, only inherit the synthesis
+        model when the resolved provider stays in the same compatibility family.
+        """
+        explicit_model = self._explicit_model_for_role(role)
+        if explicit_model:
+            return explicit_model
+
+        if role in {"utility", "synthesis"}:
+            provider = self._resolved_provider_for_role(role)
+            defaults = self._get_default_models_for_provider(provider)
+            return defaults[0] if role == "utility" else defaults[1]
+
+        if self._role_uses_synthesis_provider_fallback(role):
+            return self.resolve_model_for_role("synthesis")
+
+        synthesis_provider = self._resolved_provider_for_role("synthesis")
+        role_provider = self._resolved_provider_for_role(role)
+        if self._provider_family(role_provider) != self._provider_family(
+            synthesis_provider
+        ):
+            return None
+
+        return self.resolve_model_for_role("synthesis")
+
+    def _base_url_for_provider(self, provider: str) -> str | None:
+        """Return the configured base URL only for providers that support it."""
+        if provider in BASE_URL_CAPABLE_LLM_PROVIDERS:
+            return self.base_url
+        return None
+
+    def _is_custom_openai_endpoint(self) -> bool:
+        """Return whether this config targets a non-official OpenAI-compatible endpoint."""
+        return not is_official_openai_endpoint(self.base_url)
+
+    def _require_explicit_model_for_custom_openai(
+        self, roles: tuple[str, ...]
+    ) -> list[str]:
+        """Return roles that rely on a custom OpenAI endpoint without valid model selection."""
+        if not self._is_custom_openai_endpoint():
+            return []
+
+        missing_roles: list[str] = []
+        for role in roles:
+            resolved_provider = self._resolved_provider_for_role(role)
+            if resolved_provider not in OPENAI_COMPATIBLE_LLM_PROVIDERS:
+                continue
+            if self._configured_model_for_role(role) is None:
+                missing_roles.append(role)
+
+        return missing_roles
+
+    def _require_explicit_model_for_cross_family_role_overrides(
+        self, roles: tuple[str, ...]
+    ) -> list[str]:
+        """Return secondary roles that override to an incompatible provider family."""
+        missing_roles: list[str] = []
+        synthesis_provider = self._resolved_provider_for_role("synthesis")
+
+        for role in roles:
+            if role in {"utility", "synthesis"}:
+                continue
+            if self._role_uses_synthesis_provider_fallback(role):
+                continue
+
+            role_provider = self._resolved_provider_for_role(role)
+            if self._provider_family(role_provider) == self._provider_family(
+                synthesis_provider
+            ):
+                continue
+            if self._configured_model_for_role(role) is not None:
+                continue
+
+            missing_roles.append(role)
+
+        return missing_roles
 
     def is_provider_configured(self) -> bool:
         """
@@ -481,19 +659,42 @@ class LLMConfig(BaseSettings):
         Returns:
             True if provider is properly configured
         """
-        resolved_utility_provider = self.utility_provider or self.provider
-        resolved_synthesis_provider = self.synthesis_provider or self.provider
-        no_key_required = {"ollama", "claude-code-cli", "codex-cli"}
-        if (
-            resolved_utility_provider in no_key_required
-            and resolved_synthesis_provider in no_key_required
+        return not self.get_missing_config()
+
+    def get_missing_config_for_roles(self, roles: tuple[str, ...]) -> list[str]:
+        """Get missing config for a specific set of roles."""
+        missing: list[str] = []
+
+        if any(
+            self._provider_requires_api_key(self._resolved_provider_for_role(role))
+            for role in roles
         ):
-            # Ollama and Claude Code CLI don't require API key
-            # Claude Code CLI uses subscription-based authentication
-            return True
-        else:
-            # OpenAI and Anthropic require API key
-            return self.api_key is not None
+            if not self.api_key:
+                missing.append("api_key (set CHUNKHOUND_LLM_API_KEY)")
+
+        custom_endpoint_roles = self._require_explicit_model_for_custom_openai(roles)
+        if custom_endpoint_roles:
+            roles_text = ", ".join(custom_endpoint_roles)
+            missing.append(
+                "explicit model selection required for custom OpenAI-compatible "
+                f"endpoint roles: {roles_text}"
+            )
+
+        cross_family_roles = [
+            role
+            for role in self._require_explicit_model_for_cross_family_role_overrides(
+                roles
+            )
+            if role not in custom_endpoint_roles
+        ]
+        if cross_family_roles:
+            roles_text = ", ".join(cross_family_roles)
+            missing.append(
+                "explicit provider-compatible model required for roles: "
+                f"{roles_text}"
+            )
+
+        return missing
 
     def get_missing_config(self) -> list[str]:
         """
@@ -502,19 +703,30 @@ class LLMConfig(BaseSettings):
         Returns:
             List of missing configuration parameter names
         """
-        missing = []
+        return self.get_missing_config_for_roles(
+            ("utility", "synthesis", "map_hyde", "autodoc_cleanup")
+        )
 
-        if (
-            self.provider not in ("ollama", "claude-code-cli", "codex-cli")
-            and not self.api_key
-        ):
-            missing.append("api_key (set CHUNKHOUND_LLM_API_KEY)")
+    def _provider_requires_api_key(self, provider: str) -> bool:
+        """Return whether a provider requires an API key for the current config.
 
-        return missing
+        The current config model has a single top-level base_url shared by
+        OpenAI-compatible roles. Non-OpenAI-compatible providers ignore it.
+        """
+        if provider in {"claude-code-cli", "codex-cli", "opencode-cli"}:
+            return False
+        if provider in OPENAI_COMPATIBLE_LLM_PROVIDERS:
+            return is_official_openai_endpoint(self._base_url_for_provider(provider))
+        return True
 
     @classmethod
     def add_cli_arguments(cls, parser: argparse.ArgumentParser) -> None:
         """Add LLM-related CLI arguments."""
+        try:
+            boolean_optional_action = argparse.BooleanOptionalAction
+        except AttributeError:  # pragma: no cover - older Python
+            boolean_optional_action = None
+
         parser.add_argument(
             "--llm-utility-model",
             help="Model for utility operations (query expansion, follow-ups, classification)",
@@ -534,49 +746,35 @@ class LLMConfig(BaseSettings):
             "--llm-base-url",
             help="Base URL for LLM API (uses env var if not specified)",
         )
+        if boolean_optional_action is not None:
+            parser.add_argument(
+                "--llm-ssl-verify",
+                action=boolean_optional_action,
+                default=None,
+                help=(
+                    "Verify TLS certificates for requests sent to --llm-base-url. "
+                    "Ignored when llm.base_url is unset."
+                ),
+            )
 
         parser.add_argument(
             "--llm-provider",
-            choices=[
-                "openai",
-                "ollama",
-                "claude-code-cli",
-                "codex-cli",
-                "anthropic",
-                "gemini",
-                "grok",
-                "opencode-cli",
-            ],
+            type=_parse_llm_provider_arg,
+            metavar="{" + ",".join(CLI_PROVIDER_CHOICES) + "}",
             help="Default LLM provider for both roles",
         )
 
         parser.add_argument(
             "--llm-utility-provider",
-            choices=[
-                "openai",
-                "ollama",
-                "claude-code-cli",
-                "codex-cli",
-                "anthropic",
-                "gemini",
-                "grok",
-                "opencode-cli",
-            ],
+            type=_parse_llm_provider_arg,
+            metavar="{" + ",".join(CLI_PROVIDER_CHOICES) + "}",
             help="Override LLM provider for utility operations",
         )
 
         parser.add_argument(
             "--llm-synthesis-provider",
-            choices=[
-                "openai",
-                "ollama",
-                "claude-code-cli",
-                "codex-cli",
-                "anthropic",
-                "gemini",
-                "grok",
-                "opencode-cli",
-            ],
+            type=_parse_llm_provider_arg,
+            metavar="{" + ",".join(CLI_PROVIDER_CHOICES) + "}",
             help="Override LLM provider for synthesis operations",
         )
 
@@ -600,16 +798,8 @@ class LLMConfig(BaseSettings):
 
         parser.add_argument(
             "--llm-map-hyde-provider",
-            choices=[
-                "openai",
-                "ollama",
-                "claude-code-cli",
-                "codex-cli",
-                "anthropic",
-                "gemini",
-                "grok",
-                "opencode-cli",
-            ],
+            type=_parse_llm_provider_arg,
+            metavar="{" + ",".join(CLI_PROVIDER_CHOICES) + "}",
             help="Override provider for Code Mapper HyDE planning (falls back to synthesis)",
         )
         parser.add_argument(
@@ -624,16 +814,8 @@ class LLMConfig(BaseSettings):
 
         parser.add_argument(
             "--llm-autodoc-cleanup-provider",
-            choices=[
-                "openai",
-                "ollama",
-                "claude-code-cli",
-                "codex-cli",
-                "anthropic",
-                "gemini",
-                "grok",
-                "opencode-cli",
-            ],
+            type=_parse_llm_provider_arg,
+            metavar="{" + ",".join(CLI_PROVIDER_CHOICES) + "}",
             help="Override provider for AutoDoc LLM cleanup (falls back to synthesis)",
         )
         parser.add_argument(
@@ -655,6 +837,9 @@ class LLMConfig(BaseSettings):
             config["api_key"] = api_key
         if base_url := os.getenv("CHUNKHOUND_LLM_BASE_URL"):
             config["base_url"] = base_url
+        if ssl_verify_raw := os.getenv("CHUNKHOUND_LLM_SSL_VERIFY"):
+            if (ssl_verify := _parse_env_bool(ssl_verify_raw)) is not None:
+                config["ssl_verify"] = ssl_verify
         if provider := os.getenv("CHUNKHOUND_LLM_PROVIDER"):
             config["provider"] = provider
         if u_provider := os.getenv("CHUNKHOUND_LLM_UTILITY_PROVIDER"):
@@ -709,6 +894,8 @@ class LLMConfig(BaseSettings):
             overrides["api_key"] = args.llm_api_key
         if hasattr(args, "llm_base_url") and args.llm_base_url:
             overrides["base_url"] = args.llm_base_url
+        if hasattr(args, "llm_ssl_verify") and args.llm_ssl_verify is not None:
+            overrides["ssl_verify"] = args.llm_ssl_verify
         if hasattr(args, "llm_provider") and args.llm_provider:
             overrides["provider"] = args.llm_provider
         if hasattr(args, "llm_utility_provider") and args.llm_utility_provider:
@@ -777,5 +964,6 @@ class LLMConfig(BaseSettings):
             f"utility_model={utility_display}, "
             f"synthesis_model={synthesis_display}, "
             f"api_key={api_key_display}, "
-            f"base_url={self.base_url})"
+            f"base_url={self.base_url}, "
+            f"ssl_verify={self.ssl_verify})"
         )

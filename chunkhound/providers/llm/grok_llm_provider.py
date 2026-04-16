@@ -8,6 +8,7 @@ Docs: https://docs.x.ai/docs/models
 Auth: API key from https://console.x.ai
 """
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.providers.llm.openai_compatible_provider import OpenAICompatibleProvider
 
 
@@ -22,7 +23,7 @@ class GrokLLMProvider(OpenAICompatibleProvider):
         api_key: str | None = None,
         model: str = "grok-4-1-fast-reasoning",
         base_url: str | None = None,
-        timeout: int = 60,
+        timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
     ):
         """Initialize Grok LLM provider.

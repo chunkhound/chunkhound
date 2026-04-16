@@ -7,6 +7,7 @@ are properly registered and available to services without producing warnings.
 """
 
 import json
+import argparse
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -15,6 +16,7 @@ import gc
 import time
 from chunkhound.core.config.config import Config
 from chunkhound.core.config.embedding_config import EmbeddingConfig
+from chunkhound.core.config.llm_config import LLMConfig
 from chunkhound.utils.windows_constants import IS_WINDOWS, WINDOWS_FILE_HANDLE_DELAY
 from chunkhound.registry import configure_registry, get_registry
 from tests.utils.windows_compat import database_cleanup_context, cleanup_database_resources, windows_safe_tempdir
@@ -205,6 +207,37 @@ def test_embedding_config_rerank_env_vars(monkeypatch, clean_environment):
     assert config["rerank_batch_size"] == 64
 
 
+def test_embedding_config_ssl_env_vars(monkeypatch, clean_environment):
+    """SSL verification env vars should parse into booleans."""
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING__SSL_VERIFY", "false")
+    monkeypatch.setenv("CHUNKHOUND_EMBEDDING__RERANK_SSL_VERIFY", "true")
+
+    config = EmbeddingConfig.load_from_env()
+
+    assert config["ssl_verify"] is False
+    assert config["rerank_ssl_verify"] is True
+
+
+def test_llm_config_ssl_env_var(monkeypatch, clean_environment):
+    """LLM ssl_verify env var should parse into a boolean."""
+    monkeypatch.setenv("CHUNKHOUND_LLM_SSL_VERIFY", "false")
+
+    config = LLMConfig.load_from_env()
+
+    assert config["ssl_verify"] is False
+
+
+def test_embedding_cli_ssl_flags_parse() -> None:
+    """Embedding CLI should expose explicit positive/negative SSL flags."""
+    parser = argparse.ArgumentParser()
+    EmbeddingConfig.add_cli_arguments(parser)
+
+    args = parser.parse_args(["--no-ssl-verify", "--no-rerank-ssl-verify"])
+
+    assert args.ssl_verify is False
+    assert args.rerank_ssl_verify is False
+
+
 def test_embedding_config_rerank_batch_size_invalid_silently_ignored(monkeypatch, clean_environment):
     """
     Test that invalid rerank_batch_size env var is silently ignored.
@@ -281,3 +314,175 @@ def test_azure_api_version_accepts_valid_formats() -> None:
         api_version="2024-10-01-preview2",
     )
     assert cfg3.api_version == "2024-10-01-preview2"
+
+
+def test_local_config_overrides_env_vars(monkeypatch, clean_environment):
+    """Local .chunkhound.json must override environment variables.
+
+    Config precedence (high to low): CLI > local config > env vars > config file > defaults.
+    This is a regression test for the reorder in config.py where local config
+    was moved after env vars so it wins.
+    """
+    # Env var sets provider to grok
+    monkeypatch.setenv("CHUNKHOUND_LLM_PROVIDER", "grok")
+
+    with windows_safe_tempdir() as temp_path:
+        # Local config sets provider to openai
+        config_path = temp_path / ".chunkhound.json"
+        config_data = {
+            "llm": {
+                "provider": "openai",
+                "api_key": "test-key",
+            },
+            "indexing": {"exclude": ["from-local/**"]},
+        }
+        with open(config_path, "w") as f:
+            json.dump(config_data, f)
+
+        config = Config(target_dir=temp_path)
+
+        assert config.llm is not None
+        assert config.llm.provider == "openai", (
+            "Local .chunkhound.json should override env vars"
+        )
+        assert "from-local/**" in config.indexing.exclude
+
+
+def test_cli_overrides_local_config(clean_environment):
+    """CLI arguments must override local .chunkhound.json.
+
+    Config precedence (high to low): CLI > local config > env vars > config file > defaults.
+    Complementary to test_local_config_overrides_env_vars.
+    """
+    from types import SimpleNamespace
+
+    with windows_safe_tempdir() as temp_path:
+        config_path = temp_path / ".chunkhound.json"
+        config_data = {
+            "llm": {
+                "provider": "openai",
+                "api_key": "test-key",
+            },
+            "indexing": {"exclude": ["from-local/**"]},
+        }
+        with open(config_path, "w") as f:
+            json.dump(config_data, f)
+
+        args = SimpleNamespace(
+            llm_provider="grok",
+            path=None,
+            config=None,
+            exclude=["from-cli/**"],
+        )
+        config = Config(args, target_dir=temp_path)
+
+        assert config.llm is not None
+        assert config.llm.provider == "grok", (
+            "CLI --llm-provider should override local .chunkhound.json"
+        )
+        assert "from-cli/**" in config.indexing.exclude
+
+
+def test_explicit_config_file_overrides_local_config(clean_environment):
+    """Explicit config files must win over auto-discovered local config."""
+    from types import SimpleNamespace
+
+    with windows_safe_tempdir() as temp_path:
+        local_config_path = temp_path / ".chunkhound.json"
+        explicit_config_path = temp_path / "alt-config.json"
+
+        with open(local_config_path, "w") as f:
+            json.dump(
+                {
+                    "llm": {"provider": "openai", "api_key": "local-key"},
+                    "indexing": {"exclude": ["from-local/**"]},
+                },
+                f,
+            )
+
+        with open(explicit_config_path, "w") as f:
+            json.dump(
+                {
+                    "llm": {"provider": "grok", "api_key": "explicit-key"},
+                    "indexing": {"exclude": ["from-explicit/**"]},
+                },
+                f,
+            )
+
+        args = SimpleNamespace(
+            command="index",
+            config=str(explicit_config_path),
+            path=str(temp_path),
+        )
+        config = Config(args)
+
+        assert config.llm is not None
+        assert config.llm.provider == "grok", (
+            "Explicit --config should override local .chunkhound.json"
+        )
+        assert "from-explicit/**" in config.indexing.exclude
+
+
+def test_env_config_file_overrides_local_config(monkeypatch, clean_environment):
+    """CHUNKHOUND_CONFIG_FILE must behave like an explicit config file."""
+    with windows_safe_tempdir() as temp_path:
+        local_config_path = temp_path / ".chunkhound.json"
+        explicit_config_path = temp_path / "env-config.json"
+
+        with open(local_config_path, "w") as f:
+            json.dump(
+                {
+                    "llm": {"provider": "openai", "api_key": "local-key"},
+                    "indexing": {"exclude": ["from-local/**"]},
+                },
+                f,
+            )
+
+        with open(explicit_config_path, "w") as f:
+            json.dump(
+                {
+                    "llm": {"provider": "grok", "api_key": "env-key"},
+                    "indexing": {"exclude": ["from-env-file/**"]},
+                },
+                f,
+            )
+
+        monkeypatch.setenv("CHUNKHOUND_CONFIG_FILE", str(explicit_config_path))
+
+        config = Config(target_dir=temp_path)
+
+        assert config.llm is not None
+        assert config.llm.provider == "grok", (
+            "CHUNKHOUND_CONFIG_FILE should override local .chunkhound.json"
+        )
+        assert "from-env-file/**" in config.indexing.exclude
+
+
+def test_map_command_uses_config_parent_for_workspace_root(clean_environment):
+    """`map` must treat explicit config files as the workspace root, not args.path."""
+    from types import SimpleNamespace
+
+    with windows_safe_tempdir() as temp_path:
+        workspace_root = temp_path / "workspace"
+        docs_scope = temp_path / "docs-scope"
+        workspace_root.mkdir()
+        docs_scope.mkdir()
+
+        with open(workspace_root / "map-config.json", "w") as f:
+            json.dump({"llm": {"provider": "grok", "api_key": "workspace-key"}}, f)
+
+        with open(docs_scope / ".chunkhound.json", "w") as f:
+            json.dump({"llm": {"provider": "openai", "api_key": "scope-key"}}, f)
+
+        args = SimpleNamespace(
+            command="map",
+            config=str(workspace_root / "map-config.json"),
+            path=str(docs_scope),
+        )
+
+        config = Config(args)
+
+        assert config.target_dir == workspace_root.resolve()
+        assert config.llm is not None
+        assert config.llm.provider == "grok"
+        assert config.database.path == workspace_root.resolve() / ".chunkhound" / "db"

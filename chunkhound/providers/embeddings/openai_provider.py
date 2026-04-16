@@ -204,6 +204,8 @@ class OpenAIEmbeddingProvider:
         retry_delay: float = 1.0,
         max_tokens: int | None = None,
         rerank_batch_size: int | None = None,
+        ssl_verify: bool = True,
+        rerank_ssl_verify: bool | None = None,
         api_version: str | None = None,
         azure_endpoint: str | None = None,
         azure_deployment: str | None = None,
@@ -223,6 +225,9 @@ class OpenAIEmbeddingProvider:
             retry_delay: Delay between retry attempts
             max_tokens: Maximum tokens per request (if applicable)
             rerank_batch_size: Max documents per rerank batch (overrides model defaults, bounded by model caps)
+            ssl_verify: Verify TLS certificates for requests sent via base_url
+            rerank_ssl_verify: Verify TLS certificates for rerank requests.
+                Defaults to ssl_verify when unset.
             api_version: Azure OpenAI API version (e.g., '2024-02-01')
             azure_endpoint: Azure OpenAI endpoint URL
             azure_deployment: Azure OpenAI deployment name
@@ -254,6 +259,10 @@ class OpenAIEmbeddingProvider:
         self._retry_delay = retry_delay
         self._max_tokens = max_tokens
         self._rerank_batch_size = rerank_batch_size
+        self._ssl_verify = ssl_verify
+        self._rerank_ssl_verify = (
+            rerank_ssl_verify if rerank_ssl_verify is not None else ssl_verify
+        )
 
         # Validate rerank configuration at initialization (fail-fast)
         # Match config validation logic: check if reranking is enabled
@@ -392,21 +401,13 @@ class OpenAIEmbeddingProvider:
 
         if self._base_url:
             client_kwargs["base_url"] = self._base_url
-
-            # For custom endpoints (non-OpenAI), disable SSL verification
-            # These often use self-signed certificates (e.g., corporate servers, Ollama)
-            if not is_openai_official:
-                import httpx
-
-                # Create httpx client with SSL verification disabled
-                http_client = httpx.AsyncClient(
+            if not self._ssl_verify:
+                client_kwargs["http_client"] = httpx.AsyncClient(
                     timeout=httpx.Timeout(timeout=self._timeout),
-                    verify=False,  # Disable SSL for custom endpoints
+                    verify=False,
                 )
-                client_kwargs["http_client"] = http_client
-
                 logger.debug(
-                    f"SSL verification disabled for custom endpoint: {self._base_url}"
+                    f"SSL verification disabled for embedding endpoint: {self._base_url}"
                 )
 
         # IMPORTANT: Create the client in async context to avoid TaskGroup errors on Ubuntu
@@ -1346,13 +1347,8 @@ class OpenAIEmbeddingProvider:
             # Make API request with timeout using httpx directly
             # since OpenAI client doesn't support custom endpoints well
 
-            # Apply consistent SSL handling (same pattern as setup wizard and client init)
-            from chunkhound.core.config.openai_utils import is_official_openai_endpoint
-
             client_kwargs = {"timeout": self._timeout}
-            if not is_official_openai_endpoint(self._base_url):
-                # For custom endpoints, disable SSL verification
-                # These often use self-signed certificates (corporate servers, Ollama)
+            if not self._effective_rerank_ssl_verify(rerank_endpoint):
                 client_kwargs["verify"] = False
                 logger.debug(
                     f"SSL verification disabled for rerank endpoint: {rerank_endpoint}"
@@ -1431,6 +1427,12 @@ class OpenAIEmbeddingProvider:
             self._usage_stats["errors"] += 1
             logger.error(f"Unexpected error during reranking: {e}")
             raise
+
+    def _effective_rerank_ssl_verify(self, rerank_endpoint: str) -> bool:
+        """Return the effective SSL verification for the current rerank request."""
+        if rerank_endpoint.startswith(("http://", "https://")):
+            return self._rerank_ssl_verify
+        return True
 
     async def _parse_rerank_response(
         self, response_data: dict | list, format_hint: str, num_documents: int

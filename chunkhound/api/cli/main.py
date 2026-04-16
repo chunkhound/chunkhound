@@ -111,43 +111,41 @@ async def async_main() -> None:
     config, validation_errors = create_validated_config(args, args.command)
 
     if validation_errors:
-        # Check if we can offer interactive setup wizard for index command
-        if args.command in [None, "index"]:
-            from .setup_wizard import _should_run_setup_wizard, run_setup_wizard
-
-            if _should_run_setup_wizard(validation_errors):
-                wizard_config = await run_setup_wizard(Path(args.path), args)
-
-                if wizard_config:
-                    # Re-validate with new config
-                    config, validation_errors = create_validated_config(
-                        args, args.command
-                    )
-                else:
-                    # Wizard was run but returned None (user cancelled save)
-                    # Exit gracefully without showing original validation errors
-                    logger.info("Setup cancelled by user")
-                    sys.exit(0)
-
-        # If we still have errors after wizard (or wizard was skipped/cancelled)
-        if validation_errors:
-            # Check if this is an embedding-related error
-            embedding_error = any(
-                "embedding provider" in str(e).lower() for e in validation_errors
+        should_show_web_banner = sys.stdout.isatty() or sys.stderr.isatty()
+        logger.error(
+            "Configuration required. "
+            "Generate a config at https://chunkhound.ai "
+            "or create .chunkhound.json manually."
+        )
+        if should_show_web_banner:
+            print(
+                "\nConfiguration required. "
+                "Generate a config with the web configurator:\n"
+                "  https://chunkhound.ai\n"
+                "Or create .chunkhound.json manually.\n"
+                "Offline docs: https://chunkhound.ai/docs/configuration/\n"
             )
 
-            # Log all errors to stderr
-            for error in validation_errors:
-                logger.error(f"Error: {error}")
+        # Check if this is an embedding-related error
+        embedding_error = any(
+            "embedding provider" in str(e).lower() for e in validation_errors
+        )
 
-            # If embedding error and not in interactive mode, show helpful messages to stdout
+        # Log all errors to stderr
+        for error in validation_errors:
+            logger.error(f"Error: {error}")
+
+        # Show helpful fix suggestions for interactive terminals.
+        if should_show_web_banner:
+            # Use print() for stdout output to match test expectations
+            print("To fix this, you can:")
+            print("  1. Generate a config at https://chunkhound.ai")
+            print("  2. Create a .chunkhound.json file manually")
+            print("  3. Read the config docs at https://chunkhound.ai/docs/configuration/")
             if embedding_error and args.command in [None, "index"]:
-                # Use print() for stdout output to match test expectations
-                print("To fix this, you can:")
-                print("  1. Create a .chunkhound.json config file with embeddings")
-                print("  2. Use --no-embeddings to skip embeddings")
+                print("  4. Use --no-embeddings to skip embeddings")
 
-            sys.exit(1)
+        sys.exit(1)
 
     try:
         if args.command == "index":

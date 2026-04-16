@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Breaking Changes
+- **Config precedence reordered** — Local `.chunkhound.json` now takes precedence over
+  environment variables. If you relied on env vars overriding project-level settings,
+  use CLI arguments instead.
 - **HTTP MCP server removed** - ChunkHound now supports stdio transport only for MCP connections
   - `chunkhound mcp http` command removed
   - `--http`, `--port`, `--host` CLI flags removed
@@ -15,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Migration: Use `chunkhound mcp` (stdio) instead. All major MCP clients (Claude Code, Claude Desktop, VS Code) support stdio transport.
   - Rationale: Simplified codebase, reduced dependencies, focused on primary use case (stdio is the standard for MCP)
 - **Unsupported file types no longer indexed as plain text** - Files with unrecognized extensions are now skipped instead of being force-parsed as plain text. Files with known text extensions (.txt, .log, .cfg, .conf, .ini) are unaffected.
+- **Claude Code CLI default model changed** from `claude-sonnet-4-5-20250929` to `claude-haiku-4-5-20251001`. Users who relied on the default model will see different cost/quality characteristics. Set `llm.model`, `llm.utility_model`, or `llm.synthesis_model` explicitly to retain previous behavior.
 
 ### Added
 - **Embedded SQL detection** - SQL code embedded in string literals is now detected and indexed by default across Python, Java, JavaScript, TypeScript, C#, Go, Rust, and PHP. Disable with `--no-detect-embedded-sql` or `CHUNKHOUND_INDEXING__DETECT_EMBEDDED_SQL=false`.

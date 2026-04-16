@@ -11,6 +11,7 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.core.utils import estimate_tokens_llm
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 from chunkhound.utils.json_extraction import extract_json_from_response
@@ -24,7 +25,6 @@ class BaseCLIProvider(LLMProvider):
     - _get_provider_name(): Return the provider name string
     """
 
-    # Constants for timeouts
     HEALTH_CHECK_TIMEOUT = 30  # Seconds to wait for health check
 
     def __init__(
@@ -32,7 +32,7 @@ class BaseCLIProvider(LLMProvider):
         api_key: str | None = None,
         model: str = "default",
         base_url: str | None = None,
-        timeout: int = 60,
+        timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
     ):
         """Initialize base CLI provider.
@@ -41,7 +41,7 @@ class BaseCLIProvider(LLMProvider):
             api_key: API key (may not be used by CLI providers)
             model: Model name to use
             base_url: Base URL (may not be used by CLI providers)
-            timeout: Request timeout in seconds
+            timeout: Request timeout in seconds (defaults to DEFAULT_LLM_TIMEOUT)
             max_retries: Number of retry attempts for failed requests
         """
         self._model = model
@@ -99,6 +99,11 @@ class BaseCLIProvider(LLMProvider):
     def model(self) -> str:
         """Model name."""
         return self._model
+
+    @property
+    def timeout(self) -> int:
+        """Request timeout in seconds."""
+        return self._timeout
 
     async def complete(
         self,

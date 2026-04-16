@@ -10,8 +10,6 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from chunkhound.core.constants import VOYAGE_DEFAULT_MODEL, VOYAGE_DEFAULT_RERANK_MODEL
-
 from .embedding_config import EmbeddingConfig
 
 if TYPE_CHECKING:
@@ -83,6 +81,8 @@ class EmbeddingProviderFactory:
         rerank_url = config.get("rerank_url", "/rerank")
         rerank_format = config.get("rerank_format", "auto")
         rerank_batch_size = config.get("rerank_batch_size")
+        ssl_verify = config.get("ssl_verify", True)
+        rerank_ssl_verify = config.get("rerank_ssl_verify")
 
         # Azure OpenAI parameters
         api_version = config.get("api_version")
@@ -120,6 +120,8 @@ class EmbeddingProviderFactory:
                 rerank_url=rerank_url,
                 rerank_format=rerank_format,
                 rerank_batch_size=rerank_batch_size,
+                ssl_verify=ssl_verify,
+                rerank_ssl_verify=rerank_ssl_verify,
                 api_version=api_version,
                 azure_endpoint=azure_endpoint,
                 azure_deployment=azure_deployment,
@@ -149,6 +151,8 @@ class EmbeddingProviderFactory:
         rerank_url = config.get("rerank_url")
         rerank_format = config.get("rerank_format", "auto")
         max_concurrent_batches = config.get("max_concurrent_batches")
+        ssl_verify = config.get("ssl_verify", True)
+        rerank_ssl_verify = config.get("rerank_ssl_verify")
 
         # Model should come from config, but handle None case safely
         if not model:
@@ -170,6 +174,7 @@ class EmbeddingProviderFactory:
                 "batch_size": config.get("batch_size", 100),
                 "timeout": config.get("timeout", 30),
                 "retry_attempts": config.get("max_retries", 3),
+                "ssl_verify": ssl_verify,
             }
             if base_url is not None:
                 kwargs["base_url"] = base_url
@@ -189,6 +194,8 @@ class EmbeddingProviderFactory:
             if rerank_url and rerank_url.startswith(("http://", "https://")):
                 kwargs["rerank_url"] = rerank_url
                 kwargs["rerank_format"] = rerank_format
+                if rerank_ssl_verify is not None:
+                    kwargs["rerank_ssl_verify"] = rerank_ssl_verify
             if max_concurrent_batches is not None:
                 kwargs["max_concurrent_batches"] = max_concurrent_batches
 
@@ -284,119 +291,3 @@ class EmbeddingProviderFactory:
 
         # Create provider
         return EmbeddingProviderFactory.create_provider(config)
-
-    @staticmethod
-    def get_provider_info(provider: str) -> dict[str, Any]:
-        """
-        Get information about a specific provider.
-
-        Args:
-            provider: Provider name
-
-        Returns:
-            Dictionary containing provider information
-
-        Raises:
-            ValueError: If provider is not supported
-        """
-        if provider not in EmbeddingProviderFactory.get_supported_providers():
-            raise ValueError(f"Unsupported provider: {provider}")
-
-        info = {
-            "name": provider,
-            "dependencies_available": False,
-            "error_message": None,
-        }
-
-        # Check dependencies
-        available, error = EmbeddingProviderFactory.validate_provider_dependencies(
-            provider
-        )
-        info["dependencies_available"] = available
-        if error:
-            info["error_message"] = error
-
-        # Provider-specific information
-        if provider == "openai":
-            info.update(
-                {
-                    "description": "OpenAI text embedding API",
-                    "requires": ["api_key"],
-                    "optional": ["base_url", "model"],
-                    "default_model": "text-embedding-3-large",
-                    "supported_models": [
-                        "text-embedding-3-small",
-                        "text-embedding-3-large",
-                        "text-embedding-ada-002",
-                    ],
-                    # UI-specific metadata for setup wizard
-                    "display_name": "OpenAI",
-                    "base_url": "https://api.openai.com",
-                    "requires_api_key": True,
-                    "supports_model_listing": False,
-                    "supports_reranking": False,
-                    "default_models": [
-                        ("text-embedding-3-large", "Higher quality"),
-                        ("text-embedding-3-small", "Fast & efficient"),
-                    ],
-                    "default_rerankers": [],
-                    "default_selection": "text-embedding-3-large",
-                    "default_reranker": None,
-                }
-            )
-        elif provider == "voyageai":
-            info.update(
-                {
-                    "description": "VoyageAI specialized embedding API",
-                    "requires": ["api_key"],
-                    "optional": ["model", "rerank_model"],
-                    "default_model": VOYAGE_DEFAULT_MODEL,
-                    "supported_models": [
-                        "voyage-3.5",
-                        "voyage-code-3",
-                        "voyage-3.5-lite",
-                        "voyage-3-large",
-                    ],
-                    # UI-specific metadata for setup wizard
-                    "display_name": "VoyageAI",
-                    "base_url": None,  # Uses SDK, no direct endpoint
-                    "requires_api_key": False,  # Only required for official api.voyageai.com
-                    "supports_model_listing": False,
-                    "supports_reranking": True,
-                    "default_models": [
-                        ("voyage-3.5", "Latest general-purpose, (recommended)"),
-                        ("voyage-3.5-lite", "Cost-optimized with good accuracy"),
-                        ("voyage-3-large", "Previous gen, proven performance"),
-                        ("voyage-code-3", "Previous gen, code optimized"),
-                    ],
-                    "default_rerankers": [
-                        ("rerank-2.5", "Latest reranker, best accuracy"),
-                        ("rerank-2.5-lite", "Lighter, cost-effective"),
-                        ("rerank-2", "Previous gen, great for code"),
-                    ],
-                    "default_selection": VOYAGE_DEFAULT_MODEL,
-                    "default_reranker": VOYAGE_DEFAULT_RERANK_MODEL,
-                }
-            )
-        elif provider == "openai_compatible":
-            info.update(
-                {
-                    "description": "OpenAI-compatible API server",
-                    "requires": [],  # May or may not need API key
-                    "optional": ["api_key", "base_url", "model"],
-                    "default_model": None,
-                    "supported_models": [],  # Discovered dynamically
-                    # UI-specific metadata for setup wizard
-                    "display_name": "OpenAI-Compatible",
-                    "base_url": None,  # User provides
-                    "requires_api_key": "auto",  # Test connection first
-                    "supports_model_listing": True,
-                    "supports_reranking": True,
-                    "default_models": [],  # Discovered dynamically
-                    "default_rerankers": [],  # Discovered dynamically
-                    "default_selection": None,
-                    "default_reranker": None,
-                }
-            )
-
-        return info

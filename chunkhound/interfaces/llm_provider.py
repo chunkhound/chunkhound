@@ -103,6 +103,12 @@ class LLMProvider(ABC):
         """Model identifier."""
         ...
 
+    @property
+    @abstractmethod
+    def timeout(self) -> int:
+        """Request timeout in seconds."""
+        ...
+
     @abstractmethod
     async def complete(
         self,

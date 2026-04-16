@@ -59,7 +59,13 @@ def _extract_json_array(response: str) -> list[dict]:
     try:
         result = json.loads(text)
         if isinstance(result, list):
-            return result
+            # LLM responses occasionally include bare strings/numbers instead of dicts
+            dicts = [item for item in result if isinstance(item, dict)]
+            if len(dicts) < len(result):
+                logger.debug(
+                    f"Filtering {len(result) - len(dicts)} non-dict items from JSON array"
+                )
+            return dicts
         return []
     except json.JSONDecodeError as e:
         logger.warning(f"Failed to parse JSON from LLM response: {e}")
@@ -188,7 +194,9 @@ class FactExtractor:
 
                 ledger.add_fact(fact)
 
-            except (KeyError, TypeError, ValueError) as e:
+            except (KeyError, TypeError, ValueError, AttributeError) as e:
+                # Belt-and-suspenders: _extract_json_array already filters
+                # non-dicts, but callers may supply raw parsed JSON directly.
                 logger.debug(f"Skipping malformed fact entry: {e}")
                 continue
 

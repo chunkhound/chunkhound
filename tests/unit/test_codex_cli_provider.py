@@ -1,5 +1,7 @@
 import pytest
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
+
 
 def test_codex_cli_provider_import_and_name():
     # Red test: module does not exist yet
@@ -34,3 +36,10 @@ def test_codex_cli_effort_resolution_default(monkeypatch: pytest.MonkeyPatch) ->
     resolved, source = CodexCLIProvider.describe_reasoning_effort_resolution(None)
     assert resolved == "low"
     assert source == "default"
+
+
+def test_default_timeout():
+    """Default timeout resolves to DEFAULT_LLM_TIMEOUT."""
+    from chunkhound.providers.llm.codex_cli_provider import CodexCLIProvider
+    p = CodexCLIProvider()
+    assert p.timeout == DEFAULT_LLM_TIMEOUT

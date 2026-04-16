@@ -2,6 +2,7 @@
 
 import pytest
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.providers.llm.anthropic_llm_provider import (
     ANTHROPIC_AVAILABLE,
     BETA_CONTEXT_MANAGEMENT,
@@ -190,7 +191,7 @@ class TestConfiguration:
         provider = AnthropicLLMProvider(api_key="test-key")
 
         assert provider._model == "claude-sonnet-4-5-20250929"
-        assert provider._timeout == 60
+        assert provider.timeout == DEFAULT_LLM_TIMEOUT
         assert provider._max_retries == 3
         assert provider._thinking_enabled is False
         assert provider._thinking_budget_tokens == 10000
@@ -201,14 +202,14 @@ class TestConfiguration:
             api_key="custom-key",
             model="claude-opus-4-1-20250805",
             base_url="https://custom.endpoint.com",
-            timeout=120,
+            timeout=300,
             max_retries=5,
             thinking_enabled=True,
             thinking_budget_tokens=20000,
         )
 
         assert provider._model == "claude-opus-4-1-20250805"
-        assert provider._timeout == 120
+        assert provider.timeout == 300
         assert provider._max_retries == 5
         assert provider._thinking_enabled is True
         assert provider._thinking_budget_tokens == 20000

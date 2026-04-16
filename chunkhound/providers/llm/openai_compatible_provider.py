@@ -12,8 +12,11 @@ import asyncio
 import json
 from typing import Any
 
+import httpx
 from loguru import logger
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
+from chunkhound.core.config.openai_utils import is_official_openai_endpoint
 from chunkhound.core.utils.token_utils import estimate_tokens_llm
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 
@@ -39,7 +42,8 @@ class OpenAICompatibleProvider(LLMProvider):
         api_key: str | None = None,
         model: str = "gpt-4",
         base_url: str | None = None,
-        timeout: int = 60,
+        ssl_verify: bool = True,
+        timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
     ):
         """Initialize OpenAI-compatible provider.
@@ -48,6 +52,8 @@ class OpenAICompatibleProvider(LLMProvider):
             api_key: API key (defaults to environment variable)
             model: Model name
             base_url: Base URL (defaults to subclass implementation)
+            ssl_verify: Verify TLS certificates for requests sent via base_url.
+                Ignored when base_url is not set.
             timeout: Request timeout in seconds
             max_retries: Number of retry attempts for failed requests
         """
@@ -59,18 +65,29 @@ class OpenAICompatibleProvider(LLMProvider):
         self._model = model
         self._timeout = timeout
         self._max_retries = max_retries
+        self._ssl_verify = ssl_verify
 
         # Use provided base_url or subclass default
         effective_base_url = base_url or self._get_default_base_url()
 
         # Initialize OpenAI-compatible client
+        api_key_value = api_key
+        if not is_official_openai_endpoint(effective_base_url) and not api_key_value:
+            # The OpenAI SDK still expects a string even for local/custom backends
+            api_key_value = "not-required"
+
         client_kwargs: dict[str, Any] = {
-            "api_key": api_key,
+            "api_key": api_key_value,
             "timeout": timeout,
             "max_retries": max_retries,
         }
         if effective_base_url:
             client_kwargs["base_url"] = effective_base_url
+            if not ssl_verify:
+                client_kwargs["http_client"] = httpx.AsyncClient(
+                    timeout=httpx.Timeout(timeout=timeout),
+                    verify=False,
+                )
         self._client = AsyncOpenAI(**client_kwargs)
 
         # Usage tracking
@@ -103,6 +120,11 @@ class OpenAICompatibleProvider(LLMProvider):
     def model(self) -> str:
         """Model name."""
         return self._model
+
+    @property
+    def timeout(self) -> int:
+        """Request timeout in seconds."""
+        return self._timeout
 
     async def complete(
         self,

@@ -13,6 +13,7 @@ from typing import Any
 import xxhash
 
 from chunkhound.interfaces.embedding_provider import EmbeddingConfig, RerankResult
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.interfaces.llm_provider import LLMProvider, LLMResponse
 
 
@@ -72,6 +73,11 @@ class FakeLLMProvider(LLMProvider):
     def model(self) -> str:
         """Model name."""
         return self._model
+
+    @property
+    def timeout(self) -> int:
+        """Request timeout in seconds."""
+        return DEFAULT_LLM_TIMEOUT
 
     async def complete(
         self,

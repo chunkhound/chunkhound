@@ -16,6 +16,7 @@ from typing import Any
 
 from loguru import logger
 
+from chunkhound.core.config.llm_config import DEFAULT_LLM_TIMEOUT
 from chunkhound.providers.llm.base_cli_provider import BaseCLIProvider
 from chunkhound.utils.text_sanitization import sanitize_error_text
 
@@ -38,7 +39,7 @@ class CodexCLIProvider(BaseCLIProvider):
         api_key: str | None = None,  # Unused (CLI handles auth)
         model: str = "codex",
         base_url: str | None = None,  # Unused
-        timeout: int = 60,
+        timeout: int = DEFAULT_LLM_TIMEOUT,
         max_retries: int = 3,
         reasoning_effort: str | None = None,
     ) -> None:
