@@ -119,7 +119,7 @@ chunkhound-mcp = "chunkhound.mcp_server.stdio:main_sync"
 Homepage = "https://github.com/chunkhound/chunkhound"
 Repository = "https://github.com/chunkhound/chunkhound"
 Issues = "https://github.com/chunkhound/chunkhound/issues"
-Documentation = "https://github.com/chunkhound/chunkhound#readme"
+Documentation = "https://chunkhound.ai"
 Changelog = "https://github.com/chunkhound/chunkhound/releases"
 
 [tool.hatch.version]

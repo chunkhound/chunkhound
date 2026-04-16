@@ -1,0 +1,159 @@
+---
+import Chip from "./Chip.astro";
+
+const capabilities = [
+  {
+    title: "Multi-Hop Semantic Search",
+    description: "Discovers code through semantic bridges. Three hops find architectural relationships that keyword search misses entirely.",
+    tag: "3-hop traversal",
+  },
+  {
+    title: "Gap Detection & Filling",
+    description: "Clusters results, identifies missing concepts via LLM analysis, uses elbow detection to filter noise. Finds what you didn't know to ask for.",
+    tag: "Elbow detection",
+  },
+  {
+    title: "cAST Chunking",
+    description: "AST-aware code splitting from Carnegie Mellon research. +4.3 recall on RepoEval, +2.67 pass@1 on SWE-bench vs. naive chunking.",
+    tag: "arXiv:2506.15655",
+    tagUrl: "https://arxiv.org/abs/2506.15655",
+  },
+  {
+    title: "Depth Exploration",
+    description: "Explores different angles of files already in results. A file with auth logic and session management gets explored for both.",
+    tag: "Aspect-based queries",
+  },
+  {
+    title: "Code Research",
+    description: "One call produces a cited markdown architecture report. Query expansion, gap detection, evidence ledger, map-reduce synthesis.",
+    tag: "Cited reports",
+  },
+  {
+    title: "Unified Semantic + Regex",
+    description: "Extracts symbols from semantic results, runs parallel regex searches, reranks everything against the root query. Two paradigms, unified.",
+    tag: "Hybrid search",
+  },
+  {
+    title: "Auto-Documentation",
+    description: "Generates a searchable documentation site from your codebase. Five comprehensiveness levels from minimal to exhaustive.",
+    tag: "5 levels",
+  },
+];
+---
+
+<section id="capabilities" class="capabilities">
+  <div class="container">
+    <p class="eyebrow">CAPABILITIES</p>
+    <h2 class="heading">What no other tool can do</h2>
+
+    <blockquote class="social-proof">
+      &ldquo;An absolute beast at reading multiple large repos — what would take
+      a human days or plain Claude Code multiple attempts.&rdquo;
+      <cite>— @flrk, Discord</cite>
+    </blockquote>
+
+    <div class="grid">
+      {capabilities.map((cap) => (
+        <div class="card">
+          <h3 class="card-title">{cap.title}</h3>
+          <p class="card-desc">{cap.description}</p>
+          <Chip href={cap.tagUrl}>{cap.tag}</Chip>
+        </div>
+      ))}
+    </div>
+  </div>
+</section>
+
+<style>
+  .capabilities {
+    padding: var(--space-10) 0;
+  }
+
+  .container {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 0 var(--space-6);
+  }
+
+  .eyebrow {
+    text-transform: uppercase;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    color: var(--text-tertiary);
+    text-align: center;
+    margin-bottom: var(--space-3);
+  }
+
+  .heading {
+    font-size: var(--text-2xl);
+    line-height: var(--lh-2xl);
+    font-weight: 600;
+    color: var(--text-primary);
+    text-align: center;
+    margin-bottom: var(--space-5);
+  }
+
+  .social-proof {
+    font-size: var(--text-sm);
+    line-height: var(--lh-sm);
+    color: var(--text-secondary);
+    font-style: italic;
+    text-align: center;
+    max-width: 600px;
+    margin: 0 auto var(--space-7);
+  }
+
+  .social-proof cite {
+    font-style: normal;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--space-5);
+  }
+
+  .card {
+    background: var(--bg-surface);
+    border: var(--border-w-default) solid var(--border-color);
+    border-radius: var(--radius-xl);
+    padding: var(--space-5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .card:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+    max-width: calc(50% - var(--space-5) / 2);
+    justify-self: center;
+  }
+
+  .card-title {
+    font-size: var(--text-lg);
+    line-height: var(--lh-lg);
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .card-desc {
+    font-size: var(--text-sm);
+    line-height: var(--lh-sm);
+    color: var(--text-secondary);
+    flex: 1;
+  }
+
+  @media (max-width: 768px) {
+    .grid {
+      grid-template-columns: 1fr;
+    }
+
+    .card:last-child:nth-child(odd) {
+      max-width: none;
+      grid-column: auto;
+    }
+  }
+</style>

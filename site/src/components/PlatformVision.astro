@@ -1,0 +1,145 @@
+---
+import Chip from "./Chip.astro";
+
+const features = [
+    {
+        title: "Code Visualization",
+        description:
+            "Google Maps for code. Zoom from cluster-level architecture to individual chunks. LLM-labeled zones at every resolution.",
+        badge: "In development",
+    },
+    {
+        title: "Git History Intelligence",
+        description:
+            "Understand how code evolved. Track architectural decisions, find when behavior changed, surface the why behind the what.",
+        badge: "In development",
+    },
+    {
+        title: "Test Blast Radius",
+        description:
+            "Know which tests to run based on what changed. Semantic understanding of test-to-code relationships.",
+        badge: "In development",
+    },
+];
+---
+
+<section class="vision">
+    <div class="container">
+        <p class="eyebrow">THE PLATFORM</p>
+        <h2 class="heading">Where codebase intelligence goes next</h2>
+        <p class="body">
+            The same semantic index that powers search, research, and autodoc
+            enables entirely new ways to understand code.
+        </p>
+
+        <div class="grid">
+            {
+                features.map((f) => (
+                    <div class="card">
+                        <h3 class="card-title">{f.title}</h3>
+                        <p class="card-desc">{f.description}</p>
+                        <Chip>{f.badge}</Chip>
+                    </div>
+                ))
+            }
+        </div>
+
+        <blockquote class="social-proof">
+            &ldquo;I would pay for ChunkHound. The code expert is that
+            good.&rdquo;
+            <cite>— @FlatTreNeb, Reddit</cite>
+        </blockquote>
+    </div>
+</section>
+
+<style>
+    .vision {
+        padding: var(--space-10) 0;
+    }
+
+    .container {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 0 var(--space-6);
+        text-align: center;
+    }
+
+    .eyebrow {
+        text-transform: uppercase;
+        font-size: var(--text-xs);
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        color: var(--text-tertiary);
+        margin-bottom: var(--space-3);
+    }
+
+    .heading {
+        font-size: var(--text-2xl);
+        line-height: var(--lh-2xl);
+        font-weight: 600;
+        color: var(--text-primary);
+        margin-bottom: var(--space-4);
+    }
+
+    .body {
+        font-size: var(--text-base);
+        line-height: var(--lh-base);
+        color: var(--text-secondary);
+        max-width: 640px;
+        margin: 0 auto var(--space-7);
+    }
+
+    .grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: var(--space-5);
+        margin-bottom: var(--space-7);
+    }
+
+    .card {
+        background: var(--bg-page);
+        border: var(--border-w-default) solid var(--border-subtle);
+        border-radius: var(--radius-xl);
+        padding: var(--space-5);
+        text-align: left;
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-2);
+    }
+
+    .card-title {
+        font-size: var(--text-lg);
+        line-height: var(--lh-lg);
+        font-weight: 600;
+        color: var(--text-secondary);
+    }
+
+    .card-desc {
+        font-size: var(--text-sm);
+        line-height: var(--lh-sm);
+        color: var(--text-secondary);
+        flex: 1;
+    }
+
+    .social-proof {
+        font-size: var(--text-sm);
+        line-height: var(--lh-sm);
+        color: var(--text-secondary);
+        font-style: italic;
+        text-align: center;
+        max-width: 480px;
+        margin: 0 auto;
+    }
+
+    .social-proof cite {
+        font-style: normal;
+        font-weight: 600;
+        color: var(--text-secondary);
+    }
+
+    @media (max-width: 768px) {
+        .grid {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>

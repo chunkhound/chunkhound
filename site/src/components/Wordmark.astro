@@ -1,0 +1,85 @@
+---
+interface Props {
+    size?: "sm" | "lg";
+}
+const { size = "sm" } = Astro.props;
+---
+
+<span class:list={["wordmark-brand", size]}>
+    <img src="/logo.svg" alt="" class="wordmark-logo" />
+    <span class="wordmark-text"
+        >ChunkHound<span class="wordmark-dot" aria-hidden="true"></span></span
+    >
+</span>
+
+<style>
+    .wordmark-brand {
+        display: inline-flex;
+        align-items: center;
+        font-family: "Inter", sans-serif;
+        font-weight: 700;
+        color: var(--text-primary);
+    }
+
+    .wordmark-brand.sm {
+        font-size: 18px;
+        gap: var(--space-2);
+    }
+
+    .wordmark-brand.lg {
+        font-size: var(--text-4xl);
+        line-height: var(--lh-4xl);
+        /* display: inline-block so only the text string sets the centering width;
+           the logo is pulled out of flow via position:absolute */
+        display: inline-block;
+        position: relative;
+    }
+
+    .wordmark-brand.lg .wordmark-logo {
+        position: absolute;
+        right: 100%;
+        top: 50%;
+        transform: translateY(-50%);
+        margin-right: var(--space-3);
+    }
+
+    /* Mobile: not enough horizontal room to offset the logo — stack it above */
+    @media (max-width: 640px) {
+        .wordmark-brand.lg {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: var(--space-3);
+        }
+
+        .wordmark-brand.lg .wordmark-logo {
+            position: static;
+            transform: none;
+            margin-right: 0;
+        }
+    }
+
+    .wordmark-logo {
+        height: 1.4em;
+        width: auto;
+        filter: brightness(0) invert(1);
+    }
+
+    :global([data-theme="light"]) .wordmark-logo {
+        filter: none;
+    }
+
+    .wordmark-text {
+        position: relative;
+    }
+
+    .wordmark-dot {
+        display: inline-block;
+        width: 0.14em;
+        height: 0.14em;
+        border-radius: 50%;
+        background: var(--primary-bright, #a1bc20);
+        margin-left: 1px;
+        vertical-align: baseline;
+    }
+</style>

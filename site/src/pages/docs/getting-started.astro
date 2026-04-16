@@ -1,0 +1,256 @@
+---
+import Configurator from "../../components/Configurator.astro";
+import DocCode from "../../components/DocCode.astro";
+import DocsCallout from "../../components/DocsCallout.astro";
+import DocsLayout from "../../layouts/DocsLayout.astro";
+import PlatformCodeBlock from "../../components/PlatformCodeBlock.astro";
+import { Code } from 'astro:components';
+import { SHIKI_THEME } from '../../lib/shiki-config.js';
+import { getChunkhoundVersion } from "../../lib/version";
+
+const chunkhoundVersion = getChunkhoundVersion();
+const posixCode = `# Skip if you already have uv\ncurl -LsSf https://astral.sh/uv/install.sh | sh\nuv tool install chunkhound`;
+const psCode = `# Skip if you already have uv\npowershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"\nuv tool install chunkhound`;
+---
+
+<DocsLayout
+    title="Getting Started"
+    description="Install ChunkHound, pick your stack, index your code, and verify search end to end."
+>
+    <h1>Get ChunkHound running<span class="title-dot" aria-hidden="true"
+        ></span></h1>
+    <p class="lead">
+        Install the CLI, pick your stack, index your code. Three commands, two
+        minutes.
+    </p>
+
+    <h2>Install</h2>
+    <PlatformCodeBlock dataCopy={posixCode}>
+        <div data-platform-code="posix" data-platform-copy={posixCode}>
+            <Code lang="bash" theme={SHIKI_THEME} code={posixCode} />
+        </div>
+        <div data-platform-code="powershell" hidden data-platform-copy={psCode}>
+            <Code lang="powershell" theme={SHIKI_THEME} code={psCode} />
+        </div>
+    </PlatformCodeBlock>
+    <p>Verify the install resolved on your shell:</p>
+    <DocCode code="chunkhound --version" />
+    <DocsCallout title="Expected output" variant="success">
+        <pre><code>chunkhound {chunkhoundVersion}</code></pre>
+        <p>
+            A version line on stdout. If you see <code>command not found</code>,
+            fix your shell <code>PATH</code> before continuing.
+        </p>
+    </DocsCallout>
+
+    <p class="picker-lead">
+        Choose your editor, embedding provider, and LLM. Copy the three commands
+        below and run them from your project root.
+    </p>
+    <p>
+        For local or proxied OpenAI-compatible LLM backends like Ollama or
+        vLLM, keep the generated <code>llm.model</code> value in place.
+        ChunkHound requires an explicit model name for custom
+        <code>base_url</code> endpoints, including per-role overrides that
+        resolve to OpenAI-compatible providers.
+    </p>
+    <Configurator heading="Pick your stack" compact={false} />
+
+    <h2>Index and verify</h2>
+    <p>
+        Run these four commands in order. Each one verifies a different layer of
+        the stack: database, regex search, embeddings, then LLM.
+    </p>
+
+    <h4>1. Index the project</h4>
+    <DocCode code="chunkhound index ." />
+    <DocsCallout title="Expected output" variant="success">
+        <pre><code>Indexed 412 files, 6,841 chunks
+Database: .chunkhound/db/chunks.db</code></pre>
+        <p>
+            File and chunk counts will differ; the <code>Indexed</code> prefix and
+            the <code>.chunkhound/db/chunks.db</code> path are stable.
+        </p>
+    </DocsCallout>
+
+    <h4>2. Confirm regex search</h4>
+    <DocCode code={`chunkhound search --regex "import"`} />
+    <DocsCallout title="Expected output" variant="success">
+        <pre><code>Found 1,284 matches
+src/main.py:1: import os</code></pre>
+        <p>
+            A match count and at least one truncated result line. Zero matches with
+            no error usually means the <code>--db</code> path is wrong &mdash; see
+            <a href="/docs/configuration/">Configuration</a> for the canonical
+            database path rules.
+        </p>
+    </DocsCallout>
+
+    <h4>3. Confirm semantic search</h4>
+    <DocCode code={`chunkhound search "authentication flow"`} />
+    <DocsCallout title="Expected output" variant="success">
+        <pre><code>score   file:line                          snippet
+0.81    src/auth/session.py:42             def login(...)
+0.74    src/auth/middleware.py:18          class AuthMiddleware</code></pre>
+        <p>
+            A ranked list with a score column. If regex worked but this didn't,
+            your embedding provider credentials are missing or wrong.
+        </p>
+    </DocsCallout>
+
+    <h4>4. Confirm research</h4>
+    <DocCode code={`chunkhound research "How does authentication work?"`} />
+    <DocsCallout title="Expected output" variant="success">
+        <pre><code>Authentication is handled by src/auth/session.py, which...</code></pre>
+        <p>
+            A short natural-language answer that cites real files. If search
+            worked but this didn't, your LLM provider credentials are missing or
+            wrong, or the LLM CLI you picked isn't on <code>PATH</code>.
+        </p>
+    </DocsCallout>
+
+    <h2>Use it from your agent</h2>
+    <p>
+        Your agent already has ChunkHound &mdash; the editor command from
+        <strong>Pick your stack</strong> registered it as an MCP tool. The
+        biggest unlock is calling <code>code_research</code> <em>before</em>
+        writing code, not after.
+    </p>
+    <p>
+        <code>code_research</code> synthesises a cited markdown report covering
+        architecture, key locations, and cross-file flows. One call usually
+        replaces 5&ndash;10 manual searches.
+    </p>
+
+    <h3>Example prompts</h3>
+    <p>The pattern is one line. Paste it into your editor chat with a topic of your own:</p>
+    <DocCode lang="text" code="Use chunkhound research to ..." />
+    <p>A few directions to start with:</p>
+    <ul class="prompt-ideas">
+        <li>explain how authentication works end to end, with file:line citations</li>
+        <li>map every caller of the email subsystem and the helpers they share</li>
+        <li>trace the login flow from form submit to Set-Cookie</li>
+        <li>find every file-upload handler and compare their size limits, MIME validation, and storage targets</li>
+        <li>diagnose duplicate webhook deliveries by tracing the handler outward through retries, queues, and idempotency keys</li>
+    </ul>
+    <p>
+        Need just a file or symbol? Ask the agent to use <code>chunkhound search</code>
+        instead &mdash; it's faster and skips the LLM.
+    </p>
+
+    <h3 id="mcp">MCP integration</h3>
+    <p>
+        ChunkHound exposes <code>code_research</code>, <code>search</code>, and
+        a handful of other tools as an <abbr title="Model Context Protocol"
+            >MCP</abbr
+        > server; your editor connected to it via the command in
+        <strong>Pick your stack</strong>.
+    </p>
+
+    <h2>Where to next</h2>
+    <div class="next-grid">
+        <a href="/docs/configuration/" class="next-card">
+            <h4>Configuration</h4>
+            <p>
+                Full config shape, provider details, indexing controls, and
+                environment-variable overrides.
+            </p>
+        </a>
+        <a href="/docs/cli-reference/" class="next-card">
+            <h4>CLI Reference</h4>
+            <p>
+                Every command, every flag, and the syntax for advanced indexing
+                and research workflows.
+            </p>
+        </a>
+    </div>
+    <p class="exit">
+        Stuck? Ask in <a href="https://discord.gg/BAepHEXXnX">Discord</a> or
+        <a href="https://github.com/chunkhound/chunkhound/issues">open an issue</a>.
+    </p>
+</DocsLayout>
+
+<style>
+    .title-dot {
+        display: inline-block;
+        width: 0.18em;
+        height: 0.18em;
+        border-radius: 50%;
+        background: var(--primary-bright);
+        margin-left: 0.05em;
+        vertical-align: baseline;
+    }
+
+    .lead {
+        margin-bottom: var(--space-7);
+        font-size: var(--text-lg);
+        line-height: var(--lh-lg);
+        color: var(--text-secondary);
+    }
+
+    /* The picker lead sits above the Configurator's own centered heading,
+       so it acts as the §2 section intro. Push it down to space it from
+       the previous section before the Configurator's own padding kicks in. */
+    .picker-lead {
+        margin-top: var(--space-8);
+    }
+
+    /* Tighten the success callouts so the inner pre/p stack reads as one
+       confirmation block, not two stacked surfaces. */
+    :global(.docs-callout-success) :global(pre) {
+        margin-top: 0;
+        margin-bottom: var(--space-3);
+        background: transparent;
+        padding: 0;
+    }
+
+    :global(.docs-callout-success) :global(pre code) {
+        font-size: var(--text-sm);
+        color: var(--text-primary);
+    }
+
+    .next-grid {
+        display: grid;
+        gap: var(--space-5);
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        margin-top: var(--space-5);
+    }
+
+    .next-card {
+        display: block;
+        padding: var(--space-5);
+        border: var(--border-w-default) solid var(--border-subtle);
+        border-radius: var(--radius-xl);
+        background: var(--bg-surface);
+        color: inherit;
+        text-decoration: none;
+        transition:
+            border-color 0.2s,
+            background 0.2s;
+    }
+
+    :global(html[data-theme="light"]) .next-card {
+        border-color: var(--border-color);
+    }
+
+    .next-card:hover {
+        border-color: var(--primary);
+        text-decoration: none;
+    }
+
+    .next-card h4 {
+        margin-top: 0;
+        margin-bottom: var(--space-3);
+    }
+
+    .exit {
+        margin-top: var(--space-5);
+        color: var(--text-secondary);
+    }
+
+    @media (max-width: 640px) {
+        .next-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>

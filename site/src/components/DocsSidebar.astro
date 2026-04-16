@@ -1,0 +1,54 @@
+---
+interface Props {
+  currentPath: string;
+}
+
+const { currentPath } = Astro.props;
+
+const guides = [
+  { title: 'Getting Started', href: '/docs/getting-started/' },
+  { title: 'Configuration', href: '/docs/configuration/' },
+  { title: 'CLI Reference', href: '/docs/cli-reference/' },
+  { title: 'Changelog', href: '/docs/changelog/' },
+  { title: 'Contributing', href: '/docs/contributing/' },
+];
+
+function isActive(href: string): boolean {
+  const a = currentPath.replace(/\/+$/, '');
+  const b = href.replace(/\/+$/, '');
+  return a === b;
+}
+---
+
+<aside class="docs-sidebar" id="docs-sidebar" aria-label="Documentation">
+  <button class="docs-nav-toggle" type="button" data-docs-nav-toggle>Menu</button>
+  <div class="docs-nav-scrim" data-docs-nav-scrim></div>
+  <div class="sidebar-inner">
+    <label class="sr-only" for="docs-nav-filter">Filter pages</label>
+    <input
+      id="docs-nav-filter"
+      class="sidebar-filter"
+      type="search"
+      placeholder="Filter pages"
+      autocomplete="off"
+      data-docs-nav-filter
+    />
+
+    <div class="sidebar-section" data-sidebar-section>
+      <div class="sidebar-section-title">Guides</div>
+      <nav>
+        {guides.map((g) => (
+          <a
+            href={g.href}
+            class:list={['sidebar-link', { active: isActive(g.href) }]}
+            data-sidebar-link
+          >
+            {g.title}
+          </a>
+        ))}
+      </nav>
+    </div>
+
+    <div class="sidebar-section" data-sidebar-section>
+  </div>
+</aside>

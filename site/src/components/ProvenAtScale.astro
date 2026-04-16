@@ -1,0 +1,139 @@
+---
+
+---
+
+<section class="proven">
+    <div class="container">
+        <p class="eyebrow">PROVEN AT SCALE</p>
+        <h2 class="heading">50M+ lines of code. Production. Today.</h2>
+        <p class="body">
+            ChunkHound indexes a 50M+ line monorepo at Applied Materials.
+            Sharded USearch HNSW vector indexes with 13 formal invariants.
+            Search latency stays flat as your codebase grows.
+        </p>
+
+        <div class="card">
+            <div class="bar-row">
+                <span class="bar-label">1K files</span>
+                <div class="bar" style="width: 20%"></div>
+                <span class="bar-result">instant</span>
+            </div>
+            <div class="bar-row">
+                <span class="bar-label">50K files</span>
+                <div class="bar" style="width: 50%"></div>
+                <span class="bar-result">&lt;1s</span>
+            </div>
+            <div class="bar-row">
+                <span class="bar-label">50M+ LOC</span>
+                <div class="bar" style="width: 85%"></div>
+                <span class="bar-result">still fast</span>
+            </div>
+        </div>
+
+        <blockquote class="testimonial">
+            &ldquo;We've compressed what used to take 2–3 months down to 2–3
+            days across our 50M+ line monorepo.&rdquo;
+            <cite>— Ofir Rozenfeld, Applied Materials</cite>
+        </blockquote>
+    </div>
+</section>
+
+<style>
+    .proven {
+        padding: var(--space-10) 0;
+        text-align: center;
+    }
+
+    .container {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 0 var(--space-6);
+    }
+
+    .eyebrow {
+        text-transform: uppercase;
+        font-size: var(--text-xs);
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        color: var(--text-tertiary);
+        margin-bottom: var(--space-3);
+    }
+
+    .heading {
+        font-size: var(--text-2xl);
+        line-height: var(--lh-2xl);
+        font-weight: 600;
+        color: var(--text-primary);
+        margin-bottom: var(--space-4);
+    }
+
+    .body {
+        font-size: var(--text-base);
+        line-height: var(--lh-base);
+        color: var(--text-secondary);
+        margin-bottom: var(--space-6);
+        max-width: 640px;
+        margin-left: auto;
+        margin-right: auto;
+    }
+
+    .card {
+        background: var(--code-bg);
+        border-radius: var(--radius-xl);
+        padding: var(--space-5) var(--space-6);
+        max-width: 600px;
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-3);
+    }
+
+    .bar-row {
+        display: flex;
+        align-items: center;
+        gap: 0;
+    }
+
+    .bar-label {
+        font-family: "JetBrains Mono", monospace;
+        font-size: var(--text-sm);
+        color: var(--code-text);
+        width: 90px;
+        text-align: left;
+        flex-shrink: 0;
+    }
+
+    .bar {
+        height: 28px;
+        background: var(--primary);
+        border-radius: var(--radius-sm);
+    }
+
+    .bar-result {
+        font-size: var(--text-sm);
+        color: var(--text-secondary);
+        margin-left: var(--space-3);
+        white-space: nowrap;
+    }
+
+    .testimonial {
+        margin: var(--space-7) auto 0;
+        max-width: 600px;
+        padding: var(--space-4) var(--space-5);
+        border-left: var(--border-w-accent) solid var(--primary);
+        text-align: left;
+        font-size: var(--text-base);
+        line-height: var(--lh-base);
+        color: var(--text-secondary);
+        font-style: italic;
+    }
+
+    .testimonial cite {
+        display: block;
+        margin-top: var(--space-2);
+        font-style: normal;
+        font-weight: 600;
+        font-size: var(--text-sm);
+        color: var(--text-primary);
+    }
+</style>

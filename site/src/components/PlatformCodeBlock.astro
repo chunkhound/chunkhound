@@ -1,0 +1,144 @@
+---
+import { DEFAULT_PLATFORM, platformOptions } from "./configurator-data";
+import { COPY_SVG } from '../lib/shiki-config.js';
+
+interface Props {
+    copyBtnId?: string;
+    ariaLabel?: string;
+    dataCopy?: string;
+    class?: string;
+}
+
+const { copyBtnId, ariaLabel = "Copy", dataCopy = "", class: className } = Astro.props;
+---
+
+<div class:list={["platform-code-block", className]}>
+    <div class="code-header">
+        <div class="platform-tabs" role="tablist" aria-label="Choose your shell">
+            {platformOptions.map((p) => (
+                <button
+                    role="tab"
+                    type="button"
+                    data-platform-option={p.id}
+                    aria-selected={p.id === DEFAULT_PLATFORM ? "true" : "false"}
+                    tabindex={p.id === DEFAULT_PLATFORM ? "0" : "-1"}
+                    class="header-tab"
+                >
+                    {p.label}
+                </button>
+            ))}
+        </div>
+        <button class="copy-btn" id={copyBtnId} aria-label={ariaLabel} data-copy={dataCopy} set:html={COPY_SVG} />
+    </div>
+    <slot />
+</div>
+
+<script>
+import '../scripts/copy-handler.js';
+</script>
+
+<style>
+    .platform-code-block {
+        position: relative;
+        background: var(--code-bg);
+        border-radius: var(--radius-md);
+        overflow: hidden;
+    }
+
+    .code-header {
+        display: flex;
+        align-items: stretch;
+        justify-content: space-between;
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: inherit;
+        border-bottom-left-radius: 0;
+        border-bottom-right-radius: 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .platform-tabs {
+        display: flex;
+        align-items: stretch;
+    }
+
+    .header-tab {
+        padding: 0 var(--space-4);
+        height: 36px;
+        background: transparent;
+        border: none;
+        border-bottom: 2px solid transparent;
+        color: rgba(255, 255, 255, 0.4);
+        font-size: var(--text-xs);
+        font-weight: 600;
+        font-family: inherit;
+        letter-spacing: 0.04em;
+        cursor: pointer;
+        transition: color 0.2s, border-color 0.2s;
+    }
+
+    .header-tab[aria-selected="true"] {
+        color: var(--code-text);
+        border-bottom-color: var(--primary);
+    }
+
+    .header-tab:hover {
+        color: rgba(255, 255, 255, 0.65);
+    }
+
+    .copy-btn {
+        width: 32px;
+        height: 36px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: none;
+        border-radius: var(--radius-md);
+        background: transparent;
+        color: var(--text-tertiary);
+        cursor: pointer;
+        margin-right: var(--space-1);
+        transition: color 0.2s, background 0.2s;
+        padding: 0;
+    }
+
+    .copy-btn:hover {
+        color: var(--text-secondary);
+        background: rgba(255, 255, 255, 0.06);
+    }
+
+    .copy-btn.copied {
+        color: var(--primary);
+    }
+
+    .copy-btn :global(svg) {
+        width: 16px;
+        height: 16px;
+    }
+
+    .platform-code-block :global(pre) {
+        margin: 0;
+        padding: var(--space-4) var(--space-5);
+        overflow-x: auto;
+        background: transparent;
+        border-radius: 0;
+    }
+
+    .platform-code-block :global(code) {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 13px;
+        color: var(--code-text);
+        line-height: 1.6;
+        white-space: pre;
+        background: transparent;
+    }
+
+    @media (max-width: 768px) {
+        .platform-code-block :global(pre) {
+            padding: var(--space-3) var(--space-4);
+        }
+
+        .platform-code-block :global(code) {
+            font-size: 12px;
+        }
+    }
+</style>

@@ -1,0 +1,49 @@
+---
+import { COPY_SVG } from '../lib/shiki-config.js';
+
+interface Props {
+    copyBtnId?: string;
+    ariaLabel?: string;
+    dataCopy?: string;
+    class?: string;
+}
+
+const { copyBtnId, ariaLabel = "Copy", dataCopy = "", class: className } = Astro.props;
+---
+
+<div class:list={["code-block-md", className]}>
+    <button class="copy-btn" id={copyBtnId} aria-label={ariaLabel} data-copy={dataCopy} set:html={COPY_SVG} />
+    <slot />
+</div>
+
+<script>
+import '../scripts/copy-handler.js';
+</script>
+
+<style>
+    .code-block-md {
+        position: relative;
+    }
+
+    .code-block-md .copy-btn {
+        position: absolute;
+        top: var(--space-2);
+        right: var(--space-2);
+        width: 32px;
+        height: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: none;
+        border-radius: var(--radius-md);
+        background: transparent;
+        color: var(--text-tertiary);
+        cursor: pointer;
+        transition: color 0.2s, background 0.2s;
+        padding: 0;
+    }
+
+    .code-block-md .copy-btn:hover { color: var(--text-secondary); background: var(--bg-muted); }
+    .code-block-md .copy-btn.copied { color: var(--primary); }
+    .code-block-md .copy-btn :global(svg) { width: 16px; height: 16px; }
+</style>
