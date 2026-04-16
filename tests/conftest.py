@@ -1,21 +1,23 @@
 import os
 
+import pytest
 from loguru import logger
 
 logger.remove()
 
-import pytest
-
-
-def pytest_configure(config):
-    config.addinivalue_line("markers", "heavy: mark tests that generate large synthetic trees (skipped by default)")
+from tests.utils.windows_compat import get_configured_watcher_mode
 
 
 def pytest_collection_modifyitems(config, items):
     run_heavy = os.getenv("CHUNKHOUND_RUN_HEAVY_TESTS") == "1"
     if run_heavy:
         return
-    skip_heavy = pytest.mark.skip(reason="heavy tests skipped by default (set CHUNKHOUND_RUN_HEAVY_TESTS=1 to run)")
+    skip_heavy = pytest.mark.skip(
+        reason=(
+            "heavy tests skipped by default "
+            "(set CHUNKHOUND_RUN_HEAVY_TESTS=1 to run)"
+        )
+    )
     for item in items:
         if "heavy" in item.keywords:
             item.add_marker(skip_heavy)
@@ -38,3 +40,20 @@ def clean_environment(monkeypatch):
     for k in to_clear:
         monkeypatch.delenv(k, raising=False)
     yield
+
+
+@pytest.fixture
+def watcher_mode(request) -> str:
+    """Resolve watcher mode from explicit markers before falling back to env."""
+    native_markers = list(request.node.iter_markers(name="native_watcher"))
+    polling_markers = list(request.node.iter_markers(name="polling_watcher"))
+    if native_markers and polling_markers:
+        raise pytest.UsageError(
+            f"{request.node.nodeid} cannot request both native "
+            "and polling watcher modes"
+        )
+    if polling_markers:
+        return "polling"
+    if native_markers:
+        return "native"
+    return get_configured_watcher_mode()

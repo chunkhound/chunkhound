@@ -26,23 +26,30 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
-        
+
       - name: Install dependencies
-        run: uv sync --locked
-        
+        run: uv sync --locked --group dev
+
       - name: Run tests
         shell: bash
         run: |
-                # ── Fail fast on any collection error (bad skipif, import issues, etc.)
-                echo "::group::Test collection check"
-                uv run pytest tests/ --collectonly -q --tb=no
-                echo "::endgroup::"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            export CHUNKHOUND_TEST_WATCHER_MODE=polling
+          fi
 
-                # ── Full test suite (with retries on Windows for flaky realtime tests)
-                echo "::group::Full test suite"
-                if [ "$RUNNER_OS" = "Windows" ]; then
-                  uv run pytest tests/ -v --reruns 2 --reruns-delay 5 --only-rerun "AssertionError"
-                else
-                  uv run pytest tests/ -v
-                fi
-                echo "::endgroup::"
+          echo "::group::Test collection check"
+          uv run pytest tests/ --collectonly -q --tb=no
+          echo "::endgroup::"
+
+          echo "::group::Watcher marker collection"
+          uv run pytest tests/ --collectonly -q -m native_watcher --tb=no
+          uv run pytest tests/ --collectonly -q -m polling_watcher --tb=no
+          echo "::endgroup::"
+
+          echo "::group::Full test suite"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            uv run pytest tests/ -v --reruns 2 --reruns-delay 5 --only-rerun "AssertionError"
+          else
+            uv run pytest tests/ -v
+          fi
+          echo "::endgroup::"

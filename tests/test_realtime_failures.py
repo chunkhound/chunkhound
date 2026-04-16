@@ -26,7 +26,7 @@ class TestRealtimeFailures:
     """Tests that expose actual implementation failures."""
 
     @pytest.fixture
-    async def realtime_setup(self):
+    async def realtime_setup(self, watcher_mode):
         """Setup real service with temp database and project directory."""
         # Resolve immediately to handle Windows 8.3 short path names
         temp_dir = Path(tempfile.mkdtemp()).resolve()
@@ -49,8 +49,8 @@ class TestRealtimeFailures:
         services = create_services(db_path, config)
         services.provider.connect()
 
-        # Use polling on Windows CI where watchdog's ReadDirectoryChangesW is unreliable
-        force_polling = should_use_polling()
+        # Watcher coverage is selected explicitly per test via watcher_mode.
+        force_polling = should_use_polling(watcher_mode)
         realtime_service = RealtimeIndexingService(
             services, config, force_polling=force_polling
         )
@@ -165,19 +165,20 @@ class TestRealtimeFailures:
         reason="Polling mtime detection unreliable on NTFS (fixed in PR #220)",
         strict=False,
     )
+    @pytest.mark.polling_watcher
     @pytest.mark.asyncio
     async def test_observer_not_properly_recursive(self, realtime_setup):
         """Test that filesystem observer doesn't properly watch subdirectories."""
         service, watch_dir, _, services = realtime_setup
         await service.start(watch_dir)
 
-        await stabilize_polling_monitor()
+        await stabilize_polling_monitor("polling")
 
         # Create subdirectory and file
         subdir = watch_dir / "subdir"
         subdir.mkdir()
         subdir_file = subdir / "nested.py"
-        # Use platform-appropriate timeout for Windows CI polling mode
+        # Use the CI-aware timeout budget for explicit polling coverage.
         service.reset_file_tracking(subdir_file)
         subdir_file.write_text("def nested(): pass")
         found = await service.wait_for_file_indexed(subdir_file, timeout=get_fs_event_timeout())
@@ -185,11 +186,32 @@ class TestRealtimeFailures:
 
         await service.stop()
 
+    @pytest.mark.polling_watcher
+    @pytest.mark.asyncio
+    async def test_polling_detects_new_files(self, realtime_setup):
+        """Polling fallback should index newly created files."""
+        service, watch_dir, _, _ = realtime_setup
+        await service.start(watch_dir)
+
+        await stabilize_polling_monitor("polling")
+
+        test_file = watch_dir / "polling_create.py"
+        service.reset_file_tracking(test_file)
+        test_file.write_text("def created_by_polling(): pass")
+        found = await service.wait_for_file_indexed(
+            test_file, timeout=get_fs_event_timeout()
+        )
+        assert found, "Polling fallback should detect newly created files"
+
+        await service.stop()
+
+    @pytest.mark.polling_watcher
     @pytest.mark.asyncio
     async def test_service_doesnt_handle_file_deletions(self, realtime_setup):
-        """Test that service doesn't handle file deletions properly."""
+        """Test that polling mode handles file deletions after its first scan."""
         service, watch_dir, _, services = realtime_setup
         await service.start(watch_dir)
+        await stabilize_polling_monitor("polling")
 
         # Create and process a file
         test_file = watch_dir / "delete_test.py"
@@ -475,10 +497,7 @@ class TestRealtimeFailures:
         record = services.provider.get_file_by_path(str(nested_file.resolve()))
         assert record is not None, "Nested file should be indexed by process_file"
 
-    @pytest.mark.skipif(
-        should_use_polling(),
-        reason="Watchdog path is not exercised when polling is forced",
-    )
+    @pytest.mark.native_watcher
     @pytest.mark.asyncio
     async def test_stop_during_fs_monitor_setup_does_not_crash_or_leak(
         self, realtime_setup, monkeypatch
@@ -496,9 +515,7 @@ class TestRealtimeFailures:
         from chunkhound.services import realtime_indexing_service as rt
 
         service, watch_dir, _, _ = realtime_setup
-        # Force the watchdog path: fixture defaults to should_use_polling()
-        # which flips _force_polling on Windows CI (guarded by skipif above)
-        # but may also be False already. Be explicit.
+        # This is a native-watcher lifecycle test; keep the backend explicit.
         service._force_polling = False
 
         schedule_gate = _threading.Event()
